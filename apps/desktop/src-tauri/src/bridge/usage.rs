@@ -3,10 +3,12 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, USAGE_CODES};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::usage::WindowKind;
+use crazyagent::usage::metrics::Metrics;
+use crazyagent::usage::money::MoneySettings;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 
-fn usage_error(error: EngineError) -> BridgeError {
+pub(super) fn usage_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }
@@ -56,12 +58,54 @@ impl NativeBridge {
         }))
     }
 
+    /// Reads the Metrics page's task counts, tokens chart and run, account and harness rows
+    /// for one project, None for every project, from `since_ms`, run without the bridge
+    /// lock. Inputs: the project id and the range start. Output: the metrics.
+    pub fn usage_metrics(
+        &self,
+        project_id: Option<String>,
+        since_ms: i64,
+    ) -> Result<Unlocked<Metrics>, BridgeError> {
+        let project = project_id
+            .map(ProjectId::new)
+            .transpose()
+            .map_err(|_| failure("usage_request_invalid"))?;
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client
+                .usage_metrics(project, since_ms)
+                .await
+                .map_err(usage_error)
+        }))
+    }
+
     /// Asks the engine to poll every signed-in account's limits now, run without the
     /// bridge lock. Output: done once the request is stored.
     pub fn usage_refresh(&self) -> Result<Unlocked<()>, BridgeError> {
         let client = self.usage_client()?;
         Ok(Box::pin(async move {
             client.usage_refresh().await.map_err(usage_error)
+        }))
+    }
+
+    /// Stores the owner's main number and price source, run without the bridge lock. Input:
+    /// the settings. Output: done once they are stored.
+    pub fn usage_set_money(&self, settings: MoneySettings) -> Result<Unlocked<()>, BridgeError> {
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client.usage_set_money(settings).await.map_err(usage_error)
+        }))
+    }
+
+    /// Applies the owner's choice of the recount, run without the bridge lock. Input: whether
+    /// to use the new numbers. Output: done once it is applied.
+    pub fn usage_decide_recount(&self, use_new: bool) -> Result<Unlocked<()>, BridgeError> {
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client
+                .usage_decide_recount(use_new)
+                .await
+                .map_err(usage_error)
         }))
     }
 

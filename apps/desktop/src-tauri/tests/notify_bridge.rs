@@ -84,7 +84,7 @@ fn the_window_names_only_the_project_and_the_question() {
     assert_eq!(
         parameters("desktop_notify_question"),
         [
-            "window: WebviewWindow,",
+            "webview: Webview,",
             "state: State<'_, NativeState>,",
             "notices: State<'_, Notices>,",
             "project_id: String,",
@@ -129,6 +129,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         &EngineSource::Mapping,
         &Ask {
             question: "Which database should the app use?\nIt stores recipes.".into(),
+            kind: crazyagent::questions::QuestionKind::Single,
             options: vec!["Postgres".into(), "SQLite".into()],
             recommended: Some("SQLite".into()),
             context: Some("It runs on one laptop.".into()),

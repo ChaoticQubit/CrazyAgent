@@ -1,7 +1,7 @@
 use super::client::questions::QuestionsQuery;
 use super::frame::Message;
 use super::glyphs::Glyphs;
-use super::seam::{AccountRow, PoolScope, ProjectCard, Request};
+use super::seam::{AccountRow, Arrival, PoolScope, ProjectCard, Request};
 use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
@@ -63,6 +63,10 @@ pub struct Store {
     pub setup: Load<SetupStatus>,
     pub projects_seen: Option<String>,
     pub questions: Load<Vec<(ProjectId, u32)>>,
+    pub waiting: Option<(
+        Option<crate::protocol::ProjectId>,
+        crate::landing::WaitingChanges,
+    )>,
 }
 
 impl Store {
@@ -88,6 +92,7 @@ impl Default for Store {
             setup: Load::Idle,
             projects_seen: None,
             questions: Load::Idle,
+            waiting: None,
         }
     }
 }
@@ -106,6 +111,7 @@ pub struct Ctx {
     pub appearance: Appearance,
     pub width: u16,
     pub height: u16,
+    pub hint_rows: u16,
     pub tick: u64,
     pub quiet: bool,
     pub store: Store,
@@ -118,7 +124,11 @@ pub struct Ctx {
     pub editing: Option<super::client::editor::Edit>,
     pub editor_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub sessions_key: Option<(crate::protocol::ProjectId, char)>,
+    pub shift_arrows: crate::tui::keys::ShiftArrows,
+    pub shift_enter: crate::tui::keys::ShiftEnter,
+    pub project_step: Option<(crate::protocol::ProjectId, bool)>,
     requests: VecDeque<Request>,
+    refused: Vec<Arrival>,
     reconnect: bool,
     message: Option<Message>,
     generation: u64,
@@ -143,6 +153,7 @@ impl Ctx {
             appearance,
             width: 120,
             height: 36,
+            hint_rows: 1,
             tick: 0,
             quiet: false,
             store: Store::default(),
@@ -155,11 +166,22 @@ impl Ctx {
             editing: None,
             editor_running: std::sync::Arc::default(),
             sessions_key: None,
+            shift_arrows: crate::tui::keys::ShiftArrows::default(),
+            shift_enter: crate::tui::keys::ShiftEnter::default(),
+            project_step: None,
             requests: VecDeque::new(),
+            refused: Vec::new(),
             reconnect: false,
             message: None,
             generation: 0,
         }
+    }
+
+    /// The rows a wrapped help bar takes from the body past its first row, as the last
+    /// frame drew it: 0 unless a settings screen's hints wrap. Input: none. Output: the rows.
+    pub fn extra_hint_rows(&self) -> usize {
+        assert!(self.hint_rows >= 1);
+        usize::from(self.hint_rows - 1)
     }
 
     /// Rebuilds the theme after the Colors choice or system appearance changed.
@@ -170,22 +192,42 @@ impl Ctx {
         self.theme = Theme::new(self.depth, colors, appearance);
     }
 
-    /// Queues one engine request as `try_request` does, for callers that need
-    /// no answer because the refusal message already tells the owner.
-    /// Input: the request. Output: none.
+    /// Queues one engine request as `try_request` does. A request the full queue refuses
+    /// gets the failed reply that request gets from the engine worker, `owner_busy`, kept
+    /// until the shell delivers it at the end of the event, so the screen that asked stops
+    /// waiting and says so; a refused request with no reply, such as a keystroke, is dropped.
+    /// Every reply is kept, with no cap: each one stands for a request this event made, and
+    /// the shell takes them all at the end of every event. Input: the request. Output: none.
     pub fn request(&mut self, request: Request) {
-        self.try_request(request);
+        if let Err(request) = self.queue(request)
+            && let Some(arrival) = super::run::refused_arrival(*request)
+        {
+            self.refused.push(arrival);
+        }
+    }
+
+    /// Queues one engine request for a caller that handles a refusal itself.
+    /// Input: the request. Output: whether the engine will see it; false only when the
+    /// queue already holds 32 requests and this one was refused.
+    pub fn try_request(&mut self, request: Request) -> bool {
+        self.queue(request).is_ok()
+    }
+
+    /// Takes the busy replies for the requests the full queue refused since the last call,
+    /// oldest first. Input: none. Output: the replies.
+    pub fn take_refused(&mut self) -> Vec<Arrival> {
+        std::mem::take(&mut self.refused)
     }
 
     /// Queues one engine request; duplicates of a queued read are dropped and
     /// keystrokes for the agent terminal already waiting at the back join it.
-    /// Input: the request. Output: whether the engine will see it; false only
-    /// when the queue already holds 32 requests and this one was refused. A
-    /// joined terminal input holds at most the engine's terminal input limit.
-    pub fn try_request(&mut self, request: Request) -> bool {
+    /// Input: the request. Output: Ok when the engine will see it, or the request back
+    /// when the queue already holds 32 requests. A joined terminal input holds at most
+    /// the engine's terminal input limit.
+    fn queue(&mut self, request: Request) -> Result<(), Box<Request>> {
         if matches!(request, Request::Reconnect) {
             self.reconnect = true;
-            return true;
+            return Ok(());
         }
         if let Request::TerminalInput { agent, bytes } = &request
             && let Some(Request::TerminalInput {
@@ -196,11 +238,11 @@ impl Ctx {
             && queued.len() + bytes.len() <= INPUT_BYTES_MAX
         {
             queued.extend_from_slice(bytes);
-            return true;
+            return Ok(());
         }
         let counts = |queued: &Request| matches!(queued, Request::Questions(query) if **query == QuestionsQuery::Counts);
         if counts(&request) && self.requests.iter().any(counts) {
-            return true;
+            return Ok(());
         }
         let read = matches!(
             request,
@@ -212,14 +254,14 @@ impl Ctx {
                 .iter()
                 .any(|queued| std::mem::discriminant(queued) == std::mem::discriminant(&request))
         {
-            return true;
+            return Ok(());
         }
         if self.requests.len() >= QUEUE_MAX {
             self.say(Message::error(
                 "Too many requests are waiting.",
                 "Wait a moment, then try again.",
             ));
-            return false;
+            return Err(Box::new(request));
         }
         match request {
             Request::Profile => self.store.profile = Load::Loading,
@@ -236,13 +278,24 @@ impl Ctx {
         }
         self.requests.push_back(request);
         assert!(self.requests.len() <= QUEUE_MAX);
-        true
+        Ok(())
     }
 
     /// Takes the next queued request.
     /// Input: none. Output: the oldest request, if any.
     pub fn next_request(&mut self) -> Option<Request> {
         self.requests.pop_front()
+    }
+
+    /// Takes the oldest queued request other than the shell's pending-questions count,
+    /// which every refresh queues for the footer badge, so a test reads what a screen sent.
+    /// Input: none. Output: that request, if one waits; the count stays queued.
+    #[cfg(test)]
+    pub fn next_screen_request(&mut self) -> Option<Request> {
+        let index = self.requests.iter().position(|queued| {
+            !matches!(queued, Request::Questions(query) if **query == QuestionsQuery::Counts)
+        })?;
+        self.requests.remove(index)
     }
 
     /// Takes the oldest queued agent terminal request, ahead of requests
@@ -270,6 +323,14 @@ impl Ctx {
     /// Input: the message. Output: none.
     pub fn say(&mut self, message: Message) {
         self.message = Some(message);
+    }
+
+    /// Clears the message line when it still shows a message said earlier, so any message
+    /// said after it stays. Input: the message as it was said. Output: none.
+    pub fn unsay(&mut self, said: &Message) {
+        if self.message.as_ref() == Some(said) {
+            self.message = None;
+        }
     }
 
     /// The message line content while it should still show.
@@ -377,6 +438,115 @@ mod tests {
         assert!(ctx.next_terminal_request().is_none());
         assert!(matches!(ctx.next_request(), Some(Request::Projects)));
         assert!(matches!(ctx.next_request(), Some(Request::Pools)));
+    }
+
+    fn full() -> Ctx {
+        let mut ctx = ctx();
+        while ctx.try_request(pool_removal()) {}
+        assert_eq!(ctx.queued(), QUEUE_MAX);
+        ctx
+    }
+
+    fn pool_removal() -> Request {
+        Request::EditPool {
+            change: crate::tui::seam::PoolChange::Remove {
+                id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+                opened_projects: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn every_refused_request_one_event_makes_is_kept_for_its_busy_reply() {
+        let mut ctx = full();
+        for _ in 0..40 {
+            ctx.request(pool_removal());
+        }
+        assert_eq!(
+            ctx.take_refused().len(),
+            40,
+            "no refused request past the first 32 is dropped without a reply"
+        );
+        assert!(ctx.take_refused().is_empty());
+    }
+
+    #[test]
+    fn refused_keystrokes_leave_room_for_the_replies_screens_wait_on() {
+        let mut ctx = full();
+        let agent = crate::terminal::AgentId::team(1).unwrap();
+        for _ in 0..40 {
+            ctx.request(Request::TerminalInput {
+                agent: agent.clone(),
+                bytes: b"x".to_vec(),
+            });
+        }
+        ctx.request(pool_removal());
+        assert_eq!(
+            ctx.take_refused().len(),
+            1,
+            "only the pool change waits on a reply"
+        );
+    }
+
+    #[test]
+    fn an_event_refused_over_a_thousand_times_still_answers_each_one_busy() {
+        let mut ctx = full();
+        for _ in 0..1100 {
+            ctx.request(pool_removal());
+        }
+        assert_eq!(ctx.take_refused().len(), 1100, "no refusal is past a cap");
+    }
+
+    #[test]
+    fn a_refused_questions_recovery_or_reveal_request_gets_its_busy_reply() {
+        use crate::tui::client::OwnerEvent;
+        use crate::tui::client::ide::RevealQuery;
+        use crate::tui::client::recovery::RecoveryQuery;
+        fn busy<T>() -> Result<T, String> {
+            Err(crate::tui::seam::OWNER_BUSY.to_owned())
+        }
+        let project = ProjectId::new("harbor-notes").unwrap();
+        let questions = QuestionsQuery::List {
+            project: project.clone(),
+        };
+        let recovery = RecoveryQuery::Read {
+            project: project.clone(),
+        };
+        let reveal = RevealQuery {
+            project,
+            target: crate::ide::bridge::reveal::RevealTarget::Project {
+                path: "src/main.rs".into(),
+            },
+        };
+        let mut ctx = full();
+        ctx.request(Request::Questions(Box::new(questions.clone())));
+        ctx.request(Request::Recovery(Box::new(recovery.clone())));
+        ctx.request(Request::Reveal(Box::new(reveal.clone())));
+        let replies: Vec<OwnerEvent> = ctx
+            .take_refused()
+            .into_iter()
+            .map(|arrival| match arrival {
+                Arrival::Owner(event) => *event,
+                _ => panic!("a refused owner request answers as the owner worker does"),
+            })
+            .collect();
+        assert_eq!(
+            replies.len(),
+            3,
+            "each refused request gets the reply its screen waits on"
+        );
+        assert!(matches!(
+            &replies[0],
+            OwnerEvent::Questions(event) if event.query == questions && event.result == busy()
+        ));
+        assert!(matches!(
+            &replies[1],
+            OwnerEvent::Recovery(event) if event.query == recovery && event.result == busy()
+        ));
+        assert!(matches!(
+            &replies[2],
+            OwnerEvent::Reveal(event) if event.query == reveal && event.result == busy()
+        ));
     }
 
     #[test]

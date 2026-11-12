@@ -2,11 +2,12 @@ use super::Harness;
 use crate::usage::capture::{Format, open_record, records};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 pub const RECORDS_READ_MAX: usize = 4;
 pub const RECORD_BYTES_MAX: u64 = 8 * 1024 * 1024;
+pub const RECORD_TAIL_BYTES_MAX: u64 = RECORD_BYTES_MAX / 2;
 pub const LOADED_MAX: usize = 16;
 pub const USED_MAX: usize = 32;
 pub const PATH_BYTES_MAX: usize = 512;
@@ -69,39 +70,84 @@ fn shown(text: &str, bytes_max: usize) -> bool {
 
 /// Reads what an agent's harness wrote about itself in the agent's private home: Claude
 /// Code's `projects/**/<session>.jsonl` or Codex's `sessions/**/rollout-*.jsonl`, the
-/// newest `RECORDS_READ_MAX`, the first `RECORD_BYTES_MAX` bytes of each, never following
-/// a link. Inputs: the home and the harness. Output: the files and skills it reported.
+/// newest `RECORDS_READ_MAX`, main session records before Claude Code's own sub-agent
+/// records, never following a link. A record up to `RECORD_BYTES_MAX` is read whole; a
+/// longer one at its start and its last `RECORD_TAIL_BYTES_MAX` bytes, so skills invoked
+/// late are seen (LV-R3). Inputs: the home and the harness. Output: the files and
+/// skills it reported.
 pub fn observed(home: &Path, harness: Harness) -> Observed {
     let format = match harness {
         Harness::Claude => Format::Claude,
         Harness::Codex => Format::Codex,
     };
+    let mut found = records(home, format).0;
+    found.sort_by_key(|path| sub_agent_record(path));
     let mut seen = Observed::default();
-    for path in records(home, format).into_iter().take(RECORDS_READ_MAX) {
-        let Some((file, _, _)) = open_record(&path) else {
+    for path in found.into_iter().take(RECORDS_READ_MAX) {
+        let Some((file, _, size)) = open_record(&path) else {
             continue;
         };
         seen.records += 1;
-        let mut reader = BufReader::new(file.take(RECORD_BYTES_MAX));
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(text) = std::str::from_utf8(&line) else {
-                continue;
-            };
-            match harness {
-                Harness::Claude => claude_line(text, &mut seen),
-                Harness::Codex => codex_line(text, &mut seen),
-            }
+        let head = if size <= RECORD_BYTES_MAX {
+            RECORD_BYTES_MAX
+        } else {
+            RECORD_BYTES_MAX - RECORD_TAIL_BYTES_MAX
+        };
+        scan(
+            BufReader::new((&file).take(head)),
+            harness,
+            &mut seen,
+            false,
+        );
+        if size > RECORD_BYTES_MAX
+            && (&file)
+                .seek(SeekFrom::Start(size - RECORD_TAIL_BYTES_MAX))
+                .is_ok()
+        {
+            scan(
+                BufReader::new((&file).take(RECORD_TAIL_BYTES_MAX)),
+                harness,
+                &mut seen,
+                true,
+            );
         }
     }
     assert!(seen.records <= RECORDS_READ_MAX);
     assert!(seen.loaded.len() <= LOADED_MAX && seen.used.len() <= USED_MAX);
     seen
+}
+
+/// Says whether a record is one Claude Code wrote for one of its own sub-agents, kept in a
+/// `subagents` folder beside its session's record. Input: the record. Output: the answer.
+fn sub_agent_record(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "subagents")
+}
+
+/// Takes every whole line one part of a record holds, dropping the first when the part
+/// starts inside a line. Inputs: the part's reader, the harness, what was seen so far and
+/// whether the part starts inside a line.
+fn scan(mut reader: impl BufRead, harness: Harness, seen: &mut Observed, mid_line: bool) {
+    let mut line = Vec::new();
+    let mut first = mid_line;
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if std::mem::take(&mut first) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&line) else {
+            continue;
+        };
+        match harness {
+            Harness::Claude => claude_line(text, seen),
+            Harness::Codex => codex_line(text, seen),
+        }
+    }
 }
 
 /// Takes one Claude Code record line: an `instructions` attachment names the files it

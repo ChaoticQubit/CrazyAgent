@@ -1,12 +1,12 @@
 use super::changes::{agent_name, title};
-use super::{COMMENT_BYTES_MAX, IdeCall};
+use super::{COMMENT_BYTES_MAX, IdeCall, NOTE_PATH_BYTES_MAX, shown};
 use crate::config::ModelAccess;
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::landing::{self, AgentKind, ChangeSetId, ChangeState, FileStatus};
 use crate::protocol::{Outcome, ProjectId};
-use crate::team::events::{SEND_BYTES_MAX, plain_agent_text, send_to_agent};
-use crate::team::{AgentStatus, MESSAGE_BYTES_MAX, TeamAction, bound_text};
+use crate::team::events::{SEND_BYTES_MAX, Said, send_to_agent};
+use crate::team::{AgentStatus, MESSAGE_BYTES_MAX, TeamAction};
 use crate::terminal::Host;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::path::PathBuf;
@@ -14,8 +14,7 @@ use std::sync::Arc;
 
 const AGENT_BYTES_MAX: usize = 128;
 const TITLE_BYTES_MAX: usize = 256;
-const PATH_BYTES_MAX: usize = 1024;
-const HEADER_BYTES_MAX: usize = AGENT_BYTES_MAX + TITLE_BYTES_MAX + PATH_BYTES_MAX + 64;
+const HEADER_BYTES_MAX: usize = AGENT_BYTES_MAX + TITLE_BYTES_MAX + NOTE_PATH_BYTES_MAX + 64;
 const _: () = assert!(HEADER_BYTES_MAX + COMMENT_BYTES_MAX <= SEND_BYTES_MAX);
 const _: () = assert!(SEND_BYTES_MAX <= MESSAGE_BYTES_MAX);
 
@@ -46,23 +45,6 @@ pub(crate) async fn answer(
     .map_err(|_| failure("changes_unavailable"))?
 }
 
-/// Engine or agent text as one plain line inside the message: control characters become
-/// U+FFFD, square brackets and their look-alikes become parentheses so no `[owner]` tag can
-/// show, and it is cut to `max` bytes. Inputs: the text and the bound. Output: the line.
-fn shown(text: &str, max: usize) -> String {
-    let plain: String = text
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                '\u{fffd}'
-            } else {
-                character
-            }
-        })
-        .collect();
-    bound_text(&plain_agent_text(&plain), max)
-}
-
 /// The one message a comment becomes: whose changes, which ones, the file and line, then
 /// the owner's words with Windows and old Mac line ends made plain. Inputs: the agent, the
 /// set's title, the path, the line and the comment. Output: the message text.
@@ -71,7 +53,7 @@ fn message(agent: &str, title: &str, path: &str, line: u32, text: &str) -> Strin
         "On {}'s changes \"{}\", {} line {line}:",
         shown(agent, AGENT_BYTES_MAX),
         shown(title, TITLE_BYTES_MAX),
-        shown(path, PATH_BYTES_MAX),
+        shown(path, NOTE_PATH_BYTES_MAX),
     );
     assert!(header.len() <= HEADER_BYTES_MAX);
     format!(
@@ -84,12 +66,12 @@ fn message(agent: &str, title: &str, path: &str, line: u32, text: &str) -> Strin
 /// set takes it as one owner message in the project's team conversation through the team
 /// Message path; its frame quotes the agent's own text, so it is never an owner turn a
 /// master may name as an answer. A sub-agent's set types it into that agent's live terminal
-/// as its master's messages are typed. An owner conversation's set is refused, since the IDE
-/// holds no owner admission to drive that conversation. Only an open set of the IDE's project
-/// and a file it changed that still exists take a comment. Inputs: the store, the terminal
-/// host, the project, the set, the path, the line from 1 and the text. Output: Ok once
-/// delivered, or `changes_not_found`, `changes_closed`, `ide_comment_master_unavailable` or
-/// the team's refusal.
+/// as an engine notice in its Messages timeline. An owner conversation's set is refused,
+/// since the IDE holds no owner admission to drive that conversation. Only an open set of
+/// the IDE's project and a file it changed that still exists take a comment. Inputs: the
+/// store, the terminal host, the project, the set, the path, the line from 1 and the text.
+/// Output: Ok once delivered, or `changes_not_found`, `changes_closed`,
+/// `ide_comment_master_unavailable` or the team's refusal.
 pub(crate) fn comment(
     db: &Connection,
     host: Option<&dyn Host>,
@@ -140,7 +122,14 @@ pub(crate) fn comment(
                 return Err(failure("team_agent_not_running"));
             }
             let host = host.ok_or_else(|| failure("team_agent_unreachable"))?;
-            match send_to_agent(db, host, project, &format!("team-{agent}"), &text)? {
+            match send_to_agent(
+                db,
+                host,
+                project,
+                &format!("team-{agent}"),
+                Said::Notice,
+                &text,
+            )? {
                 Ok(typed) => {
                     assert_eq!(typed, agent);
                     Ok(())

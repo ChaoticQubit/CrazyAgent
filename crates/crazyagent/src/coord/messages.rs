@@ -138,6 +138,25 @@ pub fn reply(
     Ok(id)
 }
 
+/// Ends a question put to the owner that nobody answers any more (F12): the master withdrew
+/// it, or the owner's answer reached its asker another way. It becomes Expired from any
+/// open receipt, Read included, which `may_become` never allows for a message an agent
+/// read; an owner question has no reader that could still answer it. Takes the database,
+/// the message and the time in ms. Returns whether it ended; an answered, ended or other
+/// message is left alone.
+pub fn withdraw(db: &Connection, message: MessageId, now: i64) -> Result<bool, EngineError> {
+    let changed = db
+        .execute(
+            "UPDATE coord_messages SET receipt='expired', receipt_at=?2, turn=NULL
+             WHERE id=?1 AND kind='question' AND to_kind='owner'
+               AND receipt IN ('sent','delivered','typed','read')",
+            params![message, now],
+        )
+        .map_err(state)?;
+    assert!(changed <= 1);
+    Ok(changed == 1)
+}
+
 /// Lists the messages waiting for delivery to one agent, oldest first: receipt Sent.
 /// Takes the database, the agent and the most to return, capped at `PENDING_MAX`.
 /// Returns the messages.
@@ -171,6 +190,34 @@ pub fn unread(db: &Connection, to: AgentId, limit: usize) -> Result<Vec<Message>
         .map_err(state)?;
     let rows = statement
         .query_map(params![to, limit], message_from_row)
+        .map_err(state)?;
+    let found = rows.collect::<Result<Vec<_>, _>>().map_err(state)?;
+    assert!(found.len() <= PENDING_MAX);
+    Ok(found)
+}
+
+/// Lists the messages one agent has not read that a harness conversation started at
+/// `started` has not seen, oldest first: receipt Sent, and Delivered or Typed only when
+/// that receipt was set at or before `started`, so a message typed into this conversation
+/// is not given to it again. Takes the database, the agent, the conversation's start in ms
+/// and the most to return, capped at `PENDING_MAX`. Returns the messages.
+pub fn unseen(
+    db: &Connection,
+    to: AgentId,
+    started: i64,
+    limit: usize,
+) -> Result<Vec<Message>, EngineError> {
+    let limit = i64::try_from(limit.min(PENDING_MAX)).map_err(state)?;
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM coord_messages
+             WHERE to_kind='agent' AND to_agent=?1
+               AND (receipt='sent' OR (receipt IN ('delivered','typed') AND receipt_at<=?3))
+             ORDER BY id LIMIT ?2"
+        ))
+        .map_err(state)?;
+    let rows = statement
+        .query_map(params![to, limit, started], message_from_row)
         .map_err(state)?;
     let found = rows.collect::<Result<Vec<_>, _>>().map_err(state)?;
     assert!(found.len() <= PENDING_MAX);
@@ -223,12 +270,52 @@ pub fn mark(
 pub fn requeue_dead(db: &Connection, agent: AgentId, now: i64) -> Result<u32, EngineError> {
     let moved = db
         .execute(
-            "UPDATE coord_messages SET receipt='sent', receipt_at=?2
+            "UPDATE coord_messages SET receipt='sent', receipt_at=?2, turn=NULL
              WHERE to_kind='agent' AND to_agent=?1 AND receipt IN ('delivered','typed')",
             params![agent, now],
         )
         .map_err(state)?;
     u32::try_from(moved).map_err(state)
+}
+
+/// Names the Codex turn a bridge delivery put messages into (b19 P2), kept only while
+/// each stays Delivered since every later receipt change clears it, so an abort of that
+/// turn can put back what it dropped. Takes the database, the messages and the turn id.
+/// Returns Ok or a SQLite failure.
+pub(crate) fn delivered_into(
+    db: &Connection,
+    carried: &[MessageId],
+    turn: &str,
+) -> Result<(), EngineError> {
+    for message in carried {
+        db.execute(
+            "UPDATE coord_messages SET turn=?2 WHERE id=?1 AND receipt='delivered'",
+            params![message, turn],
+        )
+        .map_err(state)?;
+    }
+    Ok(())
+}
+
+/// Puts back to Sent one message the bridge delivered to an agent into a Codex turn that
+/// ended aborted and dropped it before its session recorded it (b19 P2), so the agent's
+/// next turn gets it; one that went into another turn, to another agent, or whose receipt
+/// moved on, is left alone. Takes the database, the message, the agent, the turn id and
+/// the time in ms. Returns Ok or a SQLite failure.
+pub(crate) fn requeue_aborted(
+    db: &Connection,
+    id: MessageId,
+    agent: AgentId,
+    turn: &str,
+    now: i64,
+) -> Result<(), EngineError> {
+    db.execute(
+        "UPDATE coord_messages SET receipt='sent', receipt_at=?4, turn=NULL
+         WHERE id=?1 AND to_kind='agent' AND to_agent=?2 AND receipt='delivered' AND turn=?3",
+        params![id, agent, turn, now],
+    )
+    .map_err(state)?;
+    Ok(())
 }
 
 /// Finds whom a question goes to from its tags and the asker's place (Q14, Q14b), and
@@ -329,7 +416,7 @@ fn set_receipt(
 ) -> Result<(), EngineError> {
     let changed = tx
         .execute(
-            "UPDATE coord_messages SET receipt=?2, receipt_at=?3 WHERE id=?1",
+            "UPDATE coord_messages SET receipt=?2, receipt_at=?3, turn=NULL WHERE id=?1",
             params![message, receipt.as_str(), now],
         )
         .map_err(state)?;

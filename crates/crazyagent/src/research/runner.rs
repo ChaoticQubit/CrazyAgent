@@ -6,16 +6,24 @@ use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
-    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, rate_limited,
+    AccountBinding, CLAUDE_TOOLS_OFF, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+    rate_limited,
 };
-use crate::harnesses::terminal_session::TerminalSession;
+#[cfg(unix)]
+use crate::harnesses::launch::{await_group_exit, kill_group};
+use crate::harnesses::leftovers::{self, Unstopped};
+use crate::harnesses::terminal_session::{TerminalSession, end_left_pane};
 use crate::launch_context::AgentContext;
 use crate::project_setup::ResearchKind;
+use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
-use crate::sandbox::policy::AgentAccess;
-use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
+use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
+use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
+#[cfg(unix)]
+use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use crate::terminal::{AgentId, Host};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -23,13 +31,16 @@ use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::ExitStatus;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const GIT: &str = "/usr/bin/git";
+/// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
+pub(crate) const GIT: &str = "/usr/bin/git";
 pub(crate) const GIT_SAFE: [&str; 10] = [
     "-c",
     "core.hooksPath=/dev/null",
@@ -60,8 +71,6 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 const SETUP_TIMED_OUT: &str = "setup_timed_out";
 #[cfg(unix)]
-const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
-#[cfg(unix)]
 const LIFELINE: &str = "IFS= read -r word; [ \"$word\" = done ] || kill -s KILL -- \"-$1\"";
 const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
@@ -74,19 +83,31 @@ const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 pub(crate) const RUN_NAME_USED: &str = "run name already used";
 const CONTEXT_BUSY: &str = "launch_home_busy";
 const PANE_PREFIX: &str = "research-";
-const PANE_EVENTS_MAX: usize = 200_000;
-const CLAUDE_ARGUMENTS: [&str; 8] = [
+/// Gives a tools-off Claude Code run one model turn, as it has no tools to take a second.
+/// It does not stop Claude Code 2.1.309 from continuing an answer cut at the output limit:
+/// it sends up to three more requests for that answer outside the turn count, so the
+/// output token cap and the caller's wall time bound such a run.
+const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
+/// The variable that caps the output tokens of each Claude Code request.
+const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
+const CLAUDE_ARGUMENTS: [&str; 6] = [
     "--print",
     "--output-format",
     "text",
     "--strict-mcp-config",
     "--setting-sources",
     "",
-    "--settings",
-    "{\"disableAllHooks\":true}",
 ];
+/// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
+const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
 
-/// Bounds every research run obeys.
+/// The most bytes of one research report: the runner takes no longer report from an agent,
+/// and a reader of a stored report reads up to this many.
+pub const REPORT_BYTES_MAX: u64 = 512 * 1024;
+
+/// Bounds every research run obeys. `output_bytes_max` is the most bytes kept in each agent
+/// log and read back from it; output past it is counted, never a reason to end the run
+/// (owner 11-11).
 #[derive(Debug, Clone)]
 pub struct ResearchLimits {
     pub wall_time: Duration,
@@ -97,13 +118,13 @@ pub struct ResearchLimits {
 }
 
 impl Default for ResearchLimits {
-    /// Twenty minutes, 4 MiB of agent output, a 512 KiB report, three agents
-    /// per project at once and two attempts per job.
+    /// Twenty minutes, 4 MiB kept of each agent log, a report of [`REPORT_BYTES_MAX`], three
+    /// agents per project at once and two attempts per job.
     fn default() -> Self {
         Self {
             wall_time: Duration::from_secs(20 * 60),
             output_bytes_max: 4 * 1024 * 1024,
-            report_bytes_max: 512 * 1024,
+            report_bytes_max: REPORT_BYTES_MAX,
             running_max: 3,
             attempts_max: 2,
         }
@@ -149,8 +170,13 @@ impl ResearchHarness {
 /// The pool account a research agent runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResearchAccount {
-    /// An OpenAI-compatible URL or a local model server, with no key, for Codex.
-    Endpoint { base_url: String, model: String },
+    /// An OpenAI-compatible URL or a local model server for Codex, with the reference of
+    /// its saved key when it has one; a keyed run reaches it only through a key relay.
+    Endpoint {
+        base_url: String,
+        model: String,
+        key: Option<CredentialRef>,
+    },
     /// A managed Codex connection of the project's pool. Each launch proves
     /// it is signed in for this engine run and holds its profile under the
     /// engine's custody lease while the agent runs.
@@ -158,9 +184,13 @@ pub enum ResearchAccount {
         connection: ModelConnection,
         model: Option<String>,
     },
-    /// An Anthropic Messages URL or local model server, with no key, for
-    /// Claude Code.
-    AnthropicEndpoint { base_url: String, model: String },
+    /// An Anthropic Messages URL or local model server for Claude Code, keyed or not
+    /// like [`ResearchAccount::Endpoint`].
+    AnthropicEndpoint {
+        base_url: String,
+        model: String,
+        key: Option<CredentialRef>,
+    },
     /// A managed Claude connection of the project's pool, held like
     /// [`ResearchAccount::ManagedCodex`].
     ManagedClaude {
@@ -267,6 +297,7 @@ pub struct ResearchRunner {
     state: PathBuf,
     codex: Option<PathBuf>,
     claude: Option<PathBuf>,
+    lookup: Option<crate::paths::HarnessLookup>,
     limits: ResearchLimits,
     claimer: String,
     stopping: AtomicBool,
@@ -275,6 +306,7 @@ pub struct ResearchRunner {
     terminal: Option<Arc<dyn Host>>,
     agents: Option<Arc<Agents>>,
     settings: Option<(PathBuf, PathBuf)>,
+    reproving: Option<Arc<AtomicBool>>,
 }
 
 /// Where one launch of a claimed research job runs: the canonical project folder, its
@@ -292,10 +324,60 @@ struct JobPlace {
 enum Ending {
     Exited(bool),
     TimedOut,
-    Overflowed,
     Cancelled,
     Interrupted,
     RateLimited,
+    Narrowed(Narrowing),
+}
+
+/// What a running research job's sandbox profile was built with, checked against the saved
+/// policy while it runs: its project and canonical folder, the access level and the granted
+/// toolchains.
+struct Granted {
+    project: ProjectId,
+    root: PathBuf,
+    access: AgentAccess,
+    toolchains: Vec<Toolchain>,
+}
+
+impl Granted {
+    /// Tells whether the policy the owner saved now no longer covers what the job holds, so
+    /// it must stop. Takes the job store. Returns the cause, or none.
+    fn narrowed(&self, jobs: &ResearchJobs) -> Option<Narrowing> {
+        let saved = jobs.agent_policy(&self.project).ok();
+        narrowing(
+            saved.as_ref(),
+            Some(self.root.as_path()),
+            Some(self.access),
+            None,
+            &self.toolchains,
+        )
+    }
+}
+
+/// The plain line a research job stopped for a narrowed policy shows while it waits to run
+/// again. Takes the cause. Returns the line.
+fn requeued_reason(cause: Narrowing) -> &'static str {
+    match cause {
+        Narrowing::Access => {
+            "The project's agent access was lowered, so this research was stopped and queued again; its next run uses the new level"
+        }
+        Narrowing::Network => {
+            "The project's agent network was narrowed, so this research was stopped and queued again; its next run uses the new network"
+        }
+        Narrowing::TurnedOff => {
+            "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it"
+        }
+        Narrowing::NotAllowed => {
+            "A toolchain this research ran with is no longer allowed for the project (turned off, or no longer used by the project), so it was stopped and queued again; its next run goes without it"
+        }
+        Narrowing::PolicyUnreadable => {
+            "The project's agent access could not be read, so this research was stopped and queued again"
+        }
+        Narrowing::FolderUnreadable => {
+            "The project folder could not be read to check this research's toolchains, so it was stopped and queued again"
+        }
+    }
 }
 
 impl ResearchRunner {
@@ -366,6 +448,7 @@ impl ResearchRunner {
             state: state.to_path_buf(),
             codex: codex.map(Path::to_path_buf),
             claude: None,
+            lookup: None,
             limits,
             claimer: format!("runner-{}-{nanos}", std::process::id()),
             stopping: AtomicBool::new(false),
@@ -374,6 +457,7 @@ impl ResearchRunner {
             terminal: None,
             agents: None,
             settings: None,
+            reproving: None,
         })
     }
 
@@ -387,7 +471,8 @@ impl ResearchRunner {
 
     /// Runs every research agent in its harness's interactive app in a pane of `host` named
     /// `research-<run>`, where the owner can watch it work. Panes an earlier engine left end
-    /// here, since that engine's jobs go back to the queue. Takes the host.
+    /// here with every process their harness started, since that engine's jobs go back to
+    /// the queue; a cleanup not confirmed is reported on stderr. Takes the host.
     /// Returns the runner, or the host's plain code.
     pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, RunError> {
         let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
@@ -395,8 +480,8 @@ impl ResearchRunner {
             if !agent.as_str().starts_with(PANE_PREFIX) {
                 continue;
             }
-            match host.kill(&agent) {
-                Ok(()) => {}
+            match end_left_pane(host.as_ref(), &agent, "research") {
+                Ok(_) => {}
                 Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                 Err(problem) => return Err(host_error(problem)),
             }
@@ -413,6 +498,22 @@ impl ResearchRunner {
         self
     }
 
+    /// Shares the engine's flag that is set while its engine-start re-proof of earlier
+    /// sign-ins still runs (DEC-108), so work that finds no signed-in account then waits
+    /// for the re-proof instead of reporting none. Takes the flag. Returns the runner.
+    pub fn with_reproof(mut self, reproving: Arc<AtomicBool>) -> Self {
+        self.reproving = Some(reproving);
+        self
+    }
+
+    /// Whether the engine-start re-proof of earlier sign-ins still runs; false without the
+    /// engine's flag. Output: the flag's value.
+    pub fn reproving(&self) -> bool {
+        self.reproving
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
     /// Lets the runner run Claude Code jobs with the absolute `claude`
     /// executable. Returns the runner, or an error for a relative or missing
     /// path.
@@ -426,17 +527,42 @@ impl ResearchRunner {
         Ok(self)
     }
 
+    /// Lets the runner find a harness the engine pinned after it started, as after an
+    /// install from the app. Only engine start sets it, so a runner built without it never
+    /// looks past the executables it was given. Takes the engine's lookup. Returns the runner.
+    pub fn with_harness_lookup(mut self, lookup: crate::paths::HarnessLookup) -> Self {
+        self.lookup = Some(lookup);
+        self
+    }
+
+    /// The entry of a harness: the one given at engine start, else the one the engine pinned
+    /// since, when the lookup is set. Takes the harness. Returns the entry, or none for a
+    /// harness that is not installed.
+    fn harness(&self, harness: ResearchHarness) -> Option<PathBuf> {
+        let given = match harness {
+            ResearchHarness::Codex => &self.codex,
+            ResearchHarness::ClaudeCode => &self.claude,
+        };
+        let entry = given
+            .clone()
+            .or_else(|| self.lookup.as_ref().and_then(|lookup| lookup(harness.id())))?;
+        assert!(entry.is_absolute());
+        Some(entry)
+    }
+
     /// Whether this runner has the executable `harness` needs.
     pub fn can_run(&self, harness: ResearchHarness) -> bool {
-        match harness {
-            ResearchHarness::Codex => self.codex.is_some(),
-            ResearchHarness::ClaudeCode => self.claude.is_some(),
-        }
+        self.harness(harness).is_some()
     }
 
     /// The job store this runner claims from.
     pub fn database(&self) -> &Path {
         &self.database
+    }
+
+    /// The attempt limit of this runner's jobs, which stale recovery obeys too.
+    pub fn attempts_max(&self) -> u32 {
+        self.limits.attempts_max
     }
 
     /// The engine-owned folder holding this runner's sandbox profiles and
@@ -522,7 +648,8 @@ impl ResearchRunner {
     /// Runs a claimed job to its end and records how it ended: done with its report,
     /// failed, cancelled, parked for a pool, or handed back. Takes the job store, the job,
     /// its project and the pool connection of the project's account, if known; a run
-    /// refused for a rate or usage limit pauses it, else spends an attempt.
+    /// refused for a rate or usage limit pauses it, else spends an attempt. A job whose
+    /// project folder a projects home move holds goes back to the queue unspent.
     fn run_claimed(
         &self,
         jobs: &ResearchJobs,
@@ -538,6 +665,13 @@ impl ResearchRunner {
             report,
             process_group,
         };
+        if jobs.home_moving(project.root)? {
+            jobs.release(&job, None)?;
+            let status = jobs
+                .get(job.id)?
+                .map_or(ResearchStatus::Queued, |job| job.status);
+            return Ok(run(status, None, None));
+        }
         let Some(harness) = ResearchHarness::of(&job.harness) else {
             let status = jobs.fail(&job, "This harness cannot run research yet", 1)?;
             return Ok(run(status, None, None));
@@ -550,7 +684,7 @@ impl ResearchRunner {
             let status = jobs.needs_pool(&job)?;
             return Ok(run(status, None, None));
         };
-        if harness == ResearchHarness::ClaudeCode && self.claude.is_none() {
+        if self.harness(harness).is_none() {
             let status = jobs.fail(&job, "This harness is not installed on this computer", 1)?;
             return Ok(run(status, None, None));
         }
@@ -579,8 +713,12 @@ impl ResearchRunner {
                     jobs.cancelled(&job)?;
                     return Ok(run(ResearchStatus::Cancelled, None, Some(group)));
                 }
-                if let Ending::Interrupted = ending {
-                    let _ = jobs.release(&job);
+                if let Ending::Interrupted | Ending::Narrowed(_) = ending {
+                    let reason = match ending {
+                        Ending::Narrowed(cause) => Some(requeued_reason(cause)),
+                        _ => None,
+                    };
+                    let _ = jobs.release(&job, reason);
                     let status = jobs
                         .get(job.id)?
                         .map_or(ResearchStatus::Queued, |job| job.status);
@@ -592,7 +730,6 @@ impl ResearchRunner {
                 }
                 let reason = match ending {
                     Ending::TimedOut => "Agent ran out of time",
-                    Ending::Overflowed => "Agent output exceeded the limit",
                     Ending::RateLimited => "The account hit its rate limit",
                     _ => "Agent stopped with an error",
                 };
@@ -606,7 +743,7 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(RunError::Busy) => {
-                jobs.release(&job)?;
+                jobs.release(&job, None)?;
                 let status = jobs
                     .get(job.id)?
                     .map_or(ResearchStatus::Queued, |job| job.status);
@@ -617,18 +754,22 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(error) => {
-                let (reason, attempts_max) = match error {
-                    RunError::Context(_) => (
-                        "Could not give the agent this project's context",
+                let (reason, attempts_max) = match &error {
+                    RunError::Context(problem) => (
+                        crate::launch_context::secret_in_command_text(problem).unwrap_or_else(
+                            || "Could not give the agent this project's context".to_owned(),
+                        ),
                         self.limits.attempts_max,
                     ),
-                    RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN, 1),
+                    RunError::Uncertain(_) => {
+                        (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1)
+                    }
                     _ => (
-                        "Could not prepare the research sandbox",
+                        "Could not prepare the research sandbox".to_owned(),
                         self.limits.attempts_max,
                     ),
                 };
-                jobs.fail(&job, reason, attempts_max)?;
+                jobs.fail(&job, &reason, attempts_max)?;
                 Err(error)
             }
         }
@@ -656,7 +797,16 @@ impl ResearchRunner {
             }
             ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
         };
-        self.launch_leased(jobs, job, account, place, lease)
+        let (account, relay) = relayed(self.engine_folder()?, account)?;
+        self.launch_leased(jobs, job, &account, place, lease, relay.as_ref())
+    }
+
+    /// The engine folder, which holds `engine.db` and the saved account keys.
+    /// Output: the folder, or a refusal for a database path with no parent.
+    fn engine_folder(&self) -> Result<&Path, RunError> {
+        self.database
+            .parent()
+            .ok_or_else(|| RunError::Invalid("engine folder".into()))
     }
 
     /// Checks that a claimed job can launch and names its run: the canonical project
@@ -731,8 +881,9 @@ impl ResearchRunner {
 
     /// Runs a claimed job's agent once its account is taken: the managed credential copy
     /// in the agent's home, the project context, the sandboxed worktree and the harness.
-    /// Inputs: the job store, the job, its account, where it runs and the held lease, none
-    /// for an endpoint account. Output: how the agent ended, its process group and output.
+    /// Inputs: the job store, the job, its account, where it runs, the held lease, none for
+    /// an endpoint account, and the key relay a keyed endpoint account runs behind, which
+    /// outlives this call. Output: how the agent ended, its process group and output.
     fn launch_leased(
         &self,
         jobs: &ResearchJobs,
@@ -740,6 +891,7 @@ impl ResearchRunner {
         account: &ResearchAccount,
         place: JobPlace,
         lease: Option<(NativeProfileUse, Option<Hold>)>,
+        relay: Option<&crate::model_gateway::relay::Relay>,
     ) -> Result<(Ending, u32, PathBuf), RunError> {
         let JobPlace {
             root,
@@ -760,36 +912,23 @@ impl ResearchRunner {
             &format!("research-{name}"),
         );
         let harness = account.harness();
-        let executable = match harness {
-            ResearchHarness::Codex => self
-                .codex
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
-            ResearchHarness::ClaudeCode => self
-                .claude
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
-        };
+        let executable = &self.harness(harness).ok_or_else(|| {
+            RunError::Invalid(match harness {
+                ResearchHarness::Codex => "codex executable missing".into(),
+                ResearchHarness::ClaudeCode => "claude executable missing".into(),
+            })
+        })?;
         let credential = match &lease {
             Some((lease, _)) => Some(
                 lease
                     .hand_to_agent(&home, self.limits.wall_time, executable)
                     .map_err(|problem| RunError::Account(problem.0))?,
             ),
-            None => None,
+            None => {
+                endpoint_keychain(&self.state, harness, &home)?;
+                None
+            }
         };
-        let installed = context
-            .install(harness.id(), &home, job.tools)
-            .map_err(|problem| {
-                if problem.0 == CONTEXT_BUSY {
-                    RunError::Busy
-                } else {
-                    RunError::Context(problem)
-                }
-            })?;
-        private_directory(&agent)?;
-        let tmp = agent.join("tmp");
-        private_directory(&tmp)?;
         let trust = jobs
             .trust(&project)
             .map_err(|_| RunError::Invalid("project repository trust unreadable".into()))?;
@@ -804,18 +943,34 @@ impl ResearchRunner {
         if let Some((line, _)) = enforcement.refusal(policy.access) {
             return Err(RunError::Invalid(line.into()));
         }
-        let network = job_network(&policy, open, model_remote(account)?);
+        let kept = job_kept_ports(self.settings.as_ref(), open)?;
+        let (network, proxy) = job_reach(&policy, open, account, job.id, &kept)?;
+        let display = jobs
+            .terminal_display(&project)
+            .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
+        let context = context.with_terminal_display(display);
+        let context = match &proxy {
+            Some(proxy) => context.with_model_proxy(proxy.port()),
+            None => context,
+        };
+        let installed = context
+            .install(harness.id(), &home, job.tools)
+            .map_err(|problem| {
+                if problem.0 == CONTEXT_BUSY {
+                    RunError::Busy
+                } else {
+                    RunError::Context(problem)
+                }
+            })?;
+        private_directory(&agent)?;
+        let tmp = agent.join("tmp");
+        private_directory(&tmp)?;
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
+        #[cfg(target_os = "macos")]
+        toolchains::write_getconf(&home, false)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
-        let kept = match (&self.settings, open) {
-            (Some((global, local)), true) => crate::config::resolve_config(global, local)
-                .ok()
-                .and_then(|config| config.settings.model_access)
-                .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access)),
-            _ => Vec::new(),
-        };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?.keep_ports(&kept)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;
@@ -823,49 +978,67 @@ impl ResearchRunner {
         let extra = jobs
             .read_paths(&project)
             .map_err(|_| RunError::Invalid("project read-only folders unreadable".into()))?;
+        let granted = Granted {
+            project: project.clone(),
+            root: root.clone(),
+            access: policy.access,
+            toolchains: policy.allowed(&root),
+        };
         (sandbox, _) = sandbox
-            .allow_tools(&Toolchains::grant(&homes, &policy.allowed(&root)))?
+            .allow_tools(&Toolchains::grant(&homes, &granted.toolchains))?
             .allow_scratch(scratch.path())?
             .allow_extra_reads(&extra)?;
-        for folder in read_folders(executable, &context, job.tools)? {
+        let program =
+            crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())?;
+        for folder in read_folders(&program, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
+        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
-        let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
-        ensure_repository(&root, &tmp)?;
-        add_worktree(&sandbox, &profile, &worktree)?;
-        let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
-        if enforcement.repo_config_as_text {
-            sandbox = sandbox.hide_repository_config(&root)?;
-        }
-        let hidden = jobs
-            .hidden_paths(&project)
-            .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
-        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
-            return Err(RunError::Invalid(code.into()));
-        }
-        for folder in &hidden {
-            sandbox = sandbox.hide(folder)?;
-        }
-        assert!(
-            !enforcement.model_endpoints_only || !matches!(sandbox.network(), SandboxNetwork::Open)
-        );
-        sandbox.install(&profile)?;
-        drop(setup);
+        let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
+            let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
+            ensure_repository(&root, &tmp)?;
+            add_worktree(&sandbox, &profile, &worktree)?;
+            let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
+            if enforcement.repo_config_as_text {
+                sandbox = sandbox.hide_repository_config(&root)?;
+            }
+            let hidden = jobs
+                .hidden_paths(&project)
+                .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
+            if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
+                return Err(RunError::Invalid(code.into()));
+            }
+            for folder in &hidden {
+                sandbox = sandbox.hide(folder)?;
+            }
+            if !unconfined {
+                sandbox =
+                    crate::sandbox::shared_folders::apply(sandbox, &root, &policy.shared_folders)
+                        .map_err(|code| RunError::Invalid(code.into()))?;
+            }
+            assert!(
+                !enforcement.model_endpoints_only
+                    || !matches!(sandbox.network(), SandboxNetwork::Open)
+            );
+            sandbox.install(&profile)?;
+            Ok(sandbox)
+        })??;
         still_held(jobs, job)?;
-        let prompt = research_prompt(&root, &job.kind)?;
+        let linked = self.linked_research(job, &root)?;
+        let prompt = research_prompt(&root, &job.kind, &linked)?;
         write_private(&agent, &agent.join("prompt.md"), prompt.as_bytes())?;
         if let Some(host) = &self.terminal {
             let output = match harness {
                 ResearchHarness::Codex => tmp.join("report.md"),
                 ResearchHarness::ClaudeCode => agent.join("output.md"),
             };
-            let (binding, model) = pane_account(account, &home);
+            let (binding, model) = pane_account(account, &home, relay)?;
             let request = LaunchRequest {
                 harness: harness.id().to_owned(),
                 trust,
-                executable: executable.to_path_buf(),
+                executable: program.clone(),
                 working_dir: worktree.clone(),
                 account: binding,
                 model,
@@ -875,10 +1048,6 @@ impl ResearchRunner {
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
-                    output_bytes: usize::try_from(self.limits.output_bytes_max)
-                        .unwrap_or(usize::MAX)
-                        .min(64 * 1024 * 1024),
-                    events: PANE_EVENTS_MAX,
                     ..LaunchLimits::default()
                 },
             };
@@ -887,20 +1056,49 @@ impl ResearchRunner {
             let mut session =
                 TerminalSession::start_installed(host.clone(), pane, request, installed, &context)
                     .map_err(|problem| {
-                        RunError::Invalid(format!("agent terminal: {}", problem.0))
+                        if problem.1.is_some() {
+                            RunError::Context(problem)
+                        } else {
+                            RunError::Invalid(format!("agent terminal: {}", problem.0))
+                        }
                     })?;
             let group = session.process_group();
             #[cfg(unix)]
             let mut lifeline = Lifeline::watch(group)?;
-            let ending = self.supervise_pane(jobs, job, &mut session, &prompt, &output);
-            let _ = session.stop();
+            let ending = self.supervise_pane(jobs, job, &granted, &mut session, &prompt, &output);
+            let stopped = session.stop();
             #[cfg(unix)]
             lifeline.release();
+            match stopped {
+                Ok(_) => {}
+                Err(Unstopped::Uncertain) => {
+                    if let Some(credential) = credential {
+                        credential.retain();
+                    }
+                    std::mem::forget(lease);
+                    return Err(RunError::Uncertain(leftovers::UNCERTAIN));
+                }
+                Err(Unstopped::Left(left)) => {
+                    let code = left.code();
+                    drop(credential);
+                    let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
+                    let by = leftovers::HoldBy {
+                        project: Some(job.project.clone()),
+                        who: format!("research job {}", job.id),
+                    };
+                    let mode = jobs.leftover_mode(&job.project);
+                    left.hold(account, lease, by, mode);
+                    return Err(RunError::Uncertain(code));
+                }
+            }
             drop(credential);
             drop(lease);
             return Ok((ending?, group, output));
         }
-        let mut launch = Command::new(executable);
+        if let Some(relay) = relay {
+            write_relay_token(&home, relay)?;
+        }
+        let mut launch = Command::new(&program);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
@@ -916,12 +1114,15 @@ impl ResearchRunner {
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut launch, &home, &tmp, job.tools, account)?;
+                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account)?;
                 launch.args(installed.arguments());
                 (agent.join("output.md"), "output.md")
             }
         };
         launch.current_dir(&worktree);
+        if let Some(port) = installed.model_proxy() {
+            launch.envs(crate::sandbox::model_proxy::variables(port));
+        }
         let mut command = if unconfined {
             sandbox.wrap_unconfined(&launch)?
         } else {
@@ -981,7 +1182,7 @@ impl ResearchRunner {
         if let Some(mut stdin) = running.child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
         }
-        let ending = self.supervise(jobs, job, &mut running, &counted, &limited)?;
+        let ending = self.supervise(jobs, job, &granted, &mut running, &counted, &limited)?;
         let stopped = running.stop();
         let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         drop(running);
@@ -1073,13 +1274,15 @@ impl ResearchRunner {
     }
 
     /// Follows a direct agent process until it exits, its stderr shows it waiting out a
-    /// rate or usage limit, the job is cancelled, the runner stops or a limit passes; the
-    /// caller then stops it. Takes the job store, the job, the process, its output count
-    /// and the limit flag its stderr drain sets. Returns how the run ended.
+    /// rate or usage limit, the job is cancelled, the saved policy no longer covers what it
+    /// was granted, the runner stops or a limit passes; the caller then stops it. Takes the
+    /// job store, the job, its grants, the process, its output count and the limit flag its
+    /// stderr drain sets. Returns how the run ended.
     fn supervise(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
+        granted: &Granted,
         agent: &mut AgentProcess,
         counted: &AtomicU64,
         limited: &AtomicBool,
@@ -1099,15 +1302,15 @@ impl ResearchRunner {
             if self.is_stopping() {
                 break Ending::Interrupted;
             }
-            if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
-                break Ending::Overflowed;
-            }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
                 match jobs.heartbeat(job, counted.load(Ordering::Relaxed)) {
                     Ok(true) => break Ending::Cancelled,
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
+                }
+                if let Some(cause) = granted.narrowed(jobs) {
+                    break Ending::Narrowed(cause);
                 }
             }
             std::thread::sleep(POLL);
@@ -1116,13 +1319,15 @@ impl ResearchRunner {
     }
 
     /// Types the research prompt into the agent's pane and follows its session record until
-    /// the turn ends or reports a rate or usage limit, the job is cancelled, the runner
-    /// stops or a limit passes. The agent's last reply becomes the report at `output`, as
-    /// `codex exec -o` and `claude -p` give. Returns how the run ended.
+    /// the turn ends or reports a rate or usage limit, the job is cancelled, the saved policy
+    /// no longer covers what it was granted, the runner stops or a limit passes. The agent's
+    /// last reply becomes the report at `output`, as `codex exec -o` and `claude -p` give.
+    /// Returns how the run ended.
     fn supervise_pane(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
+        granted: &Granted,
         session: &mut TerminalSession,
         prompt: &str,
         output: &Path,
@@ -1140,15 +1345,15 @@ impl ResearchRunner {
             if self.is_stopping() {
                 break Ending::Interrupted;
             }
-            if counted > self.limits.output_bytes_max {
-                break Ending::Overflowed;
-            }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
                 match jobs.heartbeat(job, counted) {
                     Ok(true) => break Ending::Cancelled,
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
+                }
+                if let Some(cause) = granted.narrowed(jobs) {
+                    break Ending::Narrowed(cause);
                 }
             }
             match session.next_event(POLL) {
@@ -1165,7 +1370,6 @@ impl ResearchRunner {
                 Err(problem) => {
                     break match problem.0.as_str() {
                         "launch_deadline" => Ending::TimedOut,
-                        "launch_output_limit" | "launch_event_limit" => Ending::Overflowed,
                         _ => Ending::Exited(false),
                     };
                 }
@@ -1177,6 +1381,28 @@ impl ResearchRunner {
             write_private(&self.state.join("agents"), output, last.as_bytes())?;
         }
         Ok(ending)
+    }
+
+    /// Runs `work`, which can wait long on the setup locks and the bounded git steps, while
+    /// a second connection refreshes the claim `job` every `HEARTBEAT`, so the wait is not
+    /// taken back as stale; the refresh ends with `work`, also when it panics. Inputs: the
+    /// claimed job and the work. Output: the work's result, or the store's open error.
+    fn keep_held<T>(&self, job: &ResearchJob, work: impl FnOnce() -> T) -> Result<T, RunError> {
+        let keeper = ResearchJobs::open(&self.database)?;
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        Ok(std::thread::scope(|scope| {
+            scope.spawn(move || {
+                while matches!(
+                    stopped.recv_timeout(HEARTBEAT),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    let _ = keeper.heartbeat(job, 0);
+                }
+            });
+            let result = work();
+            drop(stop);
+            result
+        }))
     }
 
     /// Names this launch of a job so it never reuses the agent state or the
@@ -1208,6 +1434,39 @@ impl ResearchRunner {
         ))
     }
 
+    /// The research files linked from the project's repository, for the planning job only:
+    /// no other job's prompt carries them, each read through the links store with no link
+    /// followed. Inputs: the job and the project folder. Output: each file's research kind,
+    /// path and text, or the refusal when the links cannot be read.
+    fn linked_research(
+        &self,
+        job: &ResearchJob,
+        root: &Path,
+    ) -> Result<Vec<(ResearchKind, LinkedText)>, RunError> {
+        if job.kind != ResearchKind::RoadmapPlanning.name() {
+            return Ok(Vec::new());
+        }
+        let unreadable = || RunError::Invalid(LINKS_UNREADABLE.into());
+        let runtime = self.database.parent().ok_or_else(unreadable)?;
+        let project = ProjectId::new(job.project.clone()).map_err(|_| unreadable())?;
+        let db = crate::questions::open(runtime).map_err(|_| unreadable())?;
+        let linked =
+            crate::project_setup::links::research(&db, &project, root).map_err(|_| unreadable())?;
+        assert!(linked.len() <= crate::project_setup::links::LINKS_MAX);
+        assert!(
+            linked
+                .iter()
+                .all(|(_, file)| file.text.len() as u64
+                    <= crate::project_setup::links::LINK_BYTES_MAX)
+        );
+        Ok(linked)
+    }
+
+    /// Publishes a finished job's output: the planning job's reply as the roadmap documents
+    /// with its open points raised, any other job's report under the project's research
+    /// folder with the owner questions its agent returned taken out of it and raised.
+    /// Inputs: the job, its harness, the project folder and the agent's output file.
+    /// Output: the written file, or the plain failure the job ends with.
     fn publish(
         &self,
         job: &ResearchJob,
@@ -1235,18 +1494,36 @@ impl ResearchRunner {
                 .map_err(|_| crate::tracker::context_import::UNIMPORTED)?;
             return Ok(state.join(crate::planning::ROADMAP));
         }
-        let report = render_report(&kind_label(&job.kind), harness.label(), body);
-        write_report(root, &job.kind, &report).map_err(|_| "Could not save the research report")
+        let label = kind_label(&job.kind);
+        let path = ResearchKind::parse(&job.kind).map_or_else(
+            || format!("context/research/{}.md", job.kind),
+            ResearchKind::report_path,
+        );
+        let (body, asks) = report_questions(body, &label, &path);
+        if body.is_empty() {
+            return Err("Agent returned no report");
+        }
+        let report = render_report(&label, harness.label(), &body);
+        let written = write_report(root, &job.kind, &report)
+            .map_err(|_| "Could not save the research report")?;
+        let source = crate::questions::EngineSource::Research(job.kind.clone());
+        crate::planning::raise_asks(self.database(), &job.project, &source, &asks)
+            .map_err(|_| REPORT_QUESTIONS_UNLOGGED)?;
+        Ok(written)
     }
 }
 
 /// One agent run outside the research queue that may only read `folder`,
 /// such as onboarding's mapping agent: `name` names its agent state and
 /// sandbox profile, `agent` and `project` name whose usage its tokens count
-/// as, `prompt` goes to it on stdin, `wall_time` bounds it.
+/// as, `prompt` goes to it on stdin, `wall_time` bounds it and
+/// `output_tokens` caps each Claude Code request (`None` for Claude Code's own
+/// limit; a Codex run has no such cap).
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
+    #[cfg(unix)]
     pub agent: &'a str,
+    #[cfg(unix)]
     pub project: Option<&'a ProjectId>,
     #[cfg(unix)]
     pub folder: &'a Path,
@@ -1254,6 +1531,8 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub prompt: &'a str,
     pub account: &'a ResearchAccount,
     pub wall_time: Duration,
+    #[cfg(unix)]
+    pub output_tokens: Option<u32>,
 }
 
 /// How a read-only agent run ended: its last message, a plain failure, out
@@ -1270,7 +1549,8 @@ pub(crate) enum ReadOnlyEnding {
 }
 
 impl ResearchRunner {
-    /// Runs one agent with tools off that can read `run.folder` but write only
+    /// Runs one agent with tools off that can read `run.folder`, its secret files
+    /// closed but the ones the owner shared back (DEC-147.9), but write only
     /// its own engine-owned work, home and temp folders, reaching nothing but
     /// its model endpoint. A managed account is held under the engine custody
     /// lease for the whole run. Takes the run and `stop`, polled while the
@@ -1288,19 +1568,6 @@ impl ResearchRunner {
         if let Some(line) = confined_unavailable(std::env::consts::OS) {
             return Ok(ReadOnlyEnding::Failed(line.into()));
         }
-        let folder = run.folder.canonicalize()?;
-        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
-            return Err(RunError::Invalid(
-                "read-only folder must be canonical".into(),
-            ));
-        }
-        let agent = self.state.join("agents").join(run.name);
-        if fs::symlink_metadata(&agent).is_ok() {
-            return Err(RunError::Invalid(RUN_NAME_USED.into()));
-        }
-        let trust = ResearchJobs::open(&self.database)?
-            .folder_trust(run.project, &folder)
-            .map_err(|_| RunError::Invalid("project repository trust unreadable".into()))?;
         let lease = match run.account {
             ResearchAccount::ManagedCodex { connection, .. }
             | ResearchAccount::ManagedClaude { connection, .. } => {
@@ -1316,6 +1583,46 @@ impl ResearchRunner {
             }
             ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
         };
+        self.run_read_only_leased(run, lease, stop)
+    }
+
+    /// Runs [`Self::run_read_only`]'s agent on a custody lease already taken for a managed
+    /// account, `None` for an endpoint account. Takes the run, the lease and `stop`.
+    /// Returns how it ended, with the same checks and cleanup as [`Self::run_read_only`].
+    #[cfg(unix)]
+    pub(crate) fn run_read_only_leased(
+        &self,
+        run: &ReadOnlyRun<'_>,
+        lease: Option<NativeProfileUse>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<ReadOnlyEnding, RunError> {
+        if !valid_run_name(run.name) || run.wall_time.is_zero() {
+            return Err(RunError::Invalid("read-only run name or limit".into()));
+        }
+        let managed = matches!(
+            run.account,
+            ResearchAccount::ManagedCodex { .. } | ResearchAccount::ManagedClaude { .. }
+        );
+        if managed != lease.is_some() {
+            return Err(RunError::Invalid(
+                "read-only run lease does not fit its account".into(),
+            ));
+        }
+        let (behind, relay) = relayed(self.engine_folder()?, run.account)?;
+        let account = &behind;
+        let folder = run.folder.canonicalize()?;
+        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
+            return Err(RunError::Invalid(
+                "read-only folder must be canonical".into(),
+            ));
+        }
+        let agent = self.state.join("agents").join(run.name);
+        if fs::symlink_metadata(&agent).is_ok() {
+            return Err(RunError::Invalid(RUN_NAME_USED.into()));
+        }
+        let trust = ResearchJobs::open(&self.database)?
+            .folder_trust(run.project, &folder)
+            .map_err(|_| RunError::Invalid("project repository trust unreadable".into()))?;
         private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
@@ -1323,27 +1630,26 @@ impl ResearchRunner {
             &home,
             crate::usage::capture::RunKind::Research,
             run.project,
-            run.account,
+            account,
             run.agent,
         );
-        let harness = run.account.harness();
-        let executable = match harness {
-            ResearchHarness::Codex => self
-                .codex
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
-            ResearchHarness::ClaudeCode => self
-                .claude
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
-        };
+        let harness = account.harness();
+        let executable = &self.harness(harness).ok_or_else(|| {
+            RunError::Invalid(match harness {
+                ResearchHarness::Codex => "codex executable missing".into(),
+                ResearchHarness::ClaudeCode => "claude executable missing".into(),
+            })
+        })?;
         let credential = match &lease {
             Some(lease) => Some(
                 lease
                     .hand_to_agent(&home, run.wall_time, executable)
                     .map_err(|problem| RunError::Account(problem.0))?,
             ),
-            None => None,
+            None => {
+                endpoint_keychain(&self.state, harness, &home)?;
+                None
+            }
         };
         let work = agent.join("work");
         private_directory(&work)?;
@@ -1353,10 +1659,12 @@ impl ResearchRunner {
             &work,
             &home,
             &tmp,
-            SandboxNetwork::Only(vec![model_remote(run.account)?]),
+            SandboxNetwork::Only(vec![model_remote(account)?]),
         )?
         .allow_read(&folder)?;
-        if let Some(parent) = executable.canonicalize()?.parent() {
+        let program =
+            crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())?;
+        if let Some(parent) = program.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
         if crate::trust::Enforcement::for_level(trust).repo_config_as_text {
@@ -1366,6 +1674,7 @@ impl ResearchRunner {
             sandbox.hides_repository_config(),
             trust == crate::trust::Trust::Untrusted
         );
+        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)
@@ -1378,26 +1687,33 @@ impl ResearchRunner {
         for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {
             sandbox = sandbox.hide(sub)?;
         }
+        let shared = match run.project {
+            Some(project) => {
+                ResearchJobs::open(&self.database)?
+                    .agent_policy(project)
+                    .map_err(|_| RunError::Invalid("project agent policy unreadable".into()))?
+                    .shared_folders
+            }
+            None => crate::sandbox::shared_folders::SharedFolders::default(),
+        };
+        let read_only = crate::sandbox::shared_folders::SharedFolders {
+            access: crate::sandbox::shared_folders::SharedAccess::ReadOnly,
+            ..shared
+        };
+        sandbox = crate::sandbox::shared_folders::apply(sandbox, &folder, &read_only)
+            .map_err(|code| RunError::Invalid(code.into()))?;
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
-        let mut command = sandbox.command(&profile, executable);
+        let mut command = sandbox.command(&profile, &program);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
-                codex_arguments(
-                    &mut command,
-                    &folder,
-                    &output,
-                    &home,
-                    false,
-                    trust,
-                    run.account,
-                )?;
+                codex_arguments(&mut command, &folder, &output, &home, false, trust, account)?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut command, &home, &tmp, false, run.account)?;
+                claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
                 (agent.join("output.md"), "output.md")
             }
         };
@@ -1406,6 +1722,9 @@ impl ResearchRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(relay) = &relay {
+            write_relay_token(&home, relay)?;
+        }
         let mut running = AgentProcess::spawn(&mut command)?;
         let counted = Arc::new(AtomicU64::new(0));
         let mut drains = Vec::with_capacity(2);
@@ -1451,9 +1770,6 @@ impl ResearchRunner {
             }
             if stop() || self.is_stopping() {
                 break Some(ReadOnlyEnding::Stopped);
-            }
-            if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
-                break Some(ReadOnlyEnding::Failed("Agent wrote too much output".into()));
             }
             std::thread::sleep(POLL);
         };
@@ -1549,10 +1865,32 @@ fn read_folders(
     Ok(folders)
 }
 
+/// The ports a research job never listens on beside `OWNER_PORTS`: the owner's configured
+/// local model ports for a tools-on job, none for a tools-off job or a runner with no
+/// settings files. Inputs: the runner's settings files and whether the job has tools.
+/// Output: the ports, or Invalid when the settings files do not read (OWNER-PORTS-FAIL-OPEN).
+fn job_kept_ports(
+    settings: Option<&(PathBuf, PathBuf)>,
+    tools: bool,
+) -> Result<Vec<u16>, RunError> {
+    match (settings, tools) {
+        (Some((global, local)), true) => crate::sandbox::settings_owner_ports(global, local)
+            .map_err(|_| {
+                RunError::Invalid(format!(
+                    "the settings files {} and {} do not read, so the owner's model ports cannot be kept from the job",
+                    global.display(),
+                    local.display()
+                ))
+            }),
+        _ => Ok(Vec::new()),
+    }
+}
+
 /// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
-/// reaches only its model endpoint, and a tools-on job follows the project's network choice
-/// with the model still reachable. Inputs: the project's agent policy, whether the job has
-/// tools, and the model endpoint. Output: the sandbox network.
+/// reaches only its model endpoint's port, on loopback for a local model, otherwise on any
+/// host, and a tools-on job follows the project's network choice with the model still
+/// reachable. Inputs: the project's agent policy, whether the job has tools, and the model
+/// endpoint. Output: the sandbox network.
 pub(crate) fn job_network(
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,
@@ -1563,6 +1901,118 @@ pub(crate) fn job_network(
     } else {
         SandboxNetwork::Only(vec![model])
     }
+}
+
+/// The sandbox network a research job runs under and the model proxy it reaches its model
+/// through (S4B-M1). A tools-on job under None whose model is not on loopback gets a proxy
+/// for its account's hosts and reaches only the proxy's port; any other job gets
+/// [`job_network`]. Inputs: the project's agent policy, whether the job has tools, its
+/// account, its id, which the proxy's refusal lines name, and the owner's model ports the
+/// proxy leaves alone. Output: the network and the proxy, which must live as long as the
+/// job runs, or the refusal of an endpoint no proxy can reach by name or a proxy that could
+/// not start.
+pub(crate) fn job_reach(
+    policy: &crate::sandbox::policy::AgentPolicy,
+    tools: bool,
+    account: &ResearchAccount,
+    job: i64,
+    kept: &[u16],
+) -> Result<(SandboxNetwork, Option<ModelProxy>), RunError> {
+    let model = model_remote(account)?;
+    let proxied = tools
+        && policy.network == crate::sandbox::policy::AgentNetwork::None
+        && matches!(model, SandboxRemote::AnyHost(_));
+    if !proxied {
+        return Ok((job_network(policy, tools, model), None));
+    }
+    let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
+        hosts
+            .iter()
+            .filter_map(|(name, port)| ModelHost::new(name, *port))
+            .collect()
+    };
+    let hosts = match account {
+        ResearchAccount::ManagedCodex { .. } => fixed(CODEX_MODEL_HOSTS),
+        ResearchAccount::ManagedClaude { .. } => fixed(CLAUDE_MODEL_HOSTS),
+        ResearchAccount::Endpoint { base_url, .. }
+        | ResearchAccount::AnthropicEndpoint { base_url, .. } => {
+            endpoint_model_host(base_url).into_iter().collect()
+        }
+    };
+    if hosts.is_empty() {
+        return Err(RunError::Invalid(
+            "with no network, a research job with tools reaches only an https endpoint named by a host name".into(),
+        ));
+    }
+    let proxy = ModelProxy::bind(job, hosts, None, kept)?;
+    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]);
+    Ok((network, Some(proxy)))
+}
+
+/// Puts a keyed endpoint account behind an engine key relay for one run (DEC-141 PA-8): the
+/// relay reads the saved key from the engine folder and holds it in memory, and the account
+/// comes back naming the relay's loopback URL, so the agent never gets the key. Inputs: the
+/// engine folder holding `account-keys` and the account. Output: the account to run and its
+/// relay, which must outlive the run; any other account unchanged with no relay.
+fn relayed(
+    engine: &Path,
+    account: &ResearchAccount,
+) -> Result<(ResearchAccount, Option<crate::model_gateway::relay::Relay>), RunError> {
+    let (upstream, key) = match account {
+        ResearchAccount::Endpoint {
+            base_url,
+            key: Some(key),
+            ..
+        }
+        | ResearchAccount::AnthropicEndpoint {
+            base_url,
+            key: Some(key),
+            ..
+        } => (base_url, key),
+        _ => return Ok((account.clone(), None)),
+    };
+    let relay = crate::harnesses::key_relay(engine, upstream, key)
+        .map_err(|problem| RunError::Account(problem.0))?;
+    let mut behind = account.clone();
+    if let ResearchAccount::Endpoint { base_url, .. }
+    | ResearchAccount::AnthropicEndpoint { base_url, .. } = &mut behind
+    {
+        *base_url = relay.base_url();
+    }
+    assert!(
+        matches!(model_remote(&behind), Ok(SandboxRemote::Loopback(port)) if port == relay.port())
+    );
+    Ok((behind, Some(relay)))
+}
+
+/// The key file a keyed research run's harness reads its relay token from, once the
+/// account's URL is checked to be a relay's: plain http on 127.0.0.1, so a keyed account is
+/// never reached directly. Inputs: the agent home and the account URL. Output: the file's
+/// path as text, or a refusal.
+fn relay_key_file(home: &Path, url: &url::Url) -> Result<String, RunError> {
+    let relayed = url.scheme() == "http"
+        && url.host() == Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST));
+    if !relayed {
+        return Err(RunError::Invalid(
+            "a keyed endpoint runs only through its key relay".into(),
+        ));
+    }
+    crate::harnesses::launch::key_file_text(&home.join(crate::harnesses::interactive::KEY_FILE))
+        .map_err(|problem| RunError::Invalid(problem.0))
+}
+
+/// Writes a relayed run's placeholder token where its harness reads it, `<home>/.crazyagent-key`,
+/// owner-only; the provider key itself stays in the relay. Inputs: the agent home and the
+/// relay. Output: Ok, or the refusal of a token or file that cannot be written.
+fn write_relay_token(
+    home: &Path,
+    relay: &crate::model_gateway::relay::Relay,
+) -> Result<(), RunError> {
+    let token = crate::harnesses::launch::Secret::new(relay.token().to_owned())
+        .map_err(|problem| RunError::Invalid(problem.0))?;
+    crate::harnesses::interactive::write_key(home, &token)
+        .map(|_| ())
+        .map_err(|problem| RunError::Invalid(problem.0))
 }
 
 pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
@@ -1588,6 +2038,29 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
                 SandboxRemote::AnyHost(port)
             })
         }
+    }
+}
+
+/// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
+/// Code agent under the None network reaches through its model proxy (S4b).
+pub(crate) const CLAUDE_MODEL_HOSTS: &[(&str, u16)] = &[("api.anthropic.com", 443)];
+
+/// The hosts a signed-in Codex account's model traffic goes to: chatgpt.com for a ChatGPT
+/// sign-in, api.openai.com for an API key. A managed profile does not say at launch which
+/// one it holds, so a Codex agent under the None network may reach both (S4b).
+pub(crate) const CODEX_MODEL_HOSTS: &[(&str, u16)] =
+    &[("chatgpt.com", 443), ("api.openai.com", 443)];
+
+/// The one host an endpoint account's traffic goes to through a model proxy (S4b): its
+/// base URL's DNS name and port. Input: the base URL. Output: the host, or none for an
+/// http URL or an IP literal, which a CONNECT proxy checking names cannot tell apart from
+/// any other address.
+pub(crate) fn endpoint_model_host(base_url: &str) -> Option<ModelHost> {
+    let url = endpoint_url(base_url).ok()?;
+    let port = url.port_or_known_default()?;
+    match url.host()? {
+        url::Host::Domain(name) if url.scheme() == "https" => ModelHost::new(name, port),
+        _ => None,
     }
 }
 
@@ -1643,6 +2116,9 @@ fn codex_arguments(
         })
         .env("CODEX_HOME", home)
         .env("RUST_LOG", CODEX_LOG);
+    let folders = crate::harnesses::codex_folder::untrusted(worktree)
+        .map_err(|_| RunError::Invalid("research worktree path".into()))?;
+    command.arg("-c").arg(folders);
     if !tools {
         for setting in crate::harnesses::launch::CODEX_TOOLS_OFF {
             command.arg("-c").arg(setting);
@@ -1650,7 +2126,11 @@ fn codex_arguments(
         command.args(["-c", crate::harnesses::launch::CODEX_NO_USER_INPUT]);
     }
     match account {
-        ResearchAccount::Endpoint { base_url, model } => {
+        ResearchAccount::Endpoint {
+            base_url,
+            model,
+            key,
+        } => {
             let url = endpoint_url(base_url)?;
             if !valid_model(model) {
                 return Err(RunError::Invalid("endpoint model name".into()));
@@ -1665,9 +2145,14 @@ fn codex_arguments(
                 .arg(format!(
                     "model_providers.crazyagent_endpoint.base_url=\"{}\"",
                     url.as_str().trim_end_matches('/')
-                ))
-                .arg("-m")
-                .arg(model);
+                ));
+            if key.is_some() {
+                let file = relay_key_file(home, &url)?;
+                command.arg("-c").arg(format!(
+                    "model_providers.crazyagent_endpoint.auth={{command=\"/bin/cat\",args=[\"{file}\"]}}"
+                ));
+            }
+            command.arg("-m").arg(model);
         }
         ResearchAccount::ManagedCodex { model, .. } => {
             command.args([
@@ -1690,31 +2175,49 @@ fn codex_arguments(
         }
     }
     if trust == crate::trust::Trust::Untrusted {
-        let folder = crate::harnesses::launch::codex_project(trust, worktree)
-            .ok_or_else(|| RunError::Invalid("launch_working_dir_unavailable".into()))?;
-        command
-            .args(["-c", crate::harnesses::launch::CODEX_NO_PROJECT_DOCS, "-c"])
-            .arg(folder);
+        command.args(["-c", crate::harnesses::launch::CODEX_NO_PROJECT_DOCS]);
     }
     command.arg("-");
     Ok(())
 }
 
 /// Adds Claude Code's print-mode arguments and environment for one research
-/// run: no MCP servers, settings sources, hooks or saved sessions, tools on or
-/// off, and the account as either a managed config directory or a keyless
-/// Anthropic endpoint in bare mode that never reads the keychain.
-/// Takes the command, the agent home and temp dir, the tools switch and the
+/// run: no MCP servers, settings sources, hooks or saved sessions, tools on, or
+/// off with the no-tools system prompt and one model turn; the account as
+/// either a managed config directory or a keyless Anthropic endpoint in bare
+/// mode that never reads the keychain.
+/// Takes the command, the agent home and temp dir, the tools switch, the most
+/// output tokens of each request (`None` for Claude Code's own limit) and the
 /// account. Returns an error for an account that does not fit Claude Code.
 fn claude_arguments(
     command: &mut Command,
     home: &Path,
     tmp: &Path,
     tools: bool,
+    output_tokens: Option<u32>,
     account: &ResearchAccount,
 ) -> Result<(), RunError> {
+    let key_file = match account {
+        ResearchAccount::AnthropicEndpoint {
+            base_url,
+            key: Some(_),
+            ..
+        } => Some(relay_key_file(home, &endpoint_url(base_url)?)?),
+        _ => None,
+    };
+    let settings = match &key_file {
+        Some(file) => {
+            let mut settings: serde_json::Value =
+                serde_json::from_str(CLAUDE_SETTINGS).expect("fixed Claude settings are JSON");
+            settings["apiKeyHelper"] = format!("/bin/cat '{file}'").into();
+            settings.to_string()
+        }
+        None => CLAUDE_SETTINGS.to_owned(),
+    };
     command
         .args(CLAUDE_ARGUMENTS)
+        .arg("--settings")
+        .arg(settings)
         .env("CLAUDE_CONFIG_DIR", home)
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home)
         .env("CLAUDE_CODE_TMPDIR", tmp)
@@ -1731,10 +2234,16 @@ fn claude_arguments(
             ])
             .env("SHELL", "/bin/zsh");
     } else {
-        command.args(["--tools", "", "--disable-slash-commands"]);
+        command.args(CLAUDE_TOOLS_OFF).args(CLAUDE_ONE_TURN);
+    }
+    if let Some(tokens) = output_tokens {
+        assert!(tokens > 0, "an output cap of zero tokens leaves no answer");
+        command.env(CLAUDE_OUTPUT_TOKENS, tokens.to_string());
     }
     match account {
-        ResearchAccount::AnthropicEndpoint { base_url, model } => {
+        ResearchAccount::AnthropicEndpoint {
+            base_url, model, ..
+        } => {
             let url = endpoint_url(base_url)?;
             if !valid_model(model) {
                 return Err(RunError::Invalid("endpoint model name".into()));
@@ -1743,9 +2252,11 @@ fn claude_arguments(
                 .arg("--bare")
                 .arg("--model")
                 .arg(model)
-                .env("ANTHROPIC_API_KEY", LOCAL_PLACEHOLDER_KEY)
                 .env("ANTHROPIC_BASE_URL", url.as_str().trim_end_matches('/'))
                 .env("ANTHROPIC_SMALL_FAST_MODEL", model);
+            if key_file.is_none() {
+                command.env("ANTHROPIC_API_KEY", LOCAL_PLACEHOLDER_KEY);
+            }
         }
         ResearchAccount::ManagedClaude { model, .. } => {
             if let Some(model) = model {
@@ -1763,25 +2274,55 @@ fn claude_arguments(
 }
 
 /// Names the account and model a research pane launches on, in the agent's home.
-/// Takes the research account and the home. Returns the binding and the model; research
-/// accounts carry no key.
-fn pane_account(account: &ResearchAccount, home: &Path) -> (AccountBinding, Option<String>) {
+/// Takes the research account, already behind its relay when keyed, the home and that
+/// relay. Returns the binding and the model: a keyed account binds the relay's URL and
+/// placeholder token, never the provider key; a keyed account with no relay is refused.
+fn pane_account(
+    account: &ResearchAccount,
+    home: &Path,
+    relay: Option<&crate::model_gateway::relay::Relay>,
+) -> Result<(AccountBinding, Option<String>), RunError> {
     let home = home.to_path_buf();
-    match account {
-        ResearchAccount::Endpoint { base_url, model }
-        | ResearchAccount::AnthropicEndpoint { base_url, model } => (
-            AccountBinding::Url {
-                home,
-                base_url: base_url.clone(),
-                key: None,
-            },
-            Some(model.clone()),
-        ),
+    Ok(match account {
+        ResearchAccount::Endpoint {
+            base_url,
+            model,
+            key,
+        }
+        | ResearchAccount::AnthropicEndpoint {
+            base_url,
+            model,
+            key,
+        } => {
+            let token = match (key, relay) {
+                (None, None) => None,
+                (Some(_), Some(relay)) => {
+                    assert_eq!(base_url, &relay.base_url());
+                    Some(
+                        crate::harnesses::launch::Secret::new(relay.token().to_owned())
+                            .map_err(|problem| RunError::Invalid(problem.0))?,
+                    )
+                }
+                _ => {
+                    return Err(RunError::Invalid(
+                        "a keyed endpoint runs only through its key relay".into(),
+                    ));
+                }
+            };
+            (
+                AccountBinding::Url {
+                    home,
+                    base_url: base_url.clone(),
+                    key: token,
+                },
+                Some(model.clone()),
+            )
+        }
         ResearchAccount::ManagedCodex { model, .. }
         | ResearchAccount::ManagedClaude { model, .. } => {
             (AccountBinding::Subscription { home }, model.clone())
         }
-    }
+    })
 }
 
 /// The error every owner-only research file or folder reports where none can be made.
@@ -1984,12 +2525,11 @@ pub(crate) fn add_worktree_at(
     add_worktree(sandbox, profile, worktree)
 }
 
-/// Adds a detached git worktree at `worktree` inside the sandbox's project folder, running
-/// git under the installed profile so that no command the repository configures runs: the
-/// worktree is added without a checkout and made local-only, its effective config is
-/// listed in the worktree's own context, and the checkout blanks every filter driver that
-/// listing names.
-/// Takes the sandbox, its installed profile and the new worktree path.
+/// Adds a detached git worktree at `worktree` in the project folder, running git under the
+/// sandbox's profile, which it installs at `profile` as the only one that may make a
+/// checkout's `.git` link; the caller confines and reinstalls it before any agent runs. The
+/// worktree is added without a checkout and made local-only, and the checkout blanks every
+/// filter driver its own effective config names. Takes the sandbox, profile path, worktree.
 #[cfg(unix)]
 pub(crate) fn add_worktree(
     sandbox: &ProjectSandbox,
@@ -2019,6 +2559,7 @@ pub(crate) fn add_worktree_at(
         return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
     }
     fs::create_dir_all(&worktrees)?;
+    sandbox.clone().adding_worktrees().install(profile)?;
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
@@ -2026,12 +2567,7 @@ pub(crate) fn add_worktree_at(
     setup_step(&mut add, "worktree_add_failed")?;
     crate::worktrees::lock_remotes(sandbox.project_root(), worktree)
         .map_err(|_| RunError::Setup("worktree_remote_lock_failed"))?;
-    let mut listing = worktree_git(sandbox, profile);
-    listing
-        .arg("-C")
-        .arg(worktree)
-        .args(["config", "--list", "--name-only", "-z"]);
-    let overrides = filter_overrides(&bounded_stdout(&mut listing)?)?;
+    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
     let mut checkout = worktree_git(sandbox, profile);
     checkout
         .args(&overrides)
@@ -2043,6 +2579,55 @@ pub(crate) fn add_worktree_at(
     Ok(())
 }
 
+/// Adds a linked lead's native teammate's own linked worktree of the project (OP-9b) at
+/// `worktree`, in the lead's teammates' folder, on `branch`: a new branch cut from `base`,
+/// or with no base the branch an earlier run left, checked out as it stands. Git runs
+/// under the lead's teammates' setup profile as [`add_worktree_at`] runs it: added
+/// without a checkout, its effective config listed in the new worktree, then checked out
+/// with every filter driver that listing names blanked. Takes the sandbox, its installed
+/// profile, the new worktree path, the branch and the commit. Returns unit, or the step
+/// that failed.
+#[cfg(unix)]
+pub(crate) fn add_teammate_worktree_at(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<(), RunError> {
+    if !worktree.starts_with(sandbox.project_root())
+        || worktree
+            .parent()
+            .and_then(Path::file_name)
+            .is_none_or(|folder| folder != crate::agent_git::TEAMMATES_FOLDER)
+        || !branch.starts_with(crate::agent_git::LINKED_PREFIX)
+        || base.is_some_and(|base| {
+            !matches!(base.len(), 40 | 64) || !base.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    {
+        return Err(RunError::Invalid(
+            "a teammate's worktree must sit in its lead's teammates' folder on a teammate branch"
+                .into(),
+        ));
+    }
+    let _setup = repository_setup(sandbox.project_root());
+    let mut add = worktree_git(sandbox, profile);
+    add.args(["worktree", "add", "-q", "--no-checkout"]);
+    match base {
+        Some(base) => add.args(["-b", branch]).arg(worktree).arg(base),
+        None => add.arg(worktree).arg(branch),
+    };
+    setup_step(&mut add, "worktree_add_failed")?;
+    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
+    let mut checkout = worktree_git(sandbox, profile);
+    checkout
+        .args(&overrides)
+        .arg("-C")
+        .arg(worktree)
+        .args(["reset", "-q", "--hard", "HEAD"]);
+    setup_step(&mut checkout, "worktree_checkout_failed")
+}
+
 /// Runs one worktree setup git step within the setup time limit. Takes the command and
 /// the plain code for a step that exits with a failure. Returns unit, or [`RunError::Setup`]
 /// with that code, or with `setup_timed_out` for a step stopped at the limit, so the owner
@@ -2051,7 +2636,7 @@ pub(crate) fn add_worktree_at(
 fn setup_step(command: &mut Command, failed: &'static str) -> Result<(), RunError> {
     match wait_bounded(crate::spawn_gate::spawn(command)?, SETUP_TIMEOUT)? {
         Ended::Succeeded => Ok(()),
-        Ended::Failed => Err(RunError::Setup(failed)),
+        Ended::Failed => Err(RunError::Setup(step_failure(failed, Path::new(TOOLS_ROOT)))),
         Ended::TimedOut => Err(RunError::Setup(SETUP_TIMED_OUT)),
     }
 }
@@ -2073,6 +2658,75 @@ pub(crate) fn setup_git() -> &'static Path {
     match real_git() {
         Some(path) => RESOLVED.get_or_init(|| path),
         None => Path::new(GIT),
+    }
+}
+
+/// The Command Line Tools git, [`TOOLS_ROOT`]'s `usr/bin/git`. Every agent profile reads its
+/// folder, so under Seatbelt this git finds its own helpers (`git-upload-pack`,
+/// `git pack-objects` and the rest) in its `libexec/git-core` instead of falling through the
+/// search path to the `/usr/bin` shims.
+#[cfg(unix)]
+pub(crate) const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+
+/// The Command Line Tools root, which every agent profile reads.
+#[cfg(unix)]
+pub(crate) const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// How many times this thread asked for [`sandboxed_git`], so a row can show an async path
+    /// leaves that lookup, which can run xcrun, to a blocking thread.
+    pub(crate) static SANDBOXED_GIT_LOOKUPS: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// The git for commands that run inside an agent's sandbox: the agent's own git script and
+/// the engine's setup steps under the agent profile. On a Mac that is the Command Line Tools
+/// git whenever it is installed, since a toolchain git elsewhere, such as Xcode's, runs under
+/// the profile but cannot read its own helpers there (T3-09); else [`setup_git`]. Engine git
+/// outside any sandbox keeps the selected toolchain's [`setup_git`]. Returns the path.
+#[cfg(unix)]
+pub(crate) fn sandboxed_git() -> &'static Path {
+    #[cfg(test)]
+    SANDBOXED_GIT_LOOKUPS.set(SANDBOXED_GIT_LOOKUPS.get() + 1);
+    if cfg!(target_os = "macos") && agent_git_problem_at(Path::new(TOOLS_ROOT)).is_none() {
+        Path::new(TOOLS_GIT)
+    } else {
+        setup_git()
+    }
+}
+
+/// Whether agent git lacks the Command Line Tools on this Mac, so its helper calls would
+/// reach the denied xcrun shims. Output: [`AGENT_GIT_NEEDS_TOOLS`], or none.
+#[cfg(target_os = "macos")]
+pub(crate) fn agent_git_problem() -> Option<&'static str> {
+    agent_git_problem_at(Path::new(TOOLS_ROOT))
+}
+
+/// Whether agent git lacks the Command Line Tools; off a Mac agent git needs none.
+/// Output: none.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn agent_git_problem() -> Option<&'static str> {
+    None
+}
+
+/// Whether a toolchain root lacks the Command Line Tools git (`usr/bin/git` under it).
+/// Input: the absolute root. Output: [`AGENT_GIT_NEEDS_TOOLS`], or none when the git is there.
+#[cfg(unix)]
+fn agent_git_problem_at(tools: &Path) -> Option<&'static str> {
+    assert!(tools.is_absolute());
+    (!tools.join("usr").join("bin").join("git").is_file()).then_some(AGENT_GIT_NEEDS_TOOLS)
+}
+
+/// The code a failed setup git step reports: the missing Command Line Tools when that is
+/// the cause on a Mac, else the step's own code. Inputs: the step's code and the toolchain
+/// root. Output: the code.
+#[cfg(unix)]
+fn step_failure(failed: &'static str, tools: &Path) -> &'static str {
+    if cfg!(target_os = "macos") {
+        agent_git_problem_at(tools).unwrap_or(failed)
+    } else {
+        failed
     }
 }
 
@@ -2103,7 +2757,7 @@ fn real_git() -> Option<PathBuf> {
 /// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
 #[cfg(unix)]
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
-    let mut git = sandbox.command(profile, setup_git());
+    let mut git = sandbox.command(profile, sandboxed_git());
     git.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_LAZY_FETCH", "1")
         .args(GIT_SAFE)
@@ -2146,9 +2800,26 @@ pub(crate) fn agent_git(
         .envs(variables.iter().copied())
         .arg("-C")
         .arg(folder)
-        .args(arguments)
-        .stdout(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(&mut command)?;
+        .args(arguments);
+    let (status, stdout, overflow) = git_output(&mut command, limit)?;
+    Ok(AgentGit {
+        code: status.and_then(|status| status.code()),
+        stdout,
+        overflow,
+    })
+}
+
+/// Runs one setup git command within the setup time limit, reading its output while it
+/// runs, so output larger than a pipe holds never stalls it. Takes the command, ready but
+/// for its output pipe, and the most output bytes kept. Returns its exit status, none when
+/// it was stopped at the limit, its output up to the bound and whether it printed more.
+#[cfg(unix)]
+fn git_output(
+    command: &mut Command,
+    limit: usize,
+) -> Result<(Option<ExitStatus>, Vec<u8>, bool), RunError> {
+    command.stdout(Stdio::piped());
+    let mut child = crate::spawn_gate::spawn(command)?;
     let stdout = child
         .stdout
         .take()
@@ -2164,9 +2835,9 @@ pub(crate) fn agent_git(
         read.map(|_| kept)
     });
     let started = Instant::now();
-    let code = loop {
+    let status = loop {
         if let Some(status) = child.try_wait()? {
-            break status.code();
+            break Some(status);
         }
         if started.elapsed() >= SETUP_TIMEOUT {
             stop_timed_out(&mut child);
@@ -2180,11 +2851,7 @@ pub(crate) fn agent_git(
     let overflow = stdout.len() > limit;
     stdout.truncate(limit);
     assert!(stdout.len() <= limit);
-    Ok(AgentGit {
-        code,
-        stdout,
-        overflow,
-    })
+    Ok((status, stdout, overflow))
 }
 
 #[cfg(unix)]
@@ -2205,33 +2872,73 @@ fn setup_debug_stderr() -> Stdio {
     Stdio::null()
 }
 
-/// Runs a setup git command whose output fits in [`GIT_CONFIG_LISTING_BYTES_MAX`] within
-/// the setup time limit. Takes the command. Returns what it printed, or `Invalid` when it
-/// fails, runs past the limit or prints more.
+/// The git arguments that list, NUL-separated, the filter keys of every config file git
+/// reads, the only keys [`filter_overrides`] uses, so the listing grows with a repository's
+/// filter drivers and never with its branches or remotes. The `-c` adds one key of the
+/// engine's own, which git reads last: a listing that ends with it ([`FILTER_KEYS_END`])
+/// is whole, and git always has a key to print, so no exit status stands for "no filter".
 #[cfg(unix)]
-fn bounded_stdout(command: &mut Command) -> Result<Vec<u8>, RunError> {
+pub(crate) const FILTER_KEYS: [&str; 7] = [
+    "-c",
+    "filter.crazyagent-listing-end.required=false",
+    "config",
+    "--name-only",
+    "-z",
+    "--get-regexp",
+    "^filter\\.",
+];
+
+/// The key the `-c` of [`FILTER_KEYS`] sets with its NUL, as git prints it at the end of a
+/// whole listing.
+#[cfg(unix)]
+const FILTER_KEYS_END: &[u8] = b"filter.crazyagent-listing-end.required\0";
+
+/// The repository's own filter keys in what a [`FILTER_KEYS`] listing printed. Takes git's
+/// whole output. Returns the NUL-separated keys before the engine's closing key, or none
+/// for a listing that does not end with that key on its own, which is cut short or not a
+/// listing at all.
+#[cfg(unix)]
+pub(crate) fn listed_filter_keys(listing: &[u8]) -> Option<&[u8]> {
+    let keys = listing.strip_suffix(FILTER_KEYS_END)?;
+    (keys.is_empty() || keys.ends_with(&[0])).then_some(keys)
+}
+
+/// Lists the filter keys a new worktree's effective config names, with git run under the
+/// agent's installed profile within the setup time limit and its output read while it runs.
+/// Takes the sandbox, its installed profile and the worktree. Returns the NUL-separated
+/// keys for [`filter_overrides`], `Setup` with `worktree_config_failed` or `setup_timed_out`
+/// for a git that fails or runs past the limit, or `Invalid` for a listing that is not
+/// whole or is longer than [`GIT_CONFIG_LISTING_BYTES_MAX`].
+#[cfg(unix)]
+fn filter_keys(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+) -> Result<Vec<u8>, RunError> {
     let refused = || RunError::Invalid("git could not list the worktree's config".into());
-    command.stdout(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(command)?;
-    let stdout = child.stdout.take().ok_or_else(refused)?;
-    match wait_bounded(child, SETUP_TIMEOUT)? {
-        Ended::Succeeded => {}
-        Ended::Failed => return Err(RunError::Setup("worktree_config_failed")),
-        Ended::TimedOut => return Err(RunError::Setup(SETUP_TIMED_OUT)),
+    let mut listing = worktree_git(sandbox, profile);
+    listing.arg("-C").arg(worktree).args(FILTER_KEYS);
+    let (status, printed, overflow) = git_output(&mut listing, GIT_CONFIG_LISTING_BYTES_MAX)?;
+    let Some(status) = status else {
+        return Err(RunError::Setup(SETUP_TIMED_OUT));
+    };
+    if !status.success() {
+        return Err(RunError::Setup(step_failure(
+            "worktree_config_failed",
+            Path::new(TOOLS_ROOT),
+        )));
     }
-    let mut bytes = Vec::new();
-    stdout
-        .take(GIT_CONFIG_LISTING_BYTES_MAX as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > GIT_CONFIG_LISTING_BYTES_MAX {
+    if overflow {
         return Err(refused());
     }
-    Ok(bytes)
+    let keys = listed_filter_keys(&printed).ok_or_else(refused)?;
+    assert!(keys.len() < printed.len());
+    Ok(keys.to_vec())
 }
 
 /// The `-c` arguments that switch off every filter driver a config listing names: empty
 /// smudge, clean and process commands and `required=false`, so a checkout runs none of them
-/// and still succeeds. Takes the NUL-separated keys of `git config --list --name-only -z`.
+/// and still succeeds. Takes NUL-separated config keys, as [`listed_filter_keys`] gives them.
 /// Returns the arguments, or `Invalid` for a driver name a `-c` cannot carry or too many.
 #[cfg(unix)]
 pub(crate) fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> {
@@ -2318,7 +3025,7 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<Ended, RunError> {
 #[cfg(unix)]
 fn stop_timed_out(child: &mut Child) {
     let group = child.id();
-    stop_group(group);
+    kill_group(group);
     let _ = child.wait();
     await_group_exit(group);
 }
@@ -2371,7 +3078,7 @@ impl AgentProcess {
             Ok(lifeline) => lifeline,
             Err(error) => {
                 let mut child = child;
-                stop_group(group);
+                kill_group(group);
                 let _ = child.wait();
                 await_group_exit(group);
                 let _ = crate::sandbox::warden::fire_reported(warden, "agent");
@@ -2396,7 +3103,7 @@ impl AgentProcess {
     #[cfg(unix)]
     pub(crate) fn stop(&mut self) -> Result<(), &'static str> {
         if !self.stopped {
-            stop_group(self.group);
+            kill_group(self.group);
             let _ = self.child.wait();
             await_group_exit(self.group);
             self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
@@ -2485,39 +3192,6 @@ impl Drop for Lifeline {
     }
 }
 
-#[cfg(unix)]
-fn stop_group(group: u32) {
-    let Ok(raw) = i32::try_from(group) else {
-        return;
-    };
-    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
-        return;
-    };
-    assert!(pid.as_raw_nonzero().get() > 1);
-    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-}
-
-/// Waits until no process of a killed agent's group is left, killing again
-/// any member that is still there. Takes the group id; returns once the group
-/// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
-/// stopped while one of its processes still lingers unnoticed.
-#[cfg(unix)]
-fn await_group_exit(group: u32) {
-    let Some(pid) = i32::try_from(group)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    else {
-        return;
-    };
-    let started = Instant::now();
-    while rustix::process::test_kill_process_group(pid).is_ok()
-        && started.elapsed() < GROUP_EXIT_WAIT
-    {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// Copies an agent stream into its log, counting every byte read and logging
 /// at most `log_max` bytes, until the stream ends.
 #[cfg(unix)]
@@ -2571,6 +3245,22 @@ fn codex_retry_limited(line: &str) -> bool {
         && line
             .split_once("sampling_error=")
             .is_some_and(|(_, cause)| rate_limited(cause))
+}
+
+/// Gives a Claude Code research agent that reaches its model by key or address, with no
+/// signed-in account handed to it, its own keychain in its home as a handoff gives a
+/// signed-in one, so a harness that stores anything there never makes macOS ask the owner
+/// to create a keychain (DEC-146 KCA-M2). Codex keeps nothing in a keychain. Inputs: the
+/// research state folder, the harness and the agent home. Output: done, or the refusal.
+fn endpoint_keychain(state: &Path, harness: ResearchHarness, home: &Path) -> Result<(), RunError> {
+    #[cfg(target_os = "macos")]
+    if matches!(harness, ResearchHarness::ClaudeCode) {
+        crate::engine::keychain::fresh_profile_keychain(state, home, &[])
+            .map_err(|_| RunError::Account("agent_keychain_unavailable".into()))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (state, harness, home);
+    Ok(())
 }
 
 /// Tells whether a research agent that exited failing was refused for a rate or usage
@@ -2671,10 +3361,18 @@ fn read_bounded(base: &Path, path: &Path, max: u64) -> io::Result<String> {
     Ok(text)
 }
 
-fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
+/// Builds a research job's prompt: the planning prompt with the linked research files for
+/// the planning job, else the brief, the owner's attached documents, the kind's task and
+/// the report rules, the owner questions block among them. Inputs: the project folder, the
+/// job kind and the linked research files. Output: the prompt, or the read failure.
+fn research_prompt(
+    root: &Path,
+    kind: &str,
+    linked: &[(ResearchKind, LinkedText)],
+) -> Result<String, RunError> {
     if kind == ResearchKind::RoadmapPlanning.name() {
         let state = crate::projects_home::state_folder(root);
-        return Ok(crate::planning::prompt::prompt(&state)?);
+        return Ok(crate::planning::prompt::prompt_with_links(&state, linked)?);
     }
     let context = crate::projects_home::state_folder(root).join("context");
     let brief = match read_bounded(&context, &context.join("brief.md"), BRIEF_BYTES_MAX) {
@@ -2718,6 +3416,8 @@ fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
     prompt.push_str(
         "\nRules:\n- Work only inside your current folder; do not change files anywhere else.\n- Reply with the full report in Markdown, with short headings.\n- Cite sources inline as Markdown links.\n- End with a section \"## Links and references\" that lists every source as a Markdown link.\n",
     );
+    prompt.push_str(QUESTIONS_RULE);
+    assert!(prompt.ends_with('\n'));
     Ok(prompt)
 }
 
@@ -2750,6 +3450,41 @@ fn kind_task(kind: &str, label: &str) -> String {
         "tech_stack_research" => "Compare technologies that suit this project and recommend a stack with clear reasons and tradeoffs.".into(),
         _ => format!("Research this topic for the project: {label}."),
     }
+}
+
+/// The job failure when a report's questions could not be logged.
+const REPORT_QUESTIONS_UNLOGGED: &str = "Could not log the report's questions for the owner";
+/// The refusal of a planning run whose project's linked files cannot be read.
+const LINKS_UNREADABLE: &str = "linked research files unreadable";
+/// The report rule asking a research agent for the decisions only the owner can make, in
+/// the shape every engine question has.
+const QUESTIONS_RULE: &str = "- When a decision needs the owner, add one fenced json block after that section and nothing after it: {\"questions\":[{\"question\":\"...\",\"kind\":\"single\",\"options\":[\"...\",\"...\"],\"recommended\":\"...\"}]}. kind is single or multi with 2 to 6 short options and one of them as recommended, or text with no options only when no short list of answers fits. Leave the block out when nothing needs the owner.\n";
+
+/// Takes the owner questions out of a research report: its last fenced JSON block holding a
+/// `questions` list is cut from the text and each question in it is checked as the questions
+/// log checks it, with where it came from as its context. Inputs: the agent's report, the
+/// job's plain label and the report's path inside the project. Output: the report without
+/// the block and the questions, the report as it came when it holds no such block.
+fn report_questions(body: &str, label: &str, path: &str) -> (String, Vec<crate::questions::Ask>) {
+    let Some((block, value)) = crate::planning::question_block(body) else {
+        return (body.to_owned(), Vec::new());
+    };
+    let context = format!(
+        "Raised by the {} job. Its report is in {path}.",
+        label.to_lowercase()
+    );
+    let asks = crate::questions::asks_from_json(&value, &context);
+    let before = body[..block.start].trim_end();
+    let after = body[block.end..].trim_start();
+    let gap = if before.is_empty() || after.is_empty() {
+        ""
+    } else {
+        "\n\n"
+    };
+    let report = format!("{before}{gap}{after}");
+    assert!(report.len() <= body.len());
+    assert!(asks.len() <= crate::questions::ASKS_FROM_ONE_REPLY_MAX);
+    (report, asks)
 }
 
 fn render_report(label: &str, harness: &str, body: &str) -> String {
@@ -2881,8 +3616,53 @@ pub(crate) fn utc_date(time: SystemTime) -> String {
 mod tests {
     use super::*;
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
+    use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    /// A Claude Code research agent with no signed-in account handed to it gets one agent
+    /// keychain of its own as its home's default and search list, and a Codex one gets no
+    /// keychain folder at all (DEC-146 r1 KCA-M2).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_claude_research_agent_without_a_lease_gets_its_own_default_keychain() {
+        use crate::credentials::test_keychain::TestKeychain;
+        let dir = tempfile::Builder::new()
+            .prefix("ca-research-keychain-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let state = dir.path().canonicalize().unwrap().join("research");
+        let homes = [state.join("claude/home"), state.join("codex/home")];
+        for home in &homes {
+            std::fs::create_dir_all(home).unwrap();
+            std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        endpoint_keychain(&state, ResearchHarness::Codex, &homes[1]).unwrap();
+        assert!(!homes[1].join("Library").exists());
+        endpoint_keychain(&state, ResearchHarness::ClaudeCode, &homes[0]).unwrap();
+        let found: Vec<PathBuf> = fs::read_dir(homes[0].join("Library/Keychains"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_str().unwrap().ends_with(".keychain-db"))
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("agent-")
+        );
+        let keychain = TestKeychain::adopt(&homes[0], found[0].clone());
+        let text = found[0].to_str().unwrap();
+        assert!(keychain.setting("default-keychain").contains(text));
+        assert!(keychain.setting("list-keychains").contains(text));
+        assert!(
+            endpoint_keychain(&state, ResearchHarness::ClaudeCode, dir.path()).is_err(),
+            "a home outside the research state got a keychain"
+        );
+    }
 
     #[test]
     fn a_research_job_network_follows_the_project_choice_only_with_tools() {
@@ -2918,8 +3698,148 @@ mod tests {
         assert!(https.contains("(remote ip \"*:443\")"), "{https}");
         assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
         let none = profile(AgentNetwork::None, true);
-        assert!(none.contains("(remote ip \"*:8443\")"), "{none}");
-        assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
+        assert!(!none.contains("(remote ip \"*:"), "{none}");
+        assert!(!none.contains("mDNSResponder"), "{none}");
+    }
+
+    /// OWNER-PORTS-FAIL-OPEN r1 L2: a tools-on job whose runner's settings files do not
+    /// read is refused as Invalid instead of starting with the owner's model ports unknown;
+    /// a tools-off job keeps no ports either way, as do settings files not made yet.
+    #[test]
+    fn a_tools_on_job_whose_settings_do_not_read_is_refused() {
+        let folder = tempfile::tempdir().unwrap();
+        let settings = (
+            folder.path().join("global.toml"),
+            folder.path().join("project.toml"),
+        );
+        assert_eq!(job_kept_ports(None, true).unwrap(), Vec::<u16>::new());
+        assert_eq!(
+            job_kept_ports(Some(&settings), true).unwrap(),
+            Vec::<u16>::new()
+        );
+        std::fs::write(&settings.0, "[[[\n").unwrap();
+        assert!(matches!(
+            job_kept_ports(Some(&settings), true),
+            Err(RunError::Invalid(reason)) if reason.contains("do not read")
+        ));
+        assert_eq!(
+            job_kept_ports(Some(&settings), false).unwrap(),
+            Vec::<u16>::new()
+        );
+    }
+
+    /// A research job's Claude Code pane gets the display the owner chose for the project's
+    /// terminals (N-D9): Classic while none is saved, Fullscreen once chosen, and a project
+    /// without settings stays Classic.
+    #[test]
+    fn a_research_job_reads_the_claude_code_display_of_its_project() {
+        use crate::coord::settings::{CoordSettings, TerminalDisplay, write};
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let database = folder.path().join("engine.db");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let project = ProjectId::new("research-display").unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, '{}')",
+                [project.as_str()],
+            )
+            .unwrap();
+        let jobs = ResearchJobs::open(&database).unwrap();
+        assert_eq!(
+            jobs.terminal_display(&project).unwrap(),
+            TerminalDisplay::Classic
+        );
+        write(
+            &connection,
+            &project,
+            &CoordSettings {
+                terminal_display: TerminalDisplay::Fullscreen,
+                ..CoordSettings::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            jobs.terminal_display(&project).unwrap(),
+            TerminalDisplay::Fullscreen
+        );
+        let other = ProjectId::new("research-elsewhere").unwrap();
+        assert_eq!(
+            jobs.terminal_display(&other).unwrap(),
+            TerminalDisplay::Classic
+        );
+    }
+
+    /// A research job with tools under None reaches its model only through a model proxy
+    /// for its account's hosts; a job with tools off, or on a loopback endpoint, reaches its
+    /// model directly, and an endpoint no proxy can name is refused (S4B-M1).
+    #[test]
+    fn a_research_job_with_tools_under_no_network_reaches_its_model_only_through_a_model_proxy() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use std::io::{BufRead, Write};
+        let none = AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        };
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let (network, proxy) = job_reach(&none, true, &account, 41, &[]).unwrap();
+        assert!(
+            proxy.is_some(),
+            "a tools-on job under None gets a model proxy, not {network:?}"
+        );
+        let port = proxy.as_ref().unwrap().port();
+        assert_eq!(
+            network,
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)])
+        );
+        for (target, status) in [
+            ("chatgpt.com:443", "HTTP/1.1 200 Connection Established"),
+            ("api.openai.com:443", "HTTP/1.1 200 Connection Established"),
+            ("example.com:443", "HTTP/1.1 403 Forbidden"),
+        ] {
+            let mut client = crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .unwrap();
+            client
+                .write_all(
+                    format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes(),
+                )
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(client)
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line.trim_end(), status, "{target}");
+        }
+        let (off, unproxied) = job_reach(&none, false, &account, 41, &[]).unwrap();
+        assert!(unproxied.is_none());
+        assert_eq!(off, SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
+        let local = ResearchAccount::Endpoint {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        };
+        let (direct, unproxied) = job_reach(&none, true, &local, 41, &[]).unwrap();
+        assert!(unproxied.is_none());
+        assert_eq!(
+            direct,
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(11_434)])
+        );
+        let unnamed = ResearchAccount::Endpoint {
+            base_url: "http://203.0.113.9:8080/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        };
+        assert!(matches!(
+            job_reach(&none, true, &unnamed, 41, &[]),
+            Err(RunError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -2957,6 +3877,118 @@ mod tests {
             .unwrap();
         assert!(free.join(".git").is_dir());
         assert!(!busy.join(".git").exists());
+    }
+
+    /// Records `id` as a project of the engine database with `folder` as its folder, so a
+    /// research run reads the project's launch context. Inputs: the database, the project
+    /// id and its folder.
+    #[cfg(target_os = "macos")]
+    fn register_project(database: &Path, id: &str, folder: &Path) {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        let project = ProjectId::new(id).unwrap();
+        let setup = crate::project_setup::StoredSetup {
+            project_id: project.clone(),
+            name: id.into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "codex".into(),
+                master_tools: false,
+                sub_harnesses: vec![],
+                min_agents: 1,
+                max_agents: 1,
+            },
+            documents: vec![],
+            folder: folder.to_str().unwrap().into(),
+            created_ms: 1,
+            revision: 1,
+        };
+        let row = crate::protocol::StoredProject {
+            project_id: project,
+            spec: crate::protocol::ProjectSpec {
+                name: id.into(),
+                repositories: vec![],
+            },
+        };
+        connection
+            .execute(
+                "INSERT INTO projects VALUES (?1,?2)",
+                rusqlite::params![id, serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                rusqlite::params![id, serde_json::to_string(&setup).unwrap()],
+            )
+            .unwrap();
+    }
+
+    /// A run that waits for its repository's setup lock longer than the stale limit keeps
+    /// its claim: the wait is heartbeated, so stale recovery neither takes the job back nor
+    /// leaves the run setting up a worktree for a job it lost (finding_40456ca5a72c5454).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_run_waiting_for_its_repository_setup_keeps_its_claim() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        repository_git(&folder, &["init", "-q"]);
+        repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+        register_project(&root.database, "alpha", &folder);
+        let limits = ResearchLimits {
+            wall_time: Duration::from_secs(10),
+            ..ResearchLimits::default()
+        };
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            limits,
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "local-model".into(),
+                key: None,
+            }),
+        };
+        let stale = Duration::from_millis(1500);
+        let held = repository_setup(&folder);
+        let (waiting, recovered) = std::thread::scope(|scope| {
+            let run = scope.spawn(|| runner.run_once(&project));
+            let started = Instant::now();
+            while jobs.get(id).unwrap().unwrap().status != ResearchStatus::Running
+                && started.elapsed() < Duration::from_secs(30)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(stale * 2);
+            let waiting = !run.is_finished();
+            let recovered = jobs.recover_stale(stale.as_millis() as u64, 2).unwrap();
+            drop(held);
+            let _ = run.join();
+            (waiting, recovered)
+        });
+        assert!(waiting, "the run never waited for its repository setup");
+        assert_eq!(
+            recovered, 0,
+            "a run waiting for its repository setup lost its claim as stale"
+        );
     }
 
     struct EngineRoot {
@@ -3000,6 +4032,23 @@ mod tests {
     }
 
     #[test]
+    fn a_harness_installed_after_engine_start_can_run_only_through_the_engines_lookup() {
+        let root = engine_root();
+        let codex = root.base.join("bin").join("codex");
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap();
+        assert!(!runner.can_run(ResearchHarness::Codex));
+        let pinned = codex.clone();
+        let runner = runner.with_harness_lookup(Arc::new(move |harness: &str| {
+            (harness == "codex").then(|| pinned.clone())
+        }));
+        assert!(runner.can_run(ResearchHarness::Codex));
+        assert_eq!(runner.harness(ResearchHarness::Codex), Some(codex));
+        assert!(!runner.can_run(ResearchHarness::ClaudeCode));
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn a_read_only_run_counts_under_its_project_even_on_an_endpoint_account() {
         let root = engine_root();
@@ -3011,6 +4060,7 @@ mod tests {
         let account = ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:9/v1".into(),
             model: "local-model".into(),
+            key: None,
         };
         let project = ProjectId::new("alpha").unwrap();
         let run = ReadOnlyRun {
@@ -3021,6 +4071,7 @@ mod tests {
             prompt: "Map this repository.",
             account: &account,
             wall_time: Duration::from_secs(5),
+            output_tokens: None,
         };
         assert!(matches!(
             runner.run_read_only(&run, &|| false),
@@ -3052,6 +4103,152 @@ mod tests {
                 row.4.as_str()
             ),
             ("alpha", "", "onboarding", "codex")
+        );
+    }
+
+    /// DEC-147.9: a read-only run on a project folder runs under the secret deny of that
+    /// folder, with the secret the owner shared back readable again and nothing else.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_keeps_the_project_secrets_closed_but_the_shared_back_ones() {
+        let root = engine_root();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join(".env"), "TOKEN=1\n").unwrap();
+        let project = ProjectId::new("alpha").unwrap();
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        let policy = crate::sandbox::policy::AgentPolicy {
+            shared_folders: crate::sandbox::shared_folders::SharedFolders {
+                secrets: vec![".env".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        drop(connection);
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-1",
+            agent: "overview",
+            project: Some(&project),
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-1.sb"))
+            .expect("the run installed its profile");
+        assert!(
+            profile.contains(&format!(
+                "(require-not (subpath \"{}/.git\"))",
+                folder.display()
+            )),
+            "{profile}"
+        );
+        assert!(
+            profile.contains(&format!(
+                "(allow file-read-data file-read-xattr\n  (subpath \"{}\")",
+                folder.join(".env").display()
+            )),
+            "{profile}"
+        );
+    }
+
+    /// L4 r1 H1: a read-only run follows the project's shared folders choice too. Under
+    /// Chosen an untracked local folder not picked stays closed, and a saved Read-write never
+    /// opens the picked one for writes, since a read-only run only reads.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_keeps_the_folders_the_project_does_not_share_closed() {
+        let root = engine_root();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("README.md"), "readme\n").unwrap();
+        repository_git(&folder, &["init", "-q"]);
+        repository_git(&folder, &["add", "README.md"]);
+        repository_git(&folder, &["commit", "-q", "-m", "Start"]);
+        for name in ["notes", "drafts"] {
+            fs::create_dir(folder.join(name)).unwrap();
+            fs::write(folder.join(name).join("plan.txt"), "plan\n").unwrap();
+        }
+        let project = ProjectId::new("alpha").unwrap();
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        let policy = crate::sandbox::policy::AgentPolicy {
+            shared_folders: crate::sandbox::shared_folders::SharedFolders {
+                scope: crate::sandbox::shared_folders::SharedScope::Chosen,
+                access: crate::sandbox::shared_folders::SharedAccess::ReadWrite,
+                chosen: vec!["notes".into()],
+                secrets: Vec::new(),
+            },
+            ..Default::default()
+        };
+        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        drop(connection);
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-2",
+            agent: "overview",
+            project: Some(&project),
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-2.sb"))
+            .expect("the run installed its profile");
+        assert!(
+            profile.contains(&format!(
+                "(subpath \"{}\")",
+                folder.join("drafts").display()
+            )),
+            "{profile}"
+        );
+        let writes = profile
+            .split("(allow file-write*")
+            .nth(1)
+            .and_then(|rest| rest.split("))\n").next())
+            .expect("the profile allows its own writes");
+        assert!(!writes.contains(&folder.display().to_string()), "{writes}");
+        assert!(
+            !profile.contains(&format!(
+                "(deny file-write-unlink\n  (require-all\n    (subpath \"{}\")",
+                folder.join("notes").display()
+            )),
+            "{profile}"
         );
     }
 
@@ -3114,20 +4311,27 @@ mod tests {
         }
     }
 
-    /// A research agent of an untrusted project reads no project docs and Codex names its
-    /// worktree untrusted, with the prompt still last; a reviewed one gets neither setting.
+    /// A research agent of an untrusted project reads no project docs, with the prompt still
+    /// last; a reviewed one reads them. Both record their folders untrusted.
     #[test]
     fn an_untrusted_research_codex_reads_no_project_docs_and_names_its_worktree_untrusted() {
         let account = ResearchAccount::ManagedCodex {
             connection: codex_connection(),
             model: None,
         };
+        let scratch = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let worktree = scratch.path().canonicalize().unwrap();
+        std::fs::create_dir(worktree.join(".git")).unwrap();
+        let wanted = format!(
+            "projects={{\"{}\"={{trust_level=\"untrusted\"}}}}",
+            worktree.display()
+        );
         let args = |trust: crate::trust::Trust| {
             let mut command = Command::new("/usr/bin/true");
             codex_arguments(
                 &mut command,
-                Path::new("/work/tree"),
-                Path::new("/work/report.md"),
+                &worktree,
+                &worktree.join("report.md"),
                 Path::new("/home"),
                 true,
                 trust,
@@ -3140,10 +4344,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let untrusted = args(crate::trust::Trust::Untrusted);
-        for setting in [
-            "project_doc_max_bytes=0",
-            "projects={\"/work/tree\"={trust_level=\"untrusted\"}}",
-        ] {
+        for setting in ["project_doc_max_bytes=0", wanted.as_str()] {
             assert!(
                 untrusted
                     .windows(2)
@@ -3154,11 +4355,48 @@ mod tests {
         assert_eq!(untrusted.last().map(String::as_str), Some("-"));
         let reviewed = args(crate::trust::Trust::Reviewed);
         assert!(
-            reviewed.iter().all(|argument| {
-                !argument.contains("project_doc_max_bytes") && !argument.contains("trust_level")
-            }),
+            reviewed
+                .iter()
+                .all(|argument| !argument.contains("project_doc_max_bytes"))
+                && reviewed.iter().any(|argument| *argument == wanted),
             "{reviewed:?}"
         );
+    }
+
+    #[test]
+    fn a_research_codex_records_its_folders_untrusted() {
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let scratch = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let worktree = scratch.path().canonicalize().unwrap();
+        std::fs::create_dir(worktree.join(".git")).unwrap();
+        let wanted = format!(
+            "projects={{\"{}\"={{trust_level=\"untrusted\"}}}}",
+            worktree.display()
+        );
+        for tools in [false, true] {
+            let mut command = Command::new("/usr/bin/true");
+            codex_arguments(
+                &mut command,
+                &worktree,
+                &worktree.join("report.md"),
+                Path::new("/home"),
+                tools,
+                crate::trust::Trust::Reviewed,
+                &account,
+            )
+            .unwrap();
+            let args: Vec<&str> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap())
+                .collect();
+            assert!(
+                args.windows(2).any(|pair| pair == ["-c", wanted.as_str()]),
+                "{tools}: {args:?}"
+            );
+        }
     }
 
     /// A research job's lease names the job as a holder of its account in the agent
@@ -3453,7 +4691,7 @@ mod tests {
             group_members(kept_group) >= 2,
             "a released lifeline killed the agent's group"
         );
-        stop_group(kept_group);
+        kill_group(kept_group);
         kept.wait().unwrap();
         await_group_exit(kept_group);
         let mut orphan = spawn();
@@ -3509,6 +4747,58 @@ mod tests {
             "See [Vet](https://vet.example/a), https://vet.example/a. and <http://b.example/x>; https://",
         );
         assert_eq!(links, vec!["https://vet.example/a", "http://b.example/x"]);
+    }
+
+    #[test]
+    fn a_report_question_block_is_raised_and_left_out_of_the_report() {
+        let body = "## Findings\n\nRivals charge less.\n\n```json\n{\"questions\":[{\"question\":\"Which rival matters most?\",\"kind\":\"single\",\"options\":[\"Scite\",\"Elicit\"],\"recommended\":\"Scite\"},{\"question\":\"No recommended one?\",\"kind\":\"multi\",\"options\":[\"A\",\"B\"]}]}\n```\n\n## Links and references\n\n- <https://a.example/x>\n";
+        let (report, asks) = report_questions(
+            body,
+            "Competitor research",
+            "context/research/competitor_research.md",
+        );
+        assert_eq!(
+            asks.len(),
+            1,
+            "a question outside the kind rules is dropped"
+        );
+        assert_eq!(asks[0].kind, crate::questions::QuestionKind::Single);
+        assert_eq!(asks[0].recommended.as_deref(), Some("Scite"));
+        assert_eq!(
+            asks[0].context.as_deref(),
+            Some(
+                "Raised by the competitor research job. Its report is in context/research/competitor_research.md."
+            )
+        );
+        assert!(!report.contains("\"questions\"") && !report.contains("```"));
+        assert!(report.contains("Rivals charge less."));
+        assert!(report.contains("## Links and references\n\n- <https://a.example/x>"));
+        let plain = "## Findings\n\n```json\n{\"prices\":[1,2]}\n```\n";
+        let (kept, none) = report_questions(
+            plain,
+            "Market research",
+            "context/research/market_research.md",
+        );
+        assert_eq!(kept, plain);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn the_research_prompt_asks_for_owner_questions_in_the_shared_shape() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = folder.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("context")).unwrap();
+        fs::write(root.join("context").join("brief.md"), "# Planner\n").unwrap();
+        let prompt = research_prompt(&root, "market_research", &[]).unwrap();
+        assert!(prompt.contains(
+            "{\"questions\":[{\"question\":\"...\",\"kind\":\"single\",\"options\":[\"...\",\"...\"],\"recommended\":\"...\"}]}"
+        ));
+        assert!(
+            prompt.contains(
+                "single or multi with 2 to 6 short options and one of them as recommended"
+            )
+        );
+        assert!(prompt.contains("Leave the block out when nothing needs the owner."));
     }
 
     #[test]
@@ -3631,6 +4921,7 @@ mod tests {
         let loopback = ResearchAccount::Endpoint {
             base_url: "http://localhost:11434/v1".into(),
             model: "m".into(),
+            key: None,
         };
         assert_eq!(
             model_remote(&loopback).unwrap(),
@@ -3639,6 +4930,7 @@ mod tests {
         let remote = ResearchAccount::Endpoint {
             base_url: "https://openrouter.ai/api/v1".into(),
             model: "m".into(),
+            key: None,
         };
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
     }
@@ -3754,6 +5046,56 @@ mod tests {
     /// call and its developer-dir lookup forks xcrun, the fragile path behind the load flake.
     /// The resolved git runs `git version` under the profile with no xcrun work and so prints
     /// nothing to stderr. Skipped only where no toolchain git resolves and the fix falls back.
+    /// Engine git outside any sandbox keeps the toolchain xcode-select chose; only git that
+    /// runs inside an agent sandbox is the Command Line Tools git, whose helpers the agent
+    /// profile reads (T3-09 r1).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_git_keeps_the_selected_toolchain_and_sandboxed_git_is_the_command_line_tools_git() {
+        let found = crate::spawn_gate::output(
+            Command::new("/usr/bin/xcrun")
+                .args(["--find", "git"])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        assert!(found.status.success());
+        let selected = PathBuf::from(String::from_utf8(found.stdout).unwrap().trim());
+        assert_eq!(setup_git(), selected);
+        if Path::new(TOOLS_GIT).is_file() {
+            assert_eq!(sandboxed_git(), Path::new(TOOLS_GIT));
+            assert_eq!(agent_git_problem(), None);
+        } else {
+            assert_eq!(sandboxed_git(), selected);
+            assert_eq!(agent_git_problem(), Some(AGENT_GIT_NEEDS_TOOLS));
+        }
+    }
+
+    /// A toolchain root with no Command Line Tools git names the plain reason, and a failed
+    /// setup git step reports it in place of its own code; a root that has one does not.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_toolchain_root_without_the_command_line_tools_git_names_the_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let tools = root.path().canonicalize().unwrap();
+        assert_eq!(agent_git_problem_at(&tools), Some(AGENT_GIT_NEEDS_TOOLS));
+        assert_eq!(
+            step_failure("worktree_add_failed", &tools),
+            AGENT_GIT_NEEDS_TOOLS
+        );
+        let bin = tools.join("usr").join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("git"), "").unwrap();
+        assert_eq!(agent_git_problem_at(&tools), None);
+        assert_eq!(
+            step_failure("worktree_add_failed", &tools),
+            "worktree_add_failed"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_setup_git_does_not_run_the_xcrun_shim_under_the_sandbox() {
@@ -3776,7 +5118,7 @@ mod tests {
         sandbox.install(&profile).unwrap();
         let printed = crate::spawn_gate::output(
             sandbox
-                .command(&profile, setup_git())
+                .command(&profile, sandboxed_git())
                 .args(["version"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -3945,6 +5287,50 @@ mod tests {
         assert!(!worktree.join(".git").exists());
     }
 
+    /// A project whose config names a thousand stale branches lists more keys than a pipe
+    /// holds (ScholarScope, v2.2.1 item 8): its agent worktree is still added, at once,
+    /// since the setup step asks only for the filter keys it reads.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_worktree_is_added_when_the_project_config_lists_more_than_64_kib_of_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("home");
+        let tmp = base.join("tmp");
+        for folder in [&project, &home, &tmp] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let sections: String = (0..1000)
+            .map(|number| {
+                format!(
+                    "[branch \"stale-branch-number-{number}\"]\n\tremote = origin\n\tmerge = refs/heads/stale-branch-number-{number}\n"
+                )
+            })
+            .collect();
+        let mut config = OpenOptions::new()
+            .append(true)
+            .open(project.join(".git").join("config"))
+            .unwrap();
+        config.write_all(sections.as_bytes()).unwrap();
+        drop(config);
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = base.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let worktree = crate::projects_home::state_folder(&project)
+            .join("worktrees")
+            .join("agent-1");
+        let started = Instant::now();
+
+        let added = add_worktree(&sandbox, &profile, &worktree);
+
+        assert!(added.is_ok(), "{added:?}");
+        assert!(worktree.join(".git").is_file());
+        assert!(started.elapsed() < SETUP_TIMEOUT);
+    }
+
     #[cfg(target_os = "macos")]
     fn repository_git(project: &Path, arguments: &[&str]) {
         let status = crate::spawn_gate::status(
@@ -3963,6 +5349,34 @@ mod tests {
         )
         .unwrap();
         assert!(status.success(), "git {arguments:?}");
+    }
+
+    /// A filter listing is taken only whole: it must end with the engine's own closing key
+    /// standing alone, and the keys before it are the repository's.
+    #[test]
+    fn a_filter_listing_is_whole_only_when_it_ends_with_the_engines_closing_key() {
+        let end = FILTER_KEYS_END;
+        assert!(FILTER_KEYS[1].as_bytes().starts_with(&end[..end.len() - 1]));
+        assert_eq!(listed_filter_keys(end), Some(&b""[..]));
+        let whole = [&b"filter.lfs.smudge\0filter.lfs.clean\0"[..], end].concat();
+        assert_eq!(
+            listed_filter_keys(&whole),
+            Some(&b"filter.lfs.smudge\0filter.lfs.clean\0"[..])
+        );
+        let cut: [Vec<u8>; 5] = [
+            Vec::new(),
+            b"filter.lfs.smudge\0".to_vec(),
+            end[..end.len() - 1].to_vec(),
+            [&b"filter.lfs.smudge"[..], end].concat(),
+            [end, &b"filter.late.smudge\0"[..]].concat(),
+        ];
+        for listing in &cut {
+            assert_eq!(listed_filter_keys(listing), None, "{listing:?}");
+        }
+        assert_eq!(
+            filter_overrides(listed_filter_keys(end).unwrap()).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -4135,6 +5549,55 @@ mod tests {
     }
 
     #[test]
+    fn a_tools_off_claude_run_takes_the_no_tools_prompt_one_turn_and_its_output_cap() {
+        let account = ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let launch = |tools: bool, output_tokens: Option<u32>| {
+            let mut command = Command::new("/usr/bin/true");
+            claude_arguments(
+                &mut command,
+                Path::new("/agent/home"),
+                Path::new("/agent/tmp"),
+                tools,
+                output_tokens,
+                &account,
+            )
+            .unwrap();
+            let arguments: Vec<String> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect();
+            let cap = command
+                .get_envs()
+                .find(|(key, _)| *key == "CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+                .map(|(_, value)| value.unwrap().to_str().unwrap().to_owned());
+            (arguments, cap)
+        };
+        let has = |arguments: &[String], pair: [&str; 2]| {
+            arguments.windows(2).any(|window| window == pair)
+        };
+        let (off, cap) = launch(false, Some(16_000));
+        assert!(has(&off, ["--tools", ""]), "{off:?}");
+        assert!(
+            has(&off, ["--system-prompt", CLAUDE_NO_TOOLS_PROMPT]),
+            "{off:?}"
+        );
+        assert!(has(&off, ["--max-turns", "1"]), "{off:?}");
+        assert_eq!(cap.as_deref(), Some("16000"));
+        assert!(CLAUDE_NO_TOOLS_PROMPT.contains("no tools"));
+        let (on, cap) = launch(true, None);
+        assert!(has(&on, ["--tools", "default"]), "{on:?}");
+        assert!(
+            !on.iter()
+                .any(|argument| argument == "--system-prompt" || argument == "--max-turns")
+        );
+        assert_eq!(cap, None);
+    }
+
+    #[test]
     fn the_engine_makes_a_repository_only_in_a_folder_it_created() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
@@ -4199,11 +5662,10 @@ mod windows_tests {
         let account = ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:9/v1".into(),
             model: "windows-model".into(),
+            key: None,
         };
         let run = ReadOnlyRun {
             name: "onboard-m-windows",
-            agent: "onboarding",
-            project: None,
             account: &account,
             wall_time: Duration::from_secs(5),
         };
@@ -4217,12 +5679,18 @@ mod windows_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+#[path = "runner/keyed_tests.rs"]
+mod keyed_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/live_claude_tests.rs"]
 mod live_claude_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/live_codex_tests.rs"]
 mod live_codex_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runner/live_engine_tests.rs"]
+pub(crate) mod live_engine_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/warden_tests.rs"]
 mod warden_tests;

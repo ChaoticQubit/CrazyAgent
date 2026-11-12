@@ -305,3 +305,37 @@ fn native_auth_custodian_cli_explicit_codex_rejects_invalid_pin_before_bootstrap
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn native_auth_custodian_cli_whose_error_stream_nobody_reads_still_exits_with_its_failure() {
+    let root = private_root();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut child = spawn(
+        Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+            .arg("native-auth-custodian")
+            .env_clear()
+            .env("HOME", root.path())
+            .env("TMPDIR", root.path())
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(writer),
+    );
+    let deadline = Instant::now() + CHILD_BOUND;
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "custodian CLI exceeded child deadline"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "the custodian panicked writing its failure to an error stream the engine closed"
+    );
+}

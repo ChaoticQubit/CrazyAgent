@@ -396,7 +396,11 @@ impl Questions {
         }
         if inbox.questions.is_empty() && inbox.more == 0 {
             lines.push(styled(
-                cut("No questions for you.", limit, ctx.glyphs.ellipsis),
+                cut(
+                    "No questions here. Agents' questions wait on the Questions page.",
+                    limit,
+                    ctx.glyphs.ellipsis,
+                ),
                 Role::Muted,
                 theme,
             ));
@@ -473,8 +477,9 @@ fn question_lines(
     let theme = &ctx.theme;
     let mark = if picked { "> " } else { "  " };
     let head = format!(
-        "{mark}{}  {}",
+        "{mark}{}  For: {}  {}",
         super::plain(&question.label),
+        super::plain(&question.for_label),
         urgency(question.severity)
     );
     let role = match (picked, question.severity) {

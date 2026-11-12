@@ -12,6 +12,8 @@ use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
     MasterTurnPhase, MasterTurnView, REPLY_BYTES_MAX, fitted_reply,
 };
+use crate::master_step_limit::steps_of_cause;
+use crate::master_time_limit::{TimeLimit, minutes_of_cause};
 use crate::protocol::{ProjectId, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
 use crate::storage::{
@@ -30,6 +32,8 @@ use std::time::Duration;
 #[cfg(unix)]
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
+/// How often a running master turn checks its grants against the policy the owner saved.
+const POLICY_CHECK_EVERY: Duration = Duration::from_secs(1);
 /// SQLite's refusal when another engine connection held the database write lock past the
 /// storage wait; the write was rolled back, so the turn is driven again (LB-28).
 const STORAGE_BUSY: &str = "database is locked";
@@ -41,6 +45,64 @@ pub(super) const CHANGES_WAITING: &str = "The edits from this turn are waiting f
 /// review; the refusal code follows in brackets.
 pub(super) const CHANGES_NOT_KEPT: &str =
     "The edits from this turn could not be kept for review and stay only in the master's worktree.";
+/// The most conflicting files a note under a master turn names.
+const NOTE_FILES_MAX: usize = 10;
+/// The cause of a master turn its harness ended as a success with no reply text, as when its
+/// last step was a tool call: the stream was read whole, so nothing was cut off (OB-5).
+const EMPTY_REPLY: &str = "master_empty_reply";
+/// The result Claude Code ends a turn with once it took every step `--max-turns` allows.
+const STEPS_USED: &str = "error_max_turns";
+
+/// Lands the change set a master turn made when the project lets the master merge into main
+/// itself (DEC-117 Q2), and says what happened in the note under the turn; None when the set
+/// waits for the owner as before. A failure is logged by its plain code and the set waits.
+/// Inputs: the store and the change set. Output: the note.
+fn master_landed_note(
+    db: &rusqlite::Connection,
+    id: &crate::landing::ChangeSetId,
+) -> Option<String> {
+    let landed = crate::projects_home::owner_home()
+        .and_then(|home| crate::landing::land_master_set(db, &home, id));
+    match landed {
+        Ok(None) => None,
+        Ok(Some(outcome)) => Some(master_land_words(&outcome)),
+        Err(error) => {
+            eprintln!(
+                "master_land_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            None
+        }
+    }
+}
+
+/// What the note under a master turn says after trying to land the turn's change set. Only
+/// a set of nothing but conflict fixes gets this far, so a land is named as that. Input:
+/// the outcome. Output: the note.
+fn master_land_words(outcome: &crate::landing::AcceptOutcome) -> String {
+    match outcome {
+        crate::landing::AcceptOutcome::Landed { branch, .. } => format!(
+            "The master merged its conflict fix into {branch} itself, as this project's setting lets it at Full access. Activity lists the merge."
+        ),
+        crate::landing::AcceptOutcome::Conflict { files } => {
+            let named: Vec<&str> = files
+                .iter()
+                .take(NOTE_FILES_MAX)
+                .map(String::as_str)
+                .collect();
+            let more = files.len().saturating_sub(named.len());
+            let more = if more == 0 {
+                String::new()
+            } else {
+                format!(" and {more} more")
+            };
+            format!(
+                "The master's change set conflicts with the branch it lands on in {}{more}, so the master did not merge it. It is waiting for you in Changes.",
+                named.join(", ")
+            )
+        }
+    }
+}
 
 pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
@@ -53,6 +115,8 @@ pub(super) struct MasterHostLaunch {
     pub(super) capture: File,
     pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
     pub(super) tool_record: Option<std::path::PathBuf>,
+    pub(super) access: crate::sandbox::policy::AgentAccess,
+    pub(super) toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
 }
 
 pub(super) struct Capture {
@@ -74,6 +138,8 @@ struct ActiveMaster {
     capture_ref: RequestId,
     provenance: Provenance,
     reported: Tokens,
+    access: crate::sandbox::policy::AgentAccess,
+    toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
 }
 
 impl MasterHost {
@@ -322,6 +388,63 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Tells whether the policy the owner saved now no longer covers what a running master
+    /// turn's sandbox profile granted. Inputs: the prepared turn, its id, and the level and
+    /// toolchains it runs with. Output: why it must stop, none while covered, or the storage
+    /// refusal.
+    async fn master_turn_narrowed(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        access: crate::sandbox::policy::AgentAccess,
+        toolchains: &[crate::sandbox::toolchains::Toolchain],
+    ) -> Result<Option<crate::sandbox::policy::Narrowing>, EngineError> {
+        let saved = match self
+            .master_runtime_command(MasterRuntimeCommand::Policy {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn_id.clone(),
+            })
+            .await?
+        {
+            MasterRuntimeResult::Policy(saved) => *saved,
+            _ => return Err(failure("master_runtime_result")),
+        };
+        Ok(crate::sandbox::policy::narrowing(
+            saved.as_ref(),
+            Some(prepared.repository.as_path()),
+            Some(access),
+            None,
+            toolchains,
+        ))
+    }
+
+    /// Answers the memory calls a running console master turn with its tools on left in its
+    /// mailbox, `remember` and `recall` under the master's name, as the team runtime does for
+    /// a master without its live terminal. Takes the prepared turn, its id and the turn's
+    /// mailbox. Returns Ok, or the refusal of a turn that is not running with its tools on.
+    pub(super) async fn serve_master_memory(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        mailbox: &std::path::Path,
+    ) -> Result<(), EngineError> {
+        match self
+            .master_runtime_command(MasterRuntimeCommand::ServeMemory {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn_id.clone(),
+                mailbox: mailbox.to_path_buf(),
+            })
+            .await?
+        {
+            MasterRuntimeResult::Turn(_) => Ok(()),
+            _ => Err(failure("master_runtime_result")),
+        }
+    }
+
     /// Takes the profile of a prepared master turn and names its conversation in the agent
     /// register as a holder of the turn's account until the returned hold is dropped, which
     /// the caller keeps until the turn's host has closed. Takes the prepared turn and its
@@ -458,6 +581,8 @@ impl OwnerRuntimeHandle {
                 .map(std::path::Path::to_path_buf)
         });
         let lease = prepared.lease.clone();
+        let settings = self.engine.settings_files();
+        let summary = turn.reply.as_ref().map(|reply| reply.text.clone());
         let landed = tokio::task::spawn_blocking(move || {
             let root = root.ok_or_else(|| failure("changes_unavailable"))?;
             let db = crate::landing::open(&root)?;
@@ -468,17 +593,29 @@ impl OwnerRuntimeHandle {
                 worktree,
                 git_dir: crate::worktrees::lease_git_dir(&db, &lease)?,
             };
-            crate::landing_turns::record(&db, &workspace, &end)
+            let (landed, news) =
+                crate::landing_turns::record_news(&db, &workspace, &end, settings.as_ref())?;
+            if let (crate::landing_turns::Landed::Added(id), Some(summary)) = (&landed, &summary)
+                && let Err(problem) = crate::landing::record_summary(&db, &workspace, id, summary)
+            {
+                eprintln!(
+                    "landing_summary_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
+            let merged = match &landed {
+                crate::landing_turns::Landed::Added(id) => master_landed_note(&db, id),
+                _ => None,
+            };
+            Ok((news, merged))
         })
         .await
         .unwrap_or_else(|_| Err(failure("changes_unavailable")));
         let note = match landed {
-            Ok(
-                crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
-            ) => {
+            Ok((false, None)) => {
                 return turn;
             }
-            Ok(crate::landing_turns::Landed::Added(_)) => CHANGES_WAITING.to_owned(),
+            Ok((_, merged)) => merged.unwrap_or_else(|| CHANGES_WAITING.to_owned()),
             Err(error) => format!(
                 "{CHANGES_NOT_KEPT} ({})",
                 crate::landing::refusal_code(&error)
@@ -553,6 +690,31 @@ impl OwnerRuntimeHandle {
         result
     }
 
+    /// Records where the master's leased worktree starts before its turn runs, unless the
+    /// engine already did, on a blocking thread with the landing store, so a master whose
+    /// turn ends with only its own commits keeps them as its change set. Input: the
+    /// prepared turn. Output: Ok once a start is stored, or the plain refusal.
+    async fn record_master_start(&self, prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
+        let root = self.authority.root.verify().ok().and_then(|()| {
+            self.authority
+                .root
+                .path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        });
+        let repository = prepared.repository.clone();
+        let worktree = prepared.cwd.clone();
+        let lease = prepared.lease.clone();
+        tokio::task::spawn_blocking(move || {
+            let root = root.ok_or_else(|| failure("changes_unavailable"))?;
+            let db = crate::landing::open(&root)?;
+            let git_dir = crate::worktrees::lease_git_dir(&db, &lease)?;
+            crate::landing::record_master_start(&db, &repository, &worktree, &git_dir)
+        })
+        .await
+        .unwrap_or_else(|_| Err(failure("changes_unavailable")))
+    }
+
     async fn drive_turn(
         &self,
         project_id: &ProjectId,
@@ -578,6 +740,7 @@ impl OwnerRuntimeHandle {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
             MasterRuntimeResult::Profile(_)
+            | MasterRuntimeResult::Policy(_)
             | MasterRuntimeResult::Checkout(_)
             | MasterRuntimeResult::Waiting => {
                 return Err(failure("master_runtime_result"));
@@ -596,10 +759,13 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        if prepared.session.selection.backend == MasterBackend::Rcli {
-            return self.launch_rcli_master_turn(&prepared, turn_id).await;
-        }
-        let result = self.launch_master_turn(&prepared, turn_id).await;
+        let result = match self.record_master_start(&prepared).await {
+            Ok(()) if prepared.session.selection.backend == MasterBackend::Rcli => {
+                return self.launch_rcli_master_turn(&prepared, turn_id).await;
+            }
+            Ok(()) => self.launch_master_turn(&prepared, turn_id).await,
+            Err(error) => Err(error),
+        };
         match result {
             Ok(turn) => Ok(turn),
             Err(error) if error.0 == "master_runtime_profile_not_acquired" => {
@@ -642,6 +808,11 @@ impl OwnerRuntimeHandle {
         let _folder = launch.folder;
         let _credential = launch.credential;
         let tool_record = launch.tool_record;
+        let (access, toolchains) = (launch.access, launch.toolchains);
+        let mailbox = tool_record
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(|tmp| tmp.join(crate::team::tool::MAILBOX_FOLDER));
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
@@ -674,24 +845,32 @@ impl OwnerRuntimeHandle {
                     launch.home,
                     action,
                     account_ref,
+                    prepared.session.project_id.clone(),
+                    prepared.time.run_time(),
                     resources,
+                    prepared.frames,
                 )
                 .await?,
             ))
         } else {
-            MasterHost::Codex(Box::new(
-                CodexHost::spawn(
-                    launch.command,
-                    launch.sandbox,
-                    profile,
-                    launch.home,
-                    action,
-                    account_ref,
-                    resources,
-                    &prepared.instructions,
-                )
-                .await?,
-            ))
+            let mut host = CodexHost::spawn(
+                launch.command,
+                launch.sandbox,
+                profile,
+                launch.home,
+                action,
+                account_ref,
+                prepared.session.project_id.clone(),
+                prepared.time.run_time(),
+                resources,
+                &prepared.instructions,
+                prepared.frames,
+            )
+            .await?;
+            if prepared.tools {
+                host.limit_steps(prepared.steps);
+            }
+            MasterHost::Codex(Box::new(host))
         };
         let mut active = ActiveMaster {
             host,
@@ -706,6 +885,8 @@ impl OwnerRuntimeHandle {
                 worktree_lease: prepared.worktree_lease.clone(),
             },
             reported: Tokens::default(),
+            access,
+            toolchains,
         };
         let (notes, noted) = match &tool_record {
             Some(_) => self.session_notes(prepared).await,
@@ -713,7 +894,7 @@ impl OwnerRuntimeHandle {
         };
         let text = format!("{notes}{}", prepared.text);
         let observed = self
-            .collect_master_turn(prepared, turn_id, &text, &mut active)
+            .collect_master_turn(prepared, turn_id, &text, &mut active, mailbox.as_deref())
             .await;
         if !matches!(&observed, Ok(MasterRuntimeObservation::Response { .. })) {
             let _ = active.host.cancel().await;
@@ -764,9 +945,10 @@ impl OwnerRuntimeHandle {
 
     /// Counts one finished master turn under its project's master row before its home is
     /// removed: the usage Claude Code reported for the turn, the Codex records in the home,
-    /// or the usage frames an rcli host reported, which keeps no records. A store that cannot
-    /// be written leaves the turn uncounted and logs only the failure code. Inputs: the
-    /// prepared turn, its home when it has records and the reported usage.
+    /// or the usage frames an rcli host reported, which keeps no records, and one turn on the
+    /// same row (`usage::turns`). A store that cannot be written leaves the turn uncounted
+    /// and logs only the failure code. Inputs: the prepared turn, its home when it has
+    /// records and the reported usage.
     pub(super) async fn count_master_usage(
         &self,
         prepared: &PreparedMasterTurn,
@@ -788,17 +970,20 @@ impl OwnerRuntimeHandle {
             harness: harness.to_owned(),
         };
         let session = prepared.session.session_id.as_str().to_owned();
+        let project = prepared.session.project_id.clone();
         let root = super::changes::engine_root(&self.authority);
         let counted = tokio::task::spawn_blocking(move || {
             let db = crate::usage::open(&root?)?;
             let now_ms = crate::team::now_ms();
-            match (format, home) {
+            let tokens = match (format, home) {
                 (Some(format), Some(home)) => {
                     count_turn(&db, &home, format, &attribution, reported, &session, now_ms)
                         .map(|_| ())
                 }
                 _ => count_reported(&db, &attribution, reported, &session, now_ms),
-            }
+            };
+            let turn = crate::usage::turns::count(&db, &project, &attribution.agent, now_ms);
+            tokens.and(turn)
         })
         .await;
         let problem = match counted {
@@ -887,13 +1072,46 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Collects one started master turn, as `collect_turn` does, and names the owner's
+    /// master time limit in the error of a turn its host's wall clock ended (OB-5c). Inputs
+    /// and output: those of `collect_turn`; the error of a clocked-out turn under a limit is
+    /// `master_time_limit_<minutes>`.
     async fn collect_master_turn(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
         text: &str,
         active: &mut ActiveMaster,
+        mailbox: Option<&std::path::Path>,
     ) -> Result<MasterRuntimeObservation, EngineError> {
+        self.collect_turn(prepared, turn_id, text, active, mailbox)
+            .await
+            .map_err(|error| timed_out(error, prepared.time))
+    }
+
+    /// Collects a running console master turn to its end: the host's events up to the
+    /// reply, with the turn inspected for cancellation and its memory calls served one
+    /// INSPECT_INTERVAL after the last inspection ended, so a slow inspection never leaves
+    /// the host's events and deadline unread (OP-22 r1). Inputs: the prepared turn, its id,
+    /// the prompt it sends with the engine's question lines, the active host and the turn's
+    /// mailbox. Output: the observation, or an engine error.
+    async fn collect_turn(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        text: &str,
+        active: &mut ActiveMaster,
+        mailbox: Option<&std::path::Path>,
+    ) -> Result<MasterRuntimeObservation, EngineError> {
+        let screen = super::master_activity::Screen::new(
+            &prepared.cwd,
+            &prepared.repository,
+            &prepared.hidden_paths,
+        );
+        let watch = self
+            .engine
+            .master_activity
+            .watch(&prepared.session.session_id, turn_id);
         self.record_master_child(prepared, turn_id, active.host.process_group())
             .await?;
         self.observe_master_turn(
@@ -935,6 +1153,7 @@ impl OwnerRuntimeHandle {
         let mut reply = ReplyText::default();
         let mut inspect = tokio::time::interval(INSPECT_INTERVAL);
         inspect.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut policy_checked = std::time::Instant::now();
         loop {
             let event = tokio::select! {
                 biased;
@@ -950,12 +1169,33 @@ impl OwnerRuntimeHandle {
                     if !matches!(turn.phase, MasterTurnPhase::Prepared | MasterTurnPhase::Running) {
                         return Err(failure("master_runtime_state_changed"));
                     }
+                    if policy_checked.elapsed() >= POLICY_CHECK_EVERY {
+                        policy_checked = std::time::Instant::now();
+                        if let Some(narrowed) = self
+                            .master_turn_narrowed(prepared, turn_id, active.access, &active.toolchains)
+                            .await?
+                        {
+                            return Err(failure(narrowed.code()));
+                        }
+                    }
+                    if let Some(mailbox) = mailbox
+                        && crate::team::tool::calls_waiting(mailbox)
+                        && let Err(error) = self.serve_master_memory(prepared, turn_id, mailbox).await
+                    {
+                        eprintln!("{}", super::master_memory_diagnostic(&error));
+                    }
+                    inspect.reset();
                     continue;
                 }
                 event = active.host.next_event() => event?,
             };
             validate_event(&active.provenance, turn_id, &event)?;
             active.capture.record(&event)?;
+            if let Some(watch) = &watch
+                && let Some(text) = screen.label(&event.kind)
+            {
+                watch.record(text, super::master_activity::now_ms());
+            }
             if let EventKind::TurnFinished { usage, .. } = &event.kind {
                 active.reported = Tokens::reported(usage);
             }
@@ -1012,8 +1252,11 @@ impl OwnerRuntimeHandle {
                     ..
                 } => {
                     let text = std::mem::take(&mut reply).finish();
-                    if text.trim().is_empty() || active.runtime.native_session_id.is_none() {
+                    if active.runtime.native_session_id.is_none() {
                         return Err(failure("master_capture_incomplete"));
+                    }
+                    if text.trim().is_empty() {
+                        return Err(failure(EMPTY_REPLY));
                     }
                     active.capture.finish()?;
                     return Ok(MasterRuntimeObservation::Response {
@@ -1028,6 +1271,12 @@ impl OwnerRuntimeHandle {
                         },
                         delegations: Vec::new(),
                     });
+                }
+                EventKind::TurnFinished { subtype, .. } if subtype == STEPS_USED => {
+                    let cause = prepared.steps.cause();
+                    return Err(failure(
+                        cause.as_deref().unwrap_or("master_capture_incomplete"),
+                    ));
                 }
                 EventKind::TurnFinished { .. }
                 | EventKind::Disconnected
@@ -1188,23 +1437,61 @@ fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }
 
-fn reason_for_error(error: &EngineError) -> MasterReason {
+/// The host codes for a master host whose wall clock ran out: Claude, Codex and rcli.
+const CLOCK_ENDED: [&str; 3] = [
+    "claude_host_deadline",
+    "codex_host_deadline",
+    "rcli_master_turn_deadline",
+];
+
+/// Names the owner's time limit in the error of a turn its host's wall clock ended, so the
+/// turn says how long it ran (OB-5c). Inputs: the turn's error and the limit the turn ran
+/// under. Output: `master_time_limit_<minutes>` for a clock that ran out under a limit,
+/// else the error unchanged.
+pub(super) fn timed_out(error: EngineError, limit: TimeLimit) -> EngineError {
+    let clock = CLOCK_ENDED.contains(&error.0.as_str());
+    match limit.cause() {
+        Some(cause) if clock => {
+            assert!(minutes_of_cause(&cause).is_some());
+            EngineError(cause)
+        }
+        _ => error,
+    }
+}
+
+pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
     match error.0.as_str() {
         "native_profile_in_use" => MasterReason::ProfileBusy,
         "gateway_health_unknown"
         | "master_sign_in_missing"
-        | "native_profile_credential_unavailable" => MasterReason::ReadinessUnknown,
+        | "native_profile_credential_unavailable"
+        | "native_profile_codex_api_key"
+        | "native_profile_codex_token_unreadable" => MasterReason::ReadinessUnknown,
         "gateway_invalid_authentication"
         | "native_profile_credential_expiring"
         | "native_profile_sign_in_revoked" => MasterReason::InvalidAuthentication,
-        "gateway_connection_changed_or_denied" => MasterReason::ConnectionChanged,
+        "gateway_connection_changed_or_denied"
+        | "agent_access_lowered"
+        | "agent_toolchain_lowered"
+        | "agent_policy_unreadable"
+        | "agent_project_unreadable" => MasterReason::ConnectionChanged,
         "gateway_quota_unknown" => MasterReason::QuotaUnknown,
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
         "gateway_rate_limited" => MasterReason::RateLimited,
         "gateway_cooldown" => MasterReason::CooldownActive,
         "native_profile_renewal_failed" => MasterReason::TransientFailure,
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
-        "codex_host_output_limit" => MasterReason::OutputLimit,
+        "codex_host_output_limit"
+        | "codex_host_protocol_capacity"
+        | "claude_host_protocol_capacity"
+        | "claude_host_stdout_limit"
+        | "claude_host_stderr_limit"
+        | "claude_host_output_limit"
+        | "claude_host_frame_limit" => MasterReason::OutputLimit,
+        EMPTY_REPLY => MasterReason::NoReply,
+        code if CLOCK_ENDED.contains(&code) => MasterReason::TimeLimit,
+        code if minutes_of_cause(code).is_some() => MasterReason::TimeLimit,
+        code if steps_of_cause(code).is_some() => MasterReason::StepLimit,
         "codex_host_capture_incomplete"
         | "master_capture_incomplete"
         | "master_capture_identity"
@@ -1215,12 +1502,33 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
         "master_repository_missing" => MasterReason::RepositoryMissing,
         "master_instructions_too_large" => MasterReason::InstructionsTooLarge,
+        "codex_host_protocol_invalid_state"
+        | "codex_host_protocol_invalid_input"
+        | "codex_host_protocol_invalid_message"
+        | "codex_host_protocol_stale_message"
+        | "codex_host_protocol_disconnected"
+        | "claude_host_protocol_invalid_state"
+        | "claude_host_protocol_invalid_input"
+        | "claude_host_protocol_invalid_message"
+        | "claude_host_protocol_stale_message"
+        | "claude_host_protocol_disconnected"
+        | "claude_host_protocol_unsupported" => MasterReason::ProtocolFault,
+        "codex_host_protocol_frame_too_large"
+        | "claude_host_protocol_frame_too_large"
+        | "codex_host_input_limit"
+        | "claude_host_input_limit" => MasterReason::FrameLimit,
+        "master_session_scope_conflict"
+        | "master_project_scope_conflict"
+        | "master_bootstrap_scope_conflict" => MasterReason::ConnectionChanged,
+        "master_bootstrap_uncertain" => MasterReason::WorktreeUncertain,
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }
         "native_profile_lock_unavailable"
         | "master_runtime_host_unavailable"
-        | "rcli_profile_configuration_required" => MasterReason::RuntimeUnavailable,
+        | "rcli_profile_configuration_required"
+        | "codex_host_startup_timeout"
+        | "claude_host_startup_timeout" => MasterReason::RuntimeUnavailable,
         _ => MasterReason::Unknown,
     }
 }
@@ -1235,6 +1543,26 @@ mod tests {
     use crate::master_session::MasterReason;
     use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_note_after_a_master_land_calls_it_a_conflict_fix() {
+        use crate::landing::AcceptOutcome;
+        let landed = master_land_words(&AcceptOutcome::Landed {
+            commit: "c0".into(),
+            branch: "main".into(),
+        });
+        assert_eq!(
+            landed,
+            "The master merged its conflict fix into main itself, as this project's setting lets it at Full access. Activity lists the merge."
+        );
+        let conflict = master_land_words(&AcceptOutcome::Conflict {
+            files: vec!["README".into(), "NOTES".into()],
+        });
+        assert_eq!(
+            conflict,
+            "The master's change set conflicts with the branch it lands on in README, NOTES, so the master did not merge it. It is waiting for you in Changes."
+        );
+    }
 
     #[test]
     fn a_tools_on_master_reply_is_its_last_message_and_a_tools_off_reply_is_unchanged() {
@@ -1295,6 +1623,17 @@ mod tests {
         assert_eq!(reply.finish(), "DONE");
     }
 
+    /// An unlinked temp file only this user can read and write (mode 0600), as the engine
+    /// makes capture files; `tempfile::tempfile` gives mode 0644 on Linux, where it opens
+    /// with `O_TMPFILE`. Output: the open file.
+    fn private_file() -> std::fs::File {
+        let file = tempfile::tempfile().unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert_eq!(file.metadata().unwrap().mode() & 0o777, 0o600);
+        file
+    }
+
     fn protocol_input() -> ObservedEvent {
         ObservedEvent {
             provenance: Provenance {
@@ -1316,7 +1655,7 @@ mod tests {
 
     #[test]
     fn capture_records_actual_file_bytes_and_syncs_before_reply_provenance() {
-        let file = tempfile::tempfile().unwrap();
+        let file = private_file();
         let readback = file.try_clone().unwrap();
         let mut capture = Capture::new(file, 8192).unwrap();
         let event = protocol_input();
@@ -1333,12 +1672,12 @@ mod tests {
 
     #[test]
     fn capture_rejects_preexisting_data_and_public_permissions() {
-        let mut existing = tempfile::tempfile().unwrap();
+        let mut existing = private_file();
         existing.write_all(b"existing").unwrap();
         assert!(
             matches!(Capture::new(existing, 8192), Err(EngineError(code)) if code == "master_capture_identity")
         );
-        let public = tempfile::tempfile().unwrap();
+        let public = private_file();
         public
             .set_permissions(std::fs::Permissions::from_mode(0o644))
             .unwrap();
@@ -1349,7 +1688,7 @@ mod tests {
 
     #[test]
     fn capture_rejects_over_limit_input_without_partial_file_or_sequence() {
-        let file = tempfile::tempfile().unwrap();
+        let file = private_file();
         let readback = file.try_clone().unwrap();
         let mut capture = Capture::new(file, 1).unwrap();
         let error = capture.record(&protocol_input()).unwrap_err();
@@ -1362,13 +1701,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "limit > 0")]
     fn capture_zero_budget_trips_internal_invariant() {
-        let _ = Capture::new(tempfile::tempfile().unwrap(), 0);
+        let _ = Capture::new(private_file(), 0);
     }
 
     #[test]
     #[should_panic(expected = "self.sequence > 0")]
     fn capture_without_an_observed_event_cannot_finish() {
-        let capture = Capture::new(tempfile::tempfile().unwrap(), 8192).unwrap();
+        let capture = Capture::new(private_file(), 8192).unwrap();
         let _ = capture.finish();
     }
 
@@ -1652,6 +1991,26 @@ mod tests {
             ("gateway_cooldown", MasterReason::CooldownActive),
             ("master_runtime_scope_revoked", MasterReason::ScopeRevoked),
             ("codex_host_output_limit", MasterReason::OutputLimit),
+            ("codex_host_protocol_capacity", MasterReason::OutputLimit),
+            ("claude_host_stdout_limit", MasterReason::OutputLimit),
+            ("claude_host_stderr_limit", MasterReason::OutputLimit),
+            ("claude_host_output_limit", MasterReason::OutputLimit),
+            ("claude_host_frame_limit", MasterReason::OutputLimit),
+            ("master_empty_reply", MasterReason::NoReply),
+            ("claude_host_deadline", MasterReason::TimeLimit),
+            ("codex_host_deadline", MasterReason::TimeLimit),
+            ("rcli_master_turn_deadline", MasterReason::TimeLimit),
+            ("master_time_limit_10", MasterReason::TimeLimit),
+            ("master_time_limit_30", MasterReason::TimeLimit),
+            ("master_time_limit_60", MasterReason::TimeLimit),
+            ("master_time_limit_600", MasterReason::Unknown),
+            ("master_time_limit_", MasterReason::Unknown),
+            ("master_step_limit_50", MasterReason::StepLimit),
+            ("master_step_limit_100", MasterReason::StepLimit),
+            ("master_step_limit_200", MasterReason::StepLimit),
+            ("master_step_limit_24", MasterReason::Unknown),
+            ("master_step_limit_", MasterReason::Unknown),
+            ("master_capture_incomplete", MasterReason::CaptureIncomplete),
             (
                 "codex_host_capture_incomplete",
                 MasterReason::CaptureIncomplete,
@@ -1664,6 +2023,68 @@ mod tests {
             (
                 "master_instructions_too_large",
                 MasterReason::InstructionsTooLarge,
+            ),
+        ] {
+            assert_eq!(
+                reason_for_error(&EngineError(code.into())),
+                expected,
+                "{code}"
+            );
+        }
+    }
+
+    /// F39, DEC-141: every protocol fault of the Claude Code and Codex master hosts, a frame
+    /// past the frame size limit, a session or bootstrap that no longer matches and a master
+    /// worktree the engine could not check each name a plain reason with an action, never
+    /// Unknown; the causes F39 found that already had one keep it.
+    #[test]
+    fn every_configured_master_failure_cause_names_a_plain_reason() {
+        for host in ["codex_host_protocol_", "claude_host_protocol_"] {
+            for (fault, expected) in [
+                ("invalid_state", MasterReason::ProtocolFault),
+                ("invalid_input", MasterReason::ProtocolFault),
+                ("invalid_message", MasterReason::ProtocolFault),
+                ("stale_message", MasterReason::ProtocolFault),
+                ("disconnected", MasterReason::ProtocolFault),
+                ("frame_too_large", MasterReason::FrameLimit),
+                ("capacity", MasterReason::OutputLimit),
+            ] {
+                let code = format!("{host}{fault}");
+                assert_eq!(
+                    reason_for_error(&EngineError(code.clone())),
+                    expected,
+                    "{code}"
+                );
+            }
+        }
+        for (code, expected) in [
+            (
+                "claude_host_protocol_unsupported",
+                MasterReason::ProtocolFault,
+            ),
+            ("codex_host_input_limit", MasterReason::FrameLimit),
+            ("claude_host_input_limit", MasterReason::FrameLimit),
+            (
+                "master_session_scope_conflict",
+                MasterReason::ConnectionChanged,
+            ),
+            (
+                "master_project_scope_conflict",
+                MasterReason::ConnectionChanged,
+            ),
+            (
+                "master_bootstrap_scope_conflict",
+                MasterReason::ConnectionChanged,
+            ),
+            (
+                "master_bootstrap_uncertain",
+                MasterReason::WorktreeUncertain,
+            ),
+            ("master_repository_missing", MasterReason::RepositoryMissing),
+            ("master_capture_incomplete", MasterReason::CaptureIncomplete),
+            (
+                "gateway_invalid_authentication",
+                MasterReason::InvalidAuthentication,
             ),
         ] {
             assert_eq!(
@@ -1722,6 +2143,28 @@ mod tests {
                 MasterReason::InvalidAuthentication,
                 "{code}"
             );
+        }
+    }
+
+    #[test]
+    fn a_clock_that_ran_out_under_a_time_limit_names_the_limit_and_nothing_else_does() {
+        for (limit, minutes) in [
+            (TimeLimit::Minutes10, "10"),
+            (TimeLimit::Minutes30, "30"),
+            (TimeLimit::Minutes60, "60"),
+        ] {
+            for code in CLOCK_ENDED {
+                let named = timed_out(EngineError(code.into()), limit);
+                assert_eq!(named.0, format!("master_time_limit_{minutes}"), "{code}");
+                assert_eq!(reason_for_error(&named), MasterReason::TimeLimit);
+            }
+            for code in ["claude_host_startup_timeout", "master_empty_reply"] {
+                assert_eq!(timed_out(EngineError(code.into()), limit).0, code);
+            }
+        }
+        for code in CLOCK_ENDED {
+            let kept = timed_out(EngineError(code.into()), TimeLimit::NoLimit);
+            assert_eq!(kept.0, code, "no limit names no minutes");
         }
     }
 

@@ -876,3 +876,90 @@ async fn native_auth_dispatch_lifetime_real_custodian_attach_failure_releases_th
     })
     .await;
 }
+
+/// Registers a stand-in custodian that reads its bootstrap, writes one line on its error
+/// stream and exits 1, as the product custodian does when it stops on an error.
+/// Inputs: the case and the line. Output: none.
+fn register_failing_custodian(case: &LifetimeCase, line: &str) {
+    let path = case.root.join("failing-custodian");
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '{line}' >&2\nexit 1\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    case.host
+        .register_native_auth_host(RegisteredNativeAuthHost::capture(&path).unwrap())
+        .unwrap();
+}
+
+/// Reads the one stored attempt after a drain. Inputs: the case and its fact. Output: the
+/// settled phase and code, once no fence and no slot remain.
+fn settled(case: &LifetimeCase, fact: &NativeAuthFact) -> (NativeAuthPhase, Option<String>) {
+    let after = case.snapshot();
+    assert!(after.fences.is_empty(), "{after:?}");
+    assert_eq!(after.facts.len(), 1);
+    let stored = &after.facts[0];
+    assert_eq!(
+        (&stored.operation_id, stored.generation),
+        (&fact.operation_id, fact.generation)
+    );
+    assert!(case.host.authority.native_auth.lock().unwrap().is_none());
+    (stored.phase, stored.code.clone())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_auth_dispatch_lifetime_a_custodian_that_names_its_failure_settles_failed_with_it() {
+    lifetime_case(|case| async move {
+        register_failing_custodian(&case, "native_auth_host_executable_changed");
+        let (fact, work) = case.work("custodian-names-its-failure").await;
+        case.retain(work);
+        case.drain().await;
+        assert_eq!(
+            settled(&case, &fact),
+            (
+                NativeAuthPhase::Failed,
+                Some("native_auth_host_executable_changed".to_owned())
+            )
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_auth_dispatch_lifetime_a_custodian_cause_outside_the_custodian_codes_settles_interrupted()
+ {
+    lifetime_case(|case| async move {
+        register_failing_custodian(&case, "native_auth_child_not_retained");
+        let (fact, work) = case.work("custodian-names-an-unlisted-cause").await;
+        case.retain(work);
+        case.drain().await;
+        assert_eq!(
+            settled(&case, &fact),
+            (
+                NativeAuthPhase::Failed,
+                Some("native_auth_interrupted".to_owned())
+            )
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_auth_dispatch_lifetime_custodian_text_that_is_not_a_plain_code_never_reaches_the_fact()
+ {
+    lifetime_case(|case| async move {
+        register_failing_custodian(&case, "token sk-ant-quokka9 at /Users/someone/profile");
+        let (fact, work) = case.work("custodian-writes-private-text").await;
+        case.retain(work);
+        case.drain().await;
+        assert_eq!(
+            settled(&case, &fact),
+            (
+                NativeAuthPhase::Failed,
+                Some("native_auth_interrupted".to_owned())
+            )
+        );
+    })
+    .await;
+}

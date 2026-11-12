@@ -5,7 +5,7 @@ use crazyagent::ledger::ActionKind;
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
-fn recovery_error(error: EngineError) -> BridgeError {
+pub(super) fn recovery_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }

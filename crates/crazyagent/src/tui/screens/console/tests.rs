@@ -23,9 +23,12 @@ fn node(id: &str, kind: NodeKind, label: &str) -> GraphNode {
         pane: None,
         presence: None,
         waiting: None,
+        waits_for: None,
         owner_questions: 0,
         no_worktree: false,
         hookless: false,
+        message_note: None,
+        started_ms: None,
     }
 }
 
@@ -42,6 +45,8 @@ fn team() -> TeamGraph {
         edges: vec![],
         messages: Vec::new(),
         overlaps: Vec::new(),
+        relations: Vec::new(),
+        master_live_terminal: true,
     }
 }
 
@@ -55,6 +60,7 @@ fn context(paths: &[&str]) -> ProjectContext {
                 path: (*path).into(),
                 kind: ContextKind::Document,
                 bytes: 10,
+                linked: false,
             })
             .collect(),
     }

@@ -4,6 +4,7 @@ import { failureCopy } from "./api-projects";
 
 export type ChangeState = "pending" | "conflict" | "updating" | "accepted" | "discarded";
 export type TurnOutcome = "succeeded" | "failed" | "cancelled";
+export type LandingResult = "none" | "landed" | "conflict" | "refused";
 
 export interface ChangeSet {
   id: string;
@@ -23,6 +24,9 @@ export interface ChangeSet {
   message: string;
   waiting: boolean;
   outside: boolean;
+  regenerated: string[];
+  number?: number | null;
+  landing_result?: LandingResult;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -54,17 +58,21 @@ export interface ChangesRefusal {
 const CONFLICT_SHOWN = 5;
 
 const REFUSALS: Record<string, string> = {
-  changes_owner_dirty: "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again.",
+  changes_owner_dirty: "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again.",
+  changes_owner_untracked: "Files in your project folder that Git doesn't track sit where these changes add files. Move or delete them, then accept again.",
   changes_detached_head: "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again.",
   changes_git_busy: "Git is in the middle of a merge, rebase, cherry-pick or bisect in your project folder. Finish or stop it, then accept again.",
   changes_conflict: "These changes conflict with your branch. Ask the agent to update, or discard.",
   changes_stale: "These changes moved on since you opened them. Review them again, then accept.",
+  move_project_in_progress: "This project is being moved into your projects folder. Try again when the move is done.",
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
   changes_branch_not_above_base: "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
+  changes_merge_unsafe: "These changes can't land as a merge commit: an agent commit isn't safe to keep in your history (too many commits, hidden characters, another author's name, or files Git treats specially). Switch Landing to Squash, then accept again.",
   changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
   changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
   changes_restore_expired: "These changes can no longer be restored. Discarded changes are kept for 7 days.",
+  changes_undo_unavailable: "This merge can't be undone. CrazyAgent undoes only a merge it committed itself, and only once.",
   changes_agent_has_pending: "This agent has newer changes waiting. Accept or discard those first.",
   changes_agent_busy: "The agent is working right now. Try again when it finishes.",
   changes_unavailable: "Landing changes isn't ready in this engine yet.",
@@ -116,10 +124,11 @@ export function loadChanges(projectId: string): Promise<Result<ChangeSet[]>> {
   return call<ChangeSet[]>("desktop_changes", { projectId });
 }
 
-/** Reads one page of a change set's diff. Inputs: the change set id and the page, from 0.
- * Output: that page's files with marks, its plain diff text and the next page, if any. */
-export function loadChangeDiff(id: string, page: number): Promise<Result<ChangeDiff>> {
-  return call<ChangeDiff>("desktop_change_diff", { id, page });
+/** Reads one page of a change set's diff at the head the owner is reading. Inputs: the
+ * change set id, that head and the page, from 0. Output: that page's files with marks, its
+ * plain diff text and the next page, if any, or `changes_stale` once the set moved on. */
+export function loadChangeDiff(id: string, head: string, page: number): Promise<Result<ChangeDiff>> {
+  return call<ChangeDiff>("desktop_change_diff", { id, head, page });
 }
 
 /** The local branches a change set can land on, the checked-out one and the team's Land on
@@ -147,6 +156,27 @@ export function loadTargetBranches(id: string): Promise<Result<TargetBranches>> 
   return call<TargetBranches>("desktop_change_branches", { id });
 }
 
+/** The project folder files in an Accept's way: tracked ones the owner may commit first, and
+ * untracked or ignored ones where the changes add a file, which are never committed. */
+export interface OwnerDirty {
+  files: string[];
+  untracked: string[];
+}
+
+/** Lists the files in the project folder that keep a change set's Accept from landing, for
+ * the "commit these files first" box. Inputs: the id and the target branch, null for the
+ * Land on branch. Output: the tracked and untracked files, both empty when none does. */
+export function loadOwnerDirty(id: string, target: string | null = null): Promise<Result<OwnerDirty>> {
+  return call<OwnerDirty>("desktop_change_owner_dirty", { id, target });
+}
+
+/** Commits only those project folder files, with the owner's message, so the next Accept can
+ * land. Inputs: the id, the files, the message and the target branch, null for the Land on
+ * branch. Output: the new commit and its branch. */
+export function commitOwnerFiles(id: string, files: string[], message: string, target: string | null = null): Promise<Result<[string, string]>> {
+  return call<[string, string]>("desktop_commit_owner_files", { id, files, message, target });
+}
+
 /** Discards a change set; it stays restorable for 7 days. Inputs: the id and the head the
  * owner reviewed. Output: when it can no longer be restored, in milliseconds. */
 export function discardChange(id: string, expectedHead: string): Promise<Result<number>> {
@@ -156,6 +186,13 @@ export function discardChange(id: string, expectedHead: string): Promise<Result<
 /** Restores a discarded change set to its agent. Input: the id. */
 export function restoreChange(id: string): Promise<Result<void>> {
   return call<void>("desktop_restore_change", { id });
+}
+
+/** Undoes a merge a change set's own Accept made, with one revert commit on the branch it
+ * landed on. Input: the change set id. Output: the undo commit and branch, or the files the
+ * branch changed since, when nothing changed. */
+export function undoChange(id: string): Promise<Result<AcceptOutcome>> {
+  return call<AcceptOutcome>("desktop_undo_change", { id });
 }
 
 /** Asks the agent to update its changes onto the owner's branch and resolve the

@@ -477,7 +477,10 @@ fn the_owner_environment_passes_only_the_basics_and_turns_every_prompt_off() {
             .map(|value| value.to_string_lossy().into_owned())
     };
     assert_eq!(value("HOME").as_deref(), Some("/Users/owner"));
-    assert_eq!(value("PATH").as_deref(), Some("/usr/bin:/bin"));
+    assert_eq!(
+        value("PATH"),
+        Some(system_path(None).to_string_lossy().into_owned())
+    );
     assert_eq!(
         value("SSH_AUTH_SOCK").as_deref(),
         Some("/private/tmp/agent.sock")
@@ -526,11 +529,11 @@ fn the_owner_path_keeps_only_real_folders_the_ide_and_agents_cannot_write() {
     .unwrap();
     assert_eq!(
         owner_path(&path, &[project.folder.as_path(), engine.as_path()]),
-        OsString::from("/usr/bin:/usr/bin:/bin")
+        system_path(None)
     );
     assert_eq!(
         owner_path(&path, &[Path::new("/usr")]),
-        OsString::from("/bin"),
+        system_path(Some(Path::new("/usr"))),
         "a denied folder is left out by its real path, through a link too"
     );
     let env = owner_env(
@@ -541,9 +544,24 @@ fn the_owner_path_keeps_only_real_folders_the_ide_and_agents_cannot_write() {
         env.iter()
             .find(|(name, _)| name == "PATH")
             .map(|(_, value)| value.clone()),
-        Some(OsString::from("/usr/bin:/usr/bin:/bin"))
+        Some(system_path(None))
     );
     assert_eq!(owner_path(OsStr::new(".:bin"), &[]), OsString::new());
+}
+
+/// The owner PATH `/usr/bin` and `/bin` leave on this host: each by its real path, once,
+/// outside `denied`. On macOS that is `/usr/bin:/bin`; where `/bin` links to `/usr/bin`, as
+/// on merged-usr Linux, it is `/usr/bin` alone. Input: the denied folder, if any. Output:
+/// the PATH value.
+fn system_path(denied: Option<&Path>) -> OsString {
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for folder in ["/usr/bin", "/bin"] {
+        let real = std::fs::canonicalize(folder).unwrap();
+        if !denied.is_some_and(|denied| real.starts_with(denied)) && !kept.contains(&real) {
+            kept.push(real);
+        }
+    }
+    std::env::join_paths(kept).unwrap()
 }
 
 #[test]
@@ -624,6 +642,18 @@ fn what_a_git_command_printed_fits_one_bridge_frame() {
     let (tail_kept, cut) = tail(&b"0123456789"[..], 4);
     assert_eq!((tail_kept.as_slice(), cut), (&b"6789"[..], true));
     assert_eq!(tail(&b"0123"[..], 4), (b"0123".to_vec(), false));
+}
+
+/// land-19 r2 L1: the IDE's git reads no grafts file and prints no advice about the one it
+/// is pointed at, so a push's error output, which the IDE shows, holds only what the push
+/// itself says.
+#[test]
+fn a_push_from_the_project_folder_prints_no_grafts_advice() {
+    let project = Project::new();
+    let head = project.commit("notes.md", "Planting notes.\n");
+    let pushed = landed(project.git(&["push", "origin", "main:main"]));
+    assert_eq!(project.served("main").as_deref(), Some(head.as_str()));
+    assert!(!pushed.stderr.contains("graft"), "{pushed:?}");
 }
 
 #[test]
@@ -936,4 +966,76 @@ fn a_git_command_past_its_limit_is_killed_and_its_outcome_unknown() {
         started.elapsed()
     );
     drop(silent);
+}
+
+/// SECAUDIT ide-git-commondir-case-variant-config-redirect: every later git the engine runs
+/// names the project's git folder as its common folder, so a `commondir` planted after the
+/// check redirects none of them.
+#[test]
+fn a_commondir_planted_after_the_check_redirects_no_later_git() {
+    let project = Project::new();
+    let store = project.root.join("store");
+    for name in ["objects", "refs"] {
+        std::fs::create_dir_all(store.join(name)).unwrap();
+    }
+    std::fs::write(
+        store.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n[probe]\n\tvalue = planted\n",
+    )
+    .unwrap();
+    ok(&project.folder, &["config", "probe.value", "project"]);
+    std::fs::write(
+        project.folder.join(".git").join("commondir"),
+        format!("{}\n", store.display()),
+    )
+    .unwrap();
+    let done = ran(
+        git(
+            &project.folder,
+            &project.env(),
+            &["config", "--get", "probe.value"],
+        ),
+        4096,
+        LIMIT,
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&done.stdout).trim(), "project");
+}
+
+/// SECAUDIT ide-git-commondir-case-variant-config-redirect: a `commondir` planted in the
+/// project's `.git`, in any spelling the volume folds together, cannot send the engine's git
+/// to another folder's config and run a command from it.
+#[test]
+fn a_planted_commondir_runs_no_command_from_another_folder_s_config() {
+    let project = Project::new();
+    std::fs::write(project.root.join("CaseProbe"), "").unwrap();
+    let names: &[&str] = if project.root.join("caseprobe").exists() {
+        &["commondir", "COMMONDIR"]
+    } else {
+        &["commondir"]
+    };
+    let store = project.root.join("store");
+    for name in ["objects", "refs"] {
+        std::fs::create_dir_all(store.join(name)).unwrap();
+    }
+    let marker = project.root.join("ssh-ran");
+    std::fs::write(
+        store.join("config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tsshCommand = touch {}\n[remote \"origin\"]\n\turl = ssh://dummy.invalid/x.git\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    for name in names {
+        let planted = project.folder.join(".git").join(name);
+        std::fs::write(&planted, format!("{}\n", store.display())).unwrap();
+        assert_eq!(
+            refused(project.git(&["ls-remote", "origin"])),
+            "ide_git_config_refused",
+            "{name}"
+        );
+        assert!(!marker.exists(), "{name}");
+        std::fs::remove_file(&planted).unwrap();
+    }
 }

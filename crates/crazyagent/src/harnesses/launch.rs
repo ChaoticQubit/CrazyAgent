@@ -1,4 +1,5 @@
 use super::interactive::KEY_FILE;
+use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
@@ -16,21 +17,21 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
 pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
 /// The longest prompt a launch sends: half of one outbound Codex frame, which leaves room
 /// for the JSON-RPC envelope around it.
-const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
+pub(crate) const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -39,9 +40,15 @@ const CODEX_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DURABLE_INPUT: &str = "input";
 pub const DURABLE_OUTPUT: &str = "output.log";
+/// The most bytes a durable harness output log holds before the engine empties it: the
+/// session's reader once it has read all of it, the watcher of a reattached agent, whose log
+/// nothing reads, at once. The agent runs on either way (owner 11-11).
+pub const DURABLE_OUTPUT_KEPT_MAX: u64 = 64 * 1024 * 1024;
 #[cfg(unix)]
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
+#[cfg(unix)]
+const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 /// The Codex `-c` settings every tools-off launch passes: a read-only sandbox,
 /// no shell or exec, patch, image, sub-agent, code mode, app, plugin, goal or
 /// web search tool and no MCP server.
@@ -73,9 +80,12 @@ const CODEX_TOOLS_ON: [&str; 8] = [
     "features.plugins=false",
     "features.goals=false",
     "features.multi_agent=false",
-    "features.multi_agent_v2=false",
+    CODEX_MULTI_AGENT_V2_OFF,
     "mcp_servers={}",
 ];
+/// The tools-on Codex setting that keeps multi-agent v2 off; a native lead's launch leaves it
+/// out so the v2 table its `config.toml` holds turns Codex's own sub-agents on (PA-7).
+const CODEX_MULTI_AGENT_V2_OFF: &str = "features.multi_agent_v2=false";
 
 type Invocation = (Vec<OsString>, Vec<(&'static str, OsString)>);
 
@@ -151,6 +161,20 @@ const CLAUDE_COMMON: [&str; 12] = [
     CLAUDE_NO_TRANSCRIPT,
 ];
 const CLAUDE_NO_TRANSCRIPT: &str = "--no-session-persistence";
+/// The system prompt of every tools-off Claude Code launch, in place of Claude Code's own
+/// agent prompt. That prompt describes Bash and other tools such a launch does not offer;
+/// under it a Claude Code 2.1.309 mapping run wrote tool calls as plain text until its
+/// output limit and kept going, so onboarding hung for its whole step time.
+pub(crate) const CLAUDE_NO_TOOLS_PROMPT: &str = "You are Claude, answering inside CrazyAgent with no tools. You cannot run commands, read or write files, browse or call any tool, and no tool results will ever come back. Never write tool calls, function call markup or commands for yourself to run. Answer directly in plain text from the conversation and the text you are given.";
+/// Claude Code's arguments for a launch with tools off: no tools, no slash commands and
+/// [`CLAUDE_NO_TOOLS_PROMPT`] as the whole system prompt.
+pub(crate) const CLAUDE_TOOLS_OFF: [&str; 5] = [
+    "--tools",
+    "",
+    "--disable-slash-commands",
+    "--system-prompt",
+    CLAUDE_NO_TOOLS_PROMPT,
+];
 
 /// Holds an API key or token in memory for one launch; it never appears in Debug,
 /// serialization, arguments or reports and is handed to the child only as an environment value.
@@ -236,14 +260,16 @@ impl AccountBinding {
 pub const RUN_TIME_MAX: Duration = Duration::from_secs(86_400);
 
 /// Bounds for one launched harness process.
-/// `run_time` caps the whole session, `stop_grace` the wait between TERM and KILL,
-/// `output_bytes` the total stdout read and `events` the events delivered.
+/// `run_time` caps the whole session and `stop_grace` the wait between TERM and KILL.
+/// `stale_turn` is how long an open turn of a session that follows every turn may get no
+/// new byte in the session record, on a pane whose app waits, before it counts as no turn.
+/// No count of output bytes or events ends a session (owner 11-11): memory is bounded per
+/// line and per read, and a line past the bound is passed over.
 #[derive(Clone, Copy, Debug)]
 pub struct LaunchLimits {
     pub run_time: Duration,
     pub stop_grace: Duration,
-    pub output_bytes: usize,
-    pub events: usize,
+    pub stale_turn: Duration,
 }
 
 impl Default for LaunchLimits {
@@ -251,8 +277,7 @@ impl Default for LaunchLimits {
         Self {
             run_time: Duration::from_secs(600),
             stop_grace: Duration::from_secs(2),
-            output_bytes: 8 * 1024 * 1024,
-            events: 10_000,
+            stale_turn: Duration::from_secs(600),
         }
     }
 }
@@ -389,12 +414,190 @@ fn claude_limit_line(line: &str) -> bool {
         })
 }
 
-/// A plain failure code from a launch adapter. It never carries secrets or raw output.
+/// A plain failure code from a launch adapter. It never carries secrets or raw output; a
+/// `launch_secret_in_command` refusal also names the MCP server and secret, never the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaunchError(pub String);
+pub struct LaunchError(pub String, pub Option<Box<SecretInCommand>>);
+
+/// The owner-given names of the MCP server and secret whose value a refused launch command
+/// would have held. Names are validated when saved, so they are plain text to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretInCommand {
+    pub server: String,
+    pub secret: String,
+}
 
 pub(super) fn failure(code: &str) -> LaunchError {
-    LaunchError(code.into())
+    LaunchError(code.into(), None)
+}
+
+/// Sends SIGKILL to every process of an agent's process group. Takes the group id, which
+/// names the group's leader and is above 1; an id that names no process does nothing.
+#[cfg(unix)]
+pub(crate) fn kill_group(group: u32) {
+    let Ok(raw) = i32::try_from(group) else {
+        return;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return;
+    };
+    assert!(pid.as_raw_nonzero().get() > 1);
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+}
+
+/// How long a group its holder saw end stays refused to every later claim: past
+/// `GROUP_FRESH` and the keeper's wait, so a session that saw its pane alive just before
+/// another path ended the group finds the number refused and only watches it (CB-2 r1 F1).
+const ENDED_REFUSED: Duration = Duration::from_secs(10);
+
+/// The process groups some path is ending now, with no time, and those a holder saw end,
+/// with the time it saw that, so a pane's stop and the terminal host's close never both
+/// signal one group (CB-2 one signal) and no later path claims a number that may lead a
+/// new group by then (CB-2 r1 F1).
+static ENDING: std::sync::Mutex<std::collections::BTreeMap<u32, Option<Instant>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// One path's hold on ending a process group: while it lives every other path leaves the
+/// group alone. Dropping it frees the number, or, once its holder saw the group answer
+/// ESRCH, keeps it refused for `ENDED_REFUSED`, as it may lead a new group by then.
+pub(crate) struct Ending {
+    group: u32,
+    gone: bool,
+}
+
+impl Ending {
+    /// Takes the hold on a process group. Input: the group id, a pid above 1. Output: the
+    /// hold, or none while another path holds that group or a holder saw it end within
+    /// `ENDED_REFUSED`.
+    pub(crate) fn claim(group: u32) -> Option<Self> {
+        assert!(group > 1 && i32::try_from(group).is_ok());
+        let mut ending = ENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ending.retain(|_, ended| ended.is_none_or(|at| at.elapsed() < ENDED_REFUSED));
+        if ending.contains_key(&group) {
+            return None;
+        }
+        ending.insert(group, None);
+        Some(Self { group, gone: false })
+    }
+
+    /// The group this hold names. Output: its id as a pid.
+    #[cfg(unix)]
+    pub(crate) fn pid(&self) -> rustix::process::Pid {
+        i32::try_from(self.group)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("a held group id is a pid above 1")
+    }
+
+    /// Records that the group answered ESRCH, so dropping this hold keeps its number
+    /// refused for `ENDED_REFUSED` instead of freeing it.
+    #[cfg(unix)]
+    pub(crate) fn gone(&mut self) {
+        self.gone = true;
+    }
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        let mut ending = ENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.gone {
+            ending.insert(self.group, Some(Instant::now()));
+        } else {
+            ending.remove(&self.group);
+        }
+    }
+}
+
+/// Ends a pane's process group once its pane is gone, from the one path that holds it
+/// (CB-2 one signal): KILL every 10 ms while the group answers, for at most
+/// `GROUP_EXIT_WAIT`, testing it before each KILL, so a group that answered ESRCH is never
+/// signalled again, as its number may lead a new group by then. macOS answers EPERM for a
+/// group whose last member it just reaped, so only ESRCH ends it. A group another path
+/// holds or a holder just saw end, as the terminal host's close of that pane, is only
+/// watched and never claimed here (CB-2 r1 F1). Inputs: the group id and this path's hold,
+/// none to only watch. Output: whether the group is gone.
+#[cfg(unix)]
+pub(crate) fn end_pane_group(group: u32, held: Option<Ending>) -> bool {
+    let Some(pid) = i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return true;
+    };
+    end_pane_group_with(
+        held,
+        GROUP_EXIT_WAIT,
+        || rustix::process::test_kill_process_group(pid) != Err(rustix::io::Errno::SRCH),
+        || {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        },
+    )
+}
+
+/// Ends a group as `end_pane_group` describes, through `left`, which tells whether the
+/// group still answers, and `kill`, which sends it KILL, called only with a hold. The hold
+/// is dropped on return, marked gone when the group answered ESRCH. Inputs: the hold, the
+/// longest wait and both calls. Output: whether the group is gone.
+#[cfg(unix)]
+fn end_pane_group_with(
+    mut held: Option<Ending>,
+    wait: Duration,
+    mut left: impl FnMut() -> bool,
+    mut kill: impl FnMut(),
+) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        if !left() {
+            if let Some(held) = held.as_mut() {
+                held.gone();
+            }
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        if held.is_some() {
+            kill();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Waits until no process of a killed agent's group is left, killing again
+/// any member that is still there. Takes the group id; returns once the group
+/// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
+/// stopped while one of its processes still lingers unnoticed. Output: whether
+/// the group is empty.
+#[cfg(unix)]
+pub(crate) fn await_group_exit(group: u32) -> bool {
+    let Some(pid) = i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return true;
+    };
+    let started = Instant::now();
+    while rustix::process::test_kill_process_group(pid).is_ok()
+        && started.elapsed() < GROUP_EXIT_WAIT
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    !group_alive(group)
+}
+
+/// Tells whether a process of a group is still there, without signalling it. Takes the
+/// group id. Output: false for an id that names no process.
+#[cfg(unix)]
+pub(crate) fn group_alive(group: u32) -> bool {
+    i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|pid| rustix::process::test_kill_process_group(pid).is_ok())
 }
 
 /// Routes a launch that carries a real provider key through an engine-owned key relay on
@@ -420,7 +623,7 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     let upstream = request.account.base_url().unwrap_or(default).to_owned();
     let secret = SecretString::new(key.reveal().as_bytes().to_vec())
         .map_err(|_| failure("launch_secret_invalid"))?;
-    let relay = Relay::start(&upstream, secret).map_err(|error| LaunchError(error.0))?;
+    let relay = Relay::start(&upstream, secret).map_err(|error| LaunchError(error.0, None))?;
     let home = request.account.home().to_path_buf();
     request.account = AccountBinding::Url {
         home,
@@ -510,6 +713,15 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         ("LC_ALL", OsStr::new("C")),
     ];
     base.extend(tools.iter().map(|(name, value)| (*name, value.as_os_str())));
+    let proxy = installed
+        .and_then(Installed::model_proxy)
+        .map(crate::sandbox::model_proxy::variables);
+    base.extend(
+        proxy
+            .iter()
+            .flatten()
+            .map(|(name, value)| (*name, OsStr::new(value))),
+    );
     if let Some(identity) = &request.git_identity {
         base.extend(
             identity
@@ -550,6 +762,11 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     Ok(command)
 }
 
+/// The Codex app-server command line, the owner's Codex settings first. Every folder of the
+/// working folder's walk is recorded untrusted for every project, untrusted ones included
+/// (threat model H2), so the app server neither loads a repository's `.codex` nor trusts a
+/// folder by itself. Inputs: the request, the installed context, if any, and the key file.
+/// Output: the arguments and variables, or `launch_working_dir_unavailable`.
 fn codex_invocation(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -557,7 +774,14 @@ fn codex_invocation(
 ) -> Result<Invocation, LaunchError> {
     let home = request.account.home().as_os_str().to_owned();
     let environment = vec![("CODEX_HOME", home)];
-    let engine = codex_configuration(request, installed.is_some(), key_file);
+    let folder = request
+        .working_dir
+        .canonicalize()
+        .map_err(|_| failure("launch_working_dir_unavailable"))?;
+    let engine: Vec<String> = codex_launch_settings(request, installed, key_file)
+        .into_iter()
+        .chain([super::codex_folder::untrusted(&folder)?])
+        .collect();
     let owner = installed.map_or_else(Vec::new, |installed| {
         let set: Vec<String> = engine
             .iter()
@@ -571,14 +795,7 @@ fn codex_invocation(
         )
     });
     let mut arguments = Vec::new();
-    let folder = match request.trust {
-        crate::trust::Trust::Reviewed => None,
-        crate::trust::Trust::Untrusted => Some(
-            codex_project(request.trust, &request.working_dir)
-                .ok_or_else(|| failure("launch_working_dir_unavailable"))?,
-        ),
-    };
-    for setting in owner.into_iter().chain(engine).chain(folder) {
+    for setting in owner.into_iter().chain(engine) {
         arguments.push(OsString::from("-c"));
         arguments.push(OsString::from(setting));
     }
@@ -589,7 +806,7 @@ fn codex_invocation(
 /// Checks the path of an account's key file before a harness is told to read it: an
 /// absolute path that fits inside a single-quoted shell word and a TOML string unchanged.
 /// Input: the path. Output: its text, or `launch_key_file_invalid`.
-pub(super) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
+pub(crate) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
     let file = path
         .to_str()
         .filter(|text| !text.chars().any(char::is_control))
@@ -600,20 +817,28 @@ pub(super) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
     Ok(file.to_owned())
 }
 
-/// The `-c` setting naming how far Codex trusts the launch folder: `trusted` for a
-/// reviewed project and `untrusted` for an untrusted one, never omitted for an untrusted
-/// launch (threat model H2). Inputs: the project's level and the folder. Output: the
-/// setting, or None when the folder has no plain text path.
-pub(crate) fn codex_project(trust: crate::trust::Trust, folder: &Path) -> Option<String> {
-    let text = folder
-        .to_str()
-        .filter(|text| !text.chars().any(char::is_control))?;
-    let folder = serde_json::to_string(text).ok()?;
-    let level = match trust {
-        crate::trust::Trust::Reviewed => "trusted",
-        crate::trust::Trust::Untrusted => "untrusted",
-    };
-    Some(format!("projects={{{folder}={{trust_level=\"{level}\"}}}}"))
+/// Builds a Codex launch's `-c` settings from [`codex_configuration`] and what its installed
+/// context asks for: a native lead (PA-7) leaves out the multi-agent v2 off switch, so its
+/// `config.toml` turns Codex's own sub-agents on. Inputs: the request, the installed
+/// context, if any, and the key file. Output: the settings, in order.
+pub(super) fn codex_launch_settings(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    key_file: Option<&str>,
+) -> Vec<String> {
+    let native = installed.is_some_and(Installed::native_threads);
+    assert!(!native || request.tools);
+    let mut settings = codex_configuration(request, installed.is_some(), key_file);
+    if native {
+        settings.retain(|setting| setting != CODEX_MULTI_AGENT_V2_OFF);
+    }
+    assert_eq!(
+        settings
+            .iter()
+            .any(|setting| setting == CODEX_MULTI_AGENT_V2_OFF),
+        request.tools && !native
+    );
+    settings
 }
 
 /// Builds the `-c` settings every Codex launch gets: file credentials in the account home,
@@ -780,7 +1005,7 @@ fn claude_invocation(
             .map(OsString::from),
         );
     } else {
-        arguments.extend(["--tools", "", "--disable-slash-commands"].map(OsString::from));
+        arguments.extend(CLAUDE_TOOLS_OFF.map(OsString::from));
     }
     let denied = claude_denied(request.tools, false, installed);
     if !denied.is_empty() {
@@ -868,8 +1093,6 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     if limits.run_time.is_zero()
         || limits.run_time > RUN_TIME_MAX
         || limits.stop_grace > Duration::from_secs(30)
-        || !(1..=64 * 1024 * 1024).contains(&limits.output_bytes)
-        || !(1..=1_000_000).contains(&limits.events)
     {
         return Err(failure("launch_limits_invalid"));
     }
@@ -911,23 +1134,30 @@ pub(crate) fn validate_home(_home: &Path) -> Result<(), LaunchError> {
     Err(failure("launch_account_home_unavailable"))
 }
 
+/// What a harness output reader hands the session: one line, the note that a line longer
+/// than `LINE_BYTES_MAX` was passed over, or the end of the output.
 enum Line {
     Bytes(Vec<u8>),
     Closed,
-    Overflow,
+    Skipped,
 }
+
+/// The most output lines a reader holds for the session before it waits for the session to
+/// take one, so a session that reads slowly holds a bounded amount of output.
+const LINES_AHEAD_MAX: usize = 16;
 
 enum Driver {
     Codex {
-        protocol: CodexProtocol,
+        protocol: Box<CodexProtocol>,
         cwd: PathBuf,
         tools: bool,
         prompt: Option<String>,
         interrupt: bool,
         server_turn: bool,
+        native_threads: bool,
     },
     Claude {
-        protocol: ClaudeProtocol,
+        protocol: Box<ClaudeProtocol>,
         turns: u64,
         interrupt: Option<String>,
         late: u64,
@@ -935,7 +1165,15 @@ enum Driver {
 }
 
 impl Driver {
-    fn new(request: &LaunchRequest) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
+    /// Starts the protocol driver of one headless launch: a Codex native lead (PA-7) keeps
+    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one.
+    /// Inputs: the request and whether it is a Codex native lead. Output: the driver and its
+    /// first frames, or a plain refusal code.
+    fn new(
+        request: &LaunchRequest,
+        native_threads: bool,
+    ) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
+        assert!(!native_threads || (harness_id(request) == "codex" && request.tools));
         match harness_id(request) {
             "codex" => {
                 let mut protocol = CodexProtocol::new();
@@ -943,12 +1181,13 @@ impl Driver {
                     .initialize()
                     .map_err(|_| failure("launch_protocol_failed"))?;
                 let driver = Self::Codex {
-                    protocol,
+                    protocol: Box::new(protocol),
                     cwd: request.working_dir.clone(),
                     tools: request.tools,
                     prompt: None,
                     interrupt: false,
                     server_turn: false,
+                    native_threads,
                 };
                 Ok((driver, vec![start]))
             }
@@ -969,7 +1208,7 @@ impl Driver {
                     .map_err(|_| failure("launch_protocol_failed"))?;
                 Ok((
                     Self::Claude {
-                        protocol,
+                        protocol: Box::new(protocol),
                         turns: 0,
                         interrupt: None,
                         late: 0,
@@ -1079,6 +1318,7 @@ impl Driver {
                 prompt,
                 interrupt,
                 server_turn,
+                native_threads,
             } => {
                 let method = crate::adapters::claude::parse_line(line)
                     .map_err(|_| failure("launch_protocol_failed"))?;
@@ -1134,6 +1374,7 @@ impl Driver {
                                 success: status == TurnStatus::Completed,
                             });
                         }
+                        CodexEvent::NativeSubAgentStarted { .. } if *native_threads => {}
                         CodexEvent::NativeSubAgentStarted { thread_id, turn_id } => {
                             writes.push(
                                 protocol
@@ -1244,18 +1485,19 @@ impl Driver {
 /// A running harness process driven through its headless interface.
 /// The process leads its own process group, and a harness on pipes has a warden in its
 /// sandbox, so stop reaches every descendant, those in their own sessions included.
-/// `uncertain` is set once its warden did not confirm that sandbox empty.
+/// `uncertain` is set once its warden did not confirm that sandbox empty; `follower` follows a
+/// Full access run's processes, which no warden reaches, from its start to its stop.
 pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     uncertain: bool,
+    follower: Option<Follower>,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
     queue: VecDeque<LaunchEvent>,
     limits: LaunchLimits,
     deadline: Instant,
-    events: usize,
     exited: bool,
     stopped: bool,
     _context: Option<Installed>,
@@ -1283,9 +1525,9 @@ impl Session {
         context: AgentContext,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
-        let key = write_key_file(&request)?;
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
+        let key = write_key_file(&request)?;
         Self::spawn(request, command, Some(installed), None, (relay, key))
     }
 
@@ -1300,16 +1542,20 @@ impl Session {
         state: &Path,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
-        let key = write_key_file(&request)?;
         let (command, installed) = match &context {
             Some(context) => {
                 let (command, installed) = command_with_context(&request, context)?;
                 (command, Some(installed))
             }
-            None => (command(&request)?, None),
+            None => {
+                let installed =
+                    crate::launch_context::lock_only(request.account.home(), &request.harness)?;
+                (command(&request)?, Some(installed))
+            }
         };
         drop(context);
         let io = DurableIo::create(state)?;
+        let key = write_key_file(&request)?;
         Self::spawn(request, command, installed, Some(io), (relay, key))
     }
 
@@ -1320,9 +1566,11 @@ impl Session {
         durable: Option<DurableIo>,
         (relay, key): (Option<Relay>, Option<KeyFile>),
     ) -> Result<Self, LaunchError> {
-        let (driver, startup) = Driver::new(&request)?;
-        let output_bytes = request.limits.output_bytes;
-        let (sender, lines) = channel();
+        let native_threads = context.as_ref().is_some_and(Installed::native_threads);
+        let (driver, startup) = Driver::new(&request, native_threads)?;
+        let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
+        command.env(LINEAGE_VARIABLE, token.as_str());
+        let (sender, lines) = sync_channel(LINES_AHEAD_MAX);
         let mut child;
         let mut warden = None;
         let stdin;
@@ -1339,7 +1587,7 @@ impl Session {
                 let (output, probe) = (io.output, io.probe);
                 std::thread::Builder::new()
                     .name("harness-output".into())
-                    .spawn(move || tail(output, probe, sender, output_bytes))
+                    .spawn(move || tail(output, probe, sender))
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
             None => {
@@ -1356,7 +1604,7 @@ impl Session {
                     .ok_or_else(|| failure("launch_stdio_unavailable"))?;
                 std::thread::Builder::new()
                     .name("harness-stdout".into())
-                    .spawn(move || forward(stdout, sender, output_bytes))
+                    .spawn(move || forward(stdout, sender))
                     .map_err(|_| failure("launch_reader_unavailable"))?;
                 std::thread::Builder::new()
                     .name("harness-stderr".into())
@@ -1368,17 +1616,20 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
         }
+        let follower = request
+            .unconfined
+            .then(|| Follower::start(child.id(), Some(token)));
         let mut session = Self {
             child,
             warden,
             uncertain: false,
+            follower,
             stdin,
             lines,
             driver,
             queue: VecDeque::new(),
             limits: request.limits,
             deadline: Instant::now() + request.limits.run_time,
-            events: 0,
             exited: false,
             stopped: false,
             _context: context,
@@ -1417,17 +1668,13 @@ impl Session {
         Ok(())
     }
 
-    /// Waits up to `wait` for the next event. Output: Some(event), None on timeout,
-    /// or an error once the session deadline passes or the output is malformed or too large.
+    /// Waits up to `wait` for the next event. A line too long to hold is passed over with
+    /// one note in the engine log. Output: Some(event), None on timeout, or an error once
+    /// the session deadline passes or the output is malformed.
     pub fn next_event(&mut self, wait: Duration) -> Result<Option<LaunchEvent>, LaunchError> {
         let until = Instant::now() + wait;
         loop {
             if let Some(event) = self.queue.pop_front() {
-                self.events += 1;
-                if self.events > self.limits.events {
-                    self.stop_group();
-                    return Err(failure("launch_event_limit"));
-                }
                 return Ok(Some(event));
             }
             if self.exited {
@@ -1455,9 +1702,8 @@ impl Session {
                     }
                     self.queue.extend(events);
                 }
-                Ok(Line::Overflow) => {
-                    self.stop_group();
-                    return Err(failure("launch_output_limit"));
+                Ok(Line::Skipped) => {
+                    eprintln!("launch_output_line_skipped over={LINE_BYTES_MAX}");
                 }
                 Ok(Line::Closed) | Err(RecvTimeoutError::Disconnected) => {
                     self.exited = true;
@@ -1470,14 +1716,21 @@ impl Session {
     }
 
     /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
-    /// run's warden, when it has one, stop every process left in its sandbox.
-    /// Output: the leader's exit code when it exited normally, or
-    /// `harness_cleanup_uncertain` when a warden did not confirm that its sandbox is empty.
-    pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
+    /// run's warden, when it has one, stop every process left in its sandbox. A Full access
+    /// run has no warden, so the processes its lineage followed from the start up to the kill,
+    /// and those carrying its launch's token, are checked after it. Output: the leader's exit
+    /// code when it exited normally, [`Unstopped::Uncertain`] when a warden did not confirm
+    /// that its sandbox is empty, or [`Unstopped::Left`] naming what a Full access run left
+    /// running.
+    pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
+        let lineage = self.follower.take().map(Follower::stop);
         let code = self.stop_group();
         assert!(self.stopped && self.warden.is_none());
         if self.uncertain {
-            return Err(failure("harness_cleanup_uncertain"));
+            return Err(Unstopped::Uncertain);
+        }
+        if let Some(lineage) = lineage {
+            lineage?.settle()?;
         }
         Ok(code)
     }
@@ -1619,7 +1872,7 @@ impl DurableIo {
         )?;
         rustix::fs::flock(&child_output, FlockOperation::NonBlockingLockExclusive)
             .map_err(|_| failure("launch_state_in_use"))?;
-        let reader = open(output.as_path(), OFlags::RDONLY, Mode::empty())?;
+        let reader = open(output.as_path(), OFlags::RDWR, Mode::empty())?;
         let probe = open(output.as_path(), OFlags::RDONLY, Mode::empty())?;
         assert!(holder_alive(&probe));
         Ok(Self {
@@ -1660,6 +1913,56 @@ pub fn holder_alive(probe: &File) -> bool {
     }
 }
 
+/// Empties a durable output log its reader has read to the end once it holds more than
+/// `DURABLE_OUTPUT_KEPT_MAX` bytes, and moves the reader back to its start, where the
+/// harness's appends now land. Only bytes already read are dropped, unless the harness
+/// writes between the length check and the cut, which are microseconds apart. Takes the
+/// reader at the log's end. Returns whether it emptied the log.
+fn trim_read_output(reader: &mut BufReader<File>) -> bool {
+    let Ok(at) = reader.stream_position() else {
+        return false;
+    };
+    if at <= DURABLE_OUTPUT_KEPT_MAX
+        || !reader
+            .get_ref()
+            .metadata()
+            .is_ok_and(|log| log.is_file() && log.len() == at)
+        || reader.get_ref().set_len(0).is_err()
+    {
+        return false;
+    }
+    let rewound = reader.seek(SeekFrom::Start(0));
+    assert!(rewound.is_err() || reader.buffer().is_empty());
+    rewound.is_ok_and(|start| start == 0)
+}
+
+/// Empties a durable output log that nothing reads, such as a reattached agent's, once it
+/// holds more than `DURABLE_OUTPUT_KEPT_MAX` bytes, so the log on disk stays bounded while
+/// the agent runs on. The path is opened without following a link or waiting on a FIFO and
+/// must still name the probed file. Takes the log path and the probe's open of it. Returns
+/// whether it emptied the log.
+#[cfg(unix)]
+pub fn trim_unread_output(output: &Path, probe: &File) -> bool {
+    let Ok(probed) = probe.metadata() else {
+        return false;
+    };
+    if probed.len() <= DURABLE_OUTPUT_KEPT_MAX {
+        return false;
+    }
+    let Ok(log) = rustix::fs::open(
+        output,
+        OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from) else {
+        return false;
+    };
+    let same = log.metadata().is_ok_and(|opened| {
+        opened.is_file() && (opened.dev(), opened.ino()) == (probed.dev(), probed.ino())
+    });
+    same && log.set_len(0).is_ok()
+}
+
 /// Turns a child's stdin pipe into the file the session writes prompts to.
 /// Takes the pipe. Returns a file owning the same descriptor.
 #[cfg(unix)]
@@ -1674,9 +1977,12 @@ fn stdin_file(pipe: std::process::ChildStdin) -> File {
     File::from(std::os::windows::io::OwnedHandle::from(pipe))
 }
 
-fn forward(stdout: ChildStdout, sender: Sender<Line>, output_bytes: usize) {
+/// Hands each line of a harness's stdout to the session until the output ends. A line
+/// longer than `LINE_BYTES_MAX` is passed over to its newline and reported once as
+/// skipped, so no amount of output ends the session. Takes the stdout and the sender.
+fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
     let mut reader = BufReader::new(stdout);
-    let mut total = 0_usize;
+    let mut skipping = false;
     loop {
         let mut line = Vec::new();
         let limit = u64::try_from(LINE_BYTES_MAX + 1).unwrap_or(u64::MAX);
@@ -1685,14 +1991,20 @@ fn forward(stdout: ChildStdout, sender: Sender<Line>, output_bytes: usize) {
                 let _ = sender.send(Line::Closed);
                 return;
             }
-            Ok(count) => {
-                total = total.saturating_add(count);
-                if total > output_bytes
-                    || (line.len() > LINE_BYTES_MAX && line.last() != Some(&b'\n'))
-                {
-                    let _ = sender.send(Line::Overflow);
-                    return;
+            Ok(_) => {
+                let ended = line.last() == Some(&b'\n');
+                if skipping {
+                    skipping = !ended;
+                    continue;
                 }
+                if line.len() > LINE_BYTES_MAX && !ended {
+                    skipping = true;
+                    if sender.send(Line::Skipped).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                assert!(line.len() <= LINE_BYTES_MAX + 1);
                 if sender.send(Line::Bytes(line)).is_err() {
                     return;
                 }
@@ -1701,10 +2013,16 @@ fn forward(stdout: ChildStdout, sender: Sender<Line>, output_bytes: usize) {
     }
 }
 
-fn tail(output: File, probe: File, sender: Sender<Line>, output_bytes: usize) {
+/// Hands each line a durable harness writes to its output file to the session until the
+/// holder of the file is gone and the file is read to its end. A line longer than
+/// `LINE_BYTES_MAX` is passed over to its newline and reported once as skipped. A log read
+/// to its end past `DURABLE_OUTPUT_KEPT_MAX` is emptied at a line boundary, so the log on
+/// disk stays bounded and the agent runs on. Takes the output file, open for reading and
+/// writing, the holder probe and the sender.
+fn tail(output: File, probe: File, sender: SyncSender<Line>) {
     let mut reader = BufReader::new(output);
     let mut line = Vec::new();
-    let mut total = 0_usize;
+    let mut skipping = false;
     let mut draining = false;
     loop {
         assert!(line.len() <= LINE_BYTES_MAX);
@@ -1716,13 +2034,21 @@ fn tail(output: File, probe: File, sender: Sender<Line>, output_bytes: usize) {
                 return;
             }
         };
-        total = total.saturating_add(count);
-        if total > output_bytes || (line.len() > LINE_BYTES_MAX && line.last() != Some(&b'\n')) {
-            let _ = sender.send(Line::Overflow);
-            return;
+        let ended = line.last() == Some(&b'\n');
+        if line.len() > LINE_BYTES_MAX && !ended {
+            line.clear();
+            if !skipping && sender.send(Line::Skipped).is_err() {
+                return;
+            }
+            skipping = true;
+            continue;
         }
-        if line.last() == Some(&b'\n') {
-            if sender.send(Line::Bytes(std::mem::take(&mut line))).is_err() {
+        if ended {
+            let whole = std::mem::take(&mut line);
+            if std::mem::take(&mut skipping) {
+                continue;
+            }
+            if sender.send(Line::Bytes(whole)).is_err() {
                 return;
             }
             continue;
@@ -1731,13 +2057,19 @@ fn tail(output: File, probe: File, sender: Sender<Line>, output_bytes: usize) {
             continue;
         }
         if draining {
-            if !line.is_empty() && sender.send(Line::Bytes(std::mem::take(&mut line))).is_err() {
+            if !skipping
+                && !line.is_empty()
+                && sender.send(Line::Bytes(std::mem::take(&mut line))).is_err()
+            {
                 return;
             }
             let _ = sender.send(Line::Closed);
             return;
         }
         if holder_alive(&probe) {
+            if (line.is_empty() || skipping) && trim_read_output(&mut reader) {
+                eprintln!("launch_output_trimmed over={DURABLE_OUTPUT_KEPT_MAX}");
+            }
             std::thread::sleep(TAIL_POLL);
         } else {
             draining = true;

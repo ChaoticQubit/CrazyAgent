@@ -13,6 +13,7 @@ pub(super) const MAGIC: &[u8; 4] = b"CAT1";
 #[cfg(unix)]
 const GRANT_CHECK: Duration = Duration::from_secs(5);
 const WRITE_TIME: Duration = Duration::from_secs(10);
+const VIEWERS_FULL: &str = "terminal_viewers_full";
 #[cfg(unix)]
 const REQUESTS_QUEUED: usize = 16;
 #[cfg(unix)]
@@ -66,6 +67,16 @@ impl TerminalControl {
             return Err(failure("terminal_input_bounds"));
         }
         self.send(&TerminalRequest::Input { bytes }).await
+    }
+
+    /// Types keys the view made from the owner's mouse wheel into the agent's terminal, as
+    /// `input` types keys. Takes at most `INPUT_BYTES_MAX` bytes.
+    /// Returns once the request is sent.
+    pub async fn scroll(&mut self, bytes: Vec<u8>) -> Result<(), EngineError> {
+        if bytes.len() > INPUT_BYTES_MAX {
+            return Err(failure("terminal_input_bounds"));
+        }
+        self.send(&TerminalRequest::Scroll { bytes }).await
     }
 
     /// Sends the owner's explicit message to the agent: the engine types it as one submission
@@ -229,6 +240,7 @@ impl Engine {
     /// program stays the one found and opened anew when it changes, such as when setup
     /// installs its own copy over an unsupported one or an upgrade removes the old one.
     /// Takes the engine root. Returns the host, or `terminal_unavailable`.
+    #[cfg(unix)]
     pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
         let mut slot = self
             .terminal
@@ -243,6 +255,61 @@ impl Engine {
         let host = crate::terminal::tmux_host(root, found.clone());
         *slot = Some((found, host.clone()));
         Ok(host)
+    }
+
+    /// Names in a team graph read the terminals of finished workers whose last screen the
+    /// open terminal host still keeps (N-D21). Any other read, and every read before a host
+    /// opened, passes unchanged: a host opened later keeps no screen yet. Takes the read.
+    /// Returns it, or `terminal_unavailable` when the host check could not finish.
+    #[cfg(unix)]
+    pub(crate) async fn kept_named(
+        &self,
+        read: OwnerReadReply,
+    ) -> Result<OwnerReadReply, EngineError> {
+        let OwnerReadReply {
+            revision,
+            config_id,
+            data,
+        } = read;
+        let host = self
+            .terminal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|(_, host)| host.clone()));
+        let data = match (data, host) {
+            (OwnerData::TeamGraph { mut graph }, Some(host)) => {
+                tokio::task::spawn_blocking(move || {
+                    crate::team::graph::name_kept(&mut graph, |agent| host.kept(agent));
+                    OwnerData::TeamGraph { graph }
+                })
+                .await
+                .map_err(|_| failure("terminal_unavailable"))?
+            }
+            (data, _) => data,
+        };
+        Ok(OwnerReadReply {
+            revision,
+            config_id,
+            data,
+        })
+    }
+
+    /// Passes a read unchanged where no terminal host opens, so no finished worker's screen
+    /// is kept to name. Takes the read. Returns it.
+    #[cfg(not(unix))]
+    pub(crate) async fn kept_named(
+        &self,
+        read: OwnerReadReply,
+    ) -> Result<OwnerReadReply, EngineError> {
+        Ok(read)
+    }
+
+    /// Refuses a terminal host where no tmux runs: no agent pane opens off the macOS
+    /// confinement, and the engine does not run on Windows in this version. Takes the engine
+    /// root, unused. Returns `terminal_unavailable`.
+    #[cfg(not(unix))]
+    pub(crate) fn terminal(&self, _root: &Path) -> Result<Arc<dyn Host>, EngineError> {
+        Err(failure("terminal_unavailable"))
     }
 }
 
@@ -294,7 +361,9 @@ async fn act(
     let host = host.clone();
     let agent = agent.clone();
     tokio::task::spawn_blocking(move || match request {
-        TerminalRequest::Input { bytes } => host.input(&agent, &bytes),
+        TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
+            host.input(&agent, &bytes)
+        }
         TerminalRequest::Prompt { text } => type_prompt(host.as_ref(), &agent, &text).map(drop),
         TerminalRequest::Resize { cols, rows } => host.resize(&agent, cols, rows),
         TerminalRequest::Attach { .. }
@@ -410,11 +479,16 @@ const PROMPT_SENT: &[u8] = b"\r";
 /// The keys an owner request puts into a team agent's terminal, for the owner typing
 /// signal: the typed keys, or for a prompt a line sent with Enter, since a prompt is the
 /// owner's own text too and can answer a box on that screen. Takes the request. Returns
-/// the keys, or none for a request that types nothing.
+/// the keys, or none for a request that types nothing or only the view's wheel keys, which
+/// are the owner reading, not typing (OB-10). A wheel request holding any other byte counts
+/// as typed keys (OB10-L1).
 #[cfg(unix)]
 fn owner_keys(request: &TerminalRequest) -> Option<&[u8]> {
     match request {
-        TerminalRequest::Input { bytes } => Some(bytes.as_slice()),
+        TerminalRequest::Scroll { bytes } if crate::team::master::wheel_only(bytes) => None,
+        TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
+            Some(bytes.as_slice())
+        }
         TerminalRequest::Prompt { .. } => Some(PROMPT_SENT),
         TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }
@@ -620,6 +694,31 @@ pub(super) async fn serve(
             let _ = stream.shutdown().await;
         }
     }
+}
+
+/// Answers a terminal view the engine has no room for with `terminal_viewers_full` in the
+/// attach reply's own shape, once the peer and its owner grant check out and its attach
+/// request is read, all within the attach deadline; then closes the connection.
+/// Takes the connection, its `CAT1` packet, the authority and the attach deadline.
+pub(super) async fn refuse(
+    mut stream: UnixStream,
+    auth: [u8; 37],
+    authority: Arc<Authority>,
+    deadline: Instant,
+) {
+    let mut packet = auth;
+    packet[..4].copy_from_slice(b"CAO1");
+    let refused = async {
+        verify_peer(&stream)?;
+        authority.authenticate(&packet)?;
+        read_frame(&mut stream).await?;
+        let full = TerminalFrame::Rejected {
+            code: VIEWERS_FULL.into(),
+        };
+        write(&mut stream, &full).await
+    };
+    let _ = tokio::time::timeout_at(deadline, refused).await;
+    let _ = stream.shutdown().await;
 }
 
 #[cfg(all(test, unix))]

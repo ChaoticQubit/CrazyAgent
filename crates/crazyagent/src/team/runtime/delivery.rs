@@ -15,6 +15,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 /// The most bytes of an item's first line kept to find it again in the agent's record.
 pub(super) const MARKER_BYTES_MAX: usize = 200;
+/// What a sub-agent's prompt types right before its task, so a task's first line is looked
+/// for after it and a short line another turn happens to hold does not match (TEAM-9-L1).
+pub(super) const TASK_LEAD: &str = "Your task: ";
 /// The most delivery intents of one kind kept pending with an unknown outcome until the
 /// owner dismisses them. A start closes older ones as unknown, their team notes kept, so
 /// undismissed ones never fill the ledger that every delivery and agent start shares.
@@ -73,6 +76,7 @@ pub(super) fn intend(
             Some(kept) => delivered(
                 &kept,
                 latest(connection, Some(kept.agent))?.get(&kept.agent),
+                kind,
             ),
             None => Resolution::Unknown,
         };
@@ -99,7 +103,7 @@ pub(super) fn intend(
         record,
         offset,
         at_ms: u64::try_from(now_ms()).unwrap_or(0),
-        marker: flat(
+        marker: marker_of(
             text.lines()
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or_default(),
@@ -150,11 +154,12 @@ pub(super) fn ended(
 /// One that never arrived waits and is typed once more. One the record cannot tell about
 /// is failed with a note, never typed again, and its intent stays pending for the owner, up
 /// to `UNKNOWN_KEPT` of each kind, marked so later starts keep it unknown without reading
-/// any record again. Input: the engine connection. Output: Ok, or a SQLite or ledger failure.
+/// any record again. Input: the engine connection. Output: Ok, `recovery_unavailable` while
+/// another writer holds the store past its wait, or another SQLite or ledger failure.
 pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
     ledger::initialize(connection)?;
-    let tx =
-        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(store_failure)?;
     let check = Delivered(latest(&tx, None)?);
     let now = now_ms();
     let messages = unheld(&tx, ActionKind::Message, &check)?;
@@ -174,11 +179,25 @@ pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
         failed.extend(settle_task(&tx, action, UNKNOWN_TASK, now)?);
     }
     keep_newest(&tx, &tasks.unknown)?;
-    tx.commit().map_err(error)?;
+    tx.commit().map_err(store_failure)?;
     for task in failed {
         events::task_ended(connection, task, now)?;
     }
     Ok(())
+}
+
+/// The failure to take or commit a settle transaction, in `settle` or `settle_released`:
+/// the plain `recovery_unavailable` for SQLite's busy and locked codes, which another writer
+/// holding the store past its wait gives, so no raw SQLite text reaches the tick or the
+/// resume reply; any other failure keeps its own text. Input: the SQLite failure. Output:
+/// the error.
+fn store_failure(problem: rusqlite::Error) -> EngineError {
+    match problem.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            crate::recovery::unavailable()
+        }
+        _ => error(problem),
+    }
 }
 
 /// Checks the pending deliveries of one kind against the agents' records. An intent whose
@@ -226,8 +245,9 @@ fn unheld(
 /// arrival the record cannot tell, is never typed again; one that never arrived waits to be
 /// handed out as usual. An unknown intent stays pending for the owner only when its item
 /// was still waiting and is failed here. The master hears of a task failed here. Inputs:
-/// the engine connection and the item. Output: Ok, also when no intent is open, or a SQLite
-/// or ledger failure.
+/// the engine connection and the item. Output: Ok, also when no intent is open,
+/// `recovery_unavailable` while another writer holds the store past its wait, or another
+/// SQLite or ledger failure.
 pub(super) fn settle_released(connection: &Connection, item: Busy) -> Result<(), EngineError> {
     let Some(open) = ledger::pending_key(connection, kind(item), &key(item))? else {
         return Ok(());
@@ -236,8 +256,8 @@ pub(super) fn settle_released(connection: &Connection, item: Busy) -> Result<(),
     if let Some(held) = held_item(&open) {
         assert!(!crate::recovery::holds(connection, held)?);
     }
-    let tx =
-        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(store_failure)?;
     let latest = match agent {
         Some(agent) => latest(&tx, Some(agent))?,
         None => BTreeMap::new(),
@@ -246,7 +266,7 @@ pub(super) fn settle_released(connection: &Connection, item: Busy) -> Result<(),
     let resolution = Delivered(latest).check(&open);
     if resolution == Resolution::NotStarted {
         ledger::finish(&tx, open.id, Outcome::Failed)?;
-        return tx.commit().map_err(error);
+        return tx.commit().map_err(store_failure);
     }
     let arrived = resolution == Resolution::Done;
     let (settled, failed) = match item {
@@ -266,7 +286,7 @@ pub(super) fn settle_released(connection: &Connection, item: Busy) -> Result<(),
         Resolution::Unknown => ledger::finish(&tx, open.id, Outcome::Unknown)?,
         _ => ledger::finish(&tx, open.id, Outcome::Done)?,
     }
-    tx.commit().map_err(error)?;
+    tx.commit().map_err(store_failure)?;
     if let Some(task) = failed {
         events::task_ended(connection, task, now)?;
     }
@@ -302,7 +322,7 @@ impl Check for Delivered {
     fn check(&self, action: &Action) -> Resolution {
         intent(action).map_or(Resolution::Unknown, |intent| {
             let pane = self.0.get(&intent.agent);
-            delivered(&intent, pane)
+            delivered(&intent, pane, action.kind)
         })
     }
 }
@@ -312,9 +332,10 @@ impl Check for Delivered {
 /// agent's latest session when it started at or after the intent, read from where that
 /// session's turns begin. An older session is never read for it, so a per-turn session left
 /// from an earlier turn cannot rule it out. An intent an earlier start found unknown stays
-/// unknown, read from no record. Inputs: the intent and the agent's latest session record.
+/// unknown, read from no record. A task is looked for after [`TASK_LEAD`], a message anywhere
+/// in a typed turn. Inputs: the intent, the agent's latest session record and the item's kind.
 /// Output: Done, NotStarted, or Unknown with no readable record.
-fn delivered(intent: &Intent, latest: Option<&PaneRecord>) -> Resolution {
+fn delivered(intent: &Intent, latest: Option<&PaneRecord>, kind: ActionKind) -> Resolution {
     if intent.unknown || intent.marker.is_empty() {
         return Resolution::Unknown;
     }
@@ -330,11 +351,14 @@ fn delivered(intent: &Intent, latest: Option<&PaneRecord>) -> Resolution {
     let Some((harness, record, offset)) = found else {
         return Resolution::Unknown;
     };
+    let wanted = if matches!(kind, ActionKind::Dispatch) {
+        format!("{TASK_LEAD}{}", intent.marker)
+    } else {
+        intent.marker.clone()
+    };
     match typed_after(&harness, &record, offset) {
         None => Resolution::Unknown,
-        Some(typed) if typed.iter().any(|text| flat(text).contains(&intent.marker)) => {
-            Resolution::Done
-        }
+        Some(typed) if typed.iter().any(|text| flat(text).contains(&wanted)) => Resolution::Done,
         Some(_) => Resolution::NotStarted,
     }
 }
@@ -370,16 +394,23 @@ fn item_id(action: &Action) -> Option<i64> {
     action.key.rsplit('/').next()?.parse().ok()
 }
 
-/// Flattens every whitespace run to one space and cuts the text to `MARKER_BYTES_MAX`
-/// bytes on a character boundary, so typed and recorded text compare alike.
-/// Input: the text. Output: at most `MARKER_BYTES_MAX` bytes.
+/// Flattens every whitespace run to one space, so typed and recorded text compare alike.
+/// Input: the text. Output: the flattened text, whole.
 fn flat(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut end = flat.len().min(MARKER_BYTES_MAX);
-    while !flat.is_char_boundary(end) {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The part of an item the ledger stores, to find the item again in what was typed: its
+/// text flattened and cut to `MARKER_BYTES_MAX` bytes on a character boundary.
+/// Input: the item's first line. Output: at most `MARKER_BYTES_MAX` bytes.
+fn marker_of(text: &str) -> String {
+    let mut marker = flat(text);
+    let mut end = marker.len().min(MARKER_BYTES_MAX);
+    while !marker.is_char_boundary(end) {
         end -= 1;
     }
-    flat[..end].to_owned()
+    marker.truncate(end);
+    marker
 }
 
 /// Reads the newest session record of every agent, or of one: its live pane's record, else

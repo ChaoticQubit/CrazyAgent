@@ -2,9 +2,11 @@ use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
+use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
-    BackgroundAtEnd, BranchMode, ChildLanding, SwitchMode, TeamAction, TeamStatus,
+    BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, LandingMode, MasterIdleStop,
+    MasterLands, ReuseIdle, SwitchApply, SwitchMode, TeamAction, TeamStatus, TerminalsPerWindow,
 };
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
@@ -34,6 +36,49 @@ impl NativeBridge {
             .await
             .map_err(|e| read_failure(&e.0))?;
         bounded(status)
+    }
+
+    /// Reads one page of a project sub-agent's Messages timeline, newest first: its tasks,
+    /// what the master and the owner said to it and its events, each with the speaker the
+    /// engine stored. Takes the project id, the agent, the cursor of the newest entry not
+    /// wanted and the page size, none for the project's setting. Returns the bounded page or a
+    /// plain failure code.
+    pub async fn team_agent_messages(
+        &self,
+        id: &str,
+        agent: i64,
+        before: Option<Cursor>,
+        limit: Option<u16>,
+    ) -> Result<AgentMessages, BridgeError> {
+        let project_id = project(id)?;
+        let messages = self
+            .reader()?
+            .team_agent_messages(project_id, agent, before, limit)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(messages)
+    }
+
+    /// Stores a project's Messages settings whole: keeping the master's messages, the kept
+    /// count, progress events, how results show, the owner's own items and the page size.
+    /// Takes the project id, the settings and the client generation. Returns the actual
+    /// commit receipt; a value outside the choices is refused as `team_action_invalid` with
+    /// `team_message_settings_invalid` behind it.
+    pub async fn team_message_settings(
+        &mut self,
+        id: &str,
+        settings: MessageSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::MessageSettings {
+                project_id,
+                settings,
+            },
+            generation,
+        )
+        .await
     }
 
     /// Reads the app's own wake rule and every project's newest owner notifications.
@@ -198,6 +243,28 @@ impl NativeBridge {
         self.team_action(action, generation).await
     }
 
+    /// Sets when a saved master harness change reaches the running live master: `when_idle`
+    /// switches it once it is idle, `next_start` keeps it on its harness until it starts
+    /// again. Takes the project id, the choice, the team settings version the client read and
+    /// the client generation. Returns the actual commit receipt, `team_action_invalid` for any
+    /// other choice, or `stale_revision` for a save from an older read.
+    pub async fn team_apply_harness_switch(
+        &mut self,
+        id: &str,
+        mode: &str,
+        version: u64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = SwitchApply::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        let action = TeamAction::ApplyHarnessSwitch {
+            project_id,
+            mode,
+            version,
+        };
+        self.team_action(action, generation).await
+    }
+
     /// Sets how deep the project's sub-agents may start workers of their own: 1 lets only
     /// the master start sub-agents, 2 lets its sub-agents lead workers, 3 lets those workers
     /// lead too. Takes the project id, the depth and the client generation. Returns the actual
@@ -320,7 +387,40 @@ impl NativeBridge {
         .await
     }
 
-    /// Turns a project's "Ask me before merging into the master's branch" setting on or
+    /// Sets what a project's agents leave running after their stop does (DEC-147.4): End them,
+    /// Keep running and release the account, or Ask me. Takes the project id, the setting and
+    /// the client generation. Returns the actual commit receipt.
+    pub async fn team_leftovers(
+        &mut self,
+        id: &str,
+        mode: crazyagent::team::LeftoverMode,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::LeftoversAtEnd { project_id, mode }, generation)
+            .await
+    }
+
+    /// Ends or keeps the processes one hold of a project lists, the owner's End or Keep in the
+    /// team view. Takes the project id, the hold's key, whether to end them and the client
+    /// generation. Returns the actual commit receipt; a hold that is gone is refused.
+    pub async fn team_leftover_hold(
+        &mut self,
+        id: &str,
+        key: u64,
+        end: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let action = if end {
+            TeamAction::EndLeftovers { project_id, key }
+        } else {
+            TeamAction::KeepLeftovers { project_id, key }
+        };
+        self.team_action(action, generation).await
+    }
+
+    /// Turns a project's "Master accepts change sets" setting on or
     /// off: on, the master's merge of a finished harness waits for the owner's Accept.
     /// Takes the project id, the switch and the client generation. Returns the actual
     /// commit receipt.
@@ -332,6 +432,161 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::AskBeforeMerge { project_id, on }, generation)
+            .await
+    }
+
+    /// Sets what a Full-access master does with its own conflict fixes: merge them into main
+    /// itself, or leave them waiting for the owner's Accept. Takes the project id, the choice
+    /// and the client generation. Returns the actual commit receipt.
+    pub async fn team_master_lands(
+        &mut self,
+        id: &str,
+        mode: MasterLands,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MasterLands { project_id, mode }, generation)
+            .await
+    }
+
+    /// Turns a project's "Re-ask a sub-agent's empty reply" setting on or off: on, a
+    /// sub-agent whose task ends with no reply text is asked once more for its reply.
+    /// Takes the project id, the switch and the client generation. Returns the actual
+    /// commit receipt.
+    pub async fn team_reask_empty_reply(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::ReaskEmptyReply { project_id, on }, generation)
+            .await
+    }
+
+    /// Saves a project's "End a turn after done" choice (F15): how long a sub-agent's task
+    /// turn may stay quiet after its agent reported done before the engine ends it, in
+    /// seconds, none for Off. Takes the project id, the choice and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn team_done_quiet(
+        &mut self,
+        id: &str,
+        secs: Option<u32>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::DoneQuiet { project_id, secs }, generation)
+            .await
+    }
+
+    /// Saves how many terminals each of a project's terminal wall windows holds: 4, 6 or 9.
+    /// Takes the project id, the choice and the client generation. Returns the actual commit
+    /// receipt.
+    pub async fn team_terminals_per_window(
+        &mut self,
+        id: &str,
+        per_window: TerminalsPerWindow,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::TerminalsPerWindow {
+                project_id,
+                per_window,
+            },
+            generation,
+        )
+        .await
+    }
+
+    /// Reads how many terminals each of a project's terminal wall windows holds, the one
+    /// team setting a wall window reads. Takes the project id. Returns the choice.
+    pub async fn terminals_per_window(&self, id: &str) -> Result<TerminalsPerWindow, BridgeError> {
+        Ok(self.team_status(id).await?.terminals_per_window)
+    }
+
+    /// Sets a project's "Catch up with main" setting: `on` lets every agent merge
+    /// `crazyagent/main` into its own branch and tells it to, `off` makes the git the app
+    /// writes for an agent refuse that merge, except a master at Full access, a guide and
+    /// not a lock, since landed work can still come in another way (OS-8). Takes the project id, the mode and the client generation. Returns the
+    /// actual commit receipt, or `team_action_invalid` for any other mode.
+    pub async fn team_catch_up_main(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = CatchUpMain::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::CatchUpMain { project_id, mode }, generation)
+            .await
+    }
+
+    /// Saves a project's "Stop the master when idle after" choice: `off`, `fifteen_minutes`
+    /// or `one_hour` (DEC-117 Q4). Takes the project id, the choice and the client
+    /// generation. Returns the actual commit receipt, or `team_action_invalid` for any other
+    /// choice.
+    pub async fn team_master_idle_stop(
+        &mut self,
+        id: &str,
+        choice: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let choice = MasterIdleStop::named(choice).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(
+            TeamAction::MasterIdleStop { project_id, choice },
+            generation,
+        )
+        .await
+    }
+
+    /// Saves a project's "Live terminal" setting: on lets its master run in a live terminal
+    /// (DEC-117 Q4). Takes the project id, the setting and the client generation. Returns the
+    /// actual commit receipt.
+    pub async fn team_master_live_terminal(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::MasterLiveTerminal { project_id, on },
+            generation,
+        )
+        .await
+    }
+
+    /// Sets a project's "Reuse idle agents" setting: `off` starts a new agent for each new
+    /// task, `on` lets an idle agent of the same lead take it (HB-S5-A). Takes the project
+    /// id, the mode and the client generation. Returns the actual commit receipt, or
+    /// `team_action_invalid` for any other mode.
+    pub async fn team_reuse_idle(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = ReuseIdle::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::ReuseIdle { project_id, mode }, generation)
+            .await
+    }
+
+    /// Sets a project's "Landing" setting: `squash` lands each accepted change set as one
+    /// commit, `merge` lands it as a merge commit that keeps every agent commit (DEC-147.6).
+    /// Takes the project id, the mode and the client generation. Returns the actual commit
+    /// receipt, or `team_action_invalid` for any other mode.
+    pub async fn team_landing_mode(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = LandingMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::LandingMode { project_id, mode }, generation)
             .await
     }
 
@@ -570,6 +825,32 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::MaxTeammates { project_id, max }, generation)
+            .await
+    }
+
+    /// Sets Sub-agent rounds per message, None for Until the goal is done (F09). Takes the
+    /// project id, the choice and the client generation. Returns the actual commit receipt.
+    pub async fn team_master_rounds(
+        &mut self,
+        id: &str,
+        max: Option<u8>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MasterRounds { project_id, max }, generation)
+            .await
+    }
+
+    /// Sets Master run time in seconds, None for No limit (F01). Takes the project id, the
+    /// choice and the client generation. Returns the actual commit receipt.
+    pub async fn team_master_run_time(
+        &mut self,
+        id: &str,
+        secs: Option<u32>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MasterRunTime { project_id, secs }, generation)
             .await
     }
 

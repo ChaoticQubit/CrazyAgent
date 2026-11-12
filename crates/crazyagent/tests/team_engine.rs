@@ -239,7 +239,10 @@ impl Owner {
         .settings
         .model_access
         .unwrap();
-        let tx = self.database.transaction().unwrap();
+        let tx = self
+            .database
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
         let outcome = crazyagent::team::execute(&tx, &access, &action).unwrap();
         tx.commit().unwrap();
         outcome
@@ -316,7 +319,7 @@ fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() 
         assert_eq!(
             owner.act(TeamAction::Message {
                 project_id: project.clone(),
-                text: "Reply with exactly these two lines and nothing else:\nDELEGATE: Reply with the single word apple.\nDELEGATE: Reply with the single word pear.".into(),
+                text: "Reply with exactly these two blocks and nothing else:\n```crazyagent-task\n{\"task\": \"Reply with the single word apple.\"}\n```\n```crazyagent-task\n{\"task\": \"Reply with the single word pear.\"}\n```".into(),
             }),
             Outcome::Applied
         );

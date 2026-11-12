@@ -4,7 +4,9 @@ use super::*;
 use crate::plugins::{Scope, SecretView};
 use crate::skills::import::{ImportCandidate, ImportFrom, ImportList, ImportState, Imported};
 use crate::tui::client::OwnerEvent;
-use crate::tui::screens::settings_accounts::tests::{check, dataset, list_ctx, render};
+use crate::tui::screens::settings_accounts::tests::{
+    bar_rows, check, dataset, every_hint_once, list_ctx, render, wide_hints,
+};
 use crate::tui::seam::Request;
 use crate::tui::shell::Shell;
 use crate::tui::theme::{Appearance, Colors, Depth, Theme};
@@ -275,7 +277,7 @@ fn the_server_form_checks_locally_and_hides_secret_values() {
             .any(|row| row.contains("Use the full path of the command")),
         "a command without a path is refused before the engine sees it"
     );
-    assert_eq!(shell.ctx.queued(), 0);
+    assert!(shell.ctx.next_screen_request().is_none());
 }
 
 #[test]
@@ -391,7 +393,7 @@ fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
     let rows = render(&mut shell, 80, 24);
     assert!(rows.iter().all(|row| !row.contains("tidewater42")));
     shell.key(Key::Enter);
-    match shell.ctx.next_request() {
+    match shell.ctx.next_screen_request() {
         Some(Request::Settings(job)) => {
             assert!(!format!("{job:?}").contains("tidewater42"));
             match *job {
@@ -407,7 +409,10 @@ fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
     let rows = render(&mut shell, 80, 24);
     assert!(rows.iter().all(|row| !row.contains("tidewater42")));
     shell.key(Key::Enter);
-    assert_eq!(shell.ctx.queued(), 0, "one change at a time");
+    assert!(
+        shell.ctx.next_screen_request().is_none(),
+        "one change at a time"
+    );
 }
 
 #[test]
@@ -1388,10 +1393,44 @@ fn l_opens_tools_on_the_selected_server_or_on_the_crazyagent_tools() {
         assert!(shown.contains("Reading the tools..."), "{shown}");
         assert!(
             matches!(
-                shell.ctx.next_request(),
+                shell.ctx.next_screen_request(),
                 Some(Request::Settings(job)) if matches!(*job, SettingsJob::Tools { project: None, .. })
             ),
             "the page reads the tools it opened on"
         );
     }
+}
+
+#[test]
+fn a_secret_too_short_to_keep_out_of_launch_commands_says_why_it_was_refused() {
+    let reason = plugin_plain("server_secret_too_short");
+    assert!(reason.contains("at least 8 characters"), "{reason}");
+    assert!(reason.contains("launch command"), "{reason}");
+}
+
+/// Plugins and skills keep every hint on the bar at 80x24 (backlog 27): its ten keys wrap
+/// to a second row instead of dropping `Esc Home`, and the list, paged from the window
+/// height, still shows the last server once it is picked.
+#[test]
+fn every_plugins_hint_stays_on_the_bar_at_80_by_24_with_the_last_server_in_view() {
+    let (skills, servers) = lists();
+    let mut shell = Shell::with(
+        plugin_ctx(240, 40),
+        Box::new(Plugins::with(skills, servers)),
+    );
+    for _ in 0..6 {
+        shell.key(Key::Down);
+    }
+    let rows = render(&mut shell, 240, 40);
+    let wide = bar_rows(&rows);
+    assert_eq!(wide.len(), 1, "{wide:?}");
+    let hints = wide_hints(&wide[0]);
+    assert!(hints.iter().any(|hint| hint == "Esc Home"), "{hints:?}");
+    let rows = render(&mut shell, 80, 24);
+    every_hint_once(&rows, &hints, "80x24");
+    assert!(
+        rows.iter().any(|row| row.contains("> figma")),
+        "{}",
+        rows.join("\n")
+    );
 }

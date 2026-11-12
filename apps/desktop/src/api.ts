@@ -1,9 +1,9 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, ToolSwitch, ToolView } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
-export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
+export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Overlaps, QuestionsTo, SubagentMode, ToolSwitch, ToolView } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
@@ -13,6 +13,16 @@ export type Result<T> = { kind: "ok"; value: T } | Failure;
 
 const FALLBACK = "Something went wrong. Try again.";
 const UNREACHABLE = "engine_unreachable";
+const STALE_ENGINE = "engine_stopped_unclean";
+/** The engine causes of a refused connect where the locator still names an engine that stopped
+ * without its cleanup (F35), as the engine's `STALE_ENGINE_CODES` lists them. */
+export const STALE_ENGINE_CAUSES: readonly string[] = [
+  "owner_locator_database_mismatch",
+  "owner_locator_replaced_or_unsafe",
+  "owner_generation_replaced_or_unsafe",
+  "owner_endpoint_replaced_or_unsafe",
+  "owner_ordinary_socket_mismatch",
+];
 const PAGE_LIMIT = 200;
 const ACCOUNT_PAGES_MAX = 100;
 
@@ -20,6 +30,8 @@ const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
   engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
+  engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",
+  engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
@@ -37,11 +49,15 @@ const COPY: Record<string, string> = {
   rejected: "The engine didn't accept this change.",
   unavailable: "This isn't available right now. Try again.",
   pool_member_limit: "A pool can hold up to 15 accounts.",
+  linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
+  linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+  linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
   pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
   pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  project_not_found: "This project no longer exists.",
   account_rank_invalid: "Use a rank from 1 to 999, or leave it empty.",
   account_reserve_invalid: "Use a reserve from 0 to 99 percent.",
   account_schedule_invalid: "Use a rank from 1 to 999 and a reserve from 0 to 99 percent.",
@@ -82,7 +98,9 @@ const COPY: Record<string, string> = {
   native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",
   native_auth_cannot_display_safely: "The sign-in page sent something CrazyAgent can't show safely. Try again.",
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
+  native_auth_sign_in_running: "A sign-in is still running. Wait for it to finish or cancel it, then try again.",
   native_auth_recovery_required: "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.",
+  native_auth_in_progress: "A sign-in is still running. Finish or cancel it on its sign-in page first.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
@@ -108,6 +126,7 @@ const COPY: Record<string, string> = {
   memory_changed: "This memory changed. Reload it and try again.",
   memory_not_kept: "Only memories you kept can be made global.",
   memory_already_global: "This memory is already in global memory.",
+  memory_not_movable: "Only an app-wide memory an agent saved can be moved to a project.",
   memory_project_missing: "That project no longer exists.",
   memory_search_invalid: "Keep the search on one line, up to 100 characters.",
   memory_page_invalid: "Show between 1 and 20 memories at a time.",
@@ -141,7 +160,34 @@ const COPY: Record<string, string> = {
   launch_harness_untrusted: "This project's repository is untrusted, so only Claude Code and Codex run its agents. Pick one of them for this project's team.",
   trust_platform_unqualified: "Untrusted projects run agents and checks only on macOS in this version.",
   repository_trust_unreadable: "CrazyAgent couldn't read this project's repository trust. Try again.",
+  shared_folders_unlisted: "CrazyAgent couldn't list the project folder's files with git, so the agent didn't start. Choose All local folders with Read-only in Agent access, or check the project's git.",
+  shared_folders_too_many: "The project folder has more than 256 untracked files and folders to keep out, or more than 32 folders to open for writing, so the agent didn't start. Choose All local folders in Agent access, or gather those files into fewer folders.",
+  shared_folders_refused: "The sandbox couldn't keep the project's secret files closed or open a shared folder, so the agent didn't start. Check Shared project folders in Agent access.",
+  shared_folders_need_macos: "On Linux and Windows only All local folders with Read-only can start agents. Change Shared project folders in Agent access.",
+  agent_access_lowered: "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
+  agent_network_narrowed: "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
+  agent_toolchain_lowered: "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
+  agent_project_unreadable: "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
+  agent_git_needs_tools: "Agent git needs the Command Line Tools: run xcode-select --install.",
   project_network_unreadable: "CrazyAgent couldn't read this project's network choice, so the check was refused. Try again.",
+  temp_folder_shared: "Your temp folder is shared with other users on this computer, so it is never given to agents.",
+  temp_folder_needs_macos: "Your temp folder can be given to agents only on macOS in this version.",
+  grant_socket_needs_macos: "A socket can be allowed only on macOS in this version.",
+  grant_socket_not_plain: "The socket path must be a full path of letters, digits, slashes, dots, dashes and underscores, at most 103 bytes, in a folder that exists.",
+  grant_socket_secret: "That socket sits with your keys or credentials, so it is never allowed.",
+  grant_socket_engine: "That socket belongs to CrazyAgent itself, so it is never allowed.",
+  grant_socket_agent: "That socket controls a terminal, an editor or an SSH connection (tmux, screen, dtach, Zellij, kitty, WezTerm, Alacritty, iTerm2, Emacs, Neovim, Kakoune, VS Code, Cursor and the like) or hands out your SSH keys, which can run anything as you, so it is never allowed.",
+  grant_socket_host: "That socket controls containers or virtual machines (Docker, containerd, Podman, Colima, Lima, OrbStack and the like), which can reach your whole computer, so it is never allowed.",
+  grant_socket_keys: "That socket belongs to a key or password agent (gpg-agent, 1Password, SSH or another agent), so it is never allowed.",
+  grant_socket_owner: "That socket belongs to the system or another user, has a second name, or sits in a folder other users can change, so it is never allowed.",
+  grant_socket_missing: "There is no socket at that path now. Start the program that makes it, then allow it again.",
+  grant_port_reserved: "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), or controls Docker, a browser or a debugger (Node, Java, Python or Go), so it is never allowed.",
+  grant_port_dynamic: "Ports from 49152 up are lent by the system to CrazyAgent's IDE and other apps for a while, so they are never allowed. Pick a fixed port below 49152.",
+  agent_grants_invalid: "A project allows at most 2 sockets, 4 ports and your temp folder, each once.",
+  grant_full: "This project already allows as many extras of that kind as it can.",
+  grant_requests_full: "Four access requests of this project are still waiting for the owner.",
+  grant_reason_invalid: "Give a reason in plain words.",
+  agent_grant_revoked: "An allowed extra this agent held (a socket, a port or your temp folder) was removed, so the agent was stopped. Its next start goes without it.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -181,7 +227,20 @@ export function classifyFailure(error: unknown): Failure {
   const raw = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "unknown";
   const code = ["not_connected", "not_configured", "owner_unavailable", "owner_revoked"].includes(raw) ? UNREACHABLE : raw;
   const cause = typeof error === "object" && error !== null && "cause" in error && typeof error.cause === "string" ? error.cause : undefined;
+  if (code === UNREACHABLE && cause !== undefined && STALE_ENGINE_CAUSES.includes(cause)) return { kind: "error", code: STALE_ENGINE, cause, message: plainError(STALE_ENGINE) };
   return cause === undefined ? { kind: "error", code, message: plainError(code) } : { kind: "error", code, cause, message: plainError(code, cause) };
+}
+
+let selection: Promise<unknown> = Promise.resolve();
+
+/** Runs one read-then-use of the bridge's model-access selection after every earlier one has
+ * ended: the bridge keeps one selected record, ticket and paging cursor from an inspect or a
+ * page read to the edit, set-up or next page that uses it, so two such pairs at once would move
+ * it under each other. A pair must not start another. Input: the pair. Output: its result. */
+export function oneSelection<T>(pair: () => Promise<T>): Promise<T> {
+  const run = selection.then(() => pair());
+  selection = run.catch(() => undefined);
+  return run;
 }
 
 /** Calls one Tauri command, retrying only the bridge's pre-action "busy" refusal.
@@ -324,14 +383,23 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_delete: "deleting a memory",
   memory_approve: "approving a memory",
   memory_agent_writes: "saving agent memory writes",
+  memory_agent_scope: "saving where agents save memories",
+  memory_move: "moving a memory",
   memory_forget: "forgetting a memory",
   memory_remember: "saving a memory",
   memory_selection: "changing the memory selection",
   master: "changing the master conversation",
   owner_profile: "saving your profile",
+  sandbox_settings: "changing the sandbox setting",
+  cleanup_settings: "changing when finished agents' worktrees go",
+  quit_settings: "changing what quitting does to team agents",
+  master_step_settings: "changing the master step limit",
+  master_time_settings: "changing the master time limit",
+  master_frame_settings: "changing the master frame size limit",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
+  project_move_home: "moving the project into your projects folder",
   start_onboarding: "starting project setup",
   run_setup: "running project setup",
   pack_set: "changing the default pack",
@@ -339,6 +407,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   team: "changing the team",
   project_setup_update: "updating the project setup",
   project_remove: "removing the project",
+  project_delete: "deleting the project",
   research_cancel: "cancelling the research",
   research_retry: "retrying the research",
   plan_roadmap: "planning the roadmap",
@@ -392,6 +461,124 @@ export function saveProfile(profile: OwnerProfile): Promise<Result<void>> {
   return change("desktop_save_owner_profile", { profile, generation: nextGeneration() });
 }
 
+/** How a limited-network agent's sockets are held on Linux, the engine's `LinuxSockets`. */
+export type LinuxSockets = "tcp_only" | "refuse" | "tcp_ports";
+
+/** The owner's app-wide sandbox settings, the engine's `SandboxSettings`. */
+export interface SandboxSettings {
+  linux_sockets: LinuxSockets;
+}
+
+/** Reads the owner's sandbox settings. Output: the stored settings, or the defaults before the first save. */
+export function getSandboxSettings(): Promise<Result<SandboxSettings>> {
+  return call<SandboxSettings>("desktop_sandbox_settings");
+}
+
+/** Saves the owner's sandbox settings. Input: the full settings. Output: ok once saved. */
+export function saveSandboxSettings(settings: SandboxSettings): Promise<Result<void>> {
+  return change("desktop_set_sandbox_settings", { settings, generation: nextGeneration() });
+}
+
+/** When the engine removes a finished agent's worktree on its own, the engine's `CleanupMode`. */
+export type CleanupMode = "after_days" | "once_landed" | "manual";
+
+/** The owner's finished agents setting, the engine's `CleanupSettings`: the mode and the days
+ * the first mode waits, 1 to 365, kept while another mode is picked. */
+export interface CleanupSettings {
+  mode: CleanupMode;
+  days: number;
+}
+
+/** Reads when finished agents' worktrees go. Output: the stored setting, or the default before the first save. */
+export function getCleanupSettings(): Promise<Result<CleanupSettings>> {
+  return call<CleanupSettings>("desktop_cleanup_settings");
+}
+
+/** Saves when finished agents' worktrees go. Input: the full setting. Output: ok once saved. */
+export function saveCleanupSettings(settings: CleanupSettings): Promise<Result<void>> {
+  return change("desktop_set_cleanup_settings", { settings, generation: nextGeneration() });
+}
+
+/** What quitting CrazyAgent does to running team agents, the engine's `OnQuit`. */
+export type OnQuit = "keep_running" | "stop";
+
+/** How long agents left running wait for CrazyAgent to come back, the engine's `LeftRunning`. */
+export type LeftRunning = "after_hours" | "never";
+
+/** The owner's agents on quit setting, the engine's `QuitSettings`: what quitting does to
+ * running team agents, and how long the ones left running wait, with the hours, 1 to 168,
+ * kept while Never is picked. */
+export interface QuitSettings {
+  on_quit: OnQuit;
+  left_running: LeftRunning;
+  hours: number;
+}
+
+/** Reads what quitting does to team agents. Output: the stored setting, or the default before the first save. */
+export function getQuitSettings(): Promise<Result<QuitSettings>> {
+  return call<QuitSettings>("desktop_quit_settings");
+}
+
+/** Saves what quitting does to team agents. Input: the full setting. Output: ok once saved. */
+export function saveQuitSettings(settings: QuitSettings): Promise<Result<void>> {
+  return change("desktop_set_quit_settings", { settings, generation: nextGeneration() });
+}
+
+/** The most steps a master takes in one turn, the engine's `StepLimit`. */
+export type StepLimit = "no_limit" | "steps50" | "steps100" | "steps200";
+
+/** The owner's master step limit setting, the engine's `MasterStepSettings`. */
+export interface MasterStepSettings {
+  limit: StepLimit;
+}
+
+/** Reads the master step limit. Output: the stored setting, or No limit before the first save. */
+export function getMasterStepSettings(): Promise<Result<MasterStepSettings>> {
+  return call<MasterStepSettings>("desktop_master_step_settings");
+}
+
+/** Saves the master step limit. Input: the full setting. Output: ok once saved. */
+export function saveMasterStepSettings(settings: MasterStepSettings): Promise<Result<void>> {
+  return change("desktop_set_master_step_settings", { settings, generation: nextGeneration() });
+}
+
+/** How long a master works on one turn before it stops, the engine's `TimeLimit`. */
+export type TimeLimit = "no_limit" | "minutes10" | "minutes30" | "minutes60";
+
+/** The owner's master time limit setting, the engine's `MasterTimeSettings`. */
+export interface MasterTimeSettings {
+  limit: TimeLimit;
+}
+
+/** Reads the master time limit. Output: the stored setting, or No limit before the first save. */
+export function getMasterTimeSettings(): Promise<Result<MasterTimeSettings>> {
+  return call<MasterTimeSettings>("desktop_master_time_settings");
+}
+
+/** Saves the master time limit. Input: the full setting. Output: ok once saved. */
+export function saveMasterTimeSettings(settings: MasterTimeSettings): Promise<Result<void>> {
+  return change("desktop_set_master_time_settings", { settings, generation: nextGeneration() });
+}
+
+/** The largest one message the engine writes to a Claude or Codex master, the engine's
+ * `FrameSize`. */
+export type FrameSize = "kib64" | "kib256" | "mib1";
+
+/** The owner's master frame size limit setting, the engine's `MasterFrameSettings`. */
+export interface MasterFrameSettings {
+  limit: FrameSize;
+}
+
+/** Reads the master frame size limit. Output: the stored setting, or 64 KiB before the first save. */
+export function getMasterFrameSettings(): Promise<Result<MasterFrameSettings>> {
+  return call<MasterFrameSettings>("desktop_master_frame_settings");
+}
+
+/** Saves the master frame size limit. Input: the full setting. Output: ok once saved. */
+export function saveMasterFrameSettings(settings: MasterFrameSettings): Promise<Result<void>> {
+  return change("desktop_set_master_frame_settings", { settings, generation: nextGeneration() });
+}
+
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
 export type SignInMethod = "subscription" | "api_key" | "url";
 export type AccountField = "hidden" | "optional" | "required";
@@ -442,6 +629,19 @@ export interface AccountCheck {
  * order, each with its sign-in methods. */
 export function accountCatalog(): Promise<Result<ProviderEntry[]>> {
   return call<ProviderEntry[]>("desktop_account_catalog");
+}
+
+/** The words each account goes by wherever a view shows it outside its own row in Accounts:
+ * the name the owner gave it, with the account id after it when another account has the
+ * same name, so two accounts never read the same. Input: the accounts. Output: the words by
+ * account id. */
+export function accountLabels(accounts: readonly { id: string; name: string }[]): Map<string, string> {
+  const uses = new Map<string, number>();
+  for (const account of accounts) uses.set(account.name, (uses.get(account.name) ?? 0) + 1);
+  const labels = new Map<string, string>();
+  for (const account of accounts) labels.set(account.id, uses.get(account.name) === 1 ? account.name : `${account.name} (${account.id})`);
+  if (labels.size > accounts.length) throw new Error(`more account labels than accounts: ${labels.size} for ${accounts.length}`);
+  return labels;
 }
 
 /** Reads every account, following the engine's pages. Output: all accounts in engine order. */
@@ -503,9 +703,11 @@ export function profileNotNeeded(code: string): boolean {
  * sent: the engine uses the key it already holds. Input: account id. Output: ok when the
  * engine configured it or it needs no profile, otherwise a plain error. */
 export async function readyForAgents(id: string): Promise<Result<void>> {
-  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
-  if (detail.kind !== "ok") return detail;
-  const configured = await call<AccountProfileView>("desktop_configure_account_profile", { ticket: detail.value.ticket, secret: null, generation: nextGeneration() });
+  const configured = await oneSelection(async (): Promise<Result<AccountProfileView>> => {
+    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
+    if (detail.kind !== "ok") return detail;
+    return call<AccountProfileView>("desktop_configure_account_profile", { ticket: detail.value.ticket, secret: null, generation: nextGeneration() });
+  });
   if (configured.kind === "error" && profileNotNeeded(configured.code)) return { kind: "ok", value: undefined };
   if (configured.kind !== "ok") return configured;
   if (configured.value.pending || configured.value.reply.outcome === "not_recorded") {
@@ -547,6 +749,9 @@ export function profileSettledLine(check: ProfileCheck): string | null {
 /** The banner line while a sign-in's outcome is unconfirmed. */
 export const STUCK_SIGN_IN_LINE = "A sign-in didn't confirm how it ended. Changes to that account and new sign-ins wait until you clear it.";
 
+/** The toast when settings changed after a stuck sign-in started: only the engine can end it. */
+export const STALE_SIGN_IN_LINE = "Settings changed after this sign-in started, so only the engine can end it, within 10 minutes of its start. Clear it again after that.";
+
 /** Asks the engine about the stuck sign-in and, while it still runs, asks it to stop. The app
  * forgets the sign-in only once the engine answers for it. Output: true when cleared, false
  * while the engine is still stopping it, or a plain error. */
@@ -557,7 +762,8 @@ export function clearStuckSignIn(): Promise<Result<boolean>> {
 /** The toast after Clear stuck sign-in. Input: the clear result. Output: the line. */
 export function stuckClearedLine(result: Result<boolean>): string {
   if (result.kind === "ok") return result.value ? "Stuck sign-in cleared." : plainError("native_auth_cancel_pending");
-  return result.kind === "error" ? result.message : plainError("unknown");
+  if (result.kind === "error") return result.code === "native_profile_source_conflict" ? STALE_SIGN_IN_LINE : result.message;
+  return plainError("unknown");
 }
 
 export interface PoolMember {
@@ -585,6 +791,8 @@ export function poolSummaries(): Promise<Result<PoolSummary[]>> {
 
 export type AccountStrategy = "use_it_or_lose_it" | "manual_rank" | "balanced";
 export type AccountPin = "never_use" | "use_last";
+/** What a live master does once its pool's account order puts another account first (DEC-139). */
+export type LiveMasterAccount = "keep" | "move_when_idle";
 
 export interface AccountPlan {
   rank: number | null;
@@ -594,6 +802,7 @@ export interface AccountPlan {
 
 export interface AccountSchedule {
   strategy: AccountStrategy;
+  live_master: LiveMasterAccount;
   pools: { id: string; strategy: AccountStrategy }[];
   projects: { id: string; strategy: AccountStrategy }[];
   accounts: { connection: string; plan: AccountPlan }[];
@@ -602,6 +811,7 @@ export interface AccountSchedule {
 
 export type ScheduleChange =
   | { kind: "app_strategy"; strategy: AccountStrategy }
+  | { kind: "live_master"; choice: LiveMasterAccount }
   | { kind: "pool_strategy"; pool: string; strategy: AccountStrategy | null }
   | { kind: "project_strategy"; project: string; strategy: AccountStrategy | null }
   | { kind: "account"; connection: string; plan: AccountPlan };
@@ -612,22 +822,40 @@ export function accountSchedule(): Promise<Result<AccountSchedule>> {
   return call<AccountSchedule>("desktop_account_schedule");
 }
 
+/** Why a ready account stands where it does in its pool's ranking. */
+export type OrderWhy =
+  | { kind: "use_last" } | { kind: "limit_reported" } | { kind: "no_reading" }
+  | { kind: "resets_soonest"; resets_ms: number } | { kind: "resets_later"; resets_ms: number }
+  | { kind: "least_used" } | { kind: "more_used" } | { kind: "more_five_hour_used" }
+  | { kind: "ranked"; rank: number } | { kind: "unranked" }
+  | { kind: "tied_rank"; rank: number | null } | { kind: "tied_order" };
+
 export type AccountStanding =
-  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean }
+  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean; why: OrderWhy }
+  | { kind: "not_signed_in" }
+  | { kind: "sign_in_unconfirmed" }
   | { kind: "paused"; until_ms: number }
   | { kind: "never_use" }
   | { kind: "five_hour_cap"; until_ms: number | null }
   | { kind: "reserve_reached"; reserve_percent: number; until_ms: number | null };
 
+export interface ProjectHold {
+  project: string;
+  name: string;
+  until_ms: number;
+}
+
 export interface RankedAccount {
   connection: string;
   standing: AccountStanding;
+  held_for?: ProjectHold[];
 }
 
 export interface PoolRanking {
   pool: string;
   strategy: AccountStrategy;
   accounts: RankedAccount[];
+  own_order_projects: number;
 }
 
 /** Reads each pool's account ranking: the order work would try its accounts now, then each
@@ -642,7 +870,8 @@ export function setAccountSchedule(scheduleChange: ScheduleChange, version: numb
   return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
-function poolId(): string {
+/** Makes the id of a new pool, so the page can select the pool it creates. Output: the id. */
+export function newPoolId(): string {
   const bytes = new Uint8Array(10);
   crypto.getRandomValues(bytes);
   return "pool-" + Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -675,40 +904,45 @@ export function mergePool(now: PoolBase, opened: PoolBase, saved: PoolBase): Res
   return poolInput(renamed ? saved.name : now.name, [...kept, ...added]);
 }
 
-/** Creates a pool, or saves the owner's changes to an existing one while keeping its project
- * assignments and any change made elsewhere since the owner read it (see `mergePool`).
- * Inputs: pool id (absent for a new pool), name, member ids, and for an existing pool its
- * name and members as the owner read them. Output: ok once the engine saved it. */
-export async function savePool(id: string | undefined, name: string, members: string[], opened?: PoolBase): Promise<Result<void>> {
-  assert(id === undefined || opened !== undefined, "saving an existing pool needs the read it was edited from");
+/** Creates a pool with its first accounts. Inputs: its new id, name and member ids. Output: ok
+ * once the engine saved it. */
+export async function createPool(id: string, name: string, members: string[]): Promise<Result<void>> {
   const input = poolInput(name, members);
   if (input.kind !== "ok") return input;
-  let ticket: string;
-  let edit: ModelAccessEdit;
-  if (id === undefined) {
+  const edit: ModelAccessEdit = { kind: "create_pool", pool: { id, name: input.value.name, members: input.value.members, projects: [], roles: [], fallback_allowed: false } as AccountPool };
+  return oneSelection(async (): Promise<Result<void>> => {
     const page = await call<ModelAccessPage>("desktop_model_access_page", { collection: "pools", next: false });
     if (page.kind !== "ok") return page;
-    ticket = page.value.ticket;
-    edit = { kind: "create_pool", pool: { id: poolId(), name: input.value.name, members: input.value.members, projects: [], roles: [], fallback_allowed: false } as AccountPool };
-  } else {
+    return change("desktop_edit_model_access", { ticket: page.value.ticket, edit, generation: nextGeneration() });
+  });
+}
+
+/** Saves the owner's changes to a pool while keeping its project assignments and any change made
+ * elsewhere since the owner read it (see `mergePool`). Inputs: pool id, name, member ids, and its
+ * name and members as the owner read them. Output: ok once the engine saved it. */
+export async function savePool(id: string, name: string, members: string[], opened: PoolBase): Promise<Result<void>> {
+  const input = poolInput(name, members);
+  if (input.kind !== "ok") return input;
+  return oneSelection(async (): Promise<Result<void>> => {
     const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
     if (detail.kind !== "ok") return detail;
     if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
     const now = detail.value.record.pool;
-    const merged = mergePool({ name: now.name ?? "", members: now.members }, opened!, input.value);
+    const merged = mergePool({ name: now.name ?? "", members: now.members }, opened, input.value);
     if (merged.kind !== "ok") return merged;
-    ticket = detail.value.ticket;
-    edit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
-  }
-  return change("desktop_edit_model_access", { ticket, edit, generation: nextGeneration() });
+    const edit: ModelAccessEdit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
+    return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit, generation: nextGeneration() });
+  });
 }
 
 /** Deletes a pool and takes it off every project that uses it, in one engine change.
  * Input: pool id. Output: ok once deleted; those projects then have no pool. */
 export async function deletePool(id: string): Promise<Result<void>> {
-  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
-  if (detail.kind !== "ok") return detail;
-  return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit: { kind: "remove_pool", id }, generation: nextGeneration() });
+  return oneSelection(async (): Promise<Result<void>> => {
+    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
+    if (detail.kind !== "ok") return detail;
+    return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit: { kind: "remove_pool", id }, generation: nextGeneration() });
+  });
 }
 
 export type HarnessAccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
@@ -723,7 +957,7 @@ export interface HarnessEntry {
   tools: { kind: "switchable" } | { kind: "limited"; reason: string };
   model_selection: boolean;
   account_kinds: HarnessAccountKind[];
-  team: { kind: "available" } | { kind: "unavailable"; reason: string };
+  team: TeamUse;
   aliases: string[];
 }
 
@@ -970,6 +1204,18 @@ export function setAgentMemoryWrites(writes: AgentMemoryWrites): Promise<Result<
   return change("desktop_set_agent_memory_writes", { writes, generation: nextGeneration() });
 }
 
+/** Moves one app-wide memory an agent saved into one project, so only that project's agents
+ * read it. Input: memory id and project id. Output: ok once moved. */
+export function moveMemory(id: string, project: string): Promise<Result<void>> {
+  return change("desktop_move_memory", { id, project, generation: nextGeneration() });
+}
+
+/** Saves the owner's Where agents save memories setting: in the agent's own project only, or
+ * where the agent asks, app-wide included. Input: the choice. Output: ok once saved. */
+export function setAgentMemoryScope(scope: AgentMemoryScope): Promise<Result<void>> {
+  return change("desktop_set_agent_memory_scope", { scope, generation: nextGeneration() });
+}
+
 /** Picks the research memories in a project nobody reviewed yet. Inputs: the project and its
  * memory list. Output: the suggestions, in engine order. */
 export function suggestionsFrom(project: { id: string; name: string }, items: MemoryItem[]): Suggestion[] {
@@ -1091,16 +1337,18 @@ export function answerQuestion(id: string, message: number, text: string): Promi
 
 /** Opens a live view of one agent's terminal on a channel: the attach frame, the screen,
  * then live output. With a pane, the view is that one pane of the terminal's window, such as
- * a native teammate's. Inputs: the terminal name, the channel and the pane id, if any.
+ * a native teammate's. A wall window names its project, whose graph must show the terminal.
+ * Inputs: the terminal name, the channel, the pane id and the project id, if any.
  * Output: the view's serial once attached, which its detach names. */
-export function attachTerminal(agent: string, output: Channel<TerminalMessage>, pane: string | null = null): Promise<Result<number>> {
-  return call<number>("desktop_terminal_attach", { agent, pane, output });
+export function attachTerminal(agent: string, output: Channel<TerminalMessage>, pane: string | null = null, project: string | null = null): Promise<Result<number>> {
+  return call<number>("desktop_terminal_attach", { agent, pane, output, id: project });
 }
 
-/** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name and
- * 1 to 4096 bytes. Output: ok once queued in order. */
-export function typeIntoTerminal(agent: string, bytes: number[]): Promise<Result<void>> {
-  return call<void>("desktop_terminal_input", { agent, bytes });
+/** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name, 1 to
+ * 4096 bytes and whether the view made them from the mouse wheel, which the engine never
+ * counts as the owner typing. Output: ok once queued in order. */
+export function typeIntoTerminal(agent: string, bytes: number[], wheel: boolean = false): Promise<Result<void>> {
+  return call<void>("desktop_terminal_input", { agent, bytes, wheel });
 }
 
 /** Sends the owner's explicit prompt to an attached agent terminal: the engine types it as one
@@ -1144,6 +1392,14 @@ export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSe
  * `stale_revision`. */
 export function setOnHarnessSwitch(id: string, mode: SwitchMode, version: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, version, generation: nextGeneration() });
+}
+
+/** Sets when a saved master harness change reaches the running live master: once it is idle, or
+ * at its next start. Inputs: the project id, the choice and the team settings version the
+ * screen read. Output: the engine receipt, not ready, or a plain error; a save from an older
+ * read is rejected as `stale_revision`. */
+export function setApplyHarnessSwitch(id: string, mode: SwitchApply, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, version, generation: nextGeneration() });
 }
 
 /** Sets how deep sub-agents may start workers of their own: 1, 2 or 3. Inputs: the project id
@@ -1193,6 +1449,18 @@ export function setMaxTeammates(id: string, max: number | null): Promise<Result<
   return call<IntentReceipt>("desktop_team_max_teammates", { id, max, generation: nextGeneration() });
 }
 
+/** Sets Sub-agent rounds per message, null for Until the goal is done (F09). Inputs: the project
+ * id and the choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterRounds(id: string, max: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_rounds", { id, max, generation: nextGeneration() });
+}
+
+/** Sets Master run time in seconds, null for No limit (F01). Inputs: the project id and the
+ * choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterRunTime(id: string, secs: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_run_time", { id, secs, generation: nextGeneration() });
+}
+
 /** Sets the project's Token budget, null for Off: once its agents use that many tokens from now,
  * the engine stops the whole team. Inputs: the project id and the tokens. Output: the engine
  * receipt, not ready, or a plain error. */
@@ -1229,12 +1497,125 @@ export function setBackgroundAtEnd(id: string, choice: BackgroundAtEnd): Promise
   return call<IntentReceipt>("desktop_team_background", { id, choice, generation: nextGeneration() });
 }
 
-/** Turns the project's "Ask me before merging into the master's branch" setting on or off;
+/** Sets what the engine does with processes the project's agents leave running after their
+ * stop. Inputs: the project id and the setting. Output: the engine receipt, not ready, or a
+ * plain error. */
+export function setLeftovers(id: string, mode: LeftoverMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_leftovers", { id, mode, generation: nextGeneration() });
+}
+
+/** Ends or keeps the processes one leftover hold lists. Inputs: the project id, the hold's key
+ * and whether to end them. Output: the engine receipt, not ready, or a plain error; a hold
+ * that is gone is refused. */
+export function settleLeftoverHold(id: string, key: number, end: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_leftover_hold", { id, key, end, generation: nextGeneration() });
+}
+
+/** Turns the project's "Master accepts change sets" setting on or off;
  * on, the master's merge of a finished harness waits for the owner's Accept in Changes.
  * Inputs: the project id and the switch. Output: the engine receipt, not ready, or a plain
  * error. */
 export function setAskBeforeMerge(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_ask_before_merge", { id, on, generation: nextGeneration() });
+}
+
+/** Sets what a Full-access master does with its own conflict fixes: merge them into main
+ * itself, or leave them waiting for the owner's Accept in Changes. Inputs: the project id and
+ * the choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterLands(id: string, mode: MasterLands): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_lands", { id, mode, generation: nextGeneration() });
+}
+
+/** Saves the project's "End a turn after done" choice: how long a sub-agent's task turn may
+ * stay quiet after its agent reported done before the engine ends it, in seconds, null for
+ * Off. Inputs: the project id and the choice, 120, 600 or 3600 or null. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function setDoneQuiet(id: string, secs: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_done_quiet", { id, secs, generation: nextGeneration() });
+}
+
+/** Turns the project's "Re-ask a sub-agent's empty reply" setting on or off; on, a
+ * sub-agent whose task ends with no reply text is asked once more for its reply. Inputs:
+ * the project id and the switch. Output: the engine receipt, not ready, or a plain error. */
+export function setReaskEmptyReply(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_reask_empty_reply", { id, on, generation: nextGeneration() });
+}
+
+/** Sets how many terminals Open all terminals puts in one terminal wall window. Inputs: the
+ * project id and the choice, 4, 6 or 9. Output: the engine receipt, not ready, or a plain
+ * error. */
+export function setTerminalsPerWindow(id: string, perWindow: 4 | 6 | 9): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_terminals_per_window", { id, perWindow, generation: nextGeneration() });
+}
+
+/** Reads how many terminals one terminal wall window holds; the wall windows may call it.
+ * Input: the project id. Output: 4, 6 or 9, not ready, or a plain error. */
+export function loadTerminalsPerWindow(id: string): Promise<Result<4 | 6 | 9>> {
+  return call<4 | 6 | 9>("desktop_terminals_per_window", { id });
+}
+
+/** Opens or updates the project's terminal wall windows: count windows titled with the
+ * project's name, closing any past the count. With focus they come to the front; without it
+ * nothing opens unless the project has one open already, and none closes. Inputs: the project id, its name,
+ * the window count and whether to focus them. Output: nothing, not ready, or a plain error. */
+export function openTerminalWindows(id: string, name: string, count: number, focus: boolean): Promise<Result<void>> {
+  return call<void>("desktop_open_terminal_windows", { id, name, count, focus });
+}
+
+/** Asks for the wall windows a wall window's growing team needs, from that wall window: the
+ * missing pages open beside it and none closes. Inputs: the project id and the window
+ * count. Output: nothing, not ready, or a plain error. */
+export function extendTerminalWindows(id: string, count: number): Promise<Result<void>> {
+  return call<void>("desktop_extend_terminal_windows", { id, count });
+}
+
+/** Brings forward, from a terminal wall window, the main window on its project's Agents tab
+ * or another wall window of its own project, as the wall's Back to Agents and Window switch
+ * do. Inputs: the project id and the target, "main" or a page. Output: nothing, not ready,
+ * or a plain error. */
+export function focusTerminalWindow(id: string, target: "main" | number): Promise<Result<void>> {
+  return call<void>("desktop_focus_terminal_window", { id, target: String(target) });
+}
+
+/** Closes a removed project's terminal wall windows, for the main window or a wall window of
+ * that project. Input: the project id. Output: nothing, not ready, or a plain error. */
+export function closeProjectWalls(id: string): Promise<Result<void>> {
+  return call<void>("desktop_close_project_walls", { id });
+}
+
+/** Sets the project's "Catch up with main" setting for agents started from now on: on lets each
+ * agent merge the landed main, `crazyagent/main`, into its own branch and tells it to; off makes the
+ * git the app writes for an agent refuse that merge, except a master at Full access, and is a guide,
+ * not a lock: landed work can still come in another way.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setCatchUpMain(id: string, mode: CatchUpMain): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_catch_up_main", { id, mode, generation: nextGeneration() });
+}
+
+/** Saves a project's "Stop the master when idle after" choice (DEC-117 Q4). Inputs: the
+ * project id and the choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterIdleStop(id: string, choice: MasterIdleStop): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_idle_stop", { id, choice, generation: nextGeneration() });
+}
+
+/** Saves a project's "Live terminal" setting (DEC-117 Q4). Inputs: the project id and whether
+ * it is on. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterLiveTerminal(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_live_terminal", { id, on, generation: nextGeneration() });
+}
+
+/** Sets the project's "Reuse idle agents" setting: off starts a new agent for each new task, on
+ * the current branch; on lets an idle agent of the same lead take it, on the history it already has.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setReuseIdle(id: string, mode: ReuseIdle): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_reuse_idle", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets the project's "Landing" setting: squash lands each accepted change set as one commit;
+ * merge lands it as a merge commit that keeps every agent commit in the owner's history.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setLandingMode(id: string, mode: LandingMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_landing_mode", { id, mode, generation: nextGeneration() });
 }
 
 /** Sets the most files one new top-level folder, a folder the owner's branch does not have,

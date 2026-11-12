@@ -120,3 +120,27 @@ fn imp1035_claude_missing_status_identity_and_oversized_output_fail_closed() {
     assert!(verified_claude_account(b"", home).is_err());
     assert!(verified_claude_account(&vec![b' '; 65_537], home).is_err());
 }
+
+/// v2.4.0 owner update: an account check's `claude auth status` ended
+/// `native_auth_claude_deadline` while the machine was under build load, at a 2 s bound inside
+/// the check's own 9 s. A status may now use the whole check bound; logout keeps its short one.
+#[test]
+fn a_status_command_may_use_the_whole_account_check_bound() {
+    assert_eq!(
+        process::command_bound(ClaudeAuthCommand::Status),
+        CHECK_TIME
+    );
+    assert!(process::command_bound(ClaudeAuthCommand::Status) > Duration::from_secs(2));
+    assert_eq!(
+        process::command_bound(ClaudeAuthCommand::Logout),
+        Duration::from_secs(2)
+    );
+    assert_eq!(
+        process::command_bound(ClaudeAuthCommand::Renew),
+        RENEWAL_TIME
+    );
+    assert_eq!(
+        process::command_bound(ClaudeAuthCommand::Login),
+        Duration::from_secs(575)
+    );
+}

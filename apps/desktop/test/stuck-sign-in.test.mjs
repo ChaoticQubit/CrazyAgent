@@ -16,7 +16,10 @@ test("a refusal from a stuck sign-in points the owner at Clear stuck sign-in, no
   assert.match(cancelError("native_auth_recovery_required"), /Clear stuck sign-in/);
   assert.match(cancelError("native_auth_operation_scope_conflict"), /Clear stuck sign-in/);
   assert.match(cancelError("native_auth_operation_missing"), /Delete the account/);
+  assert.match(cancelError("native_profile_source_conflict"), /Clear stuck sign-in/);
   assert.equal(cancelError("native_auth_not_active"), undefined);
+  assert.match(api.plainError("native_auth_in_progress"), /still running/);
+  assert.doesNotMatch(api.plainError("native_auth_in_progress"), /Clear stuck sign-in/);
 });
 
 test("the clear toast says cleared only when the engine answered for the sign-in", () => {
@@ -25,6 +28,9 @@ test("the clear toast says cleared only when the engine answered for the sign-in
   const failed = { kind: "error", code: "engine_unreachable", message: api.plainError("engine_unreachable") };
   assert.equal(api.stuckClearedLine(failed), failed.message);
   assert.equal(api.stuckClearedLine({ kind: "not_ready" }), api.plainError("unknown"));
+  const stale = { kind: "error", code: "native_profile_source_conflict", message: "" };
+  assert.equal(api.stuckClearedLine(stale), api.STALE_SIGN_IN_LINE);
+  assert.match(api.STALE_SIGN_IN_LINE, /only the engine can end it/);
 });
 
 test("the window reads the stuck sign-in again after the refusals that can leave one", () => {

@@ -3,10 +3,13 @@ use crate::harnesses::interactive::InteractiveCommand;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+#[cfg(unix)]
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, SystemTime};
 
 pub mod buffer;
 mod kept;
+pub(crate) use kept::KEPT_MAX;
 #[cfg(unix)]
 pub mod tmux;
 #[cfg(target_os = "windows")]
@@ -24,6 +27,14 @@ const TEAMMATES_NONCE_BYTES: usize = 8;
 #[cfg(unix)]
 const TEAMMATES_NAME_BYTES: usize =
     TEAMMATES_SOCKET_PREFIX.len() + 2 * TEAMMATES_NONCE_BYTES + TEAMMATES_SOCKET_SUFFIX.len();
+/// The most bytes a teammates' server pid record holds: the socket's name, a space and the
+/// ten digits of the largest pid.
+#[cfg(unix)]
+const TEAMMATES_PIN_BYTES_MAX: usize = TEAMMATES_NAME_BYTES + 1 + 10;
+/// What a teammates' server pid record holds after the socket's name until the server first
+/// answers.
+#[cfg(unix)]
+const TEAMMATES_PIN_PENDING: &str = "pending";
 const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
@@ -33,6 +44,12 @@ pub const SIZE_MIN: u16 = 2;
 pub const SIZE_MAX: u16 = 1000;
 pub const STREAM_CHUNKS_MAX: usize = 256;
 pub const VIEWERS_MAX: usize = 8;
+/// The most terminal views the desktop holds at once over every window, its main window and
+/// the terminal wall windows together.
+pub const DESKTOP_VIEWS_MAX: usize = 32;
+/// The most terminal views the engine serves at once over every agent and client: the
+/// desktop's views plus `VIEWERS_MAX` for the terminal app and other clients.
+pub const CONNECTIONS_MAX: usize = VIEWERS_MAX + DESKTOP_VIEWS_MAX;
 pub const VIEWER_BUFFER_BYTES_MAX: usize = 1024 * 1024;
 pub const SCROLLBACK_LINES: u32 = 5000;
 pub const PANES_PER_PROJECT_MAX: usize = crate::config::POOL_MEMBERS_MAX;
@@ -228,6 +245,19 @@ pub trait Host: Send + Sync {
         self.attach(agent)
     }
 
+    /// Tells whether this host still keeps the last screen of an agent terminal it ended,
+    /// which `attach` then opens as a finished view with no live output after it. Takes the
+    /// name. Returns false for a live or unknown name and always for a host that keeps none.
+    fn kept(&self, _agent: &AgentId) -> bool {
+        false
+    }
+
+    /// Keeps the last screen of an agent terminal that is about to end some other way than
+    /// `kill`, as when its keeper empties its sandbox first, so `attach` still opens how it
+    /// finished. Takes the name. Returns nothing; a host that keeps no screens, or a
+    /// terminal already gone, keeps none.
+    fn keep_last(&self, _agent: &AgentId) {}
+
     /// Types bytes into an agent terminal exactly as given, control keys included.
     /// Takes the name and at most `INPUT_BYTES_MAX` bytes.
     /// Returns once the host accepted them.
@@ -320,6 +350,33 @@ pub trait Host: Send + Sync {
     ) -> Result<PaneRef, HostError> {
         Err(failure(OWN_SERVER_UNAVAILABLE))
     }
+    /// Names the first process of a live agent terminal's own pane as the host reads it while
+    /// the terminal runs, so a caller holding no session for it can end what its harness left:
+    /// on a lead's server the pane tagged with the agent's name, else its window's first pane.
+    /// Takes the name; an unknown name fails with `terminal_agent_unknown`. Returns the
+    /// process id, or none for a host that cannot tell.
+    fn pane_pid(&self, _agent: &AgentId) -> Result<Option<u32>, HostError> {
+        Ok(None)
+    }
+
+    /// Whether this host runs an agent's pane without a keeper, as a native lead's own server
+    /// does that runs inside the lead's sandbox with no server keeper, such as one an earlier
+    /// engine started: no warden then ends what the pane's agent started, so its stop is
+    /// judged by the processes still found. Takes the name. Returns the answer; false for a
+    /// host that runs each pane as given or knows the keeper of the agent's server.
+    fn unkept(&self, _agent: &AgentId) -> bool {
+        false
+    }
+
+    /// Ends an agent's own server through the keeper this host started it under, as a native
+    /// lead's own server runs (KEEPER (b)): the keeper's warden kills every process in the
+    /// agent's sandbox, the server and its panes included, and the keeper exits only once the
+    /// warden confirmed that. Takes the name. Returns whether the keeper confirmed in time,
+    /// or none when the host knows no keeper for the agent, as for a server an earlier engine
+    /// started.
+    fn end_kept_server(&self, _agent: &AgentId) -> Option<bool> {
+        None
+    }
 
     /// Lists the agent terminals still running, reconnecting to the host first when needed.
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
@@ -332,11 +389,27 @@ pub trait Host: Send + Sync {
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
         end_except(self, keep)
     }
+
+    /// Moves the time each server of this host ends at once no engine renews it (FBTMUX-P1),
+    /// so a server whose engine never comes back does not run forever. Takes the deadline.
+    /// Returns the first failure; a host with no server outliving the engine has nothing to
+    /// renew.
+    fn renew(&self, _until: SystemTime) -> Result<(), HostError> {
+        Ok(())
+    }
 }
 
 /// The refusal for a native-mode lead on a host that cannot start a tmux server inside the
 /// lead's sandbox: Linux, Windows, or a missing tmux.
 pub const OWN_SERVER_UNAVAILABLE: &str = "terminal_own_server_unavailable";
+
+/// The refusal for a team pane call on a native lead whose latest start named a teammates'
+/// server that no longer accepts connections; its pane ids are never read on another server.
+pub const TEAMMATES_SERVER_ENDED: &str = "terminal_teammates_server_ended";
+
+/// The refusal for a native lead's teammates' socket answered by a server under another pid
+/// than the one the engine first reached there (PLC c).
+pub const TEAMMATES_SERVER_REPLACED: &str = "terminal_teammates_server_replaced";
 
 /// A host that starts each agent through `Host::spawn_own_server`, in a tmux server of its
 /// own inside the agent's sandbox; every other call goes to the host unchanged.
@@ -366,6 +439,10 @@ impl Host for OwnServer {
         self.0.snapshot(agent)
     }
 
+    fn keep_last(&self, agent: &AgentId) {
+        self.0.keep_last(agent)
+    }
+
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.0.input(agent, bytes)
     }
@@ -388,6 +465,18 @@ impl Host for OwnServer {
 
     fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
         self.0.panes(agent)
+    }
+
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        self.0.pane_pid(agent)
+    }
+
+    fn unkept(&self, agent: &AgentId) -> bool {
+        self.0.unkept(agent)
+    }
+
+    fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
+        self.0.end_kept_server(agent)
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
@@ -428,6 +517,10 @@ impl Host for OwnServer {
 
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
         self.0.close(keep)
+    }
+
+    fn renew(&self, until: SystemTime) -> Result<(), HostError> {
+        self.0.renew(until)
     }
 }
 
@@ -485,6 +578,10 @@ impl Host for PaneView {
         self.host.kill_pane(agent, &self.pane)
     }
 
+    fn unkept(&self, agent: &AgentId) -> bool {
+        self.host.unkept(agent)
+    }
+
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
         self.host.alive()
     }
@@ -511,11 +608,13 @@ pub fn end_except(host: &(impl Host + ?Sized), keep: &[AgentId]) -> Result<(), H
     Ok(())
 }
 
-/// Leaves the host as the engine stops: team agent terminals keep running for the next
-/// engine to take over, every other terminal ends, and with no team agent left the host
-/// leaves nothing behind. Takes the host; one that cannot run has nothing to end.
-/// Returns the host's first failure.
-pub fn quit(host: &(impl Host + ?Sized)) -> Result<(), HostError> {
+/// Leaves the host as the engine stops: while the owner keeps team agents running when
+/// CrazyAgent quits, their terminals keep running for the next engine to take over and every
+/// other terminal ends; otherwise every terminal ends. With no team agent kept the host
+/// leaves nothing behind. Takes the host, one that cannot run having nothing to end, and
+/// whether team agents keep running ([`crate::quit_settings::QuitSettings`]). Returns the
+/// host's first failure.
+pub fn quit(host: &(impl Host + ?Sized), keep_team_agents: bool) -> Result<(), HostError> {
     let alive = match host.alive() {
         Ok(alive) => alive,
         Err(problem) if problem.0 == "terminal_unavailable" => return Ok(()),
@@ -523,9 +622,110 @@ pub fn quit(host: &(impl Host + ?Sized)) -> Result<(), HostError> {
     };
     let keep: Vec<AgentId> = alive
         .into_iter()
-        .filter(|agent| agent.team_agent().is_some())
+        .filter(|agent| keep_team_agents && agent.team_agent().is_some())
         .collect();
     host.close(&keep)
+}
+
+#[cfg(unix)]
+/// How often a running engine moves its terminal servers' deadlines ahead (FBTMUX-P1).
+pub const RENEW_EVERY: Duration = Duration::from_secs(60);
+
+#[cfg(unix)]
+/// The engine's renewal of its terminal servers' deadlines while it runs (FBTMUX-P1). Each
+/// pass reads the owner's agents on quit setting again and sets every server's deadline that
+/// far ahead, so the holder in a server whose engine never comes back ends it once the time
+/// is up, and an engine that comes back in time renews it before adopting its agents.
+pub struct Renewal {
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+/// Starts renewing the deadlines of a host's servers at once and every [`RENEW_EVERY`].
+/// A pass whose setting cannot be read renews with the default setting and says why (see
+/// [`renew_once`]). Takes the host and the engine root that holds the engine database.
+/// Returns the running renewal, or None when its thread cannot start.
+pub fn renew_while_running(host: Arc<dyn Host>, root: PathBuf) -> Option<Renewal> {
+    let stop = Arc::new((Mutex::new(false), Condvar::new()));
+    let signal = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("terminal-renewal".into())
+        .spawn(move || {
+            let (stopped, wake) = &*signal;
+            loop {
+                if let Err(problem) = renew_once(host.as_ref(), &root, SystemTime::now()) {
+                    eprintln!(
+                        "terminal_deadline_not_renewed cause={}",
+                        crate::protocol::plain_code(&problem.0)
+                    );
+                }
+                let guard = stopped
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let (guard, _) = wake
+                    .wait_timeout_while(guard, RENEW_EVERY, |stop| !*stop)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *guard {
+                    return;
+                }
+            }
+        })
+        .ok()?;
+    Some(Renewal {
+        stop,
+        thread: Some(thread),
+    })
+}
+
+#[cfg(unix)]
+/// Renews the deadlines of a host's servers once from the owner's saved setting, or from the
+/// default setting when the saved one cannot be read, logged, so a running engine never lets
+/// its own servers reach a deadline it set earlier (FBTMUX-P1 r1 L2). Takes the host, the
+/// engine root and the current time. Returns Ok, or the host's first failure.
+pub fn renew_once(host: &dyn Host, root: &Path, now: SystemTime) -> Result<(), EngineError> {
+    let settings = saved_quit_settings(root).unwrap_or_else(|problem| {
+        eprintln!("terminal_deadline_from_default cause={}", problem.0);
+        crate::quit_settings::QuitSettings::default()
+    });
+    host.renew(settings.deadline(now))
+        .map_err(|problem| EngineError(problem.0))
+}
+
+#[cfg(unix)]
+/// Reads the owner's agents on quit setting from the engine database. Takes the engine root.
+/// Returns the setting, or the database failure or `quit_settings_invalid`.
+fn saved_quit_settings(root: &Path) -> Result<crate::quit_settings::QuitSettings, EngineError> {
+    let db = crate::landing::open(root)?;
+    crate::quit_settings::initialize(&db)?;
+    crate::quit_settings::load(&db)
+}
+
+#[cfg(unix)]
+impl Renewal {
+    /// Stops renewing and waits for the thread; the deadlines last set stay. Takes the
+    /// renewal.
+    pub fn stop(mut self) {
+        self.halt();
+    }
+
+    fn halt(&mut self) {
+        let (stopped, wake) = &*self.stop;
+        *stopped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        wake.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Renewal {
+    fn drop(&mut self) {
+        self.halt();
+    }
 }
 
 /// Turns a terminal code into the sentence clients show, such as for a refused attach.
@@ -640,12 +840,12 @@ pub fn teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, H
 /// Names a new socket for a native lead's teammates' server as the lead starts and keeps
 /// the name in the engine's own profiles folder, so no path a teammate's profile ever
 /// served is reused: a teammate still running from an earlier start cannot bind a listener
-/// where the lead's tmux clients now connect. Takes the engine root and the lead, whose
-/// profiles folder must exist. Returns the new path, or a plain code.
+/// where the lead's tmux clients now connect. The pin record is marked pending for the new
+/// name in the same step, so one that later goes missing or names another socket is refused
+/// (PLCC-L1). Takes the engine root and the lead, whose profiles folder must exist. Returns
+/// the new path, or a plain code.
 #[cfg(unix)]
 pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let id = lead
         .team_agent()
         .ok_or_else(|| failure("terminal_agent_invalid"))?;
@@ -654,7 +854,27 @@ pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<Path
     let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
     let name = format!("{TEAMMATES_SOCKET_PREFIX}{digits}{TEAMMATES_SOCKET_SUFFIX}");
     assert!(teammates_name_valid(&name));
-    let kept = crate::team::runtime::agent_teammates_socket_name(&engine_root.join("team"), id);
+    keep_record(
+        &crate::team::runtime::agent_teammates_socket_name(&engine_root.join("team"), id),
+        &name,
+    )?;
+    let pending = format!("{name} {TEAMMATES_PIN_PENDING}");
+    assert!(pending.len() <= TEAMMATES_PIN_BYTES_MAX);
+    keep_record(
+        &crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id),
+        &pending,
+    )?;
+    lead_temp_socket(engine_root, lead, &name)
+}
+
+/// Writes one engine record in the profiles folder no agent writes, in place of any earlier
+/// one: a staged file only this user reads, renamed over the record so no reader sees part
+/// of it. Takes the record path and its text. Returns Ok, or
+/// `terminal_own_server_unavailable`.
+#[cfg(unix)]
+fn keep_record(kept: &Path, text: &str) -> Result<(), HostError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let staging = kept.with_extension(format!("{}.tmp", std::process::id()));
     let written = std::fs::OpenOptions::new()
         .write(true)
@@ -663,15 +883,92 @@ pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<Path
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(&staging)
         .and_then(|mut file| {
-            file.write_all(name.as_bytes())
+            file.write_all(text.as_bytes())
                 .and_then(|()| file.sync_all())
         })
-        .and_then(|()| std::fs::rename(&staging, &kept));
+        .and_then(|()| std::fs::rename(&staging, kept));
     if written.is_err() {
         let _ = std::fs::remove_file(&staging);
         return Err(failure(OWN_SERVER_UNAVAILABLE));
     }
-    lead_temp_socket(engine_root, lead, &name)
+    Ok(())
+}
+
+/// The pid a native lead's teammates' server at one socket was pinned to (PLC c, PC-L1),
+/// read without following a link from the record beside the socket's name, which outlives
+/// the engine and a kill of the lead. Takes the engine root, the lead and the socket.
+/// Returns the pid, none while the record is pending for this socket, or
+/// `terminal_own_server_unavailable` for a record that is missing, names another socket or
+/// is not this user's plain file as [`renew_teammates_socket`] and
+/// [`keep_teammates_server_pid`] write one, so such a record refuses every server (PLCC-L1).
+#[cfg(unix)]
+fn teammates_server_pid(
+    engine_root: &Path,
+    lead: &AgentId,
+    socket: &Path,
+) -> Result<Option<u32>, HostError> {
+    use std::os::unix::fs::MetadataExt;
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let kept = crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id);
+    let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
+    let metadata = std::fs::symlink_metadata(&kept).map_err(|_| unavailable())?;
+    let plain = metadata.is_file()
+        && metadata.uid() == rustix::process::getuid().as_raw()
+        && u64::try_from(TEAMMATES_PIN_BYTES_MAX).is_ok_and(|bytes| metadata.len() <= bytes);
+    if !plain {
+        return Err(unavailable());
+    }
+    let text = std::fs::read_to_string(&kept).map_err(|_| unavailable())?;
+    let (name, value) = text
+        .split_once(' ')
+        .filter(|(name, value)| {
+            teammates_name_valid(name)
+                && (*value == TEAMMATES_PIN_PENDING
+                    || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())))
+        })
+        .ok_or_else(unavailable)?;
+    if socket.file_name().and_then(|kept| kept.to_str()) != Some(name) {
+        return Err(unavailable());
+    }
+    if value == TEAMMATES_PIN_PENDING {
+        return Ok(None);
+    }
+    let pid = value
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(unavailable)?;
+    Ok(Some(pid))
+}
+
+/// Records the pid a native lead's teammates' server at one socket first answered with
+/// (PLC c, PC-L1), beside the socket's name in the engine's profiles folder, in place of
+/// the pending mark its start left. Takes the engine root, the lead, the socket and the
+/// pid. Returns Ok, or `terminal_own_server_unavailable`.
+#[cfg(unix)]
+fn keep_teammates_server_pid(
+    engine_root: &Path,
+    lead: &AgentId,
+    socket: &Path,
+    pid: u32,
+) -> Result<(), HostError> {
+    assert!(pid > 0);
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let name = socket
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| teammates_name_valid(name))
+        .ok_or_else(|| failure(OWN_SERVER_UNAVAILABLE))?;
+    let text = format!("{name} {pid}");
+    assert!(text.len() <= TEAMMATES_PIN_BYTES_MAX);
+    keep_record(
+        &crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id),
+        &text,
+    )
 }
 
 /// Whether a text is a teammates' socket name as [`renew_teammates_socket`] makes one.
@@ -720,7 +1017,11 @@ pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
 /// `Input`, `Prompt`, `Resize` and `Detach` follow on the same
 /// connection and go to that pane. `Input` bytes, at most `INPUT_BYTES_MAX`, are typed as given and never kept.
 /// `Prompt` text, at most `PROMPT_BYTES_MAX`, is the owner's explicit message: it is typed as
-/// one submission, and a sub-agent's master later hears a note of it.
+/// one submission, and a sub-agent's master later hears a note of it. `Scroll` bytes, bound
+/// as `Input`, are keys the viewer made from the owner's mouse wheel, such as the arrow keys a
+/// full-screen app reads in place of a scroll; they are typed as `Input` is but never count
+/// as the owner typing, which holds engine input to a live master back. A `Scroll` holding
+/// anything but up and down arrow keys and mouse or focus reports counts as `Input` does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminalRequest {
@@ -738,6 +1039,9 @@ pub enum TerminalRequest {
         rows: u16,
     },
     Input {
+        bytes: Vec<u8>,
+    },
+    Scroll {
         bytes: Vec<u8>,
     },
     Prompt {

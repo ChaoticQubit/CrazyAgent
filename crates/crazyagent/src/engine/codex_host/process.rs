@@ -2,6 +2,7 @@ use super::process_custody;
 use crate::adapters::codex::FRAME_BYTES_MAX;
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::protocol::ProjectId;
 use crate::routing::ResourceBudget;
 use std::collections::VecDeque;
 use std::process::{Command, ExitStatus};
@@ -68,9 +69,11 @@ pub(super) struct CodexHostProcess {
     shared: Arc<ProcessShared>,
     input: mpsc::Sender<WriteRequest>,
     worker: JoinHandle<()>,
-    deadline: Instant,
+    deadline: Option<Instant>,
+    close_time: Duration,
     pid: u32,
     pending_input: Option<PendingInput>,
+    frame_max: usize,
 }
 
 struct PendingInput {
@@ -84,18 +87,33 @@ impl CodexHostProcess {
         command: Command,
         budget: &ResourceBudget,
     ) -> Result<Self, EngineError> {
-        Self::spawn_guarded(command, budget, None).await
+        let run_time = Duration::from_millis(budget.wall_time_ms);
+        Self::spawn_guarded(command, budget, Some(run_time), None, false).await
     }
 
+    /// Starts the harness under custody with its account lease. A Full access harness,
+    /// `unconfined`, has what it left outside its group checked when it ends, which a close
+    /// waits `STOP_TIME` longer for. Inputs: the wrapped command, the budget, the wall clock
+    /// the harness runs under, none for no clock, the lease with the project whose leftover
+    /// setting and owner view what it leaves running follow, and whether the harness runs
+    /// unconfined. Output: the running process or a plain code.
     pub(super) async fn spawn_guarded(
         command: Command,
         budget: &ResourceBudget,
-        profile: Option<NativeProfileUse>,
+        run_time: Option<Duration>,
+        lease: Option<(NativeProfileUse, ProjectId)>,
+        unconfined: bool,
     ) -> Result<Self, EngineError> {
         budget.validate().map_err(EngineError)?;
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(budget.wall_time_ms))
-            .ok_or_else(|| EngineError("codex_host_deadline_range".into()))?;
+        let deadline = match run_time {
+            Some(time) => Some(
+                Instant::now()
+                    .checked_add(time)
+                    .ok_or_else(|| EngineError("codex_host_deadline_range".into()))?,
+            ),
+            None => None,
+        };
+        assert_eq!(deadline.is_some(), run_time.is_some());
         let shared = Arc::new(ProcessShared {
             state: Mutex::new(ProcessState {
                 started: None,
@@ -115,16 +133,26 @@ impl CodexHostProcess {
         let worker = std::thread::Builder::new()
             .name("codex-host-custody".into())
             .spawn(move || {
-                process_custody::run(command, profile, receiver, retained, deadline, limit);
+                process_custody::run(
+                    command, lease, unconfined, receiver, retained, deadline, limit,
+                );
             })
             .map_err(|_| EngineError("codex_host_custodian_unavailable".into()))?;
+        let close_time = CLOSE_TIME
+            + if unconfined {
+                crate::harnesses::leftovers::STOP_TIME
+            } else {
+                Duration::ZERO
+            };
         let mut process = Self {
             shared,
             input,
             worker,
             deadline,
+            close_time,
             pid: 0,
             pending_input: None,
+            frame_max: FRAME_BYTES_MAX,
         };
         process.await_start().await?;
         assert!(process.pid() > 1);
@@ -161,7 +189,7 @@ impl CodexHostProcess {
     /// Poisons the custody's shared state with a real panic under its lock, as a panic in
     /// any holder would, so the next output the custody counts fails its accounting.
     /// Input: the host. Output: none.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn poison_shared_state(&self) {
         let shared = Arc::clone(&self.shared);
         let poisoned = std::thread::spawn(move || {
@@ -181,8 +209,17 @@ impl CodexHostProcess {
         }
     }
 
+    /// Bounds each frame this process takes for the harness by the owner's master frame size
+    /// limit (F39) in place of the engine wire frame. Input: the bound in bytes, from
+    /// `FRAME_BYTES_MAX` to `master_frame_limit::BYTES_MAX`. Output: none.
+    pub(super) fn limit_input(&mut self, bytes: usize) {
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&bytes));
+        assert!(self.pending_input.is_none());
+        self.frame_max = bytes;
+    }
+
     pub(super) async fn send(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
-        if bytes.is_empty() || bytes.len() > FRAME_BYTES_MAX + 1 {
+        if bytes.is_empty() || bytes.len() > self.frame_max + 1 {
             return Err(EngineError("codex_host_input_limit".into()));
         }
         if self.shared.close_stdin.load(Ordering::Acquire) {
@@ -208,13 +245,21 @@ impl CodexHostProcess {
             });
         }
         assert!(self.pending_input.is_some());
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        let deadline = self.deadline;
         let pending = self.pending_input.as_mut().expect("retained native input");
-        let observed = tokio::time::timeout(remaining, &mut pending.reply).await;
+        let observed = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                tokio::time::timeout(remaining, &mut pending.reply)
+                    .await
+                    .ok()
+            }
+            None => Some((&mut pending.reply).await),
+        };
         self.pending_input = None;
         match observed {
-            Ok(result) => result.map_err(|_| EngineError("codex_host_input_closed".into()))?,
-            Err(_) => {
+            Some(result) => result.map_err(|_| EngineError("codex_host_input_closed".into()))?,
+            None => {
                 self.shared.fail("codex_host_deadline");
                 Err(EngineError("codex_host_deadline".into()))
             }
@@ -264,7 +309,7 @@ impl CodexHostProcess {
 
     pub(super) async fn close(&mut self) -> Result<ExitStatus, EngineError> {
         self.request_stop();
-        let deadline = Instant::now() + CLOSE_TIME;
+        let deadline = Instant::now() + self.close_time;
         loop {
             {
                 let mut state = self.shared.lock()?;
@@ -285,8 +330,13 @@ impl CodexHostProcess {
         }
     }
 
+    /// Fails the process once its wall clock has run out; a process with no clock never
+    /// fails here. Input: the process. Output: Ok, or `codex_host_deadline`.
     fn check_deadline(&self) -> Result<(), EngineError> {
-        if Instant::now() >= self.deadline {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             self.shared.fail("codex_host_deadline");
             return Err(EngineError("codex_host_deadline".into()));
         }

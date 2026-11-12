@@ -288,8 +288,8 @@ fn adoption_flags_follow_q18_rules() {
     );
     assert_eq!(
         flags(bare),
-        Vec::<Flag>::new(),
-        "a hookless agent raises no flag"
+        [Flag::EditsWithoutWork, Flag::Ungrounded],
+        "a hookless agent raises the same flags as one with hooks (OQ-8)"
     );
     assert!(row(&view, bare).hookless);
     assert!(!row(&view, both).hookless);
@@ -338,6 +338,10 @@ fn adoption_tick_sends_one_note_per_flag_only_under_ten_minute_nudges() {
     crate::coord::settings::write(&db, &project, &off).unwrap();
     tick(&db, &project, NOW).unwrap();
     assert!(notes(&db, flagged).is_empty(), "nudges off sends nothing");
+    assert!(
+        notes(&db, bare).is_empty(),
+        "nudges off reminds no hookless agent either"
+    );
     let view_off = view(&db, &project, &[], NOW).unwrap();
     assert_eq!(view_off.nudges, Nudges::Off);
     assert_eq!(
@@ -361,9 +365,13 @@ fn adoption_tick_sends_one_note_per_flag_only_under_ten_minute_nudges() {
     );
     tick(&db, &project, NOW + 60_000).unwrap();
     assert_eq!(notes(&db, flagged).len(), 2, "one reminder per flag, ever");
-    assert!(
-        notes(&db, bare).is_empty(),
-        "a hookless agent is never reminded"
+    assert_eq!(
+        notes(&db, bare),
+        [
+            Flag::EditsWithoutWork.reminder(),
+            Flag::Ungrounded.reminder()
+        ],
+        "a hookless agent is reminded once per flag like any other (OQ-8)"
     );
     assert!(
         notes(&db, stopped).is_empty(),
@@ -563,8 +571,11 @@ fn view_keeps_newest_agents_within_budget() {
     );
 }
 
+/// A Claude agent whose launch fires no hooks gets the counts, flags and TenMinutes
+/// reminders of one with hooks (OQ-8): the engine counts its calls from its transcript, so
+/// its habits are as known as any other agent's.
 #[test]
-fn hookless_agent_raises_no_flags() {
+fn a_hookless_agent_gets_the_counts_flags_and_reminders_of_one_with_hooks() {
     let directory = tempfile::tempdir().unwrap();
     let db = Connection::open(directory.path().join("engine.db")).unwrap();
     crate::storage::initialize_authority_schemas(&db).unwrap();
@@ -583,7 +594,8 @@ fn hookless_agent_raises_no_flags() {
         .unwrap();
         let id = db.last_insert_rowid();
         db.execute(
-            "INSERT INTO coord_tool_use(agent,tool,count,last) VALUES (?1,'Edit',3,1)",
+            "INSERT INTO coord_tool_use(agent,tool,count,last)
+             VALUES (?1,'Edit',3,1),(?1,'Skill',2,1),(?1,'start_work',1,1)",
             [id],
         )
         .unwrap();
@@ -608,11 +620,17 @@ fn hookless_agent_raises_no_flags() {
     );
     let bare = row(hookless);
     assert!(bare.hookless);
-    assert!(
-        bare.flags.is_empty(),
-        "a launch without hooks raises no flag: {:?}",
-        bare.flags
+    assert_eq!(
+        bare.flags,
+        row(hooked).flags,
+        "a launch without hooks raises the same flags"
     );
+    assert_eq!(
+        bare.counts,
+        row(hooked).counts,
+        "a launch without hooks shows the same counts"
+    );
+    assert_eq!(bare.counts, [1, 0, 0, 0, 0, 0, 0, 2]);
     assert!(!row(hooked).hookless);
 
     let nudges = crate::coord::settings::CoordSettings {
@@ -632,7 +650,83 @@ fn hookless_agent_raises_no_flags() {
     assert_eq!(notes(hooked), 2, "one reminder per flag");
     assert_eq!(
         notes(hookless),
-        0,
-        "no nudge reaches an agent without hooks"
+        2,
+        "an agent without hooks gets one reminder per flag too"
     );
+}
+
+#[test]
+fn a_tool_call_is_also_counted_in_its_hour() {
+    let (_root, db, project) = database();
+    let agent = agent_row(&db, &project, "running", true, NOW, false);
+    const HOUR: i64 = 3_600_000;
+    crate::coord::record_tool(&db, agent, "Edit", 2 * HOUR + 5).unwrap();
+    crate::coord::record_tool(&db, agent, "Edit", 2 * HOUR + 9).unwrap();
+    crate::coord::record_tool(&db, agent, "Edit", 3 * HOUR).unwrap();
+    let rows: Vec<(i64, i64)> = db
+        .prepare("SELECT hour_ms,count FROM coord_tool_hours WHERE agent=?1 ORDER BY hour_ms")
+        .unwrap()
+        .query_map([agent], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows, vec![(2 * HOUR, 2), (3 * HOUR, 1)]);
+    let counted: i64 = db
+        .query_row("SELECT rows FROM coord_tool_hours_rows", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(counted, 2, "a repeat in its hour adds no row to the cap");
+}
+
+#[test]
+fn past_its_caps_a_tool_call_is_left_out_of_the_chart_only() {
+    let (_root, db, project) = database();
+    let agent = agent_row(&db, &project, "running", true, NOW, false);
+    const HOUR: i64 = 3_600_000;
+    for index in 0..crate::coord::TOOLS_PER_HOUR_MAX {
+        crate::coord::record_tool(&db, agent, &format!("tool-{index}"), HOUR).unwrap();
+    }
+    crate::coord::record_tool(&db, agent, "one-more", HOUR).unwrap();
+    let held: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM coord_tool_hours WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, crate::coord::TOOLS_PER_HOUR_MAX);
+    crate::coord::record_tool(&db, agent, "tool-0", HOUR).unwrap();
+    let repeated: i64 = db
+        .query_row(
+            "SELECT count FROM coord_tool_hours WHERE tool='tool-0'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(repeated, 2, "a tool the hour already holds still counts");
+    db.execute(
+        "UPDATE coord_tool_hours_rows SET rows=?1",
+        [crate::coord::TOOL_HOURS_MAX],
+    )
+    .unwrap();
+    crate::coord::record_tool(&db, agent, "tool-0", 2 * HOUR).unwrap();
+    let later: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM coord_tool_hours WHERE hour_ms=?1",
+            [2 * HOUR],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(later, 0);
+    let counted = |tool: &str| -> i64 {
+        db.query_row(
+            "SELECT count FROM coord_tool_use WHERE agent=?1 AND tool=?2",
+            rusqlite::params![agent, tool],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(counted("one-more"), 1, "past the caps it still counts");
+    assert_eq!(counted("tool-0"), 3, "the call past the row cap counts");
 }

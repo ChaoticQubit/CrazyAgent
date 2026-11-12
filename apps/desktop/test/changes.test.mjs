@@ -13,9 +13,20 @@ const NOW = Date.UTC(2026, 9, 26, 18, 0);
 const set = (extra = {}) => ({
   id: "cs-1", agent: { kind: "sub", id: "team-1", label: "agent-1" }, state: "pending", base: "a".repeat(40), head: "b".repeat(40),
   files: 3, added: 12, removed: 4, last_outcome: "succeeded", checked: false, created_ms: NOW - 60_000, updated_ms: NOW - 1000,
-  restorable_until_ms: null, conflicts: [], message: "Add a file", waiting: false, ...extra,
+  restorable_until_ms: null, conflicts: [], regenerated: [], message: "Add a file", waiting: false, ...extra,
 });
 const file = (extra = {}) => ({ path: "src/app.ts", old_path: null, status: "modified", kind: "text", marks: [], ...extra });
+
+test("a numbered change set is named by its number, agent, subject and files wherever it is named (AL17)", () => {
+  const wren = set({ number: 16, agent: { kind: "sub", id: "team-2", label: "Wren" }, message: "checkout UI\n\nThe form and its summary.", files: 7 });
+  assert.equal(model.changeSetName(wren), "Change set #16 (Wren: checkout UI, 7 files)");
+  assert.equal(model.changeSetName(set({ number: 1, agent: { kind: "master", id: "s-1", label: "master" }, message: "", files: 1 })), "Change set #1 (Master, 1 file)");
+  assert.equal(model.changeSetName(set({ number: 2, message: "x".repeat(80) })), `Change set #2 (agent-1: ${"x".repeat(45)}..., 3 files)`);
+  assert.equal(model.changeSetName(set({ number: null })), "agent-1", "a set the engine has not numbered yet is named by its agent");
+  assert.equal(model.changeSetName(set()), "agent-1", "an engine without numbers sends none");
+  const row = renderToStaticMarkup(createElement(view.ChangeRow, { set: wren, active: false, onSelect() {} }));
+  assert.match(row, /<strong>Change set #16 \(Wren: checkout UI, 7 files\)<\/strong>/u);
+});
 
 test("a change set reads as its agent, a state word, its size and that CrazyAgent did not check it", () => {
   assert.equal(model.agentName(set()), "agent-1");
@@ -33,6 +44,17 @@ test("a change set reads as its agent, a state word, its size and that CrazyAgen
   assert.equal(model.outcomeNote(set()), null);
   assert.equal(model.outcomeNote(set({ last_outcome: "failed" })), "The agent's last turn failed. These are the changes it made before it stopped.");
   assert.equal(model.outcomeNote(set({ last_outcome: "cancelled" })), "The agent's last turn was stopped. These are the changes it made before it stopped.");
+  assert.equal(model.outcomeNote(set({ last_outcome: "failed", state: "accepted", landing_result: "landed" })), "Last turn: failed. Landing: landed. How the turn ended does not change what landed.", "OA CS#035688c8: a landed set whose turn failed says both facts (F23)");
+  assert.equal(model.outcomeNote(set({ last_outcome: "cancelled", state: "accepted" })), "Last turn: stopped. Landing: landed. How the turn ended does not change what landed.");
+  assert.equal(model.landingNote(set({ landing_result: "refused" })), "Landing: the last Accept was refused, so nothing landed yet.");
+  assert.equal(model.landingNote(set({ landing_result: "refused", state: "accepted" })), null, "a closed set says its state instead");
+  assert.equal(model.landingNote(set()), null, "an engine without landing results sends none");
+});
+
+test("a set its agent is fixing for conflicts with main says so in Changes", () => {
+  assert.deepEqual(model.stateBadge(set({ state: "updating", conflicts: ["README"] })), { word: "Agent is fixing conflicts with main", tone: "info" });
+  assert.deepEqual(model.stateBadge(set({ state: "updating", conflicts: ["README"], waiting: true })), { word: "Updated, waiting for the agent", tone: "warn" });
+  assert.deepEqual(model.stateBadge(set({ state: "updating" })), { word: "Agent is updating", tone: "info" });
 });
 
 test("each state offers only the actions the engine can take", () => {
@@ -67,6 +89,10 @@ test("every file says how it changed and marks what can change more than its tex
   assert.deepEqual(model.fileMarks(file({ marks: ["executable", "mode"] })), ["Can run as a program", "File mode changed"]);
   assert.deepEqual(model.fileMarks(file({ path: ".gitattributes", marks: ["attributes"] })), [".gitattributes: changes how Git treats files"]);
   assert.deepEqual(model.fileMarks(file({ path: ".gitmodules", marks: ["modules"] })), [".gitmodules: changes the project's submodules"]);
+  assert.deepEqual(model.fileMarks(file({ path: "AGENTS.md", marks: ["instructions"] })), ["Instruction file: changes what every agent of this project is told"]);
+  for (const path of ["claude.md", "web/Agents.md", "AGENTS.override.md", ".claude/commands/x.md"]) {
+    assert.deepEqual(model.fileMarks(file({ path, marks: ["instructions"] })), ["Instruction file: changes what every agent of this project is told"], path);
+  }
   assert.equal(model.fileMarks(file({ marks: ["new_mark"] })).length, 1, "a mark this build does not know is still shown");
   assert.equal(model.fileMarks(file({ marks: ["new_mark"] }))[0], "Marked new mark");
   assert.equal(model.fileLine(file({ path: "evil\u001b[31m.ts" })), "Modified evil\\u001b[31m.ts");
@@ -83,7 +109,8 @@ test("diff text is shown as plain text: markup stays text and control characters
 });
 
 test("every refusal reads as a plain sentence, and a conflict names its files", () => {
-  assert.equal(client.changesRefusal({ code: "changes_owner_dirty" }), "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again.");
+  assert.equal(client.changesRefusal({ code: "changes_owner_dirty" }), "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again.");
+  assert.equal(client.changesRefusal({ code: "changes_owner_untracked" }), "Files in your project folder that Git doesn't track sit where these changes add files. Move or delete them, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_detached_head" }), "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_git_busy" }), "Git is in the middle of a merge, rebase, cherry-pick or bisect in your project folder. Finish or stop it, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_conflict", files: ["a.ts", "b.ts"] }), "These files also changed on your branch: a.ts, b.ts. Ask the agent to update, or discard.");
@@ -92,6 +119,7 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_stale" }), "These changes moved on since you opened them. Review them again, then accept.");
   assert.equal(client.changesRefusal({ code: "changes_branch_moved" }), "Your branch moved while these changes were landing, so nothing changed. Review and accept again.");
   assert.equal(client.changesRefusal({ code: "changes_git_unsupported" }), "The Git on this computer can't land changes. Update Git, then try again.");
+  assert.equal(client.changesRefusal({ code: "changes_merge_unsafe" }), "These changes can't land as a merge commit: an agent commit isn't safe to keep in your history (too many commits, hidden characters, another author's name, or files Git treats specially). Switch Landing to Squash, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_restore_expired" }), "These changes can no longer be restored. Discarded changes are kept for 7 days.");
   assert.equal(client.changesRefusal({ code: "changes_agent_has_pending" }), "This agent has newer changes waiting. Accept or discard those first.");
   assert.equal(client.changesRefusal({ code: "changes_agent_busy" }), "The agent is working right now. Try again when it finishes.");
@@ -155,6 +183,30 @@ test("Accept shows the proposed commit message to edit and sends only a usable o
   assert.match(blank, /<button[^>]*disabled=""[^>]*>Accept<\/button>/);
 });
 
+test("files in the way of an Accept are listed for a commit of only those files first, then the Accept runs again (F21)", () => {
+  const html = renderToStaticMarkup(createElement(view.CommitFirstDialog, { files: ["README", "src/<app>.ts"], untracked: [], pending: false, onCancel() {}, onCommit() {} }));
+  assert.match(html, /Commit your files first\?/);
+  assert.match(html, /Commit only these files, then the changes are accepted\. A file you staged is committed as you staged it\. Nothing else in your folder is committed\./);
+  assert.doesNotMatch(html, /not tracked by Git/);
+  assert.match(html, /<li>README<\/li><li>src\/&lt;app&gt;\.ts<\/li>/);
+  assert.match(html, /<label for="[^"]+">Commit message for your files<\/label>/);
+  assert.match(html, /<textarea[^>]*>Save my changes before accepting<\/textarea>/);
+  assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Commit these files first/);
+  assert.equal(model.committedFirstNote("c".repeat(40), "main"), "Committed your files as ccccccc on main. Accepting the changes now.");
+  const untracked = renderToStaticMarkup(createElement(view.CommitFirstDialog, { files: [], untracked: [".env"], pending: false, onCancel() {}, onCommit() {} }));
+  assert.match(untracked, /Move these files first/);
+  assert.match(untracked, /These files are not tracked by Git and sit where these changes add files\. CrazyAgent never commits them\. Move or delete them, then accept again\./);
+  assert.match(untracked, /aria-label="Untracked files in the way"><li>\.env<\/li>/);
+  assert.doesNotMatch(untracked, /Commit these files first|<textarea/, "an untracked file is never offered for a commit");
+  const both = renderToStaticMarkup(createElement(view.CommitFirstDialog, { files: ["README"], untracked: [".env"], pending: false, onCancel() {}, onCommit() {} }));
+  assert.match(both, /aria-label="Files in the way"><li>README<\/li><\/ul>/);
+  assert.match(both, /aria-label="Untracked files in the way"><li>\.env<\/li><\/ul>/);
+  const source = readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8");
+  assert.match(source, /result\.code === "changes_owner_dirty"[\s\S]*loadOwnerDirty\(set\.id, target\)/);
+  assert.match(source, /commitOwnerFiles\(asked\.set\.id, asked\.files,/, "only the tracked list is sent for a commit");
+  assert.match(source, /commitOwnerFiles\(asked\.set\.id, asked\.files, commit, asked\.target\)[\s\S]*await accept\(asked\.set, asked\.message, asked\.target\)/);
+});
+
 test("Accept lands on the team's Land on branch unless the owner picks another, and says where and whether it is checked out", () => {
   const listed = { branches: ["feat/x", "main", "stage"], current: "feat/x", land_on: "stage" };
   const away = "They land as one commit on stage, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are. CrazyAgent did not check them.";
@@ -205,6 +257,14 @@ test("a set merged but not yet handed to its agent says so and can be asked agai
   assert.equal(client.changesRefusal({ code: "team_agent_not_found" }), "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead.");
 });
 
+test("a lockfile the project's tools rebuilt is named as their work while its set waits for review", () => {
+  const rebuilt = set({ regenerated: ["Cargo.lock", "web/package-lock.json"] });
+  assert.equal(model.regeneratedNote?.(rebuilt), "Rebuilt with this project's own tools to fit your branch: Cargo.lock, web/package-lock.json. They ran on the agent's work, so review the result like the agent's own edits.");
+  assert.equal(model.regeneratedNote?.(set()), null);
+  assert.equal(model.regeneratedNote?.({ ...rebuilt, state: "accepted" }), null);
+  assert.match(readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8"), /regeneratedNote\(set\)/);
+});
+
 test("a change set that moved on while open goes back to review: Accept and Discard wait for its last page and send the head reviewed", () => {
   const opened = model.reviewOf(null, set());
   assert.deepEqual(opened, { id: "cs-1", head: "b".repeat(40), moved: false, seenAll: false });
@@ -244,4 +304,15 @@ test("a change set closed outside the app says how, keeps its note and offers no
   const none = { accept: false, discard: false, update: false, restore: false };
   assert.deepEqual(model.actions(landed, NOW), none);
   assert.deepEqual(model.actions(removed, NOW), none);
+});
+test("every diff page is read at the head under review, and a page refused as moved on rereads the list (RV-DS-13)", () => {
+  assert.equal(client.loadChangeDiff.length, 3, "the diff read names the change set, the head and the page");
+  const api = readFileSync(new URL("../src/api-changes.ts", import.meta.url), "utf8");
+  assert.match(api, /call<ChangeDiff>\("desktop_change_diff", \{ id, head, page \}\)/);
+  const source = readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8");
+  assert.match(source, /load = loadChangeDiff \}/, "Detail reads pages from the engine unless a test hands it a reader");
+  assert.match(source, /void load\(set\.id, head, page\)/);
+  assert.match(source, /if \(result\.kind === "error" && result\.code === "changes_stale"\) \{\n\s+setStaleAt\(set\);\n\s+setReview\(movedOn\);\n\s+onMoved\(\);/);
+  assert.match(source, /const \[list, reread\] = useChangeList\(data\.id\);/);
+  assert.match(source, /onMoved=\{reread\}/);
 });

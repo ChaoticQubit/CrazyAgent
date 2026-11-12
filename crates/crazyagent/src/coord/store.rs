@@ -47,6 +47,38 @@ CREATE TABLE IF NOT EXISTS coord_claims (
     released INTEGER
 );
 CREATE INDEX IF NOT EXISTS coord_claims_project ON coord_claims(project, released);
+CREATE INDEX IF NOT EXISTS coord_claims_work ON coord_claims(work, released);
+CREATE TABLE IF NOT EXISTS coord_held (
+    claim INTEGER PRIMARY KEY,
+    project TEXT NOT NULL,
+    change_set TEXT NOT NULL,
+    released INTEGER
+);
+CREATE INDEX IF NOT EXISTS coord_held_set ON coord_held(change_set, released);
+CREATE TABLE IF NOT EXISTS coord_claims_full (
+    project TEXT PRIMARY KEY,
+    told INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS coord_waits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    agent INTEGER NOT NULL,
+    work INTEGER NOT NULL,
+    file TEXT NOT NULL,
+    held TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    UNIQUE(agent, work)
+);
+CREATE TABLE IF NOT EXISTS coord_wait_cycles (
+    project TEXT NOT NULL,
+    first INTEGER NOT NULL,
+    second INTEGER NOT NULL,
+    holder INTEGER NOT NULL,
+    file TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    told INTEGER,
+    PRIMARY KEY(project, first, second)
+);
 CREATE TABLE IF NOT EXISTS coord_activity (
     agent INTEGER PRIMARY KEY,
     last_seen INTEGER NOT NULL,
@@ -60,6 +92,22 @@ CREATE TABLE IF NOT EXISTS coord_tool_use (
     last INTEGER NOT NULL,
     PRIMARY KEY(agent, tool)
 );
+CREATE TABLE IF NOT EXISTS coord_tool_hours (
+    hour_ms INTEGER NOT NULL,
+    agent INTEGER NOT NULL,
+    tool TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (hour_ms, agent, tool)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS coord_tool_hours_rows (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    rows INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS coord_tool_hours_added AFTER INSERT ON coord_tool_hours
+    BEGIN INSERT INTO coord_tool_hours_rows (singleton,rows) VALUES (1,1)
+        ON CONFLICT(singleton) DO UPDATE SET rows=rows+1; END;
+CREATE TRIGGER IF NOT EXISTS coord_tool_hours_gone AFTER DELETE ON coord_tool_hours
+    BEGIN UPDATE coord_tool_hours_rows SET rows=rows-1; END;
 CREATE TABLE IF NOT EXISTS coord_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
@@ -89,28 +137,59 @@ CREATE TABLE IF NOT EXISTS tool_switches (
     tool TEXT NOT NULL,
     switch TEXT NOT NULL,
     PRIMARY KEY(scope_project, server, tool)
-);";
+);
+CREATE TABLE IF NOT EXISTS coord_lane (
+    project TEXT NOT NULL,
+    agent INTEGER NOT NULL,
+    ticket TEXT NOT NULL,
+    uses TEXT NOT NULL,
+    label TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    created_ms INTEGER NOT NULL,
+    seen_ms INTEGER NOT NULL,
+    granted_ms INTEGER,
+    PRIMARY KEY(agent, ticket)
+);
+CREATE INDEX IF NOT EXISTS coord_lane_project ON coord_lane(project, seq);";
 
 /// The coordination tables a project's removal clears by their `project` column.
-const REMOVED_WITH_PROJECT: [&str; 6] = [
+const REMOVED_WITH_PROJECT: [&str; 11] = [
     "coord_work",
     "coord_messages",
     "coord_claims",
+    "coord_held",
+    "coord_claims_full",
+    "coord_waits",
+    "coord_wait_cycles",
     "coord_audit",
     "coord_settings",
     "coord_harness_settings",
+    "coord_lane",
 ];
 
 /// Creates the coordination tables (DEC-104) when they are missing, like the team
-/// tables, so no migration step exists. Runs after `team::initialize`, whose agent rows
+/// tables, and adds `coord_messages.turn` (the Codex turn a bridge delivery went into,
+/// b19 P2) to a database made before it. Runs after `team::initialize`, whose agent rows
 /// the layer reads. Takes the engine database. Returns Ok, or the SQLite failure.
 pub fn ensure(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(state)
+    db.execute_batch(SCHEMA).map_err(state)?;
+    let present: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('coord_messages') WHERE name='turn')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if !present {
+        db.execute_batch("ALTER TABLE coord_messages ADD COLUMN turn TEXT")
+            .map_err(state)?;
+    }
+    Ok(())
 }
 
-/// Clears a removed project's coordination rows: its work, messages, claims, audit,
-/// settings and tool switches, and the activity and tool counts of the stopped agents
-/// removed with it. Runs inside the removal's transaction before its agents go.
+/// Clears a removed project's coordination rows: its work, messages, claims and their
+/// change-set holds, full-scan notice, waits and wait cycles, audit, settings and tool switches, and the activity and tool counts
+/// of the stopped agents removed with it. Runs inside the removal's transaction before its agents go.
 /// Takes the database and the project. Returns Ok or the SQLite failure.
 pub fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
     assert!(!project.as_str().is_empty());
@@ -121,7 +200,7 @@ pub fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), Engine
         )
         .map_err(state)?;
     }
-    for table in ["coord_activity", "coord_tool_use"] {
+    for table in ["coord_activity", "coord_tool_use", "coord_tool_hours"] {
         db.execute(
             &format!(
                 "DELETE FROM {table} WHERE agent IN (SELECT id FROM team_agents
@@ -272,6 +351,12 @@ pub fn master_of(db: &Connection, project: &ProjectId) -> Result<Option<AgentId>
     )
     .optional()
     .map_err(state)
+}
+
+/// Says whether an agent is its project's master. Takes the database and the id. Returns
+/// the answer, false for an agent with no row.
+pub fn is_master(db: &Connection, id: AgentId) -> Result<bool, EngineError> {
+    Ok(agent(db, id)?.is_some_and(|row| row.master()))
 }
 
 /// Says whether two agents are lead and sub-agent of each other, whose shared scope is

@@ -1,11 +1,14 @@
 import type { ReactNode } from "react";
 import { Icon, type IconName } from "./icon";
 
-/** The page header: title, optional one-line description and an actions slot (one primary).
- * Inputs: title, description, actions. Output: a header with the page's h1. */
-export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
+/** The page header: title with optional badges on its line, optional one-line description,
+ * an optional line under it and an actions slot (one primary).
+ * Inputs: title, badges, description, the line under it, actions. Output: a header with the page's h1. */
+export function PageHeader({ title, badges, description, meta, actions }: {
+  title: ReactNode; badges?: ReactNode; description?: ReactNode; meta?: ReactNode; actions?: ReactNode;
+}) {
   return <header className="page-header">
-    <div><h1>{title}</h1>{description && <p>{description}</p>}</div>
+    <div>{badges ? <div className="page-title"><h1>{title}</h1>{badges}</div> : <h1>{title}</h1>}{description && <p>{description}</p>}{meta}</div>
     {actions && <div className="actions">{actions}</div>}
   </header>;
 }

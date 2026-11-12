@@ -42,6 +42,7 @@ test("a text diff's agent side is the text at the recorded head, never the agent
   assert.match(scm, /arguments: \[base, right, /);
   const content = readFileSync(new URL("../src/base-content.ts", import.meta.url), "utf8");
   assert.match(content, /\[HEAD_SCHEME, "ide\.head_blob"\]/);
+  assert.match(content, /\{ id: target\.id, head: uri\.query, path: target\.path, page \}/);
 });
 
 test("each file opens VS Code's diff from its base text, a deleted one shows its base, and other kinds open as files", () => {

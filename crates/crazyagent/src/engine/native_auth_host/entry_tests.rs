@@ -258,6 +258,56 @@ async fn native_auth_engine_service_registers_distinct_codex_before_ready() {
     service.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn native_auth_registered_claude_follows_its_path_link_across_an_update() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-ep-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut service = start_service(root.path()).await;
+    let executable = root.path().join("crazyagent-pin-only");
+    let old = root.path().join("cask/2.1.309/claude");
+    let new = root.path().join("cask/2.1.322/claude");
+    let link = root.path().join("claude");
+    for path in [&executable, &old, &new] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, path.as_os_str().as_encoded_bytes()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::os::unix::fs::symlink(&old, &link).unwrap();
+    service.register_native_auth_host(&executable).unwrap();
+    service.register_claude_executable(&link).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    service.ensure_ready(&stopped).unwrap();
+    let runtime = service.owner_runtime().unwrap();
+    let registered = runtime.registered_claude_executable().unwrap();
+    assert_eq!(registered.verified_path().unwrap(), old);
+    std::fs::remove_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&new, &link).unwrap();
+    let registered = runtime.registered_claude_executable().unwrap();
+    assert_eq!(registered.verified_path().unwrap(), new);
+    assert_eq!(
+        registered.verified_sha256().unwrap(),
+        format!("{:x}", Sha256::digest(std::fs::read(&new).unwrap()))
+    );
+    assert!(Arc::ptr_eq(
+        &registered,
+        &runtime.registered_claude_executable().unwrap()
+    ));
+    std::fs::remove_file(&new).unwrap();
+    assert_eq!(
+        runtime
+            .registered_claude_executable()
+            .map(|_| ())
+            .unwrap_err()
+            .0,
+        "native_auth_host_unavailable"
+    );
+    service.shutdown().await.unwrap();
+}
+
 async fn prepare_profile(root: &Path, service: &EngineService) -> NativeProfileBinding {
     let config = crate::config::resolve_config(&root.join("g.toml"), &root.join("p.toml")).unwrap();
     let (client, identity) =

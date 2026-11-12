@@ -13,6 +13,9 @@ pub const SYSTEMD_UNIT: &str = "crazyagent-engine.service";
 pub const WINDOWS_TASK: &str = "CrazyAgent Engine";
 /// How long a client waits for a starting engine to answer.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a client waits for an engine while its service manager still runs the process
+/// it started: a busy machine took close to a minute to bring the owner's engine up.
+pub const START_TIMEOUT: Duration = Duration::from_secs(180);
 
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SYSTEMCTL: &str = "systemctl";
@@ -29,6 +32,7 @@ const SERVICE_PATH_EXTRAS: [&str; 6] = [
 const POLL: Duration = Duration::from_millis(100);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(35);
+const LIVENESS_EVERY: Duration = Duration::from_secs(1);
 const LOG_SCAN_BYTES: u64 = 4 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,7 +310,7 @@ impl Service {
 </dict>\n\
 </plist>\n",
                 label = xml(&self.name),
-                executable = xml(&executable),
+                executable = self.written_executable(),
                 root = xml(&root),
                 path = xml(&self.path.to_string_lossy()),
                 log = xml(&log),
@@ -326,7 +330,7 @@ StandardError=append:{log}\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n",
-                executable = systemd_quoted(&executable),
+                executable = self.written_executable(),
                 root = systemd_quoted(&root),
                 path = systemd_quoted(&format!("PATH={}", self.path.to_string_lossy())),
                 log = systemd_specifiers(&log),
@@ -555,6 +559,79 @@ WantedBy=default.target\n",
     /// that differs never stops or restarts a running engine. Input: the bundled engine.
     pub fn stale(&self, bundled: &Path) -> bool {
         self.executable != bundled && !self.current()
+    }
+
+    /// The executable as [`Self::definition_text`] writes it on this platform: XML-escaped in
+    /// a plist, quoted for systemd, quoted for cmd and then XML-escaped in a Windows task.
+    /// Output: the text that names the executable in the definition.
+    fn written_executable(&self) -> String {
+        let executable = self.executable.to_string_lossy();
+        match self.platform {
+            Platform::MacOs => xml(&executable),
+            Platform::Linux => systemd_quoted(&executable),
+            Platform::Windows => xml(&windows_quoted(&executable)),
+        }
+    }
+
+    /// Whether the installed definition runs another program than this service's engine, as
+    /// an install script's layout or an older app location does: the line of
+    /// [`Self::definition_text`] naming the executable, as written there, is not in the file.
+    /// A different PATH or setting does not count. Output: false when nothing readable is
+    /// installed.
+    pub fn runs_another_program(&self) -> bool {
+        let Ok(text) = self.definition_text() else {
+            return false;
+        };
+        let written = self.written_executable();
+        let own = text.lines().find(|line| line.contains(written.as_str()));
+        assert!(own.is_some(), "a definition names its executable");
+        std::fs::read_to_string(&self.definition)
+            .is_ok_and(|installed| !installed.lines().any(|line| Some(line) == own))
+    }
+
+    /// Whether `service start` may replace an installed definition that runs another program
+    /// with this service's engine: the engine is an installed desktop app's (an app bundle, a
+    /// mounted AppImage or a Windows install folder) outside any cargo target folder, and no
+    /// engine known at this data root is newer, neither the last one that ran here nor the app
+    /// bundle the installed plist runs. Output: the answer; false for a dev or worktree build.
+    pub fn may_replace(&self) -> bool {
+        let own = canonical(&self.executable);
+        let built = own
+            .ancestors()
+            .any(|folder| folder.join("CACHEDIR.TAG").is_file());
+        if built || !crate::update::inside_app_bundle(&own) {
+            return false;
+        }
+        [
+            crate::engine::bootstrap::reported_engine_version(&self.root),
+            self.installed_bundle_version(),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|known| {
+            crate::update::is_newer(&known, crate::version::VERSION).is_ok_and(|newer| !newer)
+        })
+    }
+
+    /// The version of the app bundle the installed plist runs, from that bundle's Info.plist
+    /// read as text. Output: none when either file is not plain text, is larger than its cap,
+    /// or the plist names no app bundle.
+    fn installed_bundle_version(&self) -> Option<String> {
+        let installed = bounded_text(&self.definition)?;
+        let program = installed
+            .lines()
+            .skip_while(|line| !line.contains("<key>ProgramArguments</key>"))
+            .find_map(plist_string)?;
+        let bundle = Path::new(&program).ancestors().find(|folder| {
+            folder
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        })?;
+        let info = bounded_text(&bundle.join("Contents").join("Info.plist"))?;
+        info.lines()
+            .skip_while(|line| !line.contains("<key>CFBundleShortVersionString</key>"))
+            .nth(1)
+            .and_then(plist_string)
     }
 
     fn loaded(&self) -> Result<bool, ServiceError> {
@@ -824,6 +901,39 @@ fn systemd_specifiers(text: &str) -> String {
     text.replace('%', "%%")
 }
 
+/// The largest definition or Info.plist read when telling installed versions apart.
+const PLIST_BYTES_MAX: u64 = 64 << 10;
+
+/// Reads a small file as UTF-8 text. Input: the path. Output: the text, or none when it is
+/// missing, not UTF-8 or larger than [`PLIST_BYTES_MAX`].
+fn bounded_text(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(PLIST_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= PLIST_BYTES_MAX).then_some(text)
+}
+
+/// The text of a one-line plist `<string>` element, with XML's five escapes undone. Input:
+/// the line. Output: the text, or none for a line that holds no such element.
+fn plist_string(line: &str) -> Option<String> {
+    let inner = line
+        .trim()
+        .strip_prefix("<string>")?
+        .strip_suffix("</string>")?;
+    Some(
+        inner
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
+}
+
 fn systemd_quoted(text: &str) -> String {
     let mut quoted = String::from("\"");
     for character in text.chars() {
@@ -1006,8 +1116,8 @@ pub enum Started {
 /// Starts the engine for a client when none answers: through the installed service, or
 /// else as a detached `<executable> engine --home <root>` with output in the engine log.
 /// Inputs: the layout, the service, the executable, the PATH a detached engine gets and
-/// the wait bound. Output: how the engine runs once it answers, or a clear error naming
-/// the log after the bound or when the started engine stops.
+/// the wait bound, which a service start outlasts while it runs ([`wait_started`]).
+/// Output: how the engine runs once it answers, or an error naming the log.
 pub async fn ensure_running(
     layout: &Layout,
     service: &Service,
@@ -1020,18 +1130,15 @@ pub async fn ensure_running(
     }
     layout.prepare()?;
     let since = log_length(layout);
-    let mut child = None;
-    let started = if service.status()?.installed {
+    if service.status()?.installed {
         service.start()?;
-        Started::Service
-    } else {
-        let spawned = spawn_detached(layout, executable, path)?;
-        let pid = spawned.id();
-        child = Some(spawned);
-        Started::Detached { pid }
-    };
-    wait_ready(layout, bound, child.as_mut(), since).await?;
-    Ok(started)
+        wait_started(layout, service, bound, since).await?;
+        return Ok(Started::Service);
+    }
+    let mut child = spawn_detached(layout, executable, path)?;
+    let pid = child.id();
+    wait_ready(layout, bound, Some(&mut child), since).await?;
+    Ok(Started::Detached { pid })
 }
 
 fn spawn_detached(
@@ -1152,6 +1259,27 @@ fn logged_ready(layout: &Layout, since: u64) -> bool {
         && text.lines().any(|line| line == "ready")
 }
 
+/// Whether the last upgrade backup of the engine at a layout failed, as the record the
+/// engine leaves beside its database says (F36), read without an engine. Input: the layout.
+/// Output: the backup code, or none; always none where no engine database runs.
+pub fn backup_failure(layout: &Layout) -> Option<&'static str> {
+    #[cfg(unix)]
+    return crate::storage::backup_failure(layout.root());
+    #[cfg(not(unix))]
+    {
+        let _ = layout;
+        None
+    }
+}
+
+/// Why an engine that did not start may have stopped: its upgrade backup failed. Input: the
+/// layout. Output: the words to add to the start failure, empty when no backup failed.
+fn backup_reason(layout: &Layout) -> String {
+    backup_failure(layout).map_or_else(String::new, |code| {
+        format!(": it could not back up its data before an upgrade, so it changed nothing ({code})")
+    })
+}
+
 /// Waits until the engine at a layout has written `ready` to its log after a start and
 /// answers an authenticated read. Inputs: the layout, the bound, the detached engine to
 /// watch, if any, and the log length before the start. Output: Ok once both hold, or an
@@ -1164,33 +1292,89 @@ pub async fn wait_ready(
 ) -> Result<(), ServiceError> {
     let deadline = Instant::now() + bound;
     loop {
-        let probe = PROBE_TIMEOUT.min(bound.max(POLL));
-        if logged_ready(layout, since)
-            && answering(&layout.socket())
-            && !matches!(
-                check_engine(layout.root(), OwnerClientKind::Tui, probe).await,
-                EngineCheck::Unavailable { .. }
-            )
-        {
+        if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
             return Ok(());
         }
         if let Some(child) = child.as_deref_mut()
             && let Ok(Some(status)) = child.try_wait()
         {
             return Err(failure(format!(
-                "the engine stopped while starting ({status}); see {}",
+                "the engine stopped while starting ({status}){}; see {}",
+                backup_reason(layout),
                 layout.engine_log().display()
             )));
         }
         if Instant::now() >= deadline {
-            return Err(failure(format!(
-                "the engine did not answer within {} s; see {}",
-                bound.as_secs(),
-                layout.engine_log().display()
-            )));
+            return Err(unanswered(layout, bound));
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// Waits like [`wait_ready`] for an engine a service manager starts. Past `bound` it keeps
+/// waiting, up to [`START_TIMEOUT`], while the manager still runs the process it was first
+/// seen running, and it fails at once when that process stops or another one takes its
+/// place. Inputs: the layout, the service, the bound and the log length before the start.
+/// Output: Ok once the engine answers, or an error naming the engine log.
+pub async fn wait_started(
+    layout: &Layout,
+    service: &Service,
+    bound: Duration,
+    since: u64,
+) -> Result<(), ServiceError> {
+    assert!(bound <= START_TIMEOUT);
+    let started = Instant::now();
+    let mut seen: Option<u32> = None;
+    let mut looked: Option<Instant> = None;
+    loop {
+        if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
+            return Ok(());
+        }
+        if looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
+            looked = Some(Instant::now());
+            let status = service.status()?;
+            let running = status.pid.filter(|_| status.running);
+            match (seen, running) {
+                (None, pid) => seen = pid,
+                (Some(first), Some(pid)) if pid == first => {}
+                (Some(_), _) => {
+                    return Err(failure(format!(
+                        "the engine stopped while starting{}; see {}",
+                        backup_reason(layout),
+                        layout.engine_log().display()
+                    )));
+                }
+            }
+        }
+        let limit = if seen.is_some() { START_TIMEOUT } else { bound };
+        if started.elapsed() >= limit {
+            return Err(unanswered(layout, limit));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Whether the engine at a layout has written `ready` to its log after a start and answers
+/// an authenticated read. Inputs: the layout, the log length before the start and the read's
+/// bound. Output: the answer.
+async fn answered(layout: &Layout, since: u64, probe: Duration) -> bool {
+    logged_ready(layout, since)
+        && answering(&layout.socket())
+        && !matches!(
+            check_engine(layout.root(), OwnerClientKind::Tui, probe).await,
+            EngineCheck::Unavailable { .. }
+        )
+}
+
+/// The error of an engine that did not answer within a bound. Inputs: the layout and the
+/// bound. Output: the error naming the bound, a failed upgrade backup and the engine log.
+fn unanswered(layout: &Layout, bound: Duration) -> ServiceError {
+    failure(format!(
+        "the engine did not answer within {} s{}; see {}",
+        bound.as_secs(),
+        backup_reason(layout),
+        layout.engine_log().display()
+    ))
 }
 
 /// Links the running `crazyagent` into a folder on the user's PATH so a shell finds it:

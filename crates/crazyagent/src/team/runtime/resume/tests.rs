@@ -336,9 +336,37 @@ fn resume_note_lists_unknown_outcomes() {
     );
 }
 
+/// The note of an interrupted wake task carries no messages, so it does not quote a task
+/// that says one is at its end (HB-S5-C). Any other task is quoted as it was.
+#[test]
+fn the_note_of_an_interrupted_wake_task_does_not_point_at_a_missing_message() {
+    use crate::team::master::{WAKE_DELIVERED, WAKE_TASK};
+    let work = std::path::PathBuf::from("/nowhere");
+    let task = run("codex", None, &work, None);
+    let written = note(&task, Some(WAKE_TASK));
+    assert!(!written.contains(WAKE_TASK), "{written}");
+    assert!(written.ends_with(WAKE_DELIVERED), "{written}");
+}
+
+/// A wake task stopped as its message was handed over leaves that message unread, so the
+/// note says `inspect_work` lists it before it lets the agent end its turn (HB-S5-C-F1).
+#[test]
+fn the_note_of_an_interrupted_wake_task_says_inspect_work_lists_a_message_still_unread() {
+    use crate::team::master::WAKE_TASK;
+    let work = std::path::PathBuf::from("/nowhere");
+    let task = run("codex", None, &work, None);
+    let written = note(&task, Some(WAKE_TASK));
+    let unread = format!(
+        "{} lists every message you have not read",
+        crate::team::tool::INSPECT_WORK_TOOL
+    );
+    let (listed, end) = (written.find(&unread), written.find("end your turn"));
+    assert!(listed.is_some() && listed < end, "{written}");
+}
+
 #[cfg(target_os = "macos")]
 mod failed {
-    use super::super::RETRY_ONCE;
+    use super::super::{RETRY_LATER, RETRY_ONCE};
     use super::{PROJECT, RECORD_MISSING, conversation, private_folder, temporary};
     use crate::config::{
         AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint,
@@ -364,10 +392,14 @@ mod failed {
 
     /// A Codex stand-in that resumes the rollout it is named by `resume <id>`, logs each
     /// launch and every typed line, and in a fresh session hangs once in a task that started
-    /// a command it never finishes, as a turn cut short does, still reading what is typed, as
-    /// Codex does after Escape stops a turn; any other turn, and every turn of a resumed
-    /// session, even one whose note quotes that task, ends with "Done.".
+    /// a command it never finishes, as a turn cut short does, reading single keys until
+    /// Escape, which ends that turn as interrupted in its rollout, as Codex records it, and
+    /// then reads what is typed again; with a `deaf` file in its home it never answers
+    /// Escape, and with a `stubborn` file it ignores terminate from the next key on. Any
+    /// other turn, and every turn of a resumed session, even one whose note quotes that
+    /// task, ends with "Done.".
     const RESUMING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 printf '%s\n' "$*" >> "$CODEX_HOME/launches"
@@ -393,19 +425,33 @@ e=$(printf '\033')
 open=0
 hang=0
 hung=""
+said=""
 while IFS= read -r line; do
   case "$line" in *"$e[200~"*) open=1 ;; esac
   printf '%s\n' "$line" >> "$CODEX_HOME/typed"
+  said="$said$(printf '%s' "$line" | /usr/bin/sed "s/$e\[20[01]~//g") "
   case "$line" in *"hang here"*) [ -z "$resumed" ] && [ -z "$hung" ] && hang=1 ;; esac
   case "$line" in
     *"$e[201~"*) open=0 ;;
     *) [ "$open" = 1 ] && continue ;;
   esac
+  text=$(printf '%s' "$said" | /usr/bin/tr -d '\000-\037' | /usr/bin/sed 's/\\/\\\\/g; s/"/\\"/g')
+  said=""
+  printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$text" >> "$f"
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   if [ "$hang" = 1 ]; then
+    /bin/stty -icanon min 1
     printf '{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-1","arguments":"{\\"command\\":[\\"touch\\",\\"page.md\\"]}"}}\n' >> "$f"
     hang=0
     hung=1
+    while :; do
+      c=$(/bin/dd bs=1 count=1 2>/dev/null | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \n')
+      [ -n "$c" ] || exit 0
+      [ -e "$CODEX_HOME/stubborn" ] && trap '' TERM
+      [ "$c" = 1b ] && [ ! -e "$CODEX_HOME/deaf" ] && break
+    done
+    printf '{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}\n' >> "$f"
+    /bin/stty icanon
     continue
   fi
   /bin/sleep 0.3
@@ -612,6 +658,38 @@ done
             .unwrap_or_default()
         }
 
+        fn rollouts(&self, agent: i64) -> String {
+            let folder = self
+                .base
+                .join("team/agents")
+                .join(format!("agent-{agent}"))
+                .join("home/sessions/2026/10/27");
+            let mut files = std::fs::read_dir(folder)
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            files.sort();
+            files
+                .iter()
+                .map(|file| std::fs::read_to_string(file).unwrap_or_default())
+                .collect()
+        }
+
+        fn mark(&self, agent: i64, marker: &str) {
+            std::fs::write(
+                self.base
+                    .join("team/agents")
+                    .join(format!("agent-{agent}"))
+                    .join("home")
+                    .join(marker),
+                "",
+            )
+            .unwrap();
+        }
+
         fn launches(&self, agent: i64) -> Vec<String> {
             self.home_file(agent, "launches")
                 .lines()
@@ -661,6 +739,7 @@ done
                 f.sub().is_some_and(|sub| {
                     f.task(task) == ("running".into(), Some(sub), 1)
                         && f.home_file(sub, "typed").contains("hang here")
+                        && f.rollouts(sub).contains("\"function_call\"")
                 })
             });
             (task, self.sub().unwrap())
@@ -702,21 +781,7 @@ done
         let fixture = Team::new();
         let host = fixture.host();
         let mut team = fixture.runtime(&host);
-        fixture
-        .connection
-        .execute(
-            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'owner','codex',0,'hang here: write the page','queued',1)",
-            [PROJECT],
-        )
-        .unwrap();
-        let task = fixture.connection.last_insert_rowid();
-        fixture.until(&mut team, "the sub-agent hangs in its task", |f| {
-            f.sub().is_some_and(|sub| {
-                f.task(task) == ("running".into(), Some(sub), 1)
-                    && f.home_file(sub, "typed").contains("hang here")
-            })
-        });
-        let sub = fixture.sub().unwrap();
+        let (task, sub) = fixture.hung(&mut team);
         assert_eq!(fixture.launches(sub).len(), 1);
         team.shutdown().unwrap();
         drop(team);
@@ -783,21 +848,7 @@ done
         let fixture = Team::new();
         let host = fixture.host();
         let mut team = fixture.runtime(&host);
-        fixture
-        .connection
-        .execute(
-            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'owner','codex',0,'hang here: write the page','queued',1)",
-            [PROJECT],
-        )
-        .unwrap();
-        let task = fixture.connection.last_insert_rowid();
-        fixture.until(&mut team, "the sub-agent hangs in its task", |f| {
-            f.sub().is_some_and(|sub| {
-                f.task(task) == ("running".into(), Some(sub), 1)
-                    && f.home_file(sub, "typed").contains("hang here")
-            })
-        });
-        let sub = fixture.sub().unwrap();
+        let (task, sub) = fixture.hung(&mut team);
         team.shutdown().unwrap();
         drop(team);
         host.kill(&AgentId::team(sub).unwrap()).unwrap();
@@ -849,6 +900,53 @@ done
         assert_eq!(fixture.task(task), ("done".into(), Some(sub), 2));
         assert_eq!(fixture.subs(), 1, "the task never started fresh");
         team.shutdown().unwrap();
+        host.close(&[]).unwrap();
+    }
+
+    /// A resume that gives up lets go of its task and settles that task's delivery, as the
+    /// runtime's failed resume does; while another writer holds the store past its wait, that
+    /// settle answers the plain `recovery_unavailable`, never SQLite's own text, and leaves the
+    /// delivery open until the store is free.
+    #[test]
+    fn a_released_task_the_store_cannot_settle_answers_recovery_unavailable() {
+        let fixture = Team::new();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        let (task, sub) = fixture.hung(&mut team);
+        team.shutdown().unwrap();
+        drop(team);
+        host.kill(&AgentId::team(sub).unwrap()).unwrap();
+        let key = format!("team-task/{task}");
+        let open = |connection: &Connection| {
+            crate::ledger::pending(connection, crate::ledger::ActionKind::Dispatch)
+                .unwrap()
+                .into_iter()
+                .any(|action| action.key == key)
+        };
+        assert!(open(&fixture.connection), "the task's delivery is open");
+
+        recovery::release(&fixture.connection, recovery::HeldItem::Task(task)).unwrap();
+        let writer = Connection::open(fixture.base.join("engine.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(
+            crate::team::runtime::delivery::settle_released(
+                &fixture.connection,
+                crate::team::runtime::Busy::Task(task),
+            ),
+            Err(EngineError("recovery_unavailable".into())),
+            "the store is held by another writer"
+        );
+        assert!(open(&fixture.connection), "the delivery stays open");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        assert_eq!(
+            crate::team::runtime::delivery::settle_released(
+                &fixture.connection,
+                crate::team::runtime::Busy::Task(task),
+            ),
+            Ok(())
+        );
         host.close(&[]).unwrap();
     }
 
@@ -954,6 +1052,149 @@ done
         team.shutdown().unwrap();
         host.close(&[]).unwrap();
     }
+
+    /// A kept pane whose hung turn never ends on Escape cannot be taken over: the next
+    /// engine ends it. The task its run holds waits for that takeover instead of going to
+    /// the pane that is about to end, so it is not failed with that pane; it resumes in a
+    /// new pane from the recorded Codex session (`resume <id>`) and finishes there.
+    #[test]
+    fn a_task_whose_kept_pane_cannot_be_taken_over_resumes_in_a_new_pane() {
+        let fixture = Team::new();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        let (task, sub) = fixture.hung(&mut team);
+        fixture.mark(sub, "deaf");
+        assert_eq!(team.shutdown().unwrap(), vec![AgentId::team(sub).unwrap()]);
+        drop(team);
+
+        let mut team = fixture.runtime(&host);
+        fixture.until(&mut team, "the task ends", |f| {
+            matches!(f.task(task).0.as_str(), "done" | "failed")
+        });
+        assert_eq!(fixture.task(task), ("done".into(), Some(sub), 2));
+        assert_eq!(fixture.error(task), None);
+        let runs = fixture.runs();
+        assert_eq!(runs.len(), 1, "{runs:#?}");
+        assert_eq!(runs[0].agent, sub);
+        assert_eq!(runs[0].state, RunState::Resumed);
+        let resume = conversation(&runs[0]).unwrap();
+        let launched = fixture.launches(sub);
+        assert_eq!(launched.len(), 2, "{launched:?}");
+        assert!(
+            launched[1].ends_with(&format!(" resume {}", resume.id)),
+            "{launched:?}"
+        );
+        let typed = fixture.home_file(sub, "typed");
+        assert!(
+            typed.contains("The task, in case your session does not show it:"),
+            "{typed}"
+        );
+        assert_eq!(fixture.subs(), 1);
+        team.shutdown().unwrap();
+        host.close(&[]).unwrap();
+    }
+
+    /// A kept pane being taken over takes no other queued task while the takeover settles:
+    /// its agent stays held for its interrupted run. When the takeover fails, the other task
+    /// spends no attempt on the pane that ended; it runs once, after the run resumed in a new
+    /// pane.
+    #[test]
+    fn a_kept_pane_being_taken_over_takes_no_other_task() {
+        let fixture = Team::new();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        let (task, sub) = fixture.hung(&mut team);
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_reuse_idle(project,mode) VALUES (?1,'on')",
+                [PROJECT],
+            )
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'owner','codex',0,'then write the index','queued',2)",
+                [PROJECT],
+            )
+            .unwrap();
+        let other = fixture.connection.last_insert_rowid();
+        fixture.mark(sub, "deaf");
+        assert_eq!(team.shutdown().unwrap(), vec![AgentId::team(sub).unwrap()]);
+        drop(team);
+
+        let mut team = fixture.runtime(&host);
+        fixture.until(&mut team, "both tasks end", |f| {
+            [task, other]
+                .iter()
+                .all(|id| matches!(f.task(*id).0.as_str(), "done" | "failed"))
+        });
+        assert_eq!(fixture.task(task), ("done".into(), Some(sub), 2));
+        assert_eq!(
+            fixture.task(other),
+            ("done".into(), Some(sub), 1),
+            "{:?}",
+            fixture.error(other)
+        );
+        let typed = fixture.home_file(sub, "typed");
+        let note = typed
+            .find("The task, in case your session does not show it:")
+            .unwrap_or(usize::MAX);
+        let index = typed.find("then write the index").unwrap_or(usize::MAX);
+        assert!(note < index && index < usize::MAX, "{typed}");
+        assert_eq!(fixture.launches(sub).len(), 2);
+        assert_eq!(fixture.subs(), 1);
+        team.shutdown().unwrap();
+        host.close(&[]).unwrap();
+    }
+
+    /// A kept pane whose takeover fails while the engine cannot confirm its processes gone
+    /// is never started again beside them: its run waits, failed for now with that reason
+    /// and a team note, and its task stays held for the owner's retry with no new pane. The
+    /// agent runs at Full access, so no sandbox keeper ends its pane and the stand-in that
+    /// ignores terminate outlasts the cleanup's stop.
+    #[test]
+    fn a_kept_pane_whose_takeover_cleanup_is_unconfirmed_holds_its_task() {
+        let fixture = Team::new();
+        crate::sandbox::policy::save(
+            &fixture.connection,
+            PROJECT,
+            &crate::sandbox::policy::AgentPolicy {
+                access: crate::sandbox::policy::AgentAccess::Full,
+                ..crate::sandbox::policy::AgentPolicy::default()
+            },
+        )
+        .unwrap();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        let (task, sub) = fixture.hung(&mut team);
+        fixture.mark(sub, "deaf");
+        fixture.mark(sub, "stubborn");
+        assert_eq!(team.shutdown().unwrap(), vec![AgentId::team(sub).unwrap()]);
+        drop(team);
+
+        let mut team = fixture.runtime(&host);
+        fixture.until(&mut team, "the failed takeover settles its run", |f| {
+            f.runs()
+                .first()
+                .is_some_and(|run| matches!(run.state, RunState::Failed | RunState::Resumed))
+        });
+        fixture.idle(&mut team);
+        let runs = fixture.runs();
+        assert_eq!(runs.len(), 1, "{runs:#?}");
+        assert_eq!(runs[0].state, RunState::Failed, "{runs:#?}");
+        let reason = "its old terminal was not confirmed stopped (launch_adopt_cleanup_uncertain)";
+        assert_eq!(runs[0].reason.as_deref(), Some(reason));
+        assert!(fixture.noted(&format!(
+            "An agent cut short when CrazyAgent stopped could not resume: {reason}. {RETRY_LATER}."
+        )));
+        assert_eq!(fixture.task(task), ("queued".into(), None, 1), "held");
+        assert_eq!(fixture.launches(sub).len(), 1, "no new pane");
+        assert_eq!(host.alive().unwrap(), Vec::<AgentId>::new());
+        assert_eq!(fixture.subs(), 1);
+        team.shutdown().unwrap();
+        host.close(&[]).unwrap();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -983,12 +1224,16 @@ mod live {
         Plan {
             harness: plan.harness.clone(),
             executable: plan.executable.clone(),
+            entry: plan.entry.clone(),
             working_dir: plan.working_dir.clone(),
             model: plan.model.clone(),
             tools: plan.tools,
             sandbox_profile: plan.sandbox_profile.clone(),
             access: plan.access,
             trust: plan.trust,
+            toolchains: plan.toolchains.clone(),
+            network: plan.network,
+            grants: plan.grants.clone(),
             layout: plan.layout,
             git_identity: plan.git_identity.clone(),
             limits: plan.limits,
@@ -998,8 +1243,13 @@ mod live {
             continues: plan.continues,
             native: plan.native,
             tmux: plan.tmux.clone(),
+            native_threads: plan.native_threads,
             hookless: plan.hookless,
             scratch_pin: plan.scratch_pin,
+            proxy: plan.proxy.clone(),
+            relay: plan.relay.clone(),
+            terminal_display: plan.terminal_display,
+            task_start: plan.task_start.clone(),
         }
     }
 
@@ -1052,7 +1302,16 @@ mod live {
         let thread = std::thread::spawn(move || {
             let cancel = AtomicBool::new(false);
             let interrupt = AtomicBool::new(false);
-            per_turn(&plan, &home, &ordered, &reports, &cancel, &interrupt)
+            per_turn(
+                &plan,
+                &home,
+                &ordered,
+                &reports,
+                &cancel,
+                &interrupt,
+                &AtomicBool::new(false),
+                &crate::team::runtime::test_by(),
+            )
         });
         (reported, thread)
     }
@@ -1086,7 +1345,7 @@ mod live {
             match reported.recv_timeout(Duration::from_millis(200)) {
                 Ok(Report::Ready {
                     pane: Some(pane), ..
-                }) => record = Some(pane),
+                }) => record = Some(*pane),
                 Ok(Report::Finished { end, cause, .. }) => {
                     panic!("the first turn ended before it was cut short: {end:?} {cause:?}")
                 }
@@ -1146,7 +1405,7 @@ mod live {
             match reported.recv_timeout(Duration::from_secs(1)) {
                 Ok(Report::Ready {
                     pane: Some(pane), ..
-                }) => resumed = Some(pane),
+                }) => resumed = Some(*pane),
                 Ok(Report::Finished { end, cause, .. }) => finished = Some((end, cause)),
                 Err(RecvTimeoutError::Disconnected) => {
                     panic!("the resumed turn stopped without finishing")

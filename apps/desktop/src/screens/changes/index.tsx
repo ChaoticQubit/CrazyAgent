@@ -1,24 +1,34 @@
-import { useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadChanges, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
+import { acceptChange, changesRefusal, commitOwnerFiles, discardChange, loadChangeDiff, loadOwnerDirty, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
 import type { ChangeDiff, ChangeSet, TargetBranches } from "../../api-changes";
 import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import { ChangeSetChecks } from "../project/tests";
 import type { ProjectData } from "../project/shared";
-import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, committedFirstNote, conflictNote, diffText, fileLine, fileMarks, landingNote, lastPageSeen, movedNote, movedOn, outcomeNote, regeneratedNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
+import { useChangeList } from "./poll";
 import "./changes.css";
 
-const LIST_POLL_MS = 5000;
-
-type Asking = { kind: "accept" | "discard"; set: ChangeSet } | null;
+type CommitFirst = { kind: "commit"; set: ChangeSet; files: string[]; untracked: string[]; message: string; target: string | null };
+type Asking = { kind: "accept" | "discard"; set: ChangeSet } | CommitFirst | null;
 
 /** Shows diff text as plain text in a preformatted block: markup stays text and control
- * characters show as escapes. Input: the diff text. Output: the block. */
-export function DiffText({ text }: { text: string }) {
-  return <pre className="ch-diff" aria-label="Diff">{diffText(text)}</pre>;
+ * characters show as escapes. On the last page it calls `onEnd` once the end of the text
+ * is on screen inside the block's own scroll, not when the page arrived (RVA-1). Inputs:
+ * the diff text and, on the last page, what to do at its end. Output: the block. */
+export function DiffText({ text, onEnd }: { text: string; onEnd?: () => void }) {
+  const end = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    const marker = end.current;
+    if (!onEnd || marker === null) return;
+    const watch = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) onEnd(); });
+    watch.observe(marker);
+    return () => watch.disconnect();
+  }, [onEnd, text]);
+  return <pre className="ch-diff" aria-label="Diff">{diffText(text)}{onEnd && <span ref={end} className="ch-end" aria-hidden="true" />}</pre>;
 }
 
 /** The plain Not ready yet notice for an engine or build that cannot land changes yet. */
@@ -69,46 +79,95 @@ export function AcceptDialog({ set, pending, onCancel, onAccept }: {
   </Dialog>;
 }
 
+/** The "commit these files first" dialog (F21): lists the tracked files whose uncommitted
+ * changes are in the Accept's way, to commit only those, as staged where staged, before the
+ * Accept runs again, and apart from them the untracked files to move or delete, never
+ * committed. Inputs: both lists, whether it runs, and the handlers. Output: the dialog. */
+export function CommitFirstDialog({ files, untracked, pending, onCancel, onCommit }: {
+  files: string[];
+  untracked: string[];
+  pending: boolean;
+  onCancel: () => void;
+  onCommit: (message: string) => void;
+}) {
+  const [text, setText] = useState("Save my changes before accepting");
+  const id = useId();
+  const message = commitMessage(text);
+  const committing = files.length > 0;
+  return <Dialog open title={committing ? "Commit your files first?" : "Move these files first"} onClose={onCancel} busy={pending}
+    footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
+      {committing && <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onCommit(message); }}>Commit these files first</Button>}</>}>
+    {committing && <>
+      <p>These files in your project folder have changes that are not committed, and they are in the way of these changes. Commit only these files, then the changes are accepted. A file you staged is committed as you staged it. Nothing else in your folder is committed.</p>
+      <ul className="pj-rows" aria-label="Files in the way">{files.map((file) => <li key={file}>{displayText(file)}</li>)}</ul>
+      <TextArea id={id} label="Commit message for your files" value={text} onValue={setText} rows={3}
+        error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to commit." : undefined} />
+    </>}
+    {untracked.length > 0 && <>
+      <p>These files are not tracked by Git and sit where these changes add files. CrazyAgent never commits them. Move or delete them, then accept again.</p>
+      <ul className="pj-rows" aria-label="Untracked files in the way">{untracked.map((file) => <li key={file}>{displayText(file)}</li>)}</ul>
+    </>}
+  </Dialog>;
+}
+
 function refusalOf(failure: Failure): string {
   return failure.kind === "error" ? changesRefusal({ code: failure.code, cause: failure.cause }) : "";
 }
 
-function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
+/** One change set's details, its diff a page at a time and the owner's actions on it.
+ * Inputs: the change set, now, whether an action runs, the action handlers, what a page
+ * refused as moved on does, and how a diff page is read, the engine's by default.
+ * Output: the section; a diff page shows only under the change set, head and page it was
+ * read at, so an old head's end marker never counts for a new one. */
+export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, load = loadChangeDiff }: {
   set: ChangeSet;
   now: number;
   busy: boolean;
   onAsk: (asking: Asking) => void;
   onUpdate: (set: ChangeSet) => void;
   onRestore: (set: ChangeSet) => void;
+  onMoved: () => void;
+  load?: typeof loadChangeDiff;
 }) {
   const [pages, setPages] = useState<number[]>([0]);
   const page = pages[pages.length - 1];
-  const [diff, setDiff] = useState<Result<ChangeDiff>>();
+  const [read, setRead] = useState<{ id: string; head: string; page: number; result: Result<ChangeDiff> }>();
   const [review, setReview] = useState<Review>(() => reviewOf(null, set));
+  const [staleAt, setStaleAt] = useState<ChangeSet | null>(null);
   const carried = reviewOf(review, set);
   if (carried !== review) {
     setReview(carried);
     setPages([0]);
   }
+  if (staleAt !== null && staleAt !== set) {
+    setStaleAt(null);
+    setPages([0]);
+  }
   const allowed = actions(set, now);
   const settled = reviewed(carried);
-  const notes = [movedNote(carried), conflictNote(set), checkedNote(set), outcomeNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
+  const notes = [movedNote(carried), conflictNote(set), regeneratedNote(set), checkedNote(set), outcomeNote(set), landingNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
   const head = carried.head;
+  const diff = read?.id === set.id && read.head === head && read.page === page ? read.result : undefined;
   useEffect(() => {
+    if (staleAt !== null) return;
     let current = true;
-    setDiff(undefined);
-    void loadChangeDiff(set.id, page).then((result) => {
+    setRead(undefined);
+    void load(set.id, head, page).then((result) => {
       if (!current) return;
-      setDiff(result);
-      if (result.kind === "ok" && result.value.next === null) setReview((shown) => lastPageSeen(shown, head));
+      if (result.kind === "error" && result.code === "changes_stale") {
+        setStaleAt(set);
+        setReview(movedOn);
+        onMoved();
+      } else setRead({ id: set.id, head, page, result });
     });
     return () => { current = false; };
-  }, [set.id, head, page]);
+  }, [set.id, head, page, load, staleAt]);
   const value = diff?.kind === "ok" ? diff.value : null;
+  const endSeen = useCallback(() => setReview((shown) => lastPageSeen(shown, head)), [head]);
   const asked = { ...set, head };
   return <section className="pj-stack-s ch-detail" aria-label={`Changes from ${agentName(set)}`}>
     <div className="pj-row between">
-      <h3>{agentName(set)}</h3>
+      <h3>{changeSetName(set)}</h3>
       <Badge word={stateBadge(set).word} tone={stateBadge(set).tone} />
     </div>
     <p className="pj-secondary pj-small">{sizeLine(set)}</p>
@@ -127,7 +186,7 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
         <span className="pj-mono">{fileLine(file)}</span>
         {fileMarks(file).map((mark) => <span className="ch-mark pj-small" key={mark}>{mark}</span>)}
       </li>)}</ul>
-      <DiffText text={value.text} />
+      <DiffText text={value.text} onEnd={value.next === null ? endSeen : undefined} />
       {value.truncated && <p className="pj-note warn">Part of this diff is not shown: it is longer than CrazyAgent shows at once.</p>}
       {(pages.length > 1 || value.next !== null) && <div className="pj-row">
         <button type="button" className="btn" disabled={pages.length === 1} onClick={() => setPages(pages.slice(0, -1))}>Previous page</button>
@@ -138,23 +197,27 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
   </section>;
 }
 
+/** One change set in the Changes list: its agent, its state badge and its size. Inputs: the
+ * change set, whether it is the one shown and what selecting it does. Output: the row button. */
+export function ChangeRow({ set, active, onSelect }: { set: ChangeSet; active: boolean; onSelect: (id: string) => void }) {
+  const badge = stateBadge(set);
+  return <button type="button" className={`ch-row${active ? " active" : ""}`} aria-current={active} onClick={() => onSelect(set.id)}>
+    <strong>{changeSetName(set)}</strong>
+    <Badge word={badge.word} tone={badge.tone} />
+    <span className="pj-small pj-secondary">{sizeLine(set)}</span>
+  </button>;
+}
+
 /** Changes tab: every change set the project's agents made, newest first, with its diff and
  * the owner's Accept, Discard, Restore and Ask agent to update. A refused action is shown only
  * while the set it was about is the one shown, never under another set. Input: the project
- * data. Output: the tab; the list rereads every few seconds while it is open. */
+ * data. Output: the tab; the list rereads a few seconds after each reply while it is open. */
 export function ChangesTab({ data }: { data: ProjectData }) {
-  const [list, setList] = useState<Result<ChangeSet[]>>();
-  const [round, setRound] = useState(0);
+  const [list, reread] = useChangeList(data.id);
   const [selected, setSelected] = useState<string | null>(null);
   const [asking, setAsking] = useState<Asking>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ set: string; text: string } | null>(null);
-  useEffect(() => {
-    let current = true;
-    void loadChanges(data.id).then((result) => { if (current) setList(result); });
-    const timer = setInterval(() => setRound((value) => value + 1), LIST_POLL_MS);
-    return () => { current = false; clearInterval(timer); };
-  }, [data.id, round]);
   const sets = list?.kind === "ok" ? list.value : [];
   const shown = sets.find((set) => set.id === selected) ?? sets[0] ?? null;
 
@@ -166,12 +229,33 @@ export function ChangesTab({ data }: { data: ProjectData }) {
       const message = done(result.value);
       if (message !== null) data.notify(message);
     } else setNote({ set: set.id, text: notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result) });
-    setRound((value) => value + 1);
+    reread();
   }
 
   async function accept(set: ChangeSet, message: string, target: string | null) {
     setBusy(true);
-    await settle(set, await acceptChange(set.id, set.head, message, target), acceptNote);
+    const result = await acceptChange(set.id, set.head, message, target);
+    if (result.kind === "error" && result.code === "changes_owner_dirty") {
+      const dirty = await loadOwnerDirty(set.id, target);
+      if (dirty.kind === "ok" && dirty.value.files.length + dirty.value.untracked.length > 0) {
+        setBusy(false);
+        setNote(null);
+        setAsking({ kind: "commit", set, files: dirty.value.files, untracked: dirty.value.untracked, message, target });
+        return;
+      }
+    }
+    await settle(set, result, acceptNote);
+  }
+
+  async function commitFirst(asked: CommitFirst, commit: string) {
+    setBusy(true);
+    const made = await commitOwnerFiles(asked.set.id, asked.files, commit, asked.target);
+    if (made.kind !== "ok") {
+      await settle(asked.set, made, () => null);
+      return;
+    }
+    data.notify(committedFirstNote(made.value[0], made.value[1]));
+    await accept(asked.set, asked.message, asked.target);
   }
 
   async function discard(set: ChangeSet) {
@@ -199,17 +283,15 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     </ProjectEmpty>}
     {sets.length > 0 && <div className="ch-layout">
       <ul className="pj-rows ch-list" aria-label="Change sets">{sets.map((set) => <li key={set.id}>
-        <button type="button" className={`ch-row${shown?.id === set.id ? " active" : ""}`} aria-current={shown?.id === set.id} onClick={() => setSelected(set.id)}>
-          <strong>{agentName(set)}</strong>
-          <Badge word={stateBadge(set).word} tone={stateBadge(set).tone} />
-          <span className="pj-small pj-secondary">{sizeLine(set)}</span>
-        </button>
+        <ChangeRow set={set} active={shown?.id === set.id} onSelect={setSelected} />
       </li>)}</ul>
-      {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} />}
+      {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} onMoved={reread} />}
     </div>}
     {shown && <ChangeSetChecks key={shown.id} projectId={data.id} set={shown} navigate={data.navigate} />}
     {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
       onCancel={() => setAsking(null)} onAccept={(message, target) => void accept(asking.set, message, target)} />}
+    {asking?.kind === "commit" && <CommitFirstDialog key={`${asking.set.id}:${asking.set.head}`} files={asking.files} untracked={asking.untracked} pending={busy}
+      onCancel={() => setAsking(null)} onCommit={(commit) => void commitFirst(asking, commit)} />}
     <ConfirmDialog open={asking?.kind === "discard"} pending={busy} title="Discard these changes?" confirmLabel="Discard" cancelLabel="Keep reviewing"
       onCancel={() => setAsking(null)} onConfirm={() => { if (asking) void discard(asking.set); }}>
       The agent's working copy goes back to your branch. You can restore these changes for 7 days.

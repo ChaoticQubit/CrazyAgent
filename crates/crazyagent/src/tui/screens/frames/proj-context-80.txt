@@ -9,7 +9,7 @@
   >   market_research.md                  Market research
 
   Agents write results here as Markdown. o opens a file in your editor.
-
+  p opens Project memory.
 
 
 

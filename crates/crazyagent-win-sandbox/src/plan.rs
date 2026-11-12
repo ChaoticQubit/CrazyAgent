@@ -10,10 +10,11 @@ pub const MODIFY: u32 = 0x0013_01bf;
 pub const DENY_WRITE: u32 = 0x000d_0156;
 /// Every file right (`FILE_ALL_ACCESS`), denied on a hidden path.
 pub const DENY_ALL: u32 = 0x001f_01ff;
-/// File rights a folder on the way to a read-only path denies on itself only: deleting
-/// children, deleting or renaming the folder, and changing its access list or owner, so no
-/// agent can vacate or replace the read-only path inside it. Adding entries stays allowed, so
-/// a new file at the top of the project or git's `.git\index.lock` can still be made.
+/// File rights a folder on the way to a read-only or hidden path denies on itself only:
+/// deleting children, deleting or renaming the folder, and changing its access list or owner,
+/// so no agent can vacate or replace the protected path inside it. Adding entries stays
+/// allowed, so a new file at the top of the project or git's `.git\index.lock` can still be
+/// made.
 pub const ANCHOR: u32 = 0x000d_0040;
 /// File rights the deepest folder above a missing read-only path denies on itself only: the
 /// anchor's rights plus adding files or folders, since Windows cannot deny creating a single
@@ -22,7 +23,8 @@ pub const KEEP_ENTRIES: u32 = 0x000d_0046;
 
 /// One access entry the boundary puts on a path for the agent's container: read and run, or
 /// modify, on a granted root; deny writes, or deny everything, on a protected path; anchor a
-/// folder on the way to a read-only path; keep the entries of the folder above a missing one.
+/// folder on the way to a protected path in a writable root; keep the entries of the folder
+/// above a missing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     ReadExecute,
@@ -84,14 +86,14 @@ pub fn within(child: &str, parent: &str) -> bool {
 /// writable root and read and run on each read root, skipping a root another grant already
 /// covers; then deny writes on each read-only path inside a writable root and deny everything
 /// on each hidden path inside any granted root; then anchor every present folder from that
-/// writable root down to each read-only path, so the path is not vacated by renaming a folder
-/// above it, and keep the entries of the deepest present folder above a read-only path that is
-/// not present, so it is not created. A protected path outside every grant needs no entry,
-/// since the container reaches nothing it was not granted. Inputs: the profile and whether a
-/// path is present as a real file or folder, not a link or junction; a granted root counts as
-/// present. Output: the entries, or a refusal when a writable root sits in a protected path, a
-/// read root sits in a hidden one, or the grants folder sits in a writable root, where the
-/// agent could rewrite the record of its own grants.
+/// writable root down to each read-only or hidden path, so the path is not deleted through its
+/// folder or vacated by renaming a folder above it, and keep the entries of the deepest present
+/// folder above such a path that is not present, so it is not created. A protected path
+/// outside every grant needs no entry, since the container reaches nothing it was not
+/// granted. Inputs: the profile and whether a path is present as a real file or folder, not a
+/// link or junction; a granted root counts as present. Output: the entries, or a refusal when
+/// a writable root sits in a protected path, a read root sits in a hidden one, or the grants
+/// folder sits in a writable root, where the agent could rewrite the record of its own grants.
 pub fn plan(
     profile: &BoundaryProfile,
     present: impl Fn(&str) -> bool,
@@ -158,11 +160,7 @@ pub fn plan(
         }
     }
     let denies = aces.len();
-    for item in profile
-        .guarded
-        .iter()
-        .filter(|item| item.guard == Guard::ReadOnly)
-    {
+    for item in &profile.guarded {
         let Some(root) = writes.iter().find(|root| within(&item.path, root)) else {
             continue;
         };
@@ -470,6 +468,65 @@ mod tests {
         let mut readable = profile(&[read], &[PROJECT, HOME, TMP], &[]);
         readable.grants = format!(r"{read}\boundary-grants");
         assert!(plan(&readable).is_ok(), "an agent may read its own record");
+    }
+
+    #[test]
+    fn folders_holding_a_hidden_path_are_anchored_so_the_path_cannot_be_removed_or_replaced() {
+        let config = r"C:\Users\mira\Projects\shop\.config";
+        let keys = r"C:\Users\mira\Projects\shop\.config\keys";
+        let key = r"C:\Users\mira\Projects\shop\.config\keys\deploy.pem";
+        let cache = format!(r"{HOME}\cache");
+        let token = format!(r"{HOME}\cache\token");
+        let built = || {
+            profile(
+                &[r"C:\Tools"],
+                &[PROJECT, HOME, TMP],
+                &[
+                    (key, Guard::Hidden),
+                    (token.as_str(), Guard::Hidden),
+                    (r"C:\Tools\keys", Guard::Hidden),
+                ],
+            )
+        };
+
+        let present = plan(&built()).unwrap();
+        assert!(present.contains(&ace(key, Access::DenyAll)));
+        assert!(present.contains(&ace(&token, Access::DenyAll)));
+        let anchored: Vec<&str> = present
+            .iter()
+            .filter(|item| item.access == Access::Anchor)
+            .map(|item| item.path.as_str())
+            .collect();
+        assert_eq!(
+            anchored,
+            [PROJECT, config, keys, HOME, cache.as_str()],
+            "no agent may delete a hidden path through its folder or rename a folder above it"
+        );
+        assert!(
+            !present
+                .iter()
+                .any(|item| item.access == Access::KeepEntries)
+        );
+        assert!(
+            !present
+                .iter()
+                .any(|item| item.path.starts_with(r"C:\Tools") && item.access == Access::Anchor),
+            "a hidden path in a read root needs no anchor: the agent deletes nothing there"
+        );
+
+        let missing = super::plan(&built(), |path| path != key).unwrap();
+        assert!(
+            missing.contains(&ace(keys, Access::KeepEntries)),
+            "no agent may create a missing hidden path"
+        );
+        assert!(missing.contains(&ace(config, Access::Anchor)));
+        let gone = super::plan(&built(), |path| path != keys && path != key).unwrap();
+        assert!(gone.contains(&ace(config, Access::KeepEntries)));
+        assert!(
+            !gone
+                .iter()
+                .any(|item| item.path == keys && item.access.denies() && !item.access.inherits())
+        );
     }
 
     #[test]

@@ -160,7 +160,7 @@ export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { ki
 
 export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
 
-export type TeamUse = { kind: "available" } | { kind: "unavailable"; reason: string };
+export type TeamUse = { kind: "available" } | { kind: "master_only"; reason: string } | { kind: "unavailable"; reason: string };
 
 export type AccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
 
@@ -235,6 +235,9 @@ export function errorMessage(error: unknown): string {
     connection_not_found: "That connection no longer exists. Refresh and inspect it again.",
     pool_not_found: "That pool no longer exists. Refresh and inspect it again.",
     pool_member_limit: "A pool can hold up to 15 accounts",
+    linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
+    linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+    linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
     pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
     pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
     pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
@@ -272,6 +275,7 @@ export function errorMessage(error: unknown): string {
     server_secret_duplicate: "Each secret needs its own name.",
     server_secret_not_found: "This secret was removed.",
     server_secret_invalid: "Enter the secret on one line, up to 8192 characters.",
+    server_secret_too_short: "Use a secret of at least 8 characters. A shorter one is part of an agent's launch command, so CrazyAgent cannot keep it hidden.",
     server_changed: "This server changed. Review it again before approving.",
     server_check_command_only: "Only command servers can be checked from here.",
     server_check_busy: "Other checks are running. Try again in a moment.",
@@ -316,6 +320,8 @@ export function errorMessage(error: unknown): string {
     agent_restart_conflict: "This agent is already running again. Refresh the list.",
     agent_restart_limit: "This agent was restarted too many times. Start it again from its project.",
     agent_launch_failed: "The agent could not start. Check its harness and account, then restart it.",
+    launch_secret_in_command: "The agent could not start: one of this project's MCP secrets is part of its launch command, so it cannot be kept hidden. Replace that secret in Plugins.",
+    launch_context_skills_kept: "The agent could not start: an earlier run locked skills into its Codex home, so CrazyAgent could not remove them and Codex would have loaded them.",
     agent_spec_invalid: "This agent's saved settings are unreadable. Start it again from its project.",
     agent_registry_unavailable: "CrazyAgent can't read its agent list. Restart CrazyAgent.",
     agent_root_unsafe: "CrazyAgent's state folder is not private. Restart CrazyAgent after fixing its permissions.",
@@ -411,7 +417,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -488,6 +494,7 @@ export interface ProjectCatalog {
   document_bytes_max: number;
   project_document_bytes_max: number;
   default_team: TeamPlan;
+  agent_access?: { access: "sandboxed" | "own_branch" | "full"; label: string; unavailable: string | null }[];
 }
 
 export interface StoredSetup {
@@ -627,10 +634,13 @@ export type SavedMemory = {
 
 export type AgentMemoryWrites = "save" | "ask";
 
+export type AgentMemoryScope = "project" | "agent";
+
 export type SavedMemoryPage = {
   items: SavedMemory[];
   next: number | null;
   agent_writes: AgentMemoryWrites;
+  agent_scope: AgentMemoryScope;
 };
 
 export type ApprovedMemory = {
@@ -718,8 +728,8 @@ export function setProjectAgentPolicy(id: string, policy: AgentPolicy, generatio
 
 export type TeamRole = "master" | "sub" | "teammate";
 
-/** What the screens show in place of receipts and adoption counts for an agent whose launch
- * fires no hooks (DEC-104 bare-hooks), instead of zeros or a blank. */
+/** What the screens show in place of receipts for an agent whose launch fires no hooks
+ * (DEC-104 bare-hooks), instead of zeros or a blank. */
 export const HOOKLESS_WORDS = "unavailable for this account kind";
 export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
 export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
@@ -764,6 +774,7 @@ export interface TeamAgent {
   teammates?: Teammate[];
   pane?: string | null;
   hookless?: boolean;
+  message_note?: string | null;
 }
 
 /** One teammate a harness split off in its own pane of the harness's terminal: its pane id,
@@ -794,6 +805,7 @@ export interface TeamTask {
   started_ms: number | null;
   finished_ms: number | null;
   parent?: number | null;
+  wait?: string | null;
 }
 
 export interface TeamMessage {
@@ -807,11 +819,32 @@ export interface TeamMessage {
 /** What the live master does with the conversation when the master harness changes: carry it
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
+export type MasterIdleStop = "off" | "fifteen_minutes" | "one_hour";
+
+/** When a saved master harness change reaches the running live master: once it is idle, or at
+ * its next start. */
+export type SwitchApply = "when_idle" | "next_start";
 
 /** What a task does at its turn end while commands its agent started in the background
  * still run: wait for them, give them a grace time in seconds and stop them, or stop them
  * with the turn and tell the agent first. */
 export type BackgroundAtEnd = { mode: "wait" } | { mode: "grace"; secs: number } | { mode: "stop" };
+
+/** What the engine does with processes an agent leaves running after its stop: end them after
+ * a short grace, keep them running and let the account go, or hold the account and ask. */
+export type LeftoverMode = "end" | "keep" | "ask";
+
+/** One hold of processes an agent left running, as the team view lists it: its engine key,
+ * who left it, the processes it names, where it stands, when it began in Unix milliseconds
+ * and whether it still keeps an account. */
+export type LeftoverHold = {
+  key: number;
+  who: string;
+  names: string;
+  state: "held" | "ending" | "kept";
+  since_ms: number;
+  holds_account: boolean;
+};
 
 /** Where a lead's worker lands its change set: on the lead's branch when the lead accepts it,
  * or only when the owner accepts it. */
@@ -819,6 +852,16 @@ export type ChildLanding = "lead" | "owner";
 
 /** Where a project's new sub-agents commit: each on its own branch, or a detached HEAD. */
 export type BranchMode = "named" | "detached";
+
+/** What a Full-access master does with its own conflict fixes: merge them into main itself,
+ * or leave them waiting for the owner's Accept. */
+export type MasterLands = "merges" | "waits";
+/** Whether a project's agents may merge the landed main, `crazyagent/main`, into their own branch. */
+export type CatchUpMain = "on" | "off";
+/** Whether an idle agent of the same lead may take a project's next task, or each new task starts a new agent. */
+export type ReuseIdle = "on" | "off";
+/** How an accepted change set lands on the owner's branch: one squash commit, or a merge commit keeping every agent commit. */
+export type LandingMode = "squash" | "merge";
 
 /** A harness kind the coordination settings are kept for, by its catalog id. */
 export type CoordHarness = "claude-code" | "codex" | "rcli";
@@ -828,8 +871,19 @@ export type SubagentMode = "app_spawned" | "native";
 export type Delivery = "auto" | "native_only" | "typing_only";
 /** Where a sub-agent's questions for its lead go: to the lead, or straight to the owner. */
 export type QuestionsTo = "lead" | "me";
-/** What happens when two agents claim the same files: warn both, block the edit, or nothing. */
-export type Overlaps = "warn" | "block" | "off";
+/** The Overlapping edits choices the engine knows, in the order they are offered: warn both,
+ * block the edit, nothing, or wait for the file. A new engine choice is added here and in the
+ * engine together. */
+export const OVERLAP_CHOICES = ["warn", "block", "off", "wait"] as const;
+/** Why Claude Code on an API key or URL account gets no hooks, no Block or Wait, as the
+ * engine's `coord::settings::BARE_NO_HOOKS` says it (DEC-141 PA-12). */
+export const BARE_NO_HOOKS = "Claude Code on an API key or URL account starts without hooks, so it runs none of your hooks and Block and Wait cannot hold its edits.";
+/** Why an rcli master gets no hooks, as the engine's `RCLI_NO_HOOKS` says it. */
+export const RCLI_NO_HOOKS = "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
+/** Which owner hooks a Codex agent runs, as the engine's `CODEX_HOOK_EVENTS_ONLY` says it. */
+export const CODEX_HOOK_EVENTS_ONLY = "Codex agents run your hooks on the events Codex has.";
+/** What happens when two agents claim the same files: one of `OVERLAP_CHOICES`. */
+export type Overlaps = (typeof OVERLAP_CHOICES)[number];
 /** When workflow nudges remind an agent: never, with the engine's note per flag after ten
  * minutes of work, or with one hook reminder on its first edit before any code-graph query. */
 export type Nudges = "off" | "ten_minutes" | "first_edit";
@@ -845,28 +899,74 @@ export interface RoleSkills {
   worker: string[] | null;
 }
 
+/** How every agent terminal of a project draws, whatever harness runs in it (DEC-141): Classic
+ * on the normal screen, so the app's view scrolls with the wheel and a plain drag selects, or
+ * Fullscreen, the harness's own view, which takes the mouse. */
+export type TerminalDisplay = "classic" | "fullscreen";
+
+/** Whether the first turn of each task of a team agent carries the Task-start reminder: the
+ * context-mode tools to load and the approved skills to check for the task. */
+export type TaskStart = "on" | "off";
+
+/** How many heavy commands of a project run at once through its heavy lane (F28): 1, 2, 3 or
+ * 4 at a time, or No limit. */
+export type HeavyLane = "one" | "two" | "three" | "four" | "no_limit";
+
+/** A named thing a project's heavy commands share, such as a local model or a database, and
+ * how many commands may use it at once, 1 to 8. */
+export interface SharedResource {
+  name: string;
+  slots: number;
+}
+
 /** A project's coordination settings: question routing, claim overlaps, workflow nudges, the
- * tool names the adoption counts include and the skills each team role gets. */
+ * tool names the adoption counts include, the skills each team role gets, the terminal
+ * display of every harness, the Task-start reminder, the heavy lane size and the shared
+ * resources. */
 export interface CoordSettings {
   questions_to: QuestionsTo;
   overlaps: Overlaps;
   nudges: Nudges;
   counted_tools: string[];
   role_skills: RoleSkills;
+  terminal_display: TerminalDisplay;
+  task_start: TaskStart;
+  heavy_lane: HeavyLane;
+  shared_resources: SharedResource[];
 }
 
-/** One harness kind's sub-agent mode and delivery, and whether it has native teammates at all. */
+/** One heavy command in a project's lane: the agent that runs it, its label (never its
+ * arguments), the shared resources it uses and when it started or began to wait. */
+export interface LaneEntry {
+  agent: number;
+  label: string;
+  uses: string[];
+  since_ms: number;
+}
+
+/** A project's heavy lane at one moment: the commands that run and those that wait, each in
+ * turn order. */
+export interface LaneView {
+  running: LaneEntry[];
+  waiting: LaneEntry[];
+}
+
+/** One harness kind's sub-agent mode and delivery, whether it has native teammates at all, and
+ * the terminal displays its terminals can draw; an engine from before DEC-141 sends none. */
 export interface HarnessCoordination {
   harness: CoordHarness;
   mode: SubagentMode;
   delivery: Delivery;
   native: boolean;
+  displays?: TerminalDisplay[];
 }
 
-/** A project's coordination settings with each harness kind's mode and delivery. */
+/** A project's coordination settings with each harness kind's mode and delivery and its
+ * heavy lane; an engine from before F28 sends no lane. */
 export interface CoordinationView {
   settings: CoordSettings;
   harnesses: HarnessCoordination[];
+  lane?: LaneView;
 }
 
 export interface SessionSwitch {
@@ -882,6 +982,7 @@ export interface TeamStatus {
   session_limit_secs?: number | null;
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
+  apply_harness_switch?: SwitchApply;
   sub_agent_depth?: number;
   child_landing?: ChildLanding;
   show_finished?: boolean;
@@ -889,20 +990,39 @@ export interface TeamStatus {
   master_branch?: string | null;
   land_on?: string | null;
   background_at_end?: BackgroundAtEnd;
+  leftovers?: LeftoverMode;
+  leftover_holds?: LeftoverHold[];
   ask_before_merge?: boolean;
+  master_lands?: MasterLands | null;
+  access_unreadable?: boolean;
+  reask_empty_reply?: boolean;
+  done_quiet_secs?: number | null;
+  master_idle_stop?: MasterIdleStop;
+  master_live_terminal?: boolean;
+  catch_up_main?: CatchUpMain;
+  reuse_idle?: ReuseIdle;
+  landing_mode?: LandingMode;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
+  message_settings?: MessageSettings;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
   max_harnesses?: number | null;
   max_teammates?: number | null;
+  master_rounds?: number | null;
+  rounds_used?: number;
+  rounds_kept_going?: boolean;
+  master_run_secs?: number | null;
+  master_deadline_ms?: number | null;
   token_budget?: number | null;
   budget_used?: number | null;
   budget_reached?: boolean;
   spread_accounts?: boolean;
+  terminals_per_window?: 4 | 6 | 9;
   live_master?: boolean | null;
   live_problem?: string | null;
+  live_idle_stopped?: boolean;
   settings_version?: number;
   min_agents: number;
   max_agents: number;
@@ -914,8 +1034,62 @@ export interface TeamStatus {
   events: TeamEventsView;
 }
 
+/** How a finished or failed task's result shows in a Messages timeline: its first line until
+ * the owner opens it, or the whole result. */
+export type ResultsShown = "first_line" | "full";
+
+/** A project's Messages settings, stored whole: whether the master's messages and answers to
+ * its sub-agents are kept, how many kept messages the project holds, whether progress events
+ * and the owner's own tasks and prompts show, how results show and the page size. */
+export interface MessageSettings {
+  keep_master_messages: boolean;
+  kept_per_project: number;
+  progress_shown: boolean;
+  results: ResultsShown;
+  owner_items_shown: boolean;
+  page_size: number;
+}
+
+/** Who a Messages entry comes from, as the engine stored it, never as its text says. */
+export type MessageSpeaker = "master" | "owner" | "agent" | "engine";
+
+/** What one Messages entry is. */
+export type MessageKind = "task" | "wake" | "message" | "answer" | "prompt" | "question" | "progress" | "change_set_ready" | "finished" | "failed";
+
+/** Which store a Messages entry comes from; with its time and id it orders the timeline. */
+export type MessageSource = "task" | "message" | "event";
+
+/** Where a Messages page ends; the next page holds the entries before it. */
+export interface MessageCursor {
+  at_ms: number;
+  source: MessageSource;
+  id: number;
+}
+
+/** One entry of a sub-agent's Messages timeline. `text` is null for a master's message the
+ * project kept no text of; `result` is a finished task's result or a failed task's problem. */
+export interface AgentMessage extends MessageCursor {
+  from: MessageSpeaker;
+  kind: MessageKind;
+  text: string | null;
+  task: number | null;
+  state: TeamEventState | null;
+  result: string | null;
+  result_more: boolean;
+}
+
+/** One page of a sub-agent's Messages timeline, newest first, with whether older entries
+ * remain and the settings it was read under. */
+export interface AgentMessages {
+  project_id: string;
+  agent: number;
+  entries: AgentMessage[];
+  older: boolean;
+  settings: MessageSettings;
+}
+
 export type TeamEventKind = "question" | "finished" | "failed" | "change_set_ready" | "progress";
-export type TeamEventState = "queued" | "delivered" | "muted" | "carried" | "dropped";
+export type TeamEventState = "queued" | "delivered" | "muted" | "carried" | "dropped" | "settled";
 export type WakeRuleLevel = "shipped" | "app" | "project" | "agent";
 
 export interface TeamEvent {
@@ -958,14 +1132,15 @@ export interface TeamNotification {
 export type QuestionSeverity = "high" | "normal" | "low";
 
 /** One open question an agent put to the owner: who asked, how urgent it is, whom the asker
- * meant it for, the question, what the asker assumes until answered, when it was asked and
- * the asker's terminal while it runs. */
+ * meant it for and that party's name (Me for the owner), the question, what the asker assumes
+ * until answered, when it was asked and the asker's terminal while it runs. */
 export interface OwnerQuestion {
   id: number;
   agent: number;
   label: string;
   severity: QuestionSeverity;
   asked_for: "me" | "master" | "lead";
+  for_label: string;
   text: string;
   assumption: string | null;
   created_ms: number;
@@ -1016,6 +1191,7 @@ export interface AppTeamEvents {
   notifications: TeamNotification[];
   unseen: number;
   projects: { project_id: string; unseen: number; questions?: number }[];
+  working?: { project_id: string; agents: number }[];
 }
 
 export interface TeamPlanStep {
@@ -1066,6 +1242,13 @@ export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs:
  * generation. Output: the engine receipt. */
 export function teamOnHarnessSwitch(id: string, mode: SwitchMode, version: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, version, generation });
+}
+
+/** Sets when a saved master harness change reaches the running live master. Inputs: the project
+ * id, the choice, the team settings version the screen read and a generation. Output: the
+ * engine receipt; a save from an older read is rejected as `stale_revision`. */
+export function teamApplyHarnessSwitch(id: string, mode: SwitchApply, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, version, generation });
 }
 
 /** Sets how deep sub-agents may start workers of their own. Inputs: the project id, the depth
@@ -1134,6 +1317,13 @@ export function removeProject(id: string, generation: number): Promise<IntentRec
   return invoke<IntentReceipt>("desktop_remove_project", { id, generation });
 }
 
+/** Moves or copies a project kept where it is into the projects home; the engine waits for its
+ * team to stop first. Inputs: the project id, move or copy, the soft refusals the owner chose to
+ * go past and a generation. Output: the engine receipt. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
+}
+
 /** Stops one research job; a running agent's whole process group stops.
  * Inputs: project id, job id and a generation. Output: the engine receipt. */
 export function cancelResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
@@ -1174,21 +1364,51 @@ export interface FoundProject {
   project_id?: string | null;
 }
 
+/** What the native bridge read about a picked folder: its bytes, or null with the size code when
+ * it could not be measured, how many of its files are only in iCloud, its GitHub repository, its linked worktrees and their folders, whether
+ * the engine lets it move and be copied without an override and which git link a Move breaks,
+ * whether it has git, and whether it shares a disk with the projects folder (null when that is
+ * unknown). */
 export interface FolderSize {
-  bytes: number;
+  bytes: number | null;
+  size_problem?: string | null;
+  placeholders?: number;
   github?: string | null;
   worktrees?: number;
+  worktree_paths?: string[];
+  movable?: boolean;
+  git_link?: GitLink;
+  copyable?: boolean;
+  git?: boolean;
+  same_volume?: boolean | null;
 }
+
+/** Which git link outside a folder a Move breaks, as the engine reads it. */
+export type GitLink = "none" | "worktrees" | "linked_worktree" | "submodule" | "unreadable";
 
 export type AddFolderMode = "move" | "copy";
 
+/** A soft refusal of one add that the owner was shown and chose to go past for that add only. */
+export type AddOverride = "worktrees" | "linked_checkout" | "too_large";
+
 export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
+
+/** One kind of research the project's own documents already hold, read from their text:
+ * the kind and the files below the project folder that hold it. A setup mapped by an engine
+ * up to 2.2.0 may hold a roadmap planning group, whose files are roadmap files. */
+export interface FoundResearch {
+  kind: JobKind;
+  files: string[];
+}
 
 export interface MappingFacts {
   languages: string[];
   build_commands: string[];
   test_commands: string[];
   entry_points: string[];
+  research?: FoundResearch[];
+  documents?: string[];
+  roadmap?: string[];
 }
 
 /** One instruction file of a project (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md or
@@ -1211,10 +1431,29 @@ export interface ImportCommit {
   files: string[];
 }
 
+/** The moved instruction files whose move the checkout has not committed, the branch it has
+ * checked out, null for a detached HEAD or when no move waits (DEC-106 addendum), and that
+ * branch whether or not a move waits, for the project head, null for a detached HEAD. */
+export interface UncommittedImport {
+  files: string[];
+  branch: string | null;
+  checked_out: string | null;
+}
+
+/** The try a running mapping step is on: its number of `tries`, when it started in ms since the
+ * epoch and the plain reason the try before it failed. */
+export interface MappingTry {
+  number: number;
+  tries: number;
+  started_ms: number;
+  earlier: string | null;
+}
+
 export interface OnboardingView {
   project_id: string;
   graph: OnboardingStep;
   mapping: OnboardingStep;
+  mapping_try?: MappingTry;
   name: string;
   draft: ProjectSetup;
   facts: MappingFacts;
@@ -1223,6 +1462,7 @@ export interface OnboardingView {
   folder_overview: string | null;
   finished: boolean;
   imported?: ImportFile[];
+  proposed?: ProjectSetup | null;
 }
 
 export interface GitHubDeviceCode {
@@ -1328,6 +1568,7 @@ export interface SetupStatus {
   dependencies: Dependency[];
   pack: PackEntry[];
   running: boolean;
+  notes?: string[];
   version: number;
 }
 
@@ -1353,6 +1594,29 @@ export function foundProjects(): Promise<FoundProject[]> {
   return invoke<FoundProject[]>("desktop_found_projects");
 }
 
+/** How far the running iCloud download has come: the files only in iCloud it found so far and how
+ * many of them are on this Mac now. */
+export interface IcloudProgress {
+  total: number;
+  done: number;
+}
+
+/** Downloads every file of a folder that is only in iCloud and waits until all are on this Mac;
+ * the folder itself is not moved. Input: an absolute folder path. Output: how many it downloaded. */
+export function icloudDownload(path: string): Promise<number> {
+  return invoke<number>("desktop_icloud_download", { path });
+}
+
+/** Reads the running iCloud download's progress. Output: the counts, or null when none runs. */
+export function icloudProgress(): Promise<IcloudProgress | null> {
+  return invoke<IcloudProgress | null>("desktop_icloud_progress");
+}
+
+/** Stops the running iCloud download. Output: whether one was running. */
+export function icloudCancel(): Promise<boolean> {
+  return invoke<boolean>("desktop_icloud_cancel");
+}
+
 /** Measures a folder before Copy and names its GitHub repository, if any.
  * Input: an absolute folder path. Output: its size and GitHub owner/name. */
 export function folderSize(path: string): Promise<FolderSize> {
@@ -1360,9 +1624,10 @@ export function folderSize(path: string): Promise<FolderSize> {
 }
 
 /** Moves or copies an existing folder into the projects home.
- * Inputs: the source folder, move or copy, and a generation. Output: the engine receipt. */
-export function addExistingFolder(source: string, mode: AddFolderMode, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_add_existing_folder", { source, mode, generation });
+ * Inputs: the source folder, move or copy, the soft refusals the owner chose to go past and a
+ * generation. Output: the engine receipt. */
+export function addExistingFolder(source: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_add_existing_folder", { source, mode, overrides, generation });
 }
 
 /** Starts onboarding a found folder on a pool. Inputs: the folder, the pool id and a
@@ -1416,9 +1681,11 @@ export type Receipt = "sent" | "delivered" | "typed" | "read" | "replied" | "fai
  * names the node that leads it; `terminal` is the name the terminal commands take, for the
  * nodes that have one. `questions` counts the questions it queued for the master, `agent` is
  * its own team agent row and `pane` a native teammate's pane, for Stop. `presence`, `waiting`
- * on the owner in its terminal, `owner_questions` (open For: Me questions) and `no_worktree`
- * come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
- * it has no receipts. Older engines leave the optional fields out. */
+ * on the owner in its terminal, `waits_for` (the file its start waits for under Wait),
+ * `owner_questions` (open For: Me questions) and `no_worktree` come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
+ * it has no receipts; `message_note` is the engine's sentence when the Delivery setting leaves
+ * the agent no way to get messages, and `started_ms` when its earliest running task started,
+ * null while it runs none. Older engines leave the optional fields out. */
 export interface GraphNode {
   id: string;
   kind: GraphNodeKind;
@@ -1435,9 +1702,12 @@ export interface GraphNode {
   pane?: string | null;
   presence?: Presence | null;
   waiting?: Waiting | null;
+  waits_for?: string | null;
   owner_questions?: number;
   no_worktree?: boolean;
   hookless?: boolean;
+  message_note?: string | null;
+  started_ms?: number | null;
 }
 
 /** Unread messages from one party to another: how many and the newest one's receipt. Each end
@@ -1475,14 +1745,36 @@ export interface GraphEdge {
   agent_label?: string | null;
 }
 
-/** One project's team as a tree of who leads whom, its assignment edges, and the unread
- * message and claim overlap edges of the coordination layer. */
+/** How the upper node of one tree pair relates to the lower one. */
+export type Relation = "leads" | "delegated_to" | "teammate_of";
+
+/** What one tree pair is doing now: a handoff names its task, cut to 160 bytes, and a review
+ * the agent whose change set it reviews by its node name, cut to 96 bytes. */
+export type LiveAction =
+  | { action: "handing_off"; task: string }
+  | { action: "messaging" }
+  | { action: "waiting_on"; owner: boolean }
+  | { action: "reviewing"; agent: string };
+
+/** The one relation edge of a tree pair, from the node that leads to the node it leads,
+ * with the pair's live action while one holds. */
+export interface RelationEdge {
+  from: string;
+  to: string;
+  relation: Relation;
+  live: LiveAction | null;
+}
+
+/** One project's team as a tree of who leads whom, its assignment edges, the unread
+ * message and claim overlap edges of the coordination layer, and one relation edge per
+ * tree pair. */
 export interface TeamGraph {
   project_id: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
   messages?: MessageEdge[];
   overlaps?: OverlapEdge[];
+  relations?: RelationEdge[];
 }
 
 /** A control message on an attached terminal channel: the terminal's size once attached,
@@ -1987,11 +2279,13 @@ export interface AgentView {
 }
 
 /** Something other than an agent that holds an account's sign-in while it runs: a master
- * conversation's turn, ended by closing that conversation, or a research job, ended by
- * cancelling it. */
+ * conversation's turn, ended by closing that conversation, a research job, ended by
+ * cancelling it, or processes a Full access agent left running, named by `report`, which
+ * signing the account out lets go of while they still run. */
 export type Holder =
   | { kind: "master"; project: string; session: string }
-  | { kind: "research"; project: string; job: number; title: string };
+  | { kind: "research"; project: string; job: number; title: string }
+  | { kind: "leftover"; report: string };
 
 /** Everything that holds one account's sign-in now: its running agents and other holders. */
 export interface AccountUse {
@@ -2037,7 +2331,7 @@ export interface MasterTurn {
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
   reply: { text: string } | null;
-  attempt?: { connection: { account_ref: string } } | null;
+  attempt?: { connection: { id: string; account_ref: string }; selected_at_ms?: number } | null;
   accounts?: MasterAccount[];
   detail?: string | null;
   cause?: string | null;
@@ -2045,6 +2339,15 @@ export interface MasterTurn {
   changes?: string | null;
   engine_request?: MasterEngineRequest | null;
   input_cursor?: string;
+  activity?: MasterActivityLine[];
+}
+
+/** One line of what a running master turn is doing, as the engine words it: a fixed phrase
+ * with at most one project-relative path, and the engine's clock in milliseconds when it
+ * last saw it. The engine sends the lines oldest first, only while the turn is outstanding. */
+export interface MasterActivityLine {
+  at_ms: number;
+  text: string;
 }
 
 /** What the engine asked the master in a turn Ask agent to update started: the change set,
@@ -2084,6 +2387,59 @@ export interface MasterSessionSummary {
   last_line: string | null;
   agents: string[];
   results_waiting: number;
+  mode?: MasterMode | null;
+  harness?: string | null;
+}
+
+/** Which kind of master ran a message or a session: the one the engine runs one turn at a
+ * time, or the one that runs live in its terminal. */
+export type MasterMode = "one_turn" | "live";
+
+/** One stored message of a master conversation. `seq` orders a session's messages from 1.
+ * `speaker` "engine" is a request the engine typed itself and "switch" the divider where
+ * another master took the conversation over, whose `text` is the whole divider line.
+ * `harness` is a live master's catalog id or alias, or a one-turn master's backend (`rcli`,
+ * `codex`, `claude`). `text` is null for a terminal turn whose typed words were not read.
+ * `source` tells where the row comes from (see `SessionMessageSource`). */
+export interface SessionMessage {
+  seq: number;
+  speaker: "owner" | "engine" | "master" | "switch";
+  mode: MasterMode;
+  harness: string | null;
+  text: string | null;
+  at_ms: number;
+  source: SessionMessageSource;
+}
+
+/** Where a stored message comes from: a turn the engine ran ("turn"), a turn in the live
+ * terminal ("terminal"), a master switch ("switch") or the divider an upgrade placed
+ * ("backfill"). "record" is text read from the harness's own record and "counter" a row that
+ * stands for a terminal turn an older engine only counted: the engine did not see those
+ * words typed, so a view marks them. */
+export type SessionMessageSource = "turn" | "terminal" | "record" | "counter" | "switch" | "backfill";
+
+/** One page of a session's stored messages, oldest first. `next` is the `before` of the page
+ * of older messages, null once the page holds the session's first message; `count` is every
+ * stored message of the session. */
+export interface MasterMessagePage {
+  project_id: string;
+  session_id: string;
+  messages: SessionMessage[];
+  next: number | null;
+  count: number;
+}
+
+export interface MasterMessages {
+  ticket: string;
+  revision: string;
+  page: MasterMessagePage;
+}
+
+/** Reads one page of the stored messages of any session of the selected project, in either
+ * master mode: the newest when `before` is null, else those with a sequence number below it.
+ * Inputs: the selection ticket, the session id, the cursor and the page size, 1 to 64. */
+export function masterMessages(ticket: string, sessionId: string, before: number | null, limit: number): Promise<MasterMessages> {
+  return invoke<MasterMessages>("desktop_master_messages", { ticket, sessionId, before, limit });
 }
 
 export interface MasterSessions {

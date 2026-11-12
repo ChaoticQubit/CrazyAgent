@@ -160,6 +160,7 @@ async fn the_tui_lists_diffs_discards_restores_accepts_and_updates_a_real_change
     let event = native
         .changes(ChangesQuery::Diff {
             id: first.clone(),
+            head: set.head.clone(),
             page: 0,
         })
         .await;

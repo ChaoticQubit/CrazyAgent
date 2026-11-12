@@ -7,17 +7,19 @@ use crate::config::{
 };
 use crate::engine::NativeProfileCustody;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::owner::native_auth::decode_fact;
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::harnesses::terminal_session::{PaneRecord, Resume, paste};
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
-use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crate::team::{AgentRole, TaskSource, TeamAccount, TeamReach};
 use crate::terminal::{AgentId, Host};
-use rusqlite::{Connection, params};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{CStr, OsStr, OsString};
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -30,11 +32,13 @@ pub(super) const PROJECT: &str = "dec-090";
 pub(super) const AGENT: i64 = 1;
 const SIGNED_IN_CLAUDE: &str = "CRAZYAGENT_MANAGED_CLAUDE_PROFILE";
 const SIGNED_IN_CODEX: &str = "CRAZYAGENT_MANAGED_CODEX_PROFILE";
+const SIGNED_IN_CODEX_KEY: &str = "CRAZYAGENT_MANAGED_CODEX_KEY_PROFILE";
 
 /// The owner's signed-in managed profile of a real engine, named by its slot folder in
-/// `CRAZYAGENT_MANAGED_CLAUDE_PROFILE` or `CRAZYAGENT_MANAGED_CODEX_PROFILE`, held through
-/// that engine's own custody, which only reads its database and takes a shared lock on the
-/// slot. Output of `claude` and `codex`: the profile's connection and custody, or a panic
+/// `CRAZYAGENT_MANAGED_CLAUDE_PROFILE`, `CRAZYAGENT_MANAGED_CODEX_PROFILE` or
+/// `CRAZYAGENT_MANAGED_CODEX_KEY_PROFILE`, bound as the running engine proved its sign-in
+/// and held through that engine's own custody, which only reads its database and takes a
+/// shared lock on the slot. Output of `claude` and `codex`: the profile's connection and custody, or a panic
 /// with the plain BLOCKED message.
 pub(crate) struct SignedIn {
     pub(crate) connection: ModelConnection,
@@ -54,73 +58,104 @@ impl SignedIn {
         Self::open(SIGNED_IN_CODEX, "codex", "a ChatGPT account for Codex")
     }
 
-    /// Opens the slot one variable names and checks it belongs to the expected harness.
-    /// Inputs: the variable, the harness reference and the account wording. Output: the
-    /// held profile, or a panic with the plain BLOCKED message.
+    /// The owner's Codex profile signed in with an OpenAI API key, named by
+    /// `CRAZYAGENT_MANAGED_CODEX_KEY_PROFILE`. Output: the held profile.
+    pub(crate) fn codex_api_key() -> Self {
+        Self::open(SIGNED_IN_CODEX_KEY, "codex", "Codex with an OpenAI API key")
+    }
+
+    /// Opens the slot one variable names through its engine's read-only database, with the
+    /// checks the engine's usage poll makes before it holds a profile: the slot path gives
+    /// only the profile key, the running engine's host and its proved sign-in for that key
+    /// give the binding, and a sign-in the provider rejected is refused. The slot itself is
+    /// never read, listed or checked. Inputs: the variable, the harness reference and the
+    /// account wording. Output: the held profile, or a panic with the plain BLOCKED message.
     fn open(variable: &str, harness: &str, account: &str) -> Self {
-        let slot = std::env::var_os(variable).unwrap_or_else(|| {
+        let slot = PathBuf::from(std::env::var_os(variable).unwrap_or_else(|| {
             panic!(
                 "BLOCKED: no signed-in managed {harness} profile. Sign in to {account} in CrazyAgent, then run with {variable}=<engine folder>/native-profiles/<profile key>"
             )
-        });
-        let slot = PathBuf::from(slot)
-            .canonicalize()
-            .unwrap_or_else(|_| panic!("BLOCKED: {variable} does not name a profile slot"));
-        let manifest = std::fs::read(slot.join("identity.json"))
-            .unwrap_or_else(|_| panic!("BLOCKED: {variable} has no identity manifest"));
-        let identity: Value = serde_json::from_slice(&manifest).unwrap();
-        let bound = |key: &str| reference(identity["binding"][key].as_str().unwrap());
-        if bound("harness").as_str() != harness {
+        }));
+        let key = slot
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| {
+                name.len() == 64
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            });
+        let engine = slot
+            .parent()
+            .filter(|root| {
+                slot.is_absolute() && root.file_name() == Some(OsStr::new("native-profiles"))
+            })
+            .and_then(Path::parent);
+        let (Some(key), Some(engine)) = (key, engine) else {
+            panic!("BLOCKED: {variable} does not name a profile slot");
+        };
+        let database = engine.join("engine.db");
+        let db = Connection::open_with_flags(
+            &database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap_or_else(|_| panic!("BLOCKED: {variable} is not in a CrazyAgent engine folder"));
+        let tx = db.unchecked_transaction().unwrap();
+        let host = tx
+            .query_row(
+                "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
+                [],
+                |row| {
+                    Ok(HostStamp {
+                        db_instance: row.get(0)?,
+                        engine_epoch: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or_else(|| {
+                panic!("BLOCKED: the engine that keeps {variable} is not running. Open CrazyAgent, then rerun")
+            });
+        let latest: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let latest =
+            latest.unwrap_or_else(|| panic!("BLOCKED: {variable} has no sign-in in its engine"));
+        let connection = decode_fact(&latest).unwrap().binding.connection;
+        if connection.harness.as_str() != harness {
             panic!(
                 "BLOCKED: {variable} names a {} profile, not a {harness} one",
-                bound("harness").as_str()
+                connection.harness.as_str()
             );
         }
-        let database = slot
-            .parent()
-            .and_then(Path::parent)
-            .unwrap()
-            .join("engine.db");
-        let instance = identity["root"]["database_instance"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let connection = ModelConnection {
-            id: reference(&format!("{harness}-live-connection")),
-            provider: bound("provider"),
-            harness: bound("harness"),
-            protocol: bound("protocol"),
-            account_ref: bound("account_ref"),
-            endpoint: ModelEndpoint::Native {},
-            model: ModelReference {
-                id: "native-default".into(),
-                author: bound("provider"),
+        let fact = crate::storage::native_sign_in(&tx, &host, &connection, None).unwrap_or_else(
+            |problem| {
+                panic!(
+                    "BLOCKED: the sign-in {variable} names is not proved on the running engine ({}). Sign in to {account} again in CrazyAgent, then rerun",
+                    problem.0
+                )
             },
-            auth: ModelAuthentication::NativeManaged {
-                profile_ref: bound("profile_ref"),
-            },
-        };
+        );
+        if crate::model_gateway::sign_in_rejected(&tx, &connection).unwrap() {
+            panic!(
+                "BLOCKED: the provider rejected the sign-in {variable} names (usage_sign_in_rejected). Sign in to {account} again in CrazyAgent, then rerun"
+            );
+        }
+        drop(tx);
         let custody =
             NativeProfileCustody::capture(&database, &std::fs::metadata(&database).unwrap())
                 .unwrap();
-        let host = HostStamp {
-            db_instance: instance.clone(),
-            engine_epoch: "b".repeat(64),
-        };
-        let binding = NativeProfileBinding {
-            database_instance: instance,
-            engine_epoch: host.engine_epoch.clone(),
-            config_id: ConfigId::new("c".repeat(64)).unwrap(),
-            source_hash: "d".repeat(64),
-            at_revision: Cursor::new(1),
-            connection: connection.clone(),
-            custody_id: format!("{:x}", Sha256::digest(&manifest)),
-        };
         Self {
             connection,
             custody,
             host,
-            binding,
+            binding: fact.binding,
         }
     }
 
@@ -166,7 +201,181 @@ pub(crate) struct ManagedAgent {
     role: AgentRole,
     stamp: HostStamp,
     binding: NativeProfileBinding,
-    _root: tempfile::TempDir,
+    _root: Root,
+}
+
+/// The variable a live run sets to a folder that keeps a row's Codex rollouts after the
+/// row's test folder goes (G1-DIAG).
+pub(crate) const LIVE_KEEP: &str = "CRAZYAGENT_LIVE_KEEP";
+
+/// The most rollouts [`rollout_files`] reads from one agent home.
+const ROLLOUTS_KEPT_MAX: usize = 64;
+/// The most bytes one rollout may hold for [`rollout_files`] to read it.
+const ROLLOUT_BYTES_MAX: u64 = 32 * 1024 * 1024;
+/// The most entries [`rollout_files`] looks at below one sessions folder.
+const SESSION_ENTRIES_MAX: usize = 4096;
+/// The most folders [`rollout_files`] holds open while it walks.
+const SESSION_FOLDERS_OPEN_MAX: usize = 64;
+
+/// A managed agent's test folder, removed when dropped. When [`LIVE_KEEP`] names an absolute
+/// folder, it first copies the Codex rollouts under the agent home there with
+/// [`keep_rollouts`], so a failed live row keeps them. Holds the folder and the agent home.
+struct Root {
+    folder: tempfile::TempDir,
+    home: PathBuf,
+}
+
+impl Drop for Root {
+    /// Copies the rollouts when [`LIVE_KEEP`] is set, logging a failure without panicking,
+    /// since a failed row drops its folder while it unwinds. Takes the folder.
+    fn drop(&mut self) {
+        let Some(keep) = std::env::var_os(LIVE_KEEP).map(PathBuf::from) else {
+            return;
+        };
+        assert!(self.folder.path().is_absolute());
+        if !keep.is_absolute() {
+            eprintln!("live_keep_not_absolute");
+            return;
+        }
+        match keep_rollouts(&self.home, &keep) {
+            Ok(kept) => eprintln!(
+                "live_keep_rollouts copied={} skipped={}",
+                kept.copied, kept.skipped
+            ),
+            Err(error) => eprintln!("live_keep_failed kind={:?}", error.kind()),
+        }
+    }
+}
+
+/// The Codex rollouts [`rollout_files`] read from an agent home: each file's name and bytes,
+/// and how many entries it skipped as a link, another kind, a file that is not plainly this
+/// user's, or one past a bound.
+pub(super) struct Rollouts {
+    pub(super) files: Vec<(OsString, Vec<u8>)>,
+    pub(super) skipped: usize,
+}
+
+/// What [`keep_rollouts`] did: the files it wrote and the entries it skipped, a name already
+/// in the keep folder included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Kept {
+    pub(super) copied: usize,
+    pub(super) skipped: usize,
+}
+
+/// Opens one entry of an open folder as a plain rollout: never through a link, and only a
+/// regular file this user owns, with one name and at most `ROLLOUT_BYTES_MAX` bytes, checked
+/// on the open handle. Inputs: the folder and the entry's name. Output: the file, or none.
+pub(super) fn open_plain(folder: &OwnedFd, name: &CStr) -> Option<std::fs::File> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = rustix::fs::openat(folder, name, flags, Mode::empty()).ok()?;
+    let stat = rustix::fs::fstat(&file).ok()?;
+    let plain = FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+        && stat.st_uid == rustix::process::getuid().as_raw()
+        && stat.st_nlink == 1
+        && u64::try_from(stat.st_size).is_ok_and(|size| size <= ROLLOUT_BYTES_MAX);
+    plain.then(|| std::fs::File::from(file))
+}
+
+/// Reads the `.jsonl` files below `<home>/sessions`, opening the home, the sessions folder,
+/// every folder below and each file through its open parent without following a link, so a
+/// planted or swapped link never reads a file from outside the home. Input: the agent home.
+/// Output: the rollouts, none when the home has no sessions folder, a skip for a sessions
+/// folder that is a link or not a folder, or the first error opening the home or listing.
+pub(super) fn rollout_files(home: &Path) -> std::io::Result<Rollouts> {
+    use rustix::fs::{CWD, Dir, FileType, Mode, OFlags};
+    use std::io::Read;
+    let folders = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut rollouts = Rollouts {
+        files: Vec::new(),
+        skipped: 0,
+    };
+    let home = rustix::fs::openat(CWD, home, folders, Mode::empty())?;
+    let sessions = match rustix::fs::openat(&home, "sessions", folders, Mode::empty()) {
+        Ok(sessions) => sessions,
+        Err(rustix::io::Errno::NOENT) => return Ok(rollouts),
+        Err(_) => {
+            rollouts.skipped += 1;
+            return Ok(rollouts);
+        }
+    };
+    let (mut pending, mut seen) = (vec![sessions], 0);
+    'walk: while let Some(folder) = pending.pop() {
+        for entry in Dir::read_from(&folder)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if matches!(name.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            if seen == SESSION_ENTRIES_MAX {
+                rollouts.skipped += 1;
+                break 'walk;
+            }
+            seen += 1;
+            let rollout = name.to_bytes().ends_with(b".jsonl");
+            match entry.file_type() {
+                FileType::Directory if pending.len() < SESSION_FOLDERS_OPEN_MAX => {
+                    match rustix::fs::openat(&folder, name, folders, Mode::empty()) {
+                        Ok(below) => pending.push(below),
+                        Err(_) => rollouts.skipped += 1,
+                    }
+                }
+                FileType::RegularFile if rollout && rollouts.files.len() < ROLLOUTS_KEPT_MAX => {
+                    let mut bytes = Vec::new();
+                    let read = open_plain(&folder, name).is_some_and(|file| {
+                        file.take(ROLLOUT_BYTES_MAX + 1)
+                            .read_to_end(&mut bytes)
+                            .is_ok()
+                    }) && u64::try_from(bytes.len())
+                        .is_ok_and(|size| size <= ROLLOUT_BYTES_MAX);
+                    if read {
+                        let name = OsStr::from_bytes(name.to_bytes()).to_owned();
+                        rollouts.files.push((name, bytes));
+                    } else {
+                        rollouts.skipped += 1;
+                    }
+                }
+                _ => rollouts.skipped += 1,
+            }
+        }
+    }
+    assert!(rollouts.files.len() <= ROLLOUTS_KEPT_MAX && seen <= SESSION_ENTRIES_MAX);
+    Ok(rollouts)
+}
+
+/// Writes each rollout [`rollout_files`] reads from `home` into `keep`, made when missing,
+/// under its own name: a file created new, never through a link and never over a file
+/// already there. Inputs: the agent home and the keep folder. Output: what was written and
+/// skipped, or the first error.
+pub(super) fn keep_rollouts(home: &Path, keep: &Path) -> std::io::Result<Kept> {
+    use rustix::fs::{CWD, Mode, OFlags};
+    use std::io::Write;
+    let rollouts = rollout_files(home)?;
+    let mut kept = Kept {
+        copied: 0,
+        skipped: rollouts.skipped,
+    };
+    if rollouts.files.is_empty() {
+        return Ok(kept);
+    }
+    std::fs::create_dir_all(keep)?;
+    let folders = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let folder = rustix::fs::openat(CWD, keep, folders, Mode::empty())?;
+    let create =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    for (name, bytes) in &rollouts.files {
+        match rustix::fs::openat(&folder, name.as_os_str(), create, Mode::RUSR | Mode::WUSR) {
+            Ok(file) => {
+                std::fs::File::from(file).write_all(bytes)?;
+                kept.copied += 1;
+            }
+            Err(rustix::io::Errno::EXIST) => kept.skipped += 1,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    assert!(kept.copied <= rollouts.files.len());
+    Ok(kept)
 }
 
 fn reference(value: &str) -> CredentialRef {
@@ -194,6 +403,90 @@ pub(crate) fn claude() -> PathBuf {
     installed("CRAZYAGENT_CLAUDE", "claude")
 }
 
+/// The Homebrew harness executable for a row whose pass must come from the real app: a
+/// set override variable could name any program, so it ends the row with the plain
+/// BLOCKED message instead. Input: the variable and the Homebrew command name. Output:
+/// the executable's canonical path.
+fn homebrew_only(variable: &str, name: &str) -> PathBuf {
+    if std::env::var_os(variable).is_some() {
+        panic!(
+            "BLOCKED: {variable} is set, so this row could run another program than the real {name}. Unset it for a live run"
+        );
+    }
+    installed(variable, name)
+}
+
+/// The Homebrew Codex, refused while `CRAZYAGENT_CODEX` overrides it (see [`homebrew_only`]).
+pub(crate) fn real_codex() -> PathBuf {
+    homebrew_only("CRAZYAGENT_CODEX", "codex")
+}
+
+/// The Homebrew Claude Code, refused while `CRAZYAGENT_CLAUDE` overrides it (see
+/// [`homebrew_only`]).
+pub(crate) fn real_claude() -> PathBuf {
+    homebrew_only("CRAZYAGENT_CLAUDE", "claude")
+}
+
+/// A row's own terminal host that closes when dropped, so a row that panics before its
+/// own close still ends its tmux server before its folder goes. Input: the host.
+pub(super) struct Closing(Option<Arc<dyn Host>>);
+
+impl Closing {
+    /// Holds a row's host until [`Closing::close`] or a drop. Input: the host.
+    pub(super) fn new(host: Arc<dyn Host>) -> Self {
+        Self(Some(host))
+    }
+
+    /// Closes the host now, failing the row when the host cannot close. Input: none.
+    /// Output: none.
+    pub(super) fn close(mut self) {
+        self.0
+            .take()
+            .expect("a host closes once")
+            .close(&[])
+            .unwrap();
+    }
+}
+
+impl Drop for Closing {
+    fn drop(&mut self) {
+        if let Some(host) = self.0.take() {
+            let _ = host.close(&[]);
+        }
+    }
+}
+
+/// One short line per report, so a failed wait says what the lead sent: the report's kind,
+/// and for a turn its end, cause and first `SHOWN_TEXT_MAX` characters. Input: the reports.
+/// Output: the lines, in order.
+pub(super) fn shown(reports: &[Report]) -> Vec<String> {
+    const SHOWN_TEXT_MAX: usize = 300;
+    let cut = |text: &str| text.chars().take(SHOWN_TEXT_MAX).collect::<String>();
+    reports
+        .iter()
+        .map(|report| match report {
+            Report::Ready { group, pane } => {
+                format!("Ready group={group} pane={}", pane.is_some())
+            }
+            Report::Progress { bytes } => format!("Progress bytes={bytes}"),
+            Report::Usage { .. } => "Usage".to_owned(),
+            Report::Finished { text, end, cause } => {
+                format!("Finished end={end:?} cause={cause:?} text={:?}", cut(text))
+            }
+            Report::Ended { problem } => format!("Ended problem={problem:?}"),
+            Report::LeftRunning => "LeftRunning".to_owned(),
+            Report::Turn { end, text } => format!("Turn end={end:?} text={:?}", cut(text)),
+            Report::NoTurn => "NoTurn".to_owned(),
+            Report::Own { end, text } => format!("Own end={end:?} text={:?}", cut(text)),
+            Report::Conversation(_) => "Conversation".to_owned(),
+            Report::ResumeRefused => "ResumeRefused".to_owned(),
+            Report::TakeoverUnconfirmed => "TakeoverUnconfirmed".to_owned(),
+            Report::InputReady => "InputReady".to_owned(),
+            Report::Held { held } => format!("Held held={held}"),
+        })
+        .collect()
+}
+
 /// Where a prepared agent's harness app runs: as its worker's child, in a pane on a given
 /// host, or as a native-mode Claude Code lead on the engine's own terminal host at this
 /// engine's root, the project's Claude Code agents set to native teammates.
@@ -205,7 +498,34 @@ enum Placement {
 
 impl ManagedAgent {
     pub(crate) fn new(harness: &'static str, executable: &Path) -> Self {
-        Self::open(harness, executable, Placement::Child, AgentRole::Sub)
+        Self::open(
+            harness,
+            executable,
+            Placement::Child,
+            AgentRole::Sub,
+            None,
+            None,
+        )
+    }
+
+    /// The same agent in a project whose agents run under the None network (S4b), so the
+    /// runtime gives it a model proxy and a profile that reaches only the proxy. Inputs: the
+    /// launch harness and its executable. Output: the prepared agent.
+    pub(crate) fn with_no_network(harness: &'static str, executable: &Path) -> Self {
+        Self::open(
+            harness,
+            executable,
+            Placement::Child,
+            AgentRole::Sub,
+            Some(AgentNetwork::None),
+            None,
+        )
+    }
+
+    /// The loopback port of the model proxy the runtime gave this agent, none when it
+    /// reaches its model directly.
+    pub(crate) fn model_proxy(&self) -> Option<u16> {
+        self.plan.proxy.as_ref().map(|proxy| proxy.port())
     }
 
     /// The same agent, or the project's master when `role` says so, with its harness app in
@@ -217,7 +537,28 @@ impl ManagedAgent {
         host: Arc<dyn Host>,
         role: AgentRole,
     ) -> Self {
-        Self::open(harness, executable, Placement::Pane(host), role)
+        Self::open(harness, executable, Placement::Pane(host), role, None, None)
+    }
+
+    /// The same agent in a pane, in a project whose owner chose `display` for its Claude Code
+    /// terminals (N-D9), saved in the project's coordination settings before the runtime
+    /// prepares it. Inputs: the launch harness, its executable, the host, the role and the
+    /// display. Output: the prepared agent.
+    pub(crate) fn in_pane_with_display(
+        harness: &'static str,
+        executable: &Path,
+        host: Arc<dyn Host>,
+        role: AgentRole,
+        display: crate::coord::settings::TerminalDisplay,
+    ) -> Self {
+        Self::open(
+            harness,
+            executable,
+            Placement::Pane(host),
+            role,
+            None,
+            Some(display),
+        )
     }
 
     /// A Claude Code lead the runtime itself plans as a native-mode lead (DEC-104, TTDL): the
@@ -231,6 +572,8 @@ impl ManagedAgent {
             executable,
             Placement::NativeLead,
             AgentRole::Sub,
+            None,
+            None,
         )
     }
 
@@ -239,6 +582,8 @@ impl ManagedAgent {
         executable: &Path,
         placement: Placement,
         role: AgentRole,
+        network: Option<AgentNetwork>,
+        display: Option<crate::coord::settings::TerminalDisplay>,
     ) -> Self {
         let native = matches!(placement, Placement::NativeLead);
         let root = tempfile::Builder::new()
@@ -305,6 +650,29 @@ impl ManagedAgent {
                 &setup.project_id,
                 HarnessKind::ClaudeCode,
                 SubagentMode::Native,
+            )
+            .unwrap();
+        }
+        if let Some(network) = network {
+            crate::sandbox::policy::save(
+                &connection,
+                PROJECT,
+                &AgentPolicy {
+                    access: AgentAccess::Sandboxed,
+                    network,
+                    ..AgentPolicy::default()
+                },
+            )
+            .unwrap();
+        }
+        if let Some(terminal_display) = display {
+            crate::coord::settings::write(
+                &connection,
+                &setup.project_id,
+                &crate::coord::settings::CoordSettings {
+                    terminal_display,
+                    ..crate::coord::settings::CoordSettings::default()
+                },
             )
             .unwrap();
         }
@@ -424,6 +792,10 @@ impl ManagedAgent {
         let tmp = runtime.agent_folder(AGENT).join("tmp");
         let sandbox_profile = plan.sandbox_profile.clone();
         let working_dir = plan.working_dir.clone();
+        let root = Root {
+            folder: root,
+            home: home.clone(),
+        };
         Self {
             runtime,
             plan,
@@ -504,7 +876,14 @@ impl ManagedAgent {
         let cancel = AtomicBool::new(false);
         let interrupt = AtomicBool::new(false);
         let problem = per_turn(
-            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt,
+            &self.plan,
+            &self.home,
+            &ordered,
+            &reports,
+            &cancel,
+            &interrupt,
+            &AtomicBool::new(false),
+            &super::test_by(),
         );
         drop(reports);
         (reported.iter().collect(), problem)
@@ -552,7 +931,14 @@ impl ManagedAgent {
         let cancel = AtomicBool::new(false);
         let interrupt = AtomicBool::new(false);
         let problem = per_turn(
-            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt,
+            &self.plan,
+            &self.home,
+            &ordered,
+            &reports,
+            &cancel,
+            &interrupt,
+            &AtomicBool::new(false),
+            &super::test_by(),
         );
         drop(reports);
         let finished = reported.iter().find_map(|report| match report {
@@ -562,21 +948,32 @@ impl ManagedAgent {
         finished.unwrap_or_else(|| panic!("the turn never finished: {problem:?}"))
     }
 
-    /// Makes this agent a native-mode lead (DEC-104) that runs in a tmux server of its own,
-    /// as the runtime plans a native lead on a signed-in account. Input: none. Output: none.
-    fn make_native(&mut self) {
-        if self.plan.native {
-            return;
-        }
-        let (host, agent) = self
-            .plan
-            .pane
-            .clone()
-            .expect("a native lead runs in a pane");
-        self.plan.native = true;
-        self.plan.tmux =
-            Some(crate::terminal::tmux::installed(&self.base).expect("tmux must be installed"));
-        self.plan.pane = Some((crate::terminal::own_server(host), agent));
+    /// The instructions the runtime's launch context gives this agent with tools on, which a
+    /// Codex launch writes as `developer_instructions` in its home's `config.toml`. Input:
+    /// none. Output: the text.
+    pub(super) fn instructions(&self) -> String {
+        self.runtime
+            .context(
+                &ProjectId::new(PROJECT).unwrap(),
+                AGENT,
+                self.role,
+                true,
+                crate::agent_git::Layout::Linked,
+            )
+            .unwrap()
+            .instructions()
+            .to_owned()
+    }
+
+    /// Checks that the runtime planned this agent as a native-mode lead (DEC-104), as only
+    /// [`Self::engine_native_lead`] prepares one: its teammates' profile installed, their
+    /// server named and its pane on its own server of the engine's terminal host. Input:
+    /// none. Output: none, or a panic for any other agent.
+    fn assert_native(&self) {
+        assert!(
+            self.plan.native && self.plan.tmux.is_some() && self.plan.pane.is_some(),
+            "a native lead is prepared by engine_native_lead"
+        );
     }
 
     /// The first order of a signed-in native lead: a turn carrying the held profile, the
@@ -627,7 +1024,7 @@ impl ManagedAgent {
         leave: bool,
     ) -> (Vec<Report>, Option<String>) {
         assert!(!prompts.is_empty());
-        self.make_native();
+        self.assert_native();
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
         orders
@@ -654,6 +1051,8 @@ impl ManagedAgent {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(leave),
+            &AtomicBool::new(false),
+            &super::test_by(),
         );
         drop(reports);
         (reported.iter().collect(), problem)
@@ -670,7 +1069,7 @@ impl ManagedAgent {
         prompt: &str,
         turn_time: Duration,
     ) -> (Vec<Report>, Option<String>) {
-        self.make_native();
+        self.assert_native();
         let (host, agent) = self
             .plan
             .pane
@@ -684,9 +1083,14 @@ impl ManagedAgent {
             live: false,
             managed: Some(Managed {
                 home: self.home.clone(),
-                executable: self.plan.executable.clone(),
+                executable: self.plan.entry.clone(),
             }),
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            toolchains: Some(Vec::new()),
+            network: crate::sandbox::policy::AgentNetwork::Open,
+            proxy: None,
+            task_start: None,
+            grants: Vec::new(),
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
@@ -701,6 +1105,8 @@ impl ManagedAgent {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &super::test_by(),
         );
         drop(reports);
         (reported.iter().collect(), problem)
@@ -710,17 +1116,15 @@ impl ManagedAgent {
     /// runtime's first dispatch to a kept session does: the project saves `access`, the
     /// worker starts from the agent's plan at that level, its first turn carries the held
     /// profile and the worker then counts as briefed. Inputs: the profile, the first prompt,
-    /// the turn's time, the saved level and the folder of the lead's terminal host when the
-    /// caller made one, kept until the lead stopped. Output: the running team.
+    /// the turn's time and the saved level. Output: the running team.
     pub(super) fn into_native_worker(
         mut self,
         profile: NativeProfileUse,
         prompt: &str,
         turn_time: Duration,
         access: AgentAccess,
-        folder: Option<tempfile::TempDir>,
     ) -> NativeTeam {
-        self.make_native();
+        self.assert_native();
         crate::sandbox::policy::save(
             &self.runtime.connection,
             PROJECT,
@@ -774,8 +1178,40 @@ impl ManagedAgent {
             home,
             pane,
             _root,
-            _folder: folder,
         }
+    }
+
+    /// Starts this agent's worker from its plan as a launch from a plan does, continuing
+    /// `resume` when given, reads when the worker records its conversation as started fresh,
+    /// then shuts the team down. Input: the conversation to continue, if any. Output: that
+    /// time, none for a launch that continues a conversation.
+    pub(super) fn fresh_at_launch(mut self, resume: Option<Resume>) -> Option<i64> {
+        self.plan.resume = resume;
+        let seat = Seat {
+            project: ProjectId::new(PROJECT).unwrap(),
+            role: self.role,
+            harness: self.plan.harness.clone(),
+            connection: self.binding.connection.id.clone(),
+            tools: true,
+            hosted: None,
+        };
+        let Self {
+            mut runtime,
+            plan,
+            home,
+            _root,
+            ..
+        } = self;
+        runtime
+            .run_worker(
+                AGENT,
+                Launch::Fresh(Box::new(plan), Box::new(Mode::PerTurn { home })),
+                seat,
+            )
+            .unwrap();
+        let fresh = runtime.workers[&AGENT].fresh;
+        runtime.shutdown().unwrap();
+        fresh
     }
 
     /// Builds a command that runs `program` the way the agent's harness runs its tools:
@@ -821,8 +1257,7 @@ pub(super) struct NativeTeam {
     pub(super) runtime: TeamRuntime,
     pub(super) home: PathBuf,
     pane: (Arc<dyn Host>, AgentId),
-    _root: tempfile::TempDir,
-    _folder: Option<tempfile::TempDir>,
+    _root: Root,
 }
 
 impl NativeTeam {
@@ -833,12 +1268,28 @@ impl NativeTeam {
 
     /// Waits for the lead's reports until one matches `last`. Inputs: the longest wait and
     /// the match. Output: every report up to and with the match, or a panic that says what
-    /// ended the wait when the worker ended or the wait passed first.
+    /// ended the wait when the worker ended or the wait passed first and lists every report
+    /// seen before.
     pub(super) fn reports_until(
         &self,
         wait: Duration,
         last: impl Fn(&Report) -> bool,
     ) -> Vec<Report> {
+        self.reports_within(wait, last)
+            .unwrap_or_else(|(why, seen)| {
+                panic!("{why}, after {} others: {:?}", seen.len(), shown(&seen))
+            })
+    }
+
+    /// Waits for the lead's reports until one matches `last`, for a test that shows more
+    /// when the wait fails. Inputs: the longest wait and the match. Output: every report up
+    /// to and with the match, or what ended the wait first, the worker's end or the time,
+    /// with every report seen before.
+    pub(super) fn reports_within(
+        &self,
+        wait: Duration,
+        last: impl Fn(&Report) -> bool,
+    ) -> Result<Vec<Report>, (String, Vec<Report>)> {
         let deadline = Instant::now() + wait;
         let mut seen = Vec::new();
         let mut ended = None;
@@ -852,19 +1303,20 @@ impl NativeTeam {
                     }
                     seen.push(report);
                     if done {
-                        return seen;
+                        return Ok(seen);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    panic!(
-                        "no awaited report from the lead in {wait:?}, after {} others",
-                        seen.len()
-                    )
+                    return Err((format!("no awaited report from the lead in {wait:?}"), seen));
                 }
-                Err(RecvTimeoutError::Disconnected) => panic!(
-                    "the lead's worker ended before the awaited report, problem {ended:?}, after {} others",
-                    seen.len()
-                ),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err((
+                        format!(
+                            "the lead's worker ended before the awaited report, problem {ended:?}"
+                        ),
+                        seen,
+                    ));
+                }
             }
         }
     }
@@ -954,8 +1406,8 @@ impl NativeTeam {
             },
         )
         .unwrap();
-        self.runtime
-            .retire_lowered(&ProjectId::new(PROJECT).unwrap());
+        let (stored, _) = self.setup();
+        self.runtime.retire_narrowed(&stored);
     }
 
     /// Types one prompt into the lead's pane as a person at its terminal does, outside the

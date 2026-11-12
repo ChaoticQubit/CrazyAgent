@@ -6,6 +6,7 @@ use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::harnesses::terminal_session::PaneRecord;
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{CredentialRef, ProjectId};
+use crate::sandbox::policy::AgentAccess;
 use crate::team::runtime::{TeamLimits, TeamRuntime};
 use crate::team::{AgentRole, AgentStatus};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
@@ -16,13 +17,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
+#[cfg(target_os = "macos")]
+use std::time::{Instant, UNIX_EPOCH};
 
 const PROJECT: &str = "recovery-runs";
 const ENDPOINT: &str = "local-a";
 const HEARTBEAT: i64 = 1_800_000_000_000;
 const TURN_OPEN: &str = r#"{"type":"user","message":{"content":"Plan the page"}}"#;
 const TURN_DONE: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}],"stop_reason":"end_turn"}}"#;
+#[cfg(target_os = "macos")]
 const WAIT: Duration = Duration::from_secs(30);
 
 fn reference(value: &str) -> CredentialRef {
@@ -39,6 +43,7 @@ fn waiting(found: &[Interrupted]) -> Listed {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn now() -> i64 {
     i64::try_from(
         SystemTime::now()
@@ -206,6 +211,10 @@ impl Fixture {
         task
     }
 
+    /// Starts team agent `id`'s pane and keeps its record as a current engine does under the
+    /// project's default policy: Sandboxed, with no toolchain, so a later engine's policy
+    /// check (AL-2) keeps the pane it takes over. Takes the host and the agent.
+    /// Returns the record.
     fn pane(&self, host: &Arc<dyn Host>, id: i64) -> PaneRecord {
         let file = self.base.join(format!("session-{id}.jsonl"));
         std::fs::write(&file, format!("{TURN_OPEN}\n{TURN_DONE}\n")).unwrap();
@@ -217,8 +226,11 @@ impl Fixture {
         };
         let since = SystemTime::now();
         let pane = host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
-        let record =
-            PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap();
+        let record = PaneRecord {
+            access: Some(AgentAccess::Sandboxed),
+            toolchains: Some(Vec::new()),
+            ..PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap()
+        };
         self.connection
             .execute(
                 "INSERT OR REPLACE INTO team_panes(agent,record) VALUES (?1,?2)",
@@ -242,6 +254,7 @@ impl Fixture {
             .unwrap()
     }
 
+    #[cfg(target_os = "macos")]
     fn until(&self, team: &mut TeamRuntime, what: &str, done: impl Fn(&Self) -> bool) {
         let deadline = Instant::now() + WAIT;
         while !done(self) {
@@ -439,6 +452,9 @@ fn scan_twice_records_once() {
     again.shutdown().unwrap();
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_clean_stop_mid_turn_records_the_run_when_its_pane_is_gone_at_the_next_start() {
     let fixture = Fixture::new();

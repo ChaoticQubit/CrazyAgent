@@ -97,6 +97,9 @@ impl Store for Keychain {
         account: &str,
         secret: &SecretString,
     ) -> Result<CredentialRef, StoreError> {
+        if secret.expose().len() > SECRET_BYTES_MAX {
+            return Err(StoreError::code("credential_secret_invalid"));
+        }
         let service = self.owned(service)?;
         let account = checked_name(account)?;
         let found = reference(service, account)?;

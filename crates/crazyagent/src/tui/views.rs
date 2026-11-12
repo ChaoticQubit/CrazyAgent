@@ -5,18 +5,29 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Wrap};
 
+const TAB_SPACES: &str = "    ";
+
+/// Cleans text for the classic TUI: drops control and bidi characters except line breaks,
+/// shows a tab as four spaces so later text keeps its column, and stops before the byte limit.
+/// Inputs: the text and the byte limit. Output: the cleaned text, at most `limit` bytes.
 pub fn safe_text(text: &str, limit: usize) -> String {
     let mut output = String::with_capacity(text.len().min(limit));
+    let mut encoded = [0; 4];
     for character in text.chars() {
         if (character.is_control() && character != '\n' && character != '\t')
             || super::frame::bidi_control(character)
         {
             continue;
         }
-        if output.len() + character.len_utf8() > limit {
+        let piece: &str = if character == '\t' {
+            TAB_SPACES
+        } else {
+            character.encode_utf8(&mut encoded)
+        };
+        if output.len() + piece.len() > limit {
             break;
         }
-        output.push(character);
+        output.push_str(piece);
     }
     assert!(output.len() <= limit);
     output

@@ -147,7 +147,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.enable");
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
+        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents?section=tools` });
         await me.waitFor("the skills per role", (text) => ["Master skills", "Lead skills", "Worker skills"].every((label) => text.includes(label)), STEP_MS);
         await shows("workers on All approved skills", [["All approved skills", "true"], ["Chosen skills", "false"]], radios);
         assert.deepEqual(await boxes(), [], "All approved skills shows no skill boxes");

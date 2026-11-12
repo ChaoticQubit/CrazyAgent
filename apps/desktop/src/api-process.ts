@@ -1,7 +1,8 @@
 import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
-import type { GraphNode, ImportCommit, ImportFile, Nudges } from "./engine-client";
+import type { GraphNode, ImportCommit, ImportFile, Nudges, UncommittedImport } from "./engine-client";
+import { displayText } from "./screens/conversation";
 import { formatRoute } from "./ui/router";
 
 /** The most bytes one instructions text may hold; the engine refuses more. */
@@ -10,6 +11,10 @@ export const PROCESS_TEXT_BYTES_MAX = 65536;
 const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const NAME_CHARACTER = /[A-Za-z0-9_.:-]/u;
 const WORD_CHARACTER = /[A-Za-z0-9_]/u;
+
+/** The plugin names the engine accepts before a skill name (`launch_context.rs:1514-1517`):
+ * `crazyagent:tdd` names the same skill as `tdd`. */
+const SKILL_NAMESPACES = ["crazyagent:", "superpowers:", "software-practices:"] as const;
 
 /** Tells whether a name that matched up to `end` stops there: the next character is not part
  * of a name, or is punctuation such as a sentence's full stop that no letter follows.
@@ -30,6 +35,7 @@ const REFUSALS: Record<string, string> = {
   process_import_missing: "That file no longer exists. Pick another one.",
   process_import_unsafe: "That file isn't a plain file you own, so CrazyAgent won't read it.",
   process_import_unreadable: "That file couldn't be read. Check it, then try again.",
+  process_instructions_would_be_empty: "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.",
   process_import_outside: "That file links outside the project folder, so it stays where it is.",
   process_import_unmovable: "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.",
   process_request_invalid: "CrazyAgent couldn't read that path. Pick the file again.",
@@ -43,6 +49,21 @@ const REFUSALS: Record<string, string> = {
   process_folder_missing: "CrazyAgent's data folder is missing. Restart the engine, then try again.",
   process_folder_unsafe: "CrazyAgent's data folder isn't a plain folder, so nothing was saved.",
   process_unavailable: "Instructions aren't ready in this engine yet.",
+  process_save_unavailable: "The engine couldn't save right now, so nothing was saved. Save again.",
+  instructions_cleanup_pool_needed: "Pick the pool that runs this edit first.",
+  instructions_cleanup_pool_not_asked: "A project's edit runs on the project's own pool, so nothing was sent. Try again.",
+  instructions_cleanup_pool_unknown: "That pool no longer exists, so nothing was sent. Pick another one.",
+  instructions_cleanup_project_pool_missing: "This project has no pool yet, so nothing was sent. Give it one under Pools, then try again.",
+  instructions_cleanup_no_account: "No account in the pool can run this edit, so nothing was sent. Sign one in under Pools, then try again.",
+  instructions_cleanup_paused: "Every account in the pool hit its limit, so nothing was sent. Try again later.",
+  instructions_cleanup_busy: "Another Edit with AI is still running. Wait for it, then try again.",
+  instructions_cleanup_empty: "There is nothing saved to clean up yet. Write the instructions first.",
+  instructions_cleanup_failed: "The model run failed, so nothing changed. Try again.",
+  instructions_cleanup_timed_out: "The model took longer than 5 minutes, so nothing changed. Try again.",
+  instructions_cleanup_no_proposal: "The model gave no file back, so nothing changed. Try again.",
+  instructions_cleanup_too_large: "The model's file is over 64 KB, so nothing changed. Try again.",
+  instructions_cleanup_off: "Edit with AI is off for these instructions, so nothing was sent. Turn it on first.",
+  instructions_cleanup_unavailable: "Edit with AI can't run in this engine, so nothing was sent.",
   process_outcome_unknown: "CrazyAgent couldn't confirm what happened. Reload before you try again.",
   process_agent_unknown: "This agent isn't part of this project's team.",
   process_agent_unsupported: "CrazyAgent doesn't write instructions for this agent's harness.",
@@ -52,6 +73,7 @@ const REFUSALS: Record<string, string> = {
   agent_instructions_unreadable: "This agent's instructions file couldn't be read. Try again.",
   instruction_settings_invalid: "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.",
   instruction_settings_unavailable: "This project's agent settings couldn't be read. Try again.",
+  instruction_settings_save_unavailable: "The engine couldn't save right now, so nothing was saved. Change it again.",
   process_adoption_unavailable: "Workflow adoption couldn't be read. Try again.",
 };
 
@@ -144,10 +166,12 @@ export function confirmInstructionImport(projectId: string): Promise<Result<Impo
   return call<ImportFile[]>("desktop_confirm_instruction_import", { projectId });
 }
 
-/** Lists the moved instruction files whose move the project's checkout has not committed.
- * Input: the project id. Output: the paths, empty when no move waits for a commit. */
-export function loadUncommittedImport(projectId: string): Promise<Result<string[]>> {
-  return call<string[]>("desktop_uncommitted_instruction_import", { projectId });
+/** Lists the moved instruction files whose move the project's checkout has not committed,
+ * with its checked-out branch. Input: the project id. Output: the paths, empty when no move
+ * waits for a commit, the branch, null for a detached HEAD or when no move waits, and the
+ * checked-out branch whether or not a move waits. */
+export function loadUncommittedImport(projectId: string): Promise<Result<UncommittedImport>> {
+  return call<UncommittedImport>("desktop_uncommitted_instruction_import", { projectId });
 }
 
 /** Commits the instruction import's move as one local commit on the checkout's current branch
@@ -160,7 +184,7 @@ export function commitInstructionImport(projectId: string): Promise<Result<Impor
 /** The toast after a committed move, naming the branch and files. Input: the commit.
  * Output: the sentence. */
 export function committedMessage(commit: ImportCommit): string {
-  return `Committed the move on ${commit.branch}: ${commit.files.join(", ")}. Nothing was pushed.`;
+  return `Committed the move on ${displayText(commit.branch)}: ${commit.files.join(", ")}. Nothing was pushed.`;
 }
 
 /** Why one found instruction file stays in place, in plain words. Input: its refusal code.
@@ -174,6 +198,13 @@ export function defaultProcess(): Promise<Result<string>> {
   return call<string>("desktop_default_process");
 }
 
+/** Reads the instructions a project's agents get, composed by the engine as launches compose
+ * them for the project's mode. Input: the project id. Output: the text, empty when agents get
+ * none. */
+export function loadGivenText(projectId: string): Promise<Result<string>> {
+  return call<string>("desktop_process_given", { projectId });
+}
+
 /** A skill the tags can name: its engine id, its name and its one-line description. */
 export interface SkillEntry {
   id: string;
@@ -184,8 +215,23 @@ export interface SkillEntry {
 /** One piece of instructions text: plain text, or a skill name that matches the catalog. */
 export type ProcessSegment = { kind: "text"; text: string } | { kind: "skill"; id: string; name: string; description: string };
 
-/** Splits instructions text into plain text and skill tags: a whole skill name, not part of
- * a longer name, that matches the catalog. Longer names win over names they contain.
+/** Finds a catalog name written with an engine namespace at `at`, such as `crazyagent:tdd`.
+ * Inputs: the text, the position, catalog names by first character, longest first.
+ * Output: the qualified text and the bare name, or undefined when none starts there. */
+function qualifiedAt(text: string, at: number, byFirst: Map<string, string[]>): { written: string; bare: string } | undefined {
+  const namespace = SKILL_NAMESPACES.find((prefix) => text.startsWith(prefix, at));
+  if (namespace === undefined) return undefined;
+  const start = at + namespace.length;
+  const bare = byFirst.get(text[start] ?? "")?.find((candidate) => text.startsWith(candidate, start) && endsAt(text, start + candidate.length));
+  if (bare === undefined) return undefined;
+  const written = namespace + bare;
+  if (!text.startsWith(written, at)) throw new Error("A qualified skill name is not the text it was read from.");
+  return { written, bare };
+}
+
+/** Splits instructions text into plain text and skill tags: a whole skill name, bare or after
+ * an engine namespace (`crazyagent:`, `superpowers:`, `software-practices:`), not part of a
+ * longer name, that matches the catalog. Longer names win over names they contain.
  * Inputs: the text and the skill catalog. Output: the pieces, which join back to the text. */
 export function skillSegments(text: string, skills: readonly SkillEntry[]): ProcessSegment[] {
   const known = new Map<string, SkillEntry>();
@@ -201,19 +247,23 @@ export function skillSegments(text: string, skills: readonly SkillEntry[]): Proc
   let at = 0;
   while (at < text.length) {
     const before = at === 0 ? "" : text[at - 1];
-    const name = NAME_CHARACTER.test(before) ? undefined
+    const inName = NAME_CHARACTER.test(before);
+    const plainName = inName ? undefined
       : byFirst.get(text[at])?.find((candidate) => text.startsWith(candidate, at) && endsAt(text, at + candidate.length));
-    if (name === undefined) {
+    const match = plainName !== undefined ? { written: plainName, bare: plainName }
+      : inName ? undefined : qualifiedAt(text, at, byFirst);
+    if (match === undefined) {
       plain += text[at];
       at += 1;
       continue;
     }
     if (plain) segments.push({ kind: "text", text: plain });
     plain = "";
-    const skill = known.get(name);
+    const skill = known.get(match.bare);
     if (skill === undefined) throw new Error("A matched skill name is missing from the catalog.");
-    segments.push({ kind: "skill", id: skill.id, name, description: skill.description });
-    at += name.length;
+    if (match.written.length < match.bare.length) throw new Error("A written skill name is shorter than its catalog name.");
+    segments.push({ kind: "skill", id: skill.id, name: match.written, description: skill.description });
+    at += match.written.length;
   }
   if (plain) segments.push({ kind: "text", text: plain });
   return segments;
@@ -238,36 +288,63 @@ export type InstructionMode = "project_only" | "app_only" | "both";
 /** How an edit to the instructions reaches agents that already run (DEC-111 QR1). */
 export type EditDelivery = "next_message" | "restart" | "badge";
 
+/** What agents get of a project line the app instructions already have (DEC-132 Q7). */
+export type Repeated = "leave_out" | "keep";
+
 /** One project's agent settings: which instructions its agents get, whether headless
- * Claude runs keep their transcript and how an instruction edit reaches running agents. */
+ * Claude runs keep their transcript, how an instruction edit reaches running agents,
+ * whether project lines the app instructions already have are left out and whether the
+ * editor offers Edit with AI (on unless false). */
 export interface InstructionSettings {
   mode: InstructionMode;
   transcripts: boolean;
   edits?: EditDelivery;
+  repeated?: Repeated;
+  edit_with_ai?: boolean;
 }
 
-/** One project's agent settings and the version they were read at, which a save names. */
+/** One project's agent settings, the version they were read at, which a save names, and how
+ * many lines of the project's file repeat the app instructions. */
 export interface InstructionView {
   settings: InstructionSettings;
   version: number;
+  repeats?: number;
 }
 
 /** The settings of a project the owner never changed. */
 export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { mode: "both", transcripts: true, edits: "next_message" };
 
+/** Both answers to a project line the app instructions already have, the default first. */
+export const REPEATED_LINES: readonly { value: Repeated; label: string }[] = [
+  { value: "leave_out", label: "Leave out" },
+  { value: "keep", label: "Keep" },
+];
+
+/** What the page says beside the repeated lines choice: how many lines of the project's file
+ * repeat the app instructions and what agents get of them. Inputs: the project's settings and
+ * the count the engine gave. */
+export function repeatedNote(settings: InstructionSettings, repeats: number): string {
+  if (!Number.isInteger(repeats) || repeats < 0) throw new Error(`repeatedNote: ${repeats} repeated lines is not a count`);
+  if (settings.mode !== "both") return "Repeated lines only matter when agents get both the app and the project instructions.";
+  if (repeats === 0) return "No line of this project's file repeats the app instructions.";
+  const lines = repeats === 1 ? "1 line of this project's file repeats" : `${repeats} lines of this project's file repeat`;
+  if (settings.repeated === "keep") return `${lines} the app instructions, and agents get ${repeats === 1 ? "it" : "them"} twice.`;
+  return `${lines} the app instructions and ${repeats === 1 ? "is" : "are"} left out for agents. Only a line in the same place counts. Code blocks, tables and rules always stay.`;
+}
+
 /** Every way an instruction edit can reach running agents, in the order the page lists
  * them, with what each does. */
 export const EDIT_DELIVERIES: readonly { value: EditDelivery; label: string; note: string }[] = [
-  { value: "next_message", label: "Next task", note: "A running agent's next task starts with the sections you changed, sent once." },
+  { value: "next_message", label: "At next task", note: "A running agent's next task starts with the sections you changed, sent once." },
   { value: "restart", label: "Restart when idle", note: "A running agent restarts when it is next idle and resumes its conversation with the new text." },
   { value: "badge", label: "Badge only", note: "Nothing is sent. A running agent shows Instructions changed until it starts again." },
 ];
 
 /** Every instructions option in the order the page lists them, with what it hands agents. */
 export const INSTRUCTION_MODES: readonly { value: InstructionMode; label: string; note: string }[] = [
+  { value: "both", label: "App and project", note: "Agents get the app instructions, then this project's appended. An empty project text gives the app text as it is." },
   { value: "project_only", label: "Project only", note: "Agents get only this project's instructions, from its .crazyagent/instructions.md." },
   { value: "app_only", label: "App only", note: "Agents get only the app instructions from Settings > Process." },
-  { value: "both", label: "Both (app, then project appended)", note: "Agents get the app instructions, then this project's appended. An empty project text gives the app text as it is." },
 ];
 
 /** Reads one project's agent settings. Input: the project id. Output: the settings, the
@@ -287,6 +364,21 @@ export function saveInstructionSettings(projectId: string, settings: Instruction
 /** What the agent settings say after a save refused because they changed since the page
  * read them, once it shows the saved ones again. */
 export const AGENT_SETTINGS_STALE = "These agent settings changed since you opened them. The page now shows the saved ones; make your change again.";
+
+/** What the agent settings say after a save the engine could not confirm, once the page
+ * shows the saved ones again. */
+export const AGENT_SETTINGS_UNCONFIRMED = "CrazyAgent couldn't confirm these agent settings were saved. The page now shows the saved ones; check them before you change them again.";
+
+/** What the agent settings page does after a save: reads the settings and their version again
+ * after one that landed, one refused as stale or one the engine could not confirm, which may
+ * have landed, and says what happened. Input: the save's result. Output: whether to read the
+ * settings again, and the failure to show, empty for none. */
+export function afterSettingsSave(result: Result<InstructionView>): { reload: boolean; failure: string } {
+  if (result.kind === "ok") return { reload: true, failure: "" };
+  if (result.kind === "error" && result.code === "stale_revision") return { reload: true, failure: AGENT_SETTINGS_STALE };
+  if (result.kind === "error" && result.code === "process_outcome_unknown") return { reload: true, failure: AGENT_SETTINGS_UNCONFIRMED };
+  return { reload: false, failure: processMessage(result) };
+}
 
 /** The version an agent settings save names: the one read, or null when the stored settings
  * could not be read and the save replaces them. Input: the read. Output: the version. */
@@ -336,13 +428,18 @@ export interface AgentInstructions {
   files: InstructionRecord[];
 }
 
+const GIVEN_AT_LAUNCH = "none loaded by the harness itself; CrazyAgent gives its instructions at launch";
+const NO_RECORD = "A headless run reports nothing here while it keeps no transcript.";
+
 /** The one-line summary of what an agent's harness reported: "Instructions: CLAUDE.md,
- * AGENTS.md - Skills used: tdd", each file name once. Input: the view. Output: the line,
- * saying "not reported yet" before the harness wrote a session record. */
-export function reportedLine(value: Pick<AgentInstructions, "sessions" | "loaded" | "skills_used">): string {
-  if (value.sessions === 0) return "Instructions: not reported yet - Skills used: not reported yet";
+ * AGENTS.md - Skills used: tdd", each file name once, in the same words for every harness
+ * (DEC-141 PA-14): with no file loaded it says CrazyAgent gave the instructions at launch,
+ * and before any record that a headless run keeping no transcript reports nothing.
+ * Input: the view. Output: the line, "not reported yet" before a session record. */
+export function reportedLine(value: Pick<AgentInstructions, "harness" | "sessions" | "loaded" | "skills_used">): string {
+  if (value.sessions === 0) return `Instructions: not reported yet - Skills used: not reported yet. ${NO_RECORD}`;
   const names = [...new Set(value.loaded.map((file) => file.name))];
-  const files = names.length > 0 ? names.join(", ") : "none loaded by its harness";
+  const files = names.length > 0 ? names.join(", ") : GIVEN_AT_LAUNCH;
   const used = value.skills_used.length > 0 ? value.skills_used.join(", ") : "none";
   return `Instructions: ${files} - Skills used: ${used}`;
 }
@@ -387,7 +484,7 @@ export interface SkillCount {
  * tool in the settings' order, its calls of each enabled skill in the view's skill order
  * (zero included), the skills it called that the project has not enabled, its graphify and
  * ctx_* calls, its flags now and the flags it was already reminded of, and whether its
- * launch fires no hooks, so no counts or flags exist. */
+ * launch fires no hooks, whose calls the engine counts from its transcript instead. */
 export interface AgentAdoption {
   agent: number;
   role: string;
@@ -417,4 +514,75 @@ export interface Adoption {
 /** Reads one project's workflow adoption. Input: the project id. Output: the view. */
 export function loadAdoption(projectId: string): Promise<Result<Adoption>> {
   return call<Adoption>("desktop_adoption", { projectId });
+}
+
+/** The owner's app-wide instruction settings: whether Edit with AI may send the app
+ * instructions to a model. */
+export interface AppInstructionSettings {
+  edit_with_ai: boolean;
+}
+
+/** Reads the app-wide instruction settings. Output: the settings, on when never stored. */
+export function loadAppInstructionSettings(): Promise<Result<AppInstructionSettings>> {
+  return call<AppInstructionSettings>("desktop_app_instruction_settings");
+}
+
+/** Stores the app-wide instruction settings whole. Input: the settings. Output: the settings
+ * as stored. */
+export function saveAppInstructionSettings(settings: AppInstructionSettings): Promise<Result<AppInstructionSettings>> {
+  return call<AppInstructionSettings>("desktop_save_app_instruction_settings", { settings });
+}
+
+/** A cleaned instructions file a model proposes and the version of the saved file it was made
+ * from, which Accept names so a newer save is never lost. */
+export interface Proposal {
+  text: string;
+  base_version: number;
+}
+
+/** Asks the engine for a cleaned version of the saved instructions (DEC-132 Q6). Inputs: null
+ * for the app text or the project id, and the pool the owner picked for this run, which the
+ * app text needs and a project never takes. Output: the proposal; nothing is saved. */
+export function proposeProcess(projectId: string | null, pool: string | null): Promise<Result<Proposal>> {
+  if ((projectId === null) !== (pool !== null)) throw new Error("proposeProcess: the app text needs a picked pool and a project takes none");
+  return call<Proposal>("desktop_process_propose", { projectId, pool });
+}
+
+/** One line of a proposal beside the saved text: kept, added by the proposal or removed by it. */
+export type DiffRow = { kind: "same" | "added" | "removed"; text: string };
+
+/** The most lines either text may have for a line diff; past it the page shows both whole. */
+export const DIFF_LINES_MAX = 2000;
+
+/** Splits a text into its lines; a last line break ends the last line and adds none. */
+function linesOf(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+/** Compares two texts line by line with a longest common subsequence. Inputs: the saved text
+ * and the proposed one. Output: the rows in reading order, removed lines before the added
+ * ones that replace them, or null when either text has more than DIFF_LINES_MAX lines. */
+export function lineDiff(before: string, after: string): DiffRow[] | null {
+  const old = linesOf(before);
+  const next = linesOf(after);
+  if (old.length > DIFF_LINES_MAX || next.length > DIFF_LINES_MAX) return null;
+  const width = next.length + 1;
+  const common = new Uint16Array((old.length + 1) * width);
+  for (let a = old.length - 1; a >= 0; a -= 1) {
+    for (let b = next.length - 1; b >= 0; b -= 1) {
+      common[a * width + b] = old[a] === next[b] ? common[(a + 1) * width + b + 1] + 1 : Math.max(common[(a + 1) * width + b], common[a * width + b + 1]);
+    }
+  }
+  const rows: DiffRow[] = [];
+  let a = 0;
+  let b = 0;
+  while (a < old.length || b < next.length) {
+    if (a < old.length && b < next.length && old[a] === next[b]) { rows.push({ kind: "same", text: old[a] }); a += 1; b += 1; }
+    else if (a < old.length && (b === next.length || common[(a + 1) * width + b] >= common[a * width + b + 1])) { rows.push({ kind: "removed", text: old[a] }); a += 1; }
+    else { rows.push({ kind: "added", text: next[b] }); b += 1; }
+  }
+  if (rows.length < Math.max(old.length, next.length) || rows.length > old.length + next.length) throw new Error("lineDiff: the rows do not cover both texts");
+  return rows;
 }

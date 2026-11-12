@@ -28,7 +28,7 @@ test("launch takes an instructions file only once, by name, outside the home and
   }
 });
 
-test("instructions are read only from a private single-link UTF-8 file of at most 64 KiB", async () => {
+test("instructions are read only from a private single-link UTF-8 file of at most the size every master gets", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "rcli-instructions-")));
   try {
     await chmod(root, 0o700);
@@ -47,14 +47,14 @@ test("instructions are read only from a private single-link UTF-8 file of at mos
     await rm(second);
     assert.equal(await readInstructions(file), "OWNER-RULE-86\n");
     const whole = join(root, "whole.md");
-    await writeFile(whole, Buffer.alloc(65_536, 0x61), { mode: 0o600 });
-    assert.equal((await readInstructions(whole)).length, 65_536);
+    await writeFile(whole, Buffer.alloc(131_539, 0x61), { mode: 0o600 });
+    assert.equal((await readInstructions(whole)).length, 131_539);
     for (const [name, bytes] of [
       ["empty.md", Buffer.alloc(0)],
       ["blank.md", Buffer.from(" \n\t\n")],
       ["nul.md", Buffer.from("a\u0000b")],
       ["latin.md", Buffer.from([0x61, 0xff, 0xfe])],
-      ["large.md", Buffer.alloc(65_537, 0x61)],
+      ["large.md", Buffer.alloc(131_540, 0x61)],
     ]) {
       const path = join(root, name);
       await writeFile(path, bytes, { mode: 0o600 });

@@ -314,7 +314,8 @@ fn team_tools_match_the_catalog() {
     );
 
     let drop = case.base.join("tmp").join(crate::team::tool::DROP_FILE);
-    let reply_end = listed(|input, output| crate::team::tool::serve(input, output, &drop).unwrap());
+    let reply_end =
+        listed(|input, output| crate::team::tool::serve(input, output, &drop, None, &[]).unwrap());
     assert!(
         reply_end
             .iter()
@@ -578,7 +579,7 @@ fn a_lead_spawn_with_a_ticket_links_its_task_and_a_refused_ticket_leaves_no_task
 #[test]
 fn master_instructions_name_the_ticket_tools_and_the_close_setting() {
     let case = Case::new();
-    let rules = crate::setup::bundled::TICKET_RULES;
+    let rules = crate::setup::pack::TICKET_RULES;
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/pack/rules/tickets.md");
     assert_eq!(std::fs::read_to_string(shipped).unwrap(), rules);
     assert!(!rules.contains("<!--"));
@@ -627,7 +628,7 @@ fn master_instructions_name_the_ticket_tools_and_the_close_setting() {
         .unwrap();
     tx.commit().unwrap();
     let agent = base()
-        .with_agent_team_tool(engine, &case.mailbox, &[])
+        .with_agent_team_tool(engine, &case.mailbox, &[], false)
         .unwrap()
         .with_ticket_rules(&case.db, &project())
         .unwrap();
@@ -651,7 +652,7 @@ fn master_instructions_name_the_ticket_tools_and_the_close_setting() {
     let bare = ProjectId::new("bare").unwrap();
     let plain = crate::launch_context::for_project(&case.db, &bare, Layout::Linked)
         .unwrap()
-        .with_agent_team_tool(engine, &case.mailbox, &[])
+        .with_agent_team_tool(engine, &case.mailbox, &[], false)
         .unwrap();
     let before = plain.instructions().to_owned();
     let unattached = plain.with_ticket_rules(&case.db, &bare).unwrap();

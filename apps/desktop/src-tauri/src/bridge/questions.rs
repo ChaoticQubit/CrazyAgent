@@ -3,25 +3,30 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, QUESTIONS_CODES};
 use crazyagent::protocol::ProjectId;
 use crazyagent::questions::{
-    ANSWER_BYTES_MAX, Answer, OPTIONS_MAX, Question, QuestionStatus, Settlement,
+    ANSWER_BYTES_MAX, Answer, BulkDismissal, ClosedBy, LISTED_MAX, OPTIONS_MAX, Question,
+    QuestionKind, QuestionStatus, Settlement,
 };
 use serde::Serialize;
 use std::sync::Arc;
 
-/// One question an agent or an engine step asked the owner, as the window shows it: plain
-/// status words and the version an answer or dismissal sends back.
+/// One question an agent or an engine step asked the owner, as the window shows it: how it
+/// is answered (`single`, `multi` or `text`), plain status words, who closed it when the
+/// owner did not (`master`, `replaced` or `relay`) and the version an answer or dismissal
+/// sends back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QuestionRow {
     pub id: u64,
     pub project_id: String,
     pub asker: String,
     pub question: String,
+    pub kind: QuestionKind,
     pub options: Vec<String>,
     pub recommended: Option<String>,
     pub context: Option<String>,
     pub status: &'static str,
     pub version: u64,
     pub answer: Option<String>,
+    pub closed_by: Option<ClosedBy>,
     pub created_ms: u64,
     pub settled_ms: Option<u64>,
 }
@@ -33,6 +38,7 @@ impl From<Question> for QuestionRow {
             project_id: question.project.as_str().to_owned(),
             asker: question.asker,
             question: question.question,
+            kind: question.kind,
             options: question.options,
             recommended: question.recommended,
             context: question.context,
@@ -44,6 +50,7 @@ impl From<Question> for QuestionRow {
             },
             version: question.version,
             answer: question.answer,
+            closed_by: question.closed_by,
             created_ms: question.created_ms,
             settled_ms: question.settled_ms,
         }
@@ -55,6 +62,39 @@ impl From<Question> for QuestionRow {
 pub struct QuestionPage {
     pub items: Vec<QuestionRow>,
     pub next: Option<u64>,
+}
+
+/// What one "Dismiss all" did (F12): the questions dismissed, the ones settled or changed
+/// since the owner read them, and each one refused with its questions code.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct QuestionsDismissed {
+    pub settled: Vec<u64>,
+    pub stale: Vec<u64>,
+    pub refused: Vec<RefusedQuestion>,
+}
+
+/// One question a "Dismiss all" could not dismiss and the code that says why.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct RefusedQuestion {
+    pub id: u64,
+    pub code: &'static str,
+}
+
+impl From<BulkDismissal> for QuestionsDismissed {
+    fn from(outcome: BulkDismissal) -> Self {
+        Self {
+            settled: outcome.settled,
+            stale: outcome.stale,
+            refused: outcome
+                .refused
+                .into_iter()
+                .map(|(id, code)| RefusedQuestion {
+                    id,
+                    code: questions_error(EngineError(code)).code,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// How many questions of one project wait for the owner.
@@ -81,17 +121,24 @@ pub fn questions_error(error: EngineError) -> BridgeError {
     )
 }
 
-/// The owner's answer as the window sends it: exactly one of an option position below
-/// `OPTIONS_MAX` or typed text that is not blank and at most `ANSWER_BYTES_MAX` bytes.
-/// Inputs: the option and the text. Output: the answer, or `questions_answer_invalid`.
-pub fn choice(option: Option<u8>, text: Option<String>) -> Result<Answer, BridgeError> {
-    match (option, text) {
-        (Some(index), None) if usize::from(index) < OPTIONS_MAX => Ok(Answer::Option(index)),
-        (None, Some(text)) if !text.trim().is_empty() && text.len() <= ANSWER_BYTES_MAX => {
-            Ok(Answer::Text(text))
-        }
-        _ => Err(failure("questions_answer_invalid")),
+/// The owner's answer as the window sends it: distinct option positions below
+/// `OPTIONS_MAX` and an optional comment within `ANSWER_BYTES_MAX`, at least one of them.
+/// Inputs: the picks and the comment. Output: the answer, or `questions_answer_invalid`.
+pub fn choice(picks: Vec<u8>, comment: Option<String>) -> Result<Answer, BridgeError> {
+    let in_range =
+        picks.len() <= OPTIONS_MAX && picks.iter().all(|at| usize::from(*at) < OPTIONS_MAX);
+    let distinct = picks
+        .iter()
+        .enumerate()
+        .all(|(index, at)| !picks[..index].contains(at));
+    let comment = comment.filter(|text| !text.trim().is_empty());
+    let sized = comment
+        .as_ref()
+        .is_none_or(|text| text.len() <= ANSWER_BYTES_MAX);
+    if !in_range || !distinct || !sized || (picks.is_empty() && comment.is_none()) {
+        return Err(failure("questions_answer_invalid"));
     }
+    Ok(Answer { picks, comment })
 }
 
 /// Reads an engine settlement: Ok once recorded, `questions_stale` when the question
@@ -141,17 +188,17 @@ impl NativeBridge {
         }))
     }
 
-    /// Answers a pending question with one option or typed text, run without the bridge
-    /// lock. Inputs: the question id, the version the owner read, and the option or text.
-    /// Output: Ok once recorded; `questions_stale` when it changed since.
+    /// Answers a pending question with picked options, a comment or both, run without the
+    /// bridge lock. Inputs: the question id, the version the owner read, the picks and the
+    /// comment. Output: Ok once recorded; `questions_stale` when it changed since.
     pub fn answer_question(
         &self,
         id: u64,
         version: u64,
-        option: Option<u8>,
-        text: Option<String>,
+        picks: Vec<u8>,
+        comment: Option<String>,
     ) -> Result<Unlocked<()>, BridgeError> {
-        let answer = choice(option, text)?;
+        let answer = choice(picks, comment)?;
         let client = self.questions_client()?;
         Ok(Box::pin(async move {
             settled(
@@ -178,6 +225,31 @@ impl NativeBridge {
         }))
     }
 
+    /// Dismisses up to `LISTED_MAX` pending questions at once, each naming the version the
+    /// owner read, run without the bridge lock (F12). Input: each question's id and version.
+    /// Output: what happened to each, or `questions_bulk_invalid` for an empty list, one
+    /// longer than `LISTED_MAX` or one naming a question twice.
+    pub fn dismiss_questions(
+        &self,
+        items: Vec<(u64, u64)>,
+    ) -> Result<Unlocked<QuestionsDismissed>, BridgeError> {
+        let distinct = items
+            .iter()
+            .enumerate()
+            .all(|(index, (id, _))| !items[..index].iter().any(|(seen, _)| seen == id));
+        if items.is_empty() || items.len() > LISTED_MAX || !distinct {
+            return Err(failure("questions_bulk_invalid"));
+        }
+        let client = self.questions_client()?;
+        Ok(Box::pin(async move {
+            let outcome = client
+                .questions_dismiss_many(items)
+                .await
+                .map_err(questions_error)?;
+            Ok(QuestionsDismissed::from(outcome))
+        }))
+    }
+
     /// Reads how many questions wait for the owner in each project, run without the bridge
     /// lock. Output: the counts of the projects that have any.
     pub fn question_counts(&self) -> Result<Unlocked<Vec<QuestionCount>>, BridgeError> {
@@ -200,37 +272,53 @@ impl NativeBridge {
 mod tests {
     use super::*;
 
-    /// The window sends exactly one of an option or typed text, within the engine's bounds;
+    /// The window sends distinct picks, a comment or both, within the engine's bounds;
     /// anything else is refused before the engine is asked.
     #[test]
-    fn an_answer_is_one_option_or_bounded_text() {
+    fn an_answer_is_distinct_picks_a_bounded_comment_or_both() {
         let last = u8::try_from(OPTIONS_MAX - 1).unwrap();
         let past = u8::try_from(OPTIONS_MAX).unwrap();
-        assert!(matches!(choice(Some(0), None), Ok(Answer::Option(0))));
-        assert!(matches!(
-            choice(Some(last), None),
-            Ok(Answer::Option(index)) if index == last
-        ));
-        assert!(matches!(
-            choice(None, Some("Use Postgres".into())),
-            Ok(Answer::Text(text)) if text == "Use Postgres"
-        ));
-        let longest = "a".repeat(ANSWER_BYTES_MAX);
-        assert!(
-            matches!(choice(None, Some(longest.clone())), Ok(Answer::Text(text)) if text == longest)
+        let answer = |picks: &[u8], comment: Option<&str>| Answer {
+            picks: picks.to_vec(),
+            comment: comment.map(str::to_owned),
+        };
+        assert_eq!(choice(vec![0], None).unwrap(), answer(&[0], None));
+        assert_eq!(
+            choice(vec![last, 0], None).unwrap(),
+            answer(&[last, 0], None)
         );
-        for (option, text) in [
-            (None, None),
-            (Some(past), None),
-            (Some(0), Some("both".into())),
-            (None, Some(" \n\t".into())),
-            (None, Some("a".repeat(ANSWER_BYTES_MAX + 1))),
-            (None, Some("\u{e9}".repeat(ANSWER_BYTES_MAX / 2 + 1))),
+        assert_eq!(
+            choice(Vec::new(), Some("Use Postgres".into())).unwrap(),
+            answer(&[], Some("Use Postgres"))
+        );
+        assert_eq!(
+            choice(vec![0], Some("both".into())).unwrap(),
+            answer(&[0], Some("both"))
+        );
+        assert_eq!(
+            choice(vec![1], Some(" \n\t".into())).unwrap(),
+            answer(&[1], None)
+        );
+        let longest = "a".repeat(ANSWER_BYTES_MAX);
+        assert_eq!(
+            choice(Vec::new(), Some(longest.clone())).unwrap(),
+            answer(&[], Some(&longest))
+        );
+        let every: Vec<u8> = (0..=last).collect();
+        assert_eq!(choice(every.clone(), None).unwrap(), answer(&every, None));
+        for (picks, comment) in [
+            (Vec::new(), None),
+            (vec![past], None),
+            (vec![0, 0], None),
+            ([every.as_slice(), &[0]].concat(), None),
+            (Vec::new(), Some(" \n\t".into())),
+            (Vec::new(), Some("a".repeat(ANSWER_BYTES_MAX + 1))),
+            (vec![0], Some("\u{e9}".repeat(ANSWER_BYTES_MAX / 2 + 1))),
         ] {
             assert_eq!(
-                choice(option, text.clone()).unwrap_err().code,
+                choice(picks.clone(), comment.clone()).unwrap_err().code,
                 "questions_answer_invalid",
-                "{option:?} {text:?}"
+                "{picks:?} {comment:?}"
             );
         }
     }

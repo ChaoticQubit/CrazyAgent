@@ -2,6 +2,7 @@ use super::{LimitWindow, Observation, PLAN_BYTES_MAX, RESET_MS_MAX, checked_text
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use crate::github::http::Request;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -12,7 +13,8 @@ const WEEK_SECONDS: u64 = 7 * 24 * 60 * 60;
 const ACCOUNT_ID_BYTES_MAX: usize = 128;
 
 /// Whose usage call a poll makes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Provider {
     Claude,
     Codex,
@@ -146,6 +148,7 @@ pub fn parse_claude(body: &[u8]) -> Result<Observation, EngineError> {
         plan: None,
         five_hour: claude_window(&value["five_hour"])?,
         weekly: claude_window(&value["seven_day"])?,
+        provider: Some(Provider::Claude),
     };
     if observation.five_hour.is_none() && observation.weekly.is_none() {
         return Err(invalid());
@@ -189,7 +192,8 @@ fn codex_window(
 /// Reads the reply of Codex's usage call: `plan_type` and `rate_limit` with a primary and
 /// a secondary window, each with `used_percent`, `limit_window_seconds` and `reset_at` in
 /// seconds since the epoch. A window is placed by its length; without one, primary is the
-/// 5-hour window and secondary the weekly one. Inputs: the body and the time.
+/// 5-hour window and secondary the weekly one. A window of any other length refuses the
+/// reply, so it is never read as one the plan leaves out. Inputs: the body and the time.
 /// Output: the plan and windows, or `usage_reply_invalid`.
 pub fn parse_codex(body: &[u8], now_ms: i64) -> Result<Observation, EngineError> {
     let value: Value = serde_json::from_slice(body).map_err(|_| invalid())?;
@@ -201,6 +205,7 @@ pub fn parse_codex(body: &[u8], now_ms: i64) -> Result<Observation, EngineError>
         plan: plan(value["plan_type"].as_str()),
         five_hour: None,
         weekly: None,
+        provider: Some(Provider::Codex),
     };
     for (key, fallback) in [
         ("primary_window", FIVE_HOUR_SECONDS),
@@ -213,7 +218,8 @@ pub fn parse_codex(body: &[u8], now_ms: i64) -> Result<Observation, EngineError>
                 observation.five_hour = Some(window);
             }
             Some((None, window)) => observation.weekly = Some(window),
-            Some((Some(_), _)) | None => {}
+            Some((Some(_), _)) => return Err(invalid()),
+            None => {}
         }
     }
     if observation.five_hour.is_none() && observation.weekly.is_none() {
@@ -284,3 +290,6 @@ pub fn poll(
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod live_codex_tests;

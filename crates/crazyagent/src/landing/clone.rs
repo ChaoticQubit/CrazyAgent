@@ -19,8 +19,14 @@ const REF_ENTRIES_MAX: usize = 1024;
 const REF_DEPTH_MAX: usize = 16;
 const PACKED_REFS_BYTES_MAX: u64 = 65_536;
 const REFS_LISTED_MAX: usize = 16;
+const BASE_NAME_BYTES_MAX: usize = 128;
 const REF_STORES: [&str; 2] = ["reftable", "worktrees"];
 const TEAMMATES_MAX: usize = 64;
+const MAIN_LOCK: &str = "main.lock";
+/// The engine's ref in every agent clone, and in the owner repository for linked
+/// worktrees, that holds the tip of the project's Land on branch, so an agent brings main
+/// into its own branch with `git merge crazyagent/main` (OS-8).
+pub(super) const MAIN_REF: &str = "refs/crazyagent/main";
 
 #[cfg(test)]
 thread_local! {
@@ -29,6 +35,26 @@ thread_local! {
     /// None runs nothing.
     pub(super) static BETWEEN_CHECK_AND_FETCH: std::cell::Cell<Option<fn(&Path)>> =
         const { std::cell::Cell::new(None) };
+}
+
+/// The engine ref in the owner repository that keeps the commit an agent's own clone
+/// borrows as its base, so the owner's gc never drops objects the clone reads through its
+/// alternates (GA-R5). Input: the clone folder. Output: the ref, or
+/// `changes_workspace_invalid` for a folder whose name is not one plain ref part.
+pub(super) fn base_ref(worktree: &Path) -> Result<String, EngineError> {
+    let name = worktree
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(invalid)?;
+    let plain = !name.is_empty()
+        && name.len() <= BASE_NAME_BYTES_MAX
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if !plain {
+        return Err(invalid());
+    }
+    Ok(format!("refs/crazyagent/base/{name}"))
 }
 
 fn invalid() -> EngineError {
@@ -87,7 +113,8 @@ pub(super) fn add(
 /// Fills the folder `add` just made with the clone, so `add` can remove the folder again
 /// when any step fails (GA-R2): private, its git folder made with no template, the
 /// alternates line naming the owner's objects, an `info/exclude` that keeps the
-/// teammates' worktree folder out of what the agent's own `git add` takes, its branch at
+/// teammates' worktree folder and the project graph the engine shows there out of what the
+/// agent's own `git add` takes, its branch at
 /// the owner's commit and checked out with nothing left modified. Inputs: the new worktree, the branch, the
 /// alternates line, the object format and the commit. Output: Ok once checked out, else
 /// `changes_git_failed` or a git failure.
@@ -119,7 +146,11 @@ fn fill(
         .and_then(|()| {
             std::fs::write(
                 git_dir.join("info").join("exclude"),
-                format!("/{}/\n", agent_git::TEAMMATES_FOLDER),
+                format!(
+                    "/{}/\n{}\n",
+                    agent_git::TEAMMATES_FOLDER,
+                    agent_git::GRAPH_EXCLUDE
+                ),
             )
         })
         .map_err(|_| failure("changes_git_failed"))?;
@@ -133,6 +164,54 @@ fn fill(
     assert_eq!(pointer, format!("ref: refs/heads/{branch}\n").as_bytes());
     assert_eq!(clone.commit_of("HEAD")?.as_deref(), Some(head));
     Ok(())
+}
+
+/// The most bytes of a clone's `info/exclude` that `exclude_graph` reads and appends to.
+const EXCLUDE_BYTES_MAX: u64 = 256 * 1024;
+
+/// Adds the graph line to a clone's `info/exclude` when no line there keeps the project graph
+/// out of git yet, as `fill` writes it for every new clone, so a clone made before that
+/// shows the graph too (18.15.1). Every step goes through its folder's own descriptor
+/// without following a link, and only a plain file with no other hard link (F1) of at most
+/// `EXCLUDE_BYTES_MAX` bytes is read and appended to. Anything else, or a failed write,
+/// leaves the clone without the graph, never without its launch. Takes the clone's worktree.
+pub(super) fn exclude_graph(worktree: &Path) {
+    use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
+    use std::io::{Read, Write};
+    let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let append = OFlags::RDWR | OFlags::APPEND | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let opened = openat(CWD, worktree, folder, Mode::empty())
+        .and_then(|tree| openat(&tree, ".git", folder, Mode::empty()))
+        .and_then(|git| openat(&git, "info", folder, Mode::empty()))
+        .and_then(|info| openat(&info, "exclude", append | OFlags::CLOEXEC, Mode::empty()));
+    let Ok(fd) = opened else {
+        return;
+    };
+    let plain = fstat(&fd).is_ok_and(|stat| {
+        FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+            && stat.st_nlink == 1
+            && u64::try_from(stat.st_size).is_ok_and(|size| size <= EXCLUDE_BYTES_MAX)
+    });
+    let mut file = std::fs::File::from(fd);
+    let mut text = String::new();
+    if !plain
+        || Read::by_ref(&mut file)
+            .take(EXCLUDE_BYTES_MAX)
+            .read_to_string(&mut text)
+            .is_err()
+        || agent_git::graph_rule(&text) == Some(true)
+    {
+        return;
+    }
+    assert!(text.len() as u64 <= EXCLUDE_BYTES_MAX);
+    let lead = match text.is_empty() || text.ends_with('\n') {
+        true => "",
+        false => "\n",
+    };
+    let line = format!("{lead}{}\n", agent_git::GRAPH_EXCLUDE);
+    let _ = file
+        .write_all(line.as_bytes())
+        .and_then(|()| file.sync_all());
 }
 
 /// Makes the clone's pack folder and its 256 loose-object folders `00` to `ff` where any is
@@ -162,9 +241,9 @@ pub(super) fn store_folders(worktree: &Path) -> Result<(), EngineError> {
 /// folder with no git run and no link followed (CC-1): each file under `refs`, each name in
 /// `packed-refs`, `HEAD` unless it is the symbolic ref to the branch, and `reftable` or
 /// `worktrees` when either exists, since git keeps refs there too. The engine's clone makes
-/// no ref but its branch. With `teammates`, the teammate branches of the branch
-/// (`agent_git::is_teammate_branch`) and the `worktrees` folder are left out, for a caller
-/// that checks those itself. Inputs: the worktree, its branch and `teammates`. Output: at
+/// no ref but its branch and [`MAIN_REF`], which is left out as well. With `teammates`, the
+/// teammate branches of the branch (`agent_git::is_teammate_branch`) and the `worktrees`
+/// folder are left out, for a caller that checks those itself. Inputs: the worktree, its branch and `teammates`. Output: at
 /// most `REFS_LISTED_MAX` names, empty when nothing else is held, else
 /// `changes_workspace_invalid` for ref data that is not a plain file or folder or
 /// `changes_too_large` past the bounds, never a clean read.
@@ -209,7 +288,7 @@ pub(super) fn other_refs(
             .position(|byte| *byte == b' ')
             .ok_or_else(invalid)?;
         let name = String::from_utf8_lossy(&line[space + 1..]).into_owned();
-        if name != own && !task(&name) {
+        if name != own && name != MAIN_REF && !task(&name) {
             listed(&mut found, name);
         }
     }
@@ -221,6 +300,59 @@ pub(super) fn other_refs(
         listed(&mut found, name);
     }
     Ok(found)
+}
+
+/// Points [`MAIN_REF`] in an agent's own clone at the project's landed tip with no git run
+/// in the clone, whose config is the agent's (CC-N1): `refs` and `crazyagent` opened
+/// without following a link and made when missing, the ref written to a new `main.lock`
+/// and renamed over `main`, as git itself writes a loose ref. The caller holds the
+/// repository's hold, so a `main.lock` already there is stale, left by an engine stopped
+/// before its rename or by the agent, and is removed, never followed, and logged first.
+/// The clone reads the commit through its alternates. Inputs: the owner checkout root, the
+/// worktree and the tip. Output: Ok, else `changes_workspace_invalid` for a link or a
+/// foreign entry on the way.
+pub(super) fn give_main(repository: &Path, worktree: &Path, tip: &str) -> Result<(), EngineError> {
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags, mkdirat, openat, renameat, unlinkat};
+    use std::io::Write;
+    if !super::git::is_object_id(tip) {
+        return Err(failure("changes_git_failed"));
+    }
+    if super::flow::check_places(repository, worktree, &agent_git::git_dir(worktree))?
+        != agent_git::Layout::Clone
+    {
+        return Err(invalid());
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = openat(CWD, worktree, flags, Mode::empty()).map_err(|_| invalid())?;
+    let mut folder = openat(&root, ".git", flags, Mode::empty()).map_err(|_| invalid())?;
+    for part in ["refs", "crazyagent"] {
+        match mkdirat(&folder, part, Mode::from_raw_mode(0o755)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(_) => return Err(invalid()),
+        }
+        folder = openat(&folder, part, flags, Mode::empty()).map_err(|_| invalid())?;
+    }
+    let created =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let lock = match openat(&folder, MAIN_LOCK, created, Mode::from_raw_mode(0o644)) {
+        Err(rustix::io::Errno::EXIST) => {
+            unlinkat(&folder, MAIN_LOCK, AtFlags::empty()).map_err(|_| invalid())?;
+            eprintln!("landing_main_lock_cleared");
+            openat(&folder, MAIN_LOCK, created, Mode::from_raw_mode(0o644))
+        }
+        opened => opened,
+    }
+    .map_err(|_| invalid())?;
+    let mut file = std::fs::File::from(lock);
+    let written = file
+        .write_all(format!("{tip}\n").as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| failure("changes_git_failed"))
+        .and_then(|()| renameat(&folder, MAIN_LOCK, &folder, "main").map_err(|_| invalid()));
+    if written.is_err() {
+        let _ = unlinkat(&folder, MAIN_LOCK, AtFlags::empty());
+    }
+    written
 }
 
 /// Says whether an agent's own clone still holds its branch, read as data from its git
@@ -304,7 +436,7 @@ fn loose_refs(
                 let opened = openat(folder, name, flags, Mode::empty()).map_err(|_| invalid())?;
                 loose_refs(&opened, &inner, depth + 1, budget, own, found)?;
             }
-            FileType::RegularFile if inner == own => {}
+            FileType::RegularFile if inner == own || inner == MAIN_REF => {}
             FileType::RegularFile => listed(found, inner),
             _ => return Err(invalid()),
         }
@@ -359,6 +491,104 @@ fn alternate_line(repository: &Path) -> Option<String> {
     let objects = repository.join(".git").join("objects");
     let alternate = objects.to_str()?;
     (!alternate.chars().any(char::is_control)).then(|| format!("{alternate}\n"))
+}
+
+/// Replaces the whole content of a small git pointer file when it holds exactly what the
+/// engine wrote there before: a plain file with one link, read without following a link,
+/// written to a new file beside it and renamed over it. Inputs: the file, the content it
+/// must hold and the content it gets. Output: true once rewritten, false when it already
+/// holds the new content, else `changes_workspace_invalid` with nothing written.
+fn replace_exact(file: &Path, from: &[u8], to: &[u8]) -> Result<bool, EngineError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let found = std::fs::symlink_metadata(file).map_err(|_| invalid())?;
+    if !found.is_file() || found.nlink() != 1 {
+        return Err(invalid());
+    }
+    let held = bounded_read(file, ALTERNATES_BYTES_MAX)?;
+    if held == to {
+        return Ok(false);
+    }
+    if held != from {
+        return Err(invalid());
+    }
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(invalid)?;
+    let beside = file.with_file_name(format!("{name}.crazyagent-move"));
+    let _ = std::fs::remove_file(&beside);
+    let mut written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(found.mode() & 0o777)
+        .open(&beside)
+        .map_err(|_| invalid())?;
+    let stored = written.write_all(to).and_then(|()| written.sync_all());
+    drop(written);
+    if stored.is_err() || std::fs::rename(&beside, file).is_err() {
+        let _ = std::fs::remove_file(&beside);
+        return Err(invalid());
+    }
+    assert_eq!(bounded_read(file, ALTERNATES_BYTES_MAX)?, to);
+    Ok(true)
+}
+
+/// Points an agent's own clone at its project's object store after the project folder
+/// moved or was copied: the one alternates line `add` wrote for the old folder becomes the
+/// line for the new one, whose object folder must be a real folder. No git runs in the
+/// clone. Inputs: the clone's git folder and the old and new owner checkout roots. Output:
+/// true once rewritten, false when it already names the new store, else
+/// `changes_workspace_invalid` for a clone that is not as `add` left it.
+pub(super) fn repoint(git_dir: &Path, from: &Path, to: &Path) -> Result<bool, EngineError> {
+    let objects = git_dir.join("objects");
+    let info = objects.join("info");
+    let store = to.join(".git").join("objects");
+    let folder = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|found| found.is_dir());
+    if ![git_dir, objects.as_path(), info.as_path(), store.as_path()]
+        .into_iter()
+        .all(folder)
+    {
+        return Err(invalid());
+    }
+    let old = alternate_line(from).ok_or_else(invalid)?;
+    let new = alternate_line(to).ok_or_else(invalid)?;
+    replace_exact(&info.join("alternates"), old.as_bytes(), new.as_bytes())
+}
+
+/// Points a linked git worktree and its admin folder at each other after the repository
+/// that holds both moved: the admin folder's `gitdir` file names the worktree's `.git`
+/// file, which names the admin folder. Each is rewritten only when it holds exactly the
+/// old path. Inputs: the admin folder and the worktree where they are now, then where they
+/// were. Output: true once either file was rewritten, false when both already name the
+/// new places, else `changes_workspace_invalid`.
+pub(super) fn repoint_linked(
+    admin: &Path,
+    worktree: &Path,
+    old_admin: &Path,
+    old_worktree: &Path,
+) -> Result<bool, EngineError> {
+    let plain = |path: &Path| {
+        path.to_str()
+            .filter(|text| !text.chars().any(char::is_control))
+            .map(str::to_owned)
+            .ok_or_else(invalid)
+    };
+    let folder = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|found| found.is_dir());
+    if !folder(admin) || !folder(worktree) {
+        return Err(invalid());
+    }
+    let names_worktree = replace_exact(
+        &admin.join("gitdir"),
+        format!("{}/.git\n", plain(old_worktree)?).as_bytes(),
+        format!("{}/.git\n", plain(worktree)?).as_bytes(),
+    )?;
+    let names_admin = replace_exact(
+        &worktree.join(".git"),
+        format!("gitdir: {}\n", plain(old_admin)?).as_bytes(),
+        format!("gitdir: {}\n", plain(admin)?).as_bytes(),
+    )?;
+    Ok(names_worktree || names_admin)
 }
 
 /// Checks, right before git serves the clone, that its object store holds only its own
@@ -792,6 +1022,87 @@ pub(super) enum TeammateHead {
 pub(super) struct Teammate {
     pub(super) folder: std::path::PathBuf,
     pub(super) head: TeammateHead,
+}
+
+/// Lists the teammate worktrees inside a linked lead's worktree (OP-9b), read as data with
+/// no git run and no link followed: every entry of `<worktree>/.worktrees` must be a plain
+/// folder whose `.git` file names a record in the project repository's `.git/worktrees`,
+/// a record that names that folder back and holds a HEAD on a teammate branch of the task
+/// branch or at a commit, so nothing there is left uncounted. Inputs: the owner checkout
+/// root, the lead's worktree and its task branch. Output: the teammates, at most
+/// `TEAMMATES_MAX`, else `changes_workspace_invalid` for anything else there, or
+/// `changes_too_large`.
+pub(super) fn linked_teammates(
+    repository: &Path,
+    worktree: &Path,
+    branch: &str,
+) -> Result<Vec<Teammate>, EngineError> {
+    use rustix::fs::{CWD, Dir, Mode, OFlags, openat};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = openat(CWD, worktree, flags, Mode::empty()).map_err(|_| invalid())?;
+    let folders = match openat(&root, agent_git::TEAMMATES_FOLDER, flags, Mode::empty()) {
+        Ok(folders) => folders,
+        Err(rustix::io::Errno::NOENT) => return Ok(Vec::new()),
+        Err(_) => return Err(invalid()),
+    };
+    let records_path = repository.join(".git").join("worktrees");
+    let records = openat(CWD, &records_path, flags, Mode::empty()).map_err(|_| invalid())?;
+    let place = worktree.join(agent_git::TEAMMATES_FOLDER);
+    let mut found = Vec::new();
+    for entry in Dir::read_from(&folders).map_err(|_| invalid())? {
+        let entry = entry.map_err(|_| invalid())?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .map_err(|_| invalid())?
+            .to_owned();
+        if matches!(name.as_str(), "." | "..") {
+            continue;
+        }
+        if found.len() >= TEAMMATES_MAX {
+            return Err(failure("changes_too_large"));
+        }
+        let folder =
+            openat(&folders, name.as_str(), flags, Mode::empty()).map_err(|_| invalid())?;
+        let link = read_at(&folder, ".git", HEAD_BYTES_MAX)?.ok_or_else(invalid)?;
+        let admin = std::str::from_utf8(&link)
+            .ok()
+            .and_then(|link| link.strip_prefix("gitdir: "))
+            .and_then(|link| link.strip_suffix('\n'))
+            .map(Path::new)
+            .filter(|admin| admin.parent() == Some(records_path.as_path()))
+            .and_then(Path::file_name)
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(invalid)?;
+        let record = openat(&records, admin, flags, Mode::empty()).map_err(|_| invalid())?;
+        let back = read_at(&record, "gitdir", HEAD_BYTES_MAX)?.ok_or_else(invalid)?;
+        let own = place.join(&name).join(".git");
+        if std::str::from_utf8(&back)
+            .ok()
+            .and_then(|back| back.strip_suffix('\n'))
+            .map(Path::new)
+            != Some(own.as_path())
+        {
+            return Err(invalid());
+        }
+        let head = read_at(&record, "HEAD", HEAD_BYTES_MAX)?.ok_or_else(invalid)?;
+        let head = std::str::from_utf8(&head)
+            .ok()
+            .and_then(|head| head.strip_suffix('\n'))
+            .ok_or_else(invalid)?;
+        let head = match head.strip_prefix("ref: refs/heads/") {
+            Some(name) if agent_git::is_teammate_branch(branch, name) => {
+                TeammateHead::Branch(name.to_owned())
+            }
+            None if super::git::is_object_id(head) => TeammateHead::Commit(head.to_owned()),
+            _ => return Err(invalid()),
+        };
+        found.push(Teammate {
+            folder: place.join(&name),
+            head,
+        });
+    }
+    Ok(found)
 }
 
 /// Lists the teammate worktrees of a harness's clone, read as data from the clone's git

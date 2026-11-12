@@ -24,8 +24,9 @@ const PASSED: [&str; 7] = [
     "TMPDIR",
     "XDG_CONFIG_HOME",
 ];
-const FIXED: [(&str, &str); 9] = [
+const FIXED: [(&str, &str); 10] = [
     ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_GRAFT_FILE", "/dev/null"),
     ("GIT_ASKPASS", ""),
     ("SSH_ASKPASS_REQUIRE", "never"),
     ("GIT_ALLOW_PROTOCOL", PROTOCOLS),
@@ -35,7 +36,7 @@ const FIXED: [(&str, &str); 9] = [
     ("LANG", "en_US.UTF-8"),
     ("LC_ALL", "en_US.UTF-8"),
 ];
-const HARDENING: [&str; 21] = [
+const HARDENING: [&str; 25] = [
     "--no-replace-objects",
     "-c",
     "core.hooksPath=/dev/null",
@@ -57,6 +58,10 @@ const HARDENING: [&str; 21] = [
     "gc.auto=0",
     "-c",
     "maintenance.auto=false",
+    "-c",
+    "core.commitGraph=false",
+    "-c",
+    "advice.graftFileDeprecated=false",
 ];
 /// The most bytes of each of git's two output streams an answer carries, its last ones, so
 /// both fit one bridge frame once escaped for JSON.
@@ -72,7 +77,12 @@ const POLL: Duration = Duration::from_millis(20);
 /// take the connections every other IDE call needs.
 pub(super) const GIT_CALLS_MAX: usize = 3;
 pub(super) const PROJECT_GIT_CALLS_MAX: usize = 2;
-const TEMP_FOLDERS: [&str; 2] = ["/private/tmp", "/private/var/folders"];
+/// The system temp folders anyone can write, by their real paths, on macOS.
+#[cfg(target_os = "macos")]
+const TEMP_FOLDERS: &[&str] = &["/private/tmp", "/private/var/folders"];
+/// The system temp folders anyone can write, by their real paths, outside macOS.
+#[cfg(not(target_os = "macos"))]
+const TEMP_FOLDERS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
 
 const _: () = assert!(PROJECT_GIT_CALLS_MAX <= GIT_CALLS_MAX);
 const _: () = assert!(
@@ -403,9 +413,9 @@ pub(super) fn owner_env(
 
 /// The folders of a PATH git may run `ssh`, a credential helper or `gpg` from outside the
 /// IDE sandbox: absolute and existing, given by their real path so no link can be swapped
-/// later, and outside every denied folder and the system temp folders, where the IDE or an
-/// agent could plant a program. Inputs: the PATH value and the denied folders. Output: the
-/// kept folders joined as a PATH.
+/// later, outside every denied folder and the system temp folders, where the IDE or an
+/// agent could plant a program, and each real path once. Inputs: the PATH value and the
+/// denied folders. Output: the kept folders joined as a PATH.
 pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
     let denied: Vec<PathBuf> = denied
         .iter()
@@ -413,7 +423,8 @@ pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
         .chain(TEMP_FOLDERS.iter().map(Path::new))
         .map(|folder| crate::sandbox::canonical(folder).unwrap_or_else(|_| folder.to_path_buf()))
         .collect();
-    let kept: Vec<PathBuf> = std::env::split_paths(value)
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for real in std::env::split_paths(value)
         .filter(|entry| entry.is_absolute())
         .filter_map(|entry| crate::sandbox::canonical(&entry).ok())
         .filter(|real| {
@@ -421,7 +432,11 @@ pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
                 && real.to_str().is_some_and(|text| !text.contains(':'))
                 && !denied.iter().any(|folder| real.starts_with(folder))
         })
-        .collect();
+    {
+        if !kept.contains(&real) {
+            kept.push(real);
+        }
+    }
     let joined = std::env::join_paths(&kept).unwrap_or_default();
     assert!(kept.is_empty() || !joined.is_empty());
     joined
@@ -560,11 +575,17 @@ pub(super) fn transport_allowed(url: &str) -> bool {
 }
 
 /// Reads the configuration git will use in the folder, with [`HARDENING`] and the owner's
-/// environment, every entry with the file it came from. Inputs: the folder and environment.
+/// environment, every entry with the file it came from. A `.git/commondir` is refused first:
+/// no project folder has one, it would send git to another folder's configuration, and the
+/// lookup finds every spelling a case-insensitive volume folds together, where git reads it
+/// too. Inputs: the folder and environment.
 /// Output: the entries, or `ide_git_config_refused` when git fails, prints more than
 /// `CONFIG_BYTES_MAX` bytes or prints something else than `-z` entries.
 fn config(folder: &Path, env: &[(OsString, OsString)]) -> Result<Vec<Entry>, EngineError> {
     let refused = || failure("ide_git_config_refused");
+    if std::fs::symlink_metadata(folder.join(".git").join("commondir")).is_ok() {
+        return Err(refused());
+    }
     let ran = ran(
         git(folder, env, &["config", "--list", "--show-origin", "-z"]),
         CONFIG_BYTES_MAX,
@@ -585,7 +606,7 @@ fn entries(bytes: &[u8]) -> Option<Vec<Entry>> {
         return Some(Vec::new());
     }
     let parts: Vec<&str> = text.strip_suffix('\0')?.split('\0').collect();
-    if parts.len() % 2 != 0 {
+    if !parts.len().is_multiple_of(2) {
         return None;
     }
     Some(
@@ -702,14 +723,16 @@ fn urls(
 }
 
 /// Builds one engine git process for the IDE: `/usr/bin/git` with [`HARDENING`] before the
-/// arguments, a cleared environment holding only `env`, the project folder as its working
-/// folder, no input, both outputs piped and its own process group. Inputs: the folder, the
+/// arguments, a cleared environment holding only `env` and the folder's `.git` as git's
+/// common folder, so a `commondir` planted after the check in [`config`] redirects nothing,
+/// the project folder as its working folder, no input, both outputs piped and its own process group. Inputs: the folder, the
 /// environment and the arguments. Output: the unspawned command.
 fn git<S: AsRef<OsStr>>(folder: &Path, env: &[(OsString, OsString)], args: &[S]) -> Command {
     let mut command = Command::new(GIT);
     command
         .env_clear()
         .envs(env.iter().cloned())
+        .env("GIT_COMMON_DIR", folder.join(".git"))
         .current_dir(folder)
         .args(HARDENING)
         .args(args)
@@ -720,26 +743,47 @@ fn git<S: AsRef<OsStr>>(folder: &Path, env: &[(OsString, OsString)], args: &[S])
     command
 }
 
+/// [`ran_stopped`] with no grace. Inputs: the command, the bytes kept per stream and the
+/// limit. Output: as [`ran_stopped`].
+fn ran(command: Command, keep: usize, limit: Duration) -> Result<Ran, EngineError> {
+    ran_stopped(command, keep, limit, Duration::ZERO)
+}
+
+/// Whether a child exits by the deadline. Inputs: the child and the deadline. Output: its
+/// exit code, 128 for a signal, or none when it was still running or cannot be read.
+fn exited(child: &mut std::process::Child, deadline: Instant) -> Option<i32> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status.code().unwrap_or(128)),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+            _ => break None,
+        }
+    }
+}
+
 /// Runs one process to its end or its time limit, keeping the last `keep` bytes of each
-/// output stream; at the limit its whole process group is killed. Readers that outlive the
-/// process, such as through a descendant holding a pipe, are waited for at most
-/// `DRAIN_TIME`. Inputs: the command, the bytes kept per stream and the limit. Output: what
-/// it left, or `ide_git_unavailable` when it cannot start.
-fn ran(mut command: Command, keep: usize, limit: Duration) -> Result<Ran, EngineError> {
+/// output stream. At the limit a non-zero `grace` sends its process group TERM and waits
+/// that long, so git can remove its own lock; then the whole group is killed. Readers that
+/// outlive the process, such as through a descendant holding a pipe, are waited for at most
+/// `DRAIN_TIME`. Inputs: the command, the bytes kept per stream, the limit and the grace.
+/// Output: what it left, or `ide_git_unavailable` when it cannot start.
+fn ran_stopped(
+    mut command: Command,
+    keep: usize,
+    limit: Duration,
+    grace: Duration,
+) -> Result<Ran, EngineError> {
     let mut child =
         crate::spawn_gate::spawn(&mut command).map_err(|_| failure("ide_git_unavailable"))?;
     let group = Pid::from_child(&child);
     assert!(group.as_raw_nonzero().get() > 1);
     let stdout = reader(child.stdout.take(), keep);
     let stderr = reader(child.stderr.take(), keep);
-    let deadline = Instant::now() + limit;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status.code().unwrap_or(128)),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
-            _ => break None,
-        }
-    };
+    let mut status = exited(&mut child, Instant::now() + limit);
+    if status.is_none() && !grace.is_zero() {
+        let _ = rustix::process::kill_process_group(group, Signal::TERM);
+        status = exited(&mut child, Instant::now() + grace);
+    }
     if status.is_none() {
         let _ = rustix::process::kill_process_group(group, Signal::KILL);
         let _ = child.kill();
@@ -828,6 +872,8 @@ pub(super) fn text(bytes: &[u8], keep: usize) -> String {
     assert!(text.len() <= keep);
     text
 }
+
+pub(super) mod index;
 
 #[cfg(test)]
 pub(crate) mod tests;

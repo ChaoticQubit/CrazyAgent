@@ -1,11 +1,18 @@
 use crate::engine::EngineError;
 use std::path::Path;
+use std::sync::Arc;
 
 #[path = "native_auth_host/claude_auth/types.rs"]
 pub(crate) mod claude_auth_types;
 
 pub(in crate::engine) mod claude_auth {
     pub(crate) use super::claude_auth_types as types;
+}
+
+/// The pin's file rule on a platform with no pin: every file is refused as `capture`
+/// refuses it. Input: the metadata, unused. Output: `native_auth_host_unavailable`.
+pub(crate) fn pinnable(_metadata: &std::fs::Metadata) -> Result<(), EngineError> {
+    Err(EngineError("native_auth_host_unavailable".into()))
 }
 
 /// A registered native sign-in host executable, which cannot exist without the Unix
@@ -18,6 +25,24 @@ impl RegisteredNativeAuthHost {
     /// Takes the executable path, unused. Returns `native_auth_host_unavailable`.
     pub(crate) fn capture(_path: &Path) -> Result<Self, EngineError> {
         Err(EngineError("native_auth_host_unavailable".into()))
+    }
+
+    /// Refuses to pin a native sign-in host found through a PATH entry on this platform.
+    /// Takes the entry, unused. Returns `native_auth_host_unavailable`.
+    pub(crate) fn capture_entry(_entry: &Path) -> Result<Self, EngineError> {
+        Err(EngineError("native_auth_host_unavailable".into()))
+    }
+
+    pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
+        match **self {}
+    }
+
+    pub(crate) fn entry(&self) -> Option<&Path> {
+        match *self {}
+    }
+
+    pub(crate) fn vanished(&self) -> bool {
+        match *self {}
     }
 
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {

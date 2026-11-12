@@ -5,6 +5,7 @@ use crate::engine::Engine;
 use crate::engine::owner::OwnerServer;
 use crate::landing::{AcceptOutcome, ChangeState};
 use crate::protocol::FRAME_BYTES_MAX;
+use crate::sandbox::policy::AgentAccess;
 use serde_json::json;
 use std::ffi::OsStr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -41,9 +42,13 @@ impl Case {
         )
         .unwrap();
         let engine = Arc::new(
-            Engine::open(&root.path().join("engine.db"), config.clone())
-                .await
-                .unwrap(),
+            Engine::open_with_settings_sources(
+                &root.path().join("engine.db"),
+                &root.path().join("global.toml"),
+                &root.path().join("project.toml"),
+            )
+            .await
+            .unwrap(),
         );
         let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
         db.busy_timeout(Duration::from_secs(5)).unwrap();
@@ -445,7 +450,7 @@ async fn ide_session_takes_the_capability_file_once() {
     let calls = [
         workspace(),
         json!({ "name": "ide.events", "args": {} }),
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
     ];
     for call in &calls {
         assert_eq!(
@@ -545,17 +550,14 @@ async fn a_second_session_attempt_revokes_the_first_session() {
     case.stop().await;
 }
 
-/// Capabilities stop at `GRANTS_MAX` projects, and a project id that names the `ide`
-/// folder itself never gets a capability.
+/// Capabilities stop at `GRANTS_MAX` projects, and no project id can name the `ide`
+/// folder itself, so none gets a capability there.
 #[tokio::test]
 async fn ide_capabilities_stop_at_their_bound() {
     let mut case = Case::start().await;
-    assert_eq!(
-        issue(&case.runtime, &ProjectId::new(".").unwrap())
-            .err()
-            .unwrap()
-            .0,
-        "ide_project_invalid"
+    assert!(
+        ProjectId::new(".").is_err(),
+        "a project id never names the ide folder itself"
     );
     for index in 0..GRANTS_MAX {
         issue(&case.runtime, &ProjectId::new(format!("p{index}")).unwrap()).unwrap();
@@ -649,7 +651,14 @@ fn ide_terminal_frames_match_the_extension_fixture() {
     let open = unhex(terminal["open"]["frame"].as_str().unwrap());
     let request: IdeRequest = serde_json::from_slice(&open[4..]).unwrap();
     request.validate().unwrap();
-    assert_eq!(request.call, IdeCall::Terminal { cols: 80, rows: 24 });
+    assert_eq!(
+        request.call,
+        IdeCall::Terminal {
+            cols: 80,
+            rows: 24,
+            level: AgentAccess::Sandboxed
+        }
+    );
     assert_eq!(
         serde_json::to_value(&request).unwrap(),
         terminal["open"]["value"]
@@ -682,23 +691,24 @@ fn ide_terminal_frames_match_the_extension_fixture() {
 #[test]
 fn ide_request_bounds_are_refused() {
     let id = "0123456789abcdef0123456789abcdef";
+    let head = "a".repeat(40);
     let refused = [
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "", "page": 0 } }),
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "a".repeat(PATH_BYTES_MAX + 1), "page": 0 } }),
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "src/a\u{0}b.rs", "page": 0 } }),
-        json!({ "name": "ide.config_blob", "args": { "id": id, "path": "", "page": 0 } }),
-        json!({ "name": "ide.config_blob", "args": { "id": id, "path": "../agent-7/.vscode/settings.json", "page": 0 } }),
-        json!({ "name": "ide.head_blob", "args": { "id": id, "path": "", "page": 0 } }),
-        json!({ "name": "ide.head_blob", "args": { "id": id, "path": "/etc/passwd", "page": 0 } }),
-        json!({ "name": "ide.head_blob", "args": { "id": id, "path": "../repo/a.rs", "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "head": head, "path": "", "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "head": head, "path": "a".repeat(PATH_BYTES_MAX + 1), "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "head": head, "path": "src/a\u{0}b.rs", "page": 0 } }),
+        json!({ "name": "ide.config_blob", "args": { "id": id, "head": head, "path": "", "page": 0 } }),
+        json!({ "name": "ide.config_blob", "args": { "id": id, "head": head, "path": "../agent-7/.vscode/settings.json", "page": 0 } }),
+        json!({ "name": "ide.head_blob", "args": { "id": id, "head": head, "path": "", "page": 0 } }),
+        json!({ "name": "ide.head_blob", "args": { "id": id, "head": head, "path": "/etc/passwd", "page": 0 } }),
+        json!({ "name": "ide.head_blob", "args": { "id": id, "head": head, "path": "../repo/a.rs", "page": 0 } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 0, "text": "x" } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": " " } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": "x".repeat(COMMENT_BYTES_MAX + 1) } }),
         json!({ "name": "ide.accept", "args": { "id": id, "head": "a".repeat(40), "message": "m".repeat(TEXT_BYTES_MAX + 1) } }),
         json!({ "name": "ide.extension_request", "args": { "id": "../evil", "version": "1.0.0" } }),
         json!({ "name": "ide.extension_request", "args": { "id": "pub.name", "version": "1.0.0/x" } }),
-        json!({ "name": "ide.terminal", "args": { "cols": SIZE_MIN - 1, "rows": 24 } }),
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": SIZE_MAX + 1 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": SIZE_MIN - 1, "rows": 24, "level": "sandboxed" } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": SIZE_MAX + 1, "level": "sandboxed" } }),
         json!({ "name": "ide.git", "args": { "args": [], "folder": "/tmp/project" } }),
         json!({ "name": "ide.git", "args": { "args": vec!["fetch"; GIT_ARGS_MAX + 1], "folder": "/tmp/project" } }),
         json!({ "name": "ide.git", "args": { "args": ["push", ""], "folder": "/tmp/project" } }),
@@ -724,7 +734,7 @@ fn ide_request_bounds_are_refused() {
     fine.validate().unwrap();
     let terminal: IdeRequest = serde_json::from_slice(&request(
         "alpha",
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
     ))
     .unwrap();
     terminal.validate().unwrap();
@@ -736,9 +746,19 @@ fn ide_request_bounds_are_refused() {
     git.validate().unwrap();
     let elsewhere = request(
         "alpha",
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "cwd": "/tmp" } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed", "cwd": "/tmp" } }),
     );
     assert!(serde_json::from_slice::<IdeRequest>(&elsewhere).is_err());
+    for args in [
+        json!({ "cols": 80, "rows": 24 }),
+        json!({ "cols": 80, "rows": 24, "level": "root" }),
+    ] {
+        let unlevelled = request("alpha", json!({ "name": "ide.terminal", "args": args }));
+        assert!(
+            serde_json::from_slice::<IdeRequest>(&unlevelled).is_err(),
+            "{args}"
+        );
+    }
 }
 
 /// Every file tsc compiled into the extension's `out` folder ships in the embedded
@@ -1014,6 +1034,51 @@ async fn an_ide_discard_answers_with_its_outcome_after_its_capability_is_revoked
     case.stop().await;
 }
 
+/// Every page of a change set's diff and texts is read at the head the IDE listed, which
+/// Accept and Discard name too: a head the set does not hold now, such as the commit it
+/// started from, is refused as stale on every read, so the owner never reviews one head
+/// while Accept lands another (V2PRE-L1). The listed head reads.
+#[tokio::test]
+async fn ide_pages_asked_at_a_head_the_set_does_not_hold_are_refused_as_stale() {
+    let mut case = Case::start().await;
+    let (changes, socket, ide) = change_set(&case).await;
+    let set = changes.only(NOW);
+    let older = changes.owner_head();
+    assert_ne!(older, set.head);
+    let reads = |head: &str| {
+        let file = |name: &str| {
+            json!({
+                "name": name,
+                "args": { "id": set.id, "head": head, "path": "README", "page": 0 }
+            })
+        };
+        [
+            json!({ "name": "ide.change_diff", "args": { "id": set.id, "head": head, "page": 0 } }),
+            file("ide.base_blob"),
+            file("ide.head_blob"),
+        ]
+    };
+    for head in [older.as_str(), "HEAD", ""] {
+        for call in reads(head) {
+            let body = request(changes.project.as_str(), call.clone());
+            assert_eq!(
+                exchange(&socket, ide, &body).await,
+                rejected("changes_stale"),
+                "{call}"
+            );
+        }
+    }
+    for call in reads(&set.head) {
+        let body = request(changes.project.as_str(), call.clone());
+        let reply = exchange(&socket, ide, &body).await;
+        assert!(
+            matches!(reply, Some(IdeReply::Ok { .. })),
+            "{call} {reply:?}"
+        );
+    }
+    case.stop().await;
+}
+
 #[test]
 fn ide_changes_reads_end_before_the_extension_stops_waiting_and_writes_keep_the_changes_bound() {
     let extension = include_str!("../../../../../apps/ide-extension/src/engine.ts");
@@ -1034,15 +1099,18 @@ fn ide_changes_reads_end_before_the_extension_stops_waiting_and_writes_keep_the_
         IdeCall::ChangeSets {},
         IdeCall::ChangeDiff {
             id: id.clone(),
+            head: "0".repeat(40),
             page: 0,
         },
         IdeCall::BaseBlob {
             id: id.clone(),
+            head: "0".repeat(40),
             path: "src/lib.rs".into(),
             page: 0,
         },
         IdeCall::HeadBlob {
             id: id.clone(),
+            head: "0".repeat(40),
             path: "src/lib.rs".into(),
             page: 0,
         },
@@ -1177,6 +1245,7 @@ fn ide_writes_run_under_their_own_bound_and_answer_an_unknown_outcome_past_it() 
         IdeCall::ChangeSets {},
         IdeCall::HeadBlob {
             id,
+            head: "0".repeat(40),
             path: "README".into(),
             page: 0,
         },
@@ -1215,7 +1284,12 @@ async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection(
         "the write still waits when its bound passes"
     );
     let held = held_writes(case.root.path());
-    let (mut client, server) = UnixStream::pair().unwrap();
+    let (client, server) = crate::spawn_gate::unix_pair_std().unwrap();
+    for end in [&client, &server] {
+        end.set_nonblocking(true).unwrap();
+    }
+    let mut client = UnixStream::from_std(client).unwrap();
+    let server = UnixStream::from_std(server).unwrap();
     let serving = tokio::spawn(serve_within(
         server,
         ide,
@@ -1401,6 +1475,88 @@ async fn the_ide_pushes_its_project_folder_through_the_engine_and_nothing_else()
     case.stop().await;
 }
 
+/// SECAUDIT-IDE-SERVER-INDEX: the shim's index call reaches the engine over the real frame
+/// and carries one command's staged change into the project's index, while a slot of any
+/// other shape and another project's folder are refused.
+/// macOS only: the private index is carried by the Command Line Tools git under Seatbelt;
+/// elsewhere the step is refused with `index_git_unavailable`, asserted in its own Linux row.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn the_ide_carries_a_private_index_through_the_engine() {
+    use super::remote_git::tests::{Daemon, ok, owner_repository};
+    let mut case = Case::start().await;
+    let served = case.root.path().join("served");
+    std::fs::create_dir(&served).unwrap();
+    ok(
+        &served,
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    let daemon = Daemon::start(&served);
+    let folder = case.root.path().join("projects").join("alpha");
+    owner_repository(&folder, &daemon.url("remote.git"));
+    let project = ProjectId::new("alpha").unwrap();
+    let capability = issue(&case.runtime, &project).unwrap();
+    let socket = case.socket(&capability);
+    let ide = packet(MAGIC, 0, &session(&socket, &capability).await);
+    let call = |args: &[&str], folder: &Path| {
+        request(
+            "alpha",
+            json!({ "name": "ide.git", "args": { "args": args, "folder": folder } }),
+        )
+    };
+    let private = case
+        .root
+        .path()
+        .join("ide")
+        .join("alpha")
+        .join("server-data")
+        .join("git-index");
+    std::fs::create_dir_all(&private).unwrap();
+    let index = folder.join(".git").join("index");
+    std::fs::copy(&index, private.join("77.base")).unwrap();
+    std::fs::write(folder.join("notes.md"), "Planting notes.\n").unwrap();
+    ok(&folder, &["add", "notes.md"]);
+    std::fs::copy(&index, private.join("77.work")).unwrap();
+    ok(&folder, &["reset", "-q"]);
+
+    let carried = exchange(&socket, ide, &call(&["crazyagent-index", "77"], &folder)).await;
+    let Some(IdeReply::Ok { data }) = carried else {
+        panic!("{carried:?}");
+    };
+    assert_eq!(data["code"], json!(0), "{data}");
+    assert_eq!(
+        ok(&folder, &["diff", "--cached", "--name-only"]),
+        "notes.md"
+    );
+
+    let beta = case.root.path().join("projects").join("beta");
+    for (args, folder, code) in [
+        (
+            ["crazyagent-index", "../77"].as_slice(),
+            folder.as_path(),
+            "ide_git_refused",
+        ),
+        (
+            &["crazyagent-index", "77", "extra"],
+            folder.as_path(),
+            "ide_git_refused",
+        ),
+        (
+            &["crazyagent-index", "77"],
+            beta.as_path(),
+            "ide_git_folder_refused",
+        ),
+    ] {
+        assert_eq!(
+            exchange(&socket, ide, &call(args, folder)).await,
+            rejected(code),
+            "{args:?}"
+        );
+    }
+    drop(daemon);
+    case.stop().await;
+}
+
 /// While git waits on a remote that never answers, each `ide.git` call keeps its place: a
 /// project's call past `PROJECT_GIT_CALLS_MAX` and any call past `GIT_CALLS_MAX` in all are
 /// refused at once, and once the remote lets go the places are given back.
@@ -1410,16 +1566,16 @@ async fn ide_git_calls_past_their_cap_are_refused_while_the_others_run() {
     use super::remote_git::{GIT_CALLS_MAX, PROJECT_GIT_CALLS_MAX};
     const LISTEN: Duration = Duration::from_secs(30);
     const REFUSED: Duration = Duration::from_secs(10);
-    assert!(PROJECT_GIT_CALLS_MAX < GIT_CALLS_MAX);
+    const { assert!(PROJECT_GIT_CALLS_MAX < GIT_CALLS_MAX) };
     let mut case = Case::start().await;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let url = format!(
         "git://127.0.0.1:{}/slow.git",
         listener.local_addr().unwrap().port()
     );
     let (accepted, mut held) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
+        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
             if accepted.send(stream).is_err() {
                 return;
             }
@@ -1562,7 +1718,7 @@ async fn open_terminal(socket: &Path, packet: [u8; 37], body: &[u8]) -> (UnixStr
 /// The Sandboxed terminal runs in a pane the engine itself starts, outside the IDE
 /// server's sandbox, under the project's agent profile: it starts in the project folder,
 /// typed input runs, the project's file is readable, the engine database and an IDE
-/// capability file are not, the network is open, at most `TERMINALS_MAX` run at once, a
+/// capability file are not, the network is closed, at most `TERMINALS_MAX` run at once, a
 /// detached terminal's pane ends, and revoking the capability ends the rest.
 #[cfg(target_os = "macos")]
 #[tokio::test]
@@ -1573,7 +1729,7 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let folder = case.root.path().join("projects").join("alpha");
     std::fs::write(folder.join("README.md"), "alpha readme\n").unwrap();
     let database = case.root.path().join("engine.db");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let path = issue(&case.runtime, &alpha).unwrap();
     let socket = case.socket(&path);
@@ -1582,7 +1738,7 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let secret = std::fs::read_to_string(&unread).unwrap();
     let body = request(
         "alpha",
-        json!({ "name": "ide.terminal", "args": { "cols": 100, "rows": 30 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 100, "rows": 30, "level": "sandboxed" } }),
     );
     let mut stream = send(&socket, ide, &body).await;
     let opened = read_value(&mut stream).await.unwrap();
@@ -1621,7 +1777,7 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
         format!("cwd-1={}", folder.display()),
         "db-0".to_owned(),
         "project-1".to_owned(),
-        "net-1".to_owned(),
+        "net-0".to_owned(),
     ] {
         assert!(seen.contains(&answer), "{answer} missing in: {seen}");
     }
@@ -1654,6 +1810,178 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     case.stop().await;
 }
 
+/// CA-SEC-005: input sent on an open Sandboxed terminal after its capability was revoked
+/// never reaches the shell. The terminal closes as revoked at that input rather than at the
+/// next periodic grant check, and its pane ends. The idle wait before the revoke lets the
+/// periodic check's first tick, which fires at once, pass while the grant is still live.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn input_after_its_capability_was_revoked_never_reaches_the_terminal() {
+    use crate::terminal::TerminalRequest;
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let marker = case
+        .root
+        .path()
+        .join("projects")
+        .join("alpha")
+        .join("typed-after-revoke");
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
+    );
+    let (mut stream, name) = open_terminal(&socket, ide, &body).await;
+    let host = case.runtime.terminal().unwrap();
+    output_until(&mut stream, None).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    revoke(&case.runtime, &alpha).unwrap();
+    control(
+        &mut stream,
+        &TerminalRequest::Input {
+            bytes: format!("/usr/bin/touch '{}'\r", marker.display()).into_bytes(),
+        },
+    )
+    .await;
+    assert_eq!(
+        closing(&mut stream).await,
+        json!({ "kind": "closed", "reason": "ide_capability_revoked" })
+    );
+    assert!(!host.alive().unwrap().contains(&name));
+    assert!(
+        !marker.exists(),
+        "the shell ran input sent after the capability was revoked"
+    );
+    case.stop().await;
+}
+
+/// V21-SEC-2-L1: an open Sandboxed terminal that sends and receives nothing still closes as
+/// revoked as soon as its capability is revoked, well inside the periodic grant check, and
+/// its pane ends then, so neither its output nor its pane outlives the revoke.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_idle_terminal_closes_as_soon_as_its_capability_is_revoked() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
+    );
+    let (mut stream, name) = open_terminal(&socket, ide, &body).await;
+    let host = case.runtime.terminal().unwrap();
+    output_until(&mut stream, None).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    revoke(&case.runtime, &alpha).unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(2), closing(&mut stream))
+        .await
+        .expect("the terminal waited for the periodic grant check");
+    assert_eq!(
+        closed,
+        json!({ "kind": "closed", "reason": "ide_capability_revoked" })
+    );
+    assert!(!host.alive().unwrap().contains(&name));
+    case.stop().await;
+}
+
+/// A terminal asked for above the project's level is refused before any pane starts.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_terminal_asked_above_the_projects_level_never_starts_a_pane() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "own_branch" } }),
+    );
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    assert_eq!(
+        exchange(&socket, ide, &body).await,
+        rejected("ide_terminal_above_project")
+    );
+    assert!(!case.root.path().join("ide-shell").exists());
+    case.stop().await;
+}
+
+/// Settings that stop reading after the engine started stop a new terminal, which never starts
+/// with no local model port kept.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_settings_file_that_cannot_be_read_stops_the_terminal() {
+    let mut case = Case::start().await;
+    std::fs::write(case.root.path().join("global.toml"), "not = = toml").unwrap();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
+    );
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    assert_eq!(
+        exchange(&socket, ide, &body).await,
+        rejected("ide_settings_unavailable")
+    );
+    assert!(!case.root.path().join("ide-shell").exists());
+    case.stop().await;
+}
+
+/// A level above the project's is refused.
+#[test]
+fn a_terminal_above_the_projects_level_is_refused() {
+    assert_eq!(
+        terminal::terminal_level(AgentAccess::Sandboxed, AgentAccess::OwnBranch),
+        Err("ide_terminal_above_project")
+    );
+}
+
+/// The engine never starts a Full access terminal, even for a Full access project.
+#[test]
+fn an_engine_terminal_is_never_full_access() {
+    assert_eq!(
+        terminal::terminal_level(AgentAccess::Full, AgentAccess::Full),
+        Err("ide_terminal_level_refused")
+    );
+}
+
+/// A Full access project may still open a narrower terminal.
+#[test]
+fn a_full_access_project_can_open_a_narrower_terminal() {
+    assert_eq!(
+        terminal::terminal_level(AgentAccess::Full, AgentAccess::Sandboxed),
+        Ok(AgentAccess::Sandboxed)
+    );
+}
+
+/// The project's level picks the pane's words, not the terminal's: a Sandboxed terminal asked
+/// for in a Full access project is not told to raise access.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_full_access_projects_narrower_terminal_is_prepared_without_raising_words() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let db = rusqlite::Connection::open(case.root.path().join("engine.db")).unwrap();
+    let policy = crate::sandbox::policy::AgentPolicy {
+        access: AgentAccess::Full,
+        ..crate::sandbox::policy::AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, "alpha", &policy).unwrap();
+    drop(db);
+    let pane = terminal::prepare(case.root.path(), &alpha, AgentAccess::Sandboxed, None).unwrap();
+    assert!(
+        pane.argv.iter().any(|argument| argument == "This terminal can't stage or commit. Use Source Control, or a Full access terminal."),
+        "{:?}",
+        pane.argv
+    );
+    case.stop().await;
+}
+
 /// Where no sandbox is qualified for the Sandboxed terminal, the call is refused before
 /// any pane starts.
 #[cfg(target_os = "linux")]
@@ -1665,7 +1993,7 @@ async fn sandboxed_terminal_is_refused_where_the_sandbox_is_not_qualified() {
     let socket = case.socket(&path);
     let body = request(
         "alpha",
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
     );
     let ide = packet(MAGIC, 0, &session(&socket, &path).await);
     assert_eq!(

@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
+use crate::sandbox::policy::{AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles};
 use crate::team::AgentRole;
 use crate::team::names::{self, AgentName};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -18,6 +19,7 @@ pub const FILE: &str = "crazyagent.code-workspace";
 /// holding more counts as holding one, so the git stop is kept rather than guessed away.
 pub(crate) const OLDER_ENTRIES_MAX: usize = 4096;
 
+#[cfg(unix)]
 const TEMPORARY: &str = "crazyagent.code-workspace.tmp";
 const PROJECTS_FOLLOWED_MAX: i64 = 64;
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_workspaces (
@@ -139,16 +141,62 @@ pub fn folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> 
     crate::sandbox::canonical(&folder).map_err(|_| failure("ide_project_folder_invalid"))
 }
 
-/// Whether git in the project's IDE runs the project's own hooks in its Project section, as
-/// the owner saved it in the project's agent policy; Off when none is saved and always Off
-/// for an untrusted repository. Inputs: the engine root and the project. Output: the switch,
-/// or `ide_workspace_unavailable` for a policy or trust level that cannot be read, so a
-/// tampered one never turns hooks on.
-pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineError> {
+/// What a project's IDE server starts from, as the owner saved it in the project's agent
+/// policy: the access level, the network choice an Own branch IDE follows, whether git
+/// in the IDE runs the project's own hooks in its Project section and what the IDE may do to
+/// agent files (DEC-124).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdePolicy {
+    pub access: AgentAccess,
+    pub network: AgentNetwork,
+    pub hooks: bool,
+    pub agent_files: IdeAgentFiles,
+}
+
+impl IdePolicy {
+    /// Tells whether a server launched under this policy still honours the saved one: the
+    /// same level, at Own branch the same network choice, which no other level reads, and
+    /// below Full access the same hooks switch and agent folders choice, which have no effect
+    /// at Full. Input: the saved policy. Output: true when the server may keep running.
+    pub fn holds(self, saved: Self) -> bool {
+        self.access == saved.access
+            && (saved.access != AgentAccess::OwnBranch || self.network == saved.network)
+            && (saved.access == AgentAccess::Full
+                || (self.hooks == saved.hooks && self.agent_files == saved.agent_files))
+    }
+}
+
+/// The loopback ports of the owner's configured local model endpoints, read from the engine's
+/// settings files at each launch, for a sandbox to keep free of the listeners of what it runs.
+/// Input: the two settings files, or none for an engine that has none. Output: the ports, or
+/// `ide_settings_unavailable` for files that do not read, so a refused read stops the launch.
+pub fn kept_ports(settings: Option<&(PathBuf, PathBuf)>) -> Result<Vec<u16>, EngineError> {
+    let Some((global, project)) = settings else {
+        return Ok(Vec::new());
+    };
+    let config = crate::config::resolve_config(global, project)
+        .map_err(|_| failure("ide_settings_unavailable"))?;
+    Ok(config
+        .settings
+        .model_access
+        .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access)))
+}
+
+/// A project's [`IdePolicy`]; the default, Sandboxed with hooks off and the Open network no
+/// Sandboxed IDE reads, when none is saved, and hooks always off for an untrusted repository.
+/// Inputs: the engine root and the project. Output: the policy, or `ide_workspace_unavailable`
+/// for a policy or trust level that cannot be read, so a tampered one never widens the IDE or
+/// turns its hooks on.
+pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineError> {
     let trust = project_trust(root, project)?;
     let db = open(root)?;
     crate::sandbox::policy::load(&db, project.as_str())
-        .map(|policy| policy.ide_git_hooks_under(trust))
+        .map(|policy| IdePolicy {
+            access: policy.access,
+            network: policy.network,
+            hooks: policy.ide_git_hooks_under(trust),
+            agent_files: policy.ide_agent_files,
+        })
         .map_err(unavailable)
 }
 
@@ -159,6 +207,34 @@ pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineErr
 pub fn project_trust(root: &Path, project: &ProjectId) -> Result<crate::trust::Trust, EngineError> {
     let db = open(root)?;
     crate::trust::level(&db, project.as_str()).map_err(unavailable)
+}
+
+/// The agent folders rule a sandboxed IDE server or terminal of the project holds (DEC-124):
+/// the saved choice below Full access and Allow all changes at Full access, where no profile
+/// runs. When the choice protects anything it names the older agents root `<folder>/worktrees`
+/// for a project with no `.crazyagent` folder, where the engine puts every agent it starts
+/// later, and otherwise while engine-made worktrees stay there ([`older_agents`]). Inputs:
+/// the engine root, the project, its folder, its level and its saved choice. Output: the
+/// rule, or the refusal of [`older_agents`].
+pub fn agent_files_rule(
+    root: &Path,
+    project: &ProjectId,
+    folder: &Path,
+    access: AgentAccess,
+    choice: IdeAgentFiles,
+) -> Result<AgentFilesRule, EngineError> {
+    let choice = if access == AgentAccess::Full {
+        IdeAgentFiles::AllowAll
+    } else {
+        choice
+    };
+    let older_agents = choice != IdeAgentFiles::AllowAll
+        && (crate::projects_home::state_folder(folder) == folder
+            || older_agents(root, project, folder)?);
+    Ok(AgentFilesRule {
+        choice,
+        older_agents,
+    })
 }
 
 /// Whether an engine-made worktree of the project is inside the older agents root
@@ -448,6 +524,7 @@ fn unavailable<E>(_: E) -> EngineError {
     failure("ide_workspace_unavailable")
 }
 
+#[cfg(unix)]
 fn unwritable(_: std::io::Error) -> EngineError {
     failure("ide_workspace_unwritable")
 }

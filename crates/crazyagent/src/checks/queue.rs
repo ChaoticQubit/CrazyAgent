@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use super::binding::{self, Ending};
 #[cfg(unix)]
 use super::integrity::{self, Subject};
@@ -10,7 +11,9 @@ use crate::engine::owner::failure;
 use crate::landing::{self, ChangeSetId, ChangeState};
 use crate::protocol::ProjectId;
 use crate::tracker::Host;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+#[cfg(unix)]
+use rusqlite::OptionalExtension;
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::OnceLock;

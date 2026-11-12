@@ -11,6 +11,7 @@ const PROFILE: &str = "context-mode@1.0.169.sb";
 
 struct Case {
     _directory: tempfile::TempDir,
+    #[cfg(target_os = "macos")]
     base: PathBuf,
     root: PathBuf,
     bin: PathBuf,
@@ -35,6 +36,7 @@ fn case(npm: &str) -> Case {
     std::os::unix::fs::symlink("/usr/bin/true", bin.join("node")).unwrap();
     Case {
         _directory: directory,
+        #[cfg(target_os = "macos")]
         base,
         root,
         bin,

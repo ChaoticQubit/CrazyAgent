@@ -25,6 +25,7 @@ fn ollama() -> AccountPick {
         account: Box::new(ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         }),
     }
 }
@@ -164,6 +165,7 @@ fn a_service_dropped_by_a_panic_mid_run_leaves_no_agent_process() {
                         account: Box::new(ResearchAccount::Endpoint {
                             base_url: format!("http://127.0.0.1:{port}/v1"),
                             model: "hanging-model".into(),
+                            key: None,
                         }),
                     },
                 )
@@ -225,6 +227,7 @@ fn stopping_the_service_stops_running_agents_and_requeues_their_jobs() {
                     account: Box::new(ResearchAccount::Endpoint {
                         base_url: format!("http://127.0.0.1:{port}/v1"),
                         model: "hanging-model".into(),
+                        key: None,
                     }),
                 },
             )
@@ -340,6 +343,7 @@ fn research_waits_with_the_rate_limit_code_and_its_end_while_every_pool_account_
         account: Box::new(ResearchAccount::AnthropicEndpoint {
             base_url: "http://127.0.0.1:11434".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         }),
     };
     wait_for(Duration::from_secs(10), || {
@@ -382,6 +386,7 @@ fn research_on_linux_fails_once_with_the_plain_unavailable_line() {
             account: Some(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "unreached-model".into(),
+                key: None,
             }),
         })
         .unwrap()

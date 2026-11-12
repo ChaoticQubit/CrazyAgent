@@ -1,3 +1,4 @@
+use crate::coord::relay::{ANSWERED, REFUSED, REPLY_BYTES_MAX};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -11,8 +12,12 @@ use std::time::{Duration, Instant};
 pub const CALLER_SOCKET: &str = "caller.sock";
 /// How long a team server waits for the engine to name its call before giving up.
 pub const CALLER_WAIT: Duration = Duration::from_secs(10);
-/// The most new connections one lead's socket accepts a tick.
-pub const CALLERS_PER_TICK_MAX: usize = 16;
+/// The most new connections one lead's socket accepts a tick: room for every session's
+/// hook and monitor requests of a full team within one tick (relay over the caller socket,
+/// OQ-7 B).
+pub const CALLERS_PER_TICK_MAX: usize = 64;
+/// The most bytes of one relay request line, its newline included.
+pub const RELAY_LINE_BYTES_MAX: usize = 4096;
 const PENDING_MAX: usize = 16;
 /// The most connections from one pane, or from processes in no pane, that wait for their
 /// line at once (DEC-111 S1R1-3).
@@ -24,6 +29,10 @@ const STAMPS_MAX: usize = 64;
 /// (DEC-111 S1R1-3).
 const STAMPS_PER_PANE_MAX: usize = 8;
 const STAMP_TTL: Duration = Duration::from_secs(60);
+/// The engine's handler of a relay request from a pane (OQ-7 B). Takes the pane, the pane
+/// process the connection was found under, the request line and the connection, on which
+/// it writes the answer.
+pub type RelayHandler<'a> = dyn FnMut(&str, u32, &[u8], &mut dyn Write) + 'a;
 /// The most panes whose first naming process the socket remembers; the oldest makes room.
 const PINS_MAX: usize = 64;
 const ID_BYTES: usize = 32;
@@ -33,6 +42,8 @@ const PROCESSES_BYTES_MAX: usize = 1 << 20;
 const NAMED: &[u8; 3] = b"ok\n";
 const UNNAMED: &[u8; 3] = b"no\n";
 const WHO: &[u8; 4] = b"who\n";
+/// The word and space that open a relay request line.
+const RELAY: &[u8; 6] = b"relay ";
 /// The most bytes of the pane id in the engine's answer to `who`.
 const PANE_REPLY_BYTES_MAX: usize = 16;
 const TEAMMATE_WORD: &str = " teammate ";
@@ -42,6 +53,7 @@ const WHO_REPLY_BYTES_MAX: usize =
     PANE_REPLY_BYTES_MAX + TEAMMATE_WORD.len() + crate::agent_git::WORKTREE_NAME_BYTES_MAX + 1;
 
 const _: () = assert!(PENDING_PER_PANE_MAX < PENDING_MAX && STAMPS_PER_PANE_MAX < STAMPS_MAX);
+const _: () = assert!(RELAY_LINE_BYTES_MAX > LINE_BYTES && RELAY_LINE_BYTES_MAX > WHO.len());
 
 /// The caller socket of the agent whose team mailbox is `mailbox`, found from the engine's
 /// folder layout (`agent-<id>/tmp/<MAILBOX_FOLDER>` beside `agent-<id>/home`), so a team
@@ -57,6 +69,14 @@ pub fn socket_for_mailbox(mailbox: &Path) -> Option<PathBuf> {
     }
     let home = tmp.parent()?.join("home");
     Some(crate::sandbox::toolchains::tmp_path(&home).join(CALLER_SOCKET))
+}
+
+/// The name in the same folder that a caller socket is bound at before one rename moves it
+/// over the socket's own path, so that path never stands empty while the engine binds again
+/// (rv-secreview RH2R2-1). Takes the socket path. Returns the sibling, the socket's name
+/// with the `new` extension.
+pub fn binding_path(socket: &Path) -> PathBuf {
+    socket.with_extension("new")
 }
 
 /// Asks the engine to name a call before it is written: connects to the lead's caller
@@ -130,6 +150,49 @@ fn ask_place(socket: &Path, wait: Duration) -> Option<(String, Whom)> {
         reply.push(byte[0]);
     }
     None
+}
+
+/// Sends one relay request of a native teammate's hook or monitor on its lead's caller
+/// socket and reads the engine's whole answer (relay over the caller socket, OQ-7 B). The
+/// engine acts for the pane it finds the connecting process in, never for anything the
+/// request says. Takes the mailbox, the request without its `relay` word or newline, and
+/// the wait. Returns the answer after its `ok` line, or None for a request that does not fit
+/// one line, no socket, a refusal, an answer past the relay's `REPLY_BYTES_MAX` or none in
+/// time.
+pub fn relay(mailbox: &Path, request: &str, wait: Duration) -> Option<Vec<u8>> {
+    if request.contains('\n') || RELAY.len() + request.len() + 1 > RELAY_LINE_BYTES_MAX {
+        return None;
+    }
+    let socket = socket_for_mailbox(mailbox)?;
+    let mut stream = crate::spawn_gate::connect_unix_std(&socket).ok()?;
+    stream.set_read_timeout(Some(wait)).ok()?;
+    stream.set_write_timeout(Some(wait)).ok()?;
+    let mut line = Vec::with_capacity(RELAY.len() + request.len() + 1);
+    line.extend_from_slice(RELAY);
+    line.extend_from_slice(request.as_bytes());
+    line.push(b'\n');
+    assert!(line.len() <= RELAY_LINE_BYTES_MAX);
+    stream.write_all(&line).ok()?;
+    let deadline = Instant::now() + wait;
+    let mut answer = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                answer.extend_from_slice(&chunk[..read]);
+                if answer.len() > ANSWERED.len() + REPLY_BYTES_MAX {
+                    return None;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    answer.strip_prefix(ANSWERED).map(<[u8]>::to_vec)
 }
 
 /// Reads one `who` answer without its newline: `<pane> lead` or `<pane> teammate <name>`,
@@ -224,6 +287,7 @@ struct Stamp {
     call: String,
     digest: [u8; DIGEST_BYTES],
     pane: String,
+    pid: u32,
     at: Instant,
 }
 
@@ -232,43 +296,68 @@ enum Received {
     Broken,
     Who,
     Line(String, [u8; DIGEST_BYTES]),
+    Relay(Vec<u8>),
 }
 
 impl Pending {
     fn receive(&mut self) -> Received {
-        let mut buffer = [0_u8; LINE_BYTES];
-        let room = LINE_BYTES - self.line.len();
+        let mut buffer = [0_u8; RELAY_LINE_BYTES_MAX];
+        let room = RELAY_LINE_BYTES_MAX - self.line.len();
         match self.stream.read(&mut buffer[..room]) {
             Ok(0) => Received::Broken,
             Ok(read) => {
                 self.line.extend_from_slice(&buffer[..read]);
-                assert!(self.line.len() <= LINE_BYTES);
-                if self.line.len() < LINE_BYTES {
-                    return if self.line == WHO {
-                        Received::Who
-                    } else if self.line.contains(&b'\n') {
-                        Received::Broken
-                    } else {
-                        Received::Partial
-                    };
-                }
-                parse_line(&self.line).map_or(Received::Broken, |(call, digest)| {
-                    Received::Line(call, digest)
-                })
+                assert!(self.line.len() <= RELAY_LINE_BYTES_MAX);
+                self.received()
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Received::Partial,
             Err(_) => Received::Broken,
         }
+    }
+
+    /// Reads what has arrived of the connection's one line: a relay request ends at its
+    /// first newline, which must be its last byte, within `RELAY_LINE_BYTES_MAX`; `who` is
+    /// those bytes alone; a call line is exactly `LINE_BYTES`. Takes the connection.
+    /// Returns what it is, Partial while more may complete it.
+    fn received(&self) -> Received {
+        let line = &self.line;
+        if line.starts_with(RELAY) {
+            return match line.iter().position(|byte| *byte == b'\n') {
+                Some(end) if end + 1 == line.len() => {
+                    Received::Relay(line[RELAY.len()..end].to_vec())
+                }
+                None if line.len() < RELAY_LINE_BYTES_MAX => Received::Partial,
+                _ => Received::Broken,
+            };
+        }
+        if line.len() < LINE_BYTES {
+            return if line == WHO {
+                Received::Who
+            } else if line.contains(&b'\n') {
+                Received::Broken
+            } else {
+                Received::Partial
+            };
+        }
+        if line.len() > LINE_BYTES {
+            return Received::Broken;
+        }
+        parse_line(line).map_or(Received::Broken, |(call, digest)| {
+            Received::Line(call, digest)
+        })
     }
 }
 
 impl Callers {
     /// Binds a lead's caller socket at `path`. The folder must still be this user's own
     /// private folder, not a link, and the very folder the engine pinned when it made it,
-    /// if it did (DEC-111 S1R1-1); then whatever an earlier run left at `path` is removed.
-    /// The socket is kept non-blocking so a tick never waits on it. Takes the path in the
-    /// lead's short temp folder and the folder's pin, if known. Returns the socket, or the
-    /// I/O failure, `PermissionDenied` for a changed folder.
+    /// if it did (DEC-111 S1R1-1). The socket is bound at [`binding_path`], after whatever
+    /// an earlier bind left there is removed, and one rename moves it over whatever is at
+    /// `path`, so a hook asking meanwhile finds the old node or the new socket and never an
+    /// empty path (rv-secreview RH2R2-1). The socket is kept non-blocking so a tick never
+    /// waits on it. Takes the path in the lead's short temp folder and the folder's pin, if
+    /// known. Returns the socket, or the I/O failure, `PermissionDenied` for a changed
+    /// folder and `NotFound` when the node moved over `path` is not the one bound.
     pub fn bind(path: &Path, pinned: Option<(u64, u64)>) -> std::io::Result<Self> {
         let folder = path
             .parent()
@@ -280,16 +369,20 @@ impl Callers {
                     "the caller socket folder changed",
                 )
             })?;
-        if let Err(error) = std::fs::remove_file(path)
+        let binding = binding_path(path);
+        if let Err(error) = std::fs::remove_file(&binding)
             && error.kind() != std::io::ErrorKind::NotFound
         {
             return Err(error);
         }
-        let listener = crate::spawn_gate::bind_unix_std(path)?;
+        let listener = crate::spawn_gate::bind_unix_std(&binding)?;
         listener.set_nonblocking(true)?;
-        let node = socket_pin(path).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "the bound socket is gone")
-        })?;
+        let gone = || std::io::Error::new(std::io::ErrorKind::NotFound, "the bound socket is gone");
+        let made = socket_pin(&binding).ok_or_else(gone)?;
+        std::fs::rename(&binding, path)?;
+        let node = socket_pin(path)
+            .filter(|node| *node == made)
+            .ok_or_else(gone)?;
         Ok(Self {
             listener,
             path: path.to_path_buf(),
@@ -333,15 +426,19 @@ impl Callers {
     /// on accepting each the pane whose process is the connecting process or one of its
     /// first `ANCESTORS_MAX` parents, then reads each one's call id and digest and names the
     /// call by that pane, answering yes or no; a `who` request is answered with that pane and
-    /// who the engine's rows put there, or no (DEC-111 Q18, RH-2). A connection whose line
-    /// has not fully arrived waits, at most `PENDING_PER_PANE_MAX` of one pane at once, and
-    /// is dropped with no full line within `PENDING_WAIT`. Takes the lead's panes as (pane
-    /// id, pid), listed with the process table at most once a tick, only when a connection
-    /// arrives, and the lookup of who runs in a pane. Returns how many it named.
+    /// who the engine's rows put there, or no (DEC-111 Q18, RH-2); a relay request goes to
+    /// the engine with that pane (relay over the caller socket, OQ-7 B). A connection whose
+    /// line has not fully arrived waits, at most `PENDING_PER_PANE_MAX` of one pane at once,
+    /// and is dropped with no full line within `PENDING_WAIT`. Takes the lead's panes as
+    /// (pane id, pid), listed with the process table at most once a tick, only when a
+    /// connection arrives, the lookup of who runs in a pane by the pane process the
+    /// connection was found under, and the engine's handler of a relay request from a pane,
+    /// which answers on the connection. Returns how many it named.
     pub fn serve(
         &mut self,
         panes: &mut dyn FnMut() -> Vec<(String, u32)>,
-        whom: &mut dyn FnMut(&str) -> Option<Whom>,
+        whom: &mut dyn FnMut(&str, u32) -> Option<Whom>,
+        relay: &mut RelayHandler<'_>,
     ) -> usize {
         let now = Instant::now();
         self.stamps
@@ -391,6 +488,7 @@ impl Callers {
                 Received::Line(call, digest) => {
                     named += usize::from(self.answer(pending, call, digest, now));
                 }
+                Received::Relay(request) => self.relay(pending, &request, relay),
             }
         }
         for mut pending in std::mem::take(&mut self.pending) {
@@ -401,6 +499,7 @@ impl Callers {
                 Received::Line(call, digest) => {
                     named += usize::from(self.answer(pending, call, digest, now));
                 }
+                Received::Relay(request) => self.relay(pending, &request, relay),
             }
         }
         assert!(self.pending.len() <= PENDING_MAX && self.stamps.len() <= STAMPS_MAX);
@@ -420,16 +519,15 @@ impl Callers {
     ) -> bool {
         let fresh = !self.stamps.iter().any(|stamp| stamp.call == call);
         let pane = if fresh { pending.pane.take() } else { None };
-        let pane = pane
-            .filter(|(pane, pid)| self.pinned(pane, *pid))
-            .map(|(pane, _)| pane);
+        let pane = pane.filter(|(pane, pid)| self.pinned(pane, *pid));
         let named = pane.is_some();
-        if let Some(pane) = pane {
+        if let Some((pane, pid)) = pane {
             self.make_room(&pane);
             self.stamps.push(Stamp {
                 call,
                 digest,
                 pane,
+                pid,
                 at: now,
             });
         }
@@ -444,22 +542,49 @@ impl Callers {
     /// teammate <name>` (DEC-111 Q18, RH-2). A process in no pane, a pane respawned under
     /// another process, a pane id that is not plain, a pane the rows name no one by and a
     /// name that names no worktree get no. Takes the socket, the connection and the lookup.
-    fn tell(&mut self, mut pending: Pending, whom: &mut dyn FnMut(&str) -> Option<Whom>) {
+    fn tell(&mut self, mut pending: Pending, whom: &mut dyn FnMut(&str, u32) -> Option<Whom>) {
         let reply = pending
             .pane
             .take()
             .filter(|(pane, pid)| self.pinned(pane, *pid))
-            .map(|(pane, _)| pane)
-            .filter(|pane| {
+            .filter(|(pane, _)| {
                 crate::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX
             })
-            .and_then(|pane| match whom(&pane)? {
+            .and_then(|(pane, pid)| match whom(&pane, pid)? {
                 Whom::Lead => Some(format!("{pane} lead\n")),
                 Whom::Teammate(name) => crate::agent_git::worktree_name_valid(&name)
                     .then(|| format!("{pane}{TEAMMATE_WORD}{name}\n")),
             })
             .map_or_else(|| UNNAMED.to_vec(), String::into_bytes);
         let _ = pending.stream.write_all(&reply);
+    }
+
+    /// Hands one relay request to the engine with the pane the connection reached, under the
+    /// same pin a call is named by; a process in no pane and a pane respawned under another
+    /// process get no (relay over the caller socket, OQ-7 B). The connection stays
+    /// non-blocking with a send buffer that holds a whole answer, so the engine writes it at
+    /// once and never waits on a hook that stopped reading. Takes the socket, the connection,
+    /// the request and the engine's handler.
+    fn relay(&mut self, mut pending: Pending, request: &[u8], relay: &mut RelayHandler<'_>) {
+        let room = 2 * (ANSWERED.len() + REPLY_BYTES_MAX);
+        let placed = pending
+            .pane
+            .take()
+            .filter(|(pane, pid)| self.pinned(pane, *pid))
+            .filter(|_| {
+                nix::sys::socket::setsockopt(
+                    &pending.stream,
+                    nix::sys::socket::sockopt::SndBuf,
+                    &room,
+                )
+                .is_ok()
+            });
+        match placed {
+            Some((pane, pid)) => relay(&pane, pid, request, &mut pending.stream),
+            None => {
+                let _ = pending.stream.write_all(REFUSED);
+            }
+        }
     }
 
     /// Whether a pane may name a call by this pane process: the first one seen pins the pane
@@ -509,13 +634,14 @@ impl Callers {
         assert!(self.stamps.len() < STAMPS_MAX);
     }
 
-    /// Takes the name of one call, once: the pane the engine named it by, only when the
-    /// call file's bytes have the digest the caller sent. Takes the call id and the digest
-    /// of the file the engine read. Returns the pane id, or none.
-    pub fn take(&mut self, call: &str, digest: &[u8; DIGEST_BYTES]) -> Option<String> {
+    /// Takes the name of one call, once: the pane the engine named it by and the pane
+    /// process it found the caller under, only when the call file's bytes have the digest
+    /// the caller sent. Takes the call id and the digest of the file the engine read.
+    /// Returns the pane id and that process, or none.
+    pub fn take(&mut self, call: &str, digest: &[u8; DIGEST_BYTES]) -> Option<(String, u32)> {
         let at = self.stamps.iter().position(|stamp| stamp.call == call)?;
         let stamp = self.stamps.remove(at);
-        (stamp.digest == *digest).then_some(stamp.pane)
+        (stamp.digest == *digest).then_some((stamp.pane, stamp.pid))
     }
 }
 
@@ -539,21 +665,21 @@ fn socket_pin(path: &Path) -> Option<(u64, u64)> {
 }
 
 #[cfg(target_os = "macos")]
-fn peer_pid(stream: &UnixStream) -> Option<u32> {
+pub(crate) fn peer_pid(stream: &UnixStream) -> Option<u32> {
     nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::LocalPeerPid)
         .ok()
         .and_then(|pid| u32::try_from(pid).ok())
 }
 
 #[cfg(target_os = "linux")]
-fn peer_pid(stream: &UnixStream) -> Option<u32> {
+pub(crate) fn peer_pid(stream: &UnixStream) -> Option<u32> {
     nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
         .ok()
         .and_then(|credentials| u32::try_from(credentials.pid()).ok())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn peer_pid(_stream: &UnixStream) -> Option<u32> {
+pub(crate) fn peer_pid(_stream: &UnixStream) -> Option<u32> {
     None
 }
 
@@ -575,7 +701,7 @@ fn pane_of(
     None
 }
 
-fn process_parents() -> Option<HashMap<u32, u32>> {
+pub(crate) fn process_parents() -> Option<HashMap<u32, u32>> {
     let output = crate::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-A", "-o", "pid=,ppid="])

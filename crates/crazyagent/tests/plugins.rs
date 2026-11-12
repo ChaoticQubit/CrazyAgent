@@ -815,19 +815,31 @@ async fn a_server_whose_check_home_holds_many_files_answers_its_removal_at_once(
     case.close().await;
 }
 
+/// A free loopback TCP port below every range the OS hands out by itself (Linux from 32768,
+/// macOS from 49152) and apart from the owner's fixed ports, as a configured local model
+/// port must be for the Linux boundary to keep it (LPF1-M1). Output: the port.
+fn free_low_port() -> u16 {
+    let start = 20_000 + (std::process::id() % 4_000) as u16;
+    let port = (start..30_000)
+        .chain(20_000..start)
+        .find(|port| crazyagent::spawn_gate::bind_tcp_std(("127.0.0.1", *port)).is_ok())
+        .expect("a free loopback port between 20000 and 30000");
+    assert!((20_000..30_000).contains(&port));
+    port
+}
+
 /// A checked server gets the open network agents get, but while the owner's local model
 /// server is down it cannot listen on that configured endpoint's port and answer the
 /// prompts sent there; another loopback port stays free for it to bind.
 #[tokio::test]
 async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
-    let (kept, other) = {
-        let first = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let second = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        (
-            first.local_addr().unwrap().port(),
-            second.local_addr().unwrap().port(),
-        )
-    };
+    let kept = free_low_port();
+    let other = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    assert_ne!(kept, other);
     let case = Case::with_settings(&local_model_settings(kept)).await;
     let controller = case.controller().await;
     let root = case.root.path().to_path_buf();
@@ -852,6 +864,105 @@ async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
             "{name} port {port}: a check listens only where the owner's model server does not"
         );
     }
+    case.close().await;
+}
+
+/// On Linux a configured local model port inside the range the kernel hands out by itself
+/// cannot be kept free, since a listener's automatic port may land on it, so the check is
+/// refused, the owner reads the port and the range in the refusal, and the server never
+/// listens anywhere (LPF1-M1, REL220-F1, REL220-F3).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_server_check_is_refused_on_linux_when_the_kept_port_lies_where_the_kernel_picks() {
+    let kept = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    assert!(
+        kept >= 32_768,
+        "the kernel picked {kept} outside its usual range"
+    );
+    let case = Case::with_settings(&local_model_settings(kept)).await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    let spec = ServerSpec::Stdio {
+        command: fixture(&root),
+        args: vec!["listen".into(), kept.to_string()],
+    };
+    let server = controller
+        .add_mcp_server(Scope::Global, "picked".into(), spec.clone(), vec![])
+        .await
+        .unwrap();
+    controller
+        .approve_mcp_server(server.id.clone(), spec)
+        .await
+        .unwrap();
+    let checked = check(&controller, server.id.clone()).await.unwrap();
+    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    let mut picked = range.split_ascii_whitespace();
+    let (low, high) = (picked.next().unwrap(), picked.next().unwrap());
+    let problem = checked.problem.as_deref().unwrap_or_default();
+    assert!(
+        problem.starts_with(&format!(
+            "CrazyAgent did not run the check: port {kept} is kept free"
+        )),
+        "a kept port the kernel may hand out refuses the check, naming the port: {problem:?}"
+    );
+    assert!(
+        problem.contains(&format!("hands out ports {low} to {high} by itself")),
+        "the refusal names the range the port lies in: {problem:?}"
+    );
+    assert!(
+        !checked
+            .tools
+            .iter()
+            .any(|tool| tool == "listened" || tool == "refused"),
+        "a refused check runs nothing: {:?}",
+        checked.tools
+    );
+    case.close().await;
+}
+
+/// OWNER-PORTS-FAIL-OPEN (rv-secreview IDE-6 note): a settings file that stops reading
+/// after the engine started leaves the configured local model port unknown, so the check
+/// is refused with `owner_ports_settings_unreadable`, shown in its own sentence, and never
+/// listens on that port.
+#[tokio::test]
+async fn a_server_check_with_unreadable_settings_is_refused_not_run_without_kept_ports() {
+    let kept = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let case = Case::with_settings(&local_model_settings(kept)).await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    let spec = ServerSpec::Stdio {
+        command: fixture(&root),
+        args: vec!["listen".into(), kept.to_string()],
+    };
+    let server = controller
+        .add_mcp_server(Scope::Global, "kept".into(), spec.clone(), vec![])
+        .await
+        .unwrap();
+    controller
+        .approve_mcp_server(server.id.clone(), spec)
+        .await
+        .unwrap();
+    fs::write(root.join("global.toml"), "[[[\n").unwrap();
+    let checked = check(&controller, server.id.clone()).await.unwrap();
+    assert!(
+        !checked.tools.iter().any(|tool| tool == "listened"),
+        "port {kept}: {:?}",
+        checked.tools
+    );
+    assert_eq!(
+        checked.problem.as_deref(),
+        Some(
+            "CrazyAgent can't read its settings file, so it did not run the check. Fix the file and check again."
+        )
+    );
     case.close().await;
 }
 
@@ -884,10 +995,19 @@ async fn a_server_check_folder_swapped_for_a_link_is_refused() {
     let first = check(&controller, server.id.clone()).await.unwrap();
     assert_eq!(first.tools, vec!["echo", "authorized"]);
     let home = root.join("mcp-checks").join(&server.id).join("home");
+    #[cfg(target_os = "macos")]
     assert!(
-        fs::symlink_metadata(&home).unwrap().is_symlink(),
-        "the server swapped its home for a link"
+        fs::symlink_metadata(&home).unwrap().is_dir(),
+        "the check sandbox keeps the server from swapping its home for a link"
     );
+    assert!(
+        !target.join("planted").exists(),
+        "the first check never writes outside its own folders"
+    );
+    if !fs::symlink_metadata(&home).unwrap().is_symlink() {
+        fs::remove_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&target, &home).unwrap();
+    }
     let second = check(&controller, server.id.clone()).await.unwrap();
     assert!(
         !target.join("planted").exists(),

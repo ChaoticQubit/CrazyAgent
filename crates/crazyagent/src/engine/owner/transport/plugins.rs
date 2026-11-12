@@ -199,6 +199,22 @@ enum Reply {
     },
 }
 
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Skills { .. } => Some("plugins.skills"),
+        Action::SkillDetail { .. } => Some("plugins.skill_detail"),
+        Action::Servers { .. } => Some("plugins.servers"),
+        Action::Server { .. } => Some("plugins.server"),
+        Action::ImportScan => Some("plugins.import_scan"),
+        Action::Hooks { .. } => Some("plugins.hooks"),
+        Action::Effective { .. } => Some("plugins.effective"),
+        Action::Tools { .. } => Some("plugins.tools"),
+        _ => None,
+    }
+}
+
 fn unknown() -> EngineError {
     failure("plugins_outcome_unknown")
 }
@@ -744,6 +760,7 @@ impl OwnerClient {
     ) -> Result<Reply, EngineError> {
         action.validate()?;
         tokio::time::timeout(timeout, async {
+            let read = read_kind(&action);
             let envelope = Envelope {
                 plugins: action,
                 secret_present: !secrets.is_empty(),
@@ -782,7 +799,9 @@ impl OwnerClient {
                 sent.map_err(|_| failure("plugins_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -1451,8 +1470,12 @@ async fn start_check(
         let folder = id.clone();
         let settings = engine.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            let kept = settings.owner_ports();
-            let outcome = boundary_check(&root, &folder, &command, &args, &values, &kept, network);
+            let outcome = settings
+                .owner_ports()
+                .map_err(String::from)
+                .and_then(|kept| {
+                    boundary_check(&root, &folder, &command, &args, &values, &kept, network)
+                });
             for (_, value) in values.iter_mut() {
                 value.fill(0);
             }
@@ -1461,7 +1484,7 @@ async fn start_check(
         .await;
         let outcome = match outcome {
             Ok(Ok(tools)) => Ok(tools),
-            Ok(Err(code)) => Err(code.to_owned()),
+            Ok(Err(problem)) => Err(problem),
             Err(_) => Err("server_cant_start".to_owned()),
         };
         if let Err(problem) = actor(
@@ -1485,7 +1508,8 @@ async fn start_check(
 /// system paths and the command's folder only, open network without binding the owner's
 /// ports, and only its own secrets. Inputs: the engine folder, server id, command,
 /// arguments, secret values and the configured local model ports to keep. Output: the
-/// tool names, or a plain rejection code.
+/// tool names, or a plain rejection code, or for a boundary that cannot hold the check
+/// the boundary's own reason ([`crate::plugins::check_refused`]).
 #[cfg(unix)]
 fn boundary_check(
     root: &Path,
@@ -1495,22 +1519,29 @@ fn boundary_check(
     secrets: &[(String, Vec<u8>)],
     kept: &[u16],
     network: crate::sandbox::SandboxNetwork,
-) -> Result<Vec<String>, &'static str> {
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
+) -> Result<Vec<String>, String> {
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxError};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     assert!(valid_id(id));
     let program = Path::new(command);
     match std::fs::metadata(program) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err("server_command_not_found");
+            return Err("server_command_not_found".into());
         }
         Ok(found) if found.is_file() && found.permissions().mode() & 0o111 != 0 => {}
-        _ => return Err("server_command_not_runnable"),
+        _ => return Err("server_command_not_runnable".into()),
     }
     let refused = |cause: &dyn std::fmt::Display| {
         eprintln!("plugin_check_boundary_refused cause={cause}");
         "server_cant_start"
+    };
+    let boundary = |error: SandboxError| match error {
+        SandboxError::Unavailable(reason) => {
+            eprintln!("plugin_check_boundary_refused cause={reason}");
+            crate::plugins::check_refused(&reason)
+        }
+        other => refused(&other).to_owned(),
     };
     let checks = root.join(CHECK_FOLDER);
     let mut folders = Vec::with_capacity(3);
@@ -1527,9 +1558,7 @@ fn boundary_check(
             .map_err(|error| refused(&error))?
             .join(name);
         if folder.canonicalize().map_err(|error| refused(&error))? != plain {
-            return Err(refused(
-                &"check folder is not the plain folder the engine made",
-            ));
+            return Err(refused(&"check folder is not the plain folder the engine made").into());
         }
         folders.push(plain);
     }
@@ -1545,15 +1574,15 @@ fn boundary_check(
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
         .and_then(|sandbox| InstalledSandbox::install(sandbox, &check_profile(&checks, id)))
-        .map_err(|error| refused(&error))?;
+        .map_err(boundary)?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);
-    let mut process = sandbox.wrap(&server).map_err(|error| refused(&error))?;
+    let mut process = sandbox.wrap(&server).map_err(boundary)?;
     for (name, value) in secrets {
         process.env(name, std::ffi::OsStr::from_bytes(value));
     }
     assert_eq!(process.get_program(), sandbox.launcher().as_os_str());
-    check::check_command(process, check::CHECK_TIME)
+    check::check_command(process, check::CHECK_TIME).map_err(String::from)
 }
 
 /// Refuses to check a command server where no process group can be stopped. Takes the
@@ -1568,8 +1597,8 @@ fn boundary_check(
     _secrets: &[(String, Vec<u8>)],
     _kept: &[u16],
     _network: crate::sandbox::SandboxNetwork,
-) -> Result<Vec<String>, &'static str> {
-    Err("server_check_unavailable")
+) -> Result<Vec<String>, String> {
+    Err("server_check_unavailable".into())
 }
 
 async fn actor(engine: &Engine, command: Command) -> Result<ResultValue, EngineError> {

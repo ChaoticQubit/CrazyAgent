@@ -47,7 +47,8 @@ const DOWN = 1;
 const UP = -1;
 
 const cases = [
-  ["shell", 600, [[".main", "#last", DOWN], [".main", ".page > p:first-child", UP], [".nav-group", ".nav-group .nav-item", DOWN], [".sidebar", ".sidebar-foot .me", DOWN]]],
+  ["shell", 600, [[".main", "#last", DOWN], [".main", ".page > p:first-child", UP], [".nav-group", ".nav-group .nav-item", DOWN]]],
+  ["shell", 260, [[".sidebar", ".sidebar-foot .me", DOWN]]],
   ["launching", 600, [[".main", ".skeleton", DOWN]]],
   ["down", 200, [["main.full-state", "main button", DOWN], ["main.full-state", "main .brand-mark", UP]]],
   ["outdated", 200, [["main.full-state", "main button", DOWN], ["main.full-state", "main .brand-mark", UP]]],
@@ -56,7 +57,7 @@ const cases = [
 ];
 
 for (const [screen, height, steps] of cases) {
-  test(`the ${screen} screen never scrolls the window and reaches all of its content through its own scroll`, async () => {
+  test(`the ${screen} screen at ${height} px never scrolls the window and reaches all of its content through its own scroll`, async () => {
     assertNativeWindow(screen, height, await scrollCheck(screen, height, steps), steps);
   });
 }

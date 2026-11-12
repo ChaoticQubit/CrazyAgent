@@ -106,10 +106,12 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
 
 /// The longest the tracked-files check lets git run before it is killed and the folder is
 /// refused as unchecked.
+#[cfg(unix)]
 const CHECK_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(unix)]
 const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 /// The most of git's answer the check reads; a tracked folder shows in the first bytes.
+#[cfg(any(unix, test))]
 const CHECK_BYTES_MAX: u64 = 64 * 1024;
 
 /// Whether git tracks any file inside this folder, asked in the project's own checkout with

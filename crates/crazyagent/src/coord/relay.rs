@@ -1,14 +1,15 @@
 use super::hook::Event;
-use super::settings::{self, Delivery, HarnessKind, Nudges, Overlaps};
+use super::settings::{self, Delivery, HarnessKind, Nudges, Overlaps, TaskStart};
 use super::store::{failure, message, state};
 use super::{
-    AgentId, BODY_BYTES_MAX, MessageId, MessageKind, PENDING_MAX, Party, QuestionFor, Receipt,
-    Severity, TOOL_BYTES_MAX, Waiting, WorkId,
+    AgentId, BODY_BYTES_MAX, Message, MessageId, MessageKind, PENDING_MAX, Party, QuestionFor,
+    Receipt, Severity, TOOL_BYTES_MAX, Waiting, WorkId,
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::team::AgentStatus;
 use crate::team::tool::{Mailbox, call_id, call_id_valid};
+use crate::usage::capture::Format;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,9 +26,13 @@ pub const PLUGIN_FOLDER: &str = "crazyagent-relay";
 /// The delivery tag of a lead's own session: Claude Code's `tmuxPaneId` for the lead in
 /// its team config. A teammate's tag is its tmux pane id, such as `%5`.
 pub(crate) const LEAD_TAG: &str = "leader";
+/// The folder inside a native lead's mailbox that holds what the lead's own sessions and
+/// the engine exchange, kept from its teammates (relay mailbox forgery C1).
+pub const LEAD_PART: &str = "lead";
 /// The text that opens every message a session reads, followed by the id and `]`, which
 /// the read receipt scan finds in the session's transcript.
 pub(crate) const MARK: &str = "[crazyagent msg ";
+const NOTIFICATION: &str = "<task-notification>";
 pub(crate) const ROSTER_FILE: &str = "relay.json";
 pub(crate) const INBOX: &str = ".inbox";
 pub(crate) const SHOWN: &str = ".shown";
@@ -43,12 +48,19 @@ pub(crate) const INBOX_MAX: usize = 32;
 pub(crate) const LETTER_BYTES_MAX: u64 = 16 * 1024;
 pub(crate) const ROSTER_BYTES_MAX: u64 = 4 * 1024;
 pub(crate) const ASK_BYTES_MAX: u64 = 4 * 1024;
+/// The most files one overlap question names: the files of one Codex patch, asked together
+/// so one answer and one wait cover the whole patch (PA1213-F2).
+pub(crate) const ASK_PATHS_MAX: usize = 32;
 pub(crate) const ANSWER_BYTES_MAX: u64 = 64 * 1024;
 /// The longest tool log one session keeps before the engine takes it; past it, tool calls
 /// are not counted until the next tick.
 pub(crate) const TOOLS_LOG_BYTES_MAX: u64 = 32 * 1024;
 pub(crate) const WAITING_BYTES_MAX: u64 = 16;
 pub(crate) const PREVIEW_BYTES: usize = 200;
+/// The bytes of a letter's quoted body a session reads. Quoting grows a body of line breaks
+/// threefold, and a letter past one delivery's room would hold up every letter behind it.
+const QUOTED_BODY_BYTES_MAX: usize = 2 * BODY_BYTES_MAX;
+const _: () = assert!(QUOTED_BODY_BYTES_MAX + 2 * FROM_BYTES_MAX < super::hook::LETTERS_CHARS_MAX);
 const PLUGIN_NAME: &str = "crazyagent-relay";
 const MONITOR_NAME: &str = "crazyagent-inbox";
 const ROSTER_PART: &str = "relay.json.part";
@@ -57,6 +69,16 @@ const WAITING_TAKEN: &str = ".wtaken";
 const ASK_TAKEN: &str = ".asking";
 const PART: &str = ".rpart";
 const ASKS_PER_TICK_MAX: usize = 8;
+/// The most names one relay `post` request counts: the tool, `graphify` and a skill.
+const TOOLS_PER_POST_MAX: usize = 3;
+/// The most bytes of the engine's answer to one relay request after its `ok` line.
+pub const REPLY_BYTES_MAX: usize = 64 * 1024;
+/// How long a native teammate's hook or monitor waits for the engine's answer to one relay
+/// request: several engine ticks, within every relay hook's own timeout.
+pub const REQUEST_WAIT: Duration = Duration::from_millis(1500);
+/// The engine's yes that opens its answer to a relay request, and its no.
+pub(crate) const ANSWERED: &[u8; 3] = b"ok\n";
+pub(crate) const REFUSED: &[u8; 3] = b"no\n";
 const HELD_MAX: usize = 16;
 const TOOLS_PER_TICK_MAX: usize = 256;
 const FROM_BYTES_MAX: usize = 128;
@@ -70,6 +92,11 @@ const _: () = assert!(INBOX_MAX <= PENDING_MAX && TEAMMATES_MAX >= 1);
 const _: () = assert!(LETTER_BYTES_MAX as usize > 2 * BODY_BYTES_MAX + 1024);
 const _: () = assert!(PREVIEW_BYTES < BODY_BYTES_MAX && FROM_BYTES_MAX < 1024);
 const _: () = assert!(ANSWER_BYTES_MAX as usize > HELD_MAX * (2 * 512 + FROM_BYTES_MAX + 64));
+const _: () = assert!(
+    ANSWER_BYTES_MAX as usize <= REPLY_BYTES_MAX
+        && 4 * super::hook::LETTERS_CHARS_MAX + 1024 <= REPLY_BYTES_MAX
+        && INBOX_MAX * (PREVIEW_BYTES + FROM_BYTES_MAX + 128) <= REPLY_BYTES_MAX
+);
 
 /// One message as the relay hands it to a session: written by the engine as
 /// `<id as 32 hex digits>.inbox` in the agent's mailbox, taken by the session whose tag
@@ -96,7 +123,8 @@ impl Letter {
     }
 
     /// The whole message as a session reads it: the mark, the sender, what kind of
-    /// message it is and the full body. Takes the letter. Returns the text.
+    /// message it is and the full body with every line quoted, so none starts as a speaker
+    /// or another message. Takes the letter. Returns the text.
     pub(crate) fn text(&self) -> String {
         let about = match (self.kind, self.question) {
             (MessageKind::Question, Some((target, severity))) => {
@@ -119,9 +147,12 @@ impl Letter {
             .work
             .map(|work| format!(" on work {work}"))
             .unwrap_or_default();
+        let body = crate::team::events::quoted_lines(&self.body);
         format!(
             "{MARK}{}] from {}{about}{work}:\n{}",
-            self.id, self.from, self.body
+            self.id,
+            self.from,
+            clip(&body, QUOTED_BODY_BYTES_MAX)
         )
     }
 }
@@ -139,12 +170,15 @@ pub(crate) struct Roster {
 }
 
 /// A session's question to the engine before an edit under Overlaps Block: whether a file,
-/// relative to the repository root, is claimed by another active agent.
+/// relative to the repository root, is claimed by another active agent; `more` names the
+/// other files of the same patch, so one answer covers them all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ask {
     pub to: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more: Vec<String>,
 }
 
 /// The engine's answer to an `Ask`: the active claims of other agents that cover the
@@ -170,17 +204,6 @@ pub(crate) struct Held {
 /// missing. Inputs: the home, the mailbox and the engine executable, all absolute.
 /// Output: the plugin folder to pass with `--plugin-dir`, or a plain refusal.
 pub fn install(home: &Path, mailbox: &Path, engine: &Path) -> Result<PathBuf, EngineError> {
-    let plain = |path: &Path| {
-        path.is_absolute()
-            .then(|| path.to_str())
-            .flatten()
-            .filter(|text| {
-                !text
-                    .chars()
-                    .any(|c| c.is_control() || matches!(c, '\'' | '$'))
-            })
-            .map(str::to_owned)
-    };
     let (Some(engine_text), Some(mailbox_text)) = (plain(engine), plain(mailbox)) else {
         return Err(failure("coord_relay_path_invalid"));
     };
@@ -248,6 +271,46 @@ pub fn install(home: &Path, mailbox: &Path, engine: &Path) -> Result<PathBuf, En
     Ok(plugin)
 }
 
+/// The Codex tools a team agent's edit guard runs before (PA-12): the patch tool and the
+/// shell, which carries `apply_patch` when the model has no patch tool of its own (proof
+/// on Codex 0.167.1, `.local-state/flow-sprint/w-v231-pa1213/PA12-codex-hooks-proof.md`).
+pub const CODEX_EDIT_MATCHER: &str = "apply_patch|Bash";
+
+/// The command of a Codex team agent's edit guard hook, `'<engine>' coord-hook codex-edit
+/// '<mailbox>'`, which Codex runs through the shell before each `CODEX_EDIT_MATCHER` call;
+/// the mailbox folder is made 0700 when missing, so the engine serves it. Inputs: the
+/// mailbox and the engine executable, both absolute. Output: the command, or a plain
+/// refusal.
+pub fn codex_edit_hook(mailbox: &Path, engine: &Path) -> Result<String, EngineError> {
+    let (Some(engine_text), Some(mailbox_text)) = (plain(engine), plain(mailbox)) else {
+        return Err(failure("coord_relay_path_invalid"));
+    };
+    if !real_folder(mailbox) {
+        private_folder(mailbox)?;
+    }
+    let command = format!(
+        "'{engine_text}' {HOOK_COMMAND} {} '{mailbox_text}'",
+        Event::CodexEdit.as_str()
+    );
+    assert!(command.starts_with('\'') && !command.chars().any(char::is_control));
+    Ok(command)
+}
+
+/// An absolute path as hook text: valid UTF-8 with no control character, quote or `$`, so
+/// it sits inside single quotes in a shell command. Takes the path. Returns the text, or
+/// None.
+fn plain(path: &Path) -> Option<String> {
+    path.is_absolute()
+        .then(|| path.to_str())
+        .flatten()
+        .filter(|text| {
+            !text
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '\'' | '$'))
+        })
+        .map(str::to_owned)
+}
+
 /// Tells whether an agent's home holds a relay plugin, so the engine serves its mailbox.
 /// Takes the home. Returns true when the plugin manifest is a plain file there.
 pub fn installed(home: &Path) -> bool {
@@ -259,23 +322,64 @@ pub fn installed(home: &Path) -> bool {
     .is_ok_and(|metadata| metadata.is_file())
 }
 
+/// How a lead's mailbox is laid out: one folder for every session of an agent that leads
+/// no native team, or, for a native lead, the lead's sessions in [`LEAD_PART`], which the
+/// teammates' sandbox keeps them out of (relay mailbox forgery C1), while its teammates'
+/// sessions use no mailbox entry but the roster there and talk to the engine over the
+/// lead's caller socket (relay over the caller socket, OQ-7 B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Single,
+    Split,
+}
+
+/// Where one session's entries sit in its mailbox, from where the engine placed it: the
+/// mailbox itself for an agent that leads no native team, [`LEAD_PART`] for a native lead's
+/// own sessions (relay mailbox forgery C1), and for a native lead's teammates the mailbox
+/// itself, whose only entry they read is the roster in the lead's part, as everything else
+/// goes over the caller socket (relay over the caller socket, OQ-7 B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Part {
+    Single,
+    #[cfg(unix)]
+    Lead,
+    Teammates,
+}
+
+/// Opens the folder one part's entries sit in, never following a link. Takes the mailbox
+/// and the part. Returns the folder, the mailbox itself but for a native lead's own part,
+/// or the I/O error.
+pub(crate) fn part_folder(mailbox: Mailbox, part: Part) -> std::io::Result<Mailbox> {
+    match part {
+        #[cfg(unix)]
+        Part::Lead => mailbox.folder(LEAD_PART),
+        Part::Single | Part::Teammates => Ok(mailbox),
+    }
+}
+
 /// Runs one engine tick of an agent's relay: refreshes `relay.json`, marks Delivered each
 /// message a session took, drops letters no longer waiting, writes the next waiting
 /// messages of the agent and its native teammates (none under the Typing only delivery
 /// setting, nor for a master, which K2b feeds through its engine input), applies the
 /// sessions' tool counts, activity and waits and each native teammate's Idle or Working,
-/// answers their overlap
-/// questions, and, when `receipts` is set, marks Read each delivered message its session
-/// answered after (from the home's newest transcripts). Everything a session wrote is
-/// validated; nothing from the mailbox is trusted. Inputs: the database, the project, the
-/// agent, its home, its mailbox, whether to scan transcripts and the time in ms. Output:
-/// Ok, or a SQLite failure; an unreadable mailbox is skipped.
+/// answers their overlap questions, and, when `receipts` is set, marks Read each delivered
+/// message its session answered after (from the home's newest transcripts). Under the
+/// split layout the lead's part, which the engine makes when it is missing, holds the
+/// roster and serves the lead's tag alone, and nothing in the mailbox itself is read: the
+/// teammates report and take their letters through [`answer`], so nothing one teammate
+/// writes counts for the lead or another teammate. Everything a session wrote is
+/// validated; nothing from the mailbox is trusted. Inputs: the database,
+/// the project, the agent, its home, its mailbox, its layout, whether to scan transcripts
+/// and the time in ms. Output: Ok, or a SQLite failure; an unreadable mailbox or lead's
+/// part is skipped.
+#[allow(clippy::too_many_arguments)]
 pub fn serve(
     db: &Connection,
     project: &ProjectId,
     lead: AgentId,
     home: &Path,
     mailbox: &Path,
+    layout: Layout,
     receipts: bool,
     now: i64,
 ) -> Result<(), EngineError> {
@@ -287,32 +391,362 @@ pub fn serve(
         return Ok(());
     }
     let chosen = settings::read(db, project)?;
-    let delivery = settings::delivery(db, project, HarnessKind::ClaudeCode)?;
     let roster = Roster {
         overlaps: chosen.overlaps,
         nudges: chosen.nudges,
         root: worktree(db, project, lead)?,
     };
-    write_roster(&folder, &roster);
-    let master: bool = db
-        .query_row(
-            "SELECT role='master' FROM team_agents WHERE id=?1",
-            [lead],
-            |row| row.get(0),
-        )
-        .map_err(state)?;
-    let posts = delivery != Delivery::TypingOnly && !master;
-    collect_shown(db, &folder, &team, now)?;
-    sweep_letters(db, &folder, &team, posts)?;
-    if posts {
-        post_letters(db, &folder, &team)?;
+    let posts = posts(db, project, lead)?;
+    match layout {
+        Layout::Single => {
+            write_roster(&folder, &roster);
+            serve_part(db, project, &folder, &team, posts, now)?;
+        }
+        Layout::Split => {
+            let Ok(own) = folder
+                .make_folder(LEAD_PART)
+                .and_then(|()| folder.folder(LEAD_PART))
+            else {
+                return Ok(());
+            };
+            let alone: BTreeMap<String, AgentId> = team
+                .iter()
+                .filter(|(tag, _)| *tag == LEAD_TAG)
+                .map(|(tag, agent)| (tag.clone(), *agent))
+                .collect();
+            write_roster(&own, &roster);
+            serve_part(db, project, &own, &alone, posts, now)?;
+        }
     }
-    take_activity(db, &folder, &team, now)?;
-    answer_asks(db, project, &folder, &team)?;
     if receipts {
-        read_receipts(db, home, &team, now)?;
+        read_receipts(db, home, Format::Claude, team.values().copied(), now)?;
     }
     Ok(())
+}
+
+/// Whether the relay hands a lead's team its messages: not under the Typing only delivery
+/// setting, nor for a master, which K2b feeds through its engine input, nor for a Codex
+/// agent, which its app-server bridge or typing feeds; its mailbox serves the edit guard
+/// alone (PA-12). Takes the database, the project and the lead. Returns the answer or a
+/// SQLite failure.
+fn posts(db: &Connection, project: &ProjectId, lead: AgentId) -> Result<bool, EngineError> {
+    let delivery = settings::delivery(db, project, HarnessKind::ClaudeCode)?;
+    let (master, harness): (bool, String) = db
+        .query_row(
+            "SELECT role='master', harness FROM team_agents WHERE id=?1",
+            [lead],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(state)?;
+    let claude = HarnessKind::from_harness(&harness) == Some(HarnessKind::ClaudeCode);
+    Ok(delivery != Delivery::TypingOnly && !master && claude)
+}
+
+/// One relay request of a native teammate's session on its lead's caller socket (relay over
+/// the caller socket, OQ-7 B), each the engine side of one file report or claim the
+/// mailbox carried before: `post own|sub <name>...` after a tool call, `stop own|sub`,
+/// `wait question|permission`, `prompt typed|other`, `ask <path>` before an edit under
+/// Overlaps Block, `nudge` before an edit, and the monitor's `peek`. `own` marks the
+/// teammate's own session, which takes its letters, apart from a subagent of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Request {
+    Post { own: bool, tools: Vec<String> },
+    Stop { own: bool },
+    Wait(Waiting),
+    Prompt { typed: bool },
+    Ask(String),
+    Nudge,
+    Peek,
+}
+
+impl Request {
+    /// Reads one request line without its `relay` word or newline: plain words, a tool name
+    /// as `record_tool` takes it, at most `TOOLS_PER_POST_MAX` of them, and a path with no
+    /// control character. Takes the bytes. Returns the request, or None for anything else.
+    fn parse(line: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(line).ok()?;
+        if text.chars().any(char::is_control) {
+            return None;
+        }
+        let (verb, rest) = text.split_once(' ').unwrap_or((text, ""));
+        let own = |word: &str| match word {
+            "own" => Some(true),
+            "sub" => Some(false),
+            _ => None,
+        };
+        let request = match verb {
+            "post" => {
+                let mut words = rest.split(' ');
+                let own = own(words.next()?)?;
+                let tools: Vec<String> = words.map(str::to_owned).collect();
+                let plain = tools.len() <= TOOLS_PER_POST_MAX
+                    && tools.iter().all(|tool| {
+                        !tool.is_empty()
+                            && tool.len() <= TOOL_BYTES_MAX
+                            && !tool.chars().any(char::is_whitespace)
+                    });
+                plain.then_some(Self::Post { own, tools })?
+            }
+            "stop" => Self::Stop { own: own(rest)? },
+            "wait" => Self::Wait(Waiting::parse(rest)?),
+            "prompt" => match rest {
+                "typed" => Self::Prompt { typed: true },
+                "other" => Self::Prompt { typed: false },
+                _ => return None,
+            },
+            "ask" if !rest.is_empty() => Self::Ask(rest.to_owned()),
+            "nudge" if rest.is_empty() => Self::Nudge,
+            "peek" if rest.is_empty() => Self::Peek,
+            _ => return None,
+        };
+        Some(request)
+    }
+}
+
+/// The Task-start reminder of one native lead's teammates (T3-15): the lead's text, none
+/// when its launch names nothing, and the teammates given it since they last rested.
+#[derive(Debug, Default)]
+pub struct TaskStarts {
+    pub text: Option<String>,
+    pub reminded: BTreeSet<AgentId>,
+}
+
+/// The native lead a relay request came in for on its caller socket (OQ-7 B): its project,
+/// its id and its teammates' Task-start reminder (T3-15).
+pub struct ForLead<'a> {
+    pub project: &'a ProjectId,
+    pub id: AgentId,
+    pub starts: &'a mut TaskStarts,
+}
+
+/// Answers one relay request a native teammate's hook or monitor sent on its lead's caller
+/// socket (relay over the caller socket, OQ-7 B). It acts for the live teammate the
+/// engine's rows put in `pane`, the pane the socket found the connecting process in, never
+/// for one the request names, so no teammate reports, takes letters or asks as another.
+/// The answer is `ok` and its payload, written at once; letters and the first-edit reminder
+/// are marked Delivered only once written whole. A pane no live teammate of the lead holds,
+/// a malformed request and a failure get `no`. Inputs: the database, the lead with its
+/// project and Task-start reminder, the pane, the request, the connection and the time in
+/// ms. Output: Ok, or the SQLite failure after answering no.
+pub fn answer(
+    db: &Connection,
+    lead: ForLead<'_>,
+    pane: &str,
+    request: &[u8],
+    out: &mut dyn Write,
+    now: i64,
+) -> Result<(), EngineError> {
+    let ForLead {
+        project,
+        id: lead,
+        starts,
+    } = lead;
+    let reply = match reply(db, project, lead, pane, request, now, starts) {
+        Ok(reply) => reply,
+        Err(problem) => {
+            let _ = out.write_all(REFUSED);
+            return Err(problem);
+        }
+    };
+    let Some(((payload, delivered), started)) = reply else {
+        let _ = out.write_all(REFUSED);
+        return Ok(());
+    };
+    assert!(payload.len() <= REPLY_BYTES_MAX);
+    let mut whole = Vec::with_capacity(ANSWERED.len() + payload.len());
+    whole.extend_from_slice(ANSWERED);
+    whole.extend_from_slice(&payload);
+    if out.write_all(&whole).and_then(|()| out.flush()).is_err() {
+        return Ok(());
+    }
+    if let Some(mate) = started {
+        starts.reminded.insert(mate);
+    }
+    for id in delivered {
+        advance(db, id, Receipt::Delivered, now)?;
+    }
+    Ok(())
+}
+
+/// A relay answer's payload and the messages it hands over.
+type Reply = (Vec<u8>, Vec<MessageId>);
+
+/// Carries out one relay request for the teammate in `pane` and makes its answer: a prompt
+/// that starts a task, the teammate's first or its first since it rested, gets the lead's
+/// Task-start reminder while the setting is On, and a rest makes its next prompt start one.
+/// Takes the database, the project, the lead, the pane, the request, the time in ms and the
+/// lead's reminder. Returns the payload, the messages it hands over and the teammate to mark
+/// reminded once it is written, None for a pane no live teammate of the lead holds or a
+/// malformed request, or a SQLite failure.
+fn reply(
+    db: &Connection,
+    project: &ProjectId,
+    lead: AgentId,
+    pane: &str,
+    request: &[u8],
+    now: i64,
+    starts: &mut TaskStarts,
+) -> Result<Option<(Reply, Option<AgentId>)>, EngineError> {
+    let team = recipients(db, project, lead)?;
+    let Some(mate) = team.get(pane).copied().filter(|_| pane != LEAD_TAG) else {
+        return Ok(None);
+    };
+    assert_ne!(mate, lead);
+    let Some(request) = Request::parse(request) else {
+        return Ok(None);
+    };
+    let letters = |own: bool| -> Result<Vec<Letter>, EngineError> {
+        if !own || !posts(db, project, lead)? {
+            return Ok(Vec::new());
+        }
+        let mut taken = Vec::new();
+        let mut size = 0;
+        for found in super::pending(db, mate, INBOX_MAX)? {
+            let letter = letter(db, pane, found);
+            let length = super::hook::letter_chars(&letter);
+            if size + length > super::hook::LETTERS_CHARS_MAX {
+                break;
+            }
+            size += length;
+            taken.push(letter);
+        }
+        Ok(taken)
+    };
+    let handed = |mut taken: Vec<Letter>| {
+        let ids: Vec<MessageId> = taken.iter().map(|letter| letter.id).collect();
+        let text = if taken.is_empty() {
+            String::new()
+        } else {
+            super::hook::bundle(&mut taken)
+        };
+        (text.into_bytes(), ids)
+    };
+    let mut started = None;
+    let answered = match request {
+        Request::Post { own, tools } => {
+            settle(db, mate, now)?;
+            for tool in &tools {
+                super::record_tool(db, mate, tool, now)?;
+            }
+            rests(db, mate, false)?;
+            handed(letters(own)?)
+        }
+        Request::Stop { own } => {
+            settle(db, mate, now)?;
+            super::touch(db, mate, now)?;
+            let taken = letters(own)?;
+            if taken.is_empty() {
+                rests(db, mate, true)?;
+                starts.reminded.remove(&mate);
+            }
+            handed(taken)
+        }
+        Request::Wait(waiting) => {
+            super::set_waiting(db, mate, Some(waiting), now)?;
+            (Vec::new(), Vec::new())
+        }
+        Request::Prompt { typed } => {
+            rests(db, mate, false)?;
+            if typed {
+                settle(db, mate, now)?;
+                super::touch(db, mate, now)?;
+            }
+            match starts.text.as_deref() {
+                Some(text)
+                    if !starts.reminded.contains(&mate)
+                        && settings::read(db, project)?.task_start == TaskStart::On =>
+                {
+                    assert!(text.len() <= crate::launch_context::TASK_START_BYTES_MAX);
+                    started = Some(mate);
+                    (text.as_bytes().to_vec(), Vec::new())
+                }
+                _ => (Vec::new(), Vec::new()),
+            }
+        }
+        Request::Ask(path) => {
+            let bytes = serde_json::to_vec(&Answer {
+                held: held(db, project, mate, &path)?,
+            })
+            .map_err(state)?;
+            (bytes, Vec::new())
+        }
+        Request::Nudge => match super::adoption::first_edit_note(db, project, mate, now)? {
+            Some(note) => (
+                super::adoption::FIRST_EDIT_REMINDER.as_bytes().to_vec(),
+                vec![note],
+            ),
+            None => (Vec::new(), Vec::new()),
+        },
+        Request::Peek => {
+            let mut lines = String::new();
+            if posts(db, project, lead)? {
+                for found in super::pending(db, mate, INBOX_MAX)? {
+                    let letter = letter(db, pane, found);
+                    lines.push_str(&format!("{} {}\n", letter.id, letter.notice()));
+                }
+            }
+            (lines.into_bytes(), Vec::new())
+        }
+    };
+    Ok(Some((answered, started)))
+}
+
+/// Clears a teammate's wait once its session moves on, only while one is stored, so a
+/// session that never waited writes nothing. Takes the database, the teammate and the time
+/// in ms. Returns Ok or a SQLite failure.
+fn settle(db: &Connection, agent: AgentId, now: i64) -> Result<(), EngineError> {
+    let waiting: Option<String> = db
+        .query_row(
+            "SELECT waiting FROM coord_activity WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(state)?
+        .flatten();
+    if waiting.is_some() {
+        super::set_waiting(db, agent, None, now)?;
+    }
+    Ok(())
+}
+
+/// Shows a native teammate's row Idle while it rests or Working once it works again, only
+/// from Idle or Working. Takes the database, the teammate and whether it rests. Returns Ok
+/// or a SQLite failure.
+fn rests(db: &Connection, agent: AgentId, resting: bool) -> Result<(), EngineError> {
+    let status = if resting {
+        AgentStatus::Idle
+    } else {
+        AgentStatus::Working
+    };
+    db.execute(
+        "UPDATE team_agents SET status=?2 WHERE id=?1 AND role='teammate'
+         AND status IN ('idle','working') AND status<>?2",
+        params![agent, status.name()],
+    )
+    .map_err(state)?;
+    Ok(())
+}
+
+/// Runs the steps of one relay tick that read and write one folder of a mailbox, for the
+/// sessions whose entries sit there and no other: their claims, letters, reports and
+/// overlap questions. Takes the database, the project, the folder, its sessions by tag,
+/// whether letters are posted and the time in ms. Returns Ok, or a SQLite failure.
+fn serve_part(
+    db: &Connection,
+    project: &ProjectId,
+    folder: &Mailbox,
+    team: &BTreeMap<String, AgentId>,
+    posts: bool,
+    now: i64,
+) -> Result<(), EngineError> {
+    collect_shown(db, folder, team, now)?;
+    sweep_letters(db, folder, team, posts)?;
+    if posts {
+        post_letters(db, folder, team)?;
+    }
+    take_activity(db, folder, team, now)?;
+    answer_asks(db, project, folder, team)
 }
 
 /// The mailbox name stem of a delivery tag: 32 hex digits, zero for the lead and the pane
@@ -374,10 +808,18 @@ pub(crate) fn read_letter(folder: &Mailbox, name: &str) -> Option<Letter> {
     (letter.body.len() <= BODY_BYTES_MAX && letter.from.len() <= FROM_BYTES_MAX).then_some(letter)
 }
 
-/// Reads the engine's `relay.json`. Takes the mailbox. Returns the roster, or None
-/// before the engine wrote one.
-pub(crate) fn read_roster(folder: &Mailbox) -> Option<Roster> {
-    let bytes = read_entry(folder, ROSTER_FILE, ROSTER_BYTES_MAX)?;
+/// Reads the engine's `relay.json` from one part's folder: its own, but a native lead's
+/// teammates read the one in the lead's part, the only entry there their sandbox reads.
+/// Takes the part's folder and the part. Returns the roster, or None before the engine
+/// wrote one.
+pub(crate) fn read_roster(folder: &Mailbox, part: Part) -> Option<Roster> {
+    let name = match part {
+        Part::Teammates => format!("{LEAD_PART}/{ROSTER_FILE}"),
+        Part::Single => ROSTER_FILE.to_owned(),
+        #[cfg(unix)]
+        Part::Lead => ROSTER_FILE.to_owned(),
+    };
+    let bytes = read_entry(folder, &name, ROSTER_BYTES_MAX)?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -564,16 +1006,7 @@ fn post_letters(
             if waiting.contains(&stem) || taken.contains(&stem) {
                 continue;
             }
-            let letter = Letter {
-                id: found.id,
-                to: tag.clone(),
-                from: sender(db, found.from),
-                kind: found.kind,
-                question: found.question,
-                work: found.work,
-                reply_to: found.reply_to,
-                body: found.body,
-            };
+            let letter = letter(db, tag, found);
             let bytes = serde_json::to_vec(&letter).map_err(state)?;
             assert!(bytes.len() as u64 <= LETTER_BYTES_MAX);
             if put(folder, &format!("{stem}{INBOX}"), &bytes).is_ok() {
@@ -583,6 +1016,21 @@ fn post_letters(
     }
     assert!(count <= INBOX_MAX.max(waiting.len()));
     Ok(())
+}
+
+/// The letter of one waiting message for a delivery tag. Takes the database, the tag and
+/// the message. Returns the letter.
+fn letter(db: &Connection, tag: &str, found: Message) -> Letter {
+    Letter {
+        id: found.id,
+        to: tag.to_owned(),
+        from: sender(db, found.from),
+        kind: found.kind,
+        question: found.question,
+        work: found.work,
+        reply_to: found.reply_to,
+        body: found.body,
+    }
 }
 
 /// The name a session reads for a sender: "the owner", "CrazyAgent", or the agent's
@@ -620,17 +1068,7 @@ fn take_activity(
             continue;
         };
         if tag != LEAD_TAG {
-            let status = if resting.contains(&key) {
-                AgentStatus::Idle
-            } else {
-                AgentStatus::Working
-            };
-            db.execute(
-                "UPDATE team_agents SET status=?2 WHERE id=?1 AND role='teammate'
-                 AND status IN ('idle','working') AND status<>?2",
-                params![agent, status.name()],
-            )
-            .map_err(state)?;
+            rests(db, *agent, resting.contains(&key))?;
         }
         if let Some(log) = claim(folder, &key, TOOLS, TOOLS_TAKEN, TOOLS_LOG_BYTES_MAX) {
             let text = String::from_utf8_lossy(&log);
@@ -708,28 +1146,25 @@ fn answer_asks(
         let ask = read_entry(folder, &held_name, ASK_BYTES_MAX)
             .and_then(|bytes| serde_json::from_slice::<Ask>(&bytes).ok());
         let _ = folder.remove(&held_name);
-        let mut held = Vec::new();
-        if let Some(ask) = ask
-            && let Some(agent) = team.get(&ask.to)
-        {
-            match super::overlapping(db, project, *agent, &ask.path) {
-                Ok(claims) => {
-                    for claim in claims.into_iter().filter(|claim| !claim.stale) {
-                        if held.len() == HELD_MAX {
-                            break;
+        let held = match ask.as_ref().and_then(|ask| Some((team.get(&ask.to)?, ask))) {
+            Some((agent, ask)) if ask.more.len() < ASK_PATHS_MAX => {
+                let mut all: Vec<Held> = Vec::new();
+                for path in std::iter::once(&ask.path).chain(&ask.more) {
+                    for one in held(db, project, *agent, path)? {
+                        if all.len() < HELD_MAX && !all.contains(&one) {
+                            all.push(one);
                         }
-                        held.push(Held {
-                            by: sender(db, Party::Agent(claim.agent)),
-                            pattern: claim.pattern,
-                        });
                     }
                 }
-                Err(problem) if problem.0.starts_with("coord_state_unavailable") => {
-                    return Err(problem);
-                }
-                Err(_) => {}
+                all
             }
-        }
+            Some(_) => vec![Held {
+                by: "CrazyAgent".to_owned(),
+                pattern: "more files than one check reads; split the patch".to_owned(),
+            }],
+            None => Vec::new(),
+        };
+        assert!(held.len() <= HELD_MAX);
         let bytes = serde_json::to_vec(&Answer { held }).map_err(state)?;
         assert!(bytes.len() as u64 <= ANSWER_BYTES_MAX);
         let _ = put(folder, &format!("{stem}{ANSWER}"), &bytes);
@@ -737,46 +1172,130 @@ fn answer_asks(
     Ok(())
 }
 
-/// Marks Read each message delivered or typed to the lead or a teammate whose mark shows
-/// in one of the home's newest Claude Code transcripts (`projects/**/<session>.jsonl`)
-/// with assistant output after it. Reads the last `TRANSCRIPT_TAIL_BYTES` of at most
+/// The active claims of other agents that cover one file, at most `HELD_MAX`, for an
+/// agent's overlap question (K1a `overlapping`); a path that is not one plain repository
+/// file has none. A project holding more claims than one check reads answers one claim
+/// held by CrazyAgent, so the edit check fails closed. Takes the database, the project, the asking agent and the
+/// repository-relative path. Returns the claims, or a SQLite failure.
+fn held(
+    db: &Connection,
+    project: &ProjectId,
+    agent: AgentId,
+    path: &str,
+) -> Result<Vec<Held>, EngineError> {
+    let mut held = Vec::new();
+    match super::overlapping(db, project, agent, path) {
+        Ok(claims) => {
+            for claim in claims.into_iter().filter(|claim| !claim.stale) {
+                if held.len() == HELD_MAX {
+                    break;
+                }
+                held.push(Held {
+                    by: sender(db, Party::Agent(claim.agent)),
+                    pattern: claim.pattern,
+                });
+            }
+        }
+        Err(problem) if problem.0.starts_with("coord_state_unavailable") => {
+            return Err(problem);
+        }
+        Err(problem) if problem.0 == "coord_claims_full" => {
+            held.push(Held {
+                by: "CrazyAgent".to_owned(),
+                pattern:
+                    "too many claims in this project to check; they free up as the owner accepts or discards finished change sets, or as work no agent is on is released"
+                        .to_owned(),
+            });
+        }
+        Err(_) => {}
+    }
+    assert!(held.len() <= HELD_MAX);
+    Ok(held)
+}
+
+/// Marks Read each message delivered or typed to one Codex agent whose mark shows in one
+/// of its home's newest rollouts with the agent's own output after it, as [`serve`] does
+/// from a Claude Code lead's transcripts, and puts back to Sent each one the turn it went
+/// into dropped when it ended aborted (`Tails`). Takes the database, the agent, its
+/// `CODEX_HOME` and the time in ms. Returns Ok or a SQLite failure.
+pub fn codex_receipts(
+    db: &Connection,
+    agent: AgentId,
+    home: &Path,
+    now: i64,
+) -> Result<(), EngineError> {
+    read_receipts(db, home, Format::Codex, [agent], now)
+}
+
+/// Marks Read each message delivered or typed to the agents whose mark shows in one of the
+/// home's newest session records of the format, Claude Code transcripts
+/// (`projects/**/<session>.jsonl`) or Codex rollouts (`sessions/**/rollout-*.jsonl`), with
+/// the session's answer after it ([`answered`]), and puts back to Sent each message the
+/// Codex bridge delivered into a turn (its `turn`) whose start and aborted end both show in
+/// one rollout tail, when no tail shows its mark. Reads the last `TRANSCRIPT_TAIL_BYTES` of at most
 /// `TRANSCRIPTS_READ_MAX` files, read-only and never following a link.
 fn read_receipts(
     db: &Connection,
     home: &Path,
-    team: &BTreeMap<String, AgentId>,
+    format: Format,
+    agents: impl IntoIterator<Item = AgentId>,
     now: i64,
 ) -> Result<(), EngineError> {
     let mut unread = BTreeSet::new();
-    for agent in team.values() {
+    let mut turns: BTreeMap<MessageId, (AgentId, String)> = BTreeMap::new();
+    for agent in agents {
         let limit = i64::try_from(RECEIPTS_CHECKED_MAX).map_err(state)?;
         let mut statement = db
             .prepare(
-                "SELECT id FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+                "SELECT id, turn FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
                  AND receipt IN ('delivered','typed') ORDER BY id DESC LIMIT ?2",
             )
             .map_err(state)?;
         let rows = statement
-            .query_map(params![agent, limit], |row| row.get::<_, i64>(0))
+            .query_map(params![agent, limit], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })
             .map_err(state)?;
         for row in rows {
+            let (id, turn) = row.map_err(state)?;
             if unread.len() < RECEIPTS_CHECKED_MAX {
-                unread.insert(row.map_err(state)?);
+                unread.insert(id);
+                if let Some(turn) = turn {
+                    turns.insert(id, (agent, turn));
+                }
             }
         }
     }
     if unread.is_empty() {
         return Ok(());
     }
-    let mut read = BTreeSet::new();
-    let records = crate::usage::capture::records(home, crate::usage::capture::Format::Claude);
+    let wanted: BTreeSet<&str> = turns.values().map(|(_, turn)| turn.as_str()).collect();
+    let mut tails = Tails::default();
+    let records = crate::usage::capture::records(home, format).0;
     for path in records.into_iter().take(TRANSCRIPTS_READ_MAX) {
-        scan_transcript(&path, &unread, &mut read);
+        scan_transcript(&path, format, &unread, &wanted, &mut tails);
     }
-    for id in read {
-        advance(db, id, Receipt::Read, now)?;
+    for id in &tails.read {
+        advance(db, *id, Receipt::Read, now)?;
+    }
+    for (id, (agent, turn)) in &turns {
+        if !tails.shown.contains(id) && tails.aborted.contains(turn) {
+            super::messages::requeue_aborted(db, *id, *agent, turn, now)?;
+        }
     }
     Ok(())
+}
+
+/// What the tails of a home's session records showed: the unread ids answered after their
+/// mark, every unread id whose mark shows at all, and the turns unread messages went into
+/// whose start and aborted end both show in one Codex rollout tail, so a mark recorded in
+/// such a turn would show too; Codex 0.164 drops a steer still waiting when its turn aborts
+/// (b19 P2).
+#[derive(Default)]
+struct Tails {
+    read: BTreeSet<MessageId>,
+    shown: BTreeSet<MessageId>,
+    aborted: BTreeSet<String>,
 }
 
 /// Moves a message's receipt forward, leaving one that already moved past it alone.
@@ -789,9 +1308,76 @@ fn advance(db: &Connection, id: MessageId, receipt: Receipt, now: i64) -> Result
     }
 }
 
-/// Finds in one transcript's tail the unread ids whose mark is followed by an assistant
-/// record. Takes the transcript, the unread ids and the set to add read ids to.
-fn scan_transcript(path: &Path, unread: &BTreeSet<MessageId>, read: &mut BTreeSet<MessageId>) {
+/// Tells whether one session record line is the session answering: a Claude Code
+/// `assistant` record, or a Codex rollout item the agent wrote, its message or tool call,
+/// as the session search reads it (`record_message` names it the agent's). Takes the format
+/// and the line. Returns the answer.
+fn answered(format: Format, text: &str) -> bool {
+    match format {
+        Format::Claude => {
+            text.contains("\"assistant\"")
+                && serde_json::from_str::<serde_json::Value>(text)
+                    .is_ok_and(|record| record["type"] == "assistant")
+        }
+        Format::Codex => {
+            text.contains("\"response_item\"")
+                && crate::harnesses::transcript::record_message("codex", text.as_bytes())
+                    .is_some_and(|(speaker, _)| speaker == "agent")
+        }
+    }
+}
+
+/// One wanted Codex turn's start or aborted end, as a 0.164 rollout line records it.
+enum TurnEvent {
+    Started(String),
+    Aborted(String),
+}
+
+/// Reads the wanted turn one Codex rollout line starts or ends aborted: an `event_msg`
+/// `task_started` with its `turn_id` or `turn_attribution.turn_id` (0.164 writes the
+/// attribution only for a regular turn), or a `turn_aborted` with its `turn_id`. Takes the
+/// line and the wanted turn ids. Returns that event, or none for any other line or turn.
+fn turn_event(text: &str, wanted: &BTreeSet<&str>) -> Option<TurnEvent> {
+    if wanted.is_empty()
+        || !(text.contains("\"task_started\"") || text.contains("\"turn_aborted\""))
+    {
+        return None;
+    }
+    let record = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    if record["type"] != "event_msg" {
+        return None;
+    }
+    let payload = &record["payload"];
+    let kind = payload["type"].as_str()?;
+    let ids: &[&str] = match kind {
+        "task_started" => &["/turn_id", "/turn_attribution/turn_id"],
+        "turn_aborted" => &["/turn_id"],
+        _ => return None,
+    };
+    let turn = ids
+        .iter()
+        .filter_map(|id| payload.pointer(id)?.as_str())
+        .find(|turn| wanted.contains(turn))?
+        .to_owned();
+    Some(if kind == "task_started" {
+        TurnEvent::Started(turn)
+    } else {
+        TurnEvent::Aborted(turn)
+    })
+}
+
+/// Finds in one session record's tail the unread ids whose mark is followed by the
+/// session's answer ([`answered`]), the unread ids whose mark shows at all and, in a Codex
+/// rollout, the wanted turns whose start and later aborted end both lie in this tail
+/// ([`turn_event`]). Takes the record, its format, the unread ids, the turns they went into
+/// and what the tails showed so far.
+fn scan_transcript(
+    path: &Path,
+    format: Format,
+    unread: &BTreeSet<MessageId>,
+    wanted: &BTreeSet<&str>,
+    tails: &mut Tails,
+) {
     let Some((mut file, _, length)) = crate::usage::capture::open_record(path) else {
         return;
     };
@@ -805,6 +1391,7 @@ fn scan_transcript(path: &Path, unread: &BTreeSet<MessageId>, read: &mut BTreeSe
         return;
     }
     let mut seen: BTreeSet<MessageId> = BTreeSet::new();
+    let mut started: BTreeSet<String> = BTreeSet::new();
     loop {
         line.clear();
         match reader.read_until(b'\n', &mut line) {
@@ -814,37 +1401,112 @@ fn scan_transcript(path: &Path, unread: &BTreeSet<MessageId>, read: &mut BTreeSe
         let Ok(text) = std::str::from_utf8(&line) else {
             continue;
         };
-        if !seen.is_empty()
-            && text.contains("\"assistant\"")
-            && serde_json::from_str::<serde_json::Value>(text)
-                .is_ok_and(|record| record["type"] == "assistant")
-        {
-            read.append(&mut seen);
+        if !seen.is_empty() && answered(format, text) {
+            tails.read.append(&mut seen);
         }
-        for id in marks(text) {
-            if unread.contains(&id) && !read.contains(&id) {
-                seen.insert(id);
+        for id in marks(format, text) {
+            if unread.contains(&id) {
+                tails.shown.insert(id);
+                if !tails.read.contains(&id) {
+                    seen.insert(id);
+                }
+            }
+        }
+        if format == Format::Codex {
+            match turn_event(text, wanted) {
+                Some(TurnEvent::Started(turn)) => {
+                    started.insert(turn);
+                }
+                Some(TurnEvent::Aborted(turn)) if started.contains(&turn) => {
+                    tails.aborted.insert(turn);
+                }
+                _ => {}
             }
         }
     }
 }
 
-/// The message ids marked in one line of text: each `[crazyagent msg <digits>]`.
-fn marks(text: &str) -> Vec<MessageId> {
+/// The message ids one session record line marks as handed to the session: each
+/// `[crazyagent msg <digits>]` that starts a line of a text the session was given
+/// ([`given`]), outside a task notification. A mark the agent or a tool wrote, or one
+/// quoted in a letter's body, starts no such line and counts for nothing (SECAUDIT-2-F3).
+/// Takes the format and the line. Returns the ids.
+fn marks(format: Format, text: &str) -> Vec<MessageId> {
     let mut found = Vec::new();
-    let mut rest = text;
-    while let Some(at) = rest.find(MARK) {
-        rest = &rest[at + MARK.len()..];
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        if digits > 0
-            && digits <= 18
-            && rest.as_bytes().get(digits) == Some(&b']')
-            && let Ok(id) = rest[..digits].parse::<MessageId>()
-        {
-            found.push(id);
+    if !text.contains(MARK) {
+        return found;
+    }
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(text) else {
+        return found;
+    };
+    let mut texts = Vec::new();
+    if let Some(input) = given(format, &record) {
+        strings(input, &mut texts);
+    }
+    for text in texts {
+        if text.starts_with(NOTIFICATION) {
+            continue;
+        }
+        for line in text.split(crate::team::events::line_break) {
+            let Some(rest) = line.strip_prefix(MARK) else {
+                continue;
+            };
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0
+                && digits <= 18
+                && rest.as_bytes().get(digits) == Some(&b']')
+                && let Ok(id) = rest[..digits].parse::<MessageId>()
+            {
+                found.push(id);
+            }
         }
     }
     found
+}
+
+/// The part of one session record that is input handed to the session, never its own
+/// answer or a tool's output: a Claude Code user message holding no tool result, or a
+/// hook's output or queued prompt attachment; a Codex user message or its `user_message`
+/// event. Takes the format and the parsed record. Returns that part, or none.
+fn given(format: Format, record: &serde_json::Value) -> Option<&serde_json::Value> {
+    match format {
+        Format::Claude => match record["type"].as_str()? {
+            "user" => {
+                let content = &record["message"]["content"];
+                let tool = content
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|part| part["type"] == "tool_result"));
+                (!tool).then_some(content)
+            }
+            "attachment" => {
+                let kind = record["attachment"]["type"].as_str()?;
+                (kind == "queued_command" || kind.starts_with("hook_"))
+                    .then_some(&record["attachment"])
+            }
+            _ => None,
+        },
+        Format::Codex => {
+            let payload = &record["payload"];
+            match (record["type"].as_str()?, payload["type"].as_str()?) {
+                ("response_item", "message") if payload["role"] == "user" => {
+                    Some(&payload["content"])
+                }
+                ("event_msg", "user_message") => Some(&payload["message"]),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Collects every string inside a JSON value, in document order. Takes the value and the
+/// list to extend.
+fn strings<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::String(text) => out.push(text),
+        serde_json::Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+        serde_json::Value::Object(fields) => fields.values().for_each(|field| strings(field, out)),
+        _ => {}
+    }
 }
 
 /// Says whether a path is a real folder, not a link to one.
@@ -856,13 +1518,12 @@ fn real_folder(path: &Path) -> bool {
 /// checks it is a real folder afterwards. Takes the path. Returns Ok or
 /// `coord_relay_unwritable`.
 fn private_folder(path: &Path) -> Result<(), EngineError> {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(path) {
+    let created =
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(path);
+    #[cfg(not(unix))]
+    let created = std::fs::DirBuilder::new().create(path);
+    match created {
         Ok(()) => {}
         Err(problem) if problem.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(_) => return Err(failure("coord_relay_unwritable")),
@@ -882,9 +1543,9 @@ pub(crate) fn clip(text: &str, bytes: usize) -> &str {
     &text[..end]
 }
 
-/// A text on one line: every run of line breaks and tabs becomes one space.
+/// A text on one line: every run of `line_break` characters and tabs becomes one space.
 fn one_line(text: &str) -> String {
-    text.split(['\n', '\r', '\t'])
+    text.split(|c: char| crate::team::events::line_break(c) || c == '\t')
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" ")

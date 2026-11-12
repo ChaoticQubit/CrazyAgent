@@ -32,6 +32,13 @@ export function valueOf<T>(result: Result<T> | undefined): T | null {
   return result?.kind === "ok" ? result.value : null;
 }
 
+/** The section a project route asks for, such as "access" in
+ * "#/projects/alpha/agents?section=access". Input: the window's hash route. Output: the
+ * section, or undefined when the route names none. */
+export function routeSection(hash: string): string | undefined {
+  return new URLSearchParams(hash.split("?")[1] ?? "").get("section") ?? undefined;
+}
+
 /** Shows the plain "Not ready yet" state for an engine part that isn't in this build.
  * Input: what is not ready. Output: the notice. */
 export function NotReady({ what }: { what: string }) {

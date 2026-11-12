@@ -1,6 +1,7 @@
-use super::capture::{Attribution, Format, RunKind, scan_agent_home, scan_runs};
+use super::capture::{Attribution, Format, RunKind, run_attribution, scan_agent_home, scan_runs};
 use super::health::{UsageStep, clear, record_panic, record_recovered};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
+use super::recount;
 use super::report::{mark_unreported, reports_usage};
 use super::{LimitSource, failure, record_failure, record_observation, storage};
 use crate::config::{ModelAccess, ModelConnection};
@@ -21,6 +22,8 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(5);
 pub const POLL_EVERY_MS: i64 = 10 * 60 * 1000;
 const STOPPED_SCAN_MS: i64 = 10 * 60 * 1000;
 const AGENTS_PER_SCAN_MAX: i64 = 256;
+const RECOUNT_AGENTS_MAX: i64 = 8 * 1024;
+const RECOUNT_RUNS_MAX: i64 = 8 * 1024;
 const STEP_PANICKED: &str = "usage_step_panicked";
 const PANIC_PAUSE_MAX: Duration = Duration::from_secs(10 * 60);
 const PANIC_DOUBLINGS_MAX: u32 = 8;
@@ -40,6 +43,35 @@ pub fn request_refresh(db: &Connection, now_ms: i64) -> Result<(), EngineError> 
     )
     .map_err(storage)?;
     Ok(())
+}
+
+/// The least time between two polls asked for because agents reported a limit, however many
+/// reports arrive, so a run that keeps reporting cannot make the engine poll more often
+/// (SECAUDIT-RATELIMIT-FORGE).
+pub const CONFIRM_EVERY_MS: i64 = 60 * 1000;
+const _: () = assert!(CONFIRM_EVERY_MS > 0 && CONFIRM_EVERY_MS < POLL_EVERY_MS);
+
+/// Asks the usage service to poll every signed-in account at its next scan because an agent
+/// reported a limit, so the provider's own reading can confirm it, unless anything asked
+/// within the last `CONFIRM_EVERY_MS`. A store with no usage tables has no service to ask.
+/// Inputs: the store and the time. Output: whether it asked.
+pub fn request_confirm(db: &Connection, now_ms: i64) -> rusqlite::Result<bool> {
+    let usage: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_refresh')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !usage {
+        return Ok(false);
+    }
+    let asked = db.execute(
+        "INSERT INTO usage_refresh (singleton,requested_ms) VALUES (1,?1)
+         ON CONFLICT(singleton) DO UPDATE SET requested_ms=excluded.requested_ms
+         WHERE requested_ms<=excluded.requested_ms-?2",
+        params![now_ms, CONFIRM_EVERY_MS],
+    )?;
+    assert!(asked <= 1);
+    Ok(asked == 1)
 }
 
 fn refresh_requested(db: &Connection) -> Result<Option<i64>, EngineError> {
@@ -79,11 +111,12 @@ pub fn team_attribution(
 ) -> Attribution {
     let project = ProjectId::new(project).ok();
     let account = connection.and_then(|connection| CredentialRef::new(connection).ok());
-    let (kind, agent) = if master {
-        (RunKind::Master, master_agent(project.as_ref()))
+    let kind = if master {
+        RunKind::Master
     } else {
-        (RunKind::Agent, format!("team-{id}"))
+        RunKind::Agent
     };
+    let agent = team_agent_key(id, project.as_ref(), master);
     Attribution {
         kind,
         pool: match (&project, &account) {
@@ -94,6 +127,17 @@ pub fn team_attribution(
         account,
         agent,
         harness: harness.to_owned(),
+    }
+}
+
+/// The usage key a team agent's tokens and turns count against: `master_agent` for the
+/// master, `team-<id>` for a sub-agent. Inputs: the agent id, its project and whether it is
+/// the master. Output: the key.
+pub fn team_agent_key(id: i64, project: Option<&ProjectId>, master: bool) -> String {
+    if master {
+        master_agent(project)
+    } else {
+        format!("team-{id}")
     }
 }
 
@@ -132,6 +176,7 @@ pub struct Usage {
     custody: Result<NativeProfileCustody, EngineError>,
     access: AccessSource,
     executables: BTreeMap<&'static str, PathBuf>,
+    lookup: Option<crate::paths::HarnessLookup>,
     endpoints: (url::Url, url::Url, bool),
     polled_ms: Option<i64>,
     polls: u64,
@@ -165,6 +210,7 @@ impl Usage {
             custody,
             access,
             executables,
+            lookup: None,
             endpoints: (
                 endpoint(CLAUDE_USAGE_URL)?,
                 endpoint(CODEX_USAGE_URL)?,
@@ -175,6 +221,27 @@ impl Usage {
             doing: UsageStep::Poll,
             unrecovered: BTreeSet::new(),
         })
+    }
+
+    /// Lets the upkeep find a harness the engine pinned after it started, as after an
+    /// install from the app. Only engine start sets it, so an upkeep built without it never
+    /// looks past the executables it was given. Takes the engine's lookup. Returns the upkeep.
+    pub fn with_harness_lookup(mut self, lookup: crate::paths::HarnessLookup) -> Self {
+        self.lookup = Some(lookup);
+        self
+    }
+
+    /// The entry of a harness: the one given at engine start, else the one the engine pinned
+    /// since, when the lookup is set. Input: the harness id. Output: the entry, or none for
+    /// a harness that is not installed.
+    fn harness(&self, harness: &str) -> Option<PathBuf> {
+        let entry = self
+            .executables
+            .get(harness)
+            .cloned()
+            .or_else(|| self.lookup.as_ref().and_then(|lookup| lookup(harness)))?;
+        assert!(entry.is_absolute());
+        Some(entry)
     }
 
     /// Points the polls at other usage calls, such as a loopback server in a test.
@@ -213,7 +280,135 @@ impl Usage {
             |project, account| pool_of(&access, project, account),
             now_ms,
         )?;
-        self.completed(UsageStep::Runs, now_ms)
+        self.completed(UsageStep::Runs, now_ms)?;
+        self.guarded_recount(|usage| usage.recount(&access, now_ms), now_ms)
+    }
+
+    /// Runs the recount's part of a step. A panic is counted against the recount and returns
+    /// done, so that the live scan's pace does not double for it; the file being read has
+    /// already been charged a try. Inputs: the part and the time. Output: done, or the store's
+    /// failure.
+    fn guarded_recount(
+        &mut self,
+        part: impl FnOnce(&Usage) -> Result<(), EngineError>,
+        now_ms: i64,
+    ) -> Result<(), EngineError> {
+        self.doing = UsageStep::Recount;
+        let usage = &*self;
+        match guarded(|| part(usage)) {
+            Some(code) if code == STEP_PANICKED => {
+                self.unrecovered.insert(UsageStep::Recount);
+                record_panic(&self.db, UsageStep::Recount, now_ms)
+            }
+            Some(code) => Err(EngineError(code)),
+            None => self.completed(UsageStep::Recount, now_ms),
+        }
+    }
+
+    /// Starts the once-only recount, then reads one bounded part of it each step. Inputs: the
+    /// live access and the time. Output: done, or the store's failure.
+    fn recount(&self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
+        recount::forget_copy(&self.db, now_ms)?;
+        if !recount::started(&self.db)? {
+            recount::begin(&self.db, &self.recount_homes(access)?, now_ms)?;
+        }
+        recount::step(&self.db, recount::BYTES_PER_STEP, now_ms)?;
+        Ok(())
+    }
+
+    /// Lists the homes the upkeep already scans. A store without team tables has only its
+    /// runs; any other failure returns, so the once-only recount starts on a later step.
+    /// Input: the live access. Output: the homes, or the store's failure.
+    fn recount_homes(&self, access: &ModelAccess) -> Result<Vec<recount::Home>, EngineError> {
+        let mut homes = Vec::new();
+        let has_team: bool = self
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_agents')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if has_team {
+            let mut statement = self
+                .db
+                .prepare(
+                    "SELECT id,project,role,harness,connection FROM team_agents
+                     WHERE role<>'teammate' ORDER BY id DESC LIMIT ?1",
+                )
+                .map_err(storage)?;
+            let rows: Vec<(i64, String, String, String, Option<String>)> = statement
+                .query_map([RECOUNT_AGENTS_MAX], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .map_err(storage)?
+                .collect::<Result<_, _>>()
+                .map_err(storage)?;
+            for (id, project, role, harness, connection) in rows {
+                let Some(format) = Format::of(&harness) else {
+                    continue;
+                };
+                homes.push(recount::Home {
+                    path: self
+                        .team
+                        .join("agents")
+                        .join(format!("agent-{id}"))
+                        .join("home"),
+                    format,
+                    attribution: team_attribution(
+                        id,
+                        &project,
+                        role == "master",
+                        &harness,
+                        connection.as_deref(),
+                        access,
+                    ),
+                    removed: false,
+                    team_agent: Some(id),
+                });
+            }
+        }
+        let mut runs = self
+            .db
+            .prepare("SELECT home,kind,project,account,agent,harness FROM usage_runs ORDER BY started_ms DESC LIMIT ?1")
+            .map_err(storage)?;
+        let rows: Vec<(String, String, String, String, String, String)> = runs
+            .query_map([RECOUNT_RUNS_MAX], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .map_err(storage)?
+            .collect::<Result<_, _>>()
+            .map_err(storage)?;
+        for (home, kind, project, account, agent, harness) in rows {
+            let resolve =
+                |project: &str, account: &CredentialRef| pool_of(access, project, account);
+            let removed = project == super::REMOVED_PROJECTS;
+            if let Some((format, attribution)) =
+                run_attribution(&kind, project, account, agent, harness, &resolve)
+            {
+                homes.push(recount::Home {
+                    path: PathBuf::from(home),
+                    format,
+                    attribution,
+                    removed,
+                    team_agent: None,
+                });
+            }
+        }
+        Ok(homes)
     }
 
     /// Marks a part that panicked earlier as working again once it completes, writing only
@@ -334,7 +529,7 @@ impl Usage {
             MemberKind::Chatgpt => (Provider::Codex, "codex"),
             _ => return Ok(None),
         };
-        let Some(executable) = self.executables.get(harness).cloned() else {
+        let Some(executable) = self.harness(harness) else {
             return Ok(None);
         };
         let tx = self.db.unchecked_transaction().map_err(storage)?;
@@ -482,13 +677,15 @@ impl Pace {
 
 /// Starts the usage upkeep for a running engine: it steps every `SCAN_EVERY`, and less
 /// often while its steps keep panicking, reading the pools live from the engine's settings
-/// files. Inputs: the runtime folder, both settings files and the harness executables by
-/// harness id. Output: the service, or a reason.
+/// files. Inputs: the runtime folder, both settings files, the harness executables by
+/// harness id and the engine's lookup of a harness it pinned after it started.
+/// Output: the service, or a reason.
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
     project: &Path,
     executables: BTreeMap<&'static str, PathBuf>,
+    lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<UsageService, String> {
     let runtime = runtime
         .canonicalize()
@@ -507,6 +704,9 @@ pub fn start_for_engine(
         executables,
     )
     .map_err(|e| e.0)?;
+    if let Some(lookup) = lookup {
+        usage = usage.with_harness_lookup(lookup);
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let thread = std::thread::Builder::new()

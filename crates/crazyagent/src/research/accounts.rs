@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
-const ANTHROPIC_PROTOCOL: &str = "anthropic-messages";
 const DATABASE_WAIT: Duration = Duration::from_secs(5);
 
 /// The custody and sign-in code for a managed profile another launch holds.
@@ -186,30 +185,44 @@ pub fn pool_account(
     })
 }
 
+/// Tells which research account one pool member gives a harness, by the one account rule
+/// every harness shares (DEC-141 PA-8): an endpoint whose wire format the harness speaks,
+/// with its key reference when it has one, or a signed-in profile of that harness. Takes the
+/// connection, the harness id and the signed-in check. Returns the account, or none.
 fn usable(
     connection: &ModelConnection,
     harness: &str,
     signed_in: &impl Fn(&ModelConnection) -> bool,
 ) -> Option<ResearchAccount> {
     let harness = ResearchHarness::of(harness)?;
-    let anthropic = connection.protocol.as_str() == ANTHROPIC_PROTOCOL;
+    if !crate::harnesses::account_fits(harness.id(), connection) {
+        return None;
+    }
     let model =
         || (connection.model.id != ACCOUNT_DEFAULT_MODEL).then(|| connection.model.id.clone());
     match (&connection.endpoint, &connection.auth) {
-        (ModelEndpoint::Http { url }, ModelAuthentication::None {}) => match harness {
-            ResearchHarness::Codex if !anthropic => Some(ResearchAccount::Endpoint {
-                base_url: url.clone(),
-                model: connection.model.id.clone(),
-            }),
-            ResearchHarness::ClaudeCode if anthropic => Some(ResearchAccount::AnthropicEndpoint {
-                base_url: url.clone(),
-                model: connection.model.id.clone(),
-            }),
-            _ => None,
-        },
+        (ModelEndpoint::Http { url }, auth) => {
+            let base_url = crate::harnesses::endpoint_base_url(harness.id(), url).to_owned();
+            let model = connection.model.id.clone();
+            let key = match auth {
+                ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref.clone()),
+                _ => None,
+            };
+            Some(match harness {
+                ResearchHarness::Codex => ResearchAccount::Endpoint {
+                    base_url,
+                    model,
+                    key,
+                },
+                ResearchHarness::ClaudeCode => ResearchAccount::AnthropicEndpoint {
+                    base_url,
+                    model,
+                    key,
+                },
+            })
+        }
         (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. })
-            if ResearchHarness::of(connection.harness.as_str()) == Some(harness)
-                && signed_in(connection) =>
+            if signed_in(connection) =>
         {
             Some(match harness {
                 ResearchHarness::Codex => ResearchAccount::ManagedCodex {
@@ -319,7 +332,9 @@ impl SettingsResolver {
             |connection| {
                 database
                     .as_ref()
-                    .and_then(|database| crate::team::paused_until(database, connection).ok())
+                    .and_then(|database| {
+                        crate::team::held_until(database, project, connection).ok()
+                    })
                     .flatten()
             },
             &choice,
@@ -328,14 +343,20 @@ impl SettingsResolver {
     }
 
     /// The account an agent outside the research queue, such as onboarding's
-    /// mapping agent, runs on for `pool`: the pool's first member the first of
-    /// `harnesses` can use, else the next harness's, with the same sign-in
-    /// check and account pauses as [`Self::resolve`]. `harnesses` are the
-    /// installed ones, Codex first. Rereads the settings on every call. Returns
-    /// [`AccountPick::NeedsPool`] for an unknown pool or unreadable settings,
-    /// [`AccountPick::Paused`] with the earliest end when only paused members
-    /// fit, else [`AccountPick::NoUsableAccount`] when none fits.
-    pub fn pool_pick(&self, pool: &CredentialRef, harnesses: &[ResearchHarness]) -> AccountPick {
+    /// mapping agent, runs on for `project` from `pool`: the pool's first member
+    /// the first of `harnesses` can use, else the next harness's, with the same
+    /// sign-in check, account pauses and project holds as [`Self::resolve`].
+    /// `harnesses` are the installed ones, Codex first. Rereads the settings on
+    /// every call. Returns [`AccountPick::NeedsPool`] for an unknown pool or
+    /// unreadable settings, [`AccountPick::Paused`] with the earliest end when
+    /// only paused or held members fit, else [`AccountPick::NoUsableAccount`]
+    /// when none fits.
+    pub fn pool_pick(
+        &self,
+        project: &str,
+        pool: &CredentialRef,
+        harnesses: &[ResearchHarness],
+    ) -> AccountPick {
         let Ok(config) = crate::config::resolve_config(&self.global, &self.project) else {
             return AccountPick::NeedsPool;
         };
@@ -364,7 +385,7 @@ impl SettingsResolver {
         let paused_until = |connection: &CredentialRef| {
             database
                 .as_ref()
-                .and_then(|database| crate::team::paused_until(database, connection).ok())
+                .and_then(|database| crate::team::held_until(database, project, connection).ok())
                 .flatten()
         };
         let mut waiting = AccountPick::NoUsableAccount;
@@ -452,3 +473,7 @@ pub(crate) fn managed_sign_in(
     assert_eq!(fact.binding.connection, *connection);
     Ok((host, fact))
 }
+
+#[cfg(test)]
+#[path = "accounts_tests.rs"]
+mod accounts_tests;

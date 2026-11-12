@@ -4,6 +4,7 @@ pub mod app_setup;
 pub(in crate::tui) mod changes;
 pub mod clone_repo;
 pub(in crate::tui) mod console;
+pub(in crate::tui) mod first_run_accounts;
 pub mod home;
 pub mod home_folder;
 pub(in crate::tui) mod intake;
@@ -38,6 +39,8 @@ pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
 pub mod team;
+pub(in crate::tui) mod team_messages;
+pub(in crate::tui) mod team_settings;
 pub(in crate::tui) mod tests;
 pub(in crate::tui) mod tickets;
 pub(in crate::tui) mod usage;
@@ -202,6 +205,10 @@ pub enum Place {
         id: ProjectId,
         name: String,
     },
+    TeamSettings {
+        id: ProjectId,
+        name: String,
+    },
     Master {
         id: ProjectId,
         name: String,
@@ -219,9 +226,14 @@ pub enum Place {
         id: ProjectId,
         name: String,
     },
+    ProjectMemory {
+        id: ProjectId,
+        name: String,
+    },
     HomeFolder {
         first_run: bool,
     },
+    FirstRunAccounts,
     AddProject,
     AddFolder,
     CloneRepo,
@@ -248,6 +260,7 @@ pub enum Flow {
     Open(Place),
     Replace(Box<dyn Screen>),
     Back,
+    Go(Place),
 }
 
 impl std::fmt::Debug for Flow {
@@ -258,6 +271,7 @@ impl std::fmt::Debug for Flow {
             Self::Open(place) => write!(formatter, "Open({place:?})"),
             Self::Replace(screen) => write!(formatter, "Replace({:?})", screen.crumbs()),
             Self::Back => formatter.write_str("Back"),
+            Self::Go(place) => write!(formatter, "Go({place:?})"),
         }
     }
 }
@@ -275,7 +289,8 @@ impl std::fmt::Debug for Flow {
 /// 1. Implement this trait. Add a `Place` when Go to or another screen opens
 ///    it, and build it in `open`.
 /// 2. Move with `Flow`: `Open(place)` pushes, `Replace(screen)` swaps the top,
-///    `Back` pops. An `Esc` returned as `Ignored` goes back.
+///    `Back` pops, `Go(place)` leaves for Home with the place on top. An `Esc`
+///    returned as `Ignored` goes back.
 /// 3. Ask for engine data with `ctx.request(Request::..)` in `shown`. Shared
 ///    data lands in `ctx.store`; every open screen sees each `Arrival`.
 /// 4. Add key tests next to the screen and a render test against a design
@@ -299,6 +314,12 @@ pub trait Screen {
 
     /// Keys for the help line, in priority order.
     fn hints(&self, ctx: &Ctx) -> Vec<Hint>;
+
+    /// True when the help line wraps to more rows instead of dropping hints, as every
+    /// settings screen's does, so each key stays in view from 80 columns up.
+    fn wraps_hints(&self) -> bool {
+        false
+    }
 
     /// Keys for "This screen" in the Keys overlay; the help line by default.
     fn keys(&self, ctx: &Ctx) -> Vec<Hint> {
@@ -363,6 +384,40 @@ pub trait Screen {
     fn place(&self) -> Option<Place> {
         None
     }
+
+    /// The project this screen belongs to, so the header can tell that project's waiting
+    /// change sets from the rest. Input: none. Output: the project of `place`, or None
+    /// outside a project.
+    fn project(&self) -> Option<ProjectId> {
+        match self.place()? {
+            Place::Project { id, .. }
+            | Place::Team { id, .. }
+            | Place::TeamSettings { id, .. }
+            | Place::Master { id, .. }
+            | Place::ProjectProcess { id, .. }
+            | Place::ProjectHarnesses { id, .. }
+            | Place::ProjectMemory { id, .. } => Some(id),
+            Place::Onboarding { project, .. } => project,
+            Place::HarnessSettings { project, .. }
+            | Place::CheckSettings { project }
+            | Place::TicketSettings { project } => project.map(|(id, _)| id),
+            Place::Home
+            | Place::Welcome
+            | Place::Settings(_)
+            | Place::AddAccount
+            | Place::NewPool
+            | Place::NewPoolFrom(_)
+            | Place::EditPool(_)
+            | Place::NewProject
+            | Place::Setup { .. }
+            | Place::HomeFolder { .. }
+            | Place::FirstRunAccounts
+            | Place::AddProject
+            | Place::AddFolder
+            | Place::CloneRepo
+            | Place::Usage => None,
+        }
+    }
 }
 
 /// Builds the screen for a place.
@@ -382,6 +437,9 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
         Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
+        Place::TeamSettings { id, name } => {
+            Box::new(team_settings::TeamSettings::new(id.clone(), name.clone()))
+        }
         Place::Master { id, name } => Box::new(team::Team::master(id.clone(), name.clone())),
         Place::ProjectProcess { id, name } => {
             Box::new(process::ProcessPage::new(process::Scope::Project {
@@ -407,7 +465,12 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::ProjectHarnesses { id, name } => Box::new(
             settings_harnesses::Harnesses::for_project(id.clone(), name.clone()),
         ),
+        Place::ProjectMemory { id, name } => Box::new(settings_memory::Memory::for_project(
+            id.clone(),
+            name.clone(),
+        )),
         Place::HomeFolder { first_run } => Box::new(home_folder::HomeFolder::new(*first_run, ctx)),
+        Place::FirstRunAccounts => Box::new(first_run_accounts::FirstRunAccounts::new()),
         Place::AddProject => Box::new(add_project::AddProject::new()),
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),

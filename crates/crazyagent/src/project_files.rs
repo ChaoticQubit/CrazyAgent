@@ -1,5 +1,5 @@
 use crate::engine::EngineError;
-use std::path::{Component, Path};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// The most paths one file-list read returns.
@@ -8,8 +8,11 @@ pub const FILES_MAX: u16 = 200;
 pub const QUERY_BYTES_MAX: usize = 256;
 /// The longest a file-list read lets git run before it answers with what it has.
 pub const LISTING_TIME: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 const PATH_BYTES_MAX: usize = 512;
+#[cfg(unix)]
 const REPLY_BYTES_MAX: usize = 48 * 1024;
+#[cfg(unix)]
 const LISTING_BYTES_MAX: u64 = 32 * 1024 * 1024;
 #[cfg(unix)]
 const POLL: Duration = Duration::from_millis(2);
@@ -134,6 +137,7 @@ pub(crate) fn list(
 /// contains the query. Inputs: git's output, the canonical project folder, the lowercased
 /// query and the limit. Output: the kept paths and whether the limit or the reply bound
 /// ended the reading before git's output did.
+#[cfg(unix)]
 fn collect(
     output: impl std::io::Read,
     root: &Path,
@@ -176,11 +180,12 @@ fn collect(
 /// True when a listed path names a regular file in the project: a plain relative path of
 /// at most 512 bytes with no `.git` part and no control character, not itself a link, in
 /// a folder that resolves inside the project. Inputs: the canonical folder and the path.
+#[cfg(unix)]
 fn inside(root: &Path, path: &str) -> bool {
     let relative = Path::new(path);
     let plain = relative
         .components()
-        .all(|part| matches!(part, Component::Normal(name) if !name.eq_ignore_ascii_case(".git")));
+        .all(|part| matches!(part, std::path::Component::Normal(name) if !name.eq_ignore_ascii_case(".git")));
     if !plain || path.len() > PATH_BYTES_MAX || path.chars().any(char::is_control) {
         return false;
     }

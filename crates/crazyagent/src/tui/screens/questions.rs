@@ -5,11 +5,13 @@ use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::clock;
 use crate::protocol::ProjectId;
 use crate::questions::{
-    ANSWER_BYTES_MAX, Answer, Question, QuestionStatus, Settlement, asker_label,
+    ANSWER_BYTES_MAX, Answer, COMMENT_BYTES_MAX, COMMENT_LABEL, OPTIONS_MAX, Question,
+    QuestionKind, QuestionStatus, Settlement, asker_label,
 };
 use crate::tui::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
+use std::collections::BTreeSet;
 
 const LIST_POLL_MS: i64 = 5_000;
 const LIST_ROWS_MAX: usize = 6;
@@ -22,15 +24,19 @@ const READ_PAGE: usize = 10;
 const CUT: &str = "... v reads all of it";
 const QUIET_CODES: [&str; 1] = ["trusted_connection_unavailable"];
 
-/// What the owner is doing with the chosen question: typing or picking an answer, or
-/// confirming a dismissal. Both hold the id and the version the owner read, so the engine
-/// refuses a write about a question that changed since.
+/// What the owner is doing with the chosen question: picking options and writing a comment,
+/// or confirming a dismissal. Both hold the id and the version the owner read, so the engine
+/// refuses a write about a question that changed since. In the answer box `cursor` is a row:
+/// an option, or the Add a comment row after the last option, where the comment is typed
+/// once `commenting`.
 enum Settling {
     Answer {
         id: u64,
         version: u64,
         input: TextInput,
-        option: Option<usize>,
+        cursor: usize,
+        picks: BTreeSet<u8>,
+        commenting: bool,
     },
     Dismiss {
         id: u64,
@@ -40,8 +46,9 @@ enum Settling {
 
 /// One project's Questions tab: every question an agent or an engine step asked the owner,
 /// pending ones first, with the recommended answer. `a` answers the chosen pending question
-/// by picking an option or typing, `d` dismisses it after a yes. Each write names the
-/// version the owner read. Sends at most one request at a time; never invents data.
+/// by picking one or any options, adding a comment or typing, `d` dismisses it after a yes.
+/// Each write names the version the owner read. Sends at most one request at a time; never
+/// invents data.
 pub(in crate::tui) struct ProjectQuestions {
     pub project: ProjectId,
     items: Vec<Question>,
@@ -186,11 +193,19 @@ impl ProjectQuestions {
         matches!(self.settling, Some(Settling::Answer { .. }))
     }
 
-    /// Inserts pasted text into the answer being typed. Input: untrusted pasted text.
-    /// Output: true when the answer box took it.
+    /// Inserts pasted text into the answer or comment, opening the comment line when it is
+    /// closed. Input: untrusted pasted text. Output: true when the answer box took it.
     pub(in crate::tui) fn paste(&mut self, text: &str) -> bool {
+        let options = self.chosen().map_or(0, |question| question.options.len());
         match self.settling.as_mut() {
-            Some(Settling::Answer { input, .. }) => {
+            Some(Settling::Answer {
+                input,
+                cursor,
+                commenting,
+                ..
+            }) => {
+                *commenting = true;
+                *cursor = options;
                 input.insert_str(text);
                 true
             }
@@ -199,10 +214,11 @@ impl ProjectQuestions {
     }
 
     /// Handles one key: move through the questions, `v` to read the chosen one whole, `a` to
-    /// answer and `d` to dismiss the chosen pending one; in the answer box ↑↓ pick an option,
-    /// letters type, Enter sends and Esc cancels; while reading, ↑↓ and Page keys scroll and
-    /// Esc or `v` close. Input: the key. Output: true when the tab used the key; other keys,
-    /// including Esc on the list, are left to the host.
+    /// answer and `d` to dismiss the chosen pending one; in the answer box ↑↓ move over the
+    /// options and Add a comment, Space picks, `c` opens the comment line, letters type in
+    /// it, Enter sends and Esc cancels; while reading, ↑↓ and Page keys scroll and Esc or `v`
+    /// close. Input: the key. Output: true when the tab used the key; other keys, including
+    /// Esc on the list, are left to the host.
     pub(in crate::tui) fn key(&mut self, key: KeyEvent) -> bool {
         if let Some(Settling::Answer { .. }) = self.settling {
             self.answer_key(key);
@@ -247,21 +263,27 @@ impl ProjectQuestions {
         let pending = self
             .chosen()
             .filter(|question| question.status == QuestionStatus::Pending)
-            .map(|question| (question.id, question.version, recommended_option(question)));
+            .map(|question| {
+                let start = recommended_option(question).unwrap_or(0);
+                let text = question.kind == QuestionKind::Text;
+                (question.id, question.version, start, text)
+            });
         match (key.code, pending) {
             (KeyCode::Up, _) => self.cursor = self.cursor.saturating_sub(1),
             (KeyCode::Down, _) => self.cursor = self.cursor.saturating_add(1),
             (KeyCode::Char('v'), _) if self.chosen().is_some() => self.reading = Some(0),
-            (KeyCode::Char('a'), Some((id, version, option))) => {
+            (KeyCode::Char('a'), Some((id, version, cursor, text))) => {
                 self.notice = None;
                 self.settling = Some(Settling::Answer {
                     id,
                     version,
                     input: TextInput::single(ANSWER_BYTES_MAX),
-                    option,
+                    cursor,
+                    picks: BTreeSet::new(),
+                    commenting: text,
                 });
             }
-            (KeyCode::Char('d'), Some((id, version, _))) => {
+            (KeyCode::Char('d'), Some((id, version, _, _))) => {
                 self.notice = None;
                 self.settling = Some(Settling::Dismiss { id, version });
             }
@@ -271,34 +293,47 @@ impl ProjectQuestions {
         true
     }
 
+    /// Handles one key of the answer box. The box closes when the chosen question is no
+    /// longer the one it answers, as after a list read that dropped it. Input: the key.
     fn answer_key(&mut self, key: KeyEvent) {
-        let options = self.chosen().map_or(0, |question| question.options.len());
+        let shape = self
+            .chosen()
+            .map(|question| (question.id, question.kind, question.options.len()));
         let Some(Settling::Answer {
             id,
             version,
             input,
-            option,
+            cursor,
+            picks,
+            commenting,
         }) = self.settling.as_mut()
         else {
             return;
         };
+        let Some((kind, options)) = shape
+            .filter(|(chosen, _, _)| *chosen == *id)
+            .map(|(_, kind, options)| (kind, options))
+        else {
+            self.settling = None;
+            self.notice = Some(Notice::problem(
+                "That question changed while you answered. Check the list, then answer again.",
+            ));
+            return;
+        };
+        assert!(options <= OPTIONS_MAX);
+        assert!(*cursor <= options);
+        let typing = *commenting && *cursor == options;
         match key.code {
             KeyCode::Esc => self.settling = None,
-            KeyCode::Up if options > 0 => {
-                *option = Some(option.map_or(0, |at| at.saturating_sub(1)));
-            }
-            KeyCode::Down if options > 0 => {
-                *option = Some(option.map_or(0, |at| (at + 1).min(options - 1)));
-            }
+            KeyCode::Up if options > 0 => *cursor = cursor.saturating_sub(1),
+            KeyCode::Down if options > 0 => *cursor = (*cursor + 1).min(options),
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let typed = input.value().trim();
-                let answer = if !typed.is_empty() {
-                    Answer::Text(typed.to_owned())
-                } else if let Some(at) = *option {
-                    Answer::Option(u8::try_from(at).expect("options stay below OPTIONS_MAX"))
-                } else {
-                    self.notice = Some(Notice::problem("Type an answer or pick an option."));
-                    return;
+                let answer = match answer_of(options, picks, *commenting, input.value()) {
+                    Ok(answer) => answer,
+                    Err(problem) => {
+                        self.notice = Some(Notice::problem(problem));
+                        return;
+                    }
                 };
                 let (id, version) = (*id, *version);
                 self.settling = None;
@@ -309,9 +344,18 @@ impl ProjectQuestions {
                     answer,
                 });
             }
-            _ => {
+            KeyCode::Char(' ') if !typing && *cursor < options => {
+                let at = u8::try_from(*cursor).expect("options stay below OPTIONS_MAX");
+                toggle(kind, picks, at);
+            }
+            KeyCode::Char(' ' | 'c') if !typing => {
+                *commenting = true;
+                *cursor = options;
+            }
+            _ if typing => {
                 input.handle(key);
             }
+            _ => {}
         }
     }
 
@@ -443,32 +487,35 @@ impl ProjectQuestions {
                 .push(asker_label(&question.asker), look.fg),
             Row::of(format!("Asked {}", clock(asked, offset)), look.muted),
         ));
-        let picked = match &self.settling {
-            Some(Settling::Answer { input, option, .. }) if input.value().trim().is_empty() => {
-                *option
-            }
-            _ => None,
+        let (cursor, picks, commenting) = match &self.settling {
+            Some(Settling::Answer {
+                cursor,
+                picks,
+                commenting,
+                ..
+            }) => (Some(*cursor), Some(picks), *commenting),
+            _ => (None, None, false),
+        };
+        let choice_row = |index: usize, lead: &str, line: String| {
+            let here = cursor == Some(index);
+            Row::of(lead, look.muted)
+                .pad(LABEL_WIDTH.saturating_sub(2))
+                .push(if here { "> " } else { "  " }, look.accent)
+                .push(line, if here { look.accent } else { look.fg })
         };
         for (index, choice) in question.options.iter().enumerate() {
-            let mut line = format!("{}. {choice}", index + 1);
+            let at = u8::try_from(index).expect("options stay below OPTIONS_MAX");
+            let picked = picks.is_some_and(|picks| picks.contains(&at));
+            let mut line = format!("{} {}. {choice}", mark(question.kind, picked), index + 1);
             if question.recommended.as_deref() == Some(choice.as_str()) {
                 line.push_str(" (recommended)");
             }
-            let mark = if picked == Some(index) { "> " } else { "  " };
             let lead = if index == 0 { "Options" } else { "" };
-            rows.push(
-                Row::of(lead, look.muted)
-                    .pad(LABEL_WIDTH.saturating_sub(2))
-                    .push(mark, look.accent)
-                    .push(
-                        line,
-                        if picked == Some(index) {
-                            look.accent
-                        } else {
-                            look.fg
-                        },
-                    ),
-            );
+            rows.push(choice_row(index, lead, line));
+        }
+        if !question.options.is_empty() && answerable(question) {
+            let line = format!("{} {COMMENT_LABEL}", mark(question.kind, commenting));
+            rows.push(choice_row(question.options.len(), "", line));
         }
         if question.options.is_empty()
             && let Some(recommended) = &question.recommended
@@ -504,27 +551,45 @@ impl ProjectQuestions {
                 ],
                 None,
             ),
-            Some(Settling::Answer { input, option, .. }) => {
-                let room = content.saturating_sub(BOX_LEFT + 2).max(1);
-                let typed: Vec<char> = input.value().chars().collect();
-                let start = input.cursor().saturating_sub(room - 1);
-                let shown: String = typed.iter().skip(start).take(room).collect();
-                let before: String = typed[start..input.cursor()].iter().collect();
-                let mut rows = vec![
-                    Row::of("Your answer", look.heading)
-                        .pad(BOX_LEFT - 2)
-                        .push("[ ", look.accent)
-                        .cat(Row::of(shown, look.fg).pad(room))
-                        .push(" ]", look.accent),
-                ];
-                let hint = if option.is_some() {
-                    "Type your own answer, or press Enter to send the marked option."
-                } else {
-                    "Type your answer, then press Enter to send it."
+            Some(Settling::Answer {
+                input,
+                cursor,
+                commenting,
+                ..
+            }) => {
+                let options = self.chosen().map_or(0, |question| question.options.len());
+                let mut rows = Vec::new();
+                let mut at = None;
+                if *commenting {
+                    let room = content.saturating_sub(BOX_LEFT + 2).max(1);
+                    let typed: Vec<char> = input.value().chars().collect();
+                    let start = input.cursor().saturating_sub(room - 1);
+                    let shown: String = typed.iter().skip(start).take(room).collect();
+                    let before: String = typed[start..input.cursor()].iter().collect();
+                    let label = if options == 0 {
+                        "Your answer"
+                    } else {
+                        "Comment"
+                    };
+                    rows.push(
+                        Row::of(label, look.heading)
+                            .pad(BOX_LEFT - 2)
+                            .push("[ ", look.accent)
+                            .cat(Row::of(shown, look.fg).pad(room))
+                            .push(" ]", look.accent),
+                    );
+                    at = (*cursor == options).then(|| (BOX_LEFT + cells(&before), 0));
+                }
+                let hint = match (options, *commenting) {
+                    (0, _) => "Type your answer, then press Enter to send it.",
+                    (_, false) => "Space picks an option, c adds a comment, Enter sends.",
+                    (_, true) => {
+                        "Enter sends your picks with the comment. Up goes back to the options."
+                    }
                 };
                 rows.push(Row::of(hint, look.muted));
                 rows.extend(self.notice.iter().map(|notice| notice.row(look)));
-                (rows, Some((BOX_LEFT + cells(&before), 0)))
+                (rows, at)
             }
         }
     }
@@ -534,7 +599,9 @@ impl ProjectQuestions {
             Some(Settling::Answer { .. }) => {
                 return vec![
                     ("Enter", "Send"),
-                    ("\u{2191}\u{2193}", "Option"),
+                    ("\u{2191}\u{2193}", "Move"),
+                    ("Space", "Pick"),
+                    ("c", "Comment"),
                     ("Esc", "Cancel"),
                 ];
             }
@@ -649,6 +716,77 @@ fn whole(
     ));
     assert!(rows.len() <= page + 1 && top <= all.len());
     (rows, top)
+}
+
+/// The answer Enter sends from the answer box: the picks in option order and the comment
+/// when its line is open and not blank. Inputs: how many options the question has, the
+/// picks, whether the comment line is open and its text. Output: the answer, or the sentence
+/// saying what is missing or too long.
+fn answer_of(
+    options: usize,
+    picks: &BTreeSet<u8>,
+    commenting: bool,
+    typed: &str,
+) -> Result<Answer, &'static str> {
+    let typed = typed.trim();
+    let comment = (commenting && !typed.is_empty()).then(|| typed.to_owned());
+    if picks.is_empty() && comment.is_none() {
+        return Err(if options == 0 {
+            "Type your answer, then press Enter."
+        } else {
+            "Pick an option or add a comment."
+        });
+    }
+    if !picks.is_empty()
+        && comment
+            .as_ref()
+            .is_some_and(|text| text.len() > COMMENT_BYTES_MAX)
+    {
+        return Err("That comment is too long to send with a pick. Shorten it, or clear the pick.");
+    }
+    assert!(picks.len() <= options);
+    assert!(
+        comment
+            .as_ref()
+            .is_none_or(|text| text.len() <= ANSWER_BYTES_MAX)
+    );
+    Ok(Answer {
+        picks: picks.iter().copied().collect(),
+        comment,
+    })
+}
+
+/// Changes the picks when the owner presses Space on one option: a picked option is
+/// cleared, so a comment can stand alone; a single question keeps only the new option; a
+/// multi question adds it. Inputs: the kind, the picks and the option's position.
+fn toggle(kind: QuestionKind, picks: &mut BTreeSet<u8>, at: u8) {
+    assert!(kind != QuestionKind::Text);
+    assert!(usize::from(at) < OPTIONS_MAX);
+    if picks.remove(&at) {
+        return;
+    }
+    if kind == QuestionKind::Single {
+        picks.clear();
+    }
+    picks.insert(at);
+    assert!(kind != QuestionKind::Single || picks.len() == 1);
+}
+
+/// The mark before one choice: a box for a multi question, a ring for a single one, filled
+/// when picked. Inputs: the kind and whether the choice is picked. Output: the mark.
+fn mark(kind: QuestionKind, picked: bool) -> &'static str {
+    match (kind, picked) {
+        (QuestionKind::Multi, true) => "[x]",
+        (QuestionKind::Multi, false) => "[ ]",
+        (_, true) => "(o)",
+        (_, false) => "( )",
+    }
+}
+
+/// Whether the owner answers this question here: it waits, and it was not asked on an
+/// agent's own terminal. Input: the question. Output: the answer.
+fn answerable(question: &Question) -> bool {
+    question.status == QuestionStatus::Pending && !question.asker.starts_with("terminal:")
 }
 
 /// The option the asker recommended, by position, so the answer box starts on it.

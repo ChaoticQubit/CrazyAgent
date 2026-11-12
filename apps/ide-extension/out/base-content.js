@@ -58,7 +58,7 @@ function provider(engine, call) {
             for (;;) {
                 if (parts.length >= PAGES_MAX)
                     throw new Error((0, scm_model_js_1.refusal)("changes_too_large"));
-                const reply = await engine.request(call, { id: target.id, path: target.path, page });
+                const reply = await engine.request(call, { id: target.id, head: uri.query, path: target.path, page });
                 if (reply.kind !== "ok")
                     throw new Error((0, scm_model_js_1.refusal)(reply.code));
                 const data = reply.data ?? {};

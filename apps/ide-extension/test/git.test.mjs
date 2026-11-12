@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,8 @@ import {
   GIT_ARGS_MAX,
   GIT_FORWARD_ENV,
   GIT_NODE_ENV,
+  GIT_SECRET_ENV,
+  GIT_SHIM_ENV,
   GIT_SOCKET_ENV,
   gitCall,
   gitFailure,
@@ -53,6 +55,7 @@ async function withRelay(check) {
       engine.dispose();
       rmSync(project, { recursive: true, force: true });
       assert.equal(env[GIT_SOCKET_ENV], undefined, "a closed relay is no longer named");
+      assert.equal(env[GIT_SECRET_ENV], undefined, "a closed relay's secret is cleared");
     }
   });
 }
@@ -215,6 +218,52 @@ async function withUpstream(check) {
     }
   });
 }
+
+test("a project's hook under a pull's local step does not hold the relay's secret", { timeout: 30_000 }, async () => {
+  await withRelay(async (server, env, project) => {
+    const upstream = folder();
+    try {
+      tracking(project, upstream);
+      fetchingEngine(server, project);
+      commit(upstream, "beds.md", "Six beds.\n");
+      const seen = join(upstream, "seen-by-hook");
+      mkdirSync(join(project, ".git", "hooks"), { recursive: true });
+      writeFileSync(
+        join(project, ".git", "hooks", "post-merge"),
+        `#!/bin/sh\nprintf '%s' "\${${GIT_SECRET_ENV}-absent}" > '${seen}'\n`,
+        { mode: 0o755 },
+      );
+      const pulled = await forward(["pull", "origin", "main"], project, { ...env, ...BARE_GIT });
+      assert.equal(pulled.code, 0, pulled.stderr);
+      assert.equal(readFileSync(seen, "utf8"), "absent");
+    } finally {
+      rmSync(upstream, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a pull's local step runs through the shim, the only child given the relay's secret", { timeout: 30_000 }, async () => {
+  await withRelay(async (server, env, project) => {
+    const upstream = folder();
+    try {
+      tracking(project, upstream);
+      fetchingEngine(server, project);
+      commit(upstream, "beds.md", "Six beds.\n");
+      const seen = join(upstream, "seen-by-shim");
+      const shim = join(upstream, "shim");
+      writeFileSync(
+        shim,
+        `#!/bin/sh\nprintf '%s %s' "$1" "\${${GIT_SECRET_ENV}-absent}" > '${seen}'\nunset ${GIT_SECRET_ENV}\nexec git "$@"\n`,
+        { mode: 0o755 },
+      );
+      const pulled = await forward(["pull", "origin", "main"], project, { ...env, ...BARE_GIT, [GIT_SHIM_ENV]: shim });
+      assert.equal(pulled.code, 0, pulled.stderr);
+      assert.equal(readFileSync(seen, "utf8"), `merge ${env[GIT_SECRET_ENV]}`);
+    } finally {
+      rmSync(upstream, { recursive: true, force: true });
+    }
+  });
+});
 
 test("a pull of a branch with no upstream is refused, not rebased or merged onto another branch", { timeout: 30_000 }, async () => {
   await withUpstream(async (pull, project, upstream, engine) => {
@@ -394,6 +443,32 @@ test("the relay refuses a malformed command without asking the engine", { timeou
       { args: [], folder: "/tmp/project" },
       { args: ["push"], folder: "project" },
       { args: ["push"] },
+    ]) {
+      const connection = createConnection(env[GIT_SOCKET_ENV]);
+      await once(connection, "connect");
+      connection.write(encodeFrame(call));
+      const reader = new FrameReader();
+      const [chunk] = await once(connection, "data");
+      assert.deepEqual(reader.push(chunk), [{ kind: "rejected", code: "ide_git_refused" }], JSON.stringify(call));
+      connection.destroy();
+    }
+    assert.equal(asked, 0);
+  });
+});
+
+test("a process without the relay's secret gets no git command to the engine", { timeout: 20_000 }, async () => {
+  await withRelay(async (server, env, project) => {
+    let asked = 0;
+    server.on("connection", (connection) => {
+      asked += 1;
+      connection.destroy();
+    });
+    const args = ["push", "--force", "origin", "main"];
+    for (const call of [
+      { args, folder: project },
+      { args, folder: project, secret: 7 },
+      { args, folder: project, secret: "00".repeat(32) },
+      { args, folder: project, secret: "00" },
     ]) {
       const connection = createConnection(env[GIT_SOCKET_ENV]);
       await once(connection, "connect");

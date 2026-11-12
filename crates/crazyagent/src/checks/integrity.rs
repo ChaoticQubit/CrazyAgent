@@ -199,7 +199,7 @@ pub fn assess(
     let new_skips = match subject.settings.skip_markers {
         SkipMarkers::Off => Vec::new(),
         SkipMarkers::Flag | SkipMarkers::Refuse => {
-            let mut found = skips(db, &project, subject.change_set, &files)?;
+            let mut found = skips(db, &project, subject.change_set, subject.head, &files)?;
             found.extend(compared.skipped);
             found.sort();
             bounded(found, SKIPS_BUDGET)
@@ -431,6 +431,7 @@ pub(crate) fn skips(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
+    head: &str,
     files: &[ChangedFile],
 ) -> Result<Vec<NewSkip>, EngineError> {
     let mut found = Vec::new();
@@ -454,7 +455,7 @@ pub(crate) fn skips(
             continue;
         }
         scanned += 1;
-        match added_in(db, project, id, file, language) {
+        match added_in(db, project, id, head, file, language) {
             Some(markers) => found.extend(markers.into_iter().map(|marker| NewSkip {
                 path: recorded(&file.path),
                 line: marker.line,
@@ -468,23 +469,24 @@ pub(crate) fn skips(
 }
 
 /// Reads one changed test file at base and head and lists the markers its change adds.
-/// Inputs: the store, the project, the change set, the file and its language. Output:
-/// the markers, or None when either side cannot be read or the head leaves a string or
-/// comment open, so the file counts as unscanned.
+/// Inputs: the store, the project, the change set, its checked head, the file and its
+/// language. Output: the markers, or None when either side cannot be read or the head
+/// leaves a string or comment open, so the file counts as unscanned.
 fn added_in(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
+    head: &str,
     file: &ChangedFile,
     language: Language,
 ) -> Option<Vec<markers::Marker>> {
-    let head = landing::ide::head_text(db, project, id, &file.path).ok()?;
+    let text = landing::ide::head_text(db, project, id, head, &file.path).ok()?;
     let base = if file.status == FileStatus::Added {
         std::sync::Arc::from("")
     } else {
-        landing::ide::base_text(db, project, id, &file.path).ok()?
+        landing::ide::base_text(db, project, id, head, &file.path).ok()?
     };
-    markers::added(language, &base, &head)
+    markers::added(language, &base, &text)
 }
 
 /// Makes a name or path fit a trackwright run shape: every control character, line break

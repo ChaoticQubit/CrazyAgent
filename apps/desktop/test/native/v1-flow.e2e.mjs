@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { borrowSignIn, engineProfileHomes, managedCodexHome } from "./v1-flow-auth.mjs";
+import { unfold } from "./settings-steps.mjs";
 
 const source = managedCodexHome(process.env);
 const root = process.env.V1_ROOT;
@@ -162,19 +163,19 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
     await shot("02-dashboard-empty");
   });
 
-  it("adds a managed Codex account from an existing signed-in profile", async () => {
+  it("adds a managed Codex account through the browser sign-in in its own profile, then checks that sign-in", async () => {
     await click("button=Add account");
     await click("text=ChatGPT / Codex");
-    await click("text=Use the Codex sign-in on this Mac");
+    await click("text=Sign in with ChatGPT");
+    assert.doesNotMatch(await text("dialog[open]"), /on this Mac/);
     await type("#account-name", CODEX_ACCOUNT);
-    await click("button=Use this sign-in");
-    await until(async () => await page("button=Try again") || await page("button=Check again") ||
-      (await text("dialog[open]")).includes("Account added"), 180000, "managed Codex sign-in did not settle");
-    if (!(await text("dialog[open]")).includes("Account added")) {
-      assert.equal(engineProfileHomes(root).length, 1, "the sign-in made one engine profile home");
-      borrowSignIn(source, root, ledger);
-      await click(await page("button=Try again") ? "button=Try again" : "button=Check again");
-    }
+    await click("button=Sign in in this browser instead");
+    await until(async () => (await text("dialog[open]")).includes("Open this page in your browser to sign in"), 180000, "managed Codex browser sign-in did not show its page");
+    await click("button=Cancel sign-in");
+    await until(async () => await page("button=Check this account's sign-in"), 180000, "cancelled Codex sign-in did not offer the check");
+    assert.equal(engineProfileHomes(root).length, 1, "the sign-in made one engine profile home");
+    borrowSignIn(source, root, ledger);
+    await click("button=Check this account's sign-in");
     await until(async () => (await text("dialog[open]")).includes("Account added"), 180000, "managed Codex account did not sign in");
     assert.match(await text("dialog[open] .success"), new RegExp(`${CODEX_ACCOUNT}[\\s\\S]*Signed in`));
     await shot("03-codex-account");
@@ -201,13 +202,10 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
     await go("#/home");
     await click("button=Create pool");
     await type("#pool-name", POOL);
-    await click(`label=${CODEX_ACCOUNT}`);
-    await click(`label=${LOCAL_ACCOUNT}`);
-    assert.equal(await page(`label=${CODEX_ACCOUNT}`, "checked"), true);
-    assert.equal(await page(`label=${LOCAL_ACCOUNT}`, "checked"), true);
+    await click(`button[aria-label=${JSON.stringify(`Add ${CODEX_ACCOUNT}`)}]`);
+    await click(`button[aria-label=${JSON.stringify(`Add ${LOCAL_ACCOUNT}`)}]`);
+    await until(async () => (await text("main .pool-item.on .pool-item-count")) === "2 of 15" && (await text("main .pool-item.on .pool-item-label")) === POOL, 30000, "pool was not saved");
     await shot("05-pool-editor");
-    await click("button=Save pool");
-    await until(async () => !(await page("#pool-name")) && (await text("main")).includes(POOL), 30000, "pool was not saved");
   });
 
   it("creates a project with research picked and the pool assigned", async () => {
@@ -240,6 +238,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
   });
 
   it("shows research progress on the project page", async () => {
+    await click("#ov-tab-activity");
     const row = await researchSettledIn(["Running", "Done", "Failed"], 300000, "research never started");
     assert.equal(row.title, "Market research");
     assert.ok(RESEARCH_WORDS.includes(row.status));
@@ -265,6 +264,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
 
   it("finishes the research and opens its report", async () => {
     await click("#tab-overview");
+    await click("#ov-tab-activity");
     const row = await researchSettledIn(["Done", "Failed"], 900000, "research did not finish");
     assert.equal(row.status, "Done", `research failed: ${row.progress}`);
     await click("button=Open report");
@@ -275,6 +275,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
 
   it("shows the master in the Team panel", async () => {
     await click("#tab-agents");
+    await unfold("Agents and tasks");
     let seen;
     await until(async () => {
       seen = await team();
@@ -292,6 +293,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
   it("pauses every agent after the master hands a task to a sub-agent", async () => {
     await sendToMaster(HANDOFF, 660000);
     await click("#tab-agents");
+    await unfold("Agents and tasks");
     let seen;
     await until(async () => {
       seen = await team();
@@ -305,7 +307,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
     await click("dialog[open] .btn.danger");
     await until(async () => !(await page("dialog[open] .btn.danger")), 60000, "Pause all confirm did not close");
     assert.doesNotMatch(await text("body"), /Not ready yet: pausing agents/);
-    await click("text=All (");
+    await click("button=All");
     await until(async () => {
       seen = await team();
       return /^0 of \d+ agents working\.$/.test(seen.working) && seen.tasks.length > 0 &&

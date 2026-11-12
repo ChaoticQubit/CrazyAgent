@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
+import { chromeExecutable, startChrome } from "./chrome.mjs";
 
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const STARTUP_MS = 15000;
 const CALL_MS = 15000;
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
+const PAGE = '<!doctype html><html lang="en"><head></head><body></body></html>';
 
 /** Bundles one test fixture and the production modules it imports into a script that defines
  * `Fixture` in the page. Input: the fixture path. Output: the script text. */
@@ -81,25 +80,13 @@ async function connect(url) {
   return { send, on, close: () => socket.close() };
 }
 
-/** Starts the one headless Google Chrome a test file's pages run in, before any test starts, so
- * its start counts against STARTUP_MS and never against a test's own time. Chrome stops once the
- * file has nothing left to run, or is killed if the process ends another way. Output: the
- * DevTools origin and browser endpoint. */
+/** Starts the one headless Chrome for Testing named by CRAZYAGENT_CHROME that a test file's pages
+ * run in, before any test starts, so its start counts against STARTUP_MS and never against a
+ * test's own time. Chrome stops once the file has nothing left to run; `startChrome` kills it and
+ * removes its profile if the process exits or is signalled first. Output: the DevTools origin and
+ * browser endpoint. */
 async function launch() {
-  assert.ok(existsSync(CHROME), `these tests need Google Chrome at ${CHROME}`);
-  const profile = mkdtempSync(join(tmpdir(), "ca-chrome-"));
-  const chrome = spawn(CHROME, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`,
-    "--no-first-run", "--no-default-browser-check", "--disable-extensions", "about:blank"], { stdio: "ignore" });
-  const exited = new Promise((resolve) => chrome.once("exit", resolve));
-  const running = () => chrome.exitCode === null && chrome.signalCode === null;
-  chrome.unref();
-  process.once("exit", () => { if (running()) chrome.kill("SIGKILL"); });
-  const stop = async () => {
-    chrome.ref();
-    if (running()) chrome.kill("SIGTERM");
-    await exited;
-    rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-  };
+  const { chrome, profile, stop } = startChrome(chromeExecutable());
   try {
     const endpoint = await devtoolsEndpoint(profile, chrome);
     const browser = await connect(endpoint.browser);
@@ -122,8 +109,10 @@ const chrome = await launch();
  * so no storage, permission or cache crosses tests, and always closes that context afterwards.
  * Input: the check, given `evaluate(expression)` for page scripts (awaited, returned by value),
  * `send(method, params)` for DevTools commands, `on(method, listener)` for DevTools events such
- * as `Network.loadingFailed` and `context`, the browser context id. Output: what the check
- * returns. */
+ * as `Network.loadingFailed` and `context`, the browser context id. The page has the doctype
+ * the app's page has, so a check measures the layout the app shows. A promise a script returns
+ * is held by a DevTools object until it settles: awaited unheld, DevTools can answer "Promise was
+ * collected" while the page goes on working. Output: what the check returns. */
 export async function withPage(check) {
   const browser = await connect(chrome.browser);
   try {
@@ -134,10 +123,17 @@ export async function withPage(check) {
       const page = await connect(`${chrome.origin}/devtools/page/${targetId}`);
       try {
         const evaluate = async (expression) => {
-          const reply = await page.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-          if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
-          return reply.result.value;
+          const failed = (reply) => {
+            if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
+            return reply;
+          };
+          const { result } = failed(await page.send("Runtime.evaluate", { expression }));
+          if (result.subtype === "promise") return failed(await page.send("Runtime.awaitPromise", { promiseObjectId: result.objectId, returnByValue: true })).result.value;
+          if (!result.objectId) return result.value;
+          return failed(await page.send("Runtime.callFunctionOn", { objectId: result.objectId, functionDeclaration: "function () { return this; }", returnByValue: true })).result.value;
         };
+        await evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();`);
+        assert.equal(await evaluate("document.compatMode"), "CSS1Compat", "the page is in standards mode, as the app's page is");
         await page.send("Emulation.setFocusEmulationEnabled", { enabled: true });
         assert.equal(await evaluate("document.hasFocus()"), true, "the page has focus, as the app window does");
         return await check({ evaluate, send: page.send, on: page.on, context: browserContextId });

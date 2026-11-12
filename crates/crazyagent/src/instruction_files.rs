@@ -1,19 +1,23 @@
+pub use crate::agent_home::Repeated;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
+use std::time::SystemTime;
 
 pub const FILE_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_MAX: usize = NAMES.len();
 const NAME_BYTES_MAX: usize = 32;
+#[cfg(unix)]
+const IMPORTS_MAX: usize = 64;
 const HEADING: &str = "\n## Instruction files\n\nThe owner's instruction files, read by CrazyAgent from the project's committed files and, when the owner chose so, from the owner's own files. Follow them as you would follow these files in your harness.\n";
 const FILE_HEADING: &str = "\n### \n\n";
 pub const SECTION_BYTES_MAX: usize =
@@ -41,6 +45,13 @@ const NAMES: [&str; 6] = [
     "~/.codex/AGENTS.md",
 ];
 
+const CODEX_OVERRIDE: &str = "AGENTS.override.md";
+const HARNESS_FOLDERS: [&str; 2] = [".claude", ".codex"];
+const HFS_IGNORED: [char; 16] = [
+    '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+    '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
+];
+
 /// The project's own instruction files an import copies into the project instructions and
 /// then moves aside, by their path inside the project folder.
 pub const PROJECT_FILES: [&str; 4] = [
@@ -64,6 +75,8 @@ const _: () = {
 };
 
 static IMPORTING: Mutex<()> = Mutex::new(());
+const HEADS_MAX: usize = 256;
+static HEADS: Mutex<BTreeMap<PathBuf, (HeadStamp, Option<String>)>> = Mutex::new(BTreeMap::new());
 
 /// Which of the owner's two instruction texts a project's agents get: the project's own,
 /// the app-wide one, or both with the project's appended after the app's (the default).
@@ -135,10 +148,18 @@ impl EditDelivery {
     }
 }
 
+/// What Keep transcripts for headless runs set to Off means for each harness that runs
+/// headless agents (DEC-141 PA-14): Claude Code runs with --no-session-persistence, and Codex
+/// keeps its rollout because the engine counts a headless Codex run's usage only from it. The
+/// TUI and the desktop show this one sentence under the setting.
+pub const TRANSCRIPTS_OFF: &str = "Off: Claude Code keeps no transcript. Codex keeps its own session record, which CrazyAgent reads to count its usage.";
+
 /// One project's agent instruction settings: which instruction texts its agents get,
-/// whether headless Claude runs keep their transcript and how an instruction edit reaches
-/// agents already running. A project the owner never changed gets both texts, keeps
-/// transcripts and sends an edit in each running agent's next task.
+/// whether headless runs keep their transcript, how an instruction edit reaches
+/// agents already running, whether project lines the app text already has are left out
+/// of the joined text and whether Edit with AI may send the project's instructions to a
+/// model. A project the owner never changed gets both texts, keeps transcripts, sends an
+/// edit in each running agent's next task, leaves repeated lines out and has Edit with AI on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -146,6 +167,14 @@ pub struct Settings {
     pub transcripts: bool,
     #[serde(default)]
     pub edits: EditDelivery,
+    #[serde(default)]
+    pub repeated: Repeated,
+    #[serde(default = "on")]
+    pub edit_with_ai: bool,
+}
+
+fn on() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -154,7 +183,23 @@ impl Default for Settings {
             mode: Mode::Both,
             transcripts: true,
             edits: EditDelivery::NextMessage,
+            repeated: Repeated::LeaveOut,
+            edit_with_ai: true,
         }
+    }
+}
+
+/// The owner's app-wide instruction settings: whether Edit with AI may send the app
+/// instructions to a model. On until the owner turns it off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppSettings {
+    pub edit_with_ai: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self { edit_with_ai: true }
     }
 }
 
@@ -234,6 +279,20 @@ pub struct ImportCommit {
     pub commit: String,
     pub branch: String,
     pub files: Vec<String>,
+}
+
+/// The moved instruction files whose move the owner's checkout has not committed, the
+/// branch that checkout has checked out while a move waits, so a notice can name where
+/// merges are refused, and in `checked_out` that branch whether or not a move waits, for the
+/// project head. A branch is none for a detached HEAD, a name over `BRANCH_BYTES_MAX` or a
+/// branch git cannot read for the engine (a name that is not UTF-8).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UncommittedImport {
+    pub files: Vec<String>,
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub checked_out: Option<String>,
 }
 
 /// Tells whether a name is one an instruction files record may hold, so a record read back
@@ -385,11 +444,10 @@ pub fn changed_message(sections: &[String]) -> String {
 }
 
 /// An owner edit one running agent has not had yet: the project's choice of how it reaches
-/// the agent, the changed parts, the text the agent has, and the engine data folder and the
-/// text now, which become the agent's record once the change reached it.
+/// the agent, the text the agent has, and the engine data folder and the text now, which
+/// become the agent's record once the change reached it.
 pub struct Edit {
     pub delivery: EditDelivery,
-    pub sections: Vec<String>,
     started: String,
     data: PathBuf,
     now: String,
@@ -469,13 +527,11 @@ pub fn edit_for(
             }
         }
     };
-    let sections = changed_sections(&started, &now);
-    if sections.is_empty() {
+    if changed_sections(&started, &now).is_empty() {
         return Ok(None);
     }
     Ok(Some(Edit {
         delivery,
-        sections,
         started,
         data: agent.data,
         now,
@@ -532,6 +588,115 @@ pub fn badges(connection: &Connection, project: &ProjectId) -> rusqlite::Result<
         .collect()
 }
 
+/// Folds a file name the way case-insensitive volumes compare names, so a name such a
+/// volume opens as an instruction file matches it: ASCII letters to lower case, U+017F LONG S
+/// to `s` and U+212A KELVIN SIGN to `k` as APFS folds them (probed), U+0131 DOTLESS I to `i` as
+/// the NTFS upcase table maps it to `I`, and the code points HFS+ ignores in names (git's
+/// `core.protectHFS` list) left out. Input: the name or path. Output: the folded text.
+fn folded(name: &str) -> String {
+    name.chars()
+        .filter(|c| !HFS_IGNORED.contains(c))
+        .map(|c| match c {
+            '\u{17F}' => 's',
+            '\u{212A}' => 'k',
+            '\u{131}' => 'i',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+/// Tells whether a file name is one an instruction file is read under in any folder: a
+/// project file name in [`PROJECT_FILES`] or Codex's `AGENTS.override.md`, compared as
+/// `folded` compares names. Input: the name. Output: true for one.
+pub(crate) fn instruction_name(name: &str) -> bool {
+    let name = folded(name);
+    PROJECT_FILES
+        .iter()
+        .filter_map(|file| file.rsplit('/').next())
+        .chain([CODEX_OVERRIDE])
+        .any(|known| folded(known) == name)
+}
+
+/// Tells whether a folder name is a harness folder, `.claude` or `.codex`, compared as
+/// `folded` compares names. Input: the name. Output: true for one.
+pub(crate) fn harness_folder(name: &str) -> bool {
+    let name = folded(name);
+    HARNESS_FOLDERS.iter().any(|folder| *folder == name)
+}
+
+/// Tells whether a changed project path is an instruction file agents are given or read: a
+/// file named like a project source above or Codex's `AGENTS.override.md` in any folder, or
+/// any path through a `.claude` or `.codex` folder, names compared as case-insensitive
+/// volumes compare them, since macOS and Windows open `claude.md` or a long-s `AGENTS.md`
+/// as the instruction file. Input: the path relative to the project. Output: true for one.
+pub fn instruction_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    instruction_name(name) || path.split('/').any(harness_folder)
+}
+
+/// Resolves a link or import target written in the instruction file at `path` to a path in
+/// the project, from the file's folder. Inputs: the file's path in the project and the
+/// target. Output: the path, or None for an empty, absolute or home target or one that
+/// leaves the project.
+#[cfg(unix)]
+pub(crate) fn resolved(path: &str, target: &str) -> Option<String> {
+    if target.is_empty() || target.starts_with('/') || target.starts_with('~') {
+        return None;
+    }
+    let mut parts: Vec<&str> = path.split('/').collect();
+    parts.pop();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// The project paths one instruction file imports into what agents are told, as Claude Code
+/// reads imports: each word that starts with `@`, with and without trailing punctuation,
+/// resolved from the file's folder, at most `IMPORTS_MAX`. Inputs: the file's path in the
+/// project and its text. Output: the paths.
+#[cfg(unix)]
+pub(crate) fn imports(path: &str, text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let Some(target) = word.strip_prefix('@') else {
+            continue;
+        };
+        let trimmed = target.trim_end_matches(|c: char| ".,;:!?)]}'\"`".contains(c));
+        for candidate in [target, trimmed] {
+            if found.len() == IMPORTS_MAX {
+                return found;
+            }
+            if let Some(resolved) = resolved(path, candidate)
+                && !found.contains(&resolved)
+            {
+                found.push(resolved);
+            }
+        }
+    }
+    assert!(found.len() <= IMPORTS_MAX);
+    found
+}
+
+/// Tells whether a changed path is a file, or lies under a folder, whose text an
+/// instruction file feeds to agents, paths compared as case-insensitive volumes compare
+/// names. Inputs: the fed paths, each with whether it is a folder, and the changed path.
+/// Output: true when fed.
+#[cfg(unix)]
+pub(crate) fn fed(feeds: &[(String, bool)], path: &str) -> bool {
+    let path = folded(path);
+    feeds.iter().any(|(feed, folder)| {
+        let feed = folded(feed);
+        path == feed || (*folder && path.starts_with(&format!("{feed}/")))
+    })
+}
+
 /// Creates the settings and import tables, and turns a settings table from before DEC-106,
 /// whose `files` column held the removed instruction files choice, into the mode column
 /// with every stored choice read as the default mode. Input: a connection to `engine.db`.
@@ -542,7 +707,13 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
             project TEXT PRIMARY KEY,
             mode TEXT NOT NULL,
             transcripts INTEGER NOT NULL,
-            edits TEXT NOT NULL DEFAULT 'next_message'
+            edits TEXT NOT NULL DEFAULT 'next_message',
+            repeated TEXT NOT NULL DEFAULT 'leave_out',
+            edit_with_ai INTEGER NOT NULL DEFAULT 1 CHECK(edit_with_ai IN (0, 1))
+        );
+        CREATE TABLE IF NOT EXISTS agent_instruction_app_settings (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            edit_with_ai INTEGER NOT NULL CHECK(edit_with_ai IN (0, 1))
         );
         CREATE TABLE IF NOT EXISTS instruction_imports (
             project TEXT PRIMARY KEY,
@@ -565,20 +736,33 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
               WHERE mode IN ('project', 'project_and_user', 'none');",
         )?;
     }
-    if !edits_column(connection)? {
+    if !column(connection, "edits")? {
         connection.execute_batch(
             "ALTER TABLE agent_instruction_settings ADD COLUMN edits TEXT NOT NULL DEFAULT 'next_message';",
+        )?;
+    }
+    if !column(connection, "repeated")? {
+        connection.execute_batch(
+            "ALTER TABLE agent_instruction_settings ADD COLUMN repeated TEXT NOT NULL DEFAULT 'leave_out';",
+        )?;
+    }
+    if !column(connection, "edit_with_ai")? {
+        connection.execute_batch(
+            "ALTER TABLE agent_instruction_settings ADD COLUMN edit_with_ai INTEGER NOT NULL DEFAULT 1 CHECK(edit_with_ai IN (0, 1));",
         )?;
     }
     Ok(())
 }
 
-/// Tells whether the settings table holds the edit delivery column, which tables made
-/// before DEC-111 QR1 lack. Input: a connection to `engine.db`. Output: the answer.
-fn edits_column(connection: &Connection) -> rusqlite::Result<bool> {
+/// Tells whether the settings table holds a column added after its first shape: the edit
+/// delivery column tables made before DEC-111 QR1 lack, or the repeated lines and Edit with
+/// AI columns tables made before v2.2.1 lack. Inputs: a connection to `engine.db` and the
+/// column name. Output: the answer.
+fn column(connection: &Connection, name: &str) -> rusqlite::Result<bool> {
+    assert!(matches!(name, "edits" | "repeated" | "edit_with_ai"));
     connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_instruction_settings') WHERE name='edits')",
-        [],
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_instruction_settings') WHERE name=?1)",
+        [name],
         |row| row.get(0),
     )
 }
@@ -599,35 +783,107 @@ pub fn load(connection: &Connection, project: &ProjectId) -> Result<Settings, &'
     if !table {
         return Ok(Settings::default());
     }
-    let edits = match edits_column(connection).map_err(unavailable)? {
+    let edits = match column(connection, "edits").map_err(unavailable)? {
         true => "edits",
         false => "'next_message'",
     };
-    let stored: Option<(String, i64, String)> = connection
+    let repeated = match column(connection, "repeated").map_err(unavailable)? {
+        true => "repeated",
+        false => "'leave_out'",
+    };
+    let edit_with_ai = match column(connection, "edit_with_ai").map_err(unavailable)? {
+        true => "edit_with_ai",
+        false => "1",
+    };
+    let stored: Option<(String, i64, String, String, i64)> = connection
         .query_row(
             &format!(
-                "SELECT mode, transcripts, {edits} FROM agent_instruction_settings WHERE project=?1"
+                "SELECT mode, transcripts, {edits}, {repeated}, {edit_with_ai} FROM agent_instruction_settings WHERE project=?1"
             ),
             [project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(unavailable)?;
-    let Some((mode, transcripts, edits)) = stored else {
+    let Some((mode, transcripts, edits, repeated, edit_with_ai)) = stored else {
         return Ok(Settings::default());
     };
     let mode = Mode::parse(&mode).ok_or("instruction_settings_invalid")?;
-    let transcripts = match transcripts {
-        0 => false,
-        1 => true,
-        _ => return Err("instruction_settings_invalid"),
-    };
+    let transcripts = switch(transcripts).ok_or("instruction_settings_invalid")?;
+    let edit_with_ai = switch(edit_with_ai).ok_or("instruction_settings_invalid")?;
     let edits = EditDelivery::parse(&edits).ok_or("instruction_settings_invalid")?;
+    let repeated = Repeated::parse(&repeated).ok_or("instruction_settings_invalid")?;
     Ok(Settings {
         mode,
         transcripts,
         edits,
+        repeated,
+        edit_with_ai,
     })
+}
+
+/// Reads a stored on or off. Input: the stored number. Output: the choice, none for a number
+/// that is neither 0 nor 1.
+fn switch(stored: i64) -> Option<bool> {
+    match stored {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+/// Reads the app-wide instruction settings; a database that never stored any gets the
+/// defaults. Input: a connection to `engine.db`, read-only is enough. Output: the settings,
+/// `instruction_settings_invalid` for a stored value outside the options, or
+/// `instruction_settings_unavailable`.
+pub fn load_app(connection: &Connection) -> Result<AppSettings, &'static str> {
+    let unavailable = |_| "instruction_settings_unavailable";
+    let table: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_instruction_app_settings')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !table {
+        return Ok(AppSettings::default());
+    }
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT edit_with_ai FROM agent_instruction_app_settings WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    match stored {
+        None => Ok(AppSettings::default()),
+        Some(stored) => Ok(AppSettings {
+            edit_with_ai: switch(stored).ok_or("instruction_settings_invalid")?,
+        }),
+    }
+}
+
+/// Stores the app-wide instruction settings whole, creating the table first when it is
+/// missing. Inputs: a writable connection to `engine.db` and the settings. Output: unit.
+pub fn save_app(connection: &Connection, settings: AppSettings) -> rusqlite::Result<()> {
+    initialize(connection)?;
+    let changed = connection.execute(
+        "INSERT INTO agent_instruction_app_settings(singleton, edit_with_ai) VALUES (1, ?1)
+         ON CONFLICT(singleton) DO UPDATE SET edit_with_ai=excluded.edit_with_ai",
+        params![i64::from(settings.edit_with_ai)],
+    )?;
+    assert_eq!(changed, 1);
+    assert!(load_app(connection) == Ok(settings));
+    Ok(())
 }
 
 /// Stores one project's settings whole, creating the table first when it is missing.
@@ -640,13 +896,15 @@ pub fn save(
 ) -> rusqlite::Result<()> {
     initialize(connection)?;
     let changed = connection.execute(
-        "INSERT INTO agent_instruction_settings(project, mode, transcripts, edits) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts, edits=excluded.edits",
+        "INSERT INTO agent_instruction_settings(project, mode, transcripts, edits, repeated, edit_with_ai) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts, edits=excluded.edits, repeated=excluded.repeated, edit_with_ai=excluded.edit_with_ai",
         params![
             project.as_str(),
             settings.mode.as_str(),
             i64::from(settings.transcripts),
-            settings.edits.as_str()
+            settings.edits.as_str(),
+            settings.repeated.as_str(),
+            i64::from(settings.edit_with_ai)
         ],
     )?;
     assert_eq!(changed, 1);
@@ -846,6 +1104,109 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
         .filter(|(_, held)| *held)
         .map(|(path, _)| path.to_owned())
         .collect())
+}
+
+/// What a reftable checkout's `.git/HEAD` holds: a stub naming a branch git never allows, as
+/// no branch name starts with a dot, while the real HEAD lives in `.git/reftable`.
+const REFTABLE_HEAD: &[u8] = b"ref: refs/heads/.invalid";
+/// The most bytes of `.git/HEAD` read to tell the reftable stub from a real HEAD.
+const HEAD_BYTES_MAX: u64 = 1024;
+
+/// The stat of the file a checkout's branch is stamped by: `.git/HEAD`, or for a reftable
+/// checkout, whose HEAD is a stub, `.git/reftable/tables.list`. Git replaces that file through
+/// a new lock file on every branch switch, detach or rename of the current branch, so an
+/// equal stamp means the checked-out branch is the one read before.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HeadStamp {
+    file: u64,
+    len: u64,
+    modified: SystemTime,
+}
+
+/// Stats the file that stamps a checkout's branch, chosen by what `.git/HEAD` holds and never
+/// by which folders exist, so a stray `.git/reftable` in a files checkout is not stamped
+/// (UI-9-L1): the reftable stub ([`REFTABLE_HEAD`]) stamps `.git/reftable/tables.list`, any
+/// other HEAD stamps itself. Inputs: the checkout root. Output: the stamp, or None when
+/// either file cannot be read as a plain file, as in a linked worktree whose `.git` is a file.
+fn head_stamp(root: &Path) -> Option<HeadStamp> {
+    let git = root.join(".git");
+    let head = git.join("HEAD");
+    let head_meta = fs::symlink_metadata(&head).ok()?;
+    if !head_meta.is_file() {
+        return None;
+    }
+    let mut text = Vec::new();
+    fs::File::open(&head)
+        .ok()?
+        .take(HEAD_BYTES_MAX)
+        .read_to_end(&mut text)
+        .ok()?;
+    let meta = if text.trim_ascii_end() == REFTABLE_HEAD {
+        fs::symlink_metadata(git.join("reftable").join("tables.list")).ok()?
+    } else {
+        head_meta
+    };
+    if !meta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    let file = meta.ino();
+    #[cfg(not(unix))]
+    let file = 0;
+    Some(HeadStamp {
+        file,
+        len: meta.len(),
+        modified: meta.modified().ok()?,
+    })
+}
+
+/// Reads the branch a checkout has checked out through `read`, the git read, again only when
+/// the checkout's HEAD stamp changed since the last read of that root, at most `HEADS_MAX`
+/// roots kept. A failed read shows none and is not kept. Inputs: the canonical checkout root
+/// and the read. Output: the branch.
+fn branch_of(
+    root: &Path,
+    read: impl FnOnce() -> Result<Option<String>, EngineError>,
+) -> Option<String> {
+    let Some(stamp) = head_stamp(root) else {
+        return read().unwrap_or(None);
+    };
+    let kept = HEADS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(root)
+        .filter(|(seen, _)| *seen == stamp)
+        .map(|(_, branch)| branch.clone());
+    if let Some(branch) = kept {
+        return branch;
+    }
+    let Ok(branch) = read() else {
+        return None;
+    };
+    let mut heads = HEADS.lock().unwrap_or_else(PoisonError::into_inner);
+    if heads.len() == HEADS_MAX && !heads.contains_key(root) {
+        heads.clear();
+    }
+    heads.insert(root.to_path_buf(), (stamp, branch.clone()));
+    assert!(heads.len() <= HEADS_MAX);
+    branch
+}
+
+/// Lists the moved instruction files whose move the owner's checkout has not committed, as
+/// `uncommitted` does, with the branch the checkout has checked out, named as the refusal's
+/// branch only while any wait; a branch that cannot be read is left unnamed, so the move
+/// still shows. Input: the project folder. Output: the files and branches, or a plain code
+/// as `uncommitted`.
+pub fn uncommitted_import(folder: &Path) -> Result<UncommittedImport, EngineError> {
+    let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
+    let files = uncommitted(&root)?;
+    let checked_out = branch_of(&root, || crate::landing::checked_out_branch(&root));
+    let branch = (!files.is_empty()).then(|| checked_out.clone()).flatten();
+    Ok(UncommittedImport {
+        files,
+        branch,
+        checked_out,
+    })
 }
 
 /// Commits the instruction import's move in the owner's checkout, as the owner chose: one

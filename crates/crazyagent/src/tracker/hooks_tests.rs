@@ -245,7 +245,14 @@ impl Case {
 
     fn accept(&self, id: &ChangeSetId) -> Result<AcceptOutcome, EngineError> {
         let (_, head) = self.state(id);
-        crate::landing::accept(&self.db, &self.home, id, &head, None)
+        crate::landing::accept(
+            &self.db,
+            &self.home,
+            id,
+            &head,
+            None,
+            crate::activity::AcceptPlace::Changes,
+        )
     }
 
     /// Adds an owner criterion to `TH-1`, with a `change` check on a change set when one is
@@ -498,6 +505,7 @@ fn a_question_asked_on_the_task_links_once() {
     let ask = |asker: &Asker, question: &str| {
         let asked = Ask {
             question: question.into(),
+            kind: crate::questions::QuestionKind::Single,
             options: vec!["Markdown".into(), "Plain text".into()],
             recommended: None,
             context: None,

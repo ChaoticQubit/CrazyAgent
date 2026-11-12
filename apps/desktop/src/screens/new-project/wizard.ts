@@ -1,5 +1,5 @@
 import type { HarnessEntry, PoolSummary } from "../../api";
-import type { AgentAccess, HarnessSlot, JobKind, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
+import type { AccessLevel, AgentAccess, HarnessSlot, JobKind, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
 import type { AccountPool, ModelConnection } from "../../engine-client";
 
 export type StepId = "basics" | "documents" | "work" | "pool" | "team";
@@ -26,6 +26,21 @@ export const SUB_HARNESSES_MAX = 8;
 
 /** The agent access level New Project preselects (DEC-102). Projects saved before the setting stay Sandboxed. */
 export const NEW_PROJECT_ACCESS: AgentAccess = "own_branch";
+
+/** Why the engine says one access level can't run agents on this computer. Inputs: the levels
+ * from the project catalog, absent while it loads or from an engine that names none, and the
+ * level. Output: the reason, or null when the level runs or nothing is known. */
+export function levelUnavailable(levels: AccessLevel[] | undefined, access: AgentAccess): string | null {
+  return levels?.find((level) => level.access === access)?.unavailable ?? null;
+}
+
+/** The access level the New Project form holds: the owner's pick, or the preselect, unless the
+ * engine says that level can't run here, then Sandboxed, which is never saved (the TUI form's
+ * rule). Inputs: the draft and the catalog's levels. Output: the level to show and to save. */
+export function draftAccess(draft: Pick<ProjectDraft, "access">, levels: AccessLevel[] | undefined): AgentAccess {
+  const wanted = draft.access ?? NEW_PROJECT_ACCESS;
+  return levelUnavailable(levels, wanted) === null ? wanted : "sandboxed";
+}
 
 export const RESEARCH_COPY: Record<ResearchKind, string> = {
   market_research: "Who needs this, how big the market is, and how people pay today.",
@@ -355,17 +370,31 @@ export function teamNotes(team: TeamPlan, harnesses: HarnessEntry[] | null): str
 
 const GROUPS = { ready: "Ready", limited: "Limited control", not_installed: "Not installed" } as const;
 
+/** Who a harness picker chooses for: the project master or an agent row. */
+export type PickRole = "master" | "agent";
+
 /** Orders every catalog harness for a picker: Ready, Limited control, Not installed.
- * Input: the catalog. Output: options; a harness that is not installed or can't run team
- * agents can't be picked. */
-export function harnessChoices(harnesses: HarnessEntry[]): { id: string; label: string; group: string; disabled: boolean }[] {
+ * Inputs: the catalog and who the picker chooses for. Output: options; a harness that is not
+ * installed or can't run team agents can't be picked, and a master-only harness can be
+ * picked for the master only. */
+export function harnessChoices(harnesses: HarnessEntry[], role: PickRole): { id: string; label: string; group: string; disabled: boolean }[] {
   return (["ready", "limited", "not_installed"] as const).flatMap((kind) => harnesses
     .filter((harness) => harness.status.kind === kind)
     .map((harness) => {
-      const blocked = harness.team.kind === "unavailable";
-      const label = kind === "not_installed" ? `${harness.name} - Not installed` : blocked ? `${harness.name} - Can't run team agents` : harness.name;
+      const masterOnly = harness.team.kind === "master_only";
+      const blocked = harness.team.kind === "unavailable" || (masterOnly && role === "agent");
+      const label = kind === "not_installed" ? `${harness.name} - Not installed`
+        : harness.team.kind === "unavailable" ? `${harness.name} - Can't run team agents`
+          : masterOnly ? `${harness.name} - ${role === "master" ? "Master only, no live terminal" : "Runs only as the master"}` : harness.name;
       return { id: harness.id, label, group: GROUPS[kind], disabled: kind === "not_installed" || blocked };
     }));
+}
+
+/** Says why the team's master has no live terminal, for a master-only harness. Inputs: the
+ * team and the catalog, or null while it is not ready. Output: the note, or null. */
+export function masterNote(team: Pick<TeamPlan, "master">, harnesses: HarnessEntry[] | null): string | null {
+  const harness = entry(harnesses, team.master);
+  return harness?.team.kind === "master_only" ? `${harness.name} has no terminal app. Its conversation stays on the Conversation tab.` : null;
 }
 
 const HARNESS_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
@@ -376,17 +405,18 @@ const RANGE = "At most must be at least 1 and not less than At least.";
  * Output: messages for the master, each agent row and the agent range. */
 export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { master?: string; rows: (string | undefined)[]; range?: string } {
   const errors: { master?: string; rows: (string | undefined)[]; range?: string } = { rows: [] };
-  const harnessProblem = (id: string, what: string) => {
+  const harnessProblem = (id: string, what: string, role: PickRole) => {
     if (!HARNESS_ID.test(id)) return `Pick a harness for ${what}.`;
     const harness = entry(harnesses, id);
     if (harness?.status.kind === "not_installed") return `${harness.name} isn't installed on this Mac. Pick another harness.`;
     if (harness?.team.kind === "unavailable") return `${harness.name} can't run team agents yet. Pick another harness.`;
+    if (harness?.team.kind === "master_only" && role === "agent") return `${harness.name} runs only as the master. Pick another harness.`;
     return undefined;
   };
-  errors.master = harnessProblem(team.master, "the master");
+  errors.master = harnessProblem(team.master, "the master", "master");
   if (errors.master === undefined) delete errors.master;
   errors.rows = team.sub_harnesses.map((slot) => {
-    const problem = harnessProblem(slot.harness, "this row");
+    const problem = harnessProblem(slot.harness, "this row", "agent");
     if (problem) return problem;
     return Number.isInteger(slot.agents) && slot.agents >= 1 && slot.agents <= HARNESS_AGENTS_MAX ? undefined : `Each harness runs 1 to ${HARNESS_AGENTS_MAX} agents.`;
   });

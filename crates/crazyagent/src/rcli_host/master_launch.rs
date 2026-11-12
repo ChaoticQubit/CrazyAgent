@@ -20,6 +20,13 @@ use std::process::Stdio;
 
 const CONFIG_BYTES_MAX: u64 = 65_536;
 const _: () = assert!(crate::agent_home::GIVEN_BYTES_MAX as u64 <= CONFIG_BYTES_MAX);
+/// The most bytes of the instruction file an rcli master starts with, the same every master
+/// gets (`claude_host::INSTRUCTIONS_BYTES_MAX`): the launch check's limit and the bundled
+/// host's own (`INSTRUCTIONS_BYTES_MAX` in host.runtime.ts).
+pub(crate) const INSTRUCTIONS_BYTES_MAX: usize =
+    64 * 1024 + crate::instruction_files::SECTION_BYTES_MAX;
+const _: () =
+    assert!(INSTRUCTIONS_BYTES_MAX as u64 == crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX);
 #[cfg(unix)]
 const ARTIFACT_BYTES_MAX: u64 = 536_870_912;
 
@@ -161,7 +168,12 @@ impl RcliMasterLaunch {
                 return Err(error(code));
             }
             let metadata = fs::symlink_metadata(instructions).map_err(|_| error(code))?;
-            validate_file(instructions, &metadata, false)?;
+            validate_file_within(
+                instructions,
+                &metadata,
+                false,
+                INSTRUCTIONS_BYTES_MAX as u64,
+            )?;
         }
         assert_ne!(self.cwd, self.home_dir);
         assert!(!anchor.file_type().is_symlink());
@@ -306,6 +318,19 @@ fn validate_file(
     Err(error("rcli_master_unavailable"))
 }
 
+/// Refuses an rcli file of a given size limit where its Unix owner, mode and link count
+/// cannot be checked. Takes the path, metadata, kind and limit, all unused.
+/// Returns `rcli_master_unavailable`.
+#[cfg(not(unix))]
+fn validate_file_within(
+    _path: &Path,
+    _metadata: &Metadata,
+    _executable: bool,
+    _maximum: u64,
+) -> Result<(), ProtocolError> {
+    Err(error("rcli_master_unavailable"))
+}
+
 /// Reports no file stamp where the platform has no device, inode, mode or change time;
 /// `checked_file` and `validate_file` refuse there before any stamp is compared.
 /// Takes the metadata, unused. Returns zeros.
@@ -323,12 +348,26 @@ fn checked_file(_path: &Path, _executable: bool) -> Result<(File, String), Proto
 
 #[cfg(unix)]
 fn validate_file(path: &Path, metadata: &Metadata, executable: bool) -> Result<(), ProtocolError> {
-    canonical_path(path)?;
     let maximum = if executable {
         ARTIFACT_BYTES_MAX
     } else {
         CONFIG_BYTES_MAX
     };
+    validate_file_within(path, metadata, executable, maximum)
+}
+
+/// Checks one rcli file the master reads: a private regular single-link file of the euid,
+/// executable for the artifact, of 1 to `maximum` bytes. Inputs: the path, its metadata,
+/// the kind and the limit. Output: Ok, or `rcli_master_file_rejected`.
+#[cfg(unix)]
+fn validate_file_within(
+    path: &Path,
+    metadata: &Metadata,
+    executable: bool,
+    maximum: u64,
+) -> Result<(), ProtocolError> {
+    assert!(maximum > 0);
+    canonical_path(path)?;
     let forbidden = if executable { 0o022 } else { 0o077 };
     if !metadata.is_file()
         || metadata.uid() != rustix::process::geteuid().as_raw()

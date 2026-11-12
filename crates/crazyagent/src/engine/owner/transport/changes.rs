@@ -1,12 +1,15 @@
 use super::*;
 use crate::landing::{
     self, AcceptOutcome, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeDiff, ChangeSetId, ChangeSetView,
-    LIST_MAX, MESSAGE_BYTES_MAX, TargetBranches,
+    DIRTY_FILES_MAX, DIRTY_PATH_BYTES_MAX, LIST_MAX, MESSAGE_BYTES_MAX, OwnerDirty, TargetBranches,
+    WaitingChanges,
 };
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
 
-const REQUEST_BYTES_MAX: usize = 1024 + 4 * MESSAGE_BYTES_MAX;
+const REQUEST_BYTES_MAX: usize =
+    1024 + 4 * MESSAGE_BYTES_MAX + DIRTY_FILES_MAX * (DIRTY_PATH_BYTES_MAX + 8);
+const _: () = assert!(REQUEST_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
 pub(crate) const CHANGES_TIMEOUT: Duration = Duration::from_secs(120);
 const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -32,12 +35,14 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_master_closed",
     "changes_master_not_started",
     "changes_master_tools_off",
+    "changes_merge_unsafe",
     "changes_message_invalid",
     "changes_not_found",
     "changes_outcome_unknown",
     "changes_owner_dirty",
     "changes_owner_identity_missing",
     "changes_owner_unavailable",
+    "changes_owner_untracked",
     "changes_reply_bounds",
     "changes_request_bounds",
     "changes_request_invalid",
@@ -47,6 +52,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_target_invalid",
     "changes_too_large",
     "changes_unavailable",
+    "changes_undo_unavailable",
     "changes_workspace_invalid",
     "owner_authentication_failed",
     "owner_authority_unavailable",
@@ -74,6 +80,7 @@ enum Action {
     },
     Diff {
         id: ChangeSetId,
+        head: String,
         page: u16,
     },
     Accept {
@@ -94,8 +101,27 @@ enum Action {
     Restore {
         id: ChangeSetId,
     },
+    Undo {
+        id: ChangeSetId,
+    },
     Update {
         id: ChangeSetId,
+    },
+    Waiting {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectId>,
+    },
+    OwnerDirty {
+        id: ChangeSetId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+    CommitOwnerFiles {
+        id: ChangeSetId,
+        files: Vec<String>,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
 }
 
@@ -108,13 +134,50 @@ struct Envelope {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    List { change_sets: Vec<ChangeSetView> },
-    Diff { diff: ChangeDiff },
-    Accepted { outcome: AcceptOutcome },
-    Branches { branches: TargetBranches },
-    Discarded { restorable_until_ms: u64 },
+    List {
+        change_sets: Vec<ChangeSetView>,
+    },
+    Diff {
+        diff: ChangeDiff,
+    },
+    Accepted {
+        outcome: AcceptOutcome,
+    },
+    Branches {
+        branches: TargetBranches,
+    },
+    Discarded {
+        restorable_until_ms: u64,
+    },
+    Waiting {
+        waiting: WaitingChanges,
+    },
+    OwnerDirty {
+        files: Vec<String>,
+        #[serde(default)]
+        untracked: Vec<String>,
+    },
+    Committed {
+        commit: String,
+        branch: String,
+    },
     Done,
-    Rejected { code: String },
+    Rejected {
+        code: String,
+    },
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::List { .. } => Some("changes.list"),
+        Action::Diff { .. } => Some("changes.diff"),
+        Action::Branches { .. } => Some("changes.branches"),
+        Action::Waiting { .. } => Some("changes.waiting"),
+        Action::OwnerDirty { .. } => Some("changes.owner_dirty"),
+        _ => None,
+    }
 }
 
 fn unknown() -> EngineError {
@@ -131,11 +194,12 @@ fn valid_commit(commit: &str) -> bool {
 impl Action {
     fn validate(&self) -> Result<(), EngineError> {
         match self {
-            Self::Accept { expected_head, .. } | Self::Discard { expected_head, .. }
-                if !valid_commit(expected_head) =>
-            {
-                Err(failure("changes_stale"))
-            }
+            Self::Accept { expected_head, .. }
+            | Self::Discard { expected_head, .. }
+            | Self::Diff {
+                head: expected_head,
+                ..
+            } if !valid_commit(expected_head) => Err(failure("changes_stale")),
             Self::Accept {
                 message: Some(message),
                 ..
@@ -143,8 +207,28 @@ impl Action {
             Self::Accept {
                 target: Some(target),
                 ..
+            }
+            | Self::OwnerDirty {
+                target: Some(target),
+                ..
+            }
+            | Self::CommitOwnerFiles {
+                target: Some(target),
+                ..
             } if target.is_empty() || target.len() > BRANCH_BYTES_MAX => {
                 Err(failure("changes_target_invalid"))
+            }
+            Self::CommitOwnerFiles { message, .. } if message.len() > MESSAGE_BYTES_MAX => {
+                Err(failure("changes_message_invalid"))
+            }
+            Self::CommitOwnerFiles { files, .. }
+                if files.is_empty()
+                    || files.len() > DIRTY_FILES_MAX
+                    || files
+                        .iter()
+                        .any(|file| file.is_empty() || file.len() > DIRTY_PATH_BYTES_MAX) =>
+            {
+                Err(failure("changes_request_invalid"))
             }
             _ => Ok(()),
         }
@@ -161,10 +245,39 @@ impl OwnerClient {
         }
     }
 
-    /// Reads one page of a change set's diff, as plain text. Inputs: the change set and
-    /// the page, 0 first. Output: the page's files and text and the next page.
-    pub async fn change_diff(&self, id: ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
-        match self.changes_exchange(Action::Diff { id, page }).await? {
+    /// Counts the change sets waiting for the owner, ready to review or conflicting, across
+    /// the projects the engine has, and the given project's among them. Input: the project,
+    /// if any. Output: both counts; a reply whose project count is missing, unasked or above
+    /// the total is refused.
+    pub async fn waiting_changes(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<WaitingChanges, EngineError> {
+        let asked = project.is_some();
+        match self.changes_exchange(Action::Waiting { project }).await? {
+            Reply::Waiting { waiting }
+                if waiting.here.is_some() == asked
+                    && waiting.here.is_none_or(|here| here <= waiting.all) =>
+            {
+                Ok(waiting)
+            }
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads one page of a change set's diff, as plain text, at the head the owner is
+    /// reading. Inputs: the change set, that head and the page, 0 first. Output: the
+    /// page's files and text and the next page, or `changes_stale` once the set moved.
+    pub async fn change_diff(
+        &self,
+        id: ChangeSetId,
+        head: String,
+        page: u16,
+    ) -> Result<ChangeDiff, EngineError> {
+        match self
+            .changes_exchange(Action::Diff { id, head, page })
+            .await?
+        {
             Reply::Diff { diff } if diff.next.is_none_or(|next| next > page) => Ok(diff),
             _ => Err(unknown()),
         }
@@ -203,6 +316,61 @@ impl OwnerClient {
             target,
         };
         match self.changes_exchange(action).await? {
+            Reply::Accepted { outcome } => Ok(outcome),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Lists the files in the owner's project folder that keep a change set's Accept from
+    /// landing (F21), for the "commit these files first" box. Inputs: the change set and the
+    /// branch the owner picked, None for the Land on branch. Output: the tracked and the
+    /// untracked files, both empty when none blocks; a reply past `DIRTY_FILES_MAX` is refused.
+    pub async fn owner_dirty(
+        &self,
+        id: ChangeSetId,
+        target: Option<String>,
+    ) -> Result<OwnerDirty, EngineError> {
+        match self
+            .changes_exchange(Action::OwnerDirty { id, target })
+            .await?
+        {
+            Reply::OwnerDirty { files, untracked }
+                if files.len() + untracked.len() <= DIRTY_FILES_MAX =>
+            {
+                Ok(OwnerDirty { files, untracked })
+            }
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Commits the owner's files that keep a change set's Accept from landing, and nothing
+    /// else, with the owner's message (F21); the owner then accepts again. Inputs: the change
+    /// set, the files the box listed, the message and the branch the owner picked, None for
+    /// the Land on branch. Output: the commit and its branch.
+    pub async fn commit_owner_files(
+        &self,
+        id: ChangeSetId,
+        files: Vec<String>,
+        message: String,
+        target: Option<String>,
+    ) -> Result<(String, String), EngineError> {
+        let action = Action::CommitOwnerFiles {
+            id,
+            files,
+            message,
+            target,
+        };
+        match self.changes_exchange(action).await? {
+            Reply::Committed { commit, branch } if valid_commit(&commit) => Ok((commit, branch)),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Undoes a change set its own Accept merged, with one revert commit on the branch it
+    /// landed on. Input: the change set. Output: the undo commit and branch, or the files
+    /// the branch changed since, when nothing changed.
+    pub async fn undo_changes(&self, id: ChangeSetId) -> Result<AcceptOutcome, EngineError> {
+        match self.changes_exchange(Action::Undo { id }).await? {
             Reply::Accepted { outcome } => Ok(outcome),
             _ => Err(unknown()),
         }
@@ -253,6 +421,7 @@ impl OwnerClient {
     async fn changes_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         action.validate()?;
         tokio::time::timeout(self.timeout.max(CHANGES_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope { changes: action })
                 .map_err(|_| failure("changes_request_bounds"))?;
             self.root.verify()?;
@@ -279,7 +448,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("changes_owner_unavailable"))?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -380,7 +551,11 @@ async fn prepare(
     let root = engine_root(authority)?;
     if !matches!(
         action,
-        Action::List { .. } | Action::Diff { .. } | Action::Branches { .. }
+        Action::List { .. }
+            | Action::Diff { .. }
+            | Action::Waiting { .. }
+            | Action::Branches { .. }
+            | Action::OwnerDirty { .. }
     ) {
         return Ok(Prepared::Change(root, action));
     }
@@ -460,9 +635,15 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
             change_sets.truncate(LIST_MAX);
             (Reply::List { change_sets }, false)
         }
-        Action::Diff { id, page } => (
+        Action::Diff { id, head, page } => (
             Reply::Diff {
-                diff: landing::diff(&db, &id, page)?,
+                diff: landing::diff(&db, &id, &head, page)?,
+            },
+            false,
+        ),
+        Action::Waiting { project } => (
+            Reply::Waiting {
+                waiting: landing::waiting(&db, project.as_ref())?,
             },
             false,
         ),
@@ -476,7 +657,14 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
                 .map(PathBuf::from)
                 .ok_or_else(|| failure("changes_owner_identity_missing"))?;
             let outcome = match target.as_deref() {
-                None => landing::accept(&db, &home, &id, &expected_head, message.as_deref())?,
+                None => landing::accept(
+                    &db,
+                    &home,
+                    &id,
+                    &expected_head,
+                    message.as_deref(),
+                    crate::activity::AcceptPlace::Changes,
+                )?,
                 Some(target) => landing::accept_into(
                     &db,
                     &home,
@@ -484,6 +672,7 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
                     &expected_head,
                     message.as_deref(),
                     target,
+                    crate::activity::AcceptPlace::Changes,
                 )?,
             };
             (Reply::Accepted { outcome }, false)
@@ -504,18 +693,49 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
             landing::restore(&db, &id, now_ms()?)?;
             (Reply::Done, false)
         }
+        Action::Undo { id } => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or_else(|| failure("changes_owner_identity_missing"))?;
+            (
+                Reply::Accepted {
+                    outcome: landing::undo_landing(&db, &home, &id)?,
+                },
+                false,
+            )
+        }
         Action::Update { id } => (Reply::Done, crate::landing_turns::update(&db, &id)?),
+        Action::OwnerDirty { id, target } => {
+            let OwnerDirty { files, untracked } =
+                landing::owner_dirty(&db, &id, target.as_deref())?;
+            (Reply::OwnerDirty { files, untracked }, false)
+        }
+        Action::CommitOwnerFiles {
+            id,
+            files,
+            message,
+            target,
+        } => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or_else(|| failure("changes_owner_identity_missing"))?;
+            let (commit, branch) =
+                landing::commit_owner_files(&db, &home, &id, &files, &message, target.as_deref())?;
+            (Reply::Committed { commit, branch }, false)
+        }
     })
 }
 
 /// Keeps change sets tidy while the owner server runs: at start, and once a day after,
-/// it finishes or undoes Accepts and worktree resets an engine stop interrupted, closes
-/// open change sets the owner landed or removed outside the app and deletes discarded refs
-/// past their restore window, each step run on its own so a failing one never skips the
-/// others. Input: the authority, held weakly so a server dropped
-/// without its stop path still releases it. Runs until the server aborts it or the
-/// authority is gone.
-pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
+/// it finishes or undoes Accepts and worktree resets an engine stop interrupted, numbers
+/// the change sets an engine without numbers stored, closes open change sets the owner
+/// landed or removed outside the app and deletes discarded refs past their restore
+/// window, each step run on its own so a failing one never skips the
+/// others. Inputs: the authority, held weakly so a server dropped without its stop path
+/// still releases it, and the server's stop, a sender dropped or sent. Runs until the stop
+/// or until the authority is gone; a pass already running ends first, since its blocking
+/// work cannot be cancelled and holds its own connection to the engine database.
+pub(super) async fn upkeep(authority: std::sync::Weak<Authority>, mut stop: oneshot::Receiver<()>) {
     loop {
         let Some(root) = authority.upgrade().map(|authority| engine_root(&authority)) else {
             return;
@@ -524,6 +744,7 @@ pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
             Ok(root) => tokio::task::spawn_blocking(move || match landing::open(&root) {
                 Ok(db) => [
                     landing::reconcile(&db).err(),
+                    landing::number_change_sets(&db).err(),
                     landing::observe(&db, None).err(),
                     now_ms().and_then(|now| landing::prune(&db, now)).err(),
                 ]
@@ -539,7 +760,10 @@ pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
         for error in failures {
             eprintln!("landing_upkeep_failed cause={}", error.0);
         }
-        tokio::time::sleep(UPKEEP_EVERY).await;
+        tokio::select! {
+            _ = &mut stop => return,
+            () = tokio::time::sleep(UPKEEP_EVERY) => {}
+        }
     }
 }
 
@@ -706,6 +930,70 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    /// An engine stop waits for the landing upkeep its start began, so no connection of the
+    /// stopped engine is left on its database when the next engine opens it, even when the
+    /// stop comes while the upkeep still prunes thousands of discarded change sets.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_engine_stop_waits_for_its_landing_upkeep_to_leave_the_database() {
+        const DISCARDED: i64 = 5000;
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-chg-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = tmp.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(root.join("global.toml"), "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::set_permissions(
+            root.join("global.toml"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = started(root, &stopped).await;
+        let gone = root.join("gone");
+        let db = landing::open(root).unwrap();
+        db.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1) \
+             INSERT INTO landing_change_sets(id, project, agent_kind, agent_id, label, \
+             repository, worktree, git_dir, base, head, state, last_outcome, turn, prompt_line, \
+             files, added, removed, conflicts, created_ms, updated_ms, restorable_until_ms) \
+             SELECT printf('%032x', i), 'project-1', 'sub', 'agent-' || i, 'Agent', ?2, \
+             ?2 || '/agent-' || i, ?2 || '/.git/worktrees/agent-' || i, ?3, ?3, 'discarded', \
+             'succeeded', 'turn-1', 'Add a file', 1, 1, 0, '[]', 1, 1, 1 FROM n",
+            rusqlite::params![DISCARDED, gone.to_str().unwrap(), "a".repeat(40)],
+        )
+        .unwrap();
+        drop(db);
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut service = started(root, &stopped).await;
+        tokio::time::timeout(Duration::from_secs(60), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let probe = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        probe.busy_timeout(Duration::ZERO).unwrap();
+        let alone = probe.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;");
+        assert!(
+            alone.is_ok(),
+            "a connection of the stopped engine was left on its database: {alone:?}"
+        );
+        let pruned: i64 = probe
+            .query_row(
+                "SELECT count(*) FROM landing_change_sets WHERE pruned=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pruned, DISCARDED,
+            "the pass the stop waited for ran to its end"
+        );
     }
 
     /// The owner socket lists the local branches a change set can be accepted onto with the
@@ -887,6 +1175,116 @@ mod tests {
             (landing::ChangeState::Accepted, true)
         );
     }
+    /// Makes an owner repository under an engine root with one agent worktree whose turn
+    /// added a file, recorded as a change set. Input: the root. Output: the workspace and
+    /// the change set.
+    #[cfg(unix)]
+    fn recorded(root: &Path) -> (landing::Workspace, ChangeSetId) {
+        let (repo, home, worktree) = (root.join("repo"), root.join("home"), root.join("agent-1"));
+        for folder in [&repo, &home] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        git(&home, &repo, &["init", "-q", "--template=", "-b", "main"]);
+        std::fs::write(repo.join("README"), "one\n").unwrap();
+        git(&home, &repo, &["add", "README"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=O",
+                "-c",
+                "user.email=o@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Start",
+            ],
+        );
+        git(
+            &home,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(worktree.join("NEW"), "first\n").unwrap();
+        let workspace = landing::Workspace {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            agent: landing::ChangeAgent {
+                kind: landing::AgentKind::Sub,
+                id: "agent-1".into(),
+                label: "Agent 1".into(),
+            },
+            repository: repo.clone(),
+            worktree,
+            git_dir: repo.join(".git/worktrees/agent-1"),
+        };
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Add a file".into(),
+        };
+        let db = landing::open(root).unwrap();
+        let id = landing::record_turn_end(&db, &workspace, &turn)
+            .unwrap()
+            .unwrap();
+        (workspace, id)
+    }
+
+    /// A diff page is read at the head the owner is reading, named in the request as the
+    /// desktop and the TUI send it, and refused as `changes_stale` once the set moved on, so
+    /// no page of another head is shown under the head Accept names (RV-DS-13, RV-DS-79).
+    #[cfg(unix)]
+    #[test]
+    fn a_diff_page_is_read_only_at_the_head_the_owner_is_reading() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-chg-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = tmp.path();
+        let (workspace, id) = recorded(root);
+        let db = landing::open(root).unwrap();
+        let head_of = || landing::change_set(&db, &id).unwrap().unwrap().1.head;
+        let first = head_of();
+        let asked = |head: &str| -> Result<Reply, EngineError> {
+            let request = format!(
+                r#"{{"changes":{{"kind":"diff","id":"{}","head":"{head}","page":0}}}}"#,
+                id.as_str()
+            );
+            let Envelope { changes } =
+                serde_json::from_str(&request).map_err(|_| failure("changes_request_invalid"))?;
+            changes.validate()?;
+            run(root, changes).map(|(reply, _)| reply)
+        };
+        let shown = |reply: Result<Reply, EngineError>| match reply {
+            Ok(Reply::Diff { diff }) => diff.text,
+            Ok(_) => "another reply".into(),
+            Err(problem) => problem.0,
+        };
+        assert!(
+            shown(asked(&first)).contains("+first"),
+            "page at the head read"
+        );
+
+        std::fs::write(workspace.worktree.join("NEW"), "second\n").unwrap();
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-2".into(),
+            prompt_line: "Change the file".into(),
+        };
+        landing::record_turn_end(&db, &workspace, &turn).unwrap();
+        let second = head_of();
+        assert_ne!(second, first);
+        assert_eq!(shown(asked(&first)), "changes_stale");
+        assert!(shown(asked(&second)).contains("+second"));
+        assert_eq!(shown(asked("not-a-commit")), "changes_stale");
+    }
 
     /// Reads the plain codes a source file refuses with, before its tests.
     /// Input: the file text. Output: each `changes_` code once.
@@ -946,5 +1344,79 @@ mod tests {
             code.bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
         }));
+    }
+
+    /// RVA-L1 guard (051798248's red on today's head-only API): the owner read a change set,
+    /// committed on main and asked the agent to update, and the agent's next turn checked the
+    /// reviewed head out again. An Accept naming the head the owner read must never land a
+    /// revert of the owner's commit.
+    #[cfg(unix)]
+    #[test]
+    fn a_reviewed_head_checked_out_after_an_update_lands_nothing_unseen() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-chg-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = tmp.path();
+        let (repo, home) = (root.join("repo"), root.join("home"));
+        let (workspace, id) = recorded(root);
+        let db = landing::open(root).unwrap();
+        let (_, read) = landing::change_set(&db, &id).unwrap().unwrap();
+        std::fs::write(repo.join("OWNER"), "owner work\n").unwrap();
+        git(&home, &repo, &["add", "OWNER"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=O",
+                "-c",
+                "user.email=o@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Owner work",
+            ],
+        );
+        let owner_tip = git(&home, &repo, &["rev-parse", "HEAD"]);
+        landing::update(&db, &id).unwrap();
+        let (_, updated) = landing::change_set(&db, &id).unwrap().unwrap();
+        assert_eq!(updated.base, owner_tip.trim());
+        git(
+            &home,
+            &workspace.worktree,
+            &["checkout", "-q", "--detach", &read.head],
+        );
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-2".into(),
+            prompt_line: "Resolve the update".into(),
+        };
+        let turned = landing::record_turn_end(&db, &workspace, &turn).map_err(|problem| problem.0);
+        let after = landing::change_set(&db, &id).unwrap().unwrap().1;
+        std::fs::write(
+            home.join(".gitconfig"),
+            "[user]\n\tname = O\n\temail = o@example.invalid\n",
+        )
+        .unwrap();
+        let accepted = landing::accept(
+            &db,
+            &home,
+            &id,
+            &read.head,
+            None,
+            crate::activity::AcceptPlace::Changes,
+        )
+        .map_err(|problem| problem.0);
+        let kept = git(&home, &repo, &["ls-tree", "--name-only", "HEAD", "OWNER"]);
+        assert_eq!(
+            kept.trim(),
+            "OWNER",
+            "the owner's commit is reverted unseen: turn end {turned:?}, set now base {} head {} (read base {} head {}), accept {accepted:?}",
+            after.base,
+            after.head,
+            read.base,
+            read.head
+        );
     }
 }

@@ -201,7 +201,15 @@ impl Score {
     }
 
     fn accept(&self, id: &ChangeSetId) {
-        crate::landing::accept(&self.landing(), &self.home, id, &self.head(id), None).unwrap();
+        crate::landing::accept(
+            &self.landing(),
+            &self.home,
+            id,
+            &self.head(id),
+            None,
+            crate::activity::AcceptPlace::Changes,
+        )
+        .unwrap();
     }
 
     fn discard(&self, id: &ChangeSetId) {
@@ -266,6 +274,7 @@ fn dispatch(tx: &Transaction<'_>, op: &str, args: Value) -> Value {
 fn ask(text: &str) -> Ask {
     Ask {
         question: text.into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Yes".into(), "No".into()],
         recommended: None,
         context: None,
@@ -443,7 +452,16 @@ fn owner_acts_stand_when_the_ledger_refuses_their_marks() {
         &ask("May I rewrite the gate?"),
     )
     .unwrap();
-    let settled = questions::answer(&score.case.db, master, 0, &Answer::Option(0)).unwrap();
+    let settled = questions::answer(
+        &score.case.db,
+        master,
+        0,
+        &Answer {
+            picks: vec![0],
+            comment: None,
+        },
+    )
+    .unwrap();
     assert_eq!(settled, questions::Settlement::Settled);
     let stopped = score.agent();
     let tx = score.case.db.unchecked_transaction().unwrap();
@@ -479,7 +497,16 @@ fn owner_messages_answers_and_stops_count_per_task_against_the_baseline() {
         &ask("May I rewrite the gate?"),
     )
     .unwrap();
-    questions::answer(&score.case.db, master, 0, &Answer::Option(0)).unwrap();
+    questions::answer(
+        &score.case.db,
+        master,
+        0,
+        &Answer {
+            picks: vec![0],
+            comment: None,
+        },
+    )
+    .unwrap();
     let stopped = score.agent();
     let tx = score.case.db.unchecked_transaction().unwrap();
     let action = TeamAction::StopAgent {
@@ -707,7 +734,16 @@ fn the_daily_question_on_asks_once_a_day_and_a_yes_counts_the_day() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, id);
     assert_eq!(pending[0].asker, EngineSource::Scorecard.name().unwrap());
-    questions::answer(&score.case.db, id, 0, &Answer::Option(0)).unwrap();
+    questions::answer(
+        &score.case.db,
+        id,
+        0,
+        &Answer {
+            picks: vec![0],
+            comment: None,
+        },
+    )
+    .unwrap();
 
     let card = score.report();
     assert_eq!(card.chosen_days, 1);
@@ -730,7 +766,16 @@ fn the_daily_question_on_asks_once_a_day_and_a_yes_counts_the_day() {
         .unwrap()
         .unwrap();
     assert_ne!(tomorrow, id);
-    questions::answer(&score.case.db, tomorrow, 0, &Answer::Option(1)).unwrap();
+    questions::answer(
+        &score.case.db,
+        tomorrow,
+        0,
+        &Answer {
+            picks: vec![1],
+            comment: None,
+        },
+    )
+    .unwrap();
     let card = report(&score.case.db, now_ms(), 0).unwrap();
     assert_eq!(card.answered_days, 1, "both answers fell on today");
     assert_eq!(card.chosen_days, 1, "a day with a yes is chosen");

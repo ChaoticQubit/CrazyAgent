@@ -4,6 +4,7 @@ use super::master_reply::{TurnCapture, has_turn};
 use super::{
     Control, ControlBody, Event, EventBody, EventSequence, HOST_PROTOCOL_VERSION, RawControl,
 };
+use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
 use crate::protocol::{ProtocolError, RequestId};
 use crate::sandbox::InstalledSandbox;
 use std::collections::BTreeSet;
@@ -23,6 +24,7 @@ pub struct RcliMasterCompletion {
     pub turn_id: RequestId,
     pub status: RcliMasterStatus,
     pub reply: Option<String>,
+    pub failure: Option<super::RcliProviderFailure>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,11 +41,23 @@ impl RcliMasterObservation {
     }
 }
 
+/// Whether a host's time ran out at a moment: its run clock, the owner's master time limit,
+/// or the wait for a cancel it asked for. With neither, no clock ends a turn (OB-5d).
+/// Inputs: the moment, the run clock's end and the cancel wait's end. Output: the answer.
+pub(super) fn clock_ended(now: Instant, run: Option<Instant>, cancel: Option<Instant>) -> bool {
+    let ended = [run, cancel].into_iter().flatten().any(|end| now >= end);
+    assert!(!ended || run.is_some() || cancel.is_some());
+    assert!(ended || run.is_none_or(|end| now < end));
+    ended
+}
+
 pub struct RcliMasterHost {
     launch: RcliMasterLaunch,
     process: HostProcess,
     sequence: EventSequence,
     started: Instant,
+    start_time: Duration,
+    deadline: Option<Instant>,
     ready: bool,
     stopped: bool,
     failure: Option<ProtocolError>,
@@ -53,10 +67,15 @@ pub struct RcliMasterHost {
 }
 
 impl RcliMasterHost {
+    /// Starts the rcli master host in its sandbox. Inputs: the launch, the installed sandbox
+    /// and the run clock, the owner's master time limit, or none for no limit, which gives
+    /// the host no clock (OB-5d). Output: the host, not yet ready, or a plain refusal.
     pub fn launch(
         launch: RcliMasterLaunch,
         sandbox: &InstalledSandbox,
+        run_time: Option<Duration>,
     ) -> Result<Self, ProtocolError> {
+        assert!(run_time.is_none_or(|time| !time.is_zero() && time <= RUN_TIME_MAX));
         let mut command = sandbox
             .wrap(&launch.command()?)
             .map_err(|_| error("rcli_master_sandbox_refused"))?;
@@ -70,11 +89,14 @@ impl RcliMasterHost {
             launch.binding.session_id.clone(),
             launch.binding.instance_id.clone(),
         );
+        let started = Instant::now();
         let host = Self {
             launch,
             process,
             sequence,
-            started: Instant::now(),
+            started,
+            start_time: START_TIME_MAX,
+            deadline: run_time.map(|time| started + time),
             ready: false,
             stopped: false,
             failure: None,
@@ -85,11 +107,27 @@ impl RcliMasterHost {
         host.launch.command()?;
         assert!(!host.ready);
         assert!(host.active.is_none());
+        assert_eq!(host.deadline.is_some(), run_time.is_some());
         Ok(host)
     }
 
     pub fn binding(&self) -> &RcliMasterBinding {
         &self.launch.binding
+    }
+
+    /// How long the host waits for its harness to say it is ready when it has no run
+    /// clock. Input: the host. Output: the start bound.
+    #[cfg(test)]
+    pub(super) fn start_time(&self) -> Duration {
+        self.start_time
+    }
+
+    /// Shortens the start bound, so a test sees a start end without waiting the whole
+    /// bound. Input: the shorter bound. Output: none.
+    #[cfg(test)]
+    pub(super) fn shorten_start_time(&mut self, time: Duration) {
+        assert!(time <= self.start_time);
+        self.start_time = time;
     }
 
     /// Names the process group the rcli master runs in, which can outlive this host when
@@ -179,7 +217,7 @@ impl RcliMasterHost {
         })?;
         let turn = self.active.as_mut().expect("retained active host turn");
         turn.cancelling = true;
-        turn.deadline = turn.deadline.min(Instant::now() + Duration::from_secs(6));
+        turn.deadline = Some(Instant::now() + Duration::from_secs(6));
         assert_eq!(turn.id, *turn_id);
         assert!(turn.cancelling);
         Ok(())
@@ -210,15 +248,11 @@ impl RcliMasterHost {
         if self.stopped {
             return Err(error("rcli_master_closed"));
         }
-        if !self.ready && self.started.elapsed() >= Duration::from_secs(5) {
+        if !self.ready && self.deadline.is_none() && self.started.elapsed() >= self.start_time {
             return Err(self.fault(error("rcli_master_startup_deadline")));
         }
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|turn| Instant::now() >= turn.deadline)
-            || self.started.elapsed() >= Duration::from_secs(600)
-        {
+        let cancel = self.active.as_ref().and_then(|turn| turn.deadline);
+        if clock_ended(Instant::now(), self.deadline, cancel) {
             return Err(self.fault(error("rcli_master_turn_deadline")));
         }
         Ok(())

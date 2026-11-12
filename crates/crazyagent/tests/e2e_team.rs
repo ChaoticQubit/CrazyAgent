@@ -67,6 +67,11 @@ async fn closed(output: &mut TerminalOutput) -> String {
     .unwrap_or_else(|_| "no close within ten seconds".into())
 }
 
+/// The owner types into a shell in the engine's terminal server and sees it run, a resize
+/// reach it and its screen come back on a second attach, and the team graph shows the
+/// master. The shell's pane is a stand-in under a name no engine part owns: the team runtime
+/// starts on every writable engine and ends a `team-<id>` pane it has no record of, as
+/// `an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on` proves.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_master() {
     let mut engine = Engine::new("ca-e2e-team-");
@@ -76,7 +81,7 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let agent = AgentId::team(1).unwrap();
+    let agent = AgentId::new("stand-in-1").unwrap();
     let command = InteractiveCommand {
         argv: vec!["/bin/sh".into()],
         cwd: engine.path().to_path_buf(),
@@ -255,6 +260,11 @@ fn ended(pid: u32) -> bool {
     true
 }
 
+/// An engine stop ends every terminal but a team agent's pane and keeps its tmux server for
+/// that pane. Every writable engine runs the team runtime, even with no harness installed,
+/// so the next engine takes over only a team pane it has a record of and ends any other,
+/// as `a_restarted_engine_takes_over_live_agent_panes_and_ends_every_other_one` proves for
+/// a recorded one. With no team agent left, the next engine's stop ends the server.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() {
     let mut engine = Engine::new("ca-e2e-quit-");
@@ -273,6 +283,7 @@ async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() 
         env: vec![("PS1".into(), "quit$ ".into())],
         transcript: Transcript::Unavailable,
     };
+    engine.launch();
     let launcher = {
         let agents = [team.clone(), research.clone()];
         let folder = folder.clone();
@@ -287,7 +298,6 @@ async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() 
         .await
         .unwrap()
     };
-    engine.launch();
     engine.stop();
     let (launcher, alive) = tokio::task::spawn_blocking(move || {
         let alive = launcher.alive().unwrap();
@@ -300,37 +310,35 @@ async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() 
         vec![team.clone()],
         "the stopped engine keeps its team agent for the next engine and ends every other terminal"
     );
+    let server = server_pid(&tmux, &socket);
 
     engine.launch();
-    let mut owner = Owner::attach(&engine).await;
-    let TerminalSession {
-        agent: attached,
-        mut output,
-        control,
-        ..
-    } = owner
-        .controller
-        .terminal_attach(team.clone())
-        .await
-        .unwrap();
-    assert_eq!(attached, team);
-    let mut seen = Vec::new();
+    let alive = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let alive = launcher.alive().unwrap();
+            if alive.is_empty() || std::time::Instant::now() >= deadline {
+                return alive;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })
+    .await
+    .unwrap();
     assert!(
-        read_until(&mut output, &mut seen, b"quit$ ").await,
-        "the restarted engine reaches the team agent that lived on: {}",
-        String::from_utf8_lossy(&seen)
+        alive.is_empty(),
+        "the next engine ends a team pane it has no record of: {alive:?}"
     );
-    control.detach().await.unwrap();
-    owner.controller.detach();
-    let server = server_pid(&tmux, &socket);
-    tokio::task::spawn_blocking(move || launcher.kill(&team))
-        .await
-        .unwrap()
-        .unwrap();
+    assert!(socket.exists(), "the next engine keeps its tmux server");
+    let last = server_pid(&tmux, &socket);
+    assert_eq!(
+        last, server,
+        "the next engine works on in the server the team agent kept"
+    );
     engine.stop();
     assert!(
         !socket.exists(),
         "with no team agent left the engine stop ends its tmux server and removes its socket"
     );
-    assert!(ended(server), "the tmux server process is gone");
+    assert!(ended(last), "the tmux server process is gone");
 }

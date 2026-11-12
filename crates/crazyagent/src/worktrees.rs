@@ -18,7 +18,10 @@ use std::process::{Command as Process, Stdio};
 use std::time::{Duration, Instant};
 
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
-const METADATA_ENTRIES_MAX: usize = 8192;
+/// The most entries of a repository's .git outside its object store that the metadata walk
+/// reads, each one checked. A long-used repository holds thousands in its rerere cache and
+/// ref logs, so the bound leaves room for those and still ends the walk on a planted tree.
+const METADATA_ENTRIES_MAX: usize = 65_536;
 const OBJECT_ENTRIES_MAX: usize = 262_144;
 const UNTRUSTED_GIT_ENTRY: &str = "untrusted_git_entry:";
 const SHOWN_ENTRY_BYTES_MAX: usize = 160;
@@ -179,9 +182,25 @@ fn identity(_path: &Path, _directory: bool) -> Result<Identity, EngineError> {
     Err(error("worktree_filesystem_unavailable"))
 }
 
+/// Refuses the identity of an entry already read where the Unix owner, mode, device and
+/// inode do not exist. Takes the entry and kind, both unused. Returns
+/// `worktree_filesystem_unavailable`.
+#[cfg(not(unix))]
+fn identified(_entry: &std::fs::Metadata, _directory: bool) -> Result<Identity, EngineError> {
+    Err(error("worktree_filesystem_unavailable"))
+}
+
 #[cfg(unix)]
 fn identity(path: &Path, directory: bool) -> Result<Identity, EngineError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(error)?;
+    identified(&std::fs::symlink_metadata(path).map_err(error)?, directory)
+}
+
+/// Checks the identity of an entry already read without following a link, with the rules
+/// of [`identity`], so its check and its kind come from one read. Inputs: the entry's
+/// metadata and whether it must be a folder. Output: its device and inode, or
+/// `untrusted_filesystem_identity`.
+#[cfg(unix)]
+fn identified(metadata: &std::fs::Metadata, directory: bool) -> Result<Identity, EngineError> {
     if metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.mode() & 0o022 != 0
         || (directory && !metadata.is_dir())
@@ -268,8 +287,9 @@ fn git_until(
 }
 
 /// Builds the engine's Git process: the host Git with a cleared environment, no system
-/// or global config, hooks, fsmonitor, replace objects, protocols or automatic
-/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process.
+/// or global config, hooks, fsmonitor, replace objects, grafts, commit-graph files,
+/// protocols or automatic maintenance. Inputs: the repository and the arguments. Output:
+/// the unspawned process.
 fn git_command(repository: &Path, args: &[&str]) -> Process {
     let mut command = Process::new("/usr/bin/git");
     command
@@ -281,6 +301,7 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
         .args([
@@ -300,6 +321,10 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
             "gc.auto=0",
             "-c",
             "maintenance.auto=false",
+            "-c",
+            "core.commitGraph=false",
+            "-c",
+            "advice.graftFileDeprecated=false",
         ])
         .arg("--git-dir")
         .arg(repository.join(".git"))
@@ -401,10 +426,23 @@ fn walk_metadata(metadata: &Path, start: &Path) -> Result<(), EngineError> {
         if visited > METADATA_ENTRIES_MAX {
             return Err(error("git_metadata_capacity"));
         }
-        if !trusted(metadata, &path)?.is_dir() {
+        let root = path == start;
+        let found = if root {
+            Some(trusted(metadata, &path)?)
+        } else {
+            listed(metadata, &path)?
+        };
+        if !found.is_some_and(|entry| entry.is_dir()) {
             continue;
         }
-        for entry in std::fs::read_dir(&path).map_err(error)? {
+        let entries = if root {
+            std::fs::read_dir(&path).map_err(error)?
+        } else if let Some(entries) = listing(&path)? {
+            entries
+        } else {
+            continue;
+        };
+        for entry in entries {
             let child = entry.map_err(error)?.path();
             let name = child.file_name().unwrap_or_default();
             if path == worktrees {
@@ -437,35 +475,126 @@ fn walk_metadata(metadata: &Path, start: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Reads one .git entry without following a link and requires [`identity`] of it. Inputs:
-/// the .git folder and the entry. Output: its metadata, or `untrusted_git_entry:` with
-/// the entry's path inside .git.
+/// Reads the entry a walk starts from without following a link and requires [`identity`]
+/// of it from that one read. Inputs: the .git folder and the entry. Output: its metadata,
+/// the read failure when it is missing, or `untrusted_git_entry:` with the entry's path
+/// inside .git.
 fn trusted(metadata: &Path, path: &Path) -> Result<std::fs::Metadata, EngineError> {
     let entry = std::fs::symlink_metadata(path).map_err(error)?;
-    identity(path, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
+    identified(&entry, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
     Ok(entry)
+}
+
+/// A step a test runs on a listed .git entry just before the walk reads it, given the
+/// entry and whether the read lists it as a folder.
+#[cfg(test)]
+type BeforeReadStep = Box<dyn Fn(&Path, bool)>;
+
+#[cfg(test)]
+thread_local! {
+    /// What a test does to a listed .git entry just before the walk reads it, given the
+    /// entry and whether the read lists it as a folder. None leaves every entry alone.
+    static BEFORE_READ: std::cell::RefCell<Option<BeforeReadStep>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The step a walk on this thread runs before each read of a listed .git entry, set for
+/// one test and cleared when dropped.
+#[cfg(test)]
+pub(crate) struct BeforeRead;
+
+#[cfg(test)]
+impl BeforeRead {
+    /// Sets the step. Input: what to do with the entry and whether the coming read lists
+    /// it as a folder. Output: the guard that clears it.
+    pub(crate) fn set(step: impl Fn(&Path, bool) + 'static) -> Self {
+        BEFORE_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(step)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for BeforeRead {
+    fn drop(&mut self) {
+        BEFORE_READ.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Runs the step a test set in `BEFORE_READ` on this thread. Inputs: the listed entry and
+/// whether the coming read lists it as a folder. Output: none.
+#[cfg(test)]
+fn before_read(path: &Path, listing: bool) {
+    BEFORE_READ.with(|step| {
+        if let Some(step) = step.borrow().as_ref() {
+            step(path, listing);
+        }
+    });
+}
+
+/// Does nothing outside tests, where no step stands between a listing and a read. Inputs:
+/// the listed entry and the kind of read, both unused. Output: none.
+#[cfg(not(test))]
+fn before_read(_path: &Path, _listing: bool) {}
+
+/// Reads one entry a .git folder listed, without following a link, and requires
+/// [`identity`] of it from that one read. Git removes its lock files, temporary packs and
+/// pruned objects at any moment, so an entry gone since its listing is as if never listed;
+/// every other read failure and every refusal stays. Inputs: the .git folder and the
+/// entry. Output: its metadata, None when it is gone, or `untrusted_git_entry:` with the
+/// entry's path inside .git.
+fn listed(metadata: &Path, path: &Path) -> Result<Option<std::fs::Metadata>, EngineError> {
+    before_read(path, false);
+    match std::fs::symlink_metadata(path) {
+        Ok(entry) => {
+            identified(&entry, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
+            Ok(Some(entry))
+        }
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(failed) => Err(error(failed)),
+    }
+}
+
+/// Lists one folder that [`listed`] found inside .git. Git removes emptied folders at any
+/// moment, so a folder gone since that read is as if never listed; every other failure
+/// stays. Input: the folder. Output: its entries, None when it is gone, or the failure.
+fn listing(folder: &Path) -> Result<Option<std::fs::ReadDir>, EngineError> {
+    before_read(folder, true);
+    match std::fs::read_dir(folder) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(failed) => Err(error(failed)),
+    }
 }
 
 /// Checks one fan-out folder of the object store and every object file in it, since Git
 /// reads an object through any link put in its place. Names that are not hex digits, such
 /// as a temporary object left by a killed Git, are never read as objects and are left
-/// alone. Inputs: the .git folder, the fan-out folder and how many entries may still be
+/// alone, and a folder or an object Git pruned since its listing counts as read and is no
+/// finding. Inputs: the .git folder, the fan-out folder and how many entries may still be
 /// read. Output: the entries read, or the refusal or `git_object_store_capacity` code.
 fn fan_out(metadata: &Path, folder: &Path, room: usize) -> Result<usize, EngineError> {
     if room == 0 {
         return Err(error("git_object_store_capacity"));
     }
-    if !trusted(metadata, folder)?.is_dir() {
+    let Some(found) = listed(metadata, folder)? else {
+        return Ok(1);
+    };
+    if !found.is_dir() {
         return Err(untrusted(metadata, folder));
     }
+    let Some(entries) = listing(folder)? else {
+        return Ok(1);
+    };
     let mut read = 1;
-    for entry in std::fs::read_dir(folder).map_err(error)? {
+    for entry in entries {
         let path = entry.map_err(error)?.path();
         read += 1;
         if read > room {
             return Err(error("git_object_store_capacity"));
         }
-        if path.file_name().is_some_and(hex) && !trusted(metadata, &path)?.is_file() {
+        if path.file_name().is_some_and(hex)
+            && listed(metadata, &path)?.is_some_and(|object| !object.is_file())
+        {
             return Err(untrusted(metadata, &path));
         }
     }
@@ -476,10 +605,16 @@ fn fan_out(metadata: &Path, folder: &Path, room: usize) -> Result<usize, EngineE
 /// Checks the files of another worktree's admin folder that Git reads for every worktree,
 /// as `git worktree add` does: each must be a plain file when present, so no read follows
 /// a link or waits on a pipe, and HEAD must pass [`plain_head`], so Git resolves no ref of
-/// that folder. The rest of that folder is checked with its own lease.
+/// that folder. The rest of that folder is checked with its own lease. An admin folder Git
+/// removed since its listing is no finding.
 /// Inputs: the .git folder and the admin folder. Output: nothing, or the refusal code.
 fn shared_worktree_files(metadata: &Path, admin: &Path) -> Result<(), EngineError> {
-    let folder = std::fs::symlink_metadata(admin).map_err(error)?;
+    before_read(admin, false);
+    let folder = match std::fs::symlink_metadata(admin) {
+        Ok(folder) => folder,
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(failed) => return Err(error(failed)),
+    };
     if folder.file_type().is_symlink() {
         return Err(untrusted(metadata, admin));
     }
@@ -1003,14 +1138,17 @@ pub(crate) fn refuse_repository_config(repository: &Path) -> Result<(), EngineEr
     validate_config(repository)
 }
 
+/// Checks every entry of a repository's own Git config against [`REFUSED_KEYS`]. Input: the
+/// repository. Output: nothing, or `repository_config_refused:` with the refusing rule's
+/// code. The listing is bounded by the engine Git output bound, [`OUTPUT_BYTES_MAX`], so a
+/// repository with thousands of tracked branches is read whole and a longer one fails as
+/// that command does.
 fn validate_config(repository: &Path) -> Result<(), EngineError> {
     let bytes = git(
         repository,
         &["config", "--local", "--no-includes", "--null", "--list"],
     )?;
-    if bytes.len() > 65536 {
-        return Err(error("git_config_capacity"));
-    }
+    assert!(bytes.len() <= OUTPUT_BYTES_MAX);
     for record in bytes.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         let record = std::str::from_utf8(record).map_err(error)?;
         let (key, value) = record
@@ -1023,7 +1161,6 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
             return Err(error(format!("{CONFIG_REFUSED}{}", rule.code)));
         }
     }
-    assert!(bytes.len() <= 65536);
     Ok(())
 }
 
@@ -1184,6 +1321,11 @@ pub(crate) fn reserve_master_bootstrap(
     repository: &str,
 ) -> Result<Outcome, EngineError> {
     assert!(!connection.is_autocommit());
+    if crate::projects_home::project_move_holds(connection, std::path::Path::new(repository))
+        .map_err(error)?
+    {
+        return Ok(rejected("move_project_in_progress"));
+    }
     let body: Option<String> = connection
         .query_row(
             "SELECT body FROM repository_admissions WHERE project=?1 AND repository=?2",
@@ -1383,6 +1525,7 @@ pub(crate) fn lease_git_dir(
 /// Names the branch of the lease whose worktree is at `path`, the only ref a master
 /// worktree's HEAD may name when the engine reads or moves it. Inputs: the connection and
 /// the worktree path. Output: the branch, or `lease_missing`.
+#[cfg(unix)]
 pub(crate) fn lease_branch(connection: &Connection, path: &Path) -> Result<String, EngineError> {
     let path = path.to_str().ok_or_else(|| error("lease_missing"))?;
     let body: Option<String> = connection
@@ -1415,6 +1558,130 @@ fn save(connection: &Connection, record: &LeaseRecord) -> Result<(), EngineError
     Ok(())
 }
 
+/// How long a lease check that failed on a read waits before its one more try.
+const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
+/// The codes of a Git command that failed at once, which is no rule of the engine's about
+/// the repository. `git_deadline` is not among them: a Git command that ran out of time
+/// has already held its caller for its whole deadline.
+const GIT_FAST_FAILURES: [&str; 2] = [
+    "git_reader_failed",
+    "git_operation_failed_or_output_capacity",
+];
+/// The most digits of a system error number a lease log line shows.
+const LOGGED_OS_ERROR_DIGITS_MAX: usize = 5;
+/// The most leases whose failed checks one engine run logs.
+const LOGGED_LEASES_MAX: usize = 256;
+/// The most log lines the failed checks of one lease get in one engine run.
+const LOGGED_LINES_PER_LEASE_MAX: u32 = 8;
+/// What this engine run has logged of failed lease checks.
+static LEASE_LOGGED: std::sync::Mutex<LeaseLog> = std::sync::Mutex::new(LeaseLog {
+    leases: std::collections::BTreeMap::new(),
+    full: false,
+});
+
+/// Whether a lease check failed on a read and not on a rule. A rule answers a plain code,
+/// some with `:` and a detail; a read answers the system's own words or one of
+/// `GIT_FAST_FAILURES`. A Git command that ran out of time, `git_deadline`, counts as
+/// final like a rule, so a stalled Git is never waited for twice.
+/// Input: the failure. Output: the answer.
+fn read_failure(problem: &EngineError) -> bool {
+    let code = problem.0.split(':').next().unwrap_or_default();
+    crate::protocol::plain_code(code) != code || GIT_FAST_FAILURES.contains(&code)
+}
+
+/// Runs one lease check and, when it failed on a read, once more after
+/// `VERIFY_RETRY_WAIT`: the file system and Git fail a read for a moment while Git works,
+/// and that says nothing about the repository. A failure on a rule or a Git deadline is
+/// never tried again.
+/// Input: the check. Output: nothing, or the last failure and whether a second try ran.
+fn checked(mut check: impl FnMut() -> Result<(), EngineError>) -> Result<(), (EngineError, bool)> {
+    let Err(first) = check() else {
+        return Ok(());
+    };
+    if !read_failure(&first) {
+        return Err((first, false));
+    }
+    std::thread::sleep(VERIFY_RETRY_WAIT);
+    check().map_err(|second| (second, true))
+}
+
+/// What an engine log line says of a failed lease check: a rule's plain code, with the
+/// entry inside .git it names when it is `untrusted_git_entry:`, a Git failure's code, or
+/// `lease_read_failed` with the system's error number when the failure has one. It never
+/// holds the failure's own words, a path outside .git or a path that climbs.
+/// Input: the failure. Output: the words, plain codes and an entry name only.
+fn logged_failure(problem: &EngineError) -> String {
+    let (code, detail) = problem
+        .0
+        .split_once(':')
+        .unwrap_or((problem.0.as_str(), ""));
+    if crate::protocol::plain_code(code) != code {
+        let number = problem
+            .0
+            .rsplit_once("(os error ")
+            .and_then(|(_, rest)| rest.strip_suffix(')'))
+            .filter(|digits| {
+                (1..=LOGGED_OS_ERROR_DIGITS_MAX).contains(&digits.len())
+                    && digits.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        return match number {
+            Some(number) => format!("lease_read_failed_os_{number}"),
+            None => "lease_read_failed".to_owned(),
+        };
+    }
+    let inside = !detail.is_empty()
+        && detail.len() <= SHOWN_ENTRY_BYTES_MAX
+        && !detail.starts_with('/')
+        && !detail.split('/').any(|part| part == "..")
+        && detail
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '?'));
+    if inside && problem.0.starts_with(UNTRUSTED_GIT_ENTRY) {
+        return problem.0.clone();
+    }
+    code.to_owned()
+}
+
+/// The failed lease checks one engine run has logged: for each lease, by task and
+/// repository, the last line written and how many lines it got, and whether the line
+/// that says the log has no place for more leases was written. Both are bounded, by
+/// `LOGGED_LEASES_MAX` and `LOGGED_LINES_PER_LEASE_MAX`, so failing leases never fill the
+/// engine log however often they are read.
+struct LeaseLog {
+    leases: std::collections::BTreeMap<(String, String), (String, u32)>,
+    full: bool,
+}
+
+impl LeaseLog {
+    /// Decides what to write for one failed check of a lease. Inputs: the lease's task and
+    /// repository, which are remembered and never written, the cause words and whether a
+    /// second try ran. Output: the line when the lease's last line differs and the lease
+    /// has lines left; `worktree_lease_log_full` once when no place is left for another
+    /// lease; else None.
+    fn line(&mut self, task: &str, repository: &str, cause: &str, retried: bool) -> Option<String> {
+        let key = (task.to_owned(), repository.to_owned());
+        if !self.leases.contains_key(&key) && self.leases.len() >= LOGGED_LEASES_MAX {
+            let first = !self.full;
+            self.full = true;
+            return first.then(|| "worktree_lease_log_full".to_owned());
+        }
+        let line = format!("worktree_lease_uncertain cause={cause} retried={retried}");
+        let (last, lines) = self.leases.entry(key).or_default();
+        if *last == line || *lines >= LOGGED_LINES_PER_LEASE_MAX {
+            return None;
+        }
+        *lines += 1;
+        last.clone_from(&line);
+        assert!(self.leases.len() <= LOGGED_LEASES_MAX);
+        Some(line)
+    }
+}
+
+/// Reads a task's leases. A Ready or RecoveryRequired lease is checked against the file
+/// system and Git through [`checked`] and reads as Uncertain when the check fails. The
+/// failure it ends with is written to the engine log once for that lease, through
+/// [`LeaseLog`]. Inputs: the connection and the task. Output: the leases, or
+/// `lease_capacity`.
 pub(crate) fn leases(connection: &Connection, task: &TaskId) -> Result<Outcome, EngineError> {
     let mut statement = connection
         .prepare("SELECT body FROM worktree_leases WHERE task=?1 ORDER BY repository LIMIT 129")
@@ -1429,8 +1696,20 @@ pub(crate) fn leases(connection: &Connection, task: &TaskId) -> Result<Outcome, 
             if matches!(
                 record.lease.state,
                 LeaseState::Ready | LeaseState::RecoveryRequired
-            ) && verify_record(&record).is_err()
+            ) && let Err((problem, retried)) = checked(|| verify_record(&record))
             {
+                let line = LEASE_LOGGED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .line(
+                        record.lease.task_id.as_str(),
+                        &record.lease.repository,
+                        &logged_failure(&problem),
+                        retried,
+                    );
+                if let Some(line) = line {
+                    eprintln!("{line}");
+                }
                 record.lease.state = LeaseState::Uncertain;
             }
             Ok(record.lease)
@@ -2061,7 +2340,7 @@ fn worktree_config_on(listing: &[u8]) -> bool {
             key.eq_ignore_ascii_case("extensions.worktreeconfig")
                 .then_some(value)
         })
-        .last()
+        .next_back()
         .is_some_and(|value| GIT_TRUE.iter().any(|on| on.eq_ignore_ascii_case(value)))
 }
 
@@ -2202,7 +2481,7 @@ const SWEEP_WORKTREES_MAX: usize = 512;
 /// worktrees were added from and those its leases are in, at most
 /// `SWEEP_REPOSITORIES_MAX`. Input: the store. Output: the repositories.
 #[cfg(unix)]
-fn known_repositories(
+pub(crate) fn known_repositories(
     connection: &Connection,
 ) -> Result<std::collections::BTreeSet<PathBuf>, EngineError> {
     let mut repositories = std::collections::BTreeSet::new();
@@ -2780,6 +3059,293 @@ mod tests {
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
+    /// A repository whose .git holds what Git makes and removes while it works: lock files,
+    /// a temporary pack, loose objects in fan-out folders, another worktree's admin folder
+    /// and a folder of a running rebase. Input: the folder to make it in. Output: the
+    /// repository.
+    fn metadata_folder(root: &Path) -> PathBuf {
+        let repository = root.join("repository");
+        let git = repository.join(".git");
+        for folder in [
+            "refs/heads",
+            "objects/ab",
+            "objects/cd",
+            "objects/ef",
+            "objects/pack",
+            "worktrees/other",
+            "rebase-merge",
+        ] {
+            std::fs::create_dir_all(git.join(folder)).unwrap();
+        }
+        for file in [
+            "HEAD",
+            "index.lock",
+            "refs/heads/main.lock",
+            "objects/ab/0123",
+            "objects/ab/4567",
+            "objects/pack/tmp_pack_1",
+        ] {
+            std::fs::write(git.join(file), b"kept\n").unwrap();
+        }
+        repository
+    }
+
+    /// Removes one entry as Git does when it is done with it. Input: the file or folder.
+    fn unlink(path: &Path) {
+        if std::fs::symlink_metadata(path).unwrap().is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_git_entry_removed_between_its_listing_and_its_read_is_no_finding() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = metadata_folder(root.path());
+        let git = repository.join(".git");
+        let gone = [
+            "index.lock",
+            "refs/heads/main.lock",
+            "objects/pack/tmp_pack_1",
+            "objects/ab/0123",
+            "objects/cd",
+            "worktrees/other",
+        ]
+        .map(|name| git.join(name));
+        let emptied = ["rebase-merge", "objects/ef"].map(|name| git.join(name));
+        let step = {
+            let (gone, emptied) = (gone.clone(), emptied.clone());
+            BeforeRead::set(move |path, listing| {
+                let named = if listing { &emptied[..] } else { &gone[..] };
+                if named.iter().any(|entry| entry == path) {
+                    unlink(path);
+                }
+            })
+        };
+        validate_metadata(&repository).unwrap();
+        drop(step);
+        for entry in gone.iter().chain(&emptied) {
+            assert!(
+                std::fs::symlink_metadata(entry).is_err(),
+                "the walk never read {}",
+                entry.display()
+            );
+        }
+        assert!(git.join("objects/ab/4567").is_file());
+        validate_metadata(&repository).unwrap();
+    }
+
+    #[test]
+    fn a_link_or_a_pipe_put_in_a_listed_entry_s_place_is_still_refused() {
+        for (name, pipe) in [
+            ("index.lock", false),
+            ("index.lock", true),
+            ("objects/ab/0123", false),
+            ("objects/ab/0123", true),
+            ("refs/heads", false),
+            ("refs/heads", true),
+            ("objects/cd", false),
+            ("worktrees/other", false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let repository = metadata_folder(root.path());
+            let outside = root.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            let swapped = repository.join(".git").join(name);
+            let step = {
+                let swapped = swapped.clone();
+                BeforeRead::set(move |path, listing| {
+                    let kept = std::fs::symlink_metadata(path)
+                        .is_ok_and(|entry| entry.is_file() || entry.is_dir());
+                    if path != swapped || listing || !kept {
+                        return;
+                    }
+                    unlink(path);
+                    if pipe {
+                        let made = crate::spawn_gate::status(
+                            std::process::Command::new("/usr/bin/mkfifo").arg(path),
+                        )
+                        .unwrap();
+                        assert!(made.success());
+                    } else {
+                        std::os::unix::fs::symlink(&outside, path).unwrap();
+                    }
+                })
+            };
+            let refused = validate_metadata(&repository).unwrap_err();
+            drop(step);
+            assert_eq!(
+                refused.0,
+                format!("{UNTRUSTED_GIT_ENTRY}{name}"),
+                "pipe {pipe}"
+            );
+            let left = std::fs::symlink_metadata(&swapped).unwrap();
+            assert!(
+                !left.is_file() && !left.is_dir(),
+                "{name} was never swapped"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_start_or_an_unreadable_folder_is_a_failure_not_an_entry_gone() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = metadata_folder(root.path());
+        let git = repository.join(".git");
+        validate_admin(&repository, &git.join("worktrees/other")).unwrap();
+        assert!(validate_admin(&repository, &git.join("worktrees/absent")).is_err());
+        let closed = git.join("refs/heads");
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = validate_metadata(&repository);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused.is_err(), "an unreadable folder was skipped as gone");
+        validate_metadata(&repository).unwrap();
+        std::fs::remove_dir_all(&git).unwrap();
+        assert!(validate_metadata(&repository).is_err());
+    }
+
+    #[test]
+    fn only_a_read_failure_of_a_lease_check_is_tried_once_more() {
+        let run = |answers: &[Result<(), &str>]| {
+            let calls = std::cell::Cell::new(0);
+            let result = checked(|| {
+                let answer = answers[calls.get()];
+                calls.set(calls.get() + 1);
+                answer.map_err(error)
+            });
+            (
+                result.map_err(|(problem, retried)| (problem.0, retried)),
+                calls.get(),
+            )
+        };
+        let missing = "No such file or directory (os error 2)";
+        assert_eq!(run(&[Ok(())]), (Ok(()), 1));
+        assert_eq!(run(&[Err(missing), Ok(())]), (Ok(()), 2));
+        assert_eq!(
+            run(&[Err(missing), Err("Permission denied (os error 13)")]),
+            (Err(("Permission denied (os error 13)".to_owned(), true)), 2)
+        );
+        assert_eq!(
+            run(&[Err(missing), Err("untrusted_git_entry:index.lock")]),
+            (Err(("untrusted_git_entry:index.lock".to_owned(), true)), 2)
+        );
+        for fast in GIT_FAST_FAILURES {
+            assert_eq!(run(&[Err(fast), Ok(())]), (Ok(()), 2), "{fast}");
+            assert_eq!(
+                run(&[Err(fast), Err(fast)]),
+                (Err((fast.to_owned(), true)), 2),
+                "{fast}"
+            );
+        }
+        for rule in [
+            "git_deadline",
+            "untrusted_git_entry:index.lock",
+            "git_metadata_capacity",
+            "unsupported_shared_or_partial_git_metadata",
+            "repository_path_not_canonical",
+            "untrusted_filesystem_identity",
+        ] {
+            assert_eq!(
+                run(&[Err(rule), Ok(())]),
+                (Err((rule.to_owned(), false)), 1),
+                "{rule}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lease_log_line_names_a_code_and_never_text_or_a_path_outside_git() {
+        for (failure, logged) in [
+            (
+                "No such file or directory (os error 2)",
+                "lease_read_failed_os_2",
+            ),
+            ("Permission denied (os error 13)", "lease_read_failed_os_13"),
+            (
+                "/Users/owner/project: Permission denied (os error 13)",
+                "lease_read_failed_os_13",
+            ),
+            (
+                "missing field `lease` at line 1 column 2",
+                "lease_read_failed",
+            ),
+            ("failed (os error 1234567)", "lease_read_failed"),
+            ("", "lease_read_failed"),
+            ("git_deadline", "git_deadline"),
+            (
+                "repository_path_not_canonical",
+                "repository_path_not_canonical",
+            ),
+            (
+                "untrusted_git_entry:refs/heads/main.lock",
+                "untrusted_git_entry:refs/heads/main.lock",
+            ),
+            ("untrusted_git_entry:/Users/owner/x", "untrusted_git_entry"),
+            ("untrusted_git_entry:../../outside", "untrusted_git_entry"),
+            ("untrusted_git_entry:a b", "untrusted_git_entry"),
+            ("some_rule:/Users/owner/project", "some_rule"),
+        ] {
+            assert_eq!(logged_failure(&error(failure)), logged, "{failure}");
+        }
+    }
+
+    #[test]
+    fn a_failing_lease_is_logged_once_per_cause_and_the_log_is_bounded() {
+        let new = || LeaseLog {
+            leases: std::collections::BTreeMap::new(),
+            full: false,
+        };
+        let mut log = new();
+        let lost = "worktree_lease_uncertain cause=lease_read_failed_os_2 retried=true";
+        let linked = "worktree_lease_uncertain cause=untrusted_git_entry:index retried=false";
+        let mut written = Vec::new();
+        for _ in 0..50 {
+            written.extend(log.line("task-a", "/repo", "lease_read_failed_os_2", true));
+            written.extend(log.line("task-b", "/repo", "untrusted_git_entry:index", false));
+            written.extend(log.line("task-a", "/other", "untrusted_git_entry:index", false));
+        }
+        assert_eq!(written, [lost, linked, linked], "one line a lease");
+        assert!(
+            written
+                .iter()
+                .all(|line| !line.contains("task") && !line.contains("repo"))
+        );
+
+        let mut log = new();
+        let mut flapping = 0;
+        for turn in 0..50 {
+            let cause = if turn % 2 == 0 {
+                "git_deadline"
+            } else {
+                "git_reader_failed"
+            };
+            flapping += usize::from(log.line("task-a", "/repo", cause, false).is_some());
+        }
+        assert_eq!(flapping, LOGGED_LINES_PER_LEASE_MAX as usize);
+
+        let mut log = new();
+        for lease in 0..LOGGED_LEASES_MAX {
+            assert!(
+                log.line(&format!("task-{lease}"), "/repo", "git_deadline", false)
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            log.line("task-late", "/repo", "git_deadline", false)
+                .as_deref(),
+            Some("worktree_lease_log_full")
+        );
+        assert_eq!(log.line("task-late", "/repo", "git_deadline", false), None);
+        assert_eq!(log.line("task-later", "/repo", "git_deadline", false), None);
+        assert_eq!(log.line("task-0", "/repo", "git_deadline", false), None);
+        assert!(
+            log.line("task-0", "/repo", "git_reader_failed", false)
+                .is_some()
+        );
+        assert_eq!(log.leases.len(), LOGGED_LEASES_MAX);
+    }
+
     #[test]
     fn tree_listing_refuses_a_tree_past_its_file_byte_or_depth_bound() {
         let temporary = tempfile::tempdir().unwrap();
@@ -3037,5 +3603,112 @@ mod tests {
             .unwrap();
             assert!(worktree_config_on(&listing));
         }
+    }
+
+    /// Appends tracked branch sections to a repository's config, as a repository with many
+    /// branches holds them. Inputs: the repository and how many branches. Output: none; the
+    /// config file grows by about 105 bytes a branch.
+    #[cfg(unix)]
+    fn track_branches(repository: &Path, count: usize) {
+        use std::fmt::Write;
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        for branch in 0..count {
+            let name = format!("feature/scholar-scope-{branch:04}");
+            write!(
+                text,
+                "[branch \"{name}\"]\n\tremote = origin\n\tmerge = refs/heads/{name}\n"
+            )
+            .unwrap();
+        }
+        std::fs::write(&config, text).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_whose_config_lists_more_than_64_kib_is_inspected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        track_branches(&repository, 1000);
+        let listing = git(
+            &repository,
+            &["config", "--local", "--no-includes", "--null", "--list"],
+        )
+        .unwrap();
+        assert!(listing.len() > 100_000);
+        let admission = inspect(repository.to_str().unwrap()).unwrap();
+        assert_eq!(Path::new(&admission.repository), repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_key_after_64_kib_of_config_is_still_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        track_branches(&repository, 1000);
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[core]\n\tfsmonitor = /bin/true\n");
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(
+            inspect(repository.to_str().unwrap()).unwrap_err().0,
+            "repository_config_refused:core_fsmonitor"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_listing_past_the_git_output_bound_is_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[user]\n\tname = ");
+        text.push_str(&"n".repeat(OUTPUT_BYTES_MAX + 1));
+        text.push('\n');
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(
+            inspect(repository.to_str().unwrap()).unwrap_err().0,
+            "git_operation_failed_or_output_capacity"
+        );
+    }
+
+    /// Fills a folder inside a repository's .git with empty files, as a long-used
+    /// repository's `rr-cache` or `logs` holds them. Inputs: the repository, the folder's
+    /// name and how many files. Output: none.
+    #[cfg(unix)]
+    fn fill_git_folder(repository: &Path, name: &str, count: usize) {
+        let folder = repository.join(".git").join(name);
+        std::fs::create_dir(&folder).unwrap();
+        for entry in 0..count {
+            std::fs::write(folder.join(format!("{entry:06}")), b"").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_whose_git_folder_holds_more_than_8192_entries_is_inspected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        fill_git_folder(&repository, "rr-cache", 9000);
+        let admission = inspect(repository.to_str().unwrap()).unwrap();
+        assert_eq!(Path::new(&admission.repository), repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_git_folder_past_the_metadata_bound_is_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        fill_git_folder(&repository, "rr-cache", METADATA_ENTRIES_MAX + 1);
+        assert_eq!(
+            inspect(repository.to_str().unwrap()).unwrap_err().0,
+            "git_metadata_capacity"
+        );
     }
 }

@@ -346,6 +346,26 @@ impl Restart {
                 rusqlite::params![connection().as_str(), now_ms() + 600_000],
             )
             .unwrap();
+        database
+            .execute(
+                "INSERT INTO team_project_pauses(project,connection,until_ms) VALUES ('project-z',?1,?2)
+                 ON CONFLICT(project,connection) DO UPDATE SET until_ms=excluded.until_ms",
+                rusqlite::params![connection().as_str(), now_ms() + 600_000],
+            )
+            .unwrap();
+    }
+
+    /// Whether project-z still holds the account after a limit its own agent reported
+    /// (SECAUDIT-RATELIMIT-FORGE). Output: the answer.
+    fn project_held(&self) -> bool {
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        database
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_project_pauses WHERE project='project-z' AND connection=?1)",
+                [connection().as_str()],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
     /// Records the provider's rejection of one account's sign-in as its newest gateway
@@ -950,10 +970,15 @@ async fn a_fresh_sign_in_lifts_the_pause_and_rejection_that_a_sign_in_check_keep
             restart.held(),
             (true, crate::model_gateway::Health::InvalidAuthentication)
         );
+        assert!(restart.project_held());
         first.sign_in(&restart).await;
         assert_eq!(
             restart.held(),
             (false, crate::model_gateway::Health::Unknown)
+        );
+        assert!(
+            !restart.project_held(),
+            "a fresh sign-in lifts a project's hold on the account too"
         );
         restart.hold();
         first.stop().await;
@@ -1004,6 +1029,7 @@ async fn a_rejected_account_reads_rejected_until_it_signs_in_again_on_the_same_a
             restart.held(),
             (false, crate::model_gateway::Health::Unknown)
         );
+        assert!(!restart.project_held());
         run.stop().await;
     })
     .await
@@ -1227,6 +1253,9 @@ async fn research_passes_over_an_account_whose_sign_in_was_rejected_to_the_next_
     .expect("the research rejection case exceeded 60 seconds");
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn team_agents_pass_over_an_account_whose_sign_in_was_rejected_to_the_next_one() {
     use crate::team::{MessageAuthor, MessageState, TaskStatus, TeamAction};
@@ -1289,6 +1318,9 @@ async fn team_agents_pass_over_an_account_whose_sign_in_was_rejected_to_the_next
     .expect("the team rejection case exceeded 60 seconds");
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_idle_team_agent_whose_account_sign_in_is_rejected_stops_and_the_next_account_takes_over()
  {
@@ -1520,6 +1552,86 @@ async fn sign_in_rechecking_due_after_restart() {
     .expect("the earlier-run re-check case exceeded 900 seconds");
 }
 
+/// N-E1: a real Claude sign-in whose custodian stops on an error while the owner is at the
+/// browser settles Failed with the custodian's own cause, not still waiting and not the
+/// general interruption. Once the installed Claude Code shows its sign-in link, the temp
+/// profile's home folder is replaced, so the custodian's next profile check refuses it and the
+/// custodian exits non-zero naming `native_profile_custody_unsafe`; the engine's release hold
+/// does not read the home, so the attempt settles with that cause. Needs the installed Claude
+/// Code; the link is never opened and no account is signed in. Runs only by name with
+/// `--ignored` in an owner-approved live window.
+#[ignore = "live: needs the installed Claude Code; a real sign-in runs until it shows its sign-in link"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_real_claude_sign_in_whose_custodian_fails_settles_with_its_cause() {
+    let restart = Restart::live();
+    tokio::time::timeout(Duration::from_secs(300), async {
+        let run = restart.start().await;
+        let scope = run.scope(restart.config().id).await;
+        let client = run.client();
+        let started = client
+            .start_native_auth(NativeAuthStart {
+                request_id: request("custodian-cause-sign-in"),
+                scope: scope.clone(),
+                method: NativeAuthMethod::ClaudeOfficial,
+            })
+            .await
+            .unwrap();
+        let query = NativeAuthQuery {
+            request_id: request("custodian-cause-read"),
+            scope: scope.clone(),
+            operation_id: started.fact.operation_id.clone(),
+        };
+        let mut phase = started.fact.phase;
+        for _ in 0..1200 {
+            phase = client
+                .read_native_auth(query.clone())
+                .await
+                .unwrap()
+                .fact
+                .phase;
+            if phase == NativeAuthPhase::AwaitingOwner || !phase.unfinished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            phase,
+            NativeAuthPhase::AwaitingOwner,
+            "the real sign-in never showed its sign-in link"
+        );
+        let homes: Vec<PathBuf> = std::fs::read_dir(restart.root.path().join("native-profiles"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("home"))
+            .filter(|home| home.is_dir())
+            .collect();
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        std::fs::rename(&homes[0], restart.root.path().join("replaced-home")).unwrap();
+        std::fs::create_dir(&homes[0]).unwrap();
+        std::fs::set_permissions(&homes[0], std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut settled = None;
+        for _ in 0..1200 {
+            let fact = client.read_native_auth(query.clone()).await.unwrap().fact;
+            if !fact.phase.unfinished() {
+                settled = Some(fact);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let fact = settled.expect("the sign-in kept waiting after its custodian failed");
+        assert_eq!(
+            (fact.phase, fact.code.as_deref()),
+            (
+                NativeAuthPhase::Failed,
+                Some("native_profile_custody_unsafe")
+            )
+        );
+        assert_eq!(restart.fences(), 0, "the failed custodian left a fence");
+        run.stop().await;
+    })
+    .await
+    .expect("the custodian-cause case exceeded 300 seconds");
+}
+
 /// DEC-108: the engine-start re-proof flag is true before the engine runs, and clears once
 /// that re-proof ends: when it finished with nothing to re-check, when it gave up because no
 /// owner registration admits a check, and when the engine stopped it while it still waited.
@@ -1548,10 +1660,13 @@ async fn reproving_clears_when_reproof_ends() {
         for registration in registrations {
             handle
                 .authority
-                .publish(Registration {
-                    active: false,
-                    ..registration
-                })
+                .publish(
+                    Registration {
+                        active: false,
+                        ..registration
+                    },
+                    handle.authority.next_control(),
+                )
                 .unwrap();
         }
         assert!(
@@ -1651,6 +1766,126 @@ async fn live_master_waits_for_restart_recheck() {
     })
     .await
     .expect("the live master wait case exceeded 60 seconds");
+}
+
+/// LMS-1: while another process holds the signed-in account's profile for a sign-in, the
+/// started live master cannot be handed the account: over more ticks it stays on, its
+/// problem line and one team note say the profile is in use. Once the profile is free it
+/// is handed the account on the next tick and its wait line is cleared, and its terminal
+/// then runs the stand-in Claude Code, which ends at once: a refused handoff fails the
+/// master before its terminal starts. The stand-in sign-in stores no Claude record in the
+/// profile keychain, so the test adds the one a real sign-in leaves there.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
+    use crate::team::{MessageAuthor, MessageState, TeamAction};
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        let signed = run.sign_in(&restart).await;
+        run.create_project().await;
+        let profiles = restart.root.path().join("native-profiles");
+        let homes: Vec<PathBuf> = std::fs::read_dir(&profiles)
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("home"))
+            .filter(|home| home.is_dir())
+            .collect();
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        let home = &homes[0];
+        let keychain = crate::credentials::test_keychain::TestKeychain::adopt(
+            home,
+            home.join("Library/Keychains/login.keychain-db"),
+        );
+        keychain.add(
+            "unknown",
+            &format!(
+                "Claude Code-credentials-{}",
+                &crate::memory::hash(home.to_str().unwrap().as_bytes())[..8]
+            ),
+            &serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-lms1-unit",
+                    "refreshToken": "sk-ant-ort01-lms1-unit",
+                    "expiresAt": now_ms() + 365 * 86_400_000,
+                    "scopes": ["user:inference", "user:profile"],
+                    "subscriptionType": "max"
+                }
+            })
+            .to_string(),
+        );
+        let path = restart.root.path().join("engine.db");
+        let held =
+            crate::engine::NativeProfileCustody::capture(&path, &std::fs::metadata(&path).unwrap())
+                .unwrap()
+                .acquire_use(
+                    &run.handle.identity(),
+                    &signed.binding,
+                    &request("lms1-held-sign-in"),
+                    1,
+                    crate::engine::bootstrap::NativeProfileUsePurpose::Authentication,
+                )
+                .unwrap();
+        let reproving = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut team, setup, _host) = restart.live_team(reproving);
+        restart.team_action(TeamAction::LiveMaster {
+            project_id: setup.project_id.clone(),
+            on: true,
+            version: restart.team_settings_version(&setup.project_id),
+        });
+        for _ in 0..5 {
+            team.tick().unwrap();
+        }
+        let waiting = crate::team::master::PROFILE_IN_USE;
+        assert_eq!(
+            restart.live_switch(),
+            (Some(true), Some(waiting.to_owned())),
+            "the switch stays on and its problem line says the profile is in use"
+        );
+        assert_eq!(
+            restart.messages(&setup),
+            [(
+                MessageAuthor::Engine,
+                MessageState::Note,
+                waiting.to_owned()
+            )],
+            "one note"
+        );
+        assert_eq!(
+            restart.team_agents("master").len(),
+            1,
+            "the master started and waits for its account"
+        );
+        drop(held);
+        team.tick().unwrap();
+        assert_eq!(
+            restart.live_switch(),
+            (Some(true), None),
+            "the master is handed the account and its wait line is cleared"
+        );
+        assert_eq!(restart.messages(&setup).len(), 1, "no second note");
+        let mut master = restart.team_agents("master");
+        for _ in 0..50 {
+            if master.iter().any(|(_, status, _)| status == "failed") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            team.tick().unwrap();
+            master = restart.team_agents("master");
+        }
+        assert_eq!(
+            master,
+            [(
+                "connection-z".to_owned(),
+                "failed".to_owned(),
+                Some("The agent process closed. (launch_closed)".to_owned())
+            )],
+            "the master was handed the account and its terminal ran the stand-in, which ends at once"
+        );
+        team.shutdown().unwrap();
+        run.stop().await;
+    })
+    .await
+    .expect("the live master profile wait case exceeded 60 seconds");
 }
 
 /// DEC-108: once the account an earlier run signed in passes this run's re-check, the

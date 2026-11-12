@@ -119,6 +119,7 @@ impl OwnerClient {
     ) -> Result<Reply, EngineError> {
         let time = self.timeout.max(action.time());
         tokio::time::timeout(time, async {
+            let read = read_kind(&action);
             let envelope = Envelope {
                 github: action,
                 secret_present: token.is_some(),
@@ -157,7 +158,9 @@ impl OwnerClient {
                 sent.map_err(|_| failure("github_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -337,6 +340,16 @@ fn public_code(error: EngineError) -> String {
         error.0
     } else {
         "github_outcome_unknown".into()
+    }
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Status => Some("github.status"),
+        Action::Repos { .. } => Some("github.repos"),
+        _ => None,
     }
 }
 

@@ -1,5 +1,9 @@
-use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delegation, names};
+use super::{
+    DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, WAKE_NAME_BYTES_MAX, WakeLine,
+    delegation, names, text_valid,
+};
 use crate::coord::{Finish, QuestionFor, Severity};
+use crate::questions::QuestionKind;
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
@@ -11,6 +15,16 @@ use std::path::Path;
 pub const SERVER_NAME: &str = "crazyagent-team";
 pub const SERVER_COMMAND: &str = "team-mcp";
 pub const TOOL_NAME: &str = "delegate";
+/// The configured master's tool that wakes a finished sub-agent with its next task (L6,
+/// F16), recorded beside `delegate` and taken when the reply ends.
+pub const WAKE_TOOL: &str = "wake";
+/// The fence line that opens the one machine block a master without team tools hands out
+/// work with (L6): a JSON object read through the same schema as a `delegate` or `wake`
+/// record, never free prose.
+pub const BLOCK_FENCE: &str = "```crazyagent-task";
+const BLOCK_CLOSE: &str = "```";
+/// The most bytes of one block's JSON object.
+pub const BLOCK_BYTES_MAX: usize = TASK_PROMPT_BYTES_MAX * 2 + 512;
 pub const DROP_FILE: &str = "crazyagent-delegations.jsonl";
 pub const DROP_BYTES_MAX: u64 =
     (DELEGATIONS_PER_REPLY_MAX * (TASK_PROMPT_BYTES_MAX * 2 + 256)) as u64;
@@ -20,10 +34,22 @@ const RECORDED: &str = "Recorded. When your reply ends, the engine checks this t
 const INVALID: &str = "Not recorded: give a task of plain text up to 4000 bytes and, if you choose them, a harness name from the team plan and a short role such as onboarding-fix.";
 const ROLE_BYTES_MAX: usize = 64;
 const FULL: &str = "Not recorded: the engine takes at most 8 tasks from one reply.";
+const WAKE_RECORDED: &str = "Recorded. When your reply ends, the engine wakes that sub-agent in its own worktree with your text as its next task, and tells you if it cannot.";
+const WAKE_INVALID: &str = "Not recorded: name a finished sub-agent by its name, @role handle or Sub-agent number in up to 64 bytes, and give its next task as plain text up to 4000 bytes.";
+const WAKE_FULL: &str = "Not recorded: the engine takes at most 8 tasks and wakes from one reply.";
+pub(crate) const BLOCK_UNCLOSED: &str = "a crazyagent-task block has no closing ``` line";
+pub(crate) const BLOCK_TOO_LONG: &str = "a crazyagent-task block is longer than the engine reads";
+pub(crate) const BLOCK_INVALID: &str = "a crazyagent-task block is not one JSON object with task and, if you choose them, harness and role, or task and wake; no other field is taken";
+pub(crate) const BLOCK_BOUNDS: &str =
+    "a crazyagent-task block has an empty or overlong task, harness, role or agent name";
+pub(crate) const BLOCKS_FULL: &str =
+    "the engine takes at most 8 crazyagent-task blocks from one reply";
+pub(crate) const BLOCK_TOOLS_ON: &str = "a crazyagent-task block is not read while your team tools are on; hand out work with your team tools instead";
 const UNWRITABLE: &str = "Not recorded: the engine's task record could not be written.";
 
 const _: () = assert!(DROP_BYTES_MAX as usize >= DELEGATIONS_PER_REPLY_MAX * TASK_PROMPT_BYTES_MAX);
 const _: () = assert!(TASK_PROMPT_BYTES_MAX == 4000 && DELEGATIONS_PER_REPLY_MAX == 8);
+const _: () = assert!(BLOCK_BYTES_MAX < DROP_BYTES_MAX as usize && WAKE_NAME_BYTES_MAX == 64);
 
 pub const LIVE_SERVER_COMMAND: &str = "team-mcp-live";
 /// The engine subcommand that serves a sub-agent's team tools; it lists the same tools as
@@ -44,9 +70,18 @@ pub const REMEMBER_TOOL: &str = "remember";
 pub const RECALL_TOOL: &str = "recall";
 pub const SESSIONS_TOOL: &str = "sessions";
 pub const SESSION_TOOL: &str = "session";
+/// The tool an agent logs a new phase of its work or a finished test run with, to the
+/// project activity the owner reads on Overview (OS-5).
+pub const ACTIVITY_TOOL: &str = "log_activity";
+/// The tool the master discards a finished harness's waiting change set with, restorable by
+/// the owner from Changes for seven days, noted for the owner and logged (DEC-147 S3.6).
+/// Master only: a sub-agent's server leaves it out and the engine refuses it.
+pub const DISCARD_TOOL: &str = "discard";
+/// The most bytes of the reason a `discard` call gives.
+pub const DISCARD_REASON_BYTES_MAX: usize = 400;
 /// The team tools a live master and a sub-agent with tools get (DEC-104), in the order of
 /// `coord::tool_switches::BUILTIN_TOOLS`, which the owner switches each one by.
-pub const TEAM_TOOLS: [&str; 12] = [
+pub const TEAM_TOOLS: [&str; 14] = [
     START_WORK_TOOL,
     INSPECT_WORK_TOOL,
     UPDATE_WORK_TOOL,
@@ -59,16 +94,27 @@ pub const TEAM_TOOLS: [&str; 12] = [
     RECALL_TOOL,
     SESSIONS_TOOL,
     SESSION_TOOL,
+    ACTIVITY_TOOL,
+    DISCARD_TOOL,
 ];
+/// The team tools a master without its live terminal gets beside `delegate`, answered by the
+/// engine through its mailbox like a live master's.
+pub const MEMORY_TOOLS: [&str; 2] = [REMEMBER_TOOL, RECALL_TOOL];
 /// The team tools only an agent that leads others uses, left out of the list of a
 /// sub-agent the owner's Sub-agent depth setting keeps from leading.
 pub const LEAD_TOOLS: [&str; 3] = [SPAWN_TOOL, STOP_TOOL, MERGE_TOOL];
 pub const ASK_TOOL: &str = "ask";
 pub const RECORD_TOOL: &str = "record_answer";
-/// The owner's questions tools (DEC-099 A) a server lists after `TEAM_TOOLS`: `ask` logs a
-/// question for the owner and `record_answer` records the owner's chat message that
-/// answered one of the master's own. A sub-agent's server leaves `record_answer` out.
-pub const QUESTION_TOOLS: [&str; 2] = [ASK_TOOL, RECORD_TOOL];
+pub const WITHDRAW_TOOL: &str = "withdraw_question";
+pub const REQUEST_ACCESS_TOOL: &str = "request_access";
+/// The owner's questions tools (DEC-099 A, F12, F08) a server lists after `TEAM_TOOLS`:
+/// `ask` logs a question for the owner, `record_answer` records the owner's answer from chat
+/// or the master's own terminal, `withdraw_question` takes a question the master no longer
+/// needs off the owner's list and `request_access` asks the owner for one narrow extra the
+/// sandbox blocks. A sub-agent's server leaves `MASTER_QUESTION_TOOLS` out.
+pub const QUESTION_TOOLS: [&str; 4] = [ASK_TOOL, RECORD_TOOL, WITHDRAW_TOOL, REQUEST_ACCESS_TOOL];
+/// The questions tools only a master is given, left out of every sub-agent's server.
+pub const MASTER_QUESTION_TOOLS: [&str; 2] = [RECORD_TOOL, WITHDRAW_TOOL];
 pub use checks::{CHECKS_RESULTS_TOOL, CHECKS_RUN_TOOL, CHECKS_TOOLS};
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
@@ -76,12 +122,14 @@ pub const CALLS_PENDING_MAX: usize = 16;
 pub const REPLY_TEXT_MAX: usize = 32 * 1024;
 const CALL_BYTES_MAX: u64 = 16 * 1024;
 const REPLY_BYTES_MAX: u64 = 2 * REPLY_TEXT_MAX as u64 + 64;
+#[cfg(unix)]
 const MAILBOX_SCAN_MAX: usize = 256;
 const AGENT_NAME_BYTES_MAX: usize = 64;
 const CALL_SUFFIX: &str = ".call";
 const TAKEN_SUFFIX: &str = ".taken";
-const REPLY_SUFFIX: &str = ".reply";
+pub(crate) const REPLY_SUFFIX: &str = ".reply";
 const PART_SUFFIX: &str = ".part";
+pub(crate) const ANSWER_PART_SUFFIX: &str = ".reply-part";
 const PANE_KEY: &str = "pane";
 const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 const REPLY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
@@ -102,9 +150,12 @@ const REPLY_INVALID: &str =
 const MESSAGE_INVALID: &str = "Not sent: a message or note names who gets it in to, and carries no for or severity; ask a question with kind question.";
 const KEY_INVALID: &str = "Not sent: a key is up to 128 letters, digits, '-', '_', '.' or ':'.";
 const TRANSFER_INVALID: &str = "Not changed: give the work number, the version inspect_work shows and an action (assign, accept, decline, release, handoff or reopen); assign and handoff also name the agent in to.";
+const INSPECT_INVALID: &str =
+    "Not read: task is the number of an ended task, as a results message names it.";
 const FINISH_INVALID: &str = "Not finished: give the work number, the version inspect_work shows, an outcome (review_ready, complete or closed) and evidence of plain text up to 4000 bytes.";
 const AGENT_INVALID: &str =
     "Not done: name the agent by its persona name, its @role handle or its number.";
+const DISCARD_INVALID: &str = "Not discarded: name the harness by its persona name, its @role handle or its number, and give the reason in plain words on one line of up to 400 bytes.";
 const SESSIONS_INVALID: &str =
     "Not searched: give plain words up to 256 bytes, or nothing to list the conversations.";
 const SESSION_INVALID: &str =
@@ -112,14 +163,28 @@ const SESSION_INVALID: &str =
 const REMEMBER_INVALID: &str =
     "Not saved: give one plain fact of up to 2000 bytes, and a scope of project or app.";
 const RECALL_INVALID: &str = "Not searched: give plain words on one line of up to 100 bytes, or none for the newest memories.";
+const ACTIVITY_INVALID: &str = "Not logged: give the goal on one plain line of up to 120 bytes, one plain line of up to 600 bytes saying what happened, and a kind of phase or test.";
 const CALL_INVALID: &str = "Not done: the engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
-const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters, at most 6 distinct one-line options of up to 200 bytes, and if you choose them a recommended answer (one of the options, or up to 200 bytes when there are none) and context of up to 4096 bytes.";
+const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters. For kind single or multi give 2 to 6 distinct one-line options of up to 200 bytes and one of them as recommended; for kind text give no options. Context may be up to 4096 bytes.";
+const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and either the number of the owner's chat message that answers it or, for an answer the owner typed in your terminal, that answer in up to 4096 bytes.";
+const WITHDRAW_INVALID: &str =
+    "Not withdrawn: give the question number and the version you read (0 while it waits).";
+const ASK_KEYS: [&str; 6] = [
+    "question",
+    "kind",
+    "options",
+    "recommended",
+    "context",
+    "replaces",
+];
+const RECORD_KEYS: [&str; 4] = ["question", "version", "owner_turn", "answer"];
+const WITHDRAW_KEYS: [&str; 2] = ["question", "version"];
+const REQUEST_INVALID: &str = "Not requested: give kind socket with the socket's full path, kind port with one port from 1 to 49151, or kind temp_folder, and a reason in plain words of up to 2048 bytes.";
+const REQUEST_KEYS: [&str; 4] = ["kind", "path", "port", "reason"];
+const REQUEST_REASON_BYTES_MAX: usize = 2048;
 const CHECKS_RUN_INVALID: &str = "Not run: give checks as a list of up to 24 distinct check ids of the project's profile, or leave it out for every check the profile runs on request.";
 const CHECKS_RESULTS_INVALID: &str = "Not read: checks_results takes no arguments.";
-const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and the number of the owner's chat message that answers it.";
-const ASK_KEYS: [&str; 4] = ["question", "options", "recommended", "context"];
-const RECORD_KEYS: [&str; 3] = ["question", "version", "owner_turn"];
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
@@ -183,7 +248,10 @@ pub enum Call {
         title: String,
         claims: Vec<String>,
     },
-    InspectWork,
+    InspectWork {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<i64>,
+    },
     UpdateWork {
         kind: Update,
         text: String,
@@ -236,11 +304,23 @@ pub enum Call {
     Recall {
         query: String,
     },
+    LogActivity {
+        goal: String,
+        text: String,
+        kind: LogKind,
+    },
+    Discard {
+        agent: String,
+        reason: String,
+    },
     Ask {
         question: String,
+        kind: QuestionKind,
         options: Vec<String>,
         recommended: Option<String>,
         context: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces: Option<u64>,
     },
     RecordAnswer {
         question: u64,
@@ -255,6 +335,19 @@ pub enum Call {
         checks: Vec<String>,
     },
     ChecksResults,
+    RelayAnswer {
+        question: u64,
+        version: u64,
+        answer: String,
+    },
+    Withdraw {
+        question: u64,
+        version: u64,
+    },
+    RequestAccess {
+        grant: crate::sandbox::policy::AccessGrant,
+        reason: String,
+    },
 }
 
 impl Call {
@@ -264,7 +357,7 @@ impl Call {
     pub fn name(&self) -> &'static str {
         let name = match self {
             Self::StartWork { .. } => START_WORK_TOOL,
-            Self::InspectWork => INSPECT_WORK_TOOL,
+            Self::InspectWork { .. } => INSPECT_WORK_TOOL,
             Self::UpdateWork { .. } => UPDATE_WORK_TOOL,
             Self::TransferWork { .. } => TRANSFER_WORK_TOOL,
             Self::FinishWork { .. } => FINISH_WORK_TOOL,
@@ -275,8 +368,12 @@ impl Call {
             Self::Session { .. } => SESSION_TOOL,
             Self::Remember { .. } => REMEMBER_TOOL,
             Self::Recall { .. } => RECALL_TOOL,
+            Self::LogActivity { .. } => ACTIVITY_TOOL,
+            Self::Discard { .. } => DISCARD_TOOL,
             Self::Ask { .. } => ASK_TOOL,
-            Self::RecordAnswer { .. } => RECORD_TOOL,
+            Self::RecordAnswer { .. } | Self::RelayAnswer { .. } => RECORD_TOOL,
+            Self::Withdraw { .. } => WITHDRAW_TOOL,
+            Self::RequestAccess { .. } => REQUEST_ACCESS_TOOL,
             Self::Ticket { op, .. } => {
                 tracker::tool_name(*op).expect("a ticket call names an offered operation")
             }
@@ -327,6 +424,14 @@ pub enum Handover {
     Reopen,
 }
 
+/// What a `log_activity` call logs: a new phase of the work or a finished test run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogKind {
+    Phase,
+    Test,
+}
+
 /// Where a memory an agent saves applies: its own project, or every project of the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -344,25 +449,55 @@ impl MemoryReach {
     }
 }
 
+/// One task or wake a master proposes, as its `delegate` or `wake` tool records it and as a
+/// `crazyagent-task` block of a reply without team tools writes it: the one schema both
+/// paths read, with every unknown field refused.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Recorded {
+    #[serde(default)]
     harness: Option<String>,
     task: String,
     #[serde(default)]
     role: Option<String>,
+    #[serde(default)]
+    wake: Option<String>,
 }
 
-/// Serves the master's `delegate` and `ask` tools as an MCP server over stdio until its client closes input.
-/// Takes the client's input and output and the absolute drop file in the master's private temporary folder.
-/// Returns an input or output failure; each call only records a proposal or question, which the engine takes after the turn.
-pub fn serve(input: impl BufRead, output: impl Write, drop: &Path) -> std::io::Result<()> {
+/// What a master asked for in one record or block: a task for a new sub-agent, or a wake
+/// of a finished one with its next task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Proposal {
+    Delegate(Delegation),
+    Wake(WakeLine),
+}
+
+/// Serves the master's `delegate`, question and `wake` tools, with a mailbox its
+/// `MEMORY_TOOLS`, less the ones left out, over stdio until the client closes input; drop
+/// calls are taken after the turn. Takes the client's input and output, the absolute drop
+/// file, the optional mailbox folder and the tools left out. Returns an input or output
+/// failure, or a refusal of a mailbox that is not a plain folder.
+pub fn serve(
+    input: impl BufRead,
+    output: impl Write,
+    drop: &Path,
+    mailbox: Option<&Path>,
+    off: &[String],
+) -> std::io::Result<()> {
     if !drop.is_absolute() {
         return Err(std::io::Error::other(
             "the drop file must be an absolute path",
         ));
     }
-    rpc(input, output, |request| answer(request, drop))
+    if let Some(mailbox) = mailbox
+        && (!mailbox.is_absolute()
+            || !std::fs::symlink_metadata(mailbox).is_ok_and(|metadata| metadata.is_dir()))
+    {
+        return Err(std::io::Error::other(
+            "the mailbox must be an absolute plain folder",
+        ));
+    }
+    rpc(input, output, |request| answer(request, drop, mailbox, off))
 }
 
 /// Serves a live master's or a sub-agent's team tools, `TEAM_TOOLS` less the ones switched
@@ -388,14 +523,16 @@ pub fn serve_live(
     rpc(input, output, |request| answer_live(request, mailbox, off))
 }
 
-/// Says whether every name is one of the team tools, as the engine subcommands check the
-/// tools they are told to leave out. Takes the names. Returns the answer.
+/// Says whether every name is one of the team tools or the configured master's `wake`, as
+/// the engine subcommands check the tools they are told to leave out. Takes the names.
+/// Returns the answer.
 pub fn known_tools(names: &[String]) -> bool {
-    names.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len() + CHECKS_TOOLS.len()
+    names.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len() + CHECKS_TOOLS.len() + 1
         && names.iter().all(|name| {
             TEAM_TOOLS.contains(&name.as_str())
                 || QUESTION_TOOLS.contains(&name.as_str())
                 || CHECKS_TOOLS.contains(&name.as_str())
+                || name == WAKE_TOOL
         })
 }
 
@@ -463,37 +600,89 @@ fn tool_result(text: &str, error: bool) -> Value {
     json!({"content": [{"type": "text", "text": text}], "isError": error})
 }
 
-fn answer(request: &Value, drop: &Path) -> Option<Value> {
+fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) -> Option<Value> {
+    let waking = !off.iter().any(|tool| tool == WAKE_TOOL);
     let method = request.get("method")?.as_str();
     let id = request.get("id")?.clone();
     let params = request.get("params");
+    let name = params
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str);
     let result = match method {
         Some("initialize") => initialized(params),
         Some("ping") => json!({}),
-        Some("tools/list") => json!({"tools": [{
-            "name": TOOL_NAME,
-            "description": "Hand one task to a sub-agent of this project's team. The engine checks it against the team plan when your reply ends, runs it in its own git worktree and sends you the result.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "task": {"type": "string", "description": "What the sub-agent should do, in plain words."},
-                    "harness": {"type": "string", "description": "Optional sub-agent harness from the team plan, such as codex or claude-code."},
-                    "role": {"type": "string", "description": "Optional short name for this job in kebab case, such as onboarding-fix. The sub-agent is then addressed as @onboarding-fix."},
+        Some("tools/list") => {
+            let mut tools = vec![json!({
+                "name": TOOL_NAME,
+                "description": "Hand one task to a sub-agent of this project's team. The engine checks it against the team plan when your reply ends, runs it in its own git worktree and sends you the result.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task": {"type": "string", "description": "What the sub-agent should do, in plain words."},
+                        "harness": {"type": "string", "description": "Optional sub-agent harness from the team plan, such as codex or claude-code."},
+                        "role": {"type": "string", "description": "Optional short name for this job in kebab case, such as onboarding-fix. The sub-agent is then addressed as @onboarding-fix."},
+                    },
+                    "required": ["task"],
+                    "additionalProperties": false,
                 },
-                "required": ["task"],
-                "additionalProperties": false,
+            })];
+            tools.extend([
+                questions::ask_listing(),
+                questions::record_listing(),
+                questions::withdraw_listing(),
+                questions::request_listing(),
+            ]);
+            if waking {
+                tools.push(wake_listing());
+            }
+            if mailbox.is_some() {
+                tools.extend(
+                    MEMORY_TOOLS
+                        .iter()
+                        .filter(|name| !off.iter().any(|tool| tool == *name))
+                        .map(|name| spec(name)),
+                );
+            }
+            assert!(tools.len() <= 6 + MEMORY_TOOLS.len());
+            json!({ "tools": tools })
+        }
+        Some("tools/call") => match (mailbox, name) {
+            (Some(mailbox), Some(name)) if MEMORY_TOOLS.contains(&name) => {
+                match mailed(mailbox, name, params, off) {
+                    Some(result) => result,
+                    None => return Some(failure(id, -32602, "Unknown tool")),
+                }
+            }
+            _ => match call(params, drop)
+                .or_else(|| waking.then(|| wake_call(params, drop)).flatten())
+                .map(|(text, error)| (text.to_owned(), error))
+                .or_else(|| questions::drop_call(params, drop))
+            {
+                Some((text, error)) => tool_result(&text, error),
+                None => return Some(failure(id, -32602, "Unknown tool")),
             },
-        }, questions::ask_listing(), questions::record_listing()]}),
-        Some("tools/call") => match call(params, drop)
-            .map(|(text, error)| (text.to_owned(), error))
-            .or_else(|| questions::drop_call(params, drop))
-        {
-            Some((text, error)) => tool_result(&text, error),
-            None => return Some(failure(id, -32602, "Unknown tool")),
         },
         _ => return Some(failure(id, -32601, "Method not found")),
     };
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+}
+
+/// Answers one team tool call through the mailbox: refused when switched off or when an
+/// argument fails its bound, else written for the engine and answered with its reply. Takes
+/// the mailbox, the tool name, the call's parameters and the tools left out. Returns the
+/// `tools/call` result, or none for an unknown tool.
+fn mailed(mailbox: &Path, name: &str, params: Option<&Value>, off: &[String]) -> Option<Value> {
+    if off.iter().any(|tool| tool == name) {
+        return Some(tool_result(SWITCHED_OFF, true));
+    }
+    let arguments = params.and_then(|params| params.get("arguments"));
+    Some(match live_call(name, arguments)? {
+        Ok(call) => {
+            let (text, error) = ask(mailbox, &call, REPLY_WAIT);
+            tool_result(&text, error)
+        }
+        Err(refused) => tool_result(refused, true),
+    })
 }
 
 /// The team tools a server lists, in `BUILTIN_TOOLS` order, then the questions and checks
@@ -511,6 +700,12 @@ fn team_tools(off: &[String]) -> Value {
     }
     if on(RECORD_TOOL) {
         tools.push(record_tool());
+    }
+    if on(WITHDRAW_TOOL) {
+        tools.push(withdraw_tool());
+    }
+    if on(REQUEST_ACCESS_TOOL) {
+        tools.push(request_access_tool());
     }
     if on(CHECKS_RUN_TOOL) {
         tools.push(checks::run_listing());
@@ -535,7 +730,6 @@ fn spec(name: &str) -> Value {
     let agent = json!({"type": "string", "description": "The agent: its persona name, its @role handle or its number."});
     let work = json!({"type": "integer", "minimum": 1, "description": "The work number start_work or inspect_work gave."});
     let version = json!({"type": "integer", "minimum": 1, "description": "The work's version inspect_work shows; a stale one is refused so the first change wins."});
-    let none = json!({"type": "object", "properties": {}, "additionalProperties": false});
     let (description, schema) = match name {
         START_WORK_TOOL => (
             "Start a unit of work before you edit, with a short title, and claim what it touches: each claim a file, a folder ending in /, a glob, module:<name> or domain:<name>. The engine tells you and the other agents when a claim overlaps theirs and notes a claim too broad to share. Returns the work number and version.",
@@ -545,8 +739,10 @@ fn spec(name: &str) -> Value {
             }, "required": ["title"], "additionalProperties": false}),
         ),
         INSPECT_WORK_TOOL => (
-            "Read your work with its number and version, the messages and questions waiting for you (reading them here marks them read), what you sent and how far each got, and claims that overlap yours. A lead or the master also reads the agents it leads, their work and the change sets waiting.",
-            none,
+            "Read your work with its number and version, the messages and questions waiting for you (reading them here marks them read), what you sent and how far each got, and claims that overlap yours. A lead or the master also reads the agents it leads, their work and the change sets waiting. With task, read instead the whole result of that ended task, one you ran or one an agent you lead ran, when a results message cut it.",
+            json!({"type": "object", "properties": {
+                "task": {"type": "integer", "minimum": 1, "description": "The number of an ended task whose whole result you read, as a results message names it."},
+            }, "additionalProperties": false}),
         ),
         UPDATE_WORK_TOOL => (
             "Send to another agent of this project. kind message asks the agent in to for something, note tells it something, question asks with for (me for the owner, master, or lead) and severity (high, normal or low) and the engine routes it, reply answers a question or a message (work for you) whose number is in reply_to. A note takes no reply: to answer one, send kind note with to its sender. A for me question reaches the owner only. Pass a question on up the chain as a question whose reply_to names it, at the same or a higher severity. A message to a finished agent you lead wakes it with your text.",
@@ -571,7 +767,7 @@ fn spec(name: &str) -> Value {
             }, "required": ["work", "version", "action"], "additionalProperties": false}),
         ),
         FINISH_WORK_TOOL => (
-            "Finish a unit of work with evidence, such as the commands you ran and what they showed. review_ready asks your lead or the master to check it; complete and closed end it and release its claims. A lead cannot complete its work while a teammate's or sub-agent's branch is not merged into its own; this names them.",
+            "Finish a unit of work with evidence, such as the commands you ran and what they showed. review_ready asks your lead or the master to check it; complete and closed end it and keep its claims until the change set carrying the work lands, or its turn ends with nothing to land. A lead cannot complete its work while a teammate's or sub-agent's branch is not merged into its own; this names them.",
             json!({"type": "object", "properties": {
                 "work": work,
                 "version": version,
@@ -592,12 +788,27 @@ fn spec(name: &str) -> Value {
             }, "required": ["task"], "additionalProperties": false}),
         ),
         STOP_TOOL => (
-            "Stop an agent you lead: the master may stop any agent, a lead only its own sub-agents. Only the owner wakes a stopped agent again.",
+            "Stop an agent you lead: the master may stop any agent, a lead only its own sub-agents. Its unfinished tasks fail, and you or anyone above you can wake it again.",
             json!({"type": "object", "properties": {"agent": agent}, "required": ["agent"], "additionalProperties": false}),
         ),
         MERGE_TOOL => (
             "Merge a finished agent's work locally, never pushed: the master merges a lead's task branch into the Master's branch, and a lead merges one of its own sub-agents' work into its own branch. The owner's settings may keep it for the owner's Accept in Changes instead; then this says so.",
             json!({"type": "object", "properties": {"agent": agent}, "required": ["agent"], "additionalProperties": false}),
+        ),
+        DISCARD_TOOL => (
+            "Discard a finished harness's waiting change set when its work should not land, with the reason. Master only. The owner is told and can restore it from Changes for 7 days; the harness's branch goes back to the owner's branch.",
+            json!({"type": "object", "properties": {
+                "agent": agent,
+                "reason": {"type": "string", "description": "Why the work should not land, in plain words on one line of up to 400 bytes."},
+            }, "required": ["agent", "reason"], "additionalProperties": false}),
+        ),
+        ACTIVITY_TOOL => (
+            "Log to the project activity the owner reads on Overview: a new phase of the work or a finished test run, with the goal it serves and one line saying what happened.",
+            json!({"type": "object", "properties": {
+                "goal": {"type": "string", "description": "The goal the work serves, such as its work title, on one line of up to 120 bytes."},
+                "text": {"type": "string", "description": "One line of up to 600 bytes saying what happened."},
+                "kind": {"type": "string", "enum": ["phase", "test"], "description": "phase for a new phase of the work, test for a finished test run."},
+            }, "required": ["goal", "text", "kind"], "additionalProperties": false}),
         ),
         SESSIONS_TOOL => (
             "Search every past master and sub-agent conversation of this project, of any age: each hit gives the conversation id, the message number and an excerpt. With no query it lists the conversations, newest first.",
@@ -608,7 +819,7 @@ fn spec(name: &str) -> Value {
             json!({"type": "object", "properties": {"id": {"type": "string", "description": "The conversation id that sessions gave."}, "offset": {"type": "integer", "minimum": 0, "description": "The message number to start from; 0 when left out."}}, "required": ["id"], "additionalProperties": false}),
         ),
         REMEMBER_TOOL => (
-            "Save one fact, decision or lesson that agents should know in later sessions. Scope project keeps it to this project; app shares it with every project. The owner sees it with your name in the Memory tab, can delete it, and may have to approve it first.",
+            "Save one fact, decision or lesson that agents should know in later sessions. Scope project keeps it to this project; app asks to share it with every project, and the owner's setting may keep it in this project instead. The owner sees it with your name in the Memory tab, can delete it, and may have to approve it first.",
             json!({"type": "object", "properties": {"text": {"type": "string", "description": "The memory in plain words, up to 2000 bytes."}, "scope": {"type": "string", "enum": ["project", "app"], "description": "project (the default) or app."}}, "required": ["text"], "additionalProperties": false}),
         ),
         RECALL_TOOL => (
@@ -625,15 +836,55 @@ fn spec(name: &str) -> Value {
 pub fn record_tool() -> Value {
     json!({
         "name": RECORD_TOOL,
-        "description": "Record that the owner answered one of your own questions in this chat instead of in the Questions view. Name the owner's message; the engine takes the answer from that message, never from your words, and takes the question off the owner's list.",
+        "description": "Record that the owner answered a question of this project outside the Questions view, so it leaves the owner's list. For an answer in this chat, name the owner's message with owner_turn: the engine takes the answer from that message, never from your words. For an answer the owner typed in your own terminal, give it in answer, as close to the owner's words as you can: the engine takes it only after the owner typed in your terminal since the question was asked, one question per owner answer, and shows it as your report.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "question": {"type": "integer", "description": "The question number the ask tool gave you."},
+                "question": {"type": "integer", "description": "The question number."},
                 "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
-                "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
+                "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it. Leave out when you give answer."},
+                "answer": {"type": "string", "description": "The answer the owner typed in your terminal. Leave out when you give owner_turn."},
             },
-            "required": ["question", "version", "owner_turn"],
+            "required": ["question", "version"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// The MCP entry of the `withdraw_question` tool, the same for every master that is given
+/// it (F12). Output: the tool's name, description and input schema.
+pub fn withdraw_tool() -> Value {
+    json!({
+        "name": WITHDRAW_TOOL,
+        "description": "Take a question off the owner's list when it is no longer needed: one you asked, or one a sub-agent of this project asked. The owner sees it as withdrawn by you; a sub-agent that asked it is told once.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "integer", "description": "The question number."},
+                "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
+            },
+            "required": ["question", "version"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// The MCP entry of the `request_access` tool (F08), the same for every master and agent
+/// that is given it: one socket, one port on this computer or the owner's temp folder, with
+/// the reason the owner reads. Output: the tool's name, description and input schema.
+pub fn request_access_tool() -> Value {
+    json!({
+        "name": REQUEST_ACCESS_TOOL,
+        "description": "Ask the owner to allow one narrow extra your sandbox blocks: connecting to one unix socket, connecting to one TCP port on this computer, or using the owner's own temp folder as yours. The engine checks it and raises a question the owner answers in the Questions view; if allowed it joins the project's Agent access and agents restart at their next pause to get it. Use it instead of working around the sandbox. Container, VM, terminal, editor, SSH, key and password agent sockets are never allowed, nor Docker or debugger ports, nor ports from 49152 up.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["socket", "port", "temp_folder"], "description": "socket: one unix socket by its full path. port: one TCP port on this computer. temp_folder: the owner's own temp folder."},
+                "path": {"type": "string", "description": "For kind socket only: the socket's full path."},
+                "port": {"type": "integer", "minimum": 1, "maximum": 49_151, "description": "For kind port only: the port."},
+                "reason": {"type": "string", "description": "Why you need it, in one or two plain sentences the owner reads."},
+            },
+            "required": ["kind", "reason"],
             "additionalProperties": false,
         },
     })
@@ -644,14 +895,16 @@ pub fn record_tool() -> Value {
 pub fn ask_tool() -> Value {
     json!({
         "name": ASK_TOOL,
-        "description": "Ask the owner a question and log it in the project's questions. This is the only way to ask the owner anything, grill-me questions included: one question at a time, with the answer you recommend. The owner is notified and the tool replies with the question number. The owner's answer or dismissal comes to you once, as a message.",
+        "description": "Ask the owner a question and log it in the project's questions. This is the only way to ask the owner anything, grill-me questions included: one question at a time, with the answer you recommend. Prefer single or multi with a recommended option; use text only when no short list of answers fits. The owner is notified and the tool replies with the question number. The owner's answer or dismissal comes to you once, as a message.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "question": {"type": "string", "description": "One plain question for the owner."},
-                "options": {"type": "array", "items": {"type": "string"}, "maxItems": crate::questions::OPTIONS_MAX, "description": "Up to 6 short one-line answers the owner can pick from."},
-                "recommended": {"type": "string", "description": "The answer you recommend: one of the options, or a short answer when there are none."},
+                "kind": {"type": "string", "enum": ["single", "multi", "text"], "description": "single: the owner picks one option. multi: the owner picks any. text: only when the answer is genuinely free text. single and multi need 2 to 6 options and one recommended option; the owner can always add a comment."},
+                "options": {"type": "array", "items": {"type": "string"}, "maxItems": crate::questions::OPTIONS_MAX, "description": "2 to 6 short one-line answers the owner can pick from, for kind single or multi."},
+                "recommended": {"type": "string", "description": "The answer you recommend: one of the options, or a short answer for kind text."},
                 "context": {"type": "string", "description": "What the owner needs to know to answer."},
+                "replaces": {"type": "integer", "description": "To ask an old free-text question again as a choice: its number. It must be your own or one an engine step asked, and kind must be single or multi."},
             },
             "required": ["question"],
             "additionalProperties": false,
@@ -671,19 +924,8 @@ fn answer_live(request: &Value, mailbox: &Path, off: &[String]) -> Option<Value>
             let name = params
                 .and_then(|params| params.get("name"))
                 .and_then(Value::as_str);
-            let arguments = params.and_then(|params| params.get("arguments"));
-            match name {
-                Some(name) if off.iter().any(|tool| tool == name) => {
-                    tool_result(SWITCHED_OFF, true)
-                }
-                Some(name) => match live_call(name, arguments) {
-                    Some(Ok(call)) => {
-                        let (text, error) = ask(mailbox, &call, REPLY_WAIT);
-                        tool_result(&text, error)
-                    }
-                    Some(Err(refused)) => tool_result(refused, true),
-                    None => return Some(failure(id, -32602, "Unknown tool")),
-                },
+            match name.and_then(|name| mailed(mailbox, name, params, off)) {
+                Some(result) => result,
                 None => return Some(failure(id, -32602, "Unknown tool")),
             }
         }
@@ -725,7 +967,7 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             match (argument("title").map(str::trim), claims) {
                 (Some(title), Some(claims))
                     if super::text_valid(title, crate::coord::TITLE_BYTES_MAX)
-                        && !title.contains(['\n', '\t']) =>
+                        && !title.contains(|c: char| super::events::line_break(c) || c == '\t') =>
                 {
                     Ok(Call::StartWork {
                         title: title.to_owned(),
@@ -735,7 +977,10 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
                 _ => Err(START_INVALID),
             }
         }
-        INSPECT_WORK_TOOL => Ok(Call::InspectWork),
+        INSPECT_WORK_TOOL => match number("task") {
+            Some(task) => Ok(Call::InspectWork { task }),
+            None => Err(INSPECT_INVALID),
+        },
         UPDATE_WORK_TOOL => {
             let to = match argument("to").map(str::trim) {
                 None | Some("") => Some(None),
@@ -855,6 +1100,21 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(AGENT_INVALID),
         },
+        DISCARD_TOOL => match (argument("agent"), argument("reason")) {
+            (Some(agent), Some(reason))
+                if agent_name_valid(agent)
+                    && !reason.trim().is_empty()
+                    && reason.len() <= DISCARD_REASON_BYTES_MAX
+                    && !reason.chars().any(char::is_control)
+                    && !crate::memory::hidden_text(reason) =>
+            {
+                Ok(Call::Discard {
+                    agent: agent.trim().to_owned(),
+                    reason: reason.trim().to_owned(),
+                })
+            }
+            _ => Err(DISCARD_INVALID),
+        },
         SESSIONS_TOOL => match argument("query").unwrap_or_default() {
             query
                 if query.len() <= super::history::QUERY_BYTES_MAX
@@ -914,8 +1174,34 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(RECALL_INVALID),
         },
+        ACTIVITY_TOOL => {
+            let line = |key: &str, max: usize| {
+                argument(key)
+                    .filter(|line| {
+                        !line.trim().is_empty()
+                            && line.len() <= max
+                            && !line.chars().any(char::is_control)
+                    })
+                    .map(|line| line.trim().to_owned())
+            };
+            let kind = match argument("kind").map(str::trim) {
+                Some("phase") => Some(LogKind::Phase),
+                Some("test") => Some(LogKind::Test),
+                _ => None,
+            };
+            match (
+                line("goal", crate::activity::GOAL_BYTES_MAX),
+                line("text", crate::activity::TEXT_BYTES_MAX),
+                kind,
+            ) {
+                (Some(goal), Some(text), Some(kind)) => Ok(Call::LogActivity { goal, text, kind }),
+                _ => Err(ACTIVITY_INVALID),
+            }
+        }
         ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
         RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
+        WITHDRAW_TOOL => withdraw_call(arguments).ok_or(WITHDRAW_INVALID),
+        REQUEST_ACCESS_TOOL => request_call(arguments).ok_or(REQUEST_INVALID),
         CHECKS_RUN_TOOL => checks::run_call(arguments).ok_or(CHECKS_RUN_INVALID),
         CHECKS_RESULTS_TOOL => checks::results_call(arguments).ok_or(CHECKS_RESULTS_INVALID),
         _ => return tracker::call(name, arguments),
@@ -1003,9 +1289,10 @@ fn model_pick(
     }))
 }
 
-/// Reads one `ask` call: a question with its options, recommendation and context, each
-/// checked as the questions log checks it. Takes the arguments. Returns the call, or none
-/// when a part is missing, unknown or outside its bounds.
+/// Reads one `ask` call: a question with its kind, options, recommendation and context,
+/// each checked as the questions log checks it. A call without a kind is single when it has
+/// options and text when it has none. Takes the arguments. Returns the call, or none when a
+/// part is missing, unknown or outside its bounds.
 fn ask_call(arguments: Option<&Value>) -> Option<Call> {
     let arguments = arguments?.as_object()?;
     if arguments
@@ -1027,8 +1314,18 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
             .collect::<Option<_>>()?,
         Some(_) => return None,
     };
+    let kind = match arguments.get("kind") {
+        None | Some(Value::Null) => QuestionKind::stored("", options.len())?,
+        Some(Value::String(name)) if !name.is_empty() => QuestionKind::stored(name, options.len())?,
+        Some(_) => return None,
+    };
+    let replaces = match arguments.get("replaces") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_u64().filter(|id| *id > 0)?),
+    };
     let ask = crate::questions::Ask {
         question: text("question")??,
+        kind,
         options,
         recommended: text("recommended")?,
         context: text("context")?,
@@ -1037,15 +1334,56 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
     .ok()?;
     Some(Call::Ask {
         question: ask.question,
+        kind: ask.kind,
         options: ask.options,
         recommended: ask.recommended,
         context: ask.context,
+        replaces,
+    })
+}
+
+/// Reads one `request_access` call: a kind with only the field it needs, a plain grant and
+/// a reason of up to `REQUEST_REASON_BYTES_MAX` bytes; the engine checks the grant itself
+/// and plains the reason when it raises the question. Takes the arguments. Returns the
+/// call, or none when a part is missing, extra or outside its bounds.
+fn request_call(arguments: Option<&Value>) -> Option<Call> {
+    use crate::sandbox::policy::AccessGrant;
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !REQUEST_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let reason = arguments.get("reason")?.as_str()?;
+    if reason.trim().is_empty() || reason.len() > REQUEST_REASON_BYTES_MAX {
+        return None;
+    }
+    let has = |key: &str| arguments.contains_key(key);
+    let grant = match arguments.get("kind")?.as_str()? {
+        "socket" if !has("port") => AccessGrant::Socket {
+            path: std::path::PathBuf::from(arguments.get("path")?.as_str()?),
+        },
+        "port" if !has("path") => AccessGrant::Port {
+            port: u16::try_from(arguments.get("port")?.as_u64()?).ok()?,
+        },
+        "temp_folder" if !has("path") && !has("port") => AccessGrant::TempFolder,
+        _ => return None,
+    };
+    if !grant.plain() {
+        return None;
+    }
+    Some(Call::RequestAccess {
+        grant,
+        reason: reason.to_owned(),
     })
 }
 
 /// Reads one `record_answer` call: the question number, the version the master read and
-/// the owner's chat message number. Takes the arguments. Returns the call, or none when a
-/// part is missing, unknown or not a number in range.
+/// either the owner's chat message number or, for an answer the owner typed in the master's
+/// own terminal (F12), that answer as plain text within `ANSWER_BYTES_MAX`. Takes the
+/// arguments. Returns the call, or none when a part is missing, unknown, both forms are
+/// given or a value is out of range.
 fn record_call(arguments: Option<&Value>) -> Option<Call> {
     let arguments = arguments?.as_object()?;
     if arguments
@@ -1057,14 +1395,45 @@ fn record_call(arguments: Option<&Value>) -> Option<Call> {
     let number = |key: &str| arguments.get(key).and_then(Value::as_u64);
     let question = number("question").filter(|id| *id > 0)?;
     let version = number("version")?;
-    let owner_turn = number("owner_turn")
-        .and_then(|turn| i64::try_from(turn).ok())
-        .filter(|turn| *turn > 0)?;
-    Some(Call::RecordAnswer {
-        question,
-        version,
-        owner_turn,
-    })
+    match (arguments.get("owner_turn"), arguments.get("answer")) {
+        (Some(_), None) => {
+            let owner_turn = number("owner_turn")
+                .and_then(|turn| i64::try_from(turn).ok())
+                .filter(|turn| *turn > 0)?;
+            Some(Call::RecordAnswer {
+                question,
+                version,
+                owner_turn,
+            })
+        }
+        (None, Some(Value::String(answer))) => {
+            let answer = answer.trim();
+            let fits = !answer.is_empty() && answer.len() <= crate::questions::ANSWER_BYTES_MAX;
+            fits.then(|| Call::RelayAnswer {
+                question,
+                version,
+                answer: answer.to_owned(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Reads one `withdraw_question` call: the question number and the version the master
+/// read. Takes the arguments. Returns the call, or none when a part is missing, unknown or
+/// not a number in range.
+fn withdraw_call(arguments: Option<&Value>) -> Option<Call> {
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !WITHDRAW_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let number = |key: &str| arguments.get(key).and_then(Value::as_u64);
+    let question = number("question").filter(|id| *id > 0)?;
+    let version = number("version")?;
+    Some(Call::Withdraw { question, version })
 }
 
 /// Checks a call the engine read from a mailbox, which the agent's side could have written.
@@ -1072,7 +1441,7 @@ fn record_call(arguments: Option<&Value>) -> Option<Call> {
 pub fn checked(call: Call) -> Result<Call, &'static str> {
     let arguments = match &call {
         Call::StartWork { title, claims } => json!({"title": title, "claims": claims}),
-        Call::InspectWork => json!({}),
+        Call::InspectWork { task } => json!({"task": task}),
         Call::UpdateWork {
             kind,
             text,
@@ -1111,17 +1480,23 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             "reason": model.as_ref().map(|pick| &pick.reason),
         }),
         Call::Stop { agent } | Call::Merge { agent } => json!({"agent": agent}),
+        Call::Discard { agent, reason } => json!({"agent": agent, "reason": reason}),
         Call::Sessions { query } => json!({"query": query}),
         Call::Session { id, offset } => json!({"id": id, "offset": offset}),
         Call::Remember { text, scope } => json!({"text": text, "scope": scope.as_str()}),
         Call::Recall { query } => json!({"query": query}),
+        Call::LogActivity { goal, text, kind } => {
+            json!({"goal": goal, "text": text, "kind": kind})
+        }
         Call::Ask {
             question,
+            kind,
             options,
             recommended,
             context,
+            replaces,
         } => {
-            json!({"question": question, "options": options, "recommended": recommended, "context": context})
+            json!({"question": question, "kind": kind.as_str(), "options": options, "recommended": recommended, "context": context, "replaces": replaces})
         }
         Call::RecordAnswer {
             question,
@@ -1136,6 +1511,19 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         }
         Call::ChecksRun { checks } => json!({"checks": checks}),
         Call::ChecksResults => json!({}),
+        Call::RelayAnswer {
+            question,
+            version,
+            answer,
+        } => json!({"question": question, "version": version, "answer": answer}),
+        Call::Withdraw { question, version } => {
+            json!({"question": question, "version": version})
+        }
+        Call::RequestAccess { grant, reason } => {
+            let mut arguments = serde_json::to_value(grant).map_err(|_| CALL_INVALID)?;
+            arguments["reason"] = json!(reason);
+            arguments
+        }
     };
     let again = live_call(call.name(), Some(&arguments)).expect("every call names a team tool")?;
     if again != call {
@@ -1286,6 +1674,13 @@ pub(crate) fn call_id_valid(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Says whether a mailbox holds a call the engine has not taken yet, so a master turn asks
+/// storage to answer only when there is something to answer. A link at the mailbox's own
+/// name is never followed. Takes the mailbox. Returns the answer.
+pub fn calls_waiting(mailbox: &Path) -> bool {
+    !calls(mailbox, CALL_SUFFIX).is_empty()
+}
+
 /// Lists the mailbox entries with one suffix whose names carry a valid call id, oldest
 /// first, never more than `MAILBOX_SCAN_MAX` entries looked at; a link at the mailbox's
 /// own name is never followed.
@@ -1340,6 +1735,27 @@ impl Mailbox {
             flags,
             Mode::empty(),
         )?))
+    }
+
+    /// Opens a folder inside the mailbox, refusing a link or anything but a folder at its
+    /// name. Takes its name. Returns the handle or the I/O error.
+    pub(crate) fn folder(&self, name: &str) -> std::io::Result<Self> {
+        Ok(Self(rustix::fs::openat(
+            &self.0,
+            name,
+            Self::folder_flags(),
+            Mode::empty(),
+        )?))
+    }
+
+    /// Makes a folder inside the mailbox that only this user can enter, keeping whatever
+    /// already sits at its name, which [`Self::folder`] then refuses unless it is a folder.
+    /// Takes its name. Returns the I/O error.
+    pub(crate) fn make_folder(&self, name: &str) -> std::io::Result<()> {
+        match rustix::fs::mkdirat(&self.0, name, Mode::RWXU) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Lists the entries with one suffix whose names carry a valid call id and that are
@@ -1436,6 +1852,14 @@ impl Mailbox {
         Self::open(path)
     }
 
+    pub(crate) fn folder(&self, _name: &str) -> std::io::Result<Self> {
+        match *self {}
+    }
+
+    pub(crate) fn make_folder(&self, _name: &str) -> std::io::Result<()> {
+        match *self {}
+    }
+
     pub(crate) fn entries(&self, _suffix: &str) -> Vec<(std::time::SystemTime, String)> {
         match *self {}
     }
@@ -1464,7 +1888,7 @@ impl Mailbox {
 /// Reads an entry's last change time from its status, the epoch when it does not fit.
 /// Takes the status. Returns the time.
 #[cfg(unix)]
-fn modified(stat: &rustix::fs::Stat) -> std::time::SystemTime {
+pub(super) fn modified(stat: &rustix::fs::Stat) -> std::time::SystemTime {
     let seconds = u64::try_from(stat.st_mtime).ok();
     let nanos = u32::try_from(stat.st_mtime_nsec)
         .ok()
@@ -1549,8 +1973,9 @@ pub fn call_digest(bytes: &[u8]) -> [u8; CALL_DIGEST_BYTES] {
     sha2::Sha256::digest(bytes).into()
 }
 
-/// Answers one call in the mailbox: the answer is written beside it under a part name and
-/// renamed into place, so the server never reads half an answer. Takes the mailbox, the
+/// Answers one call in the mailbox: the answer is written beside it under a part name no
+/// agent of a shared mailbox can make, and renamed into place, so the server never reads
+/// half an answer. Takes the mailbox, the
 /// call id `take_calls` returned, the text, bounded to `REPLY_TEXT_MAX`, and whether it is
 /// an error. Returns the I/O failure; a planted part file, or a link at the mailbox or the
 /// master's temporary folder, makes the answer fail, never land elsewhere.
@@ -1563,7 +1988,7 @@ pub fn answer_call(mailbox: &Path, id: &str, text: &str, error: bool) -> std::io
     let bytes = serde_json::to_vec(&reply).map_err(std::io::Error::other)?;
     assert!(bytes.len() as u64 <= REPLY_BYTES_MAX);
     let mailbox = Mailbox::open_for_engine(mailbox)?;
-    let part = format!("{id}{PART_SUFFIX}");
+    let part = format!("{id}{ANSWER_PART_SUFFIX}");
     let written = mailbox
         .create(&part)
         .and_then(|mut file| file.write_all(&bytes));
@@ -1623,6 +2048,162 @@ fn call(params: Option<&Value>, drop: &Path) -> Option<(&'static str, bool)> {
     })
 }
 
+/// Lists the configured master's `wake` tool. Returns its MCP listing.
+fn wake_listing() -> Value {
+    json!({
+        "name": WAKE_TOOL,
+        "description": "Wake a finished sub-agent of this project in its own worktree with your text as its next task. The engine wakes it when your reply ends. Prefer it over a new task for work that agent knows.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": "The finished sub-agent's name, @role handle or Sub-agent number."},
+                "task": {"type": "string", "description": "What it should do next, in plain words."},
+            },
+            "required": ["agent", "task"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// Records one `wake` call in the master's drop file, through the same schema and bounds
+/// a `crazyagent-task` block's wake is read with. Takes the call's parameters and the drop
+/// file. Returns the answer and whether it is a refusal, or none for another tool.
+fn wake_call(params: Option<&Value>, drop: &Path) -> Option<(&'static str, bool)> {
+    if params?.get("name")?.as_str()? != WAKE_TOOL {
+        return None;
+    }
+    let argument = |name: &str| {
+        params
+            .and_then(|params| params.get("arguments"))
+            .and_then(|arguments| arguments.get(name))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let recorded = Recorded {
+        harness: None,
+        task: argument("task"),
+        role: None,
+        wake: Some(argument("agent")),
+    };
+    let Some(Proposal::Wake(wake)) = proposal(recorded) else {
+        return Some((WAKE_INVALID, true));
+    };
+    Some(
+        match record_line(drop, &json!({"task": wake.text, "wake": wake.agent})) {
+            Ok(true) => (WAKE_RECORDED, false),
+            Ok(false) => (WAKE_FULL, true),
+            Err(_) => (UNWRITABLE, true),
+        },
+    )
+}
+
+/// Reads one record or block into what the master asked for, the single check both paths
+/// share: a delegation through `delegation` with its role made a handle or dropped, or a
+/// wake with a bounded agent name and task text and no harness or role. Takes the record.
+/// Returns the proposal, or none when it fails a bound.
+fn proposal(recorded: Recorded) -> Option<Proposal> {
+    let Recorded {
+        harness,
+        task,
+        role,
+        wake,
+    } = recorded;
+    let Some(agent) = wake else {
+        let mut found = delegation(harness.as_deref().unwrap_or_default(), &task)?;
+        found.role = role.as_deref().and_then(names::handle);
+        return Some(Proposal::Delegate(found));
+    };
+    if harness.is_some() || role.is_some() {
+        return None;
+    }
+    let (agent, text) = (agent.trim(), task.trim());
+    if agent.is_empty()
+        || agent.len() > WAKE_NAME_BYTES_MAX
+        || agent.chars().any(char::is_control)
+        || !text_valid(text, TASK_PROMPT_BYTES_MAX)
+    {
+        return None;
+    }
+    Some(Proposal::Wake(WakeLine {
+        agent: agent.to_owned(),
+        text: text.to_owned(),
+    }))
+}
+
+/// Reads the `crazyagent-task` blocks of a tools-off master's reply (L6, F16): a line exactly
+/// `BLOCK_FENCE` at its start, one JSON object of at most `BLOCK_BYTES_MAX` bytes read through
+/// the tool record's schema and checks, and a line exactly ```. No other reply text is read.
+/// Takes the reply. Returns at most eight proposals in reply order and the distinct reasons
+/// blocks were not read.
+pub fn reply_blocks(reply: &str) -> (Vec<Proposal>, Vec<&'static str>) {
+    let mut found = Vec::new();
+    let mut unread: Vec<&'static str> = Vec::new();
+    let mut lines = reply.split('\n');
+    while let Some(line) = lines.next() {
+        if line.trim_end() != BLOCK_FENCE {
+            continue;
+        }
+        let mut body = String::new();
+        let (mut closed, mut long) = (false, false);
+        for inner in lines.by_ref() {
+            if inner.trim_end() == BLOCK_CLOSE {
+                closed = true;
+                break;
+            }
+            if long || body.len() + inner.len() + 1 > BLOCK_BYTES_MAX {
+                long = true;
+                continue;
+            }
+            body.push_str(inner);
+            body.push('\n');
+        }
+        let reason = if !closed {
+            Some(BLOCK_UNCLOSED)
+        } else if long {
+            Some(BLOCK_TOO_LONG)
+        } else if found.len() >= DELEGATIONS_PER_REPLY_MAX {
+            Some(BLOCKS_FULL)
+        } else {
+            match serde_json::from_str::<Recorded>(&body) {
+                Ok(recorded) => match block_proposal(recorded) {
+                    Some(proposed) => {
+                        found.push(proposed);
+                        None
+                    }
+                    None => Some(BLOCK_BOUNDS),
+                },
+                Err(_) => Some(BLOCK_INVALID),
+            }
+        };
+        if let Some(reason) = reason
+            && !unread.contains(&reason)
+        {
+            unread.push(reason);
+        }
+    }
+    assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX && unread.len() <= 5);
+    (found, unread)
+}
+
+/// Says whether a reply holds a line that opens a `crazyagent-task` block, exactly as
+/// `reply_blocks` would read it, so a master with team tools on is told such a block is not
+/// read (L6 review). Takes the reply. Returns the answer.
+pub fn opens_block(reply: &str) -> bool {
+    reply.split('\n').any(|line| line.trim_end() == BLOCK_FENCE)
+}
+
+/// Checks a block's role the way the `delegate` tool checks one, since no tool call checked
+/// it first, then reads the block as `proposal` does. Takes the record. Returns the
+/// proposal, or none for an unusable role or a failed bound.
+fn block_proposal(recorded: Recorded) -> Option<Proposal> {
+    let role = recorded.role.as_deref().unwrap_or_default().trim();
+    if role.len() > ROLE_BYTES_MAX || (!role.is_empty() && names::handle(role).is_none()) {
+        return None;
+    }
+    proposal(recorded)
+}
+
 /// Opens the drop file to read and append, creating it 0600, never through a link.
 /// Takes its path. Returns the open file or the I/O error.
 #[cfg(unix)]
@@ -1671,6 +2252,16 @@ fn open_recorded(drop: &Path) -> std::io::Result<File> {
 }
 
 fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
+    record_line(
+        drop,
+        &json!({"harness": proposed.harness, "task": proposed.prompt, "role": proposed.role}),
+    )
+}
+
+/// Appends one proposal to the master's drop file while it holds fewer than eight and
+/// stays within `DROP_BYTES_MAX`. Takes the drop file and the record. Returns whether it was
+/// recorded, or the I/O error.
+fn record_line(drop: &Path, value: &Value) -> std::io::Result<bool> {
     let mut file = open_drop(drop)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -1678,10 +2269,7 @@ fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
     }
     let mut recorded = Vec::new();
     (&file).take(DROP_BYTES_MAX).read_to_end(&mut recorded)?;
-    let mut line = serde_json::to_vec(
-        &json!({"harness": proposed.harness, "task": proposed.prompt, "role": proposed.role}),
-    )
-    .map_err(std::io::Error::other)?;
+    let mut line = serde_json::to_vec(value).map_err(std::io::Error::other)?;
     line.push(b'\n');
     let calls = recorded.iter().filter(|byte| **byte == b'\n').count();
     if calls >= DELEGATIONS_PER_REPLY_MAX || metadata.len() + line.len() as u64 > DROP_BYTES_MAX {
@@ -1691,11 +2279,25 @@ fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Takes the tasks a master proposed with its `delegate` tool during one turn, and clears the record.
+/// Takes the tasks a master proposed with its `delegate` tool during one turn, and clears the
+/// record, as `take_proposals` does, leaving out any wake. Takes the drop file. Returns at
+/// most eight valid delegations in call order.
+pub fn take(drop: &Path) -> Vec<Delegation> {
+    take_proposals(drop)
+        .into_iter()
+        .filter_map(|proposed| match proposed {
+            Proposal::Delegate(found) => Some(found),
+            Proposal::Wake(_) => None,
+        })
+        .collect()
+}
+
+/// Takes the tasks and wakes a master proposed with its `delegate` and `wake` tools during
+/// one turn, and clears the record.
 /// Takes the drop file in the master's private temporary folder; a link or other non-file is never
 /// read, nor a file reached through a link the master put in place of that folder.
 /// Returns at most eight valid proposals in call order, none when there is no record.
-pub fn take(drop: &Path) -> Vec<Delegation> {
+pub fn take_proposals(drop: &Path) -> Vec<Proposal> {
     let opened = open_taken(drop);
     clear(drop);
     let Ok(file) = opened else {
@@ -1708,17 +2310,10 @@ pub fn take(drop: &Path) -> Vec<Delegation> {
     if (&file).take(DROP_BYTES_MAX).read_to_end(&mut text).is_err() {
         return Vec::new();
     }
-    let found: Vec<Delegation> = text
+    let found: Vec<Proposal> = text
         .split(|byte| *byte == b'\n')
         .filter_map(|line| serde_json::from_slice::<Recorded>(line).ok())
-        .filter_map(|recorded| {
-            let mut found = delegation(
-                recorded.harness.as_deref().unwrap_or_default(),
-                &recorded.task,
-            )?;
-            found.role = recorded.role.as_deref().and_then(names::handle);
-            Some(found)
-        })
+        .filter_map(proposal)
         .take(DELEGATIONS_PER_REPLY_MAX)
         .collect();
     assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);

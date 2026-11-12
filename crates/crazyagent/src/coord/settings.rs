@@ -89,8 +89,65 @@ pub enum QuestionsTo {
     Me,
 }
 
+/// One protection the team gives an agent the same way on every harness that can (DEC-141
+/// PA-12): receipts on the messages it is sent, the owner's hooks, and the edit guard that
+/// holds an edit of a claimed file under Overlapping edits Block or Wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protection {
+    Receipts,
+    OwnerHooks,
+    EditGuard,
+}
+
+impl Protection {
+    /// Every protection, in the order the parity check walks them.
+    pub const ALL: [Self; 3] = [Self::Receipts, Self::OwnerHooks, Self::EditGuard];
+}
+
+/// Why Claude Code on an API key or URL account runs no hooks: it starts `--bare`, which
+/// skips settings and plugin hooks (DEC-104 bare-hooks, Claude Code 2.1.322 `--help`).
+pub const BARE_NO_HOOKS: &str = "Claude Code on an API key or URL account starts without hooks, so it runs none of your hooks and Block and Wait cannot hold its edits.";
+/// Why an rcli master runs no hooks: rcli has none.
+pub const RCLI_NO_HOOKS: &str =
+    "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
+/// Which owner hooks a Codex agent runs: those on an event Codex has (PA-12).
+pub const CODEX_HOOK_EVENTS_ONLY: &str = "Codex agents run your hooks on the events Codex has.";
+/// What a Codex agent's Messages timeline shows when its app-server lists a hook the launch
+/// pinned as not trusted (PA1213R2-F2), so Codex runs neither the edit guard nor that hook.
+pub const CODEX_HOOKS_UNTRUSTED: &str = "Codex does not trust CrazyAgent's hooks for this agent, so Block and Wait cannot hold its edits and your hooks do not run for it.";
+/// What a Codex agent's Messages timeline shows when the engine cannot ask its app-server
+/// about the pinned hooks in time: another Codex release, another system, or no answer.
+pub const CODEX_HOOKS_UNCHECKED: &str = "CrazyAgent could not confirm that Codex trusts its hooks for this agent, so Block and Wait may not hold its edits and your hooks may not run for it.";
+/// The short form of BARE_NO_HOOKS and RCLI_NO_HOOKS a terminal Hooks heading has room
+/// for: which agents run none of the owner's hooks.
+pub const HOOKS_NONE_SHORT: &str = "Claude Code on a key or URL and rcli run none";
+
+impl HarnessKind {
+    /// Says why this harness's agents miss one protection on one account kind, or None
+    /// when they get it (DEC-141 PA-12): Claude Code on a sign-in and Codex on any account
+    /// get all three; Claude Code on an API key or URL account starts bare, without hooks
+    /// or receipts; rcli has no hooks. Takes the kind, whether the account is an API key or
+    /// URL one, and the protection. Returns the sentence the settings show, or None.
+    pub fn lacks(self, endpoint: bool, protection: Protection) -> Option<&'static str> {
+        match (self, endpoint, protection) {
+            (Self::ClaudeCode, true, Protection::Receipts) => Some(BARE_NO_RECEIPTS),
+            (Self::ClaudeCode, true, Protection::OwnerHooks | Protection::EditGuard) => {
+                Some(BARE_NO_HOOKS)
+            }
+            (Self::Rcli, _, Protection::OwnerHooks | Protection::EditGuard) => Some(RCLI_NO_HOOKS),
+            (Self::ClaudeCode, false, _) | (Self::Codex, _, _) | (Self::Rcli, _, _) => None,
+        }
+    }
+}
+
+/// Why receipts are missing for Claude Code on an API key or URL account, in the words the
+/// clients show in place of receipts (`adoption::HOOKLESS_WORDS`).
+pub const BARE_NO_RECEIPTS: &str = "Receipts are unavailable for this account kind.";
+
 /// What an edit to a file another agent claimed does (Q15): warn both sides, block the
-/// edit where the harness has a pre-edit hook, or nothing.
+/// edit where the harness runs the edit guard (`Protection::EditGuard`), or nothing; Wait
+/// (OS-8) also refuses a start on a file another agent's work holds and prompts the agent
+/// once it is free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Overlaps {
@@ -98,6 +155,25 @@ pub enum Overlaps {
     Warn,
     Block,
     Off,
+    Wait,
+}
+
+/// How every agent terminal of the project draws, whatever harness runs in it (N-D9,
+/// DEC-141): Classic on the normal screen, so the app's terminal view scrolls with the
+/// wheel at once and a plain drag selects text, or Fullscreen, the harness's own view, which
+/// takes the mouse. Classic is the default. Each harness kind's own switches for a display
+/// are `harnesses::interactive::display_switches`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalDisplay {
+    #[default]
+    Classic,
+    Fullscreen,
+}
+
+impl TerminalDisplay {
+    /// Every display, in the order settings list them.
+    pub const ALL: [Self; 2] = [Self::Classic, Self::Fullscreen];
 }
 
 /// A team role whose skills the owner chooses (DEC-111 R3): the master, a lead (a
@@ -197,8 +273,116 @@ impl<'de> Deserialize<'de> for Nudges {
     }
 }
 
+/// Whether the first turn of each task of a team agent carries the Task-start reminder
+/// (T3-15): On, the default, names the context-mode tools to load and the approved skills
+/// to check for the task; Off gives none. It is advice, never a guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStart {
+    #[default]
+    On,
+    Off,
+}
+
+named!(TaskStart { On => "on", Off => "off" });
+
+impl TaskStart {
+    /// Every option, in the order settings list them.
+    pub const ALL: [Self; 2] = [Self::On, Self::Off];
+
+    /// The words settings show for this option. Takes the option. Returns its fixed text.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::On => "On",
+            Self::Off => "Off",
+        }
+    }
+}
+
+/// How many heavy commands of one project run at once (F28): one to four, or no limit. A
+/// heavy command an agent runs through the project's lane waits its turn behind the ones
+/// before it; One, the default, runs them one at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeavyLane {
+    #[default]
+    One,
+    Two,
+    Three,
+    Four,
+    NoLimit,
+}
+
+named!(HeavyLane { One => "one", Two => "two", Three => "three", Four => "four", NoLimit => "no_limit" });
+
+impl HeavyLane {
+    /// Every option, in the order settings list them.
+    pub const ALL: [Self; 5] = [Self::One, Self::Two, Self::Three, Self::Four, Self::NoLimit];
+
+    /// How many heavy commands may run at once. Takes the option. Returns 1 to 4, or None
+    /// for no limit.
+    pub fn slots(self) -> Option<usize> {
+        let slots = match self {
+            Self::One => Some(1),
+            Self::Two => Some(2),
+            Self::Three => Some(3),
+            Self::Four => Some(4),
+            Self::NoLimit => None,
+        };
+        assert!(slots.is_none_or(|slots| (1..=4).contains(&slots)));
+        slots
+    }
+
+    /// The words settings show for this option. Takes the option. Returns its fixed text.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::One => "1 at a time",
+            Self::Two => "2 at a time",
+            Self::Three => "3 at a time",
+            Self::Four => "4 at a time",
+            Self::NoLimit => "No limit",
+        }
+    }
+}
+
+/// The most shared resources one project names.
+pub const SHARED_RESOURCES_MAX: usize = 16;
+/// The longest shared resource name, in bytes.
+pub const RESOURCE_NAME_BYTES_MAX: usize = 32;
+/// The most commands one shared resource serves at once.
+pub const RESOURCE_SLOTS_MAX: u8 = 8;
+
+const _: () = assert!(SHARED_RESOURCES_MAX <= 64 && RESOURCE_SLOTS_MAX >= 1);
+
+/// One resource a project's agents share (F28), such as a local model or a database, with
+/// how many heavy commands it serves at once. A heavy command that names it waits until
+/// one of its slots is free, besides its turn in the lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedResource {
+    pub name: String,
+    pub slots: u8,
+}
+
+/// Checks a shared resource name: 1 to `RESOURCE_NAME_BYTES_MAX` bytes of lower case
+/// letters, digits, `.`, `_` and `-`, starting with a letter or digit, so it reads the same
+/// on a command line, in settings and in a file name. Takes the name. Returns the answer.
+pub fn resource_name_valid(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let plain = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    !bytes.is_empty()
+        && bytes.len() <= RESOURCE_NAME_BYTES_MAX
+        && plain(&bytes[0])
+        && bytes
+            .iter()
+            .all(|b| plain(b) || matches!(b, b'.' | b'_' | b'-'))
+}
+
 /// A project's coordination settings. Every option is the owner's choice; the defaults
-/// are Lead, Warn, nudges Off and `COUNTED_TOOLS_DEFAULT`.
+/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT`, the Classic terminal display, the
+/// Task-start reminder On, a heavy lane of One and no shared resources. A row stored before
+/// DEC-141 names the display `claude_display`; it reads as `terminal_display`, so the
+/// owner's choice is kept. A row stored before F28 reads with the lane defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordSettings {
@@ -208,6 +392,14 @@ pub struct CoordSettings {
     pub counted_tools: Vec<String>,
     #[serde(default)]
     pub role_skills: RoleSkills,
+    #[serde(default, alias = "claude_display")]
+    pub terminal_display: TerminalDisplay,
+    #[serde(default)]
+    pub task_start: TaskStart,
+    #[serde(default)]
+    pub heavy_lane: HeavyLane,
+    #[serde(default)]
+    pub shared_resources: Vec<SharedResource>,
 }
 
 impl Default for CoordSettings {
@@ -218,6 +410,10 @@ impl Default for CoordSettings {
             nudges: Nudges::Off,
             counted_tools: COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec(),
             role_skills: RoleSkills::default(),
+            terminal_display: TerminalDisplay::Classic,
+            task_start: TaskStart::On,
+            heavy_lane: HeavyLane::One,
+            shared_resources: Vec::new(),
         }
     }
 }
@@ -225,9 +421,26 @@ impl Default for CoordSettings {
 impl CoordSettings {
     /// Checks settings that came from a client: at most `COUNTED_TOOLS_MAX` counted
     /// tools, each 1 to `COUNTED_TOOL_BYTES_MAX` bytes of letters, digits, `_`, `-` and
-    /// `*`, none twice, and at most `ROLE_SKILLS_MAX` valid skill names per role, none
-    /// twice. Takes the settings. Returns Ok or `coord_settings_invalid`.
+    /// `*`, none twice, at most `ROLE_SKILLS_MAX` valid skill names per role, none twice,
+    /// and at most `SHARED_RESOURCES_MAX` shared resources with valid names, none twice,
+    /// each serving 1 to `RESOURCE_SLOTS_MAX` commands. Takes the settings. Returns Ok or
+    /// `coord_settings_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
+        let resources = self.shared_resources.len() <= SHARED_RESOURCES_MAX
+            && self
+                .shared_resources
+                .iter()
+                .enumerate()
+                .all(|(at, resource)| {
+                    resource_name_valid(&resource.name)
+                        && (1..=RESOURCE_SLOTS_MAX).contains(&resource.slots)
+                        && !self.shared_resources[..at]
+                            .iter()
+                            .any(|seen| seen.name == resource.name)
+                });
+        if !resources {
+            return Err(failure("coord_settings_invalid"));
+        }
         let name = |tool: &String| {
             !tool.is_empty()
                 && tool.len() <= COUNTED_TOOL_BYTES_MAX
@@ -371,10 +584,49 @@ pub fn set_delivery(
     Ok(())
 }
 
-/// Says whether a harness kind has native teammates the engine can use: Claude Code
-/// agent teams only (Q10). Takes the kind.
+/// How a harness kind runs the Native sub-agent mode, the lead's own harness running its
+/// sub-agents (Q10, DEC-141 PA-7): Claude Code as an agent team in tmux panes, Codex as
+/// multi-agent threads of the lead's own process, or not at all, with the reason the
+/// setting shows beside the choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSubAgents {
+    Teams,
+    Threads,
+    Unavailable(&'static str),
+}
+
+/// Why an RCLI lead has no native sub-agents: RCLI runs without tools (PA-3, V3).
+pub const RCLI_NATIVE_UNAVAILABLE: &str = "RCLI runs without tools, so it has no native sub-agents yet; its sub-agents are CrazyAgent workers.";
+
+/// What the app cannot show of Codex's own sub-agents (PA-7 r1): Codex 0.164 runs them as
+/// threads of the lead's process with no pane, takes their team calls through the lead's
+/// MCP servers, and needs a thread count even under No limit.
+pub const CODEX_NATIVE_SCOPE: &str = "Codex sub-agents show only in the lead's terminal, where Codex lists each one: the app's graph, counts and Stop act on the lead, their team tool calls count as the lead's, and Codex holds them to Max teammates at once, 15 under No limit because Codex needs a number.";
+
+/// What a harness kind's native sub-agents leave out of the app, for the setting to say
+/// beside the choice (DEC-141): Codex threads' limits, nothing for an agent team, whose
+/// teammates the app shows, counts and stops. Takes the kind. Returns the text, if any.
+pub fn native_scope(harness: HarnessKind) -> Option<&'static str> {
+    match native_sub_agents(harness) {
+        NativeSubAgents::Threads => Some(CODEX_NATIVE_SCOPE),
+        NativeSubAgents::Teams | NativeSubAgents::Unavailable(_) => None,
+    }
+}
+
+/// Names how a harness kind runs native sub-agents, every kind answered (DEC-141). Takes
+/// the kind. Returns the answer.
+pub fn native_sub_agents(harness: HarnessKind) -> NativeSubAgents {
+    match harness {
+        HarnessKind::ClaudeCode => NativeSubAgents::Teams,
+        HarnessKind::Codex => NativeSubAgents::Threads,
+        HarnessKind::Rcli => NativeSubAgents::Unavailable(RCLI_NATIVE_UNAVAILABLE),
+    }
+}
+
+/// Says whether a harness kind has native sub-agents the engine can use: Claude Code agent
+/// teams and Codex threads (Q10, PA-7). Takes the kind.
 pub fn native_supported(harness: HarnessKind) -> bool {
-    harness == HarnessKind::ClaudeCode
+    !matches!(native_sub_agents(harness), NativeSubAgents::Unavailable(_))
 }
 
 fn column(

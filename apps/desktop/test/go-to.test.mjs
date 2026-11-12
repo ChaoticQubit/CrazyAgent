@@ -23,12 +23,12 @@ test("Go to lists every project and its tabs, Home, every Settings section, then
   ]);
   assert.deepEqual(targets.slice(14).map((target) => [target.label, formatRoute(target.route)]), [
     ["Home", "#/home"],
+    ["Profile", "#/settings/profile"],
     ["Settings / Accounts", "#/settings/accounts"],
     ["Settings / Pools", "#/settings/pools"],
     ["Settings / Harnesses", "#/settings/harnesses"],
     ["Settings / Plugins and skills", "#/settings/plugins"],
     ["Settings / Memory", "#/settings/memory"],
-    ["Settings / Profile", "#/settings/profile"],
     ["New project", "#/projects/new?step=basics"],
     ["Clone from GitHub", "#/projects/add/clone"],
     ["Add existing folder", "#/projects/add/folder"],

@@ -21,8 +21,10 @@ export function registerBaseContent(context: vscode.ExtensionContext, engine: En
   }
 }
 
-/** One side's provider: it reads every page of the file through one engine call. Inputs:
- * the engine client and the call name. Output: the provider. */
+/** One side's provider: it reads every page of the file through one engine call, at the
+ * head the document address carries, the head the Changes list showed and Accept names,
+ * so a set that moved on refuses the read as stale. Inputs: the engine client and the call
+ * name. Output: the provider. */
 function provider(engine: Engine, call: (typeof SIDES)[number][1]): vscode.TextDocumentContentProvider {
   return {
     async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
@@ -32,7 +34,7 @@ function provider(engine: Engine, call: (typeof SIDES)[number][1]): vscode.TextD
       let page = 0;
       for (;;) {
         if (parts.length >= PAGES_MAX) throw new Error(refusal("changes_too_large"));
-        const reply = await engine.request<BasePage>(call, { id: target.id, path: target.path, page });
+        const reply = await engine.request<BasePage>(call, { id: target.id, head: uri.query, path: target.path, page });
         if (reply.kind !== "ok") throw new Error(refusal(reply.code));
         const data: Partial<BasePage> = reply.data ?? {};
         if (typeof data.text !== "string") throw new Error(refusal("changes_outcome_unknown"));

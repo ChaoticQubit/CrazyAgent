@@ -55,6 +55,7 @@ impl Fixture {
         let tmux = installed(&base).expect("tmux must be installed on this machine");
         let connection = Connection::open(base.join("engine.db")).unwrap();
         super::super::initialize(&connection).unwrap();
+        crate::project_setup::initialize(&connection).unwrap();
         Self {
             _root: root,
             base,
@@ -205,6 +206,7 @@ fn a_question_on_a_real_sub_agent_screen_is_recorded_once_and_its_typed_answer_r
             host.as_ref(),
             &project(),
             &format!("codex-{agent}"),
+            Said::Answer,
             "1"
         )
         .unwrap(),
@@ -431,6 +433,86 @@ fn a_watched_agent_that_stops_being_busy_loses_its_waiting_mark() {
     assert!(!watch.due(), "a second scan waits for SCAN_EVERY");
 }
 
+/// OB-1 r1: only an app's own input prompt at the bottom of its screen is an idle prompt:
+/// Claude Code's prompt row between two rules, empty or with a draft, with its footer rows
+/// below, or Codex's composer row. A dialog, a notice, a picker or a quoted line in its
+/// place is not one, and neither is a prompt with too many rows below it.
+#[test]
+fn only_an_app_s_own_input_prompt_at_the_bottom_is_an_idle_prompt() {
+    let rule = "\u{2500}".repeat(12);
+    let idle = [
+        (
+            "Claude Code's empty prompt",
+            format!(" Done.\n\n{rule}\n > \n{rule}\n  ? for shortcuts\n"),
+        ),
+        (
+            "Claude Code's prompt with a status line below",
+            format!(
+                "{rule}\n\u{276f} \n{rule}\n  opus \u{b7} blog\n  \u{23f5}\u{23f5} accept edits on\n"
+            ),
+        ),
+        (
+            "Claude Code's prompt with a draft",
+            format!("{rule}\n\u{276f} fix the build\n{rule}\n"),
+        ),
+        (
+            "Claude Code's boxed prompt",
+            "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\r\n\u{2502} >  \u{2502}\r\n\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}\r\n  ? for shortcuts\r\n"
+                .to_owned(),
+        ),
+        (
+            "Codex's composer",
+            "header\r\n\r\n\u{203a} Ask Codex to do anything\r\n\r\n  ? for shortcuts\r\n".to_owned(),
+        ),
+        (
+            "Codex's composer with its key hints",
+            "\u{203a} Ask Codex to do anything\r\n  \u{23ce} send   \u{2303}J newline   \u{2303}C quit\r\n"
+                .to_owned(),
+        ),
+    ];
+    for (case, screen) in &idle {
+        assert!(idle_prompt(screen.as_bytes()), "{case}");
+    }
+
+    let other = [
+        ("an empty screen", String::new()),
+        ("a screen with no prompt", "stand-in ready\n".to_owned()),
+        (
+            "a permission prompt",
+            " Do you want to proceed?\n \u{276f} 1. Yes\n   2. No\n".to_owned(),
+        ),
+        (
+            "a notice below a prompt the owner sent",
+            " > Fix the build\n\n Press Enter to continue\n".to_owned(),
+        ),
+        (
+            "a free answer field between rules",
+            format!("{rule}\n Tell the agent what to do differently:\n{rule}\n"),
+        ),
+        (
+            "a picker with its marker on an unnumbered row",
+            " Resume a conversation\n \u{276f} Fix the build\n   Review the page\n Enter to select \u{b7} Esc to cancel\n"
+                .to_owned(),
+        ),
+        (
+            "a quoted line under a rule with no rule below",
+            format!("{rule}\n > quoted\n The quote ends here.\n"),
+        ),
+        (
+            "a Codex notice below a message the owner sent",
+            "\u{203a} fix it\r\n\r\n  Update available\r\n  Press enter to continue\r\n  esc to skip\r\n"
+                .to_owned(),
+        ),
+        (
+            "Claude Code's prompt with too many rows below",
+            format!("{rule}\n > \n{rule}\n a\n b\n c\n d\n e\n f\n"),
+        ),
+    ];
+    for (case, screen) in &other {
+        assert!(!idle_prompt(screen.as_bytes()), "{case}");
+    }
+}
+
 #[test]
 fn choice_prompts_of_claude_code_and_codex_are_questions_and_plain_lists_are_not() {
     let claude = "\x1b[0m\x1b[H\x1b[2J\x1b]0;claude\x07\u{256d}\u{2500}\u{2500}\u{256e}\r\n\u{2502} Bash command                    \u{2502}\r\n\u{2502}   cargo test                    \u{2502}\r\n\u{2502} Do you want to proceed?         \u{2502}\r\n\u{2502} \x1b[36m\u{276f} 1. Yes\x1b[0m                      \u{2502}\r\n\u{2502}   2. Yes, and don't ask again   \u{2502}\r\n\u{2502}   3. No, and tell Claude what to do differently (esc) \u{2502}\r\n\u{2570}\u{2500}\u{2500}\u{256f}\x1b[0m\x1b[9;3H";
@@ -470,6 +552,20 @@ fn choice_prompts_of_claude_code_and_codex_are_questions_and_plain_lists_are_not
     assert_eq!(
         screen_rows(b"a\x1b[31mb\x1b[0m\r\nc\x07d  \r\n\x1b]2;t\x1b\\e"),
         ["ab", "cd", "e"]
+    );
+}
+
+#[test]
+fn a_typed_message_quoted_with_a_numbered_list_is_no_question_on_the_agent_screen() {
+    let typed = "\u{276f} [crazyagent msg 530] from the master: Your Claude fix is ready\r\n  > ready, quizzes of 6, 5 and 6 items) is enough. Do only this, and quickly:\r\n  > 1. Merge your worker @jobs-retry into your branch\r\n  > 2. Run uv run pytest -q -m \"not integration\"\r\n  > 3. Report the root causes in 5 lines, then end your turn\r\n\r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n\u{276f} \r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n  ? for shortcuts";
+    assert_eq!(question(typed.as_bytes()), None);
+    assert_eq!(choice(typed.as_bytes()), None);
+    let two_cursors = "Pick one?\r\n\u{276f} 1. Yes\r\n\u{276f} 2. No";
+    assert_eq!(question(two_cursors.as_bytes()), None);
+    let one_cursor = "Pick one?\r\n> 1. Yes\r\n  2. No";
+    assert_eq!(
+        question(one_cursor.as_bytes()).as_deref(),
+        Some("Pick one? | 1. Yes | 2. No")
     );
 }
 
@@ -525,7 +621,15 @@ fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
         "the master is not a sub-agent to send to"
     );
     let send = |agent: String, text: &str| {
-        send_to_agent(&fixture.connection, host.as_ref(), &project(), &agent, text).unwrap()
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &agent,
+            Said::Message,
+            text,
+        )
+        .unwrap()
     };
     assert_eq!(send(live.to_string(), "  \n"), Err("team_message_invalid"));
     assert_eq!(
@@ -580,6 +684,7 @@ fn an_id_form_reaches_its_own_agent_even_when_another_agent_holds_it_as_a_handle
             host.as_ref(),
             &project(),
             "team-7",
+            Said::Message,
             "first"
         )
         .unwrap(),
@@ -680,6 +785,7 @@ fn a_numbered_name_reaches_that_agent_not_one_whose_handle_reads_as_it() {
             host.as_ref(),
             &project(),
             &named.to_string(),
+            Said::Message,
             "hi"
         )
         .unwrap(),
@@ -1224,6 +1330,49 @@ fn a_work_question_alert_counts_as_unseen_but_not_as_a_pending_question() {
     );
 }
 
+/// F12: a work question linked into the questions log is counted there as pending, so its
+/// team alert, Normal or High, counts as a question notification and the project's flag
+/// counts the question once.
+#[test]
+fn a_linked_work_question_alert_counts_as_a_question_notification() {
+    let fixture = Fixture::new();
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    let mut alerts = Vec::new();
+    for (message, kind) in [
+        (9, NotificationKind::Question),
+        (10, NotificationKind::UrgentQuestion),
+        (11, NotificationKind::Question),
+    ] {
+        let text = format!("Ada asks you: question {message}?");
+        let alert = notify(&tx, &project(), kind, &text, message).unwrap();
+        tx.execute(
+            "INSERT INTO team_owner_alerts(source,ref,since,project,agent,notification) VALUES ('question',?3,2,?1,7,?2)",
+            params![PROJECT, alert, message],
+        )
+        .unwrap();
+        alerts.push(alert);
+    }
+    for message in [9, 10] {
+        tx.execute(
+            "INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms,kind,coord_message)
+             VALUES (?1,'agent:7','agent','Which port?','[]','pending',0,2,'text',?2)",
+            params![PROJECT, message],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    assert_eq!(alerts.len(), 3);
+    assert_eq!(
+        app(&fixture.connection).unwrap().projects,
+        [ProjectUnseen {
+            project_id: project(),
+            unseen: 3,
+            questions: 2,
+        }],
+        "the two linked alerts are question notifications, the unlinked one is not"
+    );
+}
+
 #[test]
 fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
     let fixture = Fixture::new();
@@ -1589,6 +1738,127 @@ fn a_question_muted_by_the_rule_starts_no_master_for_the_other_events() {
     assert_eq!(
         wakes(connection),
         [format!("[team] Sub-agent {ada} finished: Done.")]
+    );
+}
+
+/// F20: a queued change set ready event whose set landed before the master heard of it is
+/// settled, never delivered, and so is one older than its agent's newer open set; the wake
+/// carries only the event of the set that still waits for the master.
+#[test]
+fn a_change_set_ready_event_whose_set_already_landed_is_settled_not_delivered() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    drop(crate::landing::open(&fixture.base).unwrap());
+    let grace = fixture.agent(PROJECT, "sub", "codex", "idle");
+    let barbara = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let ada = fixture.agent(PROJECT, "sub", "codex", "idle");
+    let set = |id: &str, agent: i64, state: &str, created: i64| {
+        connection
+            .execute(
+                "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+                 VALUES (?1,?2,'sub',?3,'label','/repo',?4,'/repo/.git','b','h',?5,'succeeded','task-1','line',1,1,0,'[]',?6,?6)",
+                params![id, PROJECT, agent.to_string(), format!("/worktrees/{id}"), state, created],
+            )
+            .unwrap();
+    };
+    set("grace-1", grace, "accepted", 10);
+    set("barbara-1", barbara, "pending", 10);
+    set("ada-1", ada, "accepted", 10);
+    set("ada-2", ada, "pending", 30);
+    let ready = |agent: i64, task: i64, at: i64| {
+        record(
+            connection,
+            &project(),
+            agent,
+            Some(task),
+            EventKind::ChangeSetReady,
+            "The edits wait in Changes.",
+            at,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    ready(grace, 279, 11);
+    ready(barbara, 283, 12);
+    ready(ada, 278, 13);
+
+    assert!(deliver_by_message(connection, &project(), true, 100).unwrap());
+    assert_eq!(
+        wakes(connection),
+        [format!(
+            "[team] Sub-agent {barbara} has changes ready: The edits wait in Changes. [task 283]"
+        )]
+    );
+    assert_eq!(
+        event_states(connection),
+        [
+            (EventState::Settled, None),
+            (EventState::Delivered, Some(100)),
+            (EventState::Settled, None),
+        ]
+    );
+}
+
+/// F20: a change set the engine is updating onto a new base is still open, so its ready
+/// event stays queued; once it is accepted the event is settled.
+#[test]
+fn a_change_set_ready_event_stays_queued_while_its_set_is_updating() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    drop(crate::landing::open(&fixture.base).unwrap());
+    let ada = fixture.agent(PROJECT, "sub", "codex", "idle");
+    connection
+        .execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+             VALUES ('ada-1',?1,'sub',?2,'label','/repo','/worktrees/ada-1','/repo/.git','b','h','updating','succeeded','task-1','line',1,1,0,'[]',10,10)",
+            params![PROJECT, ada.to_string()],
+        )
+        .unwrap();
+    record(
+        connection,
+        &project(),
+        ada,
+        Some(4),
+        EventKind::ChangeSetReady,
+        "The edits wait in Changes.",
+        11,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(settle_landed(connection, &project()).unwrap(), 0);
+    assert_eq!(event_states(connection), [(EventState::Queued, None)]);
+    connection
+        .execute(
+            "UPDATE landing_change_sets SET state='accepted' WHERE id='ada-1'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(settle_landed(connection, &project()).unwrap(), 1);
+    assert_eq!(event_states(connection), [(EventState::Settled, None)]);
+}
+
+/// F20: without the change set table, as in a database the landing store never opened, a
+/// change set ready event is delivered as before.
+#[test]
+fn a_change_set_ready_event_is_delivered_when_no_change_set_table_exists() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "idle");
+    record(
+        connection,
+        &project(),
+        ada,
+        Some(7),
+        EventKind::ChangeSetReady,
+        "The edits wait in Changes.",
+        5,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(deliver_by_message(connection, &project(), true, 100).unwrap());
+    assert_eq!(
+        event_states(connection),
+        [(EventState::Delivered, Some(100))]
     );
 }
 
@@ -2450,4 +2720,283 @@ fn a_task_a_lead_delegated_ends_carried() {
     let queued = task_ended(connection, owned, 21).unwrap().unwrap();
     assert_eq!(event_state(connection, carried), "carried");
     assert_eq!(event_state(connection, queued), "queued");
+}
+
+/// What the master typed into a sub-agent is kept for the agent's Messages timeline only once
+/// its terminal took it (MSG-A): a message and an answer are kept with the master as speaker
+/// and their kind, their escape, control and bidirectional characters dropped, while blank
+/// or long text and an agent that is stopped or has no terminal keep nothing. With the
+/// project's keep setting off the timeline still shows a message was sent, with no text.
+#[test]
+fn only_a_master_message_or_answer_the_terminal_took_is_kept_for_the_timeline() {
+    use super::super::agent_messages::{EntryKind, MessageSettings, Speaker, read, save_settings};
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let live = fixture.agent(PROJECT, "sub", "codex", "working");
+    let stopped = fixture.agent(PROJECT, "sub", "codex", "stopped");
+    let paneless = fixture.agent(PROJECT, "sub", "codex", "working");
+    fixture.pane(&host, live, &["/bin/sh", "-c", "exec cat"]);
+    let kept = || -> i64 {
+        fixture
+            .connection
+            .query_row("SELECT COUNT(*) FROM team_agent_messages", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let send = |agent: i64, said: Said, text: &str| {
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &agent.to_string(),
+            said,
+            text,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        send(live, Said::Message, "Check the login page first"),
+        Ok(live)
+    );
+    assert_eq!(
+        send(
+            live,
+            Said::Answer,
+            "Use option 2\u{1b}[31m red\u{0} \u{9b}1m \u{202e}reversed\u{2066} done"
+        ),
+        Ok(live)
+    );
+    assert_eq!(kept(), 2);
+    for (agent, text) in [
+        (live, "  \n".to_owned()),
+        (live, "x".repeat(SEND_BYTES_MAX + 1)),
+        (stopped, "hi".to_owned()),
+        (paneless, "hi".to_owned()),
+    ] {
+        assert!(send(agent, Said::Message, &text).is_err(), "{agent}");
+    }
+    assert_eq!(kept(), 2, "a refused or untyped text is never kept");
+
+    let page = read(&fixture.connection, &project(), live, None, None).unwrap();
+    let said: Vec<(Speaker, EntryKind, Option<&str>)> = page
+        .entries
+        .iter()
+        .map(|entry| (entry.from, entry.kind, entry.text.as_deref()))
+        .collect();
+    assert_eq!(
+        said,
+        vec![
+            (
+                Speaker::Master,
+                EntryKind::Answer,
+                Some("Use option 2(31m red 1m reversed done")
+            ),
+            (
+                Speaker::Master,
+                EntryKind::Message,
+                Some("Check the login page first")
+            ),
+        ]
+    );
+    assert!(!page.older);
+
+    let tx =
+        Transaction::new_unchecked(&fixture.connection, TransactionBehavior::Immediate).unwrap();
+    save_settings(
+        &tx,
+        &project(),
+        &MessageSettings {
+            keep_master_messages: false,
+            ..MessageSettings::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(send(live, Said::Message, "Secret plan"), Ok(live));
+    let newest = read(&fixture.connection, &project(), live, None, None)
+        .unwrap()
+        .entries
+        .remove(0);
+    assert_eq!(
+        (newest.from, newest.kind, newest.text),
+        (Speaker::Master, EntryKind::Message, None),
+        "with the setting off only the fact of the message is kept"
+    );
+    let stored: Option<String> = fixture
+        .connection
+        .query_row(
+            "SELECT text FROM team_agent_messages ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, None, "no text is stored when the setting is off");
+}
+
+/// The master's status reply keeps its newest events within the reply cap: past the cap the
+/// oldest events are left out with a line saying how many, never the newest, and the
+/// finished list before them stays whole (WKC-3).
+#[test]
+fn a_full_status_keeps_the_newest_events_and_the_finished_list_within_the_reply_cap() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    for n in 0..FINISHED_LISTED_MAX {
+        let agent = fixture.agent(PROJECT, "sub", "codex", "stopped");
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+                params![agent, PROJECT, format!("worktrees/agent-{agent}")],
+            )
+            .unwrap();
+        let task = fixture.task(agent, "owner", "done", Some("Done."));
+        connection
+            .execute(
+                "UPDATE team_tasks SET prompt=?1 WHERE id=?2",
+                params![format!("Finished task {n} {}", "w".repeat(200)), task],
+            )
+            .unwrap();
+    }
+    let workers: Vec<i64> = (0..5)
+        .map(|_| fixture.agent(PROJECT, "sub", "codex", "working"))
+        .collect();
+    for n in 0..STATUS_EVENTS_MAX {
+        let text = format!("event-{n:02} {}", "x".repeat(EVENT_TEXT_BYTES_MAX - 12));
+        let worker = workers[usize::try_from(n).unwrap() % workers.len()];
+        assert!(
+            record(
+                connection,
+                &project(),
+                worker,
+                None,
+                EventKind::Finished,
+                &text,
+                10 + n
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+    let told = status(connection, &project()).unwrap().text();
+    assert!(
+        told.len() <= crate::team::tool::REPLY_TEXT_MAX,
+        "{} bytes",
+        told.len()
+    );
+    assert_eq!(
+        crate::team::bound_text(&told, crate::team::tool::REPLY_TEXT_MAX),
+        told
+    );
+    assert!(
+        told.contains(&format!("event-{:02} ", STATUS_EVENTS_MAX - 1)),
+        "the newest event reaches the master"
+    );
+    assert!(!told.contains("event-00 "), "the oldest event is left out");
+    assert_eq!(
+        told.lines().filter(|line| line.starts_with("- ")).count(),
+        FINISHED_LISTED_MAX,
+        "the finished list stays whole"
+    );
+    let left = told
+        .lines()
+        .find(|line| line.ends_with(" older events left out to fit this reply."))
+        .unwrap_or_else(|| panic!("no left-out line in {told}"));
+    let count: i64 = left.split(' ').next().unwrap().parse().unwrap();
+    let shown = told
+        .lines()
+        .filter(|line| line.starts_with("[team] "))
+        .count();
+    assert_eq!(count + i64::try_from(shown).unwrap(), STATUS_EVENTS_MAX);
+}
+
+fn research_job(fixture: &Fixture, project: &str, status: &str) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms) VALUES (?1,'market','codex',0,?2,1)",
+            params![project, status],
+        )
+        .unwrap();
+}
+
+fn at_work(project: &str, agents: i64) -> ProjectWorking {
+    ProjectWorking {
+        project_id: ProjectId::new(project).unwrap(),
+        agents,
+    }
+}
+
+#[test]
+fn working_list_counts_agents_at_work_and_running_research_as_a_project_card_does() {
+    let fixture = Fixture::new();
+    fixture.agent(PROJECT, "master", "claude-code", "working");
+    fixture.agent(PROJECT, "sub", "codex", "working");
+    fixture.agent(PROJECT, "sub", "codex", "working");
+    for status in ["idle", "starting", "stopped"] {
+        fixture.agent(PROJECT, "sub", "codex", status);
+    }
+    research_job(&fixture, PROJECT, "running");
+    for status in ["queued", "needs_pool", "done"] {
+        research_job(&fixture, PROJECT, status);
+    }
+    research_job(&fixture, OTHER, "running");
+    fixture.agent("team-quiet", "sub", "codex", "idle");
+
+    let view = app(&fixture.connection).unwrap();
+
+    assert_eq!(view.working, [at_work(PROJECT, 4), at_work(OTHER, 1)]);
+}
+
+#[test]
+fn working_list_stops_at_its_bound_and_fits_one_reply_beside_a_full_unseen_list() {
+    let fixture = Fixture::new();
+    let long = |at: i64| format!("{}-{at:03}", "p".repeat(124));
+    assert_eq!(long(0).len(), 128);
+    assert!(
+        ProjectId::new("p".repeat(129)).is_err(),
+        "128 bytes is the longest legal id"
+    );
+    for at in 0..=WORKING_PROJECTS_MAX {
+        fixture.agent(&long(at), "sub", "codex", "working");
+    }
+    for at in 0..=UNSEEN_PROJECTS_MAX {
+        let team = ProjectId::new(long(at)).unwrap();
+        escalate(
+            &fixture.connection,
+            &team,
+            "Spend on a new provider?",
+            at + 1,
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    let view =
+        app(&fixture.connection).expect("both full lists fit one reply at the longest legal ids");
+
+    assert_eq!(view.working.len() as i64, WORKING_PROJECTS_MAX);
+    assert_eq!(view.projects.len() as i64, UNSEEN_PROJECTS_MAX);
+    assert!(super::super::encoded_len(&view).unwrap() <= super::super::STATUS_REPLY_BYTES_MAX);
+}
+
+#[test]
+fn working_list_missing_from_an_older_engines_reply_reads_as_none_at_work() {
+    let mut reply = serde_json::to_value(AppEvents::default()).unwrap();
+    reply.as_object_mut().unwrap().remove("working");
+    let read: AppEvents = serde_json::from_value(reply).unwrap();
+    assert!(read.working.is_empty());
+}
+
+/// SECAUDIT coord-delivery-raw-body-forges-owner-line r2: each of the seven line breaks opens
+/// a quoted line, in the whole quote and in the quote after a first line.
+#[test]
+fn each_of_the_seven_breaks_opens_a_quoted_line() {
+    for line_break in [
+        '\n', '\r', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}',
+    ] {
+        let text = format!("a{line_break}b");
+        assert_eq!(quoted_lines(&text), format!("> a{line_break}> b"));
+        assert_eq!(quoted_after_first_line(&text), format!("a{line_break}> b"));
+    }
 }

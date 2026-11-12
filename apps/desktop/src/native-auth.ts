@@ -3,13 +3,42 @@ import { displayText } from "./screens/conversation";
 
 export type NativeAuthMethod = "codex_browser" | "codex_device_code" | "codex_existing" | "claude_official" | "claude_existing";
 export type NativeAuthCommand = NativeAuthMethod | "read" | "cancel" | "logout";
+export type SignInWay = "browser" | "code" | "check";
+export const SIGN_IN_WAYS: readonly SignInWay[] = ["browser", "code", "check"];
+export const CHECK_SIGN_IN = "Check this account's sign-in";
+const SIGN_IN_METHODS: Readonly<Record<string, Partial<Record<SignInWay, NativeAuthMethod>>>> = {
+  codex: { browser: "codex_browser", code: "codex_device_code", check: "codex_existing" },
+  claude: { browser: "claude_official", check: "claude_existing" },
+};
+
+/** Maps one harness-agnostic sign-in way to the managed sign-in that harness runs for it,
+ * mirroring the engine's NativeAuthMethod::for_way (DEC-141). Inputs: the engine harness name
+ * ("codex", "claude") and the way. Output: the method, or undefined when the harness has none. */
+export function signInMethodFor(harness: string, way: SignInWay): NativeAuthMethod | undefined {
+  return Object.hasOwn(SIGN_IN_METHODS, harness) ? SIGN_IN_METHODS[harness]![way] : undefined;
+}
+
+/** Names the way a managed sign-in method belongs to. Input: the method. Output: browser,
+ * code or check. */
+export function signInWay(method: NativeAuthMethod): SignInWay {
+  return method === "codex_device_code" ? "code" : method === "codex_existing" || method === "claude_existing" ? "check" : "browser";
+}
+
+/** Says why a harness cannot run a sign-in way, mirroring SignInWay::unavailable in the engine.
+ * Inputs: the engine harness name and the way. Output: the sentence, or undefined when the
+ * harness runs it. */
+export function signInWayUnavailable(harness: string, way: SignInWay): string | undefined {
+  if (signInMethodFor(harness, way)) return undefined;
+  return harness === "claude" && way === "code" ? "Claude Code has no sign-in code. It signs in through your browser."
+    : "This account kind has no managed sign-in.";
+}
 export type NativeAuthAction = { kind: "sign_in"; method: NativeAuthMethod } | { kind: "logout" };
 export type NativeAuthPhase = "starting" | "awaiting_owner" | "checking_account" |
   "authenticated_observed" | "unauthenticated_observed" | "cancelling" |
   "failed" | "cancelled" | "unavailable" | "uncertain";
 type StatusField = { state: "missing" } | { state: "null" } | { state: "value"; text: string };
 type Challenge = { kind: "codex_browser"; auth_url: string } |
-  { kind: "codex_device_code"; user_code: string; verification_url: string } |
+  { kind: "codex_device_code"; user_code: string; verification_url: string; left_s?: number | null } |
   { kind: "claude_official"; auth_url: string; accepts_code: boolean; prompt_id: "1" | null };
 type Account = { kind: "codex_api_key" } |
   { kind: "codex_chatgpt"; email: string | null; plan_type: string } |
@@ -57,6 +86,7 @@ export interface NativeAuthState {
   presentation?: NativeAuthView;
   confirming_logout: boolean;
   error?: string;
+  running_account_name?: string;
   invalidated?: boolean;
   rebound?: boolean;
   recover?: boolean;
@@ -69,7 +99,7 @@ export interface NativeAuthState {
 type Event = { kind: "open"; detail: ModelAccessDetail; navigation: number } |
   { kind: "begin"; action: NativeAuthCommand; request: number } |
   { kind: "reply"; navigation: number; request: number; reply: NativeAuthView } |
-  { kind: "failure"; navigation: number; request: number; code: string } |
+  { kind: "failure"; navigation: number; request: number; code: string; account?: string } |
   { kind: "claude_input_begin"; request: number } |
   { kind: "claude_input_accepted" | "claude_input_failure"; navigation: number; request: number } |
   { kind: "close" | "invalidate" | "confirm_logout" | "back" };
@@ -116,9 +146,7 @@ export function nativeAuthAllowed(state: NativeAuthState, action: NativeAuthComm
   }
   if (nativeAuthActive(state)) return false;
   if (action === "logout") return state.confirming_logout;
-  return state.context.harness === "codex" ?
-    action === "codex_browser" || action === "codex_device_code" || action === "codex_existing" :
-    state.context.harness === "claude" && action === "claude_official";
+  return SIGN_IN_WAYS.some((way) => signInMethodFor(state.context.harness, way) === action);
 }
 
 function actionFor(command: NativeAuthCommand): NativeAuthAction | undefined {
@@ -166,6 +194,8 @@ export function safeChallenge(challenge: Challenge): boolean {
   }
   const fields = challenge.kind === "codex_browser" ? [challenge.auth_url] :
     challenge.kind === "codex_device_code" ? [challenge.user_code, challenge.verification_url] : [];
+  if (challenge.kind === "codex_device_code" && challenge.left_s != null &&
+    !(Number.isInteger(challenge.left_s) && challenge.left_s >= 0 && challenge.left_s <= 900)) return false;
   return fields.length > 0 && fields.every((value) => typeof value === "string" &&
     !/[\u0000-\u001f\u007f-\u009f]/u.test(value) &&
     !/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(value));
@@ -222,10 +252,10 @@ function receipt(state: NativeAuthState, reply: NativeAuthView): NativeAuthState
     presentation: state.open && state.valid && !error ? reply : undefined };
 }
 
-function failed(state: NativeAuthState, code: string): NativeAuthState {
+function failed(state: NativeAuthState, code: string, account?: string): NativeAuthState {
   const action = state.in_flight && actionFor(state.in_flight.action);
   const recover = code === "native_auth_outcome_unknown_read_same_operation";
-  return { ...state, presentation: undefined, in_flight: undefined, error: code,
+  return { ...state, presentation: undefined, in_flight: undefined, error: code, running_account_name: account,
     recover: Boolean(state.recover || recover), recoverAction: action ?? state.recoverAction,
     recoveryContext: state.recoveryContext ?? state.context,
     valid: false, invalidated: true };
@@ -273,7 +303,7 @@ export function reduceNativeAuth(state: NativeAuthState | undefined,
   if (event.kind === "reply" || event.kind === "failure") {
     if (event.navigation !== state.context.navigation ||
       event.request !== state.in_flight?.request) return state;
-    if (event.kind === "failure") return failed(state, event.code);
+    if (event.kind === "failure") return failed(state, event.code, event.account);
     if (!matchesReply(state, event.reply)) {
       return failed(state, "native_auth_outcome_unknown_read_same_operation");
     }
@@ -298,6 +328,8 @@ export function nativeAuthError(code: string): string {
       return "Private code delivery is uncertain. Read or Cancel the original operation. Do not submit the code again.";
     case "native_auth_claude_input_invalid":
       return "Paste the complete code and state shown by the official Claude sign-in page.";
+    case "owner_busy":
+      return "CrazyAgent is busy with other requests. Try again in a moment.";
     default:
       return "The native authentication action is unavailable. " +
         "Refresh Settings and inspect its reason.";
@@ -317,9 +349,18 @@ export function nativeAuthFailureCode(error: unknown): string {
     "native_profile_identity_bounds", "native_profile_identity_changed",
     "native_profile_identity_invalid",
     "native_profile_capacity", "native_profile_new_home_not_empty", "native_profile_in_use",
-    "native_profile_lock_unavailable", "owner_queue_not_submitted",
+    "native_profile_lock_unavailable", "owner_queue_not_submitted", "owner_busy",
     "native_auth_identity_unavailable",
-    "native_auth_cannot_display_safely", "native_auth_presentation_limit"];
+    "native_auth_cannot_display_safely", "native_auth_presentation_limit",
+    "native_auth_sign_in_running"];
   return typeof code === "string" && allowed.includes(code) ? code :
     "native_auth_outcome_unknown_read_same_operation";
+}
+
+/** The account whose sign-in still runs, from a bridge refusal that names it.
+ * Input: the rejection value. Output: the account id, or undefined for any other failure. */
+export function nativeAuthRunningAccount(error: unknown): string | undefined {
+  if (nativeAuthFailureCode(error) !== "native_auth_sign_in_running") return undefined;
+  const account = typeof error === "object" && error !== null && "account" in error ? error.account : undefined;
+  return typeof account === "string" && account !== "" ? account : undefined;
 }

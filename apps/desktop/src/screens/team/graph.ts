@@ -1,8 +1,9 @@
-import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, type MessageEdge, type OverlapEdge, type Presence, type Receipt, type TeamAgentStatus, type TeamGraph } from "../../engine-client";
+import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, type MessageEdge, type OverlapEdge, type Presence, type LiveAction, type Receipt, type RelationEdge, type TeamAgentStatus, type TeamGraph } from "../../engine-client";
 import type { Tone } from "../../ui";
+import { elapsed } from "../project/research";
 
-export const CARD_WIDTH = 216;
-export const CARD_HEIGHT = 132;
+export const CARD_WIDTH = 176;
+export const CARD_HEIGHT = 96;
 export const CARD_GAP = 16;
 export const LEVEL_GAP = 72;
 export const ROW_GAP = 40;
@@ -10,11 +11,12 @@ export const LEAF_COLUMNS_MAX = 4;
 export const ARC_RISE = 40;
 export const MARGIN = 24;
 export const NODES_MAX = 64;
-export const BADGE_WIDTH = 120;
+export const BADGE_WIDTH = CARD_WIDTH;
 export const BADGE_HEIGHT = 24;
+export const LIVE_LABEL_WIDTH_MAX = 2 * CARD_WIDTH;
 export const TITLE_CHARS = 22;
 export const LINE_CHARS = 30;
-export const TASK_LINES = 2;
+export const TASK_LINES = 1;
 export const TIP_CHARS = 1000;
 export const TIP_HALF = 160;
 export const TIP_GAP = 8;
@@ -41,15 +43,17 @@ export const VIEW_HOME: View = { x: 0, y: 0, zoom: 1 };
 export interface PlacedCard extends Box { node: GraphNode }
 
 /** The solid assignment line from a lead's card down to one card it leads, with its badge
- * above that card: the live tasks the card's agent runs, the questions it waits on, and the
- * messages the lead sent it that are still unread, with the newest one's receipt, unless the
- * card's agent fires no hooks and has none. Unread messages the other way, to the lead, arc
- * like any other pair's. */
+ * row above that card: the pair's label, live while an action happens on it, then the live
+ * tasks the card's agent runs, the questions it waits on, and the messages the lead sent it
+ * that are still unread, with the newest one's receipt, unless the card's agent fires no hooks
+ * and has none. Unread messages the other way, to the lead, arc like any other pair's. */
 export interface Link {
   from: string;
   to: string;
   path: string;
   badge: Point;
+  label: string;
+  live: boolean;
   tasks: number;
   questions: number;
   unread: number;
@@ -254,9 +258,12 @@ export function layoutGraph(graph: TeamGraph): GraphLayout {
   const unread = (from: string, to: string) => (graph.messages ?? []).find((edge) => edge.from === from && edge.to === to && count(edge.unread) > 0);
   const link = (lead: PlacedCard, card: PlacedCard, path: string, badge: number) => {
     const message = unread(lead.node.id, card.node.id);
+    const pair = (graph.relations ?? []).find((item) => item.from === lead.node.id && item.to === card.node.id);
     links.push({
       from: lead.node.id, to: card.node.id, path,
       badge: { x: card.x + CARD_WIDTH / 2, y: badge },
+      label: pair ? edgeLabel(pair) : "",
+      live: pair !== undefined && liveShown(pair.live),
       tasks: edges.filter((edge) => live(edge) && edge.to === card.node.id).length,
       questions: questionCount(card.node),
       unread: message ? count(message.unread) : 0,
@@ -322,6 +329,32 @@ export function layoutGraph(graph: TeamGraph): GraphLayout {
  * Output: the cards in drawing order. */
 export function layoutCards(layout: GraphLayout): PlacedCard[] {
   return layout.cards;
+}
+
+const RELATION_WORDS = new Map([["leads", "leads"], ["delegated_to", "delegated to"], ["teammate_of", "teammate of"]]);
+const LIVE_ACTIONS = new Set(["handing_off", "messaging", "waiting_on", "reviewing"]);
+
+/** Whether a line shows a live action: one this build knows, so an action from a newer engine
+ * leaves the line on its relation. Input: the engine's live action. Output: true when shown. */
+function liveShown(live: LiveAction | null): live is LiveAction {
+  return live !== null && LIVE_ACTIONS.has(live.action);
+}
+
+/** The words one graph line shows, as the TUI tree shows them: the live action while it
+ * happens, a handoff naming its task's first line, a wait on the owner naming the owner's
+ * answer and a review the agent whose change set it reviews, else the relation. Input: the
+ * engine's relation edge. Output: the label, empty for a relation this build does not know. */
+export function edgeLabel(edge: RelationEdge): string {
+  const live = edge.live;
+  if (!liveShown(live)) return RELATION_WORDS.get(edge.relation) ?? "";
+  if (live.action === "messaging") return "messaging";
+  if (live.action === "waiting_on") return live.owner === true ? "waiting on: your answer" : "waiting on";
+  if (live.action === "reviewing") {
+    const name = typeof live.agent === "string" ? live.agent.split(/\s+/).filter(Boolean).join(" ") : "";
+    return name ? `reviewing: ${name}'s change set` : "reviewing: change set";
+  }
+  const task = live.task.split("\n").map((line) => line.split(/\s+/).filter(Boolean).join(" ")).find(Boolean);
+  return `handing off: ${task ?? "Untitled task"}`;
 }
 
 /** What a link's badges say to a screen reader. Input: the counts. Output: one phrase, empty
@@ -399,9 +432,15 @@ export function latestTask(node: GraphNode, edges: readonly GraphEdge[]): GraphE
 }
 
 /** The task line of a card: for the master, how many tasks are live and how many wait for an
- * agent; for an agent, its latest task, led by Done or Failed once it ended. Inputs: the node
- * and the edges. Output: the full line, before clipping. */
+ * agent; for an agent, its latest task, led by Done or Failed once it ended. Either is led by
+ * the file the node waits for under Wait (OS-8). Inputs: the node and the edges. Output: the
+ * full line, before clipping. */
 export function cardTask(node: GraphNode, edges: readonly GraphEdge[]): string {
+  const line = taskLine(node, edges);
+  return node.waits_for ? `Waiting for ${node.waits_for}. ${line}` : line;
+}
+
+function taskLine(node: GraphNode, edges: readonly GraphEdge[]): string {
   if (node.kind === "master") {
     const count = edges.filter(live).length;
     const waiting = edges.filter((edge) => live(edge) && edge.to === node.id).length;
@@ -412,22 +451,37 @@ export function cardTask(node: GraphNode, edges: readonly GraphEdge[]): string {
   return live(task) ? task.text : `${edgeStatus(task).word}: ${task.text}`;
 }
 
-/** The clipped text of one card: the title, the role, harness and account line, the branch
- * line when the agent has a branch, and up to `TASK_LINES` task lines. Inputs: the node, the
- * edges and a harness name lookup. Output: the card text. */
-export function cardText(node: GraphNode, edges: readonly GraphEdge[], harness?: (id: string) => string):
+/** The clipped text of one card: the title, the harness and account line, the branch line
+ * when the agent has a branch, and up to `TASK_LINES` task lines. Inputs: the node, the
+ * edges, the graph's nodes and a harness name lookup. Output: the card text. */
+export function cardText(node: GraphNode, edges: readonly GraphEdge[], nodes: readonly GraphNode[], harness?: (id: string) => string):
   { title: string; detail: string; branch: string | null; task: string[] } {
   const branch = node.branch?.trim();
   return {
     title: clipLines(node.label, TITLE_CHARS, 1)[0] ?? "",
-    detail: clipLines(nodeDetail(node, harness), LINE_CHARS, 1)[0] ?? "",
+    detail: clipLines(cardDetail(node, nodes, harness), LINE_CHARS, 1)[0] ?? "",
     branch: branch ? clipChars(branch, LINE_CHARS) : null,
     task: clipLines(cardTask(node, edges), LINE_CHARS, TASK_LINES),
   };
 }
 
+/** A card's second line, as the mockup words it: the harness and the account, a lead's
+ * harness followed by "lead", and a teammate named after its lead, or after its harness
+ * when the graph does not draw its lead. Inputs: the node, the graph's nodes and a harness
+ * name lookup. Output: the line, before clipping. */
+export function cardDetail(node: GraphNode, nodes: readonly GraphNode[], harness: (id: string) => string = (id) => id): string {
+  assert(Array.isArray(nodes), "a card reads the graph's nodes");
+  const lead = node.kind === "teammate" ? nodes.find((item) => item.id === node.parent && item.id !== node.id) : undefined;
+  if (lead) return `Teammate of ${lead.label}`;
+  const name = harness(node.harness);
+  assert(typeof name === "string", "a harness lookup gives a name");
+  const role = node.kind === "lead" ? `${name} lead` : node.kind === "teammate" ? `${name} teammate` : name;
+  return [role, node.account?.trim() || null].filter(Boolean).join(" · ");
+}
+
 /** The full text a card shows on hover: title, role line, branch, status and presence, that
- * its receipts and adoption are unavailable when its launch fires no hooks, why it waits on
+ * its receipts are unavailable when its launch fires no hooks, the engine's sentence when the
+ * Delivery setting leaves it no way to get messages, why it waits on
  * the owner, the messages it has not read and who sent them, its claim overlaps, its task and
  * the reply once it came, each kept to `TIP_CHARS`. Inputs: the node, the graph and a harness
  * name lookup. Output: the lines. */
@@ -443,7 +497,8 @@ export function cardTip(node: GraphNode, graph: TeamGraph, harness?: (id: string
     nodeDetail(node, harness),
     node.branch?.trim() ? `Branch ${node.branch.trim()}` : undefined,
     status || undefined,
-    node.hookless ? `Receipts and adoption ${HOOKLESS_WORDS}.` : undefined,
+    node.hookless ? `Receipts ${HOOKLESS_WORDS}.` : undefined,
+    node.message_note ?? undefined,
     waitingOnOwner(node)?.sentence,
     ...unread,
     ...overlaps,
@@ -559,13 +614,6 @@ export function edgeStatus(edge: GraphEdge): { word: string; tone: Tone } {
   return EDGE_WORDS[edge.state];
 }
 
-/** One line naming an agent or the master with its harness and status, such as
- * "Ada (@onboarding-fix) · Claude Code · working". Inputs: the node and a harness display
- * name lookup. Output: the line; a node without a status leaves that part out. */
-export function nodeLine(node: GraphNode, harness: (id: string) => string = (id) => id): string {
-  const status = nodeStatus(node);
-  return [node.label, harness(node.harness), status?.word.toLowerCase()].filter(Boolean).join(" · ");
-}
 
 const ROLE_WORDS: Record<GraphNode["kind"], string> = {
   master: "Master",
@@ -574,12 +622,28 @@ const ROLE_WORDS: Record<GraphNode["kind"], string> = {
   teammate: "Teammate",
 };
 
+/** A node's place in the tree as one word, such as "Sub-agent", and "Agent" for a kind an
+ * older or newer engine sends that this build does not know. Input: the node. Output: the word. */
+export function nodeRole(node: Pick<GraphNode, "kind">): string {
+  return Object.hasOwn(ROLE_WORDS, node.kind) ? ROLE_WORDS[node.kind] : "Agent";
+}
+
+/** How long the node's running task has run, as a terminal head says it, such as
+ * "running 14 min". Inputs: the node and now, in ms. Output: the words, or null while it
+ * runs no task or the engine does not say when its task started. */
+export function nodeRunning(node: Pick<GraphNode, "started_ms">, now: number): string | null {
+  const started = node.started_ms;
+  if (started === undefined || started === null) return null;
+  if (!Number.isSafeInteger(started)) throw new Error(`a task starts at a whole ms: ${started}`);
+  if (!Number.isFinite(now)) throw new Error(`now is a time in ms: ${now}`);
+  return `running ${elapsed(now - started)}`;
+}
+
 /** The second line of a node box: its place in the tree, its harness and its account, such
  * as "Lead, Claude Code, Work". Inputs: the node and a harness display name lookup. Output:
  * one short line; a node with no account leaves that part out. */
 export function nodeDetail(node: GraphNode, harness: (id: string) => string = (id) => id): string {
-  const role = Object.hasOwn(ROLE_WORDS, node.kind) ? ROLE_WORDS[node.kind] : "Agent";
-  return [role, harness(node.harness), node.account?.trim() || null].filter(Boolean).join(", ");
+  return [nodeRole(node), harness(node.harness), node.account?.trim() || null].filter(Boolean).join(", ");
 }
 
 /** Puts each node's account name in place of the engine's account id, so the graph names
@@ -594,6 +658,17 @@ export function namedAccounts(graph: TeamGraph, account: (id: string) => string)
 export function graphLive(graph: TeamGraph): boolean {
   return graph.nodes.some((node) => node.status === "starting" || node.status === "working")
     || graph.edges.some(live);
+}
+
+/** The team part of the Agents toolbar line, as the mockup words it: "Master and 5 agents",
+ * then how many of them the drawing leaves out. Inputs: the graph and the layout's hidden
+ * count. Output: the words. */
+export function teamLine(graph: TeamGraph, hidden = 0): string {
+  const agents = graph.nodes.filter((node) => node.kind !== "master").length;
+  if (!Number.isSafeInteger(hidden) || hidden < 0) throw new Error(`a hidden count is a whole number: ${hidden}`);
+  if (hidden > agents) throw new Error(`the drawing hides ${hidden} of ${agents} agents`);
+  const team = agents === 0 ? "Master, no agents yet" : `Master and ${plural(agents, "agent")}`;
+  return hidden > 0 ? `${team} · ${hidden} not shown` : team;
 }
 
 /** The one line under the graph title: how many agents work, how many tasks are live and how

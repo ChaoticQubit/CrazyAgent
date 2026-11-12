@@ -144,3 +144,103 @@ fn a_prompt_is_typed_as_one_submission_whatever_the_pane_mode() {
     );
     assert_eq!(keys(&"x".repeat(PROMPT_BYTES_MAX + 1), false), None);
 }
+
+/// PLCC-L1: a lead's start marks its teammates' server pin pending, so a record that is
+/// missing or names another socket refuses every server instead of trusting the first to
+/// answer. A pid at the record's bound is read and one past the largest is refused.
+#[cfg(unix)]
+#[test]
+fn a_teammates_server_pin_record_missing_or_for_another_socket_refuses_every_server() {
+    let root = tempfile::tempdir().unwrap();
+    let lead = AgentId::team(1).unwrap();
+    let record = crate::team::runtime::agent_teammates_server_pid(&root.path().join("team"), 1);
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    let earlier = renew_teammates_socket(root.path(), &lead).unwrap();
+    keep_teammates_server_pid(root.path(), &lead, &earlier, 4242).unwrap();
+    let latest = renew_teammates_socket(root.path(), &lead).unwrap();
+    let refused = || Err(failure(OWN_SERVER_UNAVAILABLE));
+    assert_eq!(
+        teammates_server_pid(root.path(), &lead, &earlier),
+        refused(),
+        "a socket the latest start did not name"
+    );
+    let name = latest.file_name().unwrap().to_str().unwrap();
+    let old = earlier.file_name().unwrap().to_str().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&record).unwrap(),
+        format!("{name} pending")
+    );
+    for text in [
+        format!("{old} 7"),
+        format!("{old} pending"),
+        format!("{name} Pending"),
+        format!("{name} pendin"),
+        format!("{name} pending "),
+        format!("{name} 4294967296"),
+    ] {
+        std::fs::write(&record, &text).unwrap();
+        assert_eq!(
+            teammates_server_pid(root.path(), &lead, &latest),
+            refused(),
+            "{text:?}"
+        );
+    }
+    std::fs::write(&record, format!("{name} 4294967295")).unwrap();
+    assert_eq!(
+        teammates_server_pid(root.path(), &lead, &latest),
+        Ok(Some(4_294_967_295))
+    );
+    std::fs::remove_file(&record).unwrap();
+    assert_eq!(
+        teammates_server_pid(root.path(), &lead, &latest),
+        refused(),
+        "a missing record"
+    );
+}
+
+/// A native lead's teammates' server pid record (PLC c PC-L1) is read back for the socket it
+/// was kept for, holds nothing for a later start's socket, and refuses every server once it
+/// is damaged or swapped for a link.
+#[cfg(unix)]
+#[test]
+fn a_teammates_server_pid_record_is_read_for_its_own_socket_and_refused_once_damaged() {
+    let root = tempfile::tempdir().unwrap();
+    let lead = AgentId::team(1).unwrap();
+    let record = crate::team::runtime::agent_teammates_server_pid(&root.path().join("team"), 1);
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    let earlier = renew_teammates_socket(root.path(), &lead).unwrap();
+    assert_eq!(teammates_server_pid(root.path(), &lead, &earlier), Ok(None));
+    keep_teammates_server_pid(root.path(), &lead, &earlier, 4242).unwrap();
+    assert_eq!(
+        teammates_server_pid(root.path(), &lead, &earlier),
+        Ok(Some(4242))
+    );
+    let latest = renew_teammates_socket(root.path(), &lead).unwrap();
+    assert_eq!(teammates_server_pid(root.path(), &lead, &latest), Ok(None));
+
+    let name = latest.file_name().unwrap().to_str().unwrap();
+    for text in [
+        format!("{name} "),
+        format!("{name} 0"),
+        format!("{name} +7"),
+        format!("{name} 7 8"),
+        format!("{name} 99999999999"),
+        format!("{name}7"),
+        "teammates-x.sock 7".into(),
+    ] {
+        std::fs::write(&record, &text).unwrap();
+        assert_eq!(
+            teammates_server_pid(root.path(), &lead, &latest),
+            Err(failure(OWN_SERVER_UNAVAILABLE)),
+            "{text:?}"
+        );
+    }
+    std::fs::remove_file(&record).unwrap();
+    let elsewhere = root.path().join("elsewhere.pid");
+    std::fs::write(&elsewhere, format!("{name} 7")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &record).unwrap();
+    assert_eq!(
+        teammates_server_pid(root.path(), &lead, &latest),
+        Err(failure(OWN_SERVER_UNAVAILABLE))
+    );
+}

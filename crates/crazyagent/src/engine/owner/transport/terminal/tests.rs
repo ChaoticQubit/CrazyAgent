@@ -170,3 +170,68 @@ fn an_owner_prompt_counts_as_an_owner_key_as_typed_keys_do() {
     assert_eq!(keyed(8), Some(at));
     assert_eq!((keyed(9), keyed(10)), (None, None));
 }
+
+/// OB-10: what a terminal view sends by itself is not the owner typing, so an answer
+/// waiting for an idle live master is never held back by it. Wheel keys a full-screen app
+/// reads, focus in and out as the owner switches tabs, and mouse reports set no owner key;
+/// an arrow key the owner presses still does.
+#[test]
+fn wheel_keys_and_a_views_own_reports_never_count_as_owner_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("engine.db");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    crate::team::initialize(&connection).unwrap();
+    let typing = OwnerTyping::new(database.clone());
+    let input = |bytes: &[u8]| TerminalRequest::Input {
+        bytes: bytes.to_vec(),
+    };
+    let requests = [
+        (
+            11,
+            TerminalRequest::Scroll {
+                bytes: b"\x1b[A\x1b[A\x1bOB".to_vec(),
+            },
+        ),
+        (12, input(b"\x1b[I")),
+        (13, input(b"\x1b[O\x1b[I\x1b[O")),
+        (14, input(b"\x1b[<65;10;5M\x1b[<0;3;4m")),
+        (15, input(b"\x1b[M`!!")),
+        (16, input(b"\x1b[A")),
+        (17, input(b"\x1b[Ix")),
+        (
+            18,
+            TerminalRequest::Scroll {
+                bytes: b"\x1b[Ayes\r".to_vec(),
+            },
+        ),
+    ];
+    let at = crate::team::now_ms();
+    for (agent, request) in &requests {
+        if let Some(keys) = owner_keys(request) {
+            typing.record(*agent, keys, at);
+        }
+    }
+    let keyed = |agent: i64| owner_key_ms(&connection, Some(&typing), agent).unwrap();
+    assert_eq!(keyed(11), None, "a wheel turn is not the owner typing");
+    assert_eq!(
+        (keyed(12), keyed(13)),
+        (None, None),
+        "focus reports a view sends as the owner switches tabs are not keys"
+    );
+    assert_eq!(
+        (keyed(14), keyed(15)),
+        (None, None),
+        "mouse reports are not keys"
+    );
+    assert_eq!(
+        keyed(16),
+        Some(at),
+        "an arrow key the owner presses still holds engine input"
+    );
+    assert_eq!(keyed(17), Some(at), "a key typed beside a report counts");
+    assert_eq!(
+        keyed(18),
+        Some(at),
+        "a wheel request carrying other keys counts as the owner typing (OB10-L1)"
+    );
+}

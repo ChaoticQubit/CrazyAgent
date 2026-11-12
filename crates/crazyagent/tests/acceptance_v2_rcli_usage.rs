@@ -149,6 +149,7 @@ fn rcli_bundle() -> PathBuf {
 fn scanning_harness() -> (&'static str, PathBuf) {
     let found = crazyagent::paths::resolve_harnesses(
         Harnesses::default(),
+        &crazyagent::harnesses::Search::from_environment(),
         std::env::var_os("PATH").as_deref(),
         None,
     );
@@ -413,6 +414,7 @@ fn token_count((input, cached, output): (u64, u64, u64)) -> String {
                 "input_tokens": input,
                 "cached_input_tokens": cached,
                 "output_tokens": output,
+                "total_tokens": input + output,
             }},
         },
     })

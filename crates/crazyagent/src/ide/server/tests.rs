@@ -1,4 +1,8 @@
 use super::*;
+use crate::ide::workspace::{IdePolicy, ide_policy};
+use crate::sandbox::policy::{
+    AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, IdeAgentFiles,
+};
 use crate::sandbox::{ProjectSandbox, SandboxNetwork};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -39,6 +43,7 @@ fn servers_in(data: &Path, idle: Duration) -> Servers {
         START_LIMIT,
         Arc::default(),
         data.join("engine").join("owner.sock"),
+        None,
     )
 }
 
@@ -145,7 +150,7 @@ async fn ide_server_listens_only_on_loopback() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("loopback");
     let info = servers
-        .open(&project, checkout.path(), &cached_build(), false)
+        .open(&project, checkout.path(), &cached_build())
         .await
         .unwrap();
     let group = servers.group(&project).unwrap();
@@ -172,7 +177,7 @@ async fn ide_server_listens_only_on_loopback() {
     );
     assert_eq!(
         servers
-            .open(&project, checkout.path(), &cached_build(), false)
+            .open(&project, checkout.path(), &cached_build())
             .await
             .unwrap(),
         info
@@ -191,7 +196,7 @@ async fn request_without_the_token_is_refused() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("refused");
     let info = servers
-        .open(&project, checkout.path(), &cached_build(), false)
+        .open(&project, checkout.path(), &cached_build())
         .await
         .unwrap();
     let host = format!("127.0.0.1:{}", info.port);
@@ -268,7 +273,7 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     let project = project("token");
     let build = cached_build();
     let first = servers
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     let folder = servers.project_folder(&project).unwrap();
@@ -289,7 +294,7 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     assert!(servers.stop(&project).await);
     assert!(!first.token_path.exists());
     let second = servers
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     assert_eq!(second.token_path, first.token_path);
@@ -356,6 +361,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("CRAZYAGENT_IDE_CAPABILITY_FILE", "/private/tmp/forged"),
         ("CRAZYAGENT_IDE_SOCKET", "/private/tmp/forged.sock"),
         ("CRAZYAGENT_IDE_LOCKED_FILE", "/private/tmp/forged-locks"),
+        ("CRAZYAGENT_IDE_ACCESS", "full"),
         ("CODEX_HOME", "/private/tmp/codex"),
         ("GIT_ASKPASS", "/private/tmp/askpass"),
         ("NODE_OPTIONS", "--require /private/tmp/evil.js"),
@@ -366,6 +372,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
         ("GIT_CONFIG_VALUE_0", "/private/tmp/evil-monitor"),
         ("GIT_CEILING_DIRECTORIES", "/private/tmp/forged-ceiling"),
+        ("GIT_CONFIG_GLOBAL", "/private/tmp/forged-config"),
     ];
     let source = given
         .iter()
@@ -374,7 +381,19 @@ fn server_env_holds_only_allowlisted_names() {
     let socket = Path::new("/private/tmp/data/engine/owner.sock");
     let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
     let ceiling = std::ffi::OsStr::new("/private/tmp/project/.crazyagent/worktrees");
-    let built = env::server_env(source, capability, socket, locked, ceiling);
+    let git_config = Path::new("/private/tmp/ide/project/gitconfig");
+    let git = env::ServerGit {
+        ceiling,
+        config: git_config,
+    };
+    let built = env::server_env(
+        source,
+        capability,
+        socket,
+        locked,
+        AgentAccess::OwnBranch,
+        Some(git),
+    );
     assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
@@ -397,6 +416,7 @@ fn server_env_holds_only_allowlisted_names() {
         "/private/tmp/ide/project/capability",
     ));
     expected.push((env::SOCKET_VARIABLE, "/private/tmp/data/engine/owner.sock"));
+    expected.push((env::ACCESS_VARIABLE, "own_branch"));
     expected.push((
         crate::ide::settings::LOCKED_VARIABLE,
         "/private/tmp/ide/project/locked-settings.json",
@@ -406,15 +426,20 @@ fn server_env_holds_only_allowlisted_names() {
         "/private/tmp/project/.crazyagent/worktrees",
     ));
     expected.extend(crate::ide::git::CONFIG_ENV);
+    expected.push(("GIT_CONFIG_GLOBAL", "/private/tmp/ide/project/gitconfig"));
+    expected.push(("GIT_CONFIG_NOSYSTEM", "1"));
     expected.sort();
     assert_eq!(seen, expected);
     assert!(seen.contains(&("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules")));
     assert!(seen.iter().all(|(name, _)| {
         env::allowed(std::ffi::OsStr::new(name))
+            || *name == env::ACCESS_VARIABLE
             || *name == env::CAPABILITY_VARIABLE
             || *name == env::SOCKET_VARIABLE
             || *name == crate::ide::settings::LOCKED_VARIABLE
             || *name == crate::ide::git::CEILING_VARIABLE
+            || *name == "GIT_CONFIG_GLOBAL"
+            || *name == "GIT_CONFIG_NOSYSTEM"
             || crate::ide::git::CONFIG_ENV
                 .iter()
                 .any(|(fixed, _)| name == fixed)
@@ -434,7 +459,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     let project = project("ports");
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let first = servers
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     let folder = servers.project_folder(&project).unwrap();
@@ -448,7 +473,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     );
     assert!(servers.stop(&project).await);
     let again = servers
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     assert_eq!(
@@ -461,7 +486,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", first.server_port)).unwrap();
     let restarted = servers_in(data.path(), IDLE_LIMIT);
     let moved = restarted
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     assert_ne!(moved.server_port, first.server_port);
@@ -476,7 +501,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     drop(held);
     assert!(restarted.stop(&project).await);
     let kept = restarted
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     assert_eq!(kept.server_port, moved.server_port);
@@ -495,21 +520,96 @@ async fn the_hooks_switch_reaches_the_git_shim_through_open() {
     let project = project("hooks");
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let root = fs::canonicalize(checkout.path()).unwrap();
-    servers.open(&project, &root, &build, true).await.unwrap();
+    set_policy(data.path(), &project, AgentAccess::Sandboxed, true);
+    servers.open(&project, &root, &build).await.unwrap();
     let folder = servers.project_folder(&project).unwrap();
     let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
     let on = fs::read_to_string(&shim).unwrap();
-    assert_eq!(on, crate::ide::git::shim_text(Some(&root)).unwrap());
-    assert_ne!(on, crate::ide::git::SHIM_TEXT);
+    assert_eq!(
+        on,
+        crate::ide::git::shim_text(
+            Some(&root),
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
+    );
+    assert_ne!(
+        on,
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
+    );
     assert!(
         on.contains(&format!("if [ \"$(pwd -P)\" = '{}' ]", root.display())),
         "{on}"
     );
     assert!(servers.stop(&project).await);
-    servers.open(&project, &root, &build, false).await.unwrap();
+    set_policy(data.path(), &project, AgentAccess::Sandboxed, false);
+    servers.open(&project, &root, &build).await.unwrap();
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::SHIM_TEXT
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
+    );
+    servers.stop_all().await;
+}
+
+/// `open` leaves the git lookup, which runs xcrun on a Mac without the Command Line Tools,
+/// to a blocking thread: the test's single async thread never makes it, and the shim it
+/// feeds still names the same git (FZ7-R1-L1).
+#[tokio::test]
+async fn open_looks_up_the_ides_git_off_the_async_thread() {
+    let checkout = scratch();
+    let data = scratch();
+    let build = cached_build();
+    let project = project("lookup");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    crate::research::runner::SANDBOXED_GIT_LOOKUPS.set(0);
+    servers.open(&project, &root, &build).await.unwrap();
+    assert_eq!(
+        crate::research::runner::SANDBOXED_GIT_LOOKUPS.get(),
+        0,
+        "the async thread looked up git itself"
+    );
+    let folder = servers.project_folder(&project).unwrap();
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    assert_eq!(
+        fs::read_to_string(&shim).unwrap(),
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
     );
     servers.stop_all().await;
 }
@@ -522,7 +622,7 @@ async fn idle_server_stops_after_the_idle_limit() {
     let servers = servers_in(data.path(), idle);
     let project = project("idle");
     let info = servers
-        .open(&project, checkout.path(), &cached_build(), false)
+        .open(&project, checkout.path(), &cached_build())
         .await
         .unwrap();
     let group = servers.group(&project).unwrap();
@@ -550,7 +650,7 @@ async fn idle_server_stops_after_the_idle_limit() {
 /// pending its launch cannot have passed `ready`. Inputs: the register, the project, the
 /// checkout and the build. Output: the cut launch's process group.
 async fn cut_open(servers: &Servers, project: &ProjectId, checkout: &Path, build: &Path) -> i32 {
-    let open = servers.open(project, checkout, build, false);
+    let open = servers.open(project, checkout, build);
     tokio::pin!(open);
     let deadline = Instant::now() + START_LIMIT;
     loop {
@@ -603,7 +703,7 @@ async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
     assert!(present(cut));
 
     let info = servers
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     let group = servers.group(&project).unwrap();
@@ -614,7 +714,7 @@ async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
         "the new launch, which passed its port check, holds the server port"
     );
     let again = servers
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     assert_eq!(again, info, "a ready launch is handed back");
@@ -636,6 +736,7 @@ async fn an_open_cut_while_its_server_starts_stops_at_its_start_limit_well_befor
         CUT_START_LIMIT,
         Arc::default(),
         data.path().join("engine").join("owner.sock"),
+        None,
     );
     let project = project("cut-start");
     let group = cut_open(&servers, &project, checkout.path(), &cached_build()).await;
@@ -668,7 +769,7 @@ async fn an_open_waits_for_an_extension_preparation_still_running_on_its_folder(
     });
     held.recv().unwrap();
     let build = cached_build();
-    let open = servers.open(&project, checkout.path(), &build, false);
+    let open = servers.open(&project, checkout.path(), &build);
     tokio::pin!(open);
     let deadline = Instant::now() + PREPARATION_HELD;
     while Instant::now() < deadline {
@@ -710,7 +811,7 @@ async fn no_ide_server_process_survives_engine_stop() {
     let project = project("engine-stop");
     let servers = service.owner_runtime().unwrap().ide_servers();
     let info = servers
-        .open(&project, checkout.path(), &cached_build(), false)
+        .open(&project, checkout.path(), &cached_build())
         .await
         .unwrap();
     assert!(
@@ -760,10 +861,10 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .unwrap();
         let crashed = servers_in(&left, IDLE_LIMIT);
         let info = runtime
-            .block_on(crashed.open(&name, &opened, &path, false))
+            .block_on(crashed.open(&name, &opened, &path))
             .unwrap();
         runtime
-            .block_on(crashed.open(&other, &other_opened, &path, false))
+            .block_on(crashed.open(&other, &other_opened, &path))
             .unwrap();
         let group = crashed.group(&name).unwrap();
         let other_group = crashed.group(&other).unwrap();
@@ -793,7 +894,7 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .exists()
     );
     let info = servers
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     let leader = Pid::from_raw(old_group).unwrap();
@@ -816,7 +917,7 @@ async fn the_server_log_never_holds_the_token() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("log");
     let info = servers
-        .open(&project, checkout.path(), &cached_build(), false)
+        .open(&project, checkout.path(), &cached_build())
         .await
         .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
@@ -862,7 +963,7 @@ async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("page");
     let info = servers
-        .open(&project, checkout.path(), &build, false)
+        .open(&project, checkout.path(), &build)
         .await
         .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
@@ -977,7 +1078,7 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("socket");
     let info = servers
-        .open(&project, checkout.path(), &cached_build(), false)
+        .open(&project, checkout.path(), &cached_build())
         .await
         .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
@@ -1016,6 +1117,223 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     servers.stop_all().await;
 }
 
+/// One project's real server launch, for running its git without starting the server.
+/// Inputs: the register, the project and its folder. Output: the command the engine built
+/// and the project's IDE folder.
+fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command, PathBuf) {
+    let folder = servers.prepare(project).unwrap();
+    let (token_path, _) = token::issue(&folder).unwrap();
+    let info = ServerInfo {
+        url: "http://127.0.0.1:47963/".to_owned(),
+        port: 47_963,
+        server_port: 47_961,
+        token_path,
+        capability_path: folder.join(CAPABILITY),
+        workspace: folder.join(WORKSPACE),
+    };
+    let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
+    let built = command(
+        Launch {
+            project,
+            build: &cached_build(),
+            folder: &folder,
+            root,
+            socket: &servers.socket,
+            policy: ide_policy(servers.folder.parent().unwrap(), project).unwrap(),
+            kept_ports: &[],
+        },
+        &info,
+        writer,
+    )
+    .unwrap();
+    (built, folder)
+}
+
+/// Runs git as a built IDE server starts it: the engine's shim under the server's installed
+/// profile and environment, with the owner's home as `HOME`, as the app has it. Inputs: the
+/// built command, the IDE folder, the owner's home, the working folder and git's arguments.
+/// Output: git's output.
+fn server_git(
+    built: &Command,
+    folder: &Path,
+    owner: &Path,
+    cwd: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    let mut git = sandbox::command(&folder.join(sandbox::PROFILE), &shim);
+    git.args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .envs(
+            built
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .env("HOME", owner)
+        .envs(crate::ide::bridge::engine_step::forwarder_env(
+            &folder.join(SERVER_DATA),
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::ide::bridge::engine_step::output_with_engine(&mut git, &folder.join(SERVER_DATA), cwd)
+}
+
+/// An owner home holding git config files the IDE profile denies: `.gitconfig` with an
+/// identity whose name needs quoting, and git's default ignore and attributes files. Output:
+/// the folder.
+fn owner_home_with_git_config() -> tempfile::TempDir {
+    let home = scratch();
+    fs::write(
+        home.path().join(".gitconfig"),
+        "[user]\n\tname = \"Dana \\\"Q\\\" O\\\\wner\"\n\temail = dana@example.invalid\n",
+    )
+    .unwrap();
+    let xdg = home.path().join(".config").join("git");
+    fs::create_dir_all(&xdg).unwrap();
+    fs::write(xdg.join("ignore"), "*.denied\n").unwrap();
+    fs::write(xdg.join("attributes"), "*.denied binary\n").unwrap();
+    home
+}
+
+/// Makes an owner repository holding one uncommitted file, with none of the owner's config.
+/// Input: its folder.
+fn owner_repository(root: &Path) {
+    let mut init = Command::new(crate::research::runner::setup_git());
+    init.args(["init", "-q"])
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    assert!(
+        crate::spawn_gate::output(&mut init)
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(root.join("a.txt"), "owner\n").unwrap();
+}
+
+/// Git dies on a user config it may not read instead of treating it as missing, which the
+/// owner saw as "Git not found" in every project: with the owner's real home as `HOME`, every
+/// git the IDE server starts reads a config its profile allows.
+#[test]
+fn the_servers_git_runs_beside_a_config_the_profile_denies_in_the_owners_home() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let (built, folder) = built_server(&servers, &project("denied-config"), &root);
+    for args in [&["--version"][..], &["status", "--porcelain"]] {
+        let output = server_git(&built, &folder, owner.path(), &root, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// A commit made from the IDE carries the name and email of the owner's own git config,
+/// which the engine hands the server because the server may not read it, and git's default
+/// ignore file in the owner's home, denied too, draws no warning.
+#[test]
+fn a_commit_from_the_ide_carries_the_name_and_email_of_the_owners_config() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let (built, folder) = built_server(&servers, &project("owner-identity"), &root);
+    crate::ide::git::write_global(&folder, &root, Some(owner.path())).unwrap();
+    let run = |args: &[&str]| server_git(&built, &folder, owner.path(), &root, args);
+    let status = run(&["status", "--porcelain"]);
+    let said = String::from_utf8_lossy(&status.stderr).into_owned();
+    assert!(status.status.success(), "{said}");
+    assert!(!said.contains("unable to access"), "{said}");
+    for args in [&["add", "a.txt"][..], &["commit", "-q", "-m", "first"]] {
+        let output = run(args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let log = run(&["log", "-1", "--format=%an <%ae>"]);
+    assert_eq!(
+        String::from_utf8_lossy(&log.stdout).trim(),
+        "Dana \"Q\" O\\wner <dana@example.invalid>"
+    );
+}
+
+/// The git config the engine writes for the server is read only to it: neither git nor a
+/// direct write from inside the server's profile changes the file.
+#[test]
+fn the_server_cannot_change_the_git_config_the_engine_wrote_for_it() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let (built, folder) = built_server(&servers, &project("config-read-only"), &root);
+    crate::ide::git::write_global(&folder, &root, Some(owner.path())).unwrap();
+    let config = folder.join(crate::ide::git::GLOBAL_CONFIG);
+    let before = fs::read(&config).unwrap();
+    let git = server_git(
+        &built,
+        &folder,
+        owner.path(),
+        &root,
+        &["config", "--global", "core.editor", "changed"],
+    );
+    assert!(
+        !git.status.success(),
+        "{}",
+        String::from_utf8_lossy(&git.stderr)
+    );
+    let mut shell = sandbox::command(&folder.join(sandbox::PROFILE), Path::new("/bin/sh"));
+    shell
+        .args(["-c", &format!("printf x >> '{}'", config.display())])
+        .current_dir(&root)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let write = crate::spawn_gate::output(&mut shell).unwrap();
+    let said = String::from_utf8_lossy(&write.stderr).into_owned();
+    assert!(!write.status.success(), "{said}");
+    assert!(said.contains("Operation not permitted"), "{said}");
+    assert_eq!(fs::read(&config).unwrap(), before);
+}
+
+/// Git's default attributes file in the owner's home, which the server's profile denies,
+/// draws no warning from the server's git. The same git pointed back at that file does warn,
+/// so the row fails if the engine's config stops naming `/dev/null`.
+#[test]
+fn the_servers_git_draws_no_warning_from_the_owners_denied_attributes_file() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let (built, folder) = built_server(&servers, &project("denied-attributes"), &root);
+    crate::ide::git::write_global(&folder, &root, Some(owner.path())).unwrap();
+    let run = |args: &[&str]| server_git(&built, &folder, owner.path(), &root, args);
+    let denied = owner.path().join(".config").join("git").join("attributes");
+    let default = format!("core.attributesFile={}", denied.display());
+    let control = run(&["-c", &default, "check-attr", "-a", "a.txt"]);
+    assert!(
+        String::from_utf8_lossy(&control.stderr).contains("unable to access"),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let quiet = run(&["check-attr", "-a", "a.txt"]);
+    let said = String::from_utf8_lossy(&quiet.stderr).into_owned();
+    assert!(quiet.status.success(), "{said}");
+    assert!(!said.contains("unable to access"), "{said}");
+}
+
 /// The git ceiling one built server command hands the IDE server. Inputs: the register,
 /// the project and its folder. Output: the value.
 fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsString {
@@ -1031,14 +1349,22 @@ fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsStr
     };
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
     let command = command(
-        project,
-        &cached_build(),
-        &folder,
-        root,
+        Launch {
+            project,
+            build: &cached_build(),
+            folder: &folder,
+            root,
+            socket: &servers.socket,
+            policy: IdePolicy {
+                access: AgentAccess::Sandboxed,
+                network: AgentNetwork::Open,
+                hooks: false,
+                agent_files: Default::default(),
+            },
+            kept_ports: &[],
+        },
         &info,
-        &servers.socket,
         writer,
-        false,
     )
     .unwrap();
     let ceiling = command
@@ -1213,14 +1539,22 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
     let socket = data.path().join("engine").join("owner.sock");
     let command = command(
-        &project,
-        &build,
-        &folder,
-        checkout.path(),
+        Launch {
+            project: &project,
+            build: &build,
+            folder: &folder,
+            root: checkout.path(),
+            socket: &socket,
+            policy: IdePolicy {
+                access: AgentAccess::Sandboxed,
+                network: AgentNetwork::Open,
+                hooks: false,
+                agent_files: Default::default(),
+            },
+            kept_ports: &[],
+        },
         &info,
-        &socket,
         writer,
-        false,
     )
     .unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
@@ -1361,10 +1695,11 @@ async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
         START_LIMIT,
         Arc::clone(&grants),
         socket,
+        None,
     );
     let project = project("built-in");
     let info = servers
-        .open(&project, checkout.path(), &cached_build(), false)
+        .open(&project, checkout.path(), &cached_build())
         .await
         .unwrap();
     let extensions = servers.project_folder(&project).unwrap().join(EXTENSIONS);
@@ -1404,7 +1739,7 @@ async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
         "a stopped server's capability is revoked"
     );
     let again = servers
-        .open(&project, checkout.path(), &cached_build(), false)
+        .open(&project, checkout.path(), &cached_build())
         .await
         .unwrap();
     let renewed = capability_packet(&again.capability_path);
@@ -1443,4 +1778,897 @@ async fn a_start_stops_waiting_once_stop_all_began() {
             .0,
         "ide_server_stopped"
     );
+}
+
+/// A project's IDE stays refused until the last Delete everything holding it ends, and the
+/// open then goes on to its next check.
+#[tokio::test]
+async fn a_projects_ide_stays_refused_until_its_last_delete_hold_ends() {
+    let folder = scratch();
+    let servers = servers_in(folder.path(), Duration::from_secs(60));
+    let held = project("held");
+    let open = || servers.open(&held, folder.path(), folder.path());
+    let first = servers.hold_for_delete(&held).await;
+    let second = servers.hold_for_delete(&held).await;
+    drop(first);
+    assert_eq!(open().await.unwrap_err().0, "ide_project_deleting");
+    drop(second);
+    assert_eq!(open().await.unwrap_err().0, "ide_build_invalid");
+}
+
+/// A Delete everything counts its hold before its stop waits for the start lock, so an open
+/// that arrives while the stop waits is refused.
+#[tokio::test]
+async fn a_delete_hold_counts_before_its_stop_waits_for_the_start_lock() {
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let id = project("held-open");
+    let held = Arc::clone(&servers.slot(&id).unwrap().start)
+        .lock_owned()
+        .await;
+    let mut holding = std::pin::pin!(servers.hold_for_delete(&id));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut holding)
+            .await
+            .is_err(),
+        "the stop must wait for the start lock"
+    );
+    assert!(
+        servers.deleting(&id),
+        "an open arriving while the stop waits must be refused"
+    );
+    drop(held);
+    drop(holding.await);
+    assert!(!servers.deleting(&id));
+}
+
+/// A hold that lands while an open is still starting waits for that open and stops what it
+/// started, and the next open is refused.
+#[tokio::test]
+async fn a_delete_hold_landing_on_a_starting_open_stops_what_it_started() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let starting = project("starting");
+    let recorded = data.path().join("ide").join("starting").join(GROUP);
+    let build = cached_build();
+    let opening = servers.open(&starting, checkout.path(), &build);
+    let holding = async {
+        let deadline = Instant::now() + START_LIMIT;
+        let group = loop {
+            if let Some((group, _)) = recorded_group(&recorded) {
+                break group.as_raw_nonzero().get();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the launch never recorded its group"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        (group, servers.hold_for_delete(&starting).await)
+    };
+    let (opened, (group, hold)) = tokio::join!(opening, holding);
+    assert!(opened.is_ok(), "{opened:?}");
+    gone(group).await;
+    assert_eq!(
+        servers
+            .open(&starting, checkout.path(), &build)
+            .await
+            .unwrap_err()
+            .0,
+        "ide_project_deleting"
+    );
+    drop(hold);
+    servers.stop_all().await;
+}
+
+/// A timed-out open is dropped while its blocking work runs on, and that work writes the
+/// project's settings. The work keeps the start lock until it ends, so a retry waits for it
+/// instead of writing beside it, and the work never runs without the lock (ide-8 r1 sec F1).
+#[tokio::test]
+async fn a_dropped_open_keeps_the_start_lock_until_its_blocking_work_ends() {
+    let start = Arc::new(tokio::sync::Mutex::new(()));
+    let held = Arc::clone(&start).lock_owned().await;
+    let (entered, running) = tokio::sync::oneshot::channel();
+    let (finish, done) = std::sync::mpsc::channel::<()>();
+    let open = tokio::spawn(async move {
+        let mut held = Some(held);
+        holding_start(&mut held, move || {
+            entered.send(()).unwrap();
+            done.recv().unwrap();
+        })
+        .await
+    });
+    running.await.unwrap();
+    open.abort();
+    assert!(open.await.unwrap_err().is_cancelled());
+    assert!(
+        start.try_lock().is_err(),
+        "a retry must wait for the work a dropped open left running"
+    );
+    finish.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(GONE_WAIT, start.lock()).await.is_ok(),
+        "the lock is free once the work has ended"
+    );
+    let unlocked = tokio::spawn(async { holding_start(&mut None, || ()).await });
+    assert!(unlocked.await.unwrap_err().is_panic());
+}
+
+/// A blocking call that never returns holds its project's start lock. The engine's stop waits
+/// [`STOP_LEFTOVER_WAIT`] in all for such locks, however many there are, so the shutdown
+/// steps after it still run (ide-8 r2, rv-code L1 and sec F1).
+#[tokio::test]
+async fn stop_all_goes_on_past_leftovers_that_hold_their_start_locks() {
+    let data = scratch();
+    let servers = servers_in(data.path(), Duration::from_secs(60));
+    let mut held = Vec::new();
+    for name in ["hung-one", "hung-two"] {
+        let slot = servers.slot(&project(name)).unwrap();
+        held.push(Arc::clone(&slot.start).lock_owned().await);
+    }
+    let limit = STOP_LEFTOVER_WAIT + STOP_LEFTOVER_WAIT / 2;
+    assert!(
+        tokio::time::timeout(limit, servers.stop_all())
+            .await
+            .is_ok(),
+        "the engine's stop must go on past a hung leftover"
+    );
+    assert_eq!(held.len(), 2);
+}
+
+/// Only the guard keeps the lock of an open that was dropped, so a full table must still keep
+/// that slot: otherwise the project's retry gets a new lock and writes beside the leftover
+/// (ide-8 r2, sec F2).
+#[tokio::test]
+async fn a_full_table_keeps_the_slot_a_leftover_still_holds() {
+    let data = scratch();
+    let servers = servers_in(data.path(), Duration::from_secs(60));
+    let leftover = project("leftover");
+    let slot = servers.slot(&leftover).unwrap();
+    let held = Arc::clone(&slot.start).lock_owned().await;
+    drop(slot);
+    for index in 1..PROJECTS_MAX {
+        servers.slot(&project(&format!("filler-{index}"))).unwrap();
+    }
+    servers.slot(&project("one-more")).unwrap();
+    let retry = servers.slot(&leftover).unwrap();
+    assert!(
+        Arc::ptr_eq(&retry.start, tokio::sync::OwnedMutexGuard::mutex(&held)),
+        "a retry must wait on the leftover's lock"
+    );
+}
+
+/// A recorded server behind a start lock that stays held must still end with the engine. Its
+/// group goes, and its record, token and group file are removed once the wait runs out, so a
+/// leftover cannot make an IDE server outlive the engine (ide-10 r1, rv-code L1 and sec F1).
+#[tokio::test]
+async fn stop_all_ends_a_recorded_server_behind_a_held_start_lock() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let id = project("behind-lock");
+    servers
+        .open(&id, checkout.path(), &cached_build())
+        .await
+        .unwrap();
+    let group = servers.group(&id).unwrap();
+    let folder = servers.project_folder(&id).unwrap();
+    assert!(folder.join(token::FILE).is_file());
+    assert!(folder.join(GROUP).is_file());
+    let held = servers.slot(&id).unwrap().start.clone().lock_owned().await;
+    servers.stop_all().await;
+    gone(group).await;
+    assert_eq!(servers.group(&id), None, "the server stays on record");
+    assert!(!folder.join(token::FILE).exists(), "token left behind");
+    assert!(!folder.join(GROUP).exists(), "group file left behind");
+    drop(held);
+}
+
+/// Saves a project's access level in the engine database of a test data root, as the owner's
+/// Save does. Inputs: the data root, the project and the level.
+fn set_level(data: &Path, project: &ProjectId, access: AgentAccess) {
+    let db = crate::landing::open(data).unwrap();
+    let policy = AgentPolicy {
+        access,
+        ..AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+}
+
+/// Saves a project's access level and IDE hooks switch in the engine database of a test
+/// data root, as the owner's Save does. Inputs: the data root, the project, the level and
+/// the switch.
+fn set_policy(data: &Path, project: &ProjectId, access: AgentAccess, hooks: bool) {
+    let db = crate::landing::open(data).unwrap();
+    let policy = AgentPolicy {
+        access,
+        ide_git_hooks: hooks,
+        ..AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+}
+
+/// Saves a project's access level and agent folders choice in the engine database of a test
+/// data root, as the owner's Save does. Inputs: the data root, the project, the level and
+/// the choice.
+fn set_agent_files(data: &Path, project: &ProjectId, access: AgentAccess, choice: IdeAgentFiles) {
+    let db = crate::landing::open(data).unwrap();
+    let policy = AgentPolicy {
+        access,
+        ide_agent_files: choice,
+        ..AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+}
+
+/// Changes only the agent folders choice of a project's saved policy in a test data root.
+/// Inputs: the data root, the project and the choice.
+fn change_agent_files(data: &Path, project: &ProjectId, choice: IdeAgentFiles) {
+    let db = crate::landing::open(data).unwrap();
+    let mut policy = crate::sandbox::policy::load(&db, project.as_str()).unwrap();
+    policy.ide_agent_files = choice;
+    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+}
+
+/// Changes only the network choice of a project's saved policy in a test data root. Inputs:
+/// the data root, the project and the choice.
+fn set_network(data: &Path, project: &ProjectId, network: AgentNetwork) {
+    let db = crate::landing::open(data).unwrap();
+    let mut policy = crate::sandbox::policy::load(&db, project.as_str()).unwrap();
+    policy.network = network;
+    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+}
+
+/// Opens a project's server in a new checkout and data root at a saved level and hooks
+/// switch. Inputs: the project's name, the level and the switch. Output: the folders, the
+/// servers and the project.
+async fn open_at(
+    name: &str,
+    access: AgentAccess,
+    hooks: bool,
+) -> (tempfile::TempDir, tempfile::TempDir, Servers, ProjectId) {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project(name);
+    set_policy(data.path(), &id, access, hooks);
+    servers.open(&id, &root, &cached_build()).await.unwrap();
+    assert!(servers.group(&id).is_some());
+    (checkout, data, servers, id)
+}
+
+/// Runs git as a Full access server starts it: the engine's shim under no profile, with the
+/// built server's environment and a test owner's home as `HOME`. Inputs: the built command,
+/// the IDE folder, the owner's home, the working folder and git's arguments. Output: git's
+/// output.
+fn full_access_git(
+    built: &Command,
+    folder: &Path,
+    owner: &Path,
+    cwd: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    let mut git = Command::new(&shim);
+    git.args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .envs(
+            built
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .env("HOME", owner)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::spawn_gate::output(&mut git).unwrap()
+}
+
+#[test]
+fn a_project_with_no_saved_policy_opens_sandboxed() {
+    let data = scratch();
+    let policy = ide_policy(data.path(), &project("none")).unwrap();
+    assert_eq!(policy.access, AgentAccess::Sandboxed);
+}
+
+/// A saved policy that cannot be read stops the open and records no launch. The checkout
+/// stands in for the build, since the policy is read before a build is looked at.
+#[tokio::test]
+async fn a_saved_policy_that_cannot_be_read_never_reaches_a_launch() {
+    let (checkout, data) = (scratch(), scratch());
+    let bad = project("bad");
+    set_level(data.path(), &bad, AgentAccess::Full);
+    let db = crate::landing::open(data.path()).unwrap();
+    db.execute(
+        "UPDATE project_agent_policy SET body='tampered' WHERE project='bad'",
+        [],
+    )
+    .unwrap();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let refused = servers
+        .open(&bad, checkout.path(), checkout.path())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "ide_workspace_unavailable");
+    assert_eq!(servers.group(&bad), None);
+}
+
+/// A port on this machine that the settings rows name as the owner's local model.
+const LOCAL_MODEL_PORT: u16 = 47_011;
+
+/// The global settings of an owner with one local model connection on a port of this machine.
+/// Input: the port. Output: the file's text.
+fn local_model_settings(port: u16) -> String {
+    format!(
+        r#"version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["local-account"]
+connections = [{{ id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "http://127.0.0.1:{port}/v1" }}, model = {{ id = "qwen2.5:0.5b", author = "openai-compatible" }}, auth = {{ method = "none" }} }}]
+pools = [{{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }}]
+"#
+    )
+}
+
+/// The servers of an engine whose global settings hold `text`. Inputs: the data folder and the
+/// text. Output: the register.
+fn servers_reading(data: &Path, text: &str) -> Servers {
+    let global = data.join("global.toml");
+    fs::write(&global, text).unwrap();
+    Servers::new(
+        data,
+        IDLE_LIMIT,
+        START_LIMIT,
+        Arc::default(),
+        data.join("engine").join("owner.sock"),
+        Some((global, data.join("project.toml"))),
+    )
+}
+
+/// The owner's local model ports come from the engine's settings files.
+#[test]
+fn the_owners_local_model_ports_are_read_from_the_settings_files() {
+    let data = scratch();
+    let global = data.path().join("global.toml");
+    fs::write(&global, local_model_settings(LOCAL_MODEL_PORT)).unwrap();
+    let files = (global, data.path().join("project.toml"));
+    assert_eq!(
+        crate::ide::workspace::kept_ports(Some(&files)).unwrap(),
+        vec![LOCAL_MODEL_PORT]
+    );
+}
+
+/// Settings that cannot be read stop the start, which never goes on with no port kept.
+#[tokio::test]
+async fn a_settings_file_that_cannot_be_read_stops_the_start() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_reading(data.path(), "not = = toml");
+    let id = project("broken-settings");
+    let refused = servers
+        .open(&id, checkout.path(), checkout.path())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "ide_settings_unavailable");
+    assert_eq!(servers.group(&id), None);
+}
+
+/// A real open of an Own branch project keeps the owner's local model port in the profile the
+/// server runs under.
+#[tokio::test]
+async fn an_own_branch_server_keeps_the_owners_local_model_port_in_its_profile() {
+    let (checkout, data) = (scratch(), scratch());
+    let build = cached_build();
+    let id = project("kept");
+    set_level(data.path(), &id, AgentAccess::OwnBranch);
+    let servers = servers_reading(data.path(), &local_model_settings(LOCAL_MODEL_PORT));
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    servers.open(&id, &root, &build).await.unwrap();
+    let folder = servers.project_folder(&id).unwrap();
+    let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+    servers.stop_all().await;
+    let rule = format!("(local ip \"*:{LOCAL_MODEL_PORT}\")");
+    assert!(profile.contains(&rule), "{profile}");
+}
+
+#[test]
+fn a_saved_network_change_only_matters_at_own_branch() {
+    let at = |access, network| IdePolicy {
+        access,
+        network,
+        hooks: false,
+        agent_files: Default::default(),
+    };
+    let own = at(AgentAccess::OwnBranch, AgentNetwork::Open);
+    let sandboxed = at(AgentAccess::Sandboxed, AgentNetwork::Open);
+    let full = at(AgentAccess::Full, AgentNetwork::Open);
+    assert!(own.holds(own));
+    assert!(!own.holds(at(AgentAccess::OwnBranch, AgentNetwork::Https)));
+    assert!(!own.holds(sandboxed));
+    assert!(sandboxed.holds(at(AgentAccess::Sandboxed, AgentNetwork::None)));
+    assert!(full.holds(at(AgentAccess::Full, AgentNetwork::Https)));
+}
+
+/// DEC-124: a server launched under one agent folders choice no longer holds once the owner
+/// saves another below Full access, so the save restarts the project's IDE; at Full access,
+/// where no profile runs, the choice never restarts it.
+#[test]
+fn a_saved_agent_folders_change_only_matters_below_full_access() {
+    let at = |access, agent_files| IdePolicy {
+        access,
+        network: AgentNetwork::Open,
+        hooks: false,
+        agent_files,
+    };
+    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        for running in IdeAgentFiles::ALL {
+            for saved in IdeAgentFiles::ALL {
+                assert_eq!(
+                    at(access, running).holds(at(access, saved)),
+                    running == saved,
+                    "{access:?} {running:?} {saved:?}"
+                );
+            }
+        }
+    }
+    assert!(
+        at(AgentAccess::Full, IdeAgentFiles::AllowAll)
+            .holds(at(AgentAccess::Full, IdeAgentFiles::ReadOnly))
+    );
+}
+
+/// DEC-124: the agent folders choice the owner saved reaches the profile each launch
+/// installs below Full access, read from the engine database the way an open reads it;
+/// Allow all changes adds no rule. A project with a `.crazyagent` folder holds its agents
+/// root there, and one without, made before the projects home, also holds `<folder>/worktrees`,
+/// where the engine puts its agents, before any agent ran there (DEC-124 r1 M1).
+#[test]
+fn a_launch_profile_holds_the_saved_agent_folders_choice() {
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let protecting = [IdeAgentFiles::NoDeleteOrRename, IdeAgentFiles::ReadOnly];
+    for (layout, older_agents) in [("home", false), ("legacy", true)] {
+        let checkout = scratch();
+        let root = fs::canonicalize(checkout.path()).unwrap();
+        if !older_agents {
+            fs::create_dir(root.join(".crazyagent")).unwrap();
+        }
+        let rule = |choice| {
+            AgentFilesRule {
+                choice,
+                older_agents,
+            }
+            .seatbelt(&root)
+        };
+        for (index, choice) in IdeAgentFiles::ALL.into_iter().enumerate() {
+            for (level, access) in [("s", AgentAccess::Sandboxed), ("o", AgentAccess::OwnBranch)] {
+                let id = project(&format!("files-{layout}-{index}-{level}"));
+                set_agent_files(data.path(), &id, access, choice);
+                assert_eq!(ide_policy(data.path(), &id).unwrap().agent_files, choice);
+                let (_, folder) = built_server(&servers, &id, &root);
+                let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+                for held in protecting {
+                    assert!(!rule(held).is_empty());
+                    assert_eq!(
+                        profile.contains(&rule(held)),
+                        held == choice,
+                        "{layout} {choice:?} {access:?} {held:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// DEC-124 r1 M1: in a project with no `.crazyagent` folder, an agent folder the engine makes
+/// under `<folder>/worktrees` after the IDE opened keeps every file under No delete or rename,
+/// while the owner's own files stay removable.
+#[test]
+fn a_project_without_a_crazyagent_folder_holds_agents_started_after_its_ide_opened() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    assert_eq!(crate::projects_home::state_folder(&root), root);
+    let id = project("legacy-later-agent");
+    set_agent_files(
+        data.path(),
+        &id,
+        AgentAccess::Sandboxed,
+        IdeAgentFiles::NoDeleteOrRename,
+    );
+    let (_, folder) = built_server(&servers, &id, &root);
+    let agent = root.join("worktrees").join("agent-1");
+    fs::create_dir_all(&agent).unwrap();
+    let file = agent.join("a.txt");
+    fs::write(&file, "agent\n").unwrap();
+    let own = root.join("own.txt");
+    fs::write(&own, "owner\n").unwrap();
+    let removes = |path: &Path| {
+        let mut rm = sandbox::command(&folder.join(sandbox::PROFILE), Path::new("/bin/rm"));
+        rm.arg("-f")
+            .arg(path)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::spawn_gate::output(&mut rm).unwrap().status.success()
+    };
+    assert!(!removes(&file));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "agent\n");
+    assert!(removes(&own));
+    assert!(!own.exists());
+}
+
+#[test]
+fn a_full_access_launch_runs_the_launcher_with_no_seatbelt() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    set_level(data.path(), &project("full"), AgentAccess::Full);
+    let (built, _) = built_server(&servers, &project("full"), &root);
+    assert_ne!(built.get_program(), crate::sandbox::SANDBOX_EXEC);
+    assert!(built.get_program().to_string_lossy().ends_with(LAUNCHER));
+}
+
+/// A launch's profile follows the project's saved level: on the same Open choice a Sandboxed
+/// launch cannot reach a listener on this machine and an Own branch launch can.
+#[test]
+fn a_launch_builds_its_profile_at_the_projects_level() {
+    let (checkout, data) = (scratch(), scratch());
+    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let reaches = |level, name: &str| {
+        let id = project(name);
+        set_level(data.path(), &id, level);
+        let (_, folder) = built_server(&servers, &id, &root);
+        let mut probe = sandbox::command(&folder.join(sandbox::PROFILE), Path::new("/usr/bin/nc"));
+        probe
+            .args(["-z", "-G", "5", "127.0.0.1", &port])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::spawn_gate::output(&mut probe)
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(!reaches(AgentAccess::Sandboxed, "at-sandboxed"));
+    assert!(reaches(AgentAccess::OwnBranch, "at-own-branch"));
+}
+
+/// A launch tells the extension the project's saved level, in the words the terminal menu reads.
+#[test]
+fn a_launch_tells_the_extension_its_access_level() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let told = |level, name: &str| {
+        let id = project(name);
+        set_level(data.path(), &id, level);
+        let (built, _) = built_server(&servers, &id, &root);
+        built
+            .get_envs()
+            .find(|(variable, _)| *variable == env::ACCESS_VARIABLE)
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+    };
+    assert_eq!(
+        told(AgentAccess::Sandboxed, "told-sandboxed").as_deref(),
+        Some("sandboxed")
+    );
+    assert_eq!(
+        told(AgentAccess::OwnBranch, "told-own").as_deref(),
+        Some("own_branch")
+    );
+    assert_eq!(
+        told(AgentAccess::Full, "told-full").as_deref(),
+        Some("full")
+    );
+}
+
+/// Full access git is the owner's own: no forced key stops the project's hook or hides the
+/// owner's identity, and the shim's count line, which needs those keys, is not written.
+#[test]
+fn a_full_access_git_runs_the_projects_hook_with_the_owners_identity() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let hook = root.join(".git").join("hooks").join("pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, "#!/bin/sh\n: > hook-ran\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    set_level(data.path(), &project("full-git"), AgentAccess::Full);
+    let (built, folder) = built_server(&servers, &project("full-git"), &root);
+    let added = full_access_git(&built, &folder, owner.path(), &root, &["add", "a.txt"]);
+    assert!(added.status.success(), "{added:?}");
+    let args = ["commit", "-q", "-m", "owner"];
+    let committed = full_access_git(&built, &folder, owner.path(), &root, &args);
+    assert!(committed.status.success(), "{committed:?}");
+    assert!(root.join("hook-ran").exists());
+    let args = ["log", "-1", "--format=%an"];
+    let author = full_access_git(&built, &folder, owner.path(), &root, &args);
+    assert_eq!(
+        String::from_utf8_lossy(&author.stdout).trim(),
+        "Dana \"Q\" O\\wner"
+    );
+}
+
+/// A level change restarts the server at the next open. The row moves to Own branch so no
+/// lib test runs a real unconfined server under the test process's own home.
+#[tokio::test]
+async fn an_open_after_a_level_change_starts_a_new_server() {
+    let (checkout, data) = (scratch(), scratch());
+    let build = cached_build();
+    let moved = project("moved");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let first = servers.open(&moved, &root, &build).await.unwrap();
+    let token = fs::read_to_string(&first.token_path).unwrap();
+    let group = recorded_launch(&servers.project_folder(&moved).unwrap());
+    set_level(data.path(), &moved, AgentAccess::OwnBranch);
+    let second = servers.open(&moved, &root, &build).await.unwrap();
+    assert_ne!(token, fs::read_to_string(&second.token_path).unwrap());
+    gone(group).await;
+    servers.stop_all().await;
+}
+
+#[tokio::test]
+async fn a_saved_level_change_stops_the_running_server() {
+    let (_checkout, data, servers, id) = open_at("level", AgentAccess::Sandboxed, false).await;
+    set_level(data.path(), &id, AgentAccess::Full);
+    assert!(servers.follow_level(&id).await);
+    assert!(servers.group(&id).is_none());
+}
+
+/// A level saved while an open is still starting waits for that open under the start lock,
+/// so a launch that read the older level is judged once it is up and stopped
+/// (v21-ide-level-3 r1 F2).
+#[tokio::test]
+async fn a_level_saved_while_an_open_is_starting_stops_what_it_started() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let starting = project("starting");
+    set_policy(data.path(), &starting, AgentAccess::Sandboxed, false);
+    let recorded = data.path().join("ide").join("starting").join(GROUP);
+    let build = cached_build();
+    let opening = servers.open(&starting, checkout.path(), &build);
+    let following = async {
+        let deadline = Instant::now() + START_LIMIT;
+        let group = loop {
+            if let Some((group, _)) = recorded_group(&recorded) {
+                break group.as_raw_nonzero().get();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the launch never recorded its group"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        set_level(data.path(), &starting, AgentAccess::Full);
+        (group, servers.follow_level(&starting).await)
+    };
+    let (opened, (group, stopped)) = tokio::join!(opening, following);
+    assert!(opened.is_ok(), "{opened:?}");
+    assert!(stopped, "the launch that read the older level kept running");
+    gone(group).await;
+    assert!(servers.group(&starting).is_none());
+    servers.stop_all().await;
+}
+
+#[tokio::test]
+async fn a_save_that_keeps_the_level_leaves_the_server_running() {
+    let (_checkout, data, servers, id) = open_at("same", AgentAccess::Sandboxed, false).await;
+    set_level(data.path(), &id, AgentAccess::Sandboxed);
+    assert!(!servers.follow_level(&id).await);
+    assert!(servers.group(&id).is_some());
+    servers.stop_all().await;
+}
+
+#[tokio::test]
+async fn saving_hooks_off_stops_an_open_sandboxed_ide() {
+    let (_checkout, data, servers, id) = open_at("hooks", AgentAccess::Sandboxed, true).await;
+    set_policy(data.path(), &id, AgentAccess::Sandboxed, false);
+    assert!(servers.follow_level(&id).await);
+    assert!(servers.group(&id).is_none());
+}
+
+#[tokio::test]
+async fn saving_hooks_off_stops_an_open_own_branch_ide() {
+    let (_checkout, data, servers, id) = open_at("hooks", AgentAccess::OwnBranch, true).await;
+    set_policy(data.path(), &id, AgentAccess::OwnBranch, false);
+    assert!(servers.follow_level(&id).await);
+    assert!(servers.group(&id).is_none());
+}
+
+#[tokio::test]
+async fn a_hooks_change_leaves_a_full_access_ide_running() {
+    let (_checkout, data, servers, id) = open_at("wide", AgentAccess::Full, true).await;
+    set_policy(data.path(), &id, AgentAccess::Full, false);
+    assert!(!servers.follow_level(&id).await);
+    assert!(servers.group(&id).is_some());
+    servers.stop_all().await;
+}
+
+/// DEC-124 r1 L2: saving only another agent folders choice stops an open Sandboxed or Own
+/// branch IDE on a real server, its process group ends, and the next open installs a
+/// profile holding the new rule, which the first one did not.
+#[tokio::test]
+async fn an_agent_folders_change_restarts_an_open_ide_under_the_new_rule() {
+    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        let (checkout, data, servers, id) = open_at("files", access, false).await;
+        let root = fs::canonicalize(checkout.path()).unwrap();
+        let folder = servers.project_folder(&id).unwrap();
+        let group = recorded_launch(&folder);
+        let rule = crate::ide::workspace::agent_files_rule(
+            data.path(),
+            &id,
+            &root,
+            access,
+            IdeAgentFiles::ReadOnly,
+        )
+        .unwrap()
+        .seatbelt(&root);
+        assert!(!rule.is_empty());
+        let before = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+        assert!(!before.contains(&rule), "{access:?}");
+        change_agent_files(data.path(), &id, IdeAgentFiles::ReadOnly);
+        assert!(servers.follow_level(&id).await, "{access:?}");
+        assert!(servers.group(&id).is_none(), "{access:?}");
+        gone(group).await;
+        servers.open(&id, &root, &cached_build()).await.unwrap();
+        assert_ne!(recorded_launch(&folder), group, "{access:?}");
+        let after = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+        assert!(after.contains(&rule), "{access:?}");
+        servers.stop_all().await;
+    }
+}
+
+#[tokio::test]
+async fn a_network_change_stops_an_own_branch_ide() {
+    let (_checkout, data, servers, id) = open_at("net", AgentAccess::OwnBranch, false).await;
+    set_network(data.path(), &id, AgentNetwork::None);
+    assert!(servers.follow_level(&id).await);
+    assert!(servers.group(&id).is_none());
+}
+
+#[tokio::test]
+async fn a_network_change_leaves_a_sandboxed_ide_running() {
+    let (_checkout, data, servers, id) = open_at("net", AgentAccess::Sandboxed, false).await;
+    set_network(data.path(), &id, AgentNetwork::None);
+    assert!(!servers.follow_level(&id).await);
+    assert!(servers.group(&id).is_some());
+    servers.stop_all().await;
+}
+
+#[tokio::test]
+async fn a_network_change_leaves_a_full_access_ide_running() {
+    let (_checkout, data, servers, id) = open_at("net", AgentAccess::Full, false).await;
+    set_network(data.path(), &id, AgentNetwork::None);
+    assert!(!servers.follow_level(&id).await);
+    assert!(servers.group(&id).is_some());
+    servers.stop_all().await;
+}
+
+/// A saved policy that can no longer be read says nothing about what the server may do, so
+/// the server stops rather than keep the level it started under.
+#[tokio::test]
+async fn a_saved_policy_that_cannot_be_read_stops_the_running_server() {
+    let (_checkout, data, servers, id) = open_at("bad", AgentAccess::Sandboxed, false).await;
+    crate::landing::open(data.path())
+        .unwrap()
+        .execute(
+            "UPDATE project_agent_policy SET body='tampered' WHERE project=?1",
+            [id.as_str()],
+        )
+        .unwrap();
+    assert!(servers.follow_level(&id).await);
+    assert!(servers.group(&id).is_none());
+}
+
+/// Workspace trust stays off below Full access, where the sandbox limits the project's code,
+/// and is on at Full access, where nothing else does.
+#[test]
+fn only_a_full_access_launch_has_workspace_trust_on() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let (sandboxed, _) = built_server(&servers, &project("kept"), &root);
+    set_level(data.path(), &project("wide"), AgentAccess::Full);
+    let (full, _) = built_server(&servers, &project("wide"), &root);
+    assert!(
+        sandboxed
+            .get_args()
+            .any(|arg| arg == "--disable-workspace-trust")
+    );
+    assert!(
+        !full
+            .get_args()
+            .any(|arg| arg == "--disable-workspace-trust")
+    );
+}
+
+/// Only a Full access server gets a lineage token, the one its command carries; a confined
+/// server's processes stay in its sandbox.
+#[test]
+fn only_a_full_access_server_carries_a_lineage_token() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    set_level(data.path(), &project("wide"), AgentAccess::Full);
+    for (name, access) in [
+        ("kept", AgentAccess::Sandboxed),
+        ("wide", AgentAccess::Full),
+    ] {
+        let (mut built, _) = built_server(&servers, &project(name), &root);
+        let token = lineage_env(&mut built, access).unwrap();
+        assert_eq!(token.is_some(), access == AgentAccess::Full, "{name}");
+        let carried = built
+            .get_envs()
+            .find(|(key, _)| *key == LINEAGE_VARIABLE)
+            .and_then(|(_, value)| value)
+            .map(std::ffi::OsStr::to_owned);
+        assert_eq!(
+            carried,
+            token.map(|token| OsString::from(token.as_str())),
+            "{name}"
+        );
+    }
+}
+
+/// A Full access launch whose lineage could not be read, as a first follow whose listing
+/// failed keeps it, fails its stop's read and leaves UNLISTED for the next open, never
+/// none; a clean end leaves none (5b r1 rv-secreview L1).
+#[test]
+fn a_stop_whose_lineage_cannot_be_read_leaves_unlisted() {
+    let followed = Followed {
+        leader: std::process::id(),
+        token: LineageToken::new().unwrap(),
+        lineage: Mutex::new(Some(Err(Unstopped::Uncertain))),
+    };
+    let settled = followed.before_stop().and_then(Lineage::settle);
+    assert!(matches!(settled, Err(Unstopped::Uncertain)));
+    assert_eq!(left_names(settled).as_deref(), Some(leftovers::UNLISTED));
+    assert_eq!(left_names(Ok(())), None);
+}
+
+/// A process that carries a Full access launch's token but left its group, parent and
+/// session is named after the stop, for the next open only.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_full_access_stop_names_a_process_that_left_its_group() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let wide = project("left");
+    set_level(data.path(), &wide, AgentAccess::Full);
+    servers
+        .open(&wide, checkout.path(), &cached_build())
+        .await
+        .unwrap();
+    let token = servers
+        .lineage_token(&wide)
+        .expect("a Full access launch has a lineage token");
+    let (_, sleeper) = crate::harnesses::leftovers::tests::detached(
+        data.path(),
+        "left-sleeper",
+        &token,
+        ("CRAZYAGENT_TEST_IDE", "left"),
+    );
+    assert!(servers.stop(&wide).await);
+    let left = servers.left(&wide);
+    let _ = rustix::process::kill_process(Pid::from_raw(sleeper).unwrap(), Signal::KILL);
+    let left = left.expect("a process carrying the launch's token outlived the stop unnamed");
+    assert!(
+        left.split(", ")
+            .any(|named| named.starts_with(&format!("{sleeper} "))),
+        "{left}"
+    );
+    assert_eq!(servers.left(&wide), None, "the names are handed out once");
 }

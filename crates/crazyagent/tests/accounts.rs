@@ -1222,6 +1222,15 @@ async fn deleting_an_account_in_pools_takes_it_out_of_them_in_one_operation() {
             .collect::<Vec<_>>(),
         ["Staying"]
     );
+    assert_eq!(
+        listed[0].id, pools[0].members[0],
+        "the id a pool and its agents carry for an account is the id Accounts lists beside its name (OB-4)"
+    );
+    assert_ne!(
+        listed[0].name,
+        listed[0].id.as_str(),
+        "the name is the owner's word, never the id"
+    );
     let saved = std::fs::read_to_string(&fixture.global).unwrap();
     assert!(!saved.contains(leaving.id.as_str()));
     assert!(!saved.contains("solo-pool"));

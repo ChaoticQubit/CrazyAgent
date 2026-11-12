@@ -5,6 +5,14 @@ import { displayText } from "./screens/conversation";
 
 export type QuestionStatus = "pending" | "answered" | "dismissed" | "answered_in_terminal";
 
+/** How the owner answers a question: pick one option, pick any options, or write free text. */
+export type QuestionKind = "single" | "multi" | "text";
+
+/** Who closed a question when the owner did not answer or dismiss it in the Questions view:
+ * the master withdrew it, it was asked again as a choice, or the master reported the answer
+ * the owner typed in its terminal. */
+export type ClosedBy = "master" | "replaced" | "relay";
+
 /** One question an agent or an engine step asked the owner, as the engine recorded it. The
  * `version` goes back with an answer or a dismissal, so a question that changed since the
  * owner read it is refused as stale. */
@@ -13,15 +21,28 @@ export interface OwnerQuestion {
   project_id: string;
   asker: string;
   question: string;
+  kind: QuestionKind;
   options: string[];
   recommended: string | null;
   context: string | null;
   status: QuestionStatus;
   version: number;
   answer: string | null;
+  closed_by?: ClosedBy | null;
   created_ms: number;
   settled_ms: number | null;
 }
+
+/** What one "Dismiss all" did: the questions dismissed, the ones that changed since the owner
+ * read them, and each one refused with its code. */
+export interface QuestionsDismissed {
+  settled: number[];
+  stale: number[];
+  refused: { id: number; code: string }[];
+}
+
+/** The most questions one "Dismiss all" sends, one page of the list. */
+export const BULK_DISMISS_MAX = 50;
 
 /** One page of a project's questions; pass `next` back as `after` for the older ones. */
 export interface QuestionPage {
@@ -35,11 +56,35 @@ export interface QuestionCount {
   pending: number;
 }
 
-/** The owner's answer: one of the question's options by position, or typed text. */
-export type QuestionChoice = { option: number } | { text: string };
+/** The owner's answer: the picked options by position, in option order, and a comment. A
+ * pick, a comment or both are given; a text question takes the comment only. */
+export interface QuestionChoice {
+  picks: number[];
+  comment: string | null;
+}
 
+/** The last choice of every single and multi question; it opens the comment box. */
+export const COMMENT_LABEL = "Add a comment";
 export const ANSWER_BYTES_MAX = 4096;
+export const COMMENT_BYTES_MAX = 2048;
 export const OPTIONS_MAX = 6;
+
+/** Where a waiting question shows while the owner is on a project, besides the Questions tab:
+ * a pop-up on the Conversation tab, a pop-up on every project tab, or the Questions tab only. */
+export type QuestionsShown = "conversation" | "every" | "tab";
+export const QUESTIONS_SHOWN_DEFAULT: QuestionsShown = "conversation";
+export const QUESTIONS_SHOWN_CHOICES: { value: QuestionsShown; label: string }[] = [
+  { value: "conversation", label: "Pop-up on Conversation" },
+  { value: "every", label: "Pop-up on every tab" },
+  { value: "tab", label: "Questions tab only" },
+];
+
+/** Reads the stored Questions show choice. Input: the stored text, if any. Output: the
+ * choice, or `QUESTIONS_SHOWN_DEFAULT` for anything else. */
+export function questionsShown(stored: string | null): QuestionsShown {
+  const known = QUESTIONS_SHOWN_CHOICES.find((choice) => choice.value === stored);
+  return known ? known.value : QUESTIONS_SHOWN_DEFAULT;
+}
 
 /** What the owner reads when a question changed since it was shown. */
 export const STALE_LINE = "This question changed. Review it again.";
@@ -47,7 +92,7 @@ export const STALE_LINE = "This question changed. Review it again.";
 const REFUSALS: Record<string, string> = {
   questions_stale: STALE_LINE,
   questions_not_found: "This question is no longer there. The list shows what is left.",
-  questions_answer_invalid: `Pick one of the options, or write an answer of up to ${ANSWER_BYTES_MAX} bytes.`,
+  questions_answer_invalid: `Pick an option or add a comment. A comment can be up to ${COMMENT_BYTES_MAX} bytes with a pick, ${ANSWER_BYTES_MAX} on its own.`,
   questions_option_invalid: "That option isn't on this question. Review it again.",
   questions_text_invalid: "The answer has hidden characters CrazyAgent can't keep. Remove them, then answer again.",
   questions_project_missing: "This project is no longer in CrazyAgent.",
@@ -55,6 +100,7 @@ const REFUSALS: Record<string, string> = {
   questions_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
   questions_in_terminal: "This question was asked in an agent's terminal. Answer it there.",
   questions_delivery_full: "The master's conversation is full right now. Try again after it reads its messages.",
+  questions_bulk_invalid: `Dismiss between 1 and ${BULK_DISMISS_MAX} waiting questions at once.`,
   owner_authentication_failed: "CrazyAgent couldn't confirm this app with the engine. Restart the app, then try again.",
   owner_authority_unavailable: "The engine isn't ready for owner actions yet. Try again in a moment.",
   owner_busy: "The engine is busy with other owner requests. Try again in a moment.",
@@ -110,8 +156,14 @@ export function askedInTerminal(question: Pick<OwnerQuestion, "asker">): boolean
   return question.asker.startsWith("terminal:");
 }
 
-/** The status word and tone of a question's badge. Input: the status. Output: the badge. */
-export function statusBadge(status: QuestionStatus): { word: string; tone: "warn" | "ok" | "neutral" } {
+/** The status word and tone of a question's badge, naming the master when it closed the
+ * question. Inputs: the status and who closed it, if not the owner. Output: the badge. */
+export function statusBadge(status: QuestionStatus, closedBy: ClosedBy | null = null): { word: string; tone: "warn" | "ok" | "neutral" } {
+  if (status !== "pending") {
+    if (closedBy === "master") return { word: "Withdrawn by the master", tone: "neutral" };
+    if (closedBy === "replaced") return { word: "Asked again as a choice", tone: "neutral" };
+    if (closedBy === "relay") return { word: "Answered in the master's terminal", tone: "ok" };
+  }
   switch (status) {
     case "pending": return { word: "Waiting for you", tone: "warn" };
     case "answered": return { word: "Answered", tone: "ok" };
@@ -128,11 +180,12 @@ export function orderQuestions(questions: readonly OwnerQuestion[]): OwnerQuesti
   return [...pending, ...settled];
 }
 
-/** The typed answer as it is sent: trimmed, not blank and at most `ANSWER_BYTES_MAX` bytes.
- * Input: the field text. Output: the answer, or null when it cannot be sent. */
-export function typedAnswer(text: string): string | null {
+/** The typed answer as it is sent: trimmed, not blank and at most `max` bytes, by default
+ * `ANSWER_BYTES_MAX`. Inputs: the field text and the bound. Output: the answer, or null when
+ * it cannot be sent. */
+export function typedAnswer(text: string, max: number = ANSWER_BYTES_MAX): string | null {
   const answer = text.trim();
-  if (answer.length === 0 || new TextEncoder().encode(answer).length > ANSWER_BYTES_MAX) return null;
+  if (answer.length === 0 || new TextEncoder().encode(answer).length > max) return null;
   return answer;
 }
 
@@ -172,19 +225,39 @@ export function loadQuestions(projectId: string, after: number | null): Promise<
   return call<QuestionPage>("desktop_questions", { projectId, after });
 }
 
-/** Answers a pending question with one option or typed text. Inputs: the question id, the
+/** Answers a pending question with picks, a comment or both. Inputs: the question id, the
  * version the owner read and the choice. Output: ok once recorded, or the refusal; a
  * question that changed is `questions_stale`. */
 export function answerQuestion(id: number, version: number, choice: QuestionChoice): Promise<Result<void>> {
-  const option = "option" in choice ? choice.option : null;
-  const text = "text" in choice ? choice.text : null;
-  return call<void>("desktop_answer_question", { id, version, option, text });
+  return call<void>("desktop_answer_question", { id, version, picks: choice.picks, comment: choice.comment });
 }
 
 /** Dismisses a pending question; the asker is told once. Inputs: the question id and the
  * version the owner read. Output: ok once recorded, or the refusal. */
 export function dismissQuestion(id: number, version: number): Promise<Result<void>> {
   return call<void>("desktop_dismiss_question", { id, version });
+}
+
+/** Dismisses many pending questions at once; each asker is told once, as for one dismissal.
+ * Input: the questions, at most `BULK_DISMISS_MAX`, each with the version the owner read.
+ * Output: what happened to each, or the refusal. */
+export function dismissQuestions(questions: readonly Pick<OwnerQuestion, "id" | "version">[]): Promise<Result<QuestionsDismissed>> {
+  if (questions.length === 0 || questions.length > BULK_DISMISS_MAX) throw new Error("a Dismiss all sends 1 to 50 questions");
+  return call<QuestionsDismissed>("desktop_dismiss_questions", { items: questions.map((question) => [question.id, question.version]) });
+}
+
+/** What the confirm dialog of "Dismiss all" says. Input: how many questions it dismisses.
+ * Output: the line. */
+export function bulkDismissNote(count: number): string {
+  return `All ${count} waiting questions leave the list. Each agent that asked is told once and can ask again; a question asked in an agent's terminal still waits there.`;
+}
+
+/** What the owner reads after "Dismiss all". Input: the outcome. Output: the line. */
+export function bulkDismissedLine(outcome: QuestionsDismissed): string {
+  const parts = [`Dismissed ${outcome.settled.length} ${outcome.settled.length === 1 ? "question" : "questions"}.`];
+  if (outcome.stale.length > 0) parts.push(`${outcome.stale.length} changed since you read them. Review them again.`);
+  if (outcome.refused.length > 0) parts.push(`${outcome.refused.length} could not be dismissed: ${questionsRefusal(outcome.refused[0])}`);
+  return parts.join(" ");
 }
 
 /** Reads how many questions wait for the owner in each project. Output: the counts. */

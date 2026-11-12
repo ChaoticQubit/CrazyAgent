@@ -5,7 +5,7 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "master_rcli_capture_tests.rs"]
 mod capture_tests;
-use super::master_runtime::Capture;
+use super::master_runtime::{Capture, timed_out};
 use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::bootstrap::NativeProfileUsePurpose;
@@ -13,6 +13,7 @@ use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
     MasterTurnPhase, MasterTurnView, fitted_reply,
 };
+use crate::master_time_limit::minutes_of_cause;
 use crate::protocol::RequestId;
 use crate::rcli_host::RcliMasterStatus;
 use crate::storage::{MasterRuntimeObservation, PreparedMasterTurn};
@@ -27,13 +28,23 @@ use custody::RcliCustody;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// The code of an rcli master turn its run clock ended, the host's own code for it. Under a
+/// master time limit the stored cause names the limit instead (OB-5d).
+const TURN_DEADLINE: &str = "rcli_master_turn_deadline";
+
+/// Whether a turn's run clock ran out; never with no clock, the owner's choice of no master
+/// time limit (OB-5d). Input: the clock's end, if any. Output: the answer.
+fn late(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
 struct ActiveRcliMaster {
     custody: RcliCustody,
     capture: Capture,
     runtime: MasterRuntimeView,
     capture_ref: RequestId,
     generation: u64,
-    deadline: Instant,
+    deadline: Option<Instant>,
     reported: crate::usage::capture::Tokens,
 }
 
@@ -55,6 +66,46 @@ fn require_rcli_connection(connection: &ModelConnection) -> Result<(), EngineErr
     Ok(())
 }
 
+/// The engine code a failed rcli turn stops with. Input: the provider failure the host
+/// named, if any. Output: the code.
+fn failed_turn_code(failure: Option<crate::rcli_host::RcliProviderFailure>) -> &'static str {
+    match failure {
+        Some(crate::rcli_host::RcliProviderFailure::RateLimited) => "gateway_rate_limited",
+        Some(crate::rcli_host::RcliProviderFailure::QuotaExhausted) => "gateway_quota_exhausted",
+        Some(crate::rcli_host::RcliProviderFailure::InvalidAuthentication) => {
+            "gateway_invalid_authentication"
+        }
+        None => "rcli_master_execution_failed",
+    }
+}
+
+/// What an rcli master's instruction file holds. Inputs: the master's startup instruction
+/// and the owner's app and project instructions. Output: the file text.
+fn instruction_file_text(instructions: &str, given: crate::agent_home::Given) -> String {
+    let fitted = super::master_host_launch::fit_process(
+        instructions,
+        given,
+        crate::rcli_host::INSTRUCTIONS_BYTES_MAX,
+    );
+    let text = super::master_host_launch::master_prompt(instructions, &fitted.text);
+    assert!(text.len() <= crate::rcli_host::INSTRUCTIONS_BYTES_MAX);
+    assert!(text.starts_with(instructions));
+    text
+}
+
+/// What one rcli master turn's instruction file holds as things are now: the owner's app and
+/// project text is read again for every turn and put after the startup instruction, so a
+/// change made between turns reaches the next one, as RCLI keeps no session to resume
+/// (DEC-141 PA-18). Inputs: the startup instruction and the agent project. Output: the file
+/// text, or the read failure.
+fn turn_instruction_text(
+    instructions: &str,
+    project: &crate::agent_home::AgentProject,
+) -> Result<String, EngineError> {
+    let given = crate::agent_home::text(project).map_err(|problem| EngineError(problem.0))?;
+    Ok(instruction_file_text(instructions, given))
+}
+
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
         || error.0.split(';').any(|part| {
@@ -70,11 +121,9 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         return MasterRuntimeObservation::Disconnected;
     }
     let reason = match error.0.as_str() {
-        "rcli_master_output_limit" | "rcli_master_stderr_limit" | "codex_host_output_limit" => {
-            MasterReason::OutputLimit
-        }
+        "rcli_master_output_limit" | "codex_host_output_limit" => MasterReason::OutputLimit,
+        "rcli_master_empty_reply" => MasterReason::NoReply,
         "rcli_master_capture_incomplete"
-        | "rcli_master_empty_reply"
         | "rcli_master_message_order"
         | "rcli_master_turn_scope"
         | "rcli_master_truncated_event"
@@ -83,9 +132,9 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         | "master_capture_unavailable"
         | "master_capture_encoding" => MasterReason::CaptureIncomplete,
         "rcli_master_input_required" => MasterReason::ApprovalRequired,
-        "rcli_master_turn_deadline" | "master_runtime_budget_exhausted" => {
-            MasterReason::BudgetExhausted
-        }
+        "master_runtime_budget_exhausted" => MasterReason::BudgetExhausted,
+        TURN_DEADLINE => MasterReason::TimeLimit,
+        code if minutes_of_cause(code).is_some() => MasterReason::TimeLimit,
         "rcli_master_profile_changed"
         | "rcli_master_profile_mismatch"
         | "native_profile_binding_conflict"
@@ -109,7 +158,7 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         | "rcli_master_closed"
         | "native_profile_lock_unavailable"
         | "master_runtime_host_unavailable" => MasterReason::RuntimeUnavailable,
-        _ => MasterReason::Unknown,
+        _ => super::master_runtime::reason_for_error(error),
     };
     MasterRuntimeObservation::Failed {
         reason,
@@ -137,6 +186,7 @@ impl OwnerRuntimeHandle {
                 .await
             }
             Err(error) => {
+                let error = timed_out(error, prepared.time);
                 self.observe_master_turn(prepared, turn_id, rcli_failure_observation(&error))
                     .await?;
                 Err(error)
@@ -162,9 +212,9 @@ impl OwnerRuntimeHandle {
         resources
             .validate()
             .map_err(|_| failure("master_runtime_budget_exhausted"))?;
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(resources.wall_time_ms))
-            .ok_or_else(|| failure("master_runtime_budget_exhausted"))?;
+        let run_time = prepared.time.run_time();
+        let deadline = run_time.map(|time| Instant::now() + time);
+        assert_eq!(deadline.is_none(), prepared.time.minutes().is_none());
         let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let current = self
             .inspect_master_turn(
@@ -188,15 +238,14 @@ impl OwnerRuntimeHandle {
         if launch.binding.project_id != prepared.session.project_id
             || launch.binding.session_id != prepared.session.session_id
             || launch.binding.connection != prepared.attempt.connection
-            || launch.binding.target_profile_ref != prepared.session.selection.target_profile_ref
+            || launch.binding.target_profile_ref != prepared.attempt.request.target_profile_ref
             || launch.home_dir != profile.profile_path()?
             || launch.cwd != prepared.cwd
             || !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
         {
             return Err(failure("master_runtime_binding"));
         }
-        let given = crate::agent_home::text(&prepared.agent_project)
-            .map_err(|problem| EngineError(problem.0))?;
+        let text = turn_instruction_text(&prepared.instructions, &prepared.agent_project)?;
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
         let _folder =
@@ -213,14 +262,14 @@ impl OwnerRuntimeHandle {
             prepared.agent_project.trust,
             &prepared.hidden_paths,
         )?;
-        if !given.text.is_empty() {
+        if !text.is_empty() {
             launch.instructions = Some(super::master_host_launch::write_master_instructions(
                 &self.authority.root,
                 &runtime_ref,
-                &given.text,
+                &text,
             )?);
         }
-        assert_eq!(launch.instructions.is_some(), !given.text.is_empty());
+        assert_eq!(launch.instructions.is_some(), !text.is_empty());
         let capture = Capture::new(file, resources.output_bytes)?;
         let launching = self
             .inspect_master_turn(
@@ -243,15 +292,15 @@ impl OwnerRuntimeHandle {
             current.ordinal,
             NativeProfileUsePurpose::Execution,
         )?;
-        if Instant::now() >= deadline {
-            return Err(failure("master_runtime_budget_exhausted"));
+        if late(deadline) {
+            return Err(failure(TURN_DEADLINE));
         }
         let runtime = MasterRuntimeView {
             runtime_ref,
             artifact_sha256: launch.artifact_sha256.clone(),
             native_session_id: None,
         };
-        let custody = RcliCustody::launch(launch, sandbox, profile)?;
+        let custody = RcliCustody::launch(launch, sandbox, profile, run_time)?;
         let mut active = ActiveRcliMaster {
             custody,
             capture,
@@ -281,9 +330,9 @@ impl OwnerRuntimeHandle {
         }
         capture?;
         if matches!(&observed, Ok(MasterRuntimeObservation::Response { .. }))
-            && Instant::now() >= active.deadline
+            && late(active.deadline)
         {
-            return Err(failure("master_runtime_budget_exhausted"));
+            return Err(failure(TURN_DEADLINE));
         }
         observed
     }
@@ -299,8 +348,8 @@ impl OwnerRuntimeHandle {
         let mut prompted = false;
         let mut inspect_at = Instant::now();
         loop {
-            if Instant::now() >= active.deadline {
-                return Err(failure("master_runtime_budget_exhausted"));
+            if late(active.deadline) {
+                return Err(failure(TURN_DEADLINE));
             }
             if Instant::now() >= inspect_at {
                 let current = self.inspect_rcli_scope(prepared, turn_id, active).await?;
@@ -310,8 +359,9 @@ impl OwnerRuntimeHandle {
                 inspect_at = Instant::now() + INSPECT_INTERVAL;
             }
             let Some(observed) = active.custody.poll()? else {
-                tokio::time::sleep_until((Instant::now() + POLL_INTERVAL).min(active.deadline))
-                    .await;
+                let wake = Instant::now() + POLL_INTERVAL;
+                let wake = active.deadline.map_or(wake, |deadline| wake.min(deadline));
+                tokio::time::sleep_until(wake).await;
                 continue;
             };
             active.reported = active.reported.plus(observed.usage);
@@ -361,8 +411,11 @@ impl OwnerRuntimeHandle {
                     let text = completion
                         .reply
                         .ok_or_else(|| failure("rcli_master_empty_reply"))?;
-                    if text.trim().is_empty() || text.contains('\0') {
+                    if text.contains('\0') {
                         return Err(failure("rcli_master_capture_incomplete"));
+                    }
+                    if text.trim().is_empty() {
+                        return Err(failure("rcli_master_empty_reply"));
                     }
                     assert!(active.capture.sequence() > 0);
                     return Ok(MasterRuntimeObservation::Response {
@@ -379,7 +432,9 @@ impl OwnerRuntimeHandle {
                     });
                 }
                 RcliMasterStatus::Cancelled => return Ok(MasterRuntimeObservation::Cancelled),
-                RcliMasterStatus::Failed => return Err(failure("rcli_master_execution_failed")),
+                RcliMasterStatus::Failed => {
+                    return Err(failure(failed_turn_code(completion.failure)));
+                }
             }
         }
     }
@@ -409,8 +464,8 @@ impl OwnerRuntimeHandle {
                 active.generation,
                 NativeProfileUsePurpose::Execution,
             )?;
-            if Instant::now() >= active.deadline {
-                return Err(failure("master_runtime_budget_exhausted"));
+            if late(active.deadline) {
+                return Err(failure(TURN_DEADLINE));
             }
         }
         Ok(current)

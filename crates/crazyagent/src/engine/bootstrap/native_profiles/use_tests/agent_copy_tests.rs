@@ -27,6 +27,12 @@ fn token(expires: u64) -> String {
     )
 }
 
+fn id_claims(expires: u64) -> String {
+    let full = token(expires);
+    let (head, _) = full.rsplit_once('.').unwrap();
+    format!("{head}.unexchangeable")
+}
+
 fn codex_auth(expires: u64) -> Vec<u8> {
     json!({
         "OPENAI_API_KEY": "sk-unit-api-key",
@@ -43,8 +49,10 @@ fn codex_auth(expires: u64) -> Vec<u8> {
     .into_bytes()
 }
 
+/// A private agent home below the engine folder, where the engine makes every agent home.
+/// Input: the case. Output: the home.
 fn agent_home(case: &UseCase) -> PathBuf {
-    let home = case.root.path().join("agent-home");
+    let home = case.state.join("agent-home");
     private_directory(&home);
     home
 }
@@ -99,7 +107,7 @@ fn an_agent_gets_a_codex_copy_that_can_never_refresh_the_account() {
         json!({
             "OPENAI_API_KEY": null,
             "tokens": {
-                "id_token": token(expires),
+                "id_token": id_claims(expires),
                 "access_token": token(expires),
                 "refresh_token": "",
                 "account_id": "acct-unit"
@@ -112,6 +120,64 @@ fn an_agent_gets_a_codex_copy_that_can_never_refresh_the_account() {
     drop(copy);
     assert!(entries(&agent).is_empty());
     assert_eq!(std::fs::read(&source).unwrap(), codex_auth(expires));
+}
+
+#[test]
+fn a_codex_copy_replaces_the_id_token_signature_but_keeps_its_claims_and_the_access_token() {
+    let mut case = UseCase::new();
+    let expires = now() + 3 * 86_400;
+    let part =
+        |value: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string());
+    let header = part(json!({"alg": "RS256", "typ": "JWT"}));
+    let payload = part(json!({
+        "exp": expires,
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acct-unit"}
+    }));
+    let id_token = format!("{header}.{payload}.ZXhjaGFuZ2VhYmxlc2lnbmF0dXJl");
+    let access = token(expires);
+    let source = case.home().join("auth.json");
+    private_file(
+        &source,
+        &json!({
+            "OPENAI_API_KEY": "sk-unit-api-key",
+            "tokens": {
+                "id_token": id_token,
+                "access_token": access,
+                "refresh_token": "unit-refresh-secret",
+                "account_id": "acct-unit"
+            },
+            "last_refresh": "2026-10-26T00:00:00Z"
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(agent.join("auth.json")).unwrap()).unwrap();
+    let copied = written["tokens"]["id_token"].as_str().unwrap();
+    let (claims_prefix, signature) = copied.rsplit_once('.').unwrap();
+    assert_eq!(claims_prefix, format!("{header}.{payload}"));
+    assert_ne!(copied, id_token);
+    assert!(!signature.is_empty());
+    assert_ne!(signature, "ZXhjaGFuZ2VhYmxlc2lnbmF0dXJl");
+    let claims_segment = copied.split('.').nth(1).unwrap();
+    let claims: Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(claims_segment)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        claims["https://api.openai.com/auth"]["chatgpt_account_id"],
+        "acct-unit"
+    );
+    assert_eq!(claims["exp"], expires);
+    assert_eq!(written["tokens"]["access_token"], access);
+    drop(copy);
 }
 
 #[test]
@@ -155,6 +221,32 @@ fn scripted_codex(case: &UseCase, name: &str, script: &str, next: &[u8]) -> Path
     std::fs::write(&harness, script).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
     harness
+}
+
+/// CA-SEC-003: a running keeper leases the profile itself, so once the turn's own lease ends
+/// a sign-out or sign-in still waits for every renewal that could write the account's
+/// record, and stopping the keeper ends that lease.
+#[test]
+fn a_running_keeper_keeps_the_profile_leased_after_the_turn_s_lease_ended() {
+    let mut case = UseCase::new();
+    private_file(&case.home().join("auth.json"), &codex_auth(now() + 600));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    drop(guard);
+    assert_busy(&case.manifest());
+    drop(copy);
+    let file = File::open(case.manifest()).unwrap();
+    let waited = Instant::now();
+    while flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "the profile stayed leased after its keeper stopped"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]
@@ -297,23 +389,152 @@ fn a_missing_or_unusable_codex_record_is_refused() {
         "native_profile_credential_unavailable"
     );
     drop(guard);
-    for record in [
-        b"not json".to_vec(),
-        json!({"OPENAI_API_KEY": "sk-unit-api-key"})
-            .to_string()
-            .into_bytes(),
-        json!({"tokens": {"id_token": "a", "access_token": "no-claims", "refresh_token": "r"}})
-            .to_string()
-            .into_bytes(),
+    let unreadable = "native_profile_codex_token_unreadable";
+    let api_key = "native_profile_codex_api_key";
+    let bytes = |record: Value| record.to_string().into_bytes();
+    for (record, code) in [
+        (b"not json".to_vec(), unreadable),
+        (bytes(json!({"OPENAI_API_KEY": "sk-unit-api-key"})), api_key),
+        (
+            bytes(json!({"OPENAI_API_KEY": "sk-unit-api-key", "tokens": null})),
+            api_key,
+        ),
+        (
+            bytes(json!({"OPENAI_API_KEY": "", "tokens": null})),
+            unreadable,
+        ),
+        (bytes(json!({"OPENAI_API_KEY": null})), unreadable),
+        (
+            bytes(
+                json!({"tokens": {"id_token": "a", "access_token": "no-claims", "refresh_token": "r"}}),
+            ),
+            unreadable,
+        ),
+        (
+            bytes(json!({"tokens": {"access_token": token(now() + 3600), "refresh_token": "r"}})),
+            unreadable,
+        ),
+        (
+            bytes(
+                json!({"tokens": {"id_token": token(now() + 3600), "access_token": "", "refresh_token": "r"}}),
+            ),
+            unreadable,
+        ),
     ] {
         private_file(&source, &record);
         let guard = execution(&mut case);
         assert_eq!(
             refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
-            "native_profile_credential_unavailable"
+            code
         );
+        assert_eq!(usage_refused(&guard, &no_harness(&case)), code);
         assert!(entries(&agent).is_empty());
     }
+}
+
+/// The refusal of a usage read of this account. Inputs: the held account and the harness.
+/// Output: the refusal code; panics when a credential was read.
+fn usage_refused(guard: &NativeProfileUse, executable: &Path) -> String {
+    match guard.usage_credential(executable) {
+        Ok(_) => panic!("the usage read got a credential"),
+        Err(problem) => problem.0,
+    }
+}
+
+#[test]
+fn a_codex_usage_read_whose_lapsed_token_the_renewal_cannot_refresh_says_the_sign_in_expired() {
+    let mut case = UseCase::new();
+    let harness = case.root.path().join("offline-codex");
+    std::fs::write(&harness, "#!/bin/sh\n: > \"$0.ran\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let source = case.home().join("auth.json");
+    private_file(&source, &codex_auth(now() + 3600));
+    let guard = execution(&mut case);
+    let read = guard.usage_credential(&harness).unwrap();
+    assert_eq!(read.account_id.as_deref(), Some("acct-unit"));
+    assert!(!case.root.path().join("offline-codex.ran").exists());
+    drop((read, guard));
+    let lapsing = codex_auth(now() + 30);
+    private_file(&source, &lapsing);
+    let guard = execution(&mut case);
+    assert_eq!(
+        usage_refused(&guard, &harness),
+        "native_profile_codex_sign_in_expired"
+    );
+    assert!(
+        case.root.path().join("offline-codex.ran").is_file(),
+        "the renewal never ran before the refusal"
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), lapsing);
+}
+
+/// An access token shaped like the ones ChatGPT issues Codex: an RS256 JWT whose claims
+/// name its audience, client, account, plan, profile, scopes and session and whose
+/// signature is 256 bytes, so it runs past 1 KiB. Input: its expiry. Output: the token.
+fn chatgpt_token(expires: u64) -> String {
+    let part = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let issued = expires - 864_000;
+    let header = json!({
+        "alg": "RS256",
+        "kid": "b1dd3f8f-9926-4f9b-b5a3-2f3c3f0e7a11",
+        "typ": "JWT"
+    });
+    let claims = json!({
+        "aud": ["https://api.openai.com/v1"],
+        "client_id": "app_unit00000000000000000000",
+        "exp": expires,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "acct-unit",
+            "chatgpt_plan_type": "pro",
+            "chatgpt_user_id": "user-unit00000000000000000000",
+            "user_id": "user-unit00000000000000000000"
+        },
+        "https://api.openai.com/profile": {"email": "unit@example.com", "email_verified": true},
+        "iat": issued,
+        "iss": "https://auth.openai.com",
+        "jti": "4f0e8c2a-7d6b-4c1e-9a3f-5b2d8e1c0a97",
+        "nbf": issued,
+        "pwd_auth_time": issued * 1000,
+        "scp": ["openid", "profile", "email", "offline_access"],
+        "session_id": "authsess_unit000000000000000000000",
+        "sub": "auth0|unit000000000000000000000000"
+    });
+    let signature: Vec<u8> = (0..=255).collect();
+    format!(
+        "{}.{}.{}",
+        part(header.to_string().as_bytes()),
+        part(claims.to_string().as_bytes()),
+        part(&signature)
+    )
+}
+
+/// R4 N-D16: a usage read of a Codex account gets its access token, although a ChatGPT
+/// access token is longer than the 1 KiB a stored secret may hold.
+#[test]
+fn a_codex_usage_read_gets_a_full_size_chatgpt_access_token() {
+    let mut case = UseCase::new();
+    let access = chatgpt_token(now() + 3600);
+    assert!(
+        access.len() > crate::credentials::SECRET_BYTES_MAX,
+        "a ChatGPT access token outgrows a stored secret: {} bytes",
+        access.len()
+    );
+    let mut record: Value = serde_json::from_slice(&codex_auth(now() + 3600)).unwrap();
+    record["tokens"]["access_token"] = json!(access);
+    private_file(
+        &case.home().join("auth.json"),
+        record.to_string().as_bytes(),
+    );
+    let guard = execution(&mut case);
+    let read = guard.usage_credential(&no_harness(&case));
+    assert_eq!(
+        read.as_ref().err().map(|problem| problem.0.as_str()),
+        None,
+        "the usage read refused the account's access token"
+    );
+    let read = read.unwrap();
+    assert_eq!(read.token.expose(), access);
+    assert_eq!(read.account_id.as_deref(), Some("acct-unit"));
 }
 
 #[test]
@@ -443,7 +664,7 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
         claude_record(expires)
     );
     drop(copy);
-    assert!(entries(&agent).is_empty());
+    assert_eq!(entries(&agent), ["Library"]);
     drop(guard);
 
     let soon = (now() + 30) * 1000;
@@ -456,6 +677,195 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
         "native_profile_renewal_failed"
     );
     assert!(entries(&agent).is_empty());
+}
+
+/// The keychain service Claude Code files an agent's sign-in under in that agent's home,
+/// derived from the secure storage folder the engine names, which is the agent home.
+#[cfg(target_os = "macos")]
+fn agent_service(agent: &Path) -> String {
+    format!(
+        "Claude Code-credentials-{}",
+        &digest(agent.to_str().unwrap().as_bytes())[..8]
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_claude_handoff_gives_the_agent_home_its_own_keychain_and_clears_a_stale_record() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 8 * 3600) * 1000;
+    let (_keychain, _service) = claude_keychain(&home, &claude_record(expires));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let path = only_keychain(&agent);
+    let stale = TestKeychain::adopt(&agent, path.clone());
+    let text = path.to_str().unwrap();
+    assert!(stale.setting("default-keychain").contains(text));
+    assert!(stale.setting("list-keychains").contains(text));
+    let service = agent_service(&agent);
+    stale.add(CLAUDE_ACCOUNT, &service, "stale");
+    assert!(stale.holds(&service));
+
+    drop(copy);
+    assert!(
+        !stale.holds(&service),
+        "a dropped copy left its keychain record"
+    );
+    assert_eq!(entries(&agent), ["Library"]);
+
+    stale.add(CLAUDE_ACCOUNT, &service, "stale");
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let fresh = only_keychain(&agent);
+    assert_ne!(fresh, path);
+    assert!(
+        !path.exists(),
+        "a new copy left the earlier keychain and its stale record"
+    );
+    let current = TestKeychain::adopt(&agent, fresh.clone());
+    assert!(!current.holds(&service));
+    let fresh_text = fresh.to_str().unwrap();
+    assert!(current.setting("default-keychain").contains(fresh_text));
+    assert!(!current.setting("list-keychains").contains(text));
+    assert!(agent.join(".credentials.json").is_file());
+    current.add(CLAUDE_ACCOUNT, &service, "stale");
+    drop(copy);
+    assert!(
+        !current.holds(&service),
+        "a dropped copy left its keychain record"
+    );
+}
+
+/// The one keychain file in an agent home's keychain folder, a regular file. Input: the
+/// agent home. Output: its path.
+#[cfg(target_os = "macos")]
+fn only_keychain(agent: &Path) -> std::path::PathBuf {
+    let found: Vec<std::path::PathBuf> = std::fs::read_dir(agent.join("Library/Keychains"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_str().unwrap().ends_with(".keychain-db"))
+        .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(std::fs::symlink_metadata(&found[0]).unwrap().is_file());
+    found.into_iter().next().unwrap()
+}
+
+/// A Claude handoff to the account's own profile home or to a home outside the engine
+/// folder is refused before any keychain is made, swapped or deleted there: the managed
+/// keychain keeps its record and settings, and the outside home gets no keychain folder
+/// and no copy (DEC-146 r1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_claude_handoff_refuses_the_profile_home_and_a_home_outside_the_engine_folder() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 8 * 3600) * 1000;
+    let (keychain, service) = claude_keychain(&home, &claude_record(expires));
+    let managed = keychain.path().to_str().unwrap().to_owned();
+    let default = keychain.setting("default-keychain");
+    assert!(default.contains(&managed));
+    let outside = case.root.path().join("outside-home");
+    private_directory(&outside);
+    let guard = execution(&mut case);
+    for agent in [home.clone(), outside.clone()] {
+        assert_eq!(
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+            "native_profile_agent_keychain_unavailable",
+            "{agent:?}"
+        );
+    }
+    assert!(entries(&outside).is_empty());
+    assert_eq!(keychain.setting("default-keychain"), default);
+    assert_eq!(
+        serde_json::from_str::<Value>(&keychain.find(&service)).unwrap(),
+        claude_record(expires)
+    );
+}
+
+/// One keychain setting of a home as `security` reports it with `HOME` set to that home
+/// and nothing else in its environment. Inputs: the home and `default-keychain` or
+/// `list-keychains`. Output: the report text.
+#[cfg(target_os = "macos")]
+fn home_setting(home: &Path, which: &str) -> String {
+    assert!(matches!(which, "default-keychain" | "list-keychains"));
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/security")
+            .args([which, "-d", "user"])
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(output.status.success(), "security {which} failed");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A native lead's teammates run under the lead's teammate home and file the lead's
+/// sign-in under the lead's item name, so that home's default and search list follow the
+/// lead's newest keychain before the earlier one is deleted, and the teammate home gets no
+/// keychain of its own (DEC-146 r1 F1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_home_uses_the_leads_keychain_from_each_handoff() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 8 * 3600) * 1000;
+    let (_keychain, _service) = claude_keychain(&home, &claude_record(expires));
+    let agent = agent_home(&case);
+    let mates = crate::launch_context::mates_home(&agent);
+    private_directory(&mates);
+    let guard = execution(&mut case);
+    let mut earlier: Option<PathBuf> = None;
+    for _ in 0..2 {
+        let copy = guard
+            .hand_to_agent(&agent, TURN, &no_harness(&case))
+            .unwrap();
+        let lead = only_keychain(&agent);
+        let text = lead.to_str().unwrap();
+        assert!(home_setting(&mates, "default-keychain").contains(text));
+        assert!(home_setting(&mates, "list-keychains").contains(text));
+        if let Some(earlier) = &earlier {
+            assert_ne!(earlier, &lead);
+            assert!(!earlier.exists(), "the lead's earlier keychain was left");
+            assert!(!home_setting(&mates, "list-keychains").contains(earlier.to_str().unwrap()));
+        }
+        assert!(
+            std::fs::read_dir(mates.join("Library/Keychains")).map_or(true, |found| found
+                .map(|entry| entry.unwrap().file_name())
+                .all(|name| !name.to_string_lossy().ends_with(".keychain-db"))),
+            "the teammate home got a keychain of its own"
+        );
+        drop(copy);
+        earlier = Some(lead);
+    }
+    let last = earlier.unwrap();
+    drop(TestKeychain::adopt(&agent, last.clone()));
+    assert!(!last.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_codex_handoff_leaves_the_agent_home_without_a_keychain() {
+    let mut case = UseCase::new();
+    private_file(
+        &case.home().join("auth.json"),
+        &codex_auth(now() + 3 * 86_400),
+    );
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    assert_eq!(entries(&agent), ["auth.json"]);
+    drop(copy);
 }
 
 #[cfg(target_os = "macos")]
@@ -502,6 +912,209 @@ fn a_claude_record_larger_than_a_pipe_buffer_is_read_whole_from_the_keychain() {
     assert_eq!(written["claudeAiOauth"]["refreshToken"], Value::Null);
     assert!(written.get("mcpOAuth").is_none());
     drop(copy);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_no_claude_copy_when_the_sign_in_can_create_api_keys() {
+    let mut case = UseCase::with_harness("claude-code");
+    let expires = (now() + 8 * 3600) * 1000;
+    let home = case.home();
+    let mut record = claude_record(expires);
+    record["claudeAiOauth"]["scopes"] =
+        json!(["user:inference", "user:profile", "org:create_api_key"]);
+    let (_keychain, _service) = claude_keychain(&home, &record);
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    assert_eq!(
+        refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+        "native_profile_scope_too_wide"
+    );
+    assert!(entries(&agent).is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_a_claude_copy_for_a_real_subscription_sign_in() {
+    let subscription = json!([
+        "user:inference",
+        "user:profile",
+        "user:sessions:claude_code",
+        "user:mcp_servers",
+        "user:file_upload"
+    ]);
+    let mut case = UseCase::with_harness("claude-code");
+    let expires = (now() + 8 * 3600) * 1000;
+    let home = case.home();
+    let mut record = claude_record(expires);
+    record["claudeAiOauth"]["scopes"] = subscription.clone();
+    let (_keychain, _service) = claude_keychain(&home, &record);
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(agent.join(".credentials.json")).unwrap()).unwrap();
+    assert_eq!(
+        written["claudeAiOauth"]["scopes"], subscription,
+        "the subscription's user scopes are kept, not narrowed away"
+    );
+    assert_eq!(written["claudeAiOauth"]["accessToken"], "sk-ant-oat01-unit");
+    assert_eq!(written["claudeAiOauth"]["refreshToken"], Value::Null);
+    drop(copy);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_no_claude_copy_for_any_org_scope() {
+    for scopes in [
+        json!(["org:create_api_key", "user:profile"]),
+        json!(["user:inference", "user:profile", "org:workspaces:create"]),
+    ] {
+        let mut case = UseCase::with_harness("claude-code");
+        let expires = (now() + 8 * 3600) * 1000;
+        let home = case.home();
+        let mut record = claude_record(expires);
+        record["claudeAiOauth"]["scopes"] = scopes.clone();
+        let (_keychain, _service) = claude_keychain(&home, &record);
+        let agent = agent_home(&case);
+        let guard = execution(&mut case);
+        assert_eq!(
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+            "native_profile_scope_too_wide",
+            "{scopes}"
+        );
+        assert!(entries(&agent).is_empty(), "{scopes}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_no_claude_copy_for_a_malformed_or_inference_less_scope_set() {
+    for scopes in [
+        json!([]),
+        json!(["user:profile"]),
+        json!(["user:inference", 123]),
+        json!([" org:create_api_key ", "user:inference"]),
+        json!(["ORG:create_api_key", "user:inference"]),
+        json!(["Org:create_api_key", "user:inference"]),
+        json!(["oRg:create_api_key", "user:inference"]),
+    ] {
+        let mut case = UseCase::with_harness("claude-code");
+        let expires = (now() + 8 * 3600) * 1000;
+        let home = case.home();
+        let mut record = claude_record(expires);
+        record["claudeAiOauth"]["scopes"] = scopes.clone();
+        let (_keychain, _service) = claude_keychain(&home, &record);
+        let agent = agent_home(&case);
+        let guard = execution(&mut case);
+        assert_eq!(
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+            "native_profile_scope_too_wide",
+            "{scopes}"
+        );
+        assert!(entries(&agent).is_empty(), "{scopes}");
+    }
+}
+
+/// Waits up to five seconds for a profile's lease to end. Input: the manifest path.
+/// Output: whether it ended.
+fn lease_ended(manifest: &Path) -> bool {
+    let file = File::open(manifest).unwrap();
+    let waited = Instant::now();
+    while flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
+        if waited.elapsed() >= Duration::from_secs(5) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    true
+}
+
+/// OB-5 r2: a turn with no time bound always gets a keeper, whatever time its token has
+/// left, so a turn that outlives the token keeps its sign-in. With a token good for thirty
+/// days the keeper leases the profile until the copy is dropped.
+#[test]
+fn a_turn_with_no_time_bound_gets_a_keeper_however_long_its_token_lasts() {
+    let mut case = UseCase::new();
+    let expires = now() + 30 * 86_400;
+    private_file(&case.home().join("auth.json"), &codex_auth(expires));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_turn(&agent, None, &no_harness(&case))
+        .unwrap();
+    drop(guard);
+    assert_busy(&case.manifest());
+    drop(copy);
+    assert!(lease_ended(&case.manifest()), "the keeper kept its lease");
+}
+
+/// A bounded turn its token outlasts still gets no keeper: once the turn's own lease ends
+/// nothing holds the profile, though the copy is still there.
+#[test]
+fn a_bounded_turn_its_token_outlasts_gets_no_keeper() {
+    let mut case = UseCase::new();
+    let expires = now() + 30 * 86_400;
+    private_file(&case.home().join("auth.json"), &codex_auth(expires));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_turn(&agent, Some(TURN), &no_harness(&case))
+        .unwrap();
+    drop(guard);
+    assert!(lease_ended(&case.manifest()), "a keeper leased the profile");
+    drop(copy);
+}
+
+#[test]
+fn dropping_an_earlier_copy_leaves_a_later_copy_or_another_file_at_the_same_name() {
+    let mut case = UseCase::new();
+    let expires = now() + 3 * 86_400;
+    private_file(&case.home().join("auth.json"), &codex_auth(expires));
+    let agent = agent_home(&case);
+    let path = agent.join("auth.json");
+    let guard = execution(&mut case);
+    let earlier = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let first = std::fs::symlink_metadata(&path).unwrap().ino();
+    let later = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let second = std::fs::symlink_metadata(&path).unwrap().ino();
+    assert_ne!(first, second, "each placement is a new file");
+    drop(earlier);
+    assert_eq!(
+        entries(&agent),
+        ["auth.json"],
+        "the later start's copy stays"
+    );
+    assert_eq!(std::fs::symlink_metadata(&path).unwrap().ino(), second);
+    drop(later);
+    assert!(
+        entries(&agent).is_empty(),
+        "the later copy leaves with its own drop"
+    );
+
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let other = agent.join("other.json");
+    private_file(&other, b"another file");
+    std::fs::rename(&other, &path).unwrap();
+    drop(copy);
+    assert_eq!(std::fs::read(&path).unwrap(), b"another file");
+    std::fs::remove_file(&path).unwrap();
+
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    drop(copy);
+    assert!(entries(&agent).is_empty(), "a copy already gone is fine");
+    drop(guard);
 }
 
 #[cfg(target_os = "macos")]

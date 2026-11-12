@@ -3,11 +3,12 @@ use crate::protocol::{
 };
 use crazyagent::adapters::NativeAction;
 use crazyagent::file_identity::same_files;
+use crazyagent::file_lock::HeldLock;
 use crazyagent::worker_dispatch::{
     AdmissionCheckOffer, DeniedReceipt, FenceOrder, FenceReceipt,
     RunnerBootIdentity as RunnerIdentity, RunnerReady,
 };
-use rustix::fs::{FlockOperation, Mode, OFlags, flock, open, openat};
+use rustix::fs::{FlockOperation, Mode, OFlags, open, openat};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -62,6 +63,7 @@ enum Record {
 
 struct Journal {
     file: File,
+    _lock: HeldLock,
     directory: File,
     root: PathBuf,
     bytes: u64,
@@ -71,7 +73,7 @@ struct Journal {
 impl Journal {
     fn open(directory: &File, root: &Path) -> io::Result<(Self, Vec<Record>)> {
         let mut file = private_file(directory, "control.log")?;
-        flock(&file, FlockOperation::NonBlockingLockExclusive)?;
+        let lock = HeldLock::take(file.try_clone()?, FlockOperation::NonBlockingLockExclusive)?;
         let mut bytes = Vec::new();
         Read::take(&mut file, JOURNAL_BYTES_MAX + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > JOURNAL_BYTES_MAX {
@@ -81,6 +83,7 @@ impl Journal {
         directory.sync_all()?;
         let journal = Self {
             file,
+            _lock: lock,
             directory: directory.try_clone()?,
             root: root.to_owned(),
             bytes: bytes.len() as u64,
@@ -692,7 +695,7 @@ pub async fn run(root: &Path) -> io::Result<()> {
     let _bootstrap = crazyagent::engine::owner::runner_bootstrap(root).map_err(invalid)?;
     let lock = private_file(&directory, "owner.lock")
         .map_err(|error| invalid(format!("runner_lock_file: {error}")))?;
-    flock(&lock, FlockOperation::NonBlockingLockExclusive)
+    let _lock = HeldLock::take(lock, FlockOperation::NonBlockingLockExclusive)
         .map_err(|error| invalid(format!("runner_lock: {error}")))?;
     let (journal, records) = Journal::open(&directory, root)?;
     let mut state = State::new(journal, records)?;

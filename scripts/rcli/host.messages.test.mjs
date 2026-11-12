@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FRAME_TEXT_MAX, encodeEvent } from "./host.codec.ts";
-import { MESSAGE_JSON_MAX, SdkMessageProjection } from "./host.messages.ts";
+import { MESSAGE_JSON_MAX, MESSAGE_STATE_BYTES_MAX, SdkMessageProjection } from "./host.messages.ts";
 
 const turn = "external-turn-1";
 const sdkTurn = "sdk-turn-1";
@@ -120,12 +120,40 @@ test("accessor records are rejected without invoking untrusted getters", () => {
   assert.equal(invoked, false);
 });
 
-test("the active turn retains at most 128 SDK message identities including discards", () => {
+test("no count of SDK messages ends a turn: the 129th and the 10,000th message are published", () => {
   const projection = new SdkMessageProjection(turn, sdkTurn);
   for (let index = 0; index < 128; index++) {
     assert.deepEqual(projection.accept(event("assistant:message:discard", `hidden-${index}`)), []);
   }
-  assert.throws(() => projection.accept(event("assistant:delta", "too-many", "x")), /host_sdk_event_rejected/);
+  for (let index = 1; index <= 10_000; index++) {
+    assert.deepEqual(projection.accept(event("assistant:message", `native-${index}`, `step ${index}`)), [
+      frame("message_started", `msg-${index}`), frame("message_delta", `msg-${index}`, `step ${index}`),
+      frame("message_finished", `msg-${index}`),
+    ]);
+  }
+});
+
+test("message state is bounded by bytes: the oldest finished messages are forgotten and recent ones stay guarded", () => {
+  const projection = new SdkMessageProjection(turn, sdkTurn);
+  const native = (index) => `n${index}`.padEnd(256, "x");
+  for (let index = 1; index <= 4000; index++) projection.accept(event("assistant:message", native(index), "x"));
+  assert(projection.messages.size <= Math.floor(MESSAGE_STATE_BYTES_MAX / (256 + 64)));
+  assert.equal(projection.stateBytes, projection.messages.size * (256 + 64));
+  assert.equal(projection.messages.has(native(1)), false);
+  assert.throws(() => projection.accept(event("assistant:delta", native(4000), "late")), /host_sdk_event_rejected/);
+  assert.deepEqual(projection.accept(event("assistant:delta", native(1), "again")), [
+    frame("message_started", "msg-4001"), frame("message_delta", "msg-4001", "again"),
+  ]);
+});
+
+test("only messages still streaming can fill the message state bound", () => {
+  const projection = new SdkMessageProjection(turn, sdkTurn);
+  const native = (index) => `n${index}`.padEnd(256, "x");
+  const fits = Math.floor(MESSAGE_STATE_BYTES_MAX / (256 + 64));
+  for (let index = 1; index <= fits; index++) projection.accept(event("assistant:delta", native(index), "x"));
+  assert.equal(projection.messages.size, fits);
+  assert.throws(() => projection.accept(event("assistant:delta", native(fits + 1), "x")), /host_sdk_event_rejected/);
+  assert.equal(projection.messages.size, fits);
 });
 
 test("a text exactly at the escaped message limit remains lossless", () => {
@@ -211,7 +239,8 @@ test("corrupt internal message state trips the identity invariant before publica
     { hostId: "msg-1", phase: "unknown" },
     { hostId: null, phase: "streaming" },
     { hostId: "foreign-id", phase: "finished" },
-    { hostId: "msg-129", phase: "streaming" },
+    { hostId: "msg-0", phase: "streaming" },
+    { hostId: "msg-99999999999999999", phase: "streaming" },
     undefined,
     null,
   ]) {

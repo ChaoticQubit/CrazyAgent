@@ -288,6 +288,7 @@ fn agent_text(case: &Hostile) -> String {
         folder: Some(case.repo.clone()),
         mode: crazyagent::instruction_files::Mode::Both,
         trust: case.trust(),
+        repeated: crazyagent::agent_home::Repeated::LeaveOut,
     })
     .unwrap();
     assert!(given.files.is_empty() && given.section_bytes == 0);
@@ -1164,9 +1165,9 @@ async fn a_non_holdout_check_cannot_show_holdout_content_to_an_agent() {
 }
 
 /// U3-16: the repository commits VS Code settings, a folder-open task and extension
-/// recommendations; the IDE settings the engine locks for an untrusted project keep VS
-/// Code's workspace trust on, so Restricted Mode applies, and automatic tasks off, while a
-/// reviewed project keeps today's settings.
+/// recommendations; an untrusted project's IDE keeps VS Code's workspace trust on, so it
+/// opens the folder in Restricted Mode, and the settings the engine locks keep automatic
+/// tasks off, while a reviewed project's IDE starts with workspace trust off as before.
 #[tokio::test]
 async fn a_repository_vscode_task_and_settings_never_run_in_the_untrusted_ide() {
     let case = Hostile::new(&[
@@ -1184,32 +1185,34 @@ async fn a_repository_vscode_task_and_settings_never_run_in_the_untrusted_ide() 
         ),
     ])
     .await;
-    let untrusted = crazyagent::ide::trust::settings(case.trust());
-    let reviewed = crazyagent::ide::trust::settings(Trust::Reviewed);
+    let untrusted = Enforcement::for_level(case.trust());
+    let reviewed = Enforcement::for_level(Trust::Reviewed);
+    let locked = crazyagent::ide::settings::locked();
     record(
         "a_repository_vscode_task_and_settings_never_run_in_the_untrusted_ide",
         &[
             (
-                "untrusted_settings",
-                serde_json::Value::Object(untrusted.clone()).to_string(),
+                "untrusted_workspace_trusted",
+                untrusted.ide_workspace_trust.to_string(),
             ),
             (
-                "reviewed_settings",
-                serde_json::Value::Object(reviewed.clone()).to_string(),
+                "reviewed_workspace_trusted",
+                reviewed.ide_workspace_trust.to_string(),
+            ),
+            (
+                "locked_settings",
+                serde_json::Value::Object(locked.clone()).to_string(),
             ),
         ],
     );
-    assert_eq!(
-        untrusted.get("security.workspace.trust.enabled"),
-        Some(&serde_json::Value::Bool(true))
+    assert!(
+        !untrusted.ide_workspace_trust,
+        "an untrusted project's IDE keeps workspace trust on"
     );
+    assert!(reviewed.ide_workspace_trust);
     assert_eq!(
-        untrusted.get("task.allowAutomaticTasks"),
+        locked.get("task.allowAutomaticTasks"),
         Some(&serde_json::Value::from("off"))
-    );
-    assert_eq!(
-        reviewed.get("security.workspace.trust.enabled"),
-        Some(&serde_json::Value::Bool(false))
     );
     case.close().await;
 }
@@ -1328,7 +1331,7 @@ async fn agent_terminal_output_with_osc_52_never_reaches_the_owner_clipboard() {
         }
     }
     host.kill(&agent).unwrap();
-    terminal::quit(host.as_ref()).unwrap();
+    terminal::quit(host.as_ref(), true).unwrap();
     let has = |needle: &[u8]| seen.windows(needle.len()).any(|window| window == needle);
     record(
         "agent_terminal_output_with_osc_52_never_reaches_the_owner_clipboard",

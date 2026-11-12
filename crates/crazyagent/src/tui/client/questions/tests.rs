@@ -20,6 +20,7 @@ fn long_ask(index: usize) -> Ask {
     question.push_str(&"a".repeat(QUESTION_BYTES_MAX - question.len()));
     Ask {
         question,
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Grid".into(), "List".into()],
         recommended: Some("Grid".into()),
         context: Some("c".repeat(crate::questions::CONTEXT_BYTES_MAX)),
@@ -139,7 +140,10 @@ async fn the_worker_lists_every_pending_question_and_maps_each_request_through_t
         project: project.clone(),
         id: ids[0],
         version: 0,
-        answer: Answer::Option(1),
+        answer: Answer {
+            picks: vec![1],
+            comment: None,
+        },
     };
     assert_eq!(
         native.questions(answer).await.result,

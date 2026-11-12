@@ -578,6 +578,7 @@ pub fn ask_daily(
     }
     let ask = Ask {
         question: DAILY_QUESTION.into(),
+        kind: questions::QuestionKind::Single,
         options: vec!["Yes".into(), "No".into()],
         recommended: None,
         context: Some(DAILY_CONTEXT.into()),

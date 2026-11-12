@@ -364,7 +364,10 @@ fn an_owner_answer_to_a_profile_question_stays_when_the_profile_is_settled() {
             &case.db,
             answered,
             0,
-            &crate::questions::Answer::Text("Looks fine".into())
+            &crate::questions::Answer {
+                picks: Vec::new(),
+                comment: Some("Looks fine".into()),
+            }
         ),
         Ok(crate::questions::Settlement::Settled)
     );

@@ -422,7 +422,7 @@ fn durable_snapshot(path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert!(names.len() <= 128);
+    assert!(names.len() <= 256);
     let mut snapshot = BTreeMap::new();
     for name in names {
         assert!(

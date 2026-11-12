@@ -59,9 +59,19 @@ test("the view says which instruction files the harness loaded and which skills 
   for (const path of ["/w/agent-12/CLAUDE.md", "/w/agent-12/AGENTS.md", "/h/agent-12/CLAUDE.md"]) assert.ok(markup.includes(path), path);
   assert.ok(markup.indexOf("Skills used:") < markup.indexOf("No app or project instructions"), "the report leads the view");
 
-  assert.match(panel({ kind: "ok", value: { ...value, loaded: [], skills_used: [] } }), /Instructions: none loaded by its harness - Skills used: none/);
-  assert.match(panel({ kind: "ok", value: { ...value, sessions: 0, loaded: [], skills_used: [] } }),
-    /Instructions: not reported yet - Skills used: not reported yet/);
+  for (const harness of ["claude-code", "codex"]) {
+    assert.match(panel({ kind: "ok", value: { ...value, harness, loaded: [], skills_used: [] } }),
+      /Instructions: none loaded by the harness itself; CrazyAgent gives its instructions at launch - Skills used: none/,
+      `DEC-141 PA-14: one line for every harness, ${harness}`);
+    const unreported = panel({ kind: "ok", value: { ...value, harness, sessions: 0, loaded: [], skills_used: [] } });
+    assert.match(unreported, /Instructions: not reported yet - Skills used: not reported yet/, harness);
+    assert.match(unreported, /A headless run reports nothing here while it keeps no transcript\./, harness);
+    assert.doesNotMatch(unreported, /Claude run/, harness);
+  }
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/team.rs", import.meta.url), "utf8");
+  for (const line of ["none loaded by the harness itself; CrazyAgent gives its instructions at launch", "A headless run reports nothing here while it keeps no transcript."]) {
+    assert.ok(tui.includes(line), `the TUI says the same: ${line}`);
+  }
   assert.doesNotMatch(panel({ kind: "ok", value: { ...value, launched: false } }), /Skills used/, "an agent that never launched has no report");
 });
 
@@ -114,5 +124,16 @@ test("every agent view refusal has a plain sentence and is an engine code", () =
 
 test("the agent panel reads the view for the open card only", () => {
   const source = readFileSync(new URL("../src/screens/team/index.tsx", import.meta.url), "utf8");
-  assert.match(source, /<AgentInstructions key=\{openNode\.id\} projectId=\{projectId\} node=\{openNode\} \/>/);
+  assert.match(source, /<AgentSide key=\{panelKey\(node\)\} projectId=\{projectId\} node=\{node\} /);
+  assert.match(source, /\{openNode && side\(openNode\)\}/);
+});
+
+test("the open agent's terminal head carries the reported line once the read is in", () => {
+  const value = { agent: 12, harness: "codex", launched: true, text: "", skills: [], sessions: 1,
+    loaded: [{ name: "AGENTS.md", path: "/w/agent-12/AGENTS.md" }], skills_used: ["tdd"], files: [] };
+  assert.equal(view.headReport({ kind: "ok", value }), "Instructions: AGENTS.md - Skills used: tdd");
+  assert.equal(view.headReport({ kind: "ok", value: { ...value, launched: false } }), undefined, "an agent that never launched has no report");
+  assert.equal(view.headReport({ kind: "loading" }), undefined);
+  const source = readFileSync(new URL("../src/screens/team/agent-instructions.tsx", import.meta.url), "utf8");
+  assert.match(source, /<TerminalPanel [^>]*reported=\{agent === undefined \? undefined : headReport\(read\)\}/);
 });

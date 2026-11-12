@@ -1,6 +1,8 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crazyagent::sandbox::{
+    HIDDEN_MAX, InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -161,7 +163,10 @@ fn worktrees_are_checked_bounded_and_kept_out_of_the_profile_location() {
     };
     let link = case.root.join("link");
     std::os::unix::fs::symlink(&case.worktree, &link).unwrap();
-    let owner = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let owner = crazyagent::sandbox::toolchains::ToolHomes::owner()
+        .unwrap()
+        .home()
+        .to_path_buf();
     for unsafe_root in [
         link.clone(),
         case.root.join("missing"),
@@ -269,10 +274,13 @@ fn a_hidden_folder_in_a_root_can_be_neither_listed_read_nor_written() {
         );
     }
     let mut bounded = sandbox(&case).hide(&case.project.join("not-yet")).unwrap();
-    for index in 1..4 {
+    for index in 1..HIDDEN_MAX {
         bounded = bounded
             .hide(&case.project.join(format!("hidden-{index}")))
             .unwrap();
     }
-    assert!(bounded.hide(&case.project.join("hidden-4")).is_err());
+    assert!(matches!(
+        bounded.hide(&case.project.join(format!("hidden-{HIDDEN_MAX}"))),
+        Err(SandboxError::Invalid(reason)) if reason == "too many hidden folders"
+    ));
 }

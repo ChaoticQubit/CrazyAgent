@@ -1,8 +1,9 @@
 use crazyagent::plugins::check::{CHECK_TIME, check_stdio};
 use crazyagent::team::Delegation;
 use crazyagent::team::tool::{
-    AGENT_SERVER_COMMAND, CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND, MAILBOX_FOLDER,
-    SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, answer_call, take, take_calls,
+    AGENT_SERVER_COMMAND, ASK_TOOL, CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND,
+    MAILBOX_FOLDER, QUESTION_TOOLS, RECALL_TOOL, RECORD_TOOL, REMEMBER_TOOL, REQUEST_ACCESS_TOOL,
+    SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, WAKE_TOOL, WITHDRAW_TOOL, answer_call, take, take_calls,
 };
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -16,8 +17,68 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
     let arguments = [SERVER_COMMAND.to_owned(), record.display().to_string()];
     assert_eq!(
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),
-        [TOOL_NAME],
-        "the engine's own MCP check sees exactly the delegate tool"
+        [
+            TOOL_NAME,
+            ASK_TOOL,
+            RECORD_TOOL,
+            WITHDRAW_TOOL,
+            REQUEST_ACCESS_TOOL,
+            WAKE_TOOL
+        ],
+        "the engine's own MCP check sees exactly the delegate tool, the master's question tools and wake"
+    );
+    let mailbox = record.with_file_name(MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let remembering = [
+        SERVER_COMMAND.to_owned(),
+        record.display().to_string(),
+        mailbox.display().to_string(),
+    ];
+    assert_eq!(
+        check_stdio(engine, &remembering, &[], CHECK_TIME).unwrap(),
+        [
+            TOOL_NAME,
+            ASK_TOOL,
+            RECORD_TOOL,
+            WITHDRAW_TOOL,
+            REQUEST_ACCESS_TOOL,
+            WAKE_TOOL,
+            REMEMBER_TOOL,
+            RECALL_TOOL
+        ],
+        "a master without its live terminal also gets its memory tools"
+    );
+    let conversing: Vec<String> = remembering
+        .iter()
+        .cloned()
+        .chain([WAKE_TOOL.to_owned()])
+        .collect();
+    assert_eq!(
+        check_stdio(engine, &conversing, &[], CHECK_TIME).unwrap(),
+        [
+            TOOL_NAME,
+            ASK_TOOL,
+            RECORD_TOOL,
+            WITHDRAW_TOOL,
+            REQUEST_ACCESS_TOOL,
+            REMEMBER_TOOL,
+            RECALL_TOOL
+        ],
+        "a conversation master's server leaves wake out"
+    );
+    let unknown = crazyagent::spawn_gate::output(
+        Command::new(engine)
+            .args(&remembering)
+            .arg("forget")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(!unknown.status.success());
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr)
+            .contains("usage: crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]")
     );
 
     let mut server = crazyagent::spawn_gate::spawn(
@@ -93,7 +154,11 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
     ];
     assert_eq!(
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),
-        TEAM_TOOLS,
+        TEAM_TOOLS
+            .iter()
+            .chain(&QUESTION_TOOLS)
+            .copied()
+            .collect::<Vec<_>>(),
     );
 
     let mut server = crazyagent::spawn_gate::spawn(
@@ -132,7 +197,11 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
             "Task 7 is queued for codex.",
             false,
         ),
-        (Call::InspectWork, "No sub-agent is working.", true),
+        (
+            Call::InspectWork { task: None },
+            "No sub-agent is working.",
+            true,
+        ),
     ];
     for (expected, text, error) in answered {
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -339,9 +408,14 @@ fn served_in_a_teammate_pane(
     let mut names = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(20);
     let answered = loop {
-        callers.serve(&mut listed, &mut |_| None);
+        callers.serve(&mut listed, &mut |_, _| None, &mut |_, _, _, _| {});
         for (id, call, digest) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
-            names.push(digest.as_ref().and_then(|digest| callers.take(&id, digest)));
+            names.push(
+                digest
+                    .as_ref()
+                    .and_then(|digest| callers.take(&id, digest))
+                    .map(|(pane, _)| pane),
+            );
             taken.push(call);
             answer_call(&mailbox, &id, "Taken.", false).unwrap();
         }
@@ -361,7 +435,11 @@ fn served_in_a_teammate_pane(
 #[test]
 fn a_teammate_s_server_is_named_by_its_process_even_when_its_env_claims_the_lead_s_pane() {
     let (taken, names, answered, lead, teammate) = served_in_a_teammate_pane(false);
-    assert_eq!(taken, [Some(Call::InspectWork)], "{answered}");
+    assert_eq!(
+        taken,
+        [Some(Call::InspectWork { task: None })],
+        "{answered}"
+    );
     assert!(answered.contains("Taken."), "{answered}");
     assert_eq!(
         names,
@@ -452,7 +530,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
         .unwrap();
     connection
         .execute(
-            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('memory-bin','sub','codex',1,'working',1,1)",
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('memory-bin','sub','claude-code',1,'working',1,1)",
             [],
         )
         .unwrap();
@@ -473,10 +551,16 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
     let arguments = [
         AGENT_SERVER_COMMAND.to_owned(),
         mailbox.display().to_string(),
+        RECORD_TOOL.to_owned(),
+        WITHDRAW_TOOL.to_owned(),
     ];
     assert_eq!(
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),
-        TEAM_TOOLS,
+        TEAM_TOOLS
+            .iter()
+            .chain(&[ASK_TOOL, REQUEST_ACCESS_TOOL])
+            .copied()
+            .collect::<Vec<_>>(),
     );
 
     let call = |id: u64, name: &str, arguments: Value| {
@@ -518,7 +602,8 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
                         pane.map(|pane| vec![(pane.to_owned(), pid)])
                             .unwrap_or_default()
                     },
-                    &mut |_| None,
+                    &mut |_, _| None,
+                    &mut |_, _, _, _| {},
                 );
             }
             crazyagent::team::history::serve_agent_calls(
@@ -532,7 +617,13 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
                         .as_mut()
                         .zip(digest)
                         .and_then(|(callers, digest)| callers.take(call, digest));
-                    team_caller(connection, None, &project, (sub, &label), named.as_deref())
+                    team_caller(
+                        connection,
+                        None,
+                        &project,
+                        (sub, &label),
+                        named.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
+                    )
                 },
                 &mut |_, _, _| None,
             );
@@ -619,7 +710,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
     assert_eq!(
         text(&answers[0]),
         (
-            "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.".to_owned(),
+            "Kept in this project's memory, not app-wide: the owner keeps agent memories in their project. Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.".to_owned(),
             false
         )
     );

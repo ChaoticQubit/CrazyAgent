@@ -126,6 +126,17 @@ fn post(target: &str, auth: &str, body: &str) -> Vec<u8> {
 }
 
 #[test]
+fn every_placeholder_fits_the_key_file_limit_and_a_relay_token_fills_it() {
+    let longest = format!(
+        "{TOKEN_PREFIX}{}",
+        "f".repeat(KEY_BYTES_MAX - TOKEN_PREFIX.len())
+    );
+    assert!(is_placeholder(&longest));
+    assert!(!is_placeholder(&format!("{longest}f")));
+    assert!(LOCAL_PLACEHOLDER.len() <= KEY_BYTES_MAX);
+}
+
+#[test]
 fn placeholders_are_the_local_value_or_a_relay_token() {
     assert!(is_placeholder(LOCAL_PLACEHOLDER));
     assert!(is_placeholder(&format!(

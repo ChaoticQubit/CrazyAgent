@@ -248,6 +248,18 @@ async fn observe_native_auth(id: &str, operation: Option<&str>) -> FixtureResult
     }))
 }
 
+/// Reads whether the owner skipped the Learn CrazyAgent guide through the engine's own
+/// learning read, independently of the window. Input: the engine socket from the
+/// environment. Output: one JSON line with the skipped flag only; no counts or step words.
+async fn observe_learning() -> FixtureResult<()> {
+    let socket =
+        std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").ok_or("native fixture socket is required")?;
+    let client = Client::new(socket.into(), Duration::from_secs(3))?;
+    let (_, mut owner) = OwnerController::attach_configured(client, OwnerClientKind::Tui).await?;
+    let progress = owner.learning_progress().await?;
+    emit(json!({ "skipped": progress.skipped }))
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).take(4).collect();
@@ -259,6 +271,7 @@ async fn main() -> std::process::ExitCode {
             serve(Path::new(root), Path::new(projects), true).await
         }
         [mode] if mode == "observe-model-access" => observe_model_access().await,
+        [mode] if mode == "observe-learning" => observe_learning().await,
         [mode, id] if mode == "observe-native-auth" => match id.to_str() {
             Some(id) => observe_native_auth(id, None).await,
             None => Err("invalid connection id".into()),

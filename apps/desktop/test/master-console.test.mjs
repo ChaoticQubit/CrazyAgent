@@ -25,6 +25,18 @@ test("master turns become console lines: the owner's words, replies, engine and 
   assert.equal(lines[6].text, "Your message 3 (its text stays in the window that sent it)");
 });
 
+test("a turn's account line names the account as Accounts does, not by the engine's id or reference (OB-4)", () => {
+  const ran = turn({ id: "t1", reply: { text: "Done." }, attempt: { connection: { id: "claude-account-6fe9", account_ref: "claude-login-6fe9" } } });
+  const accounts = [{ id: "claude-account-1a2c", name: "Claude-Arman03" }, { id: "claude-account-6fe9", name: "Claude-ChaoticQubit" }];
+  const named = consoleLines([ran], {}, {}, 0, {}, accounts);
+  assert.deepEqual(named.filter((line) => line.id === "t1-account-0").map((line) => line.text), ["On account Claude-ChaoticQubit"]);
+  assert.ok(!named.some((line) => /claude-(account|login)-/u.test(line.text)), "no id or reference in any line");
+  const unread = consoleLines([ran], {}, {}, 0);
+  assert.deepEqual(unread.filter((line) => line.id === "t1-account-0").map((line) => line.text), ["On account claude-account-6fe9"],
+    "the id is the fallback only while no name is known");
+  assert.ok(!unread.some((line) => line.text.includes("claude-login-")), "the sign-in reference is never shown");
+});
+
 test("a resumed session's turns show the owner's words read back from the engine, and this window's text wins", () => {
   const turns = [
     turn({ id: "t1", input_cursor: "c1", reply: { text: "Parked work picked up." } }),

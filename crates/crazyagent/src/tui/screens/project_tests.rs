@@ -1,7 +1,7 @@
 use super::new_project_view::{Look, Row, tab_strip};
 use super::project::{
-    JobLog, MasterStatus, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, Tab, Transcript,
-    memory_source, plain_problem, research_kind,
+    JobLog, MasterStatus, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, RemoveChoice, Tab,
+    Transcript, memory_source, plain_problem, research_kind,
 };
 use super::project_markdown::line_width;
 use super::project_view::{activity, job_status, project_screen, tab_items};
@@ -140,13 +140,46 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 SetupAction::PlanRoadmap { project_id } => {
                     controller.plan_roadmap(project_id, generation).await
                 }
+                SetupAction::Update {
+                    project_id,
+                    expected_revision,
+                    name,
+                    setup,
+                    ..
+                } => {
+                    controller
+                        .update_project_setup(
+                            project_id,
+                            expected_revision,
+                            name,
+                            setup,
+                            generation,
+                        )
+                        .await
+                }
                 other => panic!("the project screen never sends {other:?}"),
             }
             .map_err(problem)?,
         )?,
+        SetupQuery::Removal { project } => SetupView::Removal(Box::new(
+            controller.removal_preview(project).await.map_err(problem)?,
+        )),
+        SetupQuery::Overview { project } => SetupView::Overview(Box::new(
+            controller.overview_read(project).await.map_err(problem)?,
+        )),
+        SetupQuery::RefreshOverview { project } => {
+            controller
+                .overview_refresh(project)
+                .await
+                .map_err(problem)?;
+            SetupView::OverviewAsked
+        }
         SetupQuery::Catalog { .. } => panic!("the project screen never reads the catalog"),
         SetupQuery::Team { .. }
         | SetupQuery::TeamChange { .. }
+        | SetupQuery::TeamMessages { .. }
+        | SetupQuery::OpenLiveSession { .. }
+        | SetupQuery::MoveHome { .. }
         | SetupQuery::Library(_)
         | SetupQuery::CoordQuestions { .. } => {
             panic!("the project screen never reads the team or the library")
@@ -172,6 +205,7 @@ async fn settle(
             SetupQuery::Item { .. } => "item",
             SetupQuery::Memories { .. } => "memories",
             SetupQuery::Log { .. } => "log",
+            SetupQuery::Overview { .. } => "overview",
             _ => "other",
         });
         let result = serve(controller, query.clone()).await;
@@ -242,7 +276,7 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     let start = 1_793_000_000_000;
     assert_eq!(
         settle(&mut screen, &mut controller, start).await,
-        ["setup", "jobs", "context", "memories"]
+        ["setup", "jobs", "overview", "context", "memories"]
     );
     assert_eq!(screen.name, "Notes CLI");
     assert_eq!(screen.problem, None);
@@ -273,7 +307,8 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     );
     assert_eq!(
         settle(&mut screen, &mut controller, start + 3_000).await,
-        ["jobs", "memories"]
+        ["jobs", "overview", "memories"],
+        "the first Overview read asked for the first writing run, so the tabs are read again until it writes them"
     );
 
     let look = Look::plain();
@@ -879,6 +914,129 @@ fn report_paths_map_back_to_their_research() {
 }
 
 #[test]
+fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
+    let families = [
+        "agent_access_",
+        "agent_policy_",
+        "agent_network_",
+        "agent_toolchain_",
+        "agent_project_",
+    ];
+    let mut missing = Vec::new();
+    for source in [
+        include_str!("../../sandbox/policy.rs"),
+        include_str!("../../project_setup.rs"),
+        include_str!("../../storage.rs"),
+    ] {
+        for code in source.split('"').filter(|text| {
+            families.iter().any(|family| text.starts_with(family))
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }) {
+            if plain_problem(code).contains("(code: ") && !missing.contains(&code) {
+                missing.push(code);
+            }
+        }
+    }
+    assert_eq!(
+        missing,
+        Vec::<&str>::new(),
+        "every access, policy, network, toolchain and project refusal has a sentence"
+    );
+    for (code, sentence) in [
+        (
+            "agent_access_lowered",
+            "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
+        ),
+        (
+            "agent_network_narrowed",
+            "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
+        ),
+        (
+            "agent_toolchain_lowered",
+            "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
+        ),
+        (
+            "agent_project_unreadable",
+            "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
+        ),
+    ] {
+        assert_eq!(
+            plain_problem(code),
+            sentence,
+            "{code} reads as on the desktop"
+        );
+    }
+}
+
+/// TN-L1: every cause a process stops for under a narrowed policy reads its own sentence,
+/// word for word the same in the TUI and in the desktop's copy table. The walk follows one
+/// match with no catch-all arm, whose arm for each Narrowing names its code and the next
+/// Narrowing, so a new one fails to compile here until it has an arm, and that arm puts it
+/// on the walk, where its sentence is checked, whatever its code's family and wherever that
+/// code is defined (TN-L1 r1).
+#[test]
+fn every_narrowing_stop_reads_the_same_sentence_in_both_uis() {
+    use crate::sandbox::policy::Narrowing;
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/desktop/src/api.ts"
+    ))
+    .unwrap();
+    let start = source
+        .find("const COPY: Record<string, string> = {")
+        .unwrap();
+    let body = &source[start..];
+    let body = &body[..body.find("\n};").unwrap()];
+    let desktop: std::collections::BTreeMap<&str, &str> = body
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (code, sentence) = line.trim().split_once(": ")?;
+            Some((
+                code,
+                sentence
+                    .strip_suffix(',')?
+                    .strip_prefix('"')?
+                    .strip_suffix('"')?,
+            ))
+        })
+        .collect();
+    let mut walked = Vec::new();
+    let mut next = Some(Narrowing::Access);
+    while let Some(narrowing) = next {
+        assert!(
+            !walked.contains(&narrowing),
+            "the walk reaches {narrowing:?} once"
+        );
+        walked.push(narrowing);
+        let (code, after) = match narrowing {
+            Narrowing::Access => ("agent_access_lowered", Some(Narrowing::Network)),
+            Narrowing::Network => ("agent_network_narrowed", Some(Narrowing::TurnedOff)),
+            Narrowing::TurnedOff => ("agent_toolchain_lowered", Some(Narrowing::NotAllowed)),
+            Narrowing::NotAllowed => ("agent_toolchain_lowered", Some(Narrowing::PolicyUnreadable)),
+            Narrowing::PolicyUnreadable => {
+                ("agent_policy_unreadable", Some(Narrowing::FolderUnreadable))
+            }
+            Narrowing::FolderUnreadable => ("agent_project_unreadable", None),
+        };
+        next = after;
+        assert_eq!(narrowing.code(), code, "{narrowing:?} reports its code");
+        let sentence = plain_problem(code);
+        assert!(
+            !sentence.contains("(code: "),
+            "{code} has its own sentence in the TUI: {sentence}"
+        );
+        assert_eq!(
+            desktop.get(code).copied(),
+            Some(sentence.as_str()),
+            "{code} reads the same on the desktop"
+        );
+    }
+}
+
+#[test]
 fn a_memory_stands_for_itself_by_its_first_line_of_prose() {
     use super::project_view::memory_quote;
     assert_eq!(
@@ -1015,7 +1173,7 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     let start = 1_793_000_000_000;
     assert_eq!(
         settle(&mut screen, &mut controller, start).await,
-        ["setup", "jobs", "context", "memories"],
+        ["setup", "jobs", "overview", "context", "memories"],
         "no agent output is read outside the Agents tab"
     );
     screen.open(Tab::Agents);
@@ -1375,13 +1533,18 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
             pane: None,
             presence: None,
             waiting: None,
+            waits_for: None,
             owner_questions: 0,
             no_worktree: false,
             hookless: false,
+            message_note: None,
+            started_ms: None,
         }],
         edges: Vec::new(),
         messages: Vec::new(),
         overlaps: Vec::new(),
+        relations: Vec::new(),
+        master_live_terminal: true,
     }));
     screen.open(Tab::Conversation);
     let look = Look::plain();
@@ -1491,6 +1654,49 @@ fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
         shown.contains("Reading the agent's output..."),
         "another job's lines are never shown: {shown}"
     );
+}
+
+#[test]
+fn a_research_job_queued_again_shows_why_and_is_not_drawn_as_running() {
+    const REASON: &str = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";
+    let project = ProjectId::new("tidepool").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
+    screen.now_ms = 600_000;
+    screen.jobs = Some(vec![ResearchJob {
+        id: 7,
+        project_id: project,
+        kind: ResearchKind::MarketResearch,
+        kind_label: "Market research".into(),
+        status: ResearchStatus::Queued,
+        status_label: "Queued".into(),
+        report_path: "context/research/market_research.md".into(),
+        harness: "codex".into(),
+        tools: true,
+        attempts: 0,
+        claimer: None,
+        error: Some(REASON.into()),
+        cancel_requested: false,
+        output_bytes: 2048,
+        created_ms: 1_000,
+        started_ms: Some(2_000),
+        heartbeat_ms: Some(3_000),
+        finished_ms: None,
+    }]);
+    screen.open(Tab::Agents);
+    let look = Look::plain();
+    for (width, height) in [(80u16, 24u16), (120, 36)] {
+        let shown = text(&project_screen(&mut screen, width, height, &look).rows);
+        let words = shown.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains(REASON), "{shown}");
+        assert!(!shown.contains("running"), "{shown}");
+        assert!(
+            shown
+                .lines()
+                .any(|line| line.trim_start().starts_with("Market research")
+                    && line.contains("Started")),
+            "{shown}"
+        );
+    }
 }
 
 fn stored(project: &ProjectId) -> StoredSetup {
@@ -1704,6 +1910,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
 
     let update_at = |expected_revision: u64| SetupAction::Update {
         project_id: project.clone(),
+        kept: None,
         expected_revision,
         name: Some("Notes Pro".into()),
         setup: ProjectSetup {
@@ -1762,7 +1969,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     );
     let general = screen.general.as_ref().unwrap();
     assert_eq!(general.name.value(), "Notes Pro", "the typed draft is kept");
-    assert_eq!(general.stack.value(), "rust, sqlite, tauri");
+    assert_eq!(general.stack.value(), "rust, sqlite, tauri, ,");
     assert_eq!(general.revision, 5, "the form takes the saved revision");
     assert!(!general.stale);
     assert_eq!(
@@ -1961,6 +2168,134 @@ fn a_stale_general_form_names_each_field_changed_since_the_owner_last_saw_it() {
         ),
         "fields already named are compared from the setup the owner was last shown"
     );
+}
+
+/// What the remove ask shows: the engine's preview of a project whose folders are all inside
+/// the projects home, or only its dashboard choice when one is outside.
+fn removal(can_delete: bool) -> crate::team::cleanup::RemovalPreview {
+    crate::team::cleanup::RemovalPreview {
+        name: "Gone app".into(),
+        folders: vec!["/Users/owner/CrazyAgent/gone-app".into()],
+        can_delete,
+        blocked: None,
+        running: vec!["Builder 2".into()],
+        open_change_sets: 1,
+        losses: vec![crate::team::cleanup::AgentLoss {
+            id: 3,
+            label: "Tester 3".into(),
+            code: "cleanup_worktree_dirty".into(),
+        }],
+    }
+}
+
+/// The remove ask reads what removing would do and preselects Remove from dashboard (keep
+/// files); Delete everything shows only when every folder is inside the projects home, lists
+/// what would be lost, and sends only once the project's exact name is typed (DEC-118).
+#[test]
+fn remove_preselects_the_dashboard_choice_and_deletes_only_after_the_exact_name() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
+    let read = screen.next_query(30);
+    assert_eq!(
+        read,
+        Some(SetupQuery::Removal {
+            project: project.clone()
+        }),
+        "the ask reads what removing would do first"
+    );
+    screen.apply(
+        read.as_ref().unwrap(),
+        Ok(SetupView::Removal(Box::new(removal(true)))),
+    );
+    let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
+    for words in [
+        "Remove from dashboard (keep files)",
+        "Delete everything",
+        "Builder 2",
+        "Tester 3",
+        "1 change set",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    assert_eq!(screen.remove_choice, RemoveChoice::Everything);
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Handled,
+        "nothing is sent before the name is typed"
+    );
+    for letter in "Gone app ".chars() {
+        assert_eq!(
+            screen.key(key(KeyCode::Char(letter))),
+            ProjectReply::Handled
+        );
+    }
+    assert!(
+        screen.confirm_remove,
+        "typing n or y is text, not an answer"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Handled,
+        "a trailing space is not the name"
+    );
+    screen.key(key(KeyCode::Backspace));
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(SetupAction::Delete {
+            project_id: project.clone(),
+            name: "Gone app".into(),
+        }))
+    );
+    assert!(!screen.confirm_remove);
+
+    screen.key(key(KeyCode::Char('x')));
+    assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
+    assert!(screen.remove_typed.is_empty());
+    let read = screen.next_query(60).unwrap();
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(removal(false)))));
+    let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
+    assert!(
+        shown.contains("Remove from dashboard (keep files)"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("Delete everything"),
+        "a project outside the projects home offers no delete: {shown}"
+    );
+    screen.key(key(KeyCode::Down));
+    assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('y'))),
+        ProjectReply::Change(Box::new(SetupAction::Remove {
+            project_id: project.clone(),
+        }))
+    );
+}
+
+/// When the engine refuses Delete everything, the remove ask offers only Remove from
+/// dashboard and says why in the engine's own sentence, which names the other project.
+#[test]
+fn the_remove_ask_says_why_delete_everything_is_not_offered() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(false);
+    preview.blocked = Some(
+        "Service A uses a folder of this project, so deleting it would delete that project's files too. Remove it from the dashboard instead."
+            .into(),
+    );
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
+    assert!(shown.contains("Service A uses a folder"), "{shown}");
+    assert!(!shown.contains("Type the project name"), "{shown}");
+    screen.key(key(KeyCode::Down));
+    assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
 }
 
 #[test]
@@ -2166,7 +2501,7 @@ async fn failed_and_empty_reads_settle_back_off_and_say_why() {
     let start = 1_793_000_000_000;
     assert_eq!(
         settle(&mut screen, &mut controller, start).await,
-        ["setup", "jobs", "context", "memories"]
+        ["setup", "jobs", "overview", "context", "memories"]
     );
 
     screen.read("context/documents/empty.md");
@@ -2396,7 +2731,17 @@ fn access_view(access: AgentAccess, version: u64) -> PolicyView {
             .collect(),
         toolchains: Vec::new(),
         ide_git_hooks: false,
+        tool_cache: Default::default(),
+        tool_caches: Vec::new(),
+        ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
+        local_folders: Vec::new(),
         version,
+        apply_changes: Default::default(),
+        apply_choices: Vec::new(),
+        grants: Vec::new(),
+        temp_folder: Default::default(),
+        grant_log: Vec::new(),
     }
 }
 
@@ -2436,7 +2781,11 @@ fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
             access: AgentAccess::Sandboxed,
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
+            ..Default::default()
         },
     };
     assert_eq!(
@@ -2625,6 +2974,52 @@ fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
     );
 }
 
+/// Once the research jobs and a context with no roadmap document are read, `p` on the
+/// Settings tab plans a roadmap at once and `k` opens the hidden folders box, so neither
+/// action takes the other's key.
+#[test]
+fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.jobs = Some(Vec::new());
+    screen.hidden_paths = Some(vec!["/Users/owner/secret".into()]);
+    screen.context = Some(crate::project_setup::ProjectContext {
+        project_id: project.clone(),
+        folder: "/Users/owner/hidden".into(),
+        items: vec![],
+    });
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Roadmap   Not planned   p Plan roadmap now"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Hidden    /Users/owner/secret   k Edit hidden folders"),
+        "{shown}"
+    );
+
+    let ProjectReply::Change(action) = screen.key(key(KeyCode::Char('p'))) else {
+        panic!("p asks the engine to plan");
+    };
+    assert_eq!(
+        *action,
+        SetupAction::PlanRoadmap {
+            project_id: project.clone(),
+        }
+    );
+    assert!(
+        screen.hidden.is_none(),
+        "p never opens the hidden folders box"
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.hidden.as_ref().unwrap().input.value(),
+        "/Users/owner/secret"
+    );
+}
+
 #[test]
 fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     let look = Look::plain();
@@ -2635,7 +3030,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
         paths: vec![],
         version: 0,
     });
-    assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
     assert!(screen.hidden.is_none());
     assert_eq!(
         screen.problem.as_deref(),
@@ -2643,7 +3038,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
-        shown.contains("Hidden    Loading...   d Edit hidden folders"),
+        shown.contains("Hidden    Loading...   k Edit hidden folders"),
         "{shown}"
     );
 
@@ -2669,11 +3064,11 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
-        shown.contains("Hidden    /Users/owner/secret   d Edit hidden folders"),
+        shown.contains("Hidden    /Users/owner/secret   k Edit hidden folders"),
         "{shown}"
     );
 
-    assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
     assert_eq!(
         screen.hidden.as_ref().unwrap().input.value(),
         "/Users/owner/secret"
@@ -2742,7 +3137,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     assert_eq!(screen.hidden_paths, None);
 
     screen.hidden_paths = Some(vec![]);
-    screen.key(key(KeyCode::Char('d')));
+    screen.key(key(KeyCode::Char('k')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
     assert_eq!(
@@ -2801,9 +3196,12 @@ fn console_screen() -> ProjectScreen {
         pane: None,
         presence: None,
         waiting: None,
+        waits_for: None,
         owner_questions: 0,
         no_worktree: false,
         hookless: false,
+        message_note: None,
+        started_ms: None,
     };
     screen.team = crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
         project_id: project.clone(),
@@ -2814,6 +3212,8 @@ fn console_screen() -> ProjectScreen {
         edges: vec![],
         messages: Vec::new(),
         overlaps: Vec::new(),
+        relations: Vec::new(),
+        master_live_terminal: true,
     }));
     screen.context = Some(ProjectContext {
         project_id: project,
@@ -2822,6 +3222,7 @@ fn console_screen() -> ProjectScreen {
             path: "docs/brief.md".into(),
             kind: ContextKind::Document,
             bytes: 10,
+            linked: false,
         }],
     });
     screen.open(Tab::Conversation);
@@ -2835,6 +3236,132 @@ fn type_text(screen: &mut ProjectScreen, text: &str) {
             screen.key(key(KeyCode::Char(character))),
             ProjectReply::Handled
         );
+    }
+}
+
+#[test]
+fn a_running_master_turn_shows_what_it_last_did_and_ctrl_o_opens_the_whole_list() {
+    use crate::master_session::MasterActivityLine;
+    let mut screen = console_screen();
+    let now: i64 = 3_600_000;
+    let texts = [
+        "Searching the code",
+        "Reading README.md",
+        "Running a command",
+        "Editing src/app/layout.tsx",
+        "Updating its plan",
+        "Writing a reply",
+        "Reading src/app/page.tsx",
+    ];
+    let lines: Vec<MasterActivityLine> = texts
+        .iter()
+        .zip(0u64..)
+        .map(|(text, step)| MasterActivityLine {
+            at_ms: 3_600_000 - 4_000 - (6 - step) * 10_000,
+            text: (*text).into(),
+        })
+        .collect();
+    let thinking = |activity: &[MasterActivityLine]| MasterStatus::Thinking {
+        since_ms: Some(now - 6 * 60_000),
+        activity: activity.to_vec(),
+    };
+    let look = Look::plain();
+    let control_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let draw = |screen: &mut ProjectScreen| {
+        let drawn = project_screen(screen, 90, 40, &look);
+        let rows: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+        (rows, drawn.help)
+    };
+    let under = |rows: &[String], count: usize| -> Vec<String> {
+        let at = rows
+            .iter()
+            .rposition(|row| row.contains("Thinking..."))
+            .unwrap_or_else(|| panic!("{}", rows.join("\n")));
+        rows[at + 1..at + 1 + count]
+            .iter()
+            .map(|row| row.trim().to_owned())
+            .collect()
+    };
+    screen.now_ms = now;
+
+    screen.transcript.as_mut().expect("console").status = thinking(&lines[2..]);
+    let (rows, help) = draw(&mut screen);
+    let shown = rows.join("\n");
+    assert!(
+        shown.contains("Thinking...  6 min \u{b7} Reading src/app/page.tsx, 4 s ago"),
+        "{shown}"
+    );
+    assert!(!screen.more_activity());
+    assert!(!help.iter().any(|(key, _)| *key == "Ctrl-O"), "{help:?}");
+    screen.key(control_o);
+    assert!(!screen.activity_open, "five lines have no longer list");
+
+    screen.transcript.as_mut().expect("console").status = thinking(&lines);
+    let (rows, help) = draw(&mut screen);
+    let shown = rows.join("\n");
+    assert_eq!(
+        under(&rows, 5),
+        [
+            "44 s ago  Running a command",
+            "34 s ago  Editing src/app/layout.tsx",
+            "24 s ago  Updating its plan",
+            "14 s ago  Writing a reply",
+            "4 s ago  Reading src/app/page.tsx",
+        ],
+        "{shown}"
+    );
+    assert!(!shown.contains("Searching the code"), "{shown}");
+    assert!(!shown.contains("Reading README.md"), "{shown}");
+    assert!(help.contains(&("Ctrl-O", "All activity")), "{help:?}");
+
+    assert_eq!(screen.key(control_o), ProjectReply::Handled);
+    assert!(screen.activity_open);
+    assert_eq!(screen.input.value(), "", "the key types nothing");
+    let (rows, help) = draw(&mut screen);
+    let listed = under(&rows, 7);
+    assert_eq!(listed[0], "1 min ago  Searching the code");
+    assert_eq!(listed[1], "54 s ago  Reading README.md");
+    assert_eq!(listed[6], "4 s ago  Reading src/app/page.tsx");
+    assert!(help.contains(&("Ctrl-O", "Less activity")), "{help:?}");
+
+    screen.now_ms = now + 9 * 60_000;
+    let (rows, _) = draw(&mut screen);
+    let shown = rows.join("\n");
+    assert!(
+        shown.contains("Thinking...  15 min \u{b7} no new activity for 9 min"),
+        "{shown}"
+    );
+
+    screen.transcript.as_mut().expect("console").status = MasterStatus::Replied;
+    let (rows, help) = draw(&mut screen);
+    let shown = rows.join("\n");
+    assert!(!shown.contains("Thinking"), "{shown}");
+    assert!(!shown.contains("src/app/page.tsx"), "{shown}");
+    assert!(!help.iter().any(|(key, _)| *key == "Ctrl-O"), "{help:?}");
+    assert!(!screen.more_activity());
+}
+
+#[test]
+fn an_activity_line_wider_than_the_screen_is_cut_to_its_width() {
+    use crate::master_session::MasterActivityLine;
+    let mut screen = console_screen();
+    let long = format!("Reading {}", "deep/".repeat(36));
+    screen.now_ms = 60_000;
+    screen.transcript.as_mut().expect("console").status = MasterStatus::Thinking {
+        since_ms: Some(0),
+        activity: vec![MasterActivityLine {
+            at_ms: 56_000,
+            text: long,
+        }],
+    };
+    let drawn = project_screen(&mut screen, 60, 30, &Look::plain());
+    let rows: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+    let shown = rows.join("\n");
+    let wide: Vec<&String> = rows.iter().filter(|row| row.contains("deep/")).collect();
+    assert_eq!(wide.len(), 2, "{shown}");
+    for row in wide {
+        assert!(row.chars().count() <= 60, "{shown}");
+        assert!(row.trim_end().ends_with('\u{2026}'), "{shown}");
     }
 }
 
@@ -3206,11 +3733,13 @@ fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder
                 path: "context/brief.md".into(),
                 kind: ContextKind::Brief,
                 bytes: 10,
+                linked: false,
             },
             ContextItem {
                 path: "context/documents/spec.md".into(),
                 kind: ContextKind::Document,
                 bytes: 20,
+                linked: false,
             },
         ],
     });
@@ -3269,6 +3798,7 @@ fn shift_o_on_the_context_tab_is_in_the_key_help_and_says_why_when_the_ide_canno
             path: "context/documents/spec.md".into(),
             kind: ContextKind::Document,
             bytes: 20,
+            linked: false,
         }],
     };
     screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
@@ -3479,6 +4009,7 @@ async fn settings_plan_roadmap_now_starts_the_job() {
         SetupQuery::Change {
             action: SetupAction::Update {
                 project_id: project.clone(),
+                kept: None,
                 expected_revision,
                 name: None,
                 setup: edited,
@@ -3511,4 +4042,721 @@ fn h_on_the_settings_tab_opens_the_project_harness_list() {
         .map(|line| line.trim_end().to_owned())
         .unwrap_or_default();
     assert!(team.ends_with("   h Harness settings"), "{team}");
+}
+
+/// A document longer than one chunk is opened, another file is opened while its second
+/// chunk is in flight, then the first is opened again: the late chunk never starts the new
+/// preview, which reads from offset 0 and shows the whole document in order.
+#[tokio::test]
+async fn reopening_a_file_while_a_chunk_is_in_flight_reads_it_from_the_start() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-chunk-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let long: String = (1..=2000).map(|line| format!("line {line:05}\n")).collect();
+    assert!(long.len() > 2 * crate::project_setup::CONTEXT_CHUNK_BYTES);
+    std::fs::write(sources.path().join("long.md"), &long).unwrap();
+    std::fs::write(sources.path().join("short.md"), "# Short\n").unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    let project = ProjectId::new("chunks").unwrap();
+    let document = |name: &str| sources.path().join(name).to_str().unwrap().to_owned();
+    let created = controller
+        .setup_project(
+            project.clone(),
+            ProjectSpec {
+                name: "Chunks".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Long documents.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Cli],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![document("long.md"), document("short.md")],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        created,
+        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+    ));
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let now = 1_793_000_000_000;
+    settle(&mut screen, &mut controller, now).await;
+    let long_path = "context/documents/long.md";
+    let item = |offset: u64| SetupQuery::Item {
+        project: project.clone(),
+        path: long_path.into(),
+        offset,
+    };
+
+    screen.read(long_path);
+    let first = screen.next_query(now).unwrap();
+    assert_eq!(first, item(0));
+    send(&mut screen, &mut controller, first).await;
+    let second = screen.next_query(now).unwrap();
+    let SetupQuery::Item { offset, .. } = &second else {
+        panic!("the preview reads its next chunk: {second:?}");
+    };
+    assert!(*offset > 0, "{second:?}");
+    let in_flight = serve(&mut controller, second.clone()).await;
+    screen.read("context/documents/short.md");
+    screen.read(long_path);
+    screen.apply(&second, in_flight);
+
+    let restart = screen.next_query(now);
+    assert_eq!(
+        restart,
+        Some(item(0)),
+        "the reopened preview reads from the start"
+    );
+    send(&mut screen, &mut controller, restart.unwrap()).await;
+    for _ in 0..8 {
+        let Some(query) = screen.next_query(now) else {
+            break;
+        };
+        send(&mut screen, &mut controller, query).await;
+    }
+    let preview = screen.preview.as_ref().unwrap();
+    assert_eq!(preview.path, long_path);
+    assert_eq!(preview.next, None);
+    assert_eq!(preview.text, long, "the whole document, in order");
+}
+
+/// A stack entry may hold a comma, which the engine allows: saving the General form after
+/// changing only the name keeps every stack entry as it was.
+#[test]
+fn the_general_form_keeps_stack_entries_holding_commas_when_the_stack_is_untouched() {
+    let project = ProjectId::new("commas").unwrap();
+    let mut setup = stored(&project);
+    setup.tech_stack = vec!["C, C++ interop".into(), "rust".into()];
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let first = screen.next_query(10).unwrap();
+    screen.apply(&first, Ok(SetupView::Setup(Some(Box::new(setup.clone())))));
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    let control_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    assert_eq!(screen.key(control_u), ProjectReply::Handled);
+    assert_eq!(screen.paste("Notes Pro"), ProjectReply::Handled);
+
+    let reply = screen.key(key(KeyCode::Enter));
+
+    let ProjectReply::Change(action) = reply else {
+        panic!("the name change is sent: {reply:?}");
+    };
+    match *action {
+        SetupAction::Update {
+            name, setup: sent, ..
+        } => {
+            assert_eq!(name.as_deref(), Some("Notes Pro"));
+            assert_eq!(sent.tech_stack, setup.tech_stack);
+        }
+        other => panic!("the form sends an update: {other:?}"),
+    }
+}
+
+/// Appending to a stack whose saved entry holds a comma keeps that entry whole: only the
+/// text the owner typed splits on commas.
+#[test]
+fn editing_the_stack_keeps_saved_entries_holding_commas_whole() {
+    let project = ProjectId::new("commas").unwrap();
+    let mut setup = stored(&project);
+    setup.tech_stack = vec!["C, C++ interop".into(), "rust".into()];
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let first = screen.next_query(10).unwrap();
+    screen.apply(&first, Ok(SetupView::Setup(Some(Box::new(setup.clone())))));
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    screen.key(key(KeyCode::Tab));
+    screen.key(key(KeyCode::Tab));
+    assert_eq!(screen.general.as_ref().unwrap().cursor, 2);
+    assert_eq!(screen.paste(", go, kotlin"), ProjectReply::Handled);
+
+    let reply = screen.key(key(KeyCode::Enter));
+
+    let ProjectReply::Change(action) = reply else {
+        panic!("the stack change is sent: {reply:?}");
+    };
+    match *action {
+        SetupAction::Update { setup: sent, .. } => {
+            assert_eq!(sent.tech_stack, ["C, C++ interop", "rust", "go", "kotlin"]);
+        }
+        other => panic!("the form sends an update: {other:?}"),
+    }
+}
+
+#[test]
+fn a_live_switch_that_opened_no_session_shows_on_and_names_why() {
+    let project = ProjectId::new("unopened").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Unopened".into(), None);
+    let query = SetupQuery::TeamChange {
+        action: crate::team::TeamAction::LiveMaster {
+            project_id: project.clone(),
+            on: true,
+            version: 0,
+        },
+        generation: 1,
+    };
+    screen.apply(
+        &query,
+        Ok(SetupView::LiveWithoutSession(
+            "No account pool is assigned to this project as its master".into(),
+        )),
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some(
+            "No master session opened, so this conversation won't be in Sessions. No account pool is assigned to this project as its master"
+        )
+    );
+    screen.apply(
+        &query,
+        Ok(SetupView::LiveWithoutSession(
+            "master_open_provenance".into(),
+        )),
+    );
+    let named = screen.problem.clone().unwrap();
+    assert!(
+        named.starts_with("No master session opened, so this conversation won't be in Sessions. ")
+            && named.contains("master_open_provenance"),
+        "{named}"
+    );
+}
+
+/// A short window shows the help lines of the setting the cursor is on along with its row, so
+/// the owner reads what the setting does while changing it (FB-TUI F1).
+#[test]
+fn the_access_box_shows_the_help_of_the_row_the_cursor_is_on_in_a_short_window() {
+    use super::project_access::{IDE_GIT_HOOKS_LINE, agent_files_help, network_help};
+    use crate::sandbox::policy::{AgentNetwork, IdeAgentFiles, ToolchainView};
+    use crate::sandbox::toolchains::Toolchain;
+    let opening = |help: &str| help.split(' ').take(5).collect::<Vec<_>>().join(" ");
+    let project = ProjectId::new("access-help").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_access_read(&mut screen, 20);
+    let mut view = access_view(AgentAccess::Sandboxed, 1);
+    view.toolchains = [(Toolchain::Rust, "Rust"), (Toolchain::Python, "Python")]
+        .into_iter()
+        .map(|(toolchain, label)| ToolchainView {
+            toolchain,
+            label: label.into(),
+            installed: true,
+            used: false,
+            allowed: false,
+        })
+        .collect();
+    screen.apply(&read, Ok(SetupView::AgentPolicy(view)));
+    screen.key(key(KeyCode::Char('c')));
+    let look = Look::plain();
+    for _ in 0..3 {
+        screen.key(key(KeyCode::Down));
+    }
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("> Network")
+            && shown.contains(&opening(network_help(AgentNetwork::default())))
+            && shown.contains("[> Save ]"),
+        "{shown}"
+    );
+    screen.key(key(KeyCode::Down));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("> [ ] IDE git runs the project's hooks")
+            && shown.contains(&opening(IDE_GIT_HOOKS_LINE))
+            && shown.contains("[> Save ]"),
+        "{shown}"
+    );
+    screen.key(key(KeyCode::Down));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("> IDE changes in agent folders  < Allow all changes >")
+            && shown.contains(&opening(agent_files_help(IdeAgentFiles::AllowAll)))
+            && shown.contains("[> Save ]"),
+        "{shown}"
+    );
+}
+
+/// The Agent access box keeps its save line, or the Full access warning with its y and n, on
+/// screen when the window is shorter than the box, and the settings above follow the cursor
+/// down to the IDE hooks switch with the lines left out counted (FB-TUI row 3). The Full
+/// access warning is checked on macOS only: Linux offers Sandboxed alone in this version
+/// (`LINUX_UNAVAILABLE`), so there the level stays and Enter saves.
+#[test]
+fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
+    use crate::sandbox::policy::ToolchainView;
+    use crate::sandbox::toolchains::Toolchain;
+    let project = ProjectId::new("access-short").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_access_read(&mut screen, 20);
+    let mut view = access_view(AgentAccess::Sandboxed, 1);
+    view.toolchains = [(Toolchain::Rust, "Rust"), (Toolchain::Python, "Python")]
+        .into_iter()
+        .map(|(toolchain, label)| ToolchainView {
+            toolchain,
+            label: label.into(),
+            installed: true,
+            used: false,
+            allowed: false,
+        })
+        .collect();
+    screen.apply(&read, Ok(SetupView::AgentPolicy(view)));
+    screen.key(key(KeyCode::Char('c')));
+    let look = Look::plain();
+    for (width, height) in [(120, 40), (80, 24)] {
+        let drawn = project_screen(&mut screen, width, height, &look);
+        assert_eq!(drawn.rows.len(), usize::from(height) - 4);
+        let shown = text(&drawn.rows);
+        assert!(
+            shown.contains("> Access      < Sandboxed >")
+                && shown.contains("[> Save ]")
+                && shown.contains("more lines below"),
+            "{width}x{height}:\n{shown}"
+        );
+    }
+    let shown = text(&project_screen(&mut screen, 120, 40, &look).rows);
+    assert!(
+        shown.contains("Toolchains agents may use") && shown.contains("[ ] Rust"),
+        "{shown}"
+    );
+    for _ in 0..4 {
+        screen.key(key(KeyCode::Down));
+    }
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("> [ ] IDE git runs the project's hooks")
+            && shown.contains("more lines above")
+            && shown.contains("[> Save ]"),
+        "{shown}"
+    );
+    for _ in 0..4 {
+        screen.key(key(KeyCode::Up));
+    }
+    screen.key(key(KeyCode::Right));
+    screen.key(key(KeyCode::Right));
+    screen.key(key(KeyCode::Enter));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    if cfg!(target_os = "macos") {
+        assert!(
+            shown.contains("Full access: Agents run with your user's permissions")
+                && shown.contains("[> y Allow Full access ]"),
+            "{shown}"
+        );
+    } else if cfg!(target_os = "linux") {
+        assert!(
+            shown.contains("> Access      < Sandboxed >") && shown.contains("Saving..."),
+            "{shown}"
+        );
+    }
+}
+
+/// The Settings key m asks before a project moves into the projects home: the ask says the
+/// team must be stopped and its work follows, m sends a Move, c a Copy, and n or Esc keeps the
+/// project where it is. A refusal shows as a plain line and an applied move reads the setup
+/// again.
+#[test]
+fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
+    use crate::projects_home::AddMode;
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    let shown = text(&project_screen(&mut screen, 120, 30, &Look::plain()).rows);
+    assert!(shown.contains("m Move into CrazyAgent folder"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Char('m'))), ProjectReply::Handled);
+    assert!(screen.confirm_move);
+    let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
+    let shown = text(&drawn.rows);
+    assert!(
+        shown.contains("Move Kept into your CrazyAgent folder?"),
+        "{shown}"
+    );
+    assert!(shown.contains("Stop the team first"), "{shown}");
+    assert!(shown.contains("[> Keep it here ]"), "{shown}");
+    assert_eq!(
+        drawn.help,
+        [
+            ("m", "Move"),
+            ("c", "Copy"),
+            ("n", "Keep it here"),
+            ("Esc", "Keep it here")
+        ]
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('q'))), ProjectReply::Handled);
+    assert!(screen.confirm_move);
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(!screen.confirm_move);
+    screen.key(key(KeyCode::Char('m')));
+    assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
+    assert!(!screen.confirm_move);
+    screen.key(key(KeyCode::Char('m')));
+    assert_eq!(
+        screen.key(key(KeyCode::Char('m'))),
+        ProjectReply::MoveHome(AddMode::Move)
+    );
+    assert!(!screen.confirm_move);
+    screen.key(key(KeyCode::Char('m')));
+    assert_eq!(
+        screen.key(key(KeyCode::Char('c'))),
+        ProjectReply::MoveHome(AddMode::Copy)
+    );
+    assert!(!screen.confirm_move);
+
+    let query = SetupQuery::MoveHome {
+        project,
+        mode: AddMode::Move,
+        generation: 4,
+    };
+    let refused = |code: &str| {
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: code.into(),
+        }))
+    };
+    screen.apply(&query, refused("move_project_busy"));
+    assert!(
+        screen
+            .problem
+            .as_deref()
+            .is_some_and(|problem| problem.starts_with("Stop the team first")),
+        "{:?}",
+        screen.problem
+    );
+    screen.apply(&query, refused("move_project_already_home"));
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This project is already in your projects folder.")
+    );
+    screen.apply(&query, refused("home_move_worktrees"));
+    assert!(
+        screen
+            .problem
+            .as_deref()
+            .is_some_and(|problem| !problem.contains("home_move_worktrees")),
+        "{:?}",
+        screen.problem
+    );
+    screen.problem = None;
+    screen.setup_due = false;
+    screen.apply(&query, Ok(SetupView::Changed(OwnerResult::Applied)));
+    assert_eq!(screen.problem, None);
+    assert!(screen.setup_due);
+}
+
+#[test]
+fn a_file_linked_from_the_repo_says_so_opens_from_the_project_folder_and_is_not_deleted() {
+    use super::project::OpenRequest;
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    screen.context = Some(ProjectContext {
+        project_id: project.clone(),
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        items: vec![ContextItem {
+            path: "repo/docs/plan-2026.md".into(),
+            kind: ContextKind::Plan,
+            bytes: 15,
+            linked: true,
+        }],
+    });
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("plan-2026.md"), "{shown}");
+    assert!(shown.contains("Linked from your repo"), "{shown}");
+    assert!(!shown.contains("Planned after research"), "{shown}");
+
+    let plan = OpenRequest::Context {
+        folder: "/private/tmp/ca-notes-cli".into(),
+        path: "docs/plan-2026.md".into(),
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Char('o'))),
+        ProjectReply::Open(plan.clone()),
+        "a linked file opens from the project folder, not the state folder"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('v'))),
+        ProjectReply::Edit(plan)
+    );
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert!(screen.reading, "the linked file opens in the reader");
+    screen.key(key(KeyCode::Esc));
+    assert!(!screen.reading);
+    assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
+    assert!(screen.confirm_delete.is_none(), "no delete is asked for");
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This file is linked from your repo. It can't be deleted here.")
+    );
+}
+
+mod overview_read {
+    use super::*;
+    use crate::project_overview::{Apply, Competitors, Overview, Tab as OverviewTab, TabState};
+    use crate::roadmap_status::Refresh;
+
+    const STEP: i64 = super::super::project::REFRESH_MS;
+
+    fn overview() -> Overview {
+        Overview {
+            readme: None,
+            tabs: OverviewTab::ALL
+                .into_iter()
+                .map(|tab| TabState {
+                    tab,
+                    text: None,
+                    version: String::new(),
+                    edited: false,
+                    proposal: None,
+                    proposal_version: String::new(),
+                    blocked: None,
+                })
+                .collect(),
+            competitors: Competitors::Missing,
+            running: false,
+            stale: false,
+            checked_ms: None,
+            failure: None,
+            refresh: Refresh::AfterLanding,
+            apply: Apply::AlwaysAsk,
+            needs_home: false,
+        }
+    }
+
+    /// Answers every other read as failed until the screen asks for the Overview tabs.
+    fn overview_asked(screen: &mut ProjectScreen, now: i64) -> Option<SetupQuery> {
+        for _ in 0..16 {
+            let query = screen.next_query(now)?;
+            if matches!(query, SetupQuery::Overview { .. }) {
+                return Some(query);
+            }
+            screen.apply(&query, Err("engine_unavailable".into()));
+        }
+        panic!("reads never settled");
+    }
+
+    fn read(screen: &mut ProjectScreen, now: i64, overview: Overview) {
+        let query = overview_asked(screen, now).expect("the tabs are read");
+        screen.apply(&query, Ok(SetupView::Overview(Box::new(overview))));
+    }
+
+    #[test]
+    fn the_overview_tab_reads_the_tabs_once_and_again_only_while_something_is_pending() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        let asked = overview_asked(&mut screen, 100).unwrap();
+        assert_eq!(
+            asked,
+            SetupQuery::Overview {
+                project: project.clone()
+            }
+        );
+        screen.apply(&asked, Ok(SetupView::Overview(Box::new(overview()))));
+        assert!(screen.overview_tabs.is_some());
+        assert_eq!(
+            overview_asked(&mut screen, 100 + 10 * STEP),
+            None,
+            "nothing is pending"
+        );
+
+        let mut running = overview();
+        running.running = true;
+        let asked = SetupQuery::RefreshOverview {
+            project: project.clone(),
+        };
+        screen.apply(&asked, Ok(SetupView::OverviewAsked));
+        read(&mut screen, 200_000, running);
+        assert_eq!(
+            overview_asked(&mut screen, 200_000 + STEP - 1),
+            None,
+            "not before the wait"
+        );
+        assert!(
+            overview_asked(&mut screen, 200_000 + STEP).is_some(),
+            "a run is read again"
+        );
+
+        let mut waiting = overview();
+        waiting.stale = true;
+        screen.apply(
+            &SetupQuery::Overview {
+                project: project.clone(),
+            },
+            Ok(SetupView::Overview(Box::new(waiting.clone()))),
+        );
+        let later = 200_000 + 3 * STEP;
+        assert!(
+            overview_asked(&mut screen, later).is_some(),
+            "a landing waits for a run"
+        );
+
+        for (round, (off, needs_home)) in [(true, false), (false, true)].into_iter().enumerate() {
+            let checked = later + (round as i64 + 1) * 10 * STEP;
+            let mut held = waiting.clone();
+            held.needs_home = needs_home;
+            if off {
+                held.refresh = Refresh::Off;
+            }
+            screen.apply(
+                &SetupQuery::Overview {
+                    project: project.clone(),
+                },
+                Ok(SetupView::Overview(Box::new(held))),
+            );
+            assert_eq!(
+                overview_asked(&mut screen, checked),
+                None,
+                "no run can start"
+            );
+        }
+    }
+
+    #[test]
+    fn another_tab_does_not_read_the_overview_tabs() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        screen.open(Tab::Context);
+        assert_eq!(overview_asked(&mut screen, 100), None);
+        assert!(screen.overview_tabs.is_none());
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_last_tabs_and_is_tried_again_after_the_wait() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        let asked = overview_asked(&mut screen, 100).unwrap();
+        screen.apply(&asked, Err("overview_unavailable".into()));
+        assert!(screen.overview_tabs.is_none());
+        assert_eq!(
+            screen.problem.as_deref(),
+            Some("The Overview tabs can't be read right now. Try again in a moment.")
+        );
+        assert_eq!(overview_asked(&mut screen, 100 + STEP - 1), None);
+        let mut running = overview();
+        running.running = true;
+        read(&mut screen, 100 + STEP, running);
+        let again = overview_asked(&mut screen, 100 + 2 * STEP).unwrap();
+        screen.apply(&again, Err("overview_unavailable".into()));
+        assert!(
+            screen
+                .overview_tabs
+                .as_ref()
+                .is_some_and(|kept| kept.running)
+        );
+    }
+
+    #[test]
+    fn shift_r_asks_for_a_run_or_says_why_none_can_start() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        let refresh = shifted(KeyCode::Char('R'));
+        assert_ne!(
+            screen.key(refresh),
+            ProjectReply::RefreshOverview,
+            "not before the read"
+        );
+        read(&mut screen, 100, overview());
+        assert_eq!(screen.key(refresh), ProjectReply::RefreshOverview);
+
+        let asked = SetupQuery::RefreshOverview {
+            project: project.clone(),
+        };
+        screen.apply(&asked, Ok(SetupView::OverviewAsked));
+        assert!(
+            overview_asked(&mut screen, 101).is_some(),
+            "the ask is followed by a read"
+        );
+
+        type Change = fn(&mut Overview);
+        let cases: [(Change, &str); 3] = [
+            (
+                |o| o.running = true,
+                "A run is writing the tabs now. They fill in when it ends.",
+            ),
+            (
+                |o| o.refresh = Refresh::Off,
+                "Overview tabs are off for this project. Turn them on in Project settings.",
+            ),
+            (
+                |o| o.needs_home = true,
+                "Overview tabs need this project in the CrazyAgent folder. Move it there in the desktop app, in Project settings.",
+            ),
+        ];
+        for (change, line) in cases {
+            let mut held = overview();
+            change(&mut held);
+            screen.overview_tabs = Some(held);
+            screen.problem = None;
+            assert_eq!(screen.key(refresh), ProjectReply::Handled, "{line}");
+            assert_eq!(screen.problem.as_deref(), Some(line));
+        }
+    }
+
+    #[test]
+    fn a_refused_refresh_says_why_and_reads_the_tabs_again() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        read(&mut screen, 100, overview());
+        let asked = SetupQuery::RefreshOverview { project };
+        screen.apply(&asked, Err("overview_off".into()));
+        assert_eq!(
+            screen.problem.as_deref(),
+            Some("Overview tabs are off for this project. Turn them on in Project settings.")
+        );
+        assert!(overview_asked(&mut screen, 101).is_some());
+    }
+}
+
+#[test]
+fn p_on_the_context_tab_opens_project_memory_and_both_layouts_say_so() {
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    screen.context = Some(ProjectContext {
+        project_id: project.clone(),
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        items: vec![ContextItem {
+            path: "context/documents/spec.md".into(),
+            kind: ContextKind::Document,
+            bytes: 20,
+            linked: false,
+        }],
+    });
+    let look = Look::plain();
+    for (width, height) in [(80, 24), (120, 36)] {
+        let drawn = project_screen(&mut screen, width, height, &look);
+        let shown = text(&drawn.rows);
+        assert!(
+            shown.contains("p opens Project memory."),
+            "{width}: {shown}"
+        );
+        assert!(!shown.contains("Settings, Memory"), "{width}: {shown}");
+        assert!(
+            drawn.help.contains(&("p", "Project memory")),
+            "{width}: {:?}",
+            drawn.help
+        );
+    }
+    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Memory);
 }

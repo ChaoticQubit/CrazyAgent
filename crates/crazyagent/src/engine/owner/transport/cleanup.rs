@@ -1,10 +1,13 @@
 use super::*;
 use crate::protocol::{ProjectId, encode_frame};
-use crate::team::cleanup::{self, FinishedAgent, RECLAIMABLE_MAX, Removal};
+use crate::team::cleanup::{
+    self, CANDIDATES_MAX, FinishedAgent, RECLAIMABLE_MAX, Removal, RemovalPreview,
+};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 2048;
 pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_secs(120);
+const SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
 
 /// Every code a Cleanup request can answer an owner client with: the reasons a finished
 /// agent is kept, this protocol's own, the change store's it reads through, and the owner
@@ -52,6 +55,9 @@ enum Action {
         project: ProjectId,
         agents: Vec<i64>,
     },
+    Removal {
+        project: ProjectId,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -70,9 +76,22 @@ enum Reply {
         agents: Vec<i64>,
         kept: Option<String>,
     },
+    Removal {
+        preview: RemovalPreview,
+    },
     Rejected {
         code: String,
     },
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Finished { .. } => Some("cleanup.finished"),
+        Action::Removal { .. } => Some("cleanup.removal"),
+        _ => None,
+    }
 }
 
 fn unknown() -> EngineError {
@@ -80,21 +99,22 @@ fn unknown() -> EngineError {
 }
 
 impl OwnerClient {
-    /// Reads a project's finished agents whose worktree and agent folder the owner may
-    /// remove, newest first, with their size on disk. Input: the project. Output: at most
-    /// `RECLAIMABLE_MAX` agents.
+    /// Reads a project's finished agents that still hold a worktree, newest first: the ones
+    /// the owner may remove with their worktree's size on disk, and the ones a check keeps
+    /// with its code. Input: the project. Output: at most `CANDIDATES_MAX` agents.
     pub async fn finished_agents(
         &self,
         project: ProjectId,
     ) -> Result<Vec<FinishedAgent>, EngineError> {
         match self.cleanup_exchange(Action::Finished { project }).await? {
-            Reply::Finished { agents } if agents.len() <= RECLAIMABLE_MAX => Ok(agents),
+            Reply::Finished { agents } if agents.len() <= CANDIDATES_MAX => Ok(agents),
             _ => Err(unknown()),
         }
     }
 
-    /// Removes the worktrees and agent folders of finished agents the owner confirmed; the
-    /// engine checks every one again first. Inputs: the project and the agents.
+    /// Removes the worktrees of finished agents the owner confirmed; the engine checks every
+    /// one again first, and their folders, conversations and history stay. Inputs: the
+    /// project and the agents.
     /// Output: the agents removed with the code of the first one kept when it stopped part
     /// way, or the refusal when it removed none.
     pub async fn remove_finished_agents(
@@ -115,8 +135,19 @@ impl OwnerClient {
         }
     }
 
+    /// Reads what removing a project would do: its name, the folders Delete everything
+    /// would move and whether it may, its running agents, open change sets and the work
+    /// each agent would lose. Input: the project. Output: the preview.
+    pub async fn removal_preview(&self, project: ProjectId) -> Result<RemovalPreview, EngineError> {
+        match self.cleanup_exchange(Action::Removal { project }).await? {
+            Reply::Removal { preview } => Ok(preview),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn cleanup_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(CLEANUP_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope { cleanup: action })
                 .map_err(|_| failure("cleanup_request_bounds"))?;
             self.root.verify()?;
@@ -143,7 +174,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("cleanup_unavailable"))?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -163,6 +196,7 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 /// removal still to admit, with the engine folder it changes.
 enum Prepared {
     Finished(Vec<FinishedAgent>),
+    Removal(Box<RemovalPreview>),
     Remove(PathBuf, ProjectId, Vec<i64>),
 }
 
@@ -191,6 +225,14 @@ pub(super) async fn serve(
                 Some(barrier),
             )
         }
+        Ok(Prepared::Removal(preview)) => {
+            let barrier = engine.owner_egress.write().await;
+            (
+                checked(authority, packet, admission)
+                    .map(|()| Reply::Removal { preview: *preview }),
+                Some(barrier),
+            )
+        }
         Err(error) => (Err(error), None),
     };
     let reply = match answered {
@@ -205,6 +247,58 @@ pub(super) async fn serve(
         .map_err(|_| unknown())?,
     };
     write_reply(stream, &frame).await
+}
+
+/// Removes finished agents' worktrees on the engine's own schedule while the owner server
+/// runs, as the owner's setting says: a pass at start, which also takes agents that finished
+/// before this build once their wait is over, then one every `SWEEP_EVERY`, each on a
+/// blocking thread off the request path, reading the setting again each time, and each
+/// starting where the last one stopped. Inputs: the authority, held weakly so a server
+/// dropped without its stop path still releases it, and the server's stop. Runs until the
+/// stop or until the authority is gone; a pass already running ends first.
+pub(super) async fn sweep(authority: std::sync::Weak<Authority>, mut stop: oneshot::Receiver<()>) {
+    let mut after = 0;
+    loop {
+        let Some(root) = authority
+            .upgrade()
+            .map(|authority| super::changes::engine_root(&authority))
+        else {
+            return;
+        };
+        let passed = match root {
+            Ok(root) => tokio::task::spawn_blocking(move || {
+                let db = open(&root)?;
+                crate::cleanup_settings::initialize(&db)?;
+                let settings = crate::cleanup_settings::load(&db)?;
+                cleanup::sweep(&db, &root, &settings, after, crate::team::now_ms())
+            })
+            .await
+            .unwrap_or_else(|_| Err(failure("cleanup_unavailable"))),
+            Err(error) => Err(error),
+        };
+        match passed {
+            Ok(swept) => {
+                after = swept.after;
+                for line in swept.failures {
+                    eprintln!("finished_agents_sweep_skipped {line}");
+                }
+                for line in swept.kept {
+                    eprintln!("finished_agents_sweep_kept {line}");
+                }
+            }
+            Err(error) => {
+                after = 0;
+                eprintln!(
+                    "finished_agents_sweep_failed cause={}",
+                    crate::protocol::plain_code(&error.0)
+                );
+            }
+        }
+        tokio::select! {
+            _ = &mut stop => return,
+            () = tokio::time::sleep(SWEEP_EVERY) => {}
+        }
+    }
 }
 
 /// Opens the change store of an engine folder with the team tables in place.
@@ -241,7 +335,15 @@ async fn prepare(
         Action::Finished { project } => tokio::task::spawn_blocking(move || {
             let db = open(&root)?;
             let now = crate::team::now_ms();
-            cleanup::finished(&db, &root.join("team"), &project, now).map(Prepared::Finished)
+            cleanup::finished(&db, &project, now).map(Prepared::Finished)
+        })
+        .await
+        .map_err(|_| failure("cleanup_unavailable"))?,
+        Action::Removal { project } => tokio::task::spawn_blocking(move || {
+            let mut db = open(&root)?;
+            let now = crate::team::now_ms();
+            cleanup::removal_preview(&mut db, &project, now)
+                .map(|preview| Prepared::Removal(Box::new(preview)))
         })
         .await
         .map_err(|_| failure("cleanup_unavailable"))?,
@@ -282,15 +384,13 @@ async fn remove(
         tokio::task::spawn_blocking(move || {
             let db = open(&root)?;
             let now = crate::team::now_ms();
-            Ok(
-                match cleanup::remove(&db, &root.join("team"), &project, &agents, now)? {
-                    Removal {
-                        agents,
-                        kept: Some(code),
-                    } if agents.is_empty() => Reply::Rejected { code },
-                    Removal { agents, kept } => Reply::Removed { agents, kept },
-                },
-            )
+            Ok(match cleanup::remove(&db, &root, &project, &agents, now)? {
+                Removal {
+                    agents,
+                    kept: Some(code),
+                } if agents.is_empty() => Reply::Rejected { code },
+                Removal { agents, kept } => Reply::Removed { agents, kept },
+            })
         })
     };
     work.await.map_err(|_| failure("cleanup_unavailable"))?

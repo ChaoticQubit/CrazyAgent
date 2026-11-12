@@ -1,0 +1,21 @@
+{
+  "identifier": "terminal-wall",
+  "description": "Terminal wall windows reach only the agent terminals, the team graph, Stop, the Terminals per window setting, opening their own project's next windows, bringing forward the main window or their own project's windows, and closing their own project's windows once that project is gone.",
+  "local": true,
+  "windows": ["terminals-*"],
+  "webviews": ["terminals-*"],
+  "permissions": [
+    "allow-desktop-terminal-attach",
+    "allow-desktop-terminal-input",
+    "allow-desktop-terminal-prompt",
+    "allow-desktop-terminal-resize",
+    "allow-desktop-terminal-detach",
+    "allow-desktop-team-graph",
+    "allow-desktop-team-stop-agent",
+    "allow-desktop-team-stop-teammate",
+    "allow-desktop-terminals-per-window",
+    "allow-desktop-extend-terminal-windows",
+    "allow-desktop-focus-terminal-window",
+    "allow-desktop-close-project-walls"
+  ]
+}

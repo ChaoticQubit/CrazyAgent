@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
+#[cfg(target_os = "macos")]
+use crazyagent::landing::MergeOutcome;
 use crazyagent::landing::{
-    self, AcceptOutcome, AgentKind, ChangeAgent, ChangeSetId, MergeOutcome, TurnEnd, TurnOutcome,
-    Workspace,
+    self, AcceptOutcome, AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOutcome, Workspace,
 };
 use crazyagent::protocol::ProjectId;
 use rusqlite::{Connection, params};
@@ -69,6 +70,7 @@ struct Agent {
 /// own clone on `crazyagent/lead`, recorded as the engine records a team agent's worktree.
 struct Team {
     _temp: tempfile::TempDir,
+    #[cfg(target_os = "macos")]
     root: PathBuf,
     project: PathBuf,
     home: PathBuf,
@@ -102,6 +104,14 @@ impl Team {
         let db = landing::open(&engine).unwrap();
         crazyagent::team::initialize(&db).unwrap();
         crazyagent::coord::ensure(&db).unwrap();
+        db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            .unwrap();
+        db.execute(
+            "INSERT INTO projects(id, body) VALUES (?1, '{}')",
+            [PROJECT],
+        )
+        .unwrap();
+        crazyagent::activity::initialize(&db).unwrap();
         let worktree = project.join(".crazyagent/worktrees/agent-1");
         let branch = landing::claim_task_branch(&db, &project, &worktree, "lead").unwrap();
         assert_eq!(branch, "crazyagent/lead");
@@ -114,6 +124,7 @@ impl Team {
         };
         let team = Self {
             _temp: temp,
+            #[cfg(target_os = "macos")]
             root,
             project,
             home,
@@ -422,6 +433,23 @@ fn merge_into_the_lead_clone_under_its_profile() {
         team.git(lead, &["rev-parse", "refs/heads/crazyagent/lead--fix"]),
         second
     );
+    let merged: Vec<(String, String)> =
+        crazyagent::activity::list(&team.db, &team.id, crazyagent::activity::LIST_MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.kind == crazyagent::activity::ActivityKind::LeadMerged)
+            .map(|item| (item.actor, item.text))
+            .collect();
+    let label = |agent: i64| crazyagent::team::events::label(&team.db, agent).unwrap();
+    let once = (
+        label(1),
+        format!("Merged the work of {} from crazyagent/lead--fix", label(2)),
+    );
+    assert_eq!(
+        merged,
+        vec![once.clone(), once],
+        "two merges, not the no-op"
+    );
 }
 
 /// A merge refuses a lead with uncommitted changes, a lead on another branch and a worker
@@ -511,6 +539,62 @@ fn hand_merged_worker_set_closes_at_the_lead_turn_end() {
     assert_eq!(team.pending_ref(&set), "");
 }
 
+/// OS-8 L4: a lead's merge that holds a worker's change set closes that set as landed and
+/// releases the claims of the worker's review-ready work, so another agent's start on the
+/// same file no longer overlaps it.
+#[test]
+fn a_lead_merge_covering_a_worker_set_releases_the_worker_s_claims() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.db
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (9,?1,'sub','claude-code',1,'working',0,0)",
+            [PROJECT],
+        )
+        .unwrap();
+    let now = i64::try_from(now_ms()).unwrap();
+    let (work, _) = crazyagent::coord::start_work(
+        &team.db,
+        &team.id,
+        2,
+        "Fix".into(),
+        vec!["README".into()],
+        now,
+    )
+    .unwrap();
+    crazyagent::coord::finish(
+        &team.db,
+        work,
+        1,
+        crazyagent::coord::Finish::ReviewReady,
+        "Green.".into(),
+        2,
+        now,
+    )
+    .unwrap();
+    team.commit(&fix, "README", "one\nTWO\nthree\n", "Worker edit");
+    let set = team.turn_end(&fix);
+    let start = || {
+        crazyagent::coord::start_work(
+            &team.db,
+            &team.id,
+            9,
+            "Docs".into(),
+            vec!["README".into()],
+            now,
+        )
+        .unwrap()
+        .1
+        .len()
+    };
+    assert_eq!(start(), 1, "the worker's set still waits");
+    let tip = team.hand_merge(&team.lead, &fix);
+    landing::settle_sub_agents(&team.db, &team.id, 1).unwrap();
+    assert_eq!(team.state(&set), ("accepted".to_owned(), Some(tip)));
+    assert_eq!(start(), 0, "the merged worker set's claim is released");
+}
+
 /// When the owner accepts a lead's set that holds a worker's work, the worker's set closes
 /// with it as accepted, landed as the owner's squash commit (fix/hand-merged-set 8f98740a).
 #[test]
@@ -528,6 +612,7 @@ fn lead_accept_closes_worker_sets_it_holds() {
         &team.view_head(&lead_set),
         None,
         "main",
+        crazyagent::activity::AcceptPlace::Changes,
     )
     .unwrap() else {
         panic!("the lead's accept conflicted");
@@ -543,6 +628,96 @@ fn lead_accept_closes_worker_sets_it_holds() {
         ("accepted".to_owned(), Some(commit))
     );
     assert_eq!(team.pending_ref(&worker_set), "");
+}
+
+/// A lead that merged a worker's new file and then moved it holds the work, so the owner's
+/// Accept of the lead closes the worker's set and does not offer it again (TEAM-4-L1).
+#[test]
+fn lead_accept_closes_a_worker_set_whose_new_file_the_lead_moved() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
+    team.hand_merge(&team.lead, &fix);
+    team.git(&team.lead.worktree, &["mv", "fix.txt", "moved.txt"]);
+    team.git(&team.lead.worktree, &["commit", "-q", "-m", "Move it"]);
+    let lead_set = team.turn_end(&team.lead);
+    let AcceptOutcome::Landed { commit, .. } = landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &team.view_head(&lead_set),
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
+        panic!("the lead's accept conflicted");
+    };
+    assert_eq!(
+        team.git(&team.project, &["show", "main:moved.txt"]),
+        "fixed"
+    );
+    assert_eq!(
+        team.state(&worker_set),
+        ("accepted".to_owned(), Some(commit))
+    );
+    assert_eq!(team.pending_ref(&worker_set), "");
+    assert!(!team.owner_listed().contains(&worker_set));
+}
+
+/// A lead whose merge kept none of a worker's new file and whose own file is only like it
+/// does not hold the work: the worker's set stays open and offered after the owner's
+/// Accept of the lead (TEAM-4-L1).
+#[test]
+fn lead_accept_leaves_open_a_worker_set_whose_file_the_lead_has_only_a_like_one_of() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
+    merge_keeping_nothing(&team, &fix, true);
+    team.commit(&team.lead, "moved.txt", "fixed\nmore\n", "Own file");
+    let lead_set = team.turn_end(&team.lead);
+    landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &team.view_head(&lead_set),
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap();
+    assert_eq!(team.state(&lead_set).0, "accepted");
+    assert_eq!(team.state(&worker_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&worker_set));
+}
+
+/// An empty file a worker added is not held by an unrelated new empty file on the lead's
+/// line, though git would pair any two empty files as a rename: the worker's set stays open
+/// and offered after the owner's Accept of the lead (LAND-PROTO r1 L1).
+#[test]
+fn an_unrelated_empty_file_on_the_lead_line_does_not_hold_a_worker_s_empty_file() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "empty.txt", "", "Add a marker");
+    let worker_set = team.turn_end(&fix);
+    merge_keeping_nothing(&team, &fix, true);
+    team.commit(&team.lead, "__init__.py", "", "Own empty file");
+    let lead_set = team.turn_end(&team.lead);
+    landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &team.view_head(&lead_set),
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap();
+    assert_eq!(team.state(&lead_set).0, "accepted");
+    assert_eq!(team.state(&worker_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&worker_set));
 }
 
 /// While Lands is Lead, the owner's Changes list leaves out a lead's workers' sets, since
@@ -602,6 +777,7 @@ fn a_lead_accept_accepts_covered_worker_sets_and_discards_the_rest() {
         &team.view_head(&lead_set),
         None,
         "main",
+        crazyagent::activity::AcceptPlace::Changes,
     )
     .unwrap() else {
         panic!("the lead's accept conflicted");
@@ -635,27 +811,882 @@ fn worker_sets_close_with_their_lead_three_levels_down() {
     assert_eq!(states, ["discarded", "discarded", "discarded"]);
 }
 
-/// A worker set left open after its lead's set closed, as before workers closed with their
-/// lead, is closed at the next Changes read once the lead merges its workers; a worker set
-/// opened after the lead's set closed is kept (fix/changes-vs-owner-branch, DEC-107
-/// orphans).
+/// A worker set left open after its lead's set closed stays open at every later read when
+/// the owner's Lands setting then moves to Lead, and the owner's list offers it, since
+/// nobody pressed a discard; a set opened after the lead's closed stays out of that list,
+/// as the lead may still merge it (fix/v21-team-4 F2, was DEC-107 orphans).
 #[test]
-fn a_worker_set_left_open_by_its_closed_lead_is_swept_but_a_newer_one_is_kept() {
+fn a_worker_set_left_open_by_its_closed_lead_stays_open_and_listed_but_a_newer_one_is_not() {
+    for accepted in [false, true] {
+        let team = Team::new();
+        team.lands("owner");
+        let fix = team.worker(2, &team.lead, "fix");
+        let docs = team.worker(3, &team.lead, "docs");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let left = team.turn_end(&fix);
+        team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        let head = team.view_head(&lead_set);
+        if accepted {
+            landing::accept_into(
+                &team.db,
+                &team.home,
+                &lead_set,
+                &head,
+                None,
+                "main",
+                crazyagent::activity::AcceptPlace::Changes,
+            )
+            .unwrap();
+        } else {
+            landing::discard(&team.db, &lead_set, &head, now_ms()).unwrap();
+        }
+        assert_eq!(team.state(&left).0, "pending", "accepted {accepted}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        team.commit(&docs, "docs.txt", "documented\n", "Document it");
+        let newer = team.turn_end(&docs);
+        team.lands("lead");
+        for _ in 0..2 {
+            landing::observe(&team.db, Some(&team.id)).unwrap();
+        }
+        assert_eq!(team.state(&left).0, "pending", "accepted {accepted}");
+        assert_eq!(team.state(&newer).0, "pending", "accepted {accepted}");
+        let listed = team.owner_listed();
+        assert!(listed.contains(&left), "accepted {accepted}");
+        assert!(!listed.contains(&newer), "accepted {accepted}");
+    }
+}
+
+/// A worker set whose work its closed lead holds, left open because a live close skipped
+/// it, lands with the lead's commit at the next read, and a deeper worker's set with work
+/// nothing holds stays open and is offered to the owner (fix/v21-team-4 F2, r2).
+#[test]
+fn a_worker_set_its_closed_lead_holds_lands_at_the_next_read() {
     let team = Team::new();
-    team.lands("owner");
+    team.lands("lead");
     let fix = team.worker(2, &team.lead, "fix");
-    let docs = team.worker(3, &team.lead, "docs");
+    let deep = team.worker(3, &fix, "deep");
     team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
-    let left = team.turn_end(&fix);
+    let worker_set = team.turn_end(&fix);
+    team.commit(&deep, "deep.txt", "deep\n", "Deep work");
+    let deep_set = team.turn_end(&deep);
+    team.hand_merge(&team.lead, &fix);
+    let lead_set = team.turn_end(&team.lead);
+    let step = serde_json::json!({ "step": "reset", "target": team.view_head(&worker_set) });
+    team.db
+        .execute(
+            "UPDATE landing_change_sets SET intent=?1 WHERE id=?2",
+            params![step.to_string(), worker_set.as_str()],
+        )
+        .unwrap();
+    let head = team.view_head(&lead_set);
+    let AcceptOutcome::Landed { commit, .. } = landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &head,
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
+        panic!("the lead's accept conflicted");
+    };
+    assert_eq!(team.state(&worker_set).0, "pending");
+    team.db
+        .execute(
+            "UPDATE landing_change_sets SET intent=NULL WHERE id=?1",
+            [worker_set.as_str()],
+        )
+        .unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(
+        team.state(&worker_set),
+        ("accepted".to_owned(), Some(commit))
+    );
+    assert_eq!(team.pending_ref(&worker_set), "");
+    assert_eq!(team.state(&deep_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&deep_set));
+}
+
+/// An owner's Accept stopped after its branch moved and finished at the next start is not
+/// a live press: a worker set opened before it finished stays open and is offered to the
+/// owner (fix/v21-team-4 r2, sec F1).
+#[test]
+fn a_land_finished_after_a_restart_leaves_a_worker_set_open_and_offered() {
+    let team = Team::new();
+    team.lands("lead");
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    let old = team.git(&team.project, &["rev-parse", "refs/heads/main"]);
+    let head = team.view_head(&lead_set);
+    let AcceptOutcome::Landed { commit, .. } = landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &head,
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
+        panic!("the lead's accept conflicted");
+    };
+    let step = serde_json::json!({
+        "step": "land",
+        "reference": "refs/heads/main",
+        "old": old,
+        "new": commit,
+    });
+    team.db
+        .execute(
+            "UPDATE landing_change_sets
+             SET state='pending',landed=NULL,landed_on=NULL,made=0,intent=?1 WHERE id=?2",
+            params![step.to_string(), lead_set.as_str()],
+        )
+        .unwrap();
+    let pending = format!("refs/crazyagent/pending/{}", lead_set.as_str());
+    team.git(&team.project, &["update-ref", &pending, &head]);
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let fix_set = team.turn_end(&fix);
+    landing::reconcile(&team.db).unwrap();
+    assert_eq!(team.state(&lead_set), ("accepted".to_owned(), Some(commit)));
+    assert_eq!(team.state(&fix_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&fix_set));
+}
+
+/// A Discard of a lead's set by anyone but the owner leaves its worker's open set open and
+/// offered, since only the owner's own press discards the rest (fix/v21-team-4 r2, sec F1).
+#[test]
+fn a_discard_by_anyone_but_the_owner_leaves_a_worker_set_open_and_offered() {
+    let team = Team::new();
+    team.lands("lead");
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let fix_set = team.turn_end(&fix);
+    team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    let head = team.view_head(&lead_set);
+    let by = crazyagent::activity::MASTER_ACTOR;
+    landing::discard_as(&team.db, &lead_set, &head, now_ms(), by).unwrap();
+    assert_eq!(team.state(&fix_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&fix_set));
+}
+
+/// Merges a worker's branch into its lead's clone and keeps none of its work, as a lead
+/// can by hand: with `git merge -s ours`, or with a real merge reverted after. Takes the
+/// team, the worker and which of the two.
+fn merge_keeping_nothing(team: &Team, worker: &Agent, ours: bool) {
+    let lead = &team.lead.worktree;
+    if ours {
+        let from = worker.worktree.to_str().unwrap();
+        team.git(lead, &["fetch", "-q", from, &worker.branch]);
+        let merge = [
+            "merge",
+            "--no-ff",
+            "-q",
+            "--no-edit",
+            "-s",
+            "ours",
+            "FETCH_HEAD",
+        ];
+        team.git(lead, &merge);
+    } else {
+        team.hand_merge(&team.lead, worker);
+        team.git(lead, &["revert", "-m", "1", "--no-edit", "HEAD"]);
+    }
+}
+
+/// A lead's hand merge that kept none of a worker's work holds its head without the work,
+/// so the worker's set stays open at the end of the lead's turn (fix/v21-team-4 M1).
+#[test]
+fn a_lead_merge_that_kept_no_work_leaves_the_set_open_at_the_lead_turn_end() {
+    for ours in [true, false] {
+        let team = Team::new();
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let set = team.turn_end(&fix);
+        merge_keeping_nothing(&team, &fix, ours);
+        landing::settle_sub_agents(&team.db, &team.id, 1).unwrap();
+        assert_eq!(
+            team.state(&set),
+            ("pending".to_owned(), None),
+            "ours {ours}"
+        );
+        assert_ne!(team.pending_ref(&set), "", "ours {ours}");
+    }
+}
+
+/// While Lands is Lead a worker's set is judged against its lead's tip: a tip that holds
+/// the head without the work does not land it at the next read (fix/v21-team-4 M1).
+#[test]
+fn a_lead_merge_that_kept_no_work_leaves_the_set_open_at_the_next_read() {
+    for ours in [true, false] {
+        let team = Team::new();
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let set = team.turn_end(&fix);
+        merge_keeping_nothing(&team, &fix, ours);
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+        assert_eq!(
+            team.state(&set),
+            ("pending".to_owned(), None),
+            "ours {ours}"
+        );
+        assert_ne!(team.pending_ref(&set), "", "ours {ours}");
+    }
+}
+
+/// The owner's Accept of a lead that holds a worker's head without its work neither
+/// accepts nor discards the worker's set: it stays open, the owner's list offers it once
+/// the lead closed, and the owner can land the work (fix/v21-team-4 M1).
+#[test]
+fn a_lead_accept_leaves_open_and_offers_a_worker_set_it_merged_without_the_work() {
+    for ours in [true, false] {
+        let team = Team::new();
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        merge_keeping_nothing(&team, &fix, ours);
+        team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        let head = team.view_head(&lead_set);
+        landing::accept_into(
+            &team.db,
+            &team.home,
+            &lead_set,
+            &head,
+            None,
+            "main",
+            crazyagent::activity::AcceptPlace::Changes,
+        )
+        .unwrap();
+        assert_eq!(team.state(&lead_set).0, "accepted", "ours {ours}");
+        assert_eq!(team.state(&worker_set).0, "pending", "ours {ours}");
+        assert!(team.owner_listed().contains(&worker_set), "ours {ours}");
+        let head = team.view_head(&worker_set);
+        let landed = landing::accept_into(
+            &team.db,
+            &team.home,
+            &worker_set,
+            &head,
+            None,
+            "main",
+            crazyagent::activity::AcceptPlace::Changes,
+        );
+        assert!(
+            matches!(landed, Ok(AcceptOutcome::Landed { .. })),
+            "ours {ours}: {landed:?}"
+        );
+        assert_eq!(team.git(&team.project, &["show", "main:fix.txt"]), "fixed");
+        assert_eq!(team.state(&worker_set).0, "accepted", "ours {ours}");
+    }
+}
+
+/// A lead's merge tool finds nothing to merge for a branch its clone already holds; when
+/// the clone holds it without the work the worker's set stays open and the lead is told
+/// the work is absent (fix/v21-team-4 M1, r2 L2).
+#[cfg(target_os = "macos")]
+#[test]
+fn merge_of_a_branch_held_without_its_work_leaves_the_set_open() {
+    for ours in [true, false] {
+        let team = Team::new();
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let set = team.turn_end(&fix);
+        merge_keeping_nothing(&team, &fix, ours);
+        let (sandbox, profile) = team.lead_rights();
+        let rights = landing::LeadGit {
+            sandbox: &sandbox,
+            profile: &profile,
+        };
+        assert_eq!(
+            landing::merge_sub_agent(&team.db, &team.id, 1, 2, &rights).unwrap(),
+            MergeOutcome::WorkAbsent {
+                branch: "crazyagent/lead--fix".into()
+            },
+            "ours {ours}"
+        );
+        assert_eq!(
+            team.state(&set),
+            ("pending".to_owned(), None),
+            "ours {ours}"
+        );
+    }
+}
+
+/// A lead's merge in its own clone is refused while a worker below that worker holds an
+/// open set, before any git step; a hand merge at the end of the lead's turn closes
+/// nothing either. Once the deeper set closed the merge closes the worker's set
+/// (fix/v21-team-4, rv-code 15122 M1).
+#[cfg(target_os = "macos")]
+#[test]
+fn merge_in_a_lead_clone_is_refused_while_a_worker_below_holds_an_open_set() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    let deep = team.worker(3, &fix, "deep");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let fix_set = team.turn_end(&fix);
+    team.commit(&deep, "deep.txt", "deep\n", "Deep work");
+    let deep_set = team.turn_end(&deep);
+    let before = team.head(&team.lead);
+    let (sandbox, profile) = team.lead_rights();
+    let rights = landing::LeadGit {
+        sandbox: &sandbox,
+        profile: &profile,
+    };
+    let merge = || landing::merge_sub_agent(&team.db, &team.id, 1, 2, &rights);
+    assert_eq!(merge().unwrap_err().0, landing::WORKER_OPEN);
+    assert_eq!(team.head(&team.lead), before);
+    team.hand_merge(&team.lead, &fix);
+    landing::settle_sub_agents(&team.db, &team.id, 1).unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&fix_set).0, "pending");
+    assert_eq!(team.state(&deep_set).0, "pending");
+    landing::discard(&team.db, &deep_set, &team.view_head(&deep_set), now_ms()).unwrap();
+    assert_eq!(
+        merge().unwrap(),
+        MergeOutcome::AlreadyMerged {
+            branch: "crazyagent/lead--fix".into()
+        }
+    );
+    assert_eq!(team.state(&fix_set).0, "accepted");
+}
+
+/// The owner's branch takes the lead's README line in a commit of its own and then moves
+/// that line on, so a merge of the lead's set conflicts though main holds its work. Takes
+/// the team.
+fn owner_takes_the_lead_line(team: &Team) {
+    for (text, message) in [
+        ("one\nlead\nthree\n", "Port the lead's work"),
+        ("one\nowner\nthree\n", "Build on the port"),
+    ] {
+        fs::write(team.project.join("README"), text).unwrap();
+        team.git(&team.project, &["add", "README"]);
+        team.git(&team.project, &["commit", "-q", "-m", message]);
+    }
+}
+
+/// A lead's set main took stays open while a worker main never took holds an open set, as
+/// a sub-agent or as a native teammate and under either Lands setting: closing the lead
+/// would hide that work and let the orphan sweep discard it (HB-S4).
+#[test]
+fn a_lead_main_took_stays_open_while_a_worker_main_never_took_is_open() {
+    for (lands, role) in [
+        ("lead", "sub"),
+        ("owner", "sub"),
+        ("lead", "teammate"),
+        ("owner", "teammate"),
+    ] {
+        let team = Team::new();
+        team.lands(lands);
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        team.db
+            .execute("UPDATE team_agents SET role=?1 WHERE id=2", [role])
+            .unwrap();
+        team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        owner_takes_the_lead_line(&team);
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+        assert_eq!(team.state(&worker_set).0, "pending", "{lands} {role}");
+        assert_eq!(team.state(&lead_set).0, "pending", "{lands} {role}");
+        let listed = landing::list(&team.db, &team.id).unwrap();
+        assert!(listed.iter().any(|view| view.id == worker_set));
+        assert!(team.owner_listed().contains(&lead_set), "{lands} {role}");
+    }
+}
+
+/// A worker's worker counts: a lead's set main took stays open while a level below its
+/// direct worker holds an open set (HB-S4).
+#[test]
+fn a_lead_main_took_stays_open_while_a_deeper_worker_is_open() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    let deep = team.worker(3, &fix, "deep");
+    team.commit(&deep, "deep.txt", "deep\n", "Go deep");
+    let deep_set = team.turn_end(&deep);
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    owner_takes_the_lead_line(&team);
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&deep_set).0, "pending");
+    assert_eq!(team.state(&lead_set).0, "pending");
+}
+
+/// HB-S4-R2-LOWS L1: an open set holds a lead's set main took open down to the third level
+/// below the lead, the most the engine follows, and one at the fourth level does not. The
+/// fourth level is a clone cut under the second whose team row names the third as its lead.
+#[test]
+fn a_lead_main_took_stays_open_for_a_worker_three_levels_down_and_not_four() {
+    for (level, lead_state) in [(3, "pending"), (4, "discarded")] {
+        let team = Team::new();
+        let fix = team.worker(2, &team.lead, "fix");
+        let deep = team.worker(3, &fix, "deep");
+        let deeper = team.worker(4, &deep, "deeper");
+        let worker = if level == 3 {
+            deeper
+        } else {
+            let deepest = team.worker(5, &deep, "deepest");
+            team.db
+                .execute("UPDATE team_agents SET parent=4 WHERE id=5", [])
+                .unwrap();
+            deepest
+        };
+        team.commit(&worker, "deep.txt", "deep\n", "Go deep");
+        let worker_set = team.turn_end(&worker);
+        team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        owner_takes_the_lead_line(&team);
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+        assert_eq!(
+            team.state(&lead_set).0,
+            lead_state,
+            "a worker at level {level}"
+        );
+        assert_eq!(team.state(&worker_set).0, "pending", "level {level}");
+    }
+}
+
+/// HB-S4-R2-LOWS L2: when a later step of closing a lead's set main took fails, here the
+/// drop of its pending ref behind a held ref lock, the set still reads closed and the
+/// project's activity still says once that the engine closed it.
+#[test]
+fn a_lead_main_took_closed_with_a_failed_later_step_still_says_so_in_activity() {
+    let team = Team::new();
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    owner_takes_the_lead_line(&team);
+    let lock = team
+        .project
+        .join(".git/refs/crazyagent/pending")
+        .join(format!("{}.lock", lead_set.as_str()));
+    fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    fs::write(&lock, "").unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "discarded");
+    assert_ne!(
+        team.pending_ref(&lead_set),
+        "",
+        "the step after the stored close failed"
+    );
+    let noted = crazyagent::activity::list(&team.db, &team.id, crazyagent::activity::LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| {
+            item.kind == crazyagent::activity::ActivityKind::Discarded
+                && item.change_set.as_deref() == Some(lead_set.as_str())
+                && item.actor == crazyagent::activity::ENGINE_ACTOR
+        })
+        .count();
+    assert_eq!(noted, 1);
+    fs::remove_file(&lock).unwrap();
+}
+
+/// Once no worker holds an open set the lead's set main took closes at the next read, and
+/// Restore gives back that set, its head and its pending ref (HB-S4).
+#[test]
+fn a_lead_main_took_closes_after_its_workers_and_restore_gives_it_back_whole() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    let head = team.view_head(&lead_set);
+    owner_takes_the_lead_line(&team);
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "pending");
+    landing::discard(
+        &team.db,
+        &worker_set,
+        &team.view_head(&worker_set),
+        now_ms(),
+    )
+    .unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "discarded");
+    assert_eq!(team.pending_ref(&lead_set), "");
+    let closed = landing::change_set(&team.db, &lead_set).unwrap().unwrap().1;
+    landing::restore(&team.db, &lead_set, closed.restorable_until_ms.unwrap() - 1).unwrap();
+    assert_eq!(team.state(&lead_set).0, "pending");
+    assert_eq!(team.view_head(&lead_set), head);
+    assert_ne!(team.pending_ref(&lead_set), "");
+}
+
+/// A real store trigger on this connection that refuses any update closing a change set as
+/// discarded, as a store that cannot write would. `DROP TRIGGER refuse_discard` lifts it.
+const REFUSE_DISCARD: &str =
+    "CREATE TEMP TRIGGER refuse_discard BEFORE UPDATE ON landing_change_sets
+     WHEN NEW.state='discarded' BEGIN SELECT RAISE(ABORT, 'refused'); END;";
+
+/// HB-S4-R2-LOWS (fix/v21-activity-save): when the store refuses the close of a lead's set
+/// main took, the set stays open and the project's activity says nothing, at that read or
+/// the next; once a read closes it, activity says so once. The refusal is a real store
+/// trigger on the change set's row.
+#[test]
+fn a_lead_main_took_whose_stored_close_fails_writes_no_activity_until_it_closes() {
+    let team = Team::new();
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    owner_takes_the_lead_line(&team);
+    team.db.execute_batch(REFUSE_DISCARD).unwrap();
+    let noted = || {
+        crazyagent::activity::list(&team.db, &team.id, crazyagent::activity::LIST_MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|item| {
+                item.kind == crazyagent::activity::ActivityKind::Discarded
+                    && item.change_set.as_deref() == Some(lead_set.as_str())
+            })
+            .count()
+    };
+    for read in ["first", "next"] {
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+        assert_eq!(team.state(&lead_set).0, "pending", "{read} read");
+        assert_eq!(
+            noted(),
+            0,
+            "no row for a close the store refused, {read} read"
+        );
+    }
+    team.db
+        .execute_batch("DROP TRIGGER refuse_discard")
+        .unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "discarded");
+    assert_eq!(noted(), 1);
+}
+
+/// HB-S4-R2-LOWS (fix/v21-activity-save): when the store refuses the close of a lead's set
+/// main took, the set, still open, keeps no discarded ref, which prune would never drop
+/// since it reads discarded sets only, and keeps its pending ref; once a read closes it, the
+/// discarded ref holds its head for a restore.
+#[test]
+fn a_lead_main_took_whose_stored_close_fails_keeps_no_discarded_ref() {
+    let team = Team::new();
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    owner_takes_the_lead_line(&team);
+    team.db.execute_batch(REFUSE_DISCARD).unwrap();
+    let discarded = format!("refs/crazyagent/discarded/{}", lead_set.as_str());
+    let held = || {
+        team.git(
+            &team.project,
+            &["for-each-ref", "--format=%(objectname)", &discarded],
+        )
+    };
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "pending");
+    assert_eq!(held(), "", "no discarded ref on a set the store kept open");
+    assert_ne!(team.pending_ref(&lead_set), "");
+    team.db
+        .execute_batch("DROP TRIGGER refuse_discard")
+        .unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "discarded");
+    assert_eq!(held(), team.view_head(&lead_set));
+}
+
+/// The owner's branch holds a lead's README line outside the app and moves no further, so
+/// the next read judges the lead's set landed: by a merge of its head or by a port of the
+/// same line in a commit of its own. Takes the team, the lead's set and which of the two.
+fn owner_lands_the_lead_line(team: &Team, lead_set: &ChangeSetId, by_merge: bool) {
+    if by_merge {
+        let head = team.view_head(lead_set);
+        team.git(
+            &team.project,
+            &["merge", "--no-ff", "-q", "--no-edit", &head],
+        );
+        return;
+    }
+    fs::write(team.project.join("README"), "one\nlead\nthree\n").unwrap();
+    team.git(&team.project, &["add", "README"]);
+    team.git(
+        &team.project,
+        &["commit", "-q", "-m", "Port the lead's work"],
+    );
+}
+
+/// A lead's set main landed outside the app stays open and listed while a worker it does
+/// not hold has an open set, as a sub-agent or as a native teammate, under either Lands
+/// setting, by a merge or by a port: a close the owner did not press never discards a
+/// worker's open set (HB-S4-LANDED).
+#[test]
+fn a_lead_main_landed_stays_open_while_a_worker_it_does_not_hold_is_open() {
+    for (lands, role) in [
+        ("lead", "sub"),
+        ("owner", "sub"),
+        ("lead", "teammate"),
+        ("owner", "teammate"),
+    ] {
+        for by_merge in [true, false] {
+            let team = Team::new();
+            team.lands(lands);
+            let fix = team.worker(2, &team.lead, "fix");
+            team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+            let worker_set = team.turn_end(&fix);
+            team.db
+                .execute("UPDATE team_agents SET role=?1 WHERE id=2", [role])
+                .unwrap();
+            team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+            let lead_set = team.turn_end(&team.lead);
+            owner_lands_the_lead_line(&team, &lead_set, by_merge);
+            landing::observe(&team.db, Some(&team.id)).unwrap();
+            let shape = format!("{lands} {role} by_merge={by_merge}");
+            assert_eq!(team.state(&worker_set).0, "pending", "{shape}");
+            assert_eq!(team.state(&lead_set).0, "pending", "{shape}");
+            let listed = landing::list(&team.db, &team.id).unwrap();
+            assert!(listed.iter().any(|view| view.id == worker_set), "{shape}");
+            assert!(team.owner_listed().contains(&lead_set), "{shape}");
+        }
+    }
+}
+
+/// Once no worker holds an open set, the lead's set main landed outside the app closes as
+/// landed at the next read, on the commit that holds it (HB-S4-LANDED).
+#[test]
+fn a_lead_main_landed_closes_as_landed_once_its_workers_end() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    owner_lands_the_lead_line(&team, &lead_set, true);
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "pending");
+    landing::discard(
+        &team.db,
+        &worker_set,
+        &team.view_head(&worker_set),
+        now_ms(),
+    )
+    .unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    let tip = team.git(&team.project, &["rev-parse", "HEAD"]);
+    assert_eq!(team.state(&lead_set), ("accepted".to_owned(), Some(tip)));
+}
+
+/// A worker set the lead's head holds lands by itself, so a lead main landed outside the
+/// app does not wait on it past the next read (HB-S4-LANDED).
+#[test]
+fn a_lead_main_landed_closes_with_a_worker_set_its_head_holds() {
+    for lands in ["lead", "owner"] {
+        let team = Team::new();
+        team.lands(lands);
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        team.hand_merge(&team.lead, &fix);
+        team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        owner_lands_the_lead_line(&team, &lead_set, true);
+        for _ in 0..2 {
+            landing::observe(&team.db, Some(&team.id)).unwrap();
+        }
+        assert_eq!(team.state(&worker_set).0, "accepted", "{lands}");
+        assert_eq!(team.state(&lead_set).0, "accepted", "{lands}");
+    }
+}
+
+/// A worker set the owner restored after its lead's Discard closed it stays open: the next
+/// read's orphan sweep does not discard it again (HB-S4-LANDED).
+#[test]
+fn a_worker_set_the_owner_restored_survives_the_next_read() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
     team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
     let lead_set = team.turn_end(&team.lead);
     landing::discard(&team.db, &lead_set, &team.view_head(&lead_set), now_ms()).unwrap();
-    assert_eq!(team.state(&left).0, "pending");
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    team.commit(&docs, "docs.txt", "documented\n", "Document it");
-    let newer = team.turn_end(&docs);
-    team.lands("lead");
+    assert_eq!(team.state(&worker_set).0, "discarded");
+    let closed = landing::change_set(&team.db, &worker_set)
+        .unwrap()
+        .unwrap()
+        .1;
+    landing::restore(
+        &team.db,
+        &worker_set,
+        closed.restorable_until_ms.unwrap() - 1,
+    )
+    .unwrap();
+    assert_eq!(team.state(&worker_set).0, "pending");
     landing::observe(&team.db, Some(&team.id)).unwrap();
-    assert_eq!(team.state(&left).0, "discarded");
+    assert_eq!(team.state(&worker_set).0, "pending");
+    let listed = landing::list(&team.db, &team.id).unwrap();
+    assert!(listed.iter().any(|view| view.id == worker_set));
+}
+
+/// A lead's worktree removed outside the app closes only the lead's set: its workers' open
+/// sets stay open at every later read and on the owner's list under either Lands setting,
+/// and the owner can still close them, since no one pressed anything in the app
+/// (HB-S4-LANDED).
+#[test]
+fn a_lead_removed_outside_the_app_leaves_its_workers_sets_open_and_listed() {
+    for (lands, role) in [
+        ("lead", "sub"),
+        ("owner", "sub"),
+        ("lead", "teammate"),
+        ("owner", "teammate"),
+    ] {
+        let team = Team::new();
+        team.lands(lands);
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        team.db
+            .execute("UPDATE team_agents SET role=?1 WHERE id=2", [role])
+            .unwrap();
+        team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        fs::remove_dir_all(&team.lead.worktree).unwrap();
+        for _ in 0..3 {
+            landing::observe(&team.db, Some(&team.id)).unwrap();
+        }
+        let shape = format!("{lands} {role}");
+        assert_eq!(team.state(&lead_set).0, "discarded", "{shape}");
+        assert_eq!(team.state(&worker_set).0, "pending", "{shape}");
+        assert!(team.owner_listed().contains(&worker_set), "{shape}");
+        let head = team.view_head(&worker_set);
+        landing::discard(&team.db, &worker_set, &head, now_ms()).unwrap();
+        assert_eq!(team.state(&worker_set).0, "discarded", "{shape}");
+    }
+}
+
+/// A worker set the owner restored stays on the owner's list under Lands = Lead after its
+/// lead opens a newer set, since the lead's closes leave a restored set alone and only the
+/// owner can close it (TEAM-3-F3).
+#[test]
+fn a_restored_worker_set_stays_listed_after_its_lead_opens_a_newer_set() {
+    let team = Team::new();
+    team.lands("lead");
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
+    team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    landing::discard(&team.db, &lead_set, &team.view_head(&lead_set), now_ms()).unwrap();
+    let closed = landing::change_set(&team.db, &worker_set)
+        .unwrap()
+        .unwrap()
+        .1;
+    landing::restore(
+        &team.db,
+        &worker_set,
+        closed.restorable_until_ms.unwrap() - 1,
+    )
+    .unwrap();
+    assert_eq!(team.state(&worker_set).0, "pending");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    team.commit(&team.lead, "more.txt", "more\n", "More lead work");
+    let newer = team.turn_end(&team.lead);
     assert_eq!(team.state(&newer).0, "pending");
+    for _ in 0..2 {
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+    }
+    assert_eq!(team.state(&worker_set).0, "pending");
+    assert!(team.owner_listed().contains(&worker_set));
+    landing::discard(&team.db, &newer, &team.view_head(&newer), now_ms()).unwrap();
+    assert_eq!(team.state(&worker_set).0, "pending");
+    assert!(team.owner_listed().contains(&worker_set));
+}
+
+/// A lead's worker set stays off the owner's list under Lands = Lead while its lead has a
+/// copy, and is listed once the lead's copy is gone, removed outside the app or no longer
+/// recorded, also for a lead that never had a set of its own, since no lead will land it
+/// (TEAM-3-F3).
+#[test]
+fn a_worker_set_whose_lead_copy_is_gone_is_listed_though_the_lead_had_no_set() {
+    for gone in ["removed", "unrecorded"] {
+        let team = Team::new();
+        team.lands("lead");
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+        assert!(!team.owner_listed().contains(&worker_set), "{gone}");
+        if gone == "removed" {
+            fs::remove_dir_all(&team.lead.worktree).unwrap();
+        } else {
+            team.db
+                .execute("DELETE FROM team_worktrees WHERE agent=1", [])
+                .unwrap();
+        }
+        for _ in 0..2 {
+            landing::observe(&team.db, Some(&team.id)).unwrap();
+        }
+        assert_eq!(team.state(&worker_set).0, "pending", "{gone}");
+        assert!(team.owner_listed().contains(&worker_set), "{gone}");
+    }
+}
+
+/// A land the owner did not press is refused while a worker below the set's agent holds
+/// an open set, for the master and for the engine alike: nothing lands, nothing closes,
+/// and a refusal leaves both sets as they were (HB-S4-LANDED r2).
+#[test]
+fn a_land_the_owner_did_not_press_is_refused_while_a_worker_set_is_open() {
+    use crazyagent::activity::{ENGINE_ACTOR, MASTER_ACTOR};
+    for by in [MASTER_ACTOR, ENGINE_ACTOR] {
+        let team = Team::new();
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        let start = team.git(&team.project, &["rev-parse", "main"]);
+        let refused = landing::accept_into_as(
+            &team.db,
+            &team.home,
+            &lead_set,
+            &team.view_head(&lead_set),
+            None,
+            "main",
+            by,
+        )
+        .unwrap_err();
+        assert_eq!(refused.0, landing::WORKER_OPEN, "{by}");
+        assert_eq!(team.git(&team.project, &["rev-parse", "main"]), start);
+        assert_eq!(team.state(&lead_set).0, "pending", "{by}");
+        assert_eq!(team.state(&worker_set).0, "pending", "{by}");
+    }
+}
+
+/// TEAM-3-R2-LOWS F3: a worker set held in a conflict or in an update holds back a land the
+/// owner did not press as a pending one does, since each is work the owner has not seen
+/// land. The state is written as a refused Accept or a stopped update leaves it.
+#[test]
+fn a_land_the_owner_did_not_press_is_refused_while_a_worker_set_conflicts_or_updates() {
+    for held in ["conflict", "updating"] {
+        let team = Team::new();
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        team.db
+            .execute(
+                "UPDATE landing_change_sets SET state=?1 WHERE id=?2",
+                params![held, worker_set.as_str()],
+            )
+            .unwrap();
+        let start = team.git(&team.project, &["rev-parse", "main"]);
+        let refused = landing::accept_into_as(
+            &team.db,
+            &team.home,
+            &lead_set,
+            &team.view_head(&lead_set),
+            None,
+            "main",
+            crazyagent::activity::ENGINE_ACTOR,
+        )
+        .unwrap_err();
+        assert_eq!(refused.0, landing::WORKER_OPEN, "{held}");
+        assert_eq!(team.git(&team.project, &["rev-parse", "main"]), start);
+        assert_eq!(team.state(&lead_set).0, "pending", "{held}");
+        assert_eq!(team.state(&worker_set).0, held);
+    }
 }

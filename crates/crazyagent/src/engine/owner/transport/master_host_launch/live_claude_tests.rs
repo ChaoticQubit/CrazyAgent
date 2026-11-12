@@ -52,8 +52,10 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
         &claude,
         &connection,
         "You are a test. Follow the user's instruction exactly.",
-        Duration::from_millis(budget.wall_time_ms),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         None,
+        &[],
+        StepLimit::NoLimit,
         &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
@@ -79,7 +81,10 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
             worktree_lease: RequestId::new("claude-live-master-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        crate::protocol::ProjectId::new("claude-live-master-project").unwrap(),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         budget,
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -191,8 +196,10 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
         &claude,
         &connection,
         "You are a test. Follow the user's steps exactly and use your tools for them.",
-        Duration::from_millis(budget.wall_time_ms),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         Some(&engine),
+        &[],
+        StepLimit::NoLimit,
         &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
@@ -202,6 +209,8 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
         Some(crate::engine::claude_host::MasterTools {
             engine: &engine,
             drop: &record,
+            mailbox: &record.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
         }),
     )
     .unwrap();
@@ -217,7 +226,10 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
             worktree_lease: RequestId::new("claude-live-tools-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        crate::protocol::ProjectId::new("claude-live-master-project").unwrap(),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         budget,
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -332,8 +344,10 @@ async fn a_real_claude_master_asked_for_a_background_task_ends_its_turn_at_the_r
         &claude,
         &connection,
         "You are a test. Follow the user's steps exactly and use your tools for them.",
-        Duration::from_millis(budget.wall_time_ms),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         Some(&engine),
+        &[],
+        StepLimit::NoLimit,
         &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
@@ -349,7 +363,10 @@ async fn a_real_claude_master_asked_for_a_background_task_ends_its_turn_at_the_r
             worktree_lease: RequestId::new("claude-live-background-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        crate::protocol::ProjectId::new("claude-live-master-project").unwrap(),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         budget,
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -504,8 +521,10 @@ async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
         &claude,
         &connection,
         "You are a test. Follow the user's steps exactly and use your tools for them.",
-        DETACHED_LIVE_TIME,
+        Some(DETACHED_LIVE_TIME),
         Some(&engine),
+        &[],
+        StepLimit::NoLimit,
         &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
@@ -521,7 +540,10 @@ async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
             worktree_lease: RequestId::new(format!("claude-live-{name}-lease").as_str()).unwrap(),
         },
         connection.account_ref.clone(),
+        crate::protocol::ProjectId::new("claude-live-master-project").unwrap(),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         budget,
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();

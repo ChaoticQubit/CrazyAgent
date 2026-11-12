@@ -1,15 +1,16 @@
 use super::super::teammates_socket;
 use super::super::{
     AgentId, Host, HostError, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo, PaneRef,
-    TerminalStream, failure,
+    TEAMMATES_SERVER_ENDED, TerminalStream, failure,
 };
-use super::{Tmux, harness_socket, user};
+use super::{ServerPin, Tmux, harness_socket, renew_socket, user};
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::BTreeMap;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 /// The most agent folders the engine reads when it looks for native-mode leads whose own
 /// servers still run, such as after an engine restart.
@@ -18,6 +19,17 @@ const LEADS_SCAN_MAX: usize = 4096;
 const LEADS_KEPT_MAX: usize = 256;
 /// The most adopted teammates the engine remembers the lead of at once.
 const MEMBERS_KEPT_MAX: usize = LEADS_KEPT_MAX * PANES_LISTED_MAX;
+/// How long a lead's own server, just started under its keeper, has to accept connections.
+#[cfg(target_os = "macos")]
+const KEEPER_READY: Duration = Duration::from_secs(5);
+/// How often the engine looks whether that server accepts connections yet.
+#[cfg(target_os = "macos")]
+const KEEPER_READY_POLL: Duration = Duration::from_millis(20);
+/// How long the engine waits for a server keeper it asked to stop to exit: the keeper reads
+/// its warden's report for up to 4 s.
+const KEEPER_WAIT: Duration = Duration::from_secs(6);
+/// How often the engine looks whether that keeper exited.
+const KEEPER_POLL: Duration = Duration::from_millis(50);
 
 /// The engine's terminal host across its tmux servers: its own private server, and per
 /// native-mode lead one server started inside that lead's Seatbelt profile and one inside
@@ -27,6 +39,8 @@ const MEMBERS_KEPT_MAX: usize = LEADS_KEPT_MAX * PANES_LISTED_MAX;
 /// teammates' server, or its lead's own for a lead started without one; every other call
 /// goes to the engine's server. So team code, viewers and stops reach a native lead and its
 /// teammates by name, and no unconfined client ever connects to a server a lead controls.
+/// A lead's own server this engine started runs under a keeper, the engine's own child,
+/// kept here until the lead's stop ends it (KEEPER (b)).
 pub struct Servers {
     engine: Tmux,
     root: PathBuf,
@@ -34,6 +48,8 @@ pub struct Servers {
     leads: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     mates: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     members: Mutex<BTreeMap<AgentId, AgentId>>,
+    pins: Mutex<BTreeMap<AgentId, Arc<ServerPin>>>,
+    keepers: Mutex<BTreeMap<AgentId, Child>>,
 }
 
 /// Whether a lead's own socket is a live socket of this user, read without following a link.
@@ -103,6 +119,39 @@ fn lead_panes(own: &Tmux, mates: &Tmux, lead: &AgentId) -> Result<Vec<PaneInfo>,
     Ok(panes)
 }
 
+/// Asks a lead's server keeper to stop with terminate and waits up to `KEEPER_WAIT` for it to
+/// exit. The keeper's warden then kills every process in the lead's sandbox, the server and
+/// its panes included, and the keeper exits cleanly only once the warden confirmed that or
+/// found signals not confined. The keeper is the engine's own child, not reaped before it
+/// exits, so its id names no other process. Takes the keeper. Returns whether it exited
+/// cleanly in time.
+fn end_keeper(keeper: &mut Child) -> bool {
+    if let Ok(Some(status)) = keeper.try_wait() {
+        return status.success();
+    }
+    let Some(pid) = i32::try_from(keeper.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+    let deadline = Instant::now() + KEEPER_WAIT;
+    loop {
+        match keeper.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(KEEPER_POLL),
+            _ => return false,
+        }
+    }
+}
+
+/// Whether a keeper still runs, not yet reaped. Takes the keeper. Returns the answer; a
+/// keeper whose state cannot be read counts as running, so it is never dropped unreaped.
+fn keeper_runs(keeper: &mut Child) -> bool {
+    !matches!(keeper.try_wait(), Ok(Some(_)))
+}
+
 impl Servers {
     /// Opens the host on the engine's own server and finds lead servers by name. Takes the
     /// engine's server host, the engine root and the tmux program. Returns the host; nothing
@@ -115,7 +164,92 @@ impl Servers {
             leads: Mutex::new(BTreeMap::new()),
             mates: Mutex::new(BTreeMap::new()),
             members: Mutex::new(BTreeMap::new()),
+            pins: Mutex::new(BTreeMap::new()),
+            keepers: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Starts a lead's own server under the [`crate::sandbox::KEEPER`] when none listens at
+    /// its socket (KEEPER (b)): `tmux -D`, in the foreground inside the lead's profile, after
+    /// the [`crate::sandbox::PANE_SHIM`] forked the run's warden, so the keeper's stop has the
+    /// warden kill every process in the lead's sandbox. The keeper runs outside the sandbox
+    /// with a fixed argv and only `PATH`. A server already listening, as one an earlier
+    /// engine left, gets no keeper and stays unkept. Takes the lead and its socket. Returns
+    /// whether a keeper started now, `terminal_folder_unsafe` for a socket path that is not
+    /// this user's socket, or `terminal_unavailable`.
+    #[cfg(target_os = "macos")]
+    fn keep_server(&self, lead: &AgentId, socket: &Path) -> Result<bool, HostError> {
+        use std::os::unix::process::CommandExt;
+        let program = self
+            .program
+            .as_deref()
+            .ok_or_else(|| failure(OWN_SERVER_UNAVAILABLE))?;
+        let folder = socket
+            .parent()
+            .ok_or_else(|| failure("terminal_folder_unsafe"))?;
+        let profile = profile_of(&self.root, lead)?;
+        if let Ok(metadata) = std::fs::symlink_metadata(socket)
+            && (!metadata.file_type().is_socket() || metadata.uid() != user())
+        {
+            return Err(failure("terminal_folder_unsafe"));
+        }
+        let mut keepers = self
+            .keepers
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        if crate::spawn_gate::connect_unix_std(socket).is_ok() {
+            return Ok(false);
+        }
+        if let Some(mut earlier) = keepers.remove(lead)
+            && !end_keeper(&mut earlier)
+            && keeper_runs(&mut earlier)
+        {
+            keepers.insert(lead.clone(), earlier);
+            return Err(failure("terminal_unavailable"));
+        }
+        keepers.retain(|_, keeper| keeper_runs(keeper));
+        if keepers.len() >= LEADS_KEPT_MAX {
+            return Err(failure("terminal_unavailable"));
+        }
+        let mut keeper = crate::spawn_gate::spawn(
+            std::process::Command::new(crate::sandbox::KEEPER[0])
+                .args(&crate::sandbox::KEEPER[1..])
+                .arg(crate::sandbox::SANDBOX_EXEC)
+                .arg("-f")
+                .arg(&profile)
+                .args(crate::sandbox::PANE_SHIM)
+                .arg(program)
+                .args(["-D", "-u", "-f", "/dev/null", "-S"])
+                .arg(socket)
+                .env_clear()
+                .env("PATH", super::SERVER_PATH)
+                .current_dir(folder)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0),
+        )
+        .map_err(|_| failure("terminal_unavailable"))?;
+        let deadline = Instant::now() + KEEPER_READY;
+        while crate::spawn_gate::connect_unix_std(socket).is_err() {
+            if !keeper_runs(&mut keeper) || Instant::now() >= deadline {
+                if !end_keeper(&mut keeper) && keeper_runs(&mut keeper) {
+                    keepers.insert(lead.clone(), keeper);
+                }
+                return Err(failure("terminal_unavailable"));
+            }
+            std::thread::sleep(KEEPER_READY_POLL);
+        }
+        keepers.insert(lead.clone(), keeper);
+        assert!(keepers.len() <= LEADS_KEPT_MAX);
+        Ok(true)
+    }
+
+    /// A lead's own server with no keeper, off macOS, where no lead runs on one. Takes the
+    /// lead and its socket. Returns `terminal_own_server_unavailable`.
+    #[cfg(not(target_os = "macos"))]
+    fn keep_server(&self, _lead: &AgentId, _socket: &Path) -> Result<bool, HostError> {
+        Err(failure(OWN_SERVER_UNAVAILABLE))
     }
 
     /// The lead's own server when one listens for it now, else none; a name that is not a
@@ -185,10 +319,48 @@ impl Servers {
             socket,
             &profile_of(&self.root, lead)?,
             &teammates_profile_of(&self.root, lead)?,
+            self.pin(lead, socket)?,
         )?);
         mates.insert(lead.clone(), server.clone());
         assert!(mates.len() <= LEADS_KEPT_MAX);
         Ok(server)
+    }
+
+    /// The pin a native lead's teammates' server pid is kept in for the socket its latest
+    /// start named (PLC c): one per socket while the engine runs, kept across the clients it
+    /// opens and drops there, so a server under another pid is refused even after a client
+    /// was dropped while none listened; a new socket gets a new pin. Each pin reads and keeps
+    /// its pid in a record on disk, so a pin made again after a restart or a kill holds the
+    /// same pid (PC-L1). Takes the lead and the socket. Returns the pin, or
+    /// `terminal_unavailable` when too many are kept.
+    fn pin(&self, lead: &AgentId, socket: &Path) -> Result<Arc<ServerPin>, HostError> {
+        let mut pins = self
+            .pins
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        if let Some(pin) = pins.get(lead)
+            && pin.socket == socket
+        {
+            return Ok(pin.clone());
+        }
+        pins.remove(lead);
+        if pins.len() >= LEADS_KEPT_MAX {
+            pins.retain(|known, _| {
+                harness_socket(&self.root, known).is_ok_and(|socket| listening(&socket))
+            });
+            if pins.len() >= LEADS_KEPT_MAX {
+                return Err(failure("terminal_unavailable"));
+            }
+        }
+        let pin = Arc::new(ServerPin {
+            root: self.root.clone(),
+            lead: lead.clone(),
+            socket: socket.to_path_buf(),
+            pid: Mutex::new(None),
+        });
+        pins.insert(lead.clone(), pin.clone());
+        assert!(pins.len() <= LEADS_KEPT_MAX);
+        Ok(pin)
     }
 
     /// A native lead's teammates' server when one accepts connections at the socket its
@@ -208,6 +380,20 @@ impl Servers {
         self.mates_host(lead, &socket).map(Some)
     }
 
+    /// The teammates' server a native lead's team panes are on (PLC d): the one its latest
+    /// start named, which must still accept connections, so a pane id read there is never
+    /// resolved on the lead's own server, which numbers its panes from the same `%0`. Takes
+    /// the lead. Returns the server, none for a lead started without one, whose team panes
+    /// are on its own server, or `terminal_teammates_server_ended`.
+    fn team_mates(&self, lead: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
+        if teammates_socket(&self.root, lead).is_err() {
+            return Ok(None);
+        }
+        self.mates(lead)?
+            .map(Some)
+            .ok_or_else(|| failure(TEAMMATES_SERVER_ENDED))
+    }
+
     /// Forgets the client hosts of a lead's servers and the teammates adopted under it.
     /// Takes the lead.
     fn forget(&self, lead: &AgentId) {
@@ -219,6 +405,9 @@ impl Servers {
         }
         if let Ok(mut members) = self.members.lock() {
             members.retain(|_, known| known != lead);
+        }
+        if let Ok(mut pins) = self.pins.lock() {
+            pins.remove(lead);
         }
     }
 
@@ -244,9 +433,12 @@ impl Servers {
     }
 
     /// The server an adopted teammate runs on while it listens: its lead's teammates' server,
-    /// or its lead's own for a lead started without one; else none, forgetting a teammate
-    /// whose lead's servers are gone. Takes the teammate. Returns the server host or the
-    /// failure to open one.
+    /// or its lead's own for a lead started without one (CA-SEC-002: never its own once a
+    /// teammates' server it had ended, since the lead can tag a pane there with the
+    /// teammate's name); else none, forgetting a teammate whose servers are all gone. Takes
+    /// the teammate. Returns the server host, `terminal_agent_unknown` while its teammates'
+    /// server is gone and its lead's own listens, as one failed connect proves no end, or
+    /// the failure to open one.
     fn member(&self, agent: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
         let lead = self
             .members
@@ -256,9 +448,16 @@ impl Servers {
         let Some(lead) = lead else {
             return Ok(None);
         };
-        let server = match self.mates(&lead)? {
-            Some(mates) => Some(mates),
-            None => self.own(&lead)?,
+        let server = match self.team_mates(&lead) {
+            Ok(Some(mates)) => Some(mates),
+            Ok(None) => self.own(&lead)?,
+            Err(problem) if problem.0 == TEAMMATES_SERVER_ENDED => {
+                if self.own(&lead)?.is_some() {
+                    return Err(failure("terminal_agent_unknown"));
+                }
+                None
+            }
+            Err(problem) => return Err(problem),
         };
         if server.is_none()
             && let Ok(mut members) = self.members.lock()
@@ -306,18 +505,16 @@ impl Servers {
         }
     }
 
-    /// Runs one call on the server that holds the panes of an agent's window: a native
-    /// lead's teammates' server while it and the lead's own listen, else as [`Self::on`].
+    /// Runs one call on the server that holds the panes of an agent's window: for a lead
+    /// whose own server listens, its [`Self::team_mates`] or its own, else as [`Self::on`].
     /// Takes the agent and the call. Returns the call's result.
     fn on_panes<T>(
         &self,
         agent: &AgentId,
         call: impl FnOnce(&Tmux) -> Result<T, HostError>,
     ) -> Result<T, HostError> {
-        if self.own(agent)?.is_some()
-            && let Some(mates) = self.mates(agent)?
-        {
-            return call(&mates);
+        if let Some(own) = self.own(agent)? {
+            return call(&self.team_mates(agent)?.unwrap_or(own));
         }
         self.on(agent, call)
     }
@@ -352,7 +549,17 @@ impl Host for Servers {
         let pane_env = self
             .mates_host(agent, &teammates_socket(&self.root, agent)?)?
             .anchor_for(agent, command)?;
-        server.spawn_with(agent, command, &pane_env)
+        let started = self.keep_server(agent, &socket)?;
+        let ready = if started {
+            server.exit_when_empty()
+        } else {
+            Ok(())
+        };
+        let spawned = ready.and_then(|()| server.spawn_with(agent, command, &pane_env));
+        if spawned.is_err() && started {
+            let _ = self.end_kept_server(agent);
+        }
+        spawned
     }
 
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
@@ -409,14 +616,16 @@ impl Host for Servers {
         }
         let mut ended = false;
         for lead in self.leads_listening() {
-            let servers = [self.mates(&lead), self.own(&lead)];
-            for server in servers
-                .into_iter()
-                .filter_map(|server| server.ok().flatten())
+            let server = match self.team_mates(&lead) {
+                Ok(Some(mates)) => Some(mates),
+                Ok(None) => self.own(&lead).ok().flatten(),
+                Err(_) => None,
+            };
+            if let Some(server) = server
+                && server.holds(agent)
+                && server.kill(agent).is_ok()
             {
-                if server.holds(agent) && server.kill(agent).is_ok() {
-                    ended = true;
-                }
+                ended = true;
             }
         }
         if ended {
@@ -430,7 +639,7 @@ impl Host for Servers {
         let own = self
             .own(lead)?
             .ok_or_else(|| failure(OWN_SERVER_UNAVAILABLE))?;
-        let server = self.mates(lead)?.unwrap_or(own);
+        let server = self.team_mates(lead)?.unwrap_or(own);
         if self.own(agent)?.is_some() || self.engine.alive()?.contains(agent) {
             return Err(failure("terminal_agent_running"));
         }
@@ -439,12 +648,41 @@ impl Host for Servers {
     }
 
     fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
-        if let Some(own) = self.own(agent)?
-            && let Some(mates) = self.mates(agent)?
-        {
-            return lead_panes(&own, &mates, agent);
+        if let Some(own) = self.own(agent)? {
+            return match self.team_mates(agent)? {
+                Some(mates) => lead_panes(&own, &mates, agent),
+                None => own.panes(agent),
+            };
         }
         self.on(agent, |server| server.panes(agent))
+    }
+
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        self.on(agent, |server| server.pane_pid(agent))
+    }
+
+    fn unkept(&self, agent: &AgentId) -> bool {
+        if self
+            .keepers
+            .lock()
+            .is_ok_and(|keepers| keepers.contains_key(agent))
+        {
+            return false;
+        }
+        self.on(agent, |server| Ok(server.unkept(agent)))
+            .unwrap_or(true)
+    }
+
+    fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
+        let mut keeper = self.keepers.lock().ok()?.remove(agent)?;
+        let ended = end_keeper(&mut keeper);
+        if !ended
+            && keeper_runs(&mut keeper)
+            && let Ok(mut keepers) = self.keepers.lock()
+        {
+            keepers.entry(agent.clone()).or_insert(keeper);
+        }
+        Some(ended)
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
@@ -486,6 +724,7 @@ impl Host for Servers {
     }
 
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
+        let mut first = None;
         for lead in self.leads_listening() {
             if keep.contains(&lead) {
                 continue;
@@ -493,9 +732,29 @@ impl Host for Servers {
             match self.kill(&lead) {
                 Ok(()) => {}
                 Err(problem) if problem.0 == "terminal_agent_unknown" => {}
-                Err(problem) => return Err(problem),
+                Err(problem) => first = first.or(Some(problem)),
             }
         }
-        self.engine.close(keep)
+        let closed = self.engine.close(keep);
+        match first {
+            Some(problem) => Err(problem),
+            None => closed,
+        }
+    }
+
+    fn renew(&self, until: SystemTime) -> Result<(), HostError> {
+        let mut first = self.engine.renew(until).err();
+        for lead in self.leads_listening() {
+            let sockets = [
+                harness_socket(&self.root, &lead).ok(),
+                teammates_socket(&self.root, &lead).ok(),
+            ];
+            for socket in sockets.into_iter().flatten() {
+                if let Err(problem) = renew_socket(&socket, until) {
+                    first = first.or(Some(problem));
+                }
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 }

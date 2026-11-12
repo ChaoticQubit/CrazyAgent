@@ -15,17 +15,19 @@ use std::time::Duration;
 const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent --version\n\
+crazyagent --third-party-notices\n\
 crazyagent engine [--home DIR] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent tui\n\
 crazyagent tui SOCKET\n\
 crazyagent service install|uninstall|status|start|stop|link-cli\n\
 crazyagent update [--check] [--channel stable|dev]\n\
-crazyagent team-mcp DROP_FILE\n\
+crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]\n\
 crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]\n\
 crazyagent team-mcp-agent MAILBOX_DIR [OFF_TOOL ...]\n\
 crazyagent coord-hook post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR\n\
 crazyagent coord-watch MAILBOX_DIR\n\
+crazyagent lane --folder LANE_DIR [--uses NAME]... [--label TEXT] -- PROGRAM [ARGUMENT ...]\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -50,6 +52,10 @@ fn main() -> ExitCode {
     }
     if args == ["--version"] {
         println!("{}", crazyagent::version::line());
+        return ExitCode::SUCCESS;
+    }
+    if args == ["--third-party-notices"] {
+        print!("{}", crazyagent::usage::THIRD_PARTY_NOTICES);
         return ExitCode::SUCCESS;
     }
     if args.first().is_some_and(|arg| arg == "update") {
@@ -93,7 +99,7 @@ fn main() -> ExitCode {
         return match run_native_auth_custodian(&args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("{error}");
+                let _ = writeln!(io::stderr(), "{error}");
                 ExitCode::FAILURE
             }
         };
@@ -102,15 +108,26 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|arg| arg == crazyagent::team::tool::SERVER_COMMAND)
     {
-        let result = if args.len() != 2 {
-            Err("usage: crazyagent team-mcp DROP_FILE".to_owned())
-        } else {
-            crazyagent::team::tool::serve(
-                io::stdin().lock(),
-                io::stdout().lock(),
-                Path::new(&args[1]),
-            )
-            .map_err(|e| e.to_string())
+        let off: Option<Vec<String>> = args
+            .get(3..)
+            .unwrap_or_default()
+            .iter()
+            .map(|arg| arg.to_str().map(str::to_owned))
+            .collect();
+        let result = match off {
+            Some(off) if args.len() >= 2 && crazyagent::team::tool::known_tools(&off) => {
+                crazyagent::team::tool::serve(
+                    io::stdin().lock(),
+                    io::stdout().lock(),
+                    Path::new(&args[1]),
+                    args.get(2).map(Path::new),
+                    &off,
+                )
+                .map_err(|e| e.to_string())
+            }
+            _ => {
+                Err("usage: crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]".to_owned())
+            }
         };
         return match result {
             Ok(()) => ExitCode::SUCCESS,
@@ -203,6 +220,17 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::coord::lane::COMMAND)
+    {
+        let lane: Vec<OsString> = std::env::args_os()
+            .skip(2)
+            .take(crazyagent::coord::lane::ARGUMENTS_MAX + 1)
+            .collect();
+        let code = crazyagent::coord::lane::run(&lane, &mut io::stderr().lock());
+        return ExitCode::from(u8::try_from(code.clamp(0, 255)).unwrap_or(1));
     }
     if args
         .first()
@@ -459,7 +487,8 @@ fn engine_options_with_claude(args: &[OsString]) -> Result<EngineOptions, String
     Ok((writable, codex.map(Path::to_path_buf), claude, rcli))
 }
 
-/// One engine start, read from the positional form or from the defaults.
+/// One engine start, read from the positional form or from the defaults, with the harness
+/// search the engine keeps for Check again, Choose file and a sign-in retry.
 struct EngineStart {
     root: PathBuf,
     global: PathBuf,
@@ -468,6 +497,7 @@ struct EngineStart {
     writable: bool,
     harnesses: crazyagent::paths::Harnesses,
     found_on_path: [bool; 3],
+    search: crazyagent::harnesses::Search,
 }
 
 const DEFAULT_ENGINE_USAGE: &str = "usage: crazyagent engine [--home DIR] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]";
@@ -478,8 +508,9 @@ fn uses_defaults(args: &[OsString]) -> bool {
 }
 
 /// Reads the default engine form: no positional arguments, an optional `--home` and the
-/// harness flags. Input: the command arguments. Output: the start with its layout prepared
-/// and every harness resolved for this start only, or a usage error.
+/// harness flags. Each harness is its flag, else the file the owner chose, else the first file
+/// the shared search finds that passes the chosen-file checks (`finding::pick`). Input: the
+/// command arguments. Output: the start with its layout prepared and harnesses resolved.
 fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     let mut home = None;
     let mut explicit = crazyagent::paths::Harnesses::default();
@@ -520,11 +551,41 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
         explicit.claude.is_none(),
         explicit.rcli.is_none(),
     ];
-    let harnesses = crazyagent::paths::resolve_harnesses(
-        explicit,
-        std::env::var_os("PATH").as_deref(),
-        executable.parent(),
-    );
+    let search = crazyagent::harnesses::Search::from_environment();
+    let chosen = crazyagent::harnesses::finding::at_start(layout.root(), search.home());
+    let path = std::env::var_os("PATH");
+    let space = crazyagent::harnesses::finding::AgentSpace::open(layout.root());
+    let found = |id: &str| {
+        let space = match &space {
+            Ok(space) => space,
+            Err(error) => {
+                eprintln!("no found {id} file is used ({})", error.0);
+                return None;
+            }
+        };
+        crazyagent::harnesses::finding::pick_noting(
+            id,
+            &search,
+            path.as_deref(),
+            space,
+            |file, error| {
+                eprintln!(
+                    "the found {id} file {} is not used ({})",
+                    file.display(),
+                    error.0
+                );
+            },
+        )?
+        .ok()
+    };
+    let harnesses = crazyagent::paths::Harnesses {
+        codex: explicit.codex.or(chosen.codex).or_else(|| found("codex")),
+        claude: explicit
+            .claude
+            .or(chosen.claude)
+            .or_else(|| found("claude-code")),
+        rcli: crazyagent::paths::rcli_entry(explicit.rcli, path.as_deref(), executable.parent()),
+    };
     Ok(EngineStart {
         root: layout.root().to_path_buf(),
         global: layout.global_settings(),
@@ -533,9 +594,14 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
         writable: true,
         harnesses,
         found_on_path,
+        search,
     })
 }
 
+/// Reads the positional engine form, where every harness is a flag. Its later search looks
+/// only in the PATH and HOME folders it was started with, never the system folders, so a
+/// test engine sees only the harnesses its caller placed. Input: the command arguments.
+/// Output: the start, or a usage error.
 fn positional_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     let (writable, codex, claude, rcli) = engine_options_with_claude(args)?;
     assert!((5..=12).contains(&args.len()));
@@ -552,6 +618,11 @@ fn positional_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
             rcli,
         },
         found_on_path: [false; 3],
+        search: crazyagent::harnesses::Search::engine(
+            std::env::var_os("PATH").as_deref(),
+            &[],
+            std::env::var_os("HOME").map(PathBuf::from),
+        ),
     })
 }
 
@@ -569,9 +640,9 @@ type Register = fn(
 ) -> Result<(), crazyagent::engine::EngineError>;
 
 /// Registers the harness executables of one start. An explicit flag that cannot be
-/// registered stops the engine; one found on PATH is dropped with a note on stderr, so
-/// setup reports it as missing. Inputs: the service, the harnesses and which came from
-/// PATH. Output: Ok with the harnesses left registered, or the explicit failure.
+/// registered stops the engine; a chosen or found one is dropped with a note on stderr
+/// naming the refusal, and Check again reports it. Inputs: the service, the harnesses and
+/// which were not flags. Output: Ok with the harnesses left registered, or the failure.
 fn register_harnesses(
     service: &mut crazyagent::engine::bootstrap::EngineService,
     harnesses: &mut crazyagent::paths::Harnesses,
@@ -629,6 +700,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         writable,
         mut harnesses,
         found_on_path,
+        search,
     } = start;
     let runtime_dir = root.as_path();
     let socket_name = socket_name.as_str();
@@ -681,26 +753,35 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         .map_err(|e| e.to_string())
                 })
                 .and_then(|()| register_harnesses(&mut service, &mut harnesses, found_on_path))
+                .and_then(|()| {
+                    service
+                        .set_harness_search(search)
+                        .map_err(|e| e.to_string())
+                })
                 .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
-                .and_then(|()| match harnesses.codex.as_deref().filter(|_| writable) {
-                    None => Ok(None),
-                    Some(executable) => {
-                        let agents = service
-                            .owner_runtime()
-                            .map(|handle| handle.agents())
-                            .transpose()
-                            .map_err(|error| error.0)?;
-                        crazyagent::research::service::start_for_engine(
-                            runtime_dir,
-                            &global,
-                            &project,
-                            executable,
-                            harnesses.claude.as_deref(),
-                            agent_terminal(&service),
-                            agents,
-                        )
-                        .map(Some)
+                .and_then(|()| {
+                    if !writable {
+                        return Ok(None);
                     }
+                    let agents = service
+                        .owner_runtime()
+                        .map(|handle| handle.agents())
+                        .transpose()
+                        .map_err(|error| error.0)?;
+                    crazyagent::research::service::start_for_engine(
+                        runtime_dir,
+                        &global,
+                        &project,
+                        harnesses.codex.as_deref(),
+                        harnesses.claude.as_deref(),
+                        agent_terminal(&service),
+                        agents,
+                        service
+                            .owner_runtime()
+                            .map(|handle| handle.harness_lookup()),
+                        service.owner_runtime().map(|handle| handle.reproving()),
+                    )
+                    .map(Some)
                 })
                 .and_then(|research| {
                     if !writable {
@@ -712,6 +793,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         &project,
                         harnesses.codex.as_deref(),
                         harnesses.claude.as_deref(),
+                        service
+                            .owner_runtime()
+                            .map(|handle| handle.harness_lookup()),
                     ) {
                         Ok(onboarding) => Ok((research, Some(onboarding))),
                         Err(error) => {
@@ -728,7 +812,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     if let Some(executable) = harnesses.claude.as_deref() {
                         executables.insert("claude-code", executable.to_path_buf());
                     }
-                    if !writable || executables.is_empty() {
+                    if !writable {
                         return Ok((research, onboarding, None));
                     }
                     let agents = match service
@@ -751,6 +835,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         agents,
                         agent_terminal(&service),
                         service.owner_runtime().map(|handle| handle.reproving()),
+                        service
+                            .owner_runtime()
+                            .map(|handle| handle.harness_lookup()),
                     ) {
                         Ok(team) => Ok((research, onboarding, Some(team))),
                         Err(error) => {
@@ -791,6 +878,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     &global,
                     &project,
                     executables,
+                    service
+                        .owner_runtime()
+                        .map(|handle| handle.harness_lookup()),
                 ) {
                     Ok(usage) => Some(usage),
                     Err(problem) => {
@@ -804,6 +894,10 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             let terminal = service
                 .owner_runtime()
                 .and_then(|runtime| runtime.terminal().ok());
+            #[cfg(unix)]
+            let renewal = terminal.clone().and_then(|host| {
+                crazyagent::terminal::renew_while_running(host, runtime_dir.to_path_buf())
+            });
             let result = service.run(stopped).await.map_err(|e| e.to_string());
             if let Some(upkeep) = usage_upkeep {
                 let _ = tokio::task::spawn_blocking(move || upkeep.stop()).await;
@@ -815,9 +909,17 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             if let Some(team) = team {
                 let _ = tokio::task::spawn_blocking(move || team.stop()).await;
             }
+            #[cfg(unix)]
+            if let Some(renewal) = renewal {
+                let _ = tokio::task::spawn_blocking(move || renewal.stop()).await;
+            }
             if let Some(terminal) = terminal {
+                let root = runtime_dir.to_path_buf();
                 let quit = tokio::task::spawn_blocking(move || {
-                    crazyagent::terminal::quit(terminal.as_ref())
+                    let keep = crazyagent::landing::open(&root)
+                        .and_then(|db| crazyagent::quit_settings::load(&db))
+                        .map_or(true, |settings| settings.keeps_team_agents());
+                    crazyagent::terminal::quit(terminal.as_ref(), keep)
                 })
                 .await;
                 if let Ok(Err(problem)) = quit {
@@ -936,7 +1038,7 @@ async fn offer_restart(
     service.stop().map_err(|e| e.to_string())?;
     let since = crazyagent::service::log_length(layout);
     service.start().map_err(|e| e.to_string())?;
-    crazyagent::service::wait_ready(layout, crazyagent::service::READY_TIMEOUT, None, since)
+    crazyagent::service::wait_started(layout, service, crazyagent::service::READY_TIMEOUT, since)
         .await
         .map_err(|e| e.to_string())?;
     match crazyagent::service::check_engine(
@@ -1019,7 +1121,30 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
         "start" if answering => println!("The engine is already running"),
         "start" => {
             let since = crazyagent::service::log_length(&layout);
-            service.start().map_err(|e| e.to_string())?;
+            let another = service.runs_another_program();
+            if another && service.may_replace() {
+                let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+                crazyagent::service::Service {
+                    executable: crazyagent::service::persistable(
+                        &service.executable,
+                        &layout,
+                        appdir.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?,
+                    ..service.clone()
+                }
+                .install()
+            } else {
+                if another {
+                    eprintln!(
+                        "{} runs another engine; it starts as it is. To run this one at login: {} service install",
+                        service.definition.display(),
+                        service.executable.display()
+                    );
+                }
+                service.start()
+            }
+            .map_err(|e| e.to_string())?;
             wait(&layout, since)?;
             println!("Started {}", service.name);
         }

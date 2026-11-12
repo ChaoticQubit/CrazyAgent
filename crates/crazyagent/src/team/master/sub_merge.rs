@@ -186,6 +186,7 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
             ),
             false,
         ),
+        Ok(MergeOutcome::WorkAbsent { branch }) => refused(work_absent(label, &branch)),
         Ok(MergeOutcome::Conflict { branch, files }) => refused(format!(
             "Not merged: {label}'s branch {branch} conflicts with your task branch in {}. The merge was undone. Run git merge {branch} in your worktree, resolve and commit it, then call merge again; or ask {label} to merge your task branch first and finish its work again.",
             bound_text(&files.join(", "), FILES_SHOWN_MAX),
@@ -195,10 +196,23 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
     }
 }
 
+/// The sentence a lead reads when a sub-agent's branch is in its task branch's history but
+/// the work is not, so the open set stayed open. Takes the sub-agent's label and the
+/// branch. Returns the sentence.
+fn work_absent(label: &str, branch: &str) -> String {
+    format!(
+        "Nothing to merge: {label}'s branch {} is in your task branch's history, but its work is absent from your task branch. Its change set stays open and is waiting for the owner; merging again will not change that.",
+        bound_text(branch, crate::landing::BRANCH_BYTES_MAX)
+    )
+}
+
 /// The sentence a lead reads for a merge landing refused. Takes the sub-agent's label and
 /// the plain code. Returns the sentence.
 fn refusal(label: &str, code: &str) -> String {
     match code {
+        crate::landing::WORKER_OPEN => {
+            format!("Not merged: {}", crate::landing::WORKER_OPEN_TEXT)
+        }
         "changes_lead_off_task_branch" => {
             "Not merged: check out your task branch in your worktree first; the merge goes into it.".to_owned()
         }
@@ -221,5 +235,26 @@ fn refusal(label: &str, code: &str) -> String {
             "Not merged: {label}'s work could not be merged ({}).",
             bound_text(code, CODE_SHOWN_MAX)
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{refusal, work_absent};
+
+    #[test]
+    fn a_lead_merge_refused_for_an_open_worker_says_why() {
+        assert_eq!(
+            refusal("Sub-agent 2", crate::landing::WORKER_OPEN),
+            format!("Not merged: {}", crate::landing::WORKER_OPEN_TEXT)
+        );
+    }
+
+    #[test]
+    fn a_branch_held_without_its_work_says_the_work_is_absent_and_the_set_waits_for_the_owner() {
+        assert_eq!(
+            work_absent("Sub-agent 2", "crazyagent/lead--fix"),
+            "Nothing to merge: Sub-agent 2's branch crazyagent/lead--fix is in your task branch's history, but its work is absent from your task branch. Its change set stays open and is waiting for the owner; merging again will not change that."
+        );
     }
 }

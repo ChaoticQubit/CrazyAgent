@@ -2,15 +2,17 @@ use super::buffer::{Feed, buffer, skipped_marker};
 pub use super::harness_socket;
 use super::{
     AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo,
-    PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TerminalStream, VIEWERS_MAX, end_except,
-    failure, pane_id_valid,
+    PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TEAMMATES_SERVER_REPLACED, TerminalStream,
+    VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
+use crate::harnesses::launch::Ending;
 pub use servers::Servers;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -21,13 +23,79 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
 const HOLDER: &str = "_crazyagent";
-const HOLDER_COMMAND: &str =
-    "while [ -S \"${TMUX%,*,*}\" ]; do sleep 2; done; p=${TMUX%,*}; kill \"${p##*,}\"";
+/// How many 2 second holder loops pass between two reads of the server's deadline: the
+/// modification time of its socket, which the running engine keeps ahead (FBTMUX-P1).
+const DEADLINE_CHECK_LOOPS: u32 = 30;
+/// How many deadline reads in a row must find the deadline passed before the holder ends
+/// its server, about five awake minutes, so an engine waking with the machine renews first.
+const DEADLINE_LATE_CHECKS: u32 = 5;
+/// The command that prints a file's modification time in seconds, following a socket alias.
+#[cfg(target_os = "macos")]
+const MODIFIED: &str = "stat -L -f %m";
+#[cfg(not(target_os = "macos"))]
+const MODIFIED: &str = "stat -L -c %Y";
+
+/// The POSIX command of a server's holder session. It ends the server at once when its
+/// socket is gone, and once a deadline was ever set ahead, after `late` reads in a row, one
+/// every `loops` loops, find it passed; a server no engine renewed keeps only the socket
+/// bound. Takes the read spacing and the count. Returns the command text.
+fn holder_command(loops: u32, late: u32) -> String {
+    assert!(loops >= 1 && late >= 1);
+    format!(
+        "s=${{TMUX%,*,*}}; i=0; a=0; l=0; while [ -S \"$s\" ]; do i=$((i+1)); if [ $i -ge {loops} ]; then i=0; d=$({MODIFIED} \"$s\" 2>/dev/null) && n=$(date +%s) && if [ \"$n\" -lt \"$d\" ]; then a=1; l=0; elif [ $a = 1 ]; then l=$((l+1)); fi; [ $l -ge {late} ] && break; fi; sleep 2; done; p=${{TMUX%,*}}; kill \"${{p##*,}}\""
+    )
+}
+
+/// Moves one server's deadline (FBTMUX-P1): sets the modification time of its socket, which
+/// its holder reads, never through a link and only on a socket of this user. Takes the
+/// socket and the deadline. Returns Ok, also when no socket is there, or
+/// `terminal_unavailable` when the time cannot be set.
+fn renew_socket(socket: &Path, until: SystemTime) -> Result<(), HostError> {
+    let Ok(metadata) = std::fs::symlink_metadata(socket) else {
+        return Ok(());
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != user() {
+        return Ok(());
+    }
+    let seconds = until
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+        .ok_or_else(|| failure("terminal_unavailable"))?;
+    let times = rustix::fs::Timestamps {
+        last_access: rustix::fs::Timespec {
+            tv_sec: 0,
+            tv_nsec: rustix::fs::UTIME_OMIT,
+        },
+        last_modification: rustix::fs::Timespec {
+            tv_sec: seconds,
+            tv_nsec: 0,
+        },
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        socket,
+        &times,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(|_| failure("terminal_unavailable"))
+}
 /// The program that runs the POSIX holder command. Given to tmux as separate arguments, it
 /// is started directly, not through `default-shell`, which is the owner's login shell and
 /// may be fish, csh or nushell, none of which can read the holder.
 const HOLDER_SHELL: [&str; 2] = ["/bin/sh", "-c"];
 const SERVER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// A native lead's teammates' server pin (PLC c): the pid that server first answered with at
+/// one socket, none until read or kept, shared by every engine client on that socket and kept
+/// in a record beside the socket's name, so it outlives the engine and a kill of the lead
+/// (PC-L1).
+struct ServerPin {
+    root: PathBuf,
+    lead: AgentId,
+    socket: PathBuf,
+    pid: Mutex<Option<u32>>,
+}
 const ENV_PROGRAM: &str = "/usr/bin/env -i";
 /// The program a native-mode lead's own server starts the lead with: it runs the command in
 /// the environment the server hands every pane, the lead's own variables plus the tmux
@@ -55,6 +123,13 @@ const REPLY_CUT: &str = "terminal_reply_cut";
 const PLACED: &str = "#{pane_id} #{pane_pid}";
 const PANE_FIELDS: &str = "#{pane_id} #{pane_pid} #{pane_dead}";
 const CLOSE_TIME: Duration = Duration::from_secs(2);
+/// How long the processes of closed panes get to end on the hangup tmux sent them, as long
+/// as the engine gives a headless agent after its stop signal.
+const HANGUP_GRACE: Duration = Duration::from_secs(2);
+/// How long a stop goes on killing what the closed panes left in their groups.
+const GROUP_KILL_WAIT: Duration = Duration::from_secs(2);
+/// The most reaper threads one host keeps; a stop past it first waits for the oldest.
+const REAPERS_MAX: usize = 64;
 const LINE_BYTES_MAX: usize = 1024 * 1024;
 const REPLY_BYTES_MAX: usize = 32 * 1024 * 1024;
 const COMMAND_BYTES_MAX: usize = 256 * 1024;
@@ -69,7 +144,9 @@ type Answer = Result<Lines, HostError>;
 /// The server's socket lives in the engine's own private folder and never the owner's tmux.
 /// Agents keep running when the engine stops; a later host on the same folder finds them again.
 /// The server ends itself, with its agents, once its socket is gone, such as when the engine
-/// home is deleted, so no server outlives the folder that reaches it. A confined host drives a
+/// home is deleted, so no server outlives the folder that reaches it, and once the deadline
+/// the running engine keeps setting ahead has passed, so no server outlives an engine that
+/// never comes back by more than the owner's chosen time (FBTMUX-P1). A confined host drives a
 /// native-mode lead's own server instead: the server and every client the engine starts on it
 /// run inside the lead's Seatbelt profile, since a tmux server can make a client run commands.
 /// A teammates host drives a native lead's teammates' server: the server starts inside the
@@ -80,8 +157,11 @@ pub struct Tmux {
     socket: PathBuf,
     confined: Option<PathBuf>,
     starts_in: Option<PathBuf>,
+    pin: Option<Arc<ServerPin>>,
     control: Mutex<Option<Arc<Control>>>,
     spawning: Mutex<()>,
+    reapers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    deadline_checks: (u32, u32),
 }
 
 struct Control {
@@ -141,8 +221,11 @@ impl Tmux {
             socket: folder.join(SOCKET),
             confined: None,
             starts_in: None,
+            pin: None,
             control: Mutex::new(None),
             spawning: Mutex::new(()),
+            reapers: Mutex::new(Vec::new()),
+            deadline_checks: (DEADLINE_CHECK_LOOPS, DEADLINE_LATE_CHECKS),
         }
     }
 
@@ -166,8 +249,11 @@ impl Tmux {
             socket: socket.to_path_buf(),
             confined: Some(profile.to_path_buf()),
             starts_in: None,
+            pin: None,
             control: Mutex::new(None),
             spawning: Mutex::new(()),
+            reapers: Mutex::new(Vec::new()),
+            deadline_checks: (DEADLINE_CHECK_LOOPS, DEADLINE_LATE_CHECKS),
         })
     }
 
@@ -175,22 +261,40 @@ impl Tmux {
     /// [`super::teammates_socket`], rv-audit S1 F1): the server starts inside the teammates'
     /// profile, which cannot reach its socket, and each engine client connects inside the
     /// lead's profile and never starts a server, so no server runs in the lead's profile with
-    /// teammate panes. Nothing starts until the first call. Takes the tmux program, the
-    /// socket, the lead's installed profile and the teammates'. Returns the host, or
+    /// teammate panes. Each client it connects checks the server's pid against `pin`.
+    /// Nothing starts until the first call. Takes the tmux program, the socket, the lead's
+    /// installed profile, the teammates' and the socket's pin. Returns the host, or
     /// `terminal_folder_unsafe` for a socket path with no folder.
-    pub fn teammates(
+    fn teammates(
         executable: Option<PathBuf>,
         socket: &Path,
         profile: &Path,
         server_profile: &Path,
+        pin: Arc<ServerPin>,
     ) -> Result<Self, HostError> {
         if !server_profile.is_absolute() || server_profile == profile {
             return Err(failure("terminal_folder_unsafe"));
         }
         Ok(Self {
             starts_in: Some(server_profile.to_path_buf()),
+            pin: Some(pin),
             ..Self::confined(executable, socket, profile)?
         })
+    }
+
+    /// Has a server this host starts read its deadline every `loops` holder loops and end
+    /// after `late` passed reads, so a row sees the bound within seconds. Takes the spacing
+    /// and the count. Returns the host.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn with_deadline_checks(mut self, loops: u32, late: u32) -> Self {
+        assert!(loops >= 1 && late >= 1);
+        self.deadline_checks = (loops, late);
+        self
+    }
+
+    /// The command of the holder session a server this host starts runs.
+    fn holder(&self) -> String {
+        holder_command(self.deadline_checks.0, self.deadline_checks.1)
     }
 
     /// Gives the tmux server's socket. Takes the host.
@@ -258,6 +362,43 @@ impl Tmux {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(_) => Err(failure("terminal_unavailable")),
         }
+    }
+
+    /// The process the kernel names as the listener bound at this host's socket, read from a
+    /// raw connection, never a tmux client, so no reply of the server decides it. A link
+    /// swapped in at the path reaches a listener bound under another name, so the name the
+    /// kernel gives the peer must be the socket's own. tmux binds the whole address, so that
+    /// name is padded with zero bytes after its end. Output: its pid, or none when nothing
+    /// there answers or the listener is bound elsewhere.
+    fn server_pid(&self) -> Option<u32> {
+        let socket = self.address().ok()?;
+        let stream = crate::spawn_gate::connect_unix_std(&socket).ok()?;
+        let peer = stream.peer_addr().ok()?;
+        let named = peer.as_pathname()?.as_os_str().as_bytes();
+        if named.split(|byte| *byte == 0).next()? != socket.as_os_str().as_bytes() {
+            return None;
+        }
+        crate::team::caller::peer_pid(&stream).filter(|pid| *pid > 1)
+    }
+
+    /// Keeps the panes whose first process the kernel reports as a child of the listener at
+    /// this host's socket. tmux forks each pane's first process from its server, while a pane
+    /// listing is only what the server says, and a native lead can swap in a listener of its
+    /// own at that socket, so a stand-in can name no process outside the server bound at
+    /// this address. Takes the panes. Returns those kept, none when the listener or the
+    /// process table cannot be read.
+    fn served(&self, panes: &[PaneInfo]) -> Vec<PaneInfo> {
+        assert!(panes.len() <= PANES_LISTED_MAX);
+        let (Some(server), Some(parents)) =
+            (self.server_pid(), crate::team::caller::process_parents())
+        else {
+            return Vec::new();
+        };
+        panes
+            .iter()
+            .filter(|pane| parents.get(&pane.pid) == Some(&server))
+            .cloned()
+            .collect()
     }
 
     /// Gives the control connection the host already holds while it still reads.
@@ -364,7 +505,7 @@ impl Tmux {
                 .arg(socket)
                 .args(["new-session", "-d", "-s", SESSION, "-n", HOLDER])
                 .args(HOLDER_SHELL)
-                .arg(HOLDER_COMMAND)
+                .arg(self.holder())
                 .env_clear()
                 .env("PATH", SERVER_PATH)
                 .current_dir(&self.folder)
@@ -381,9 +522,10 @@ impl Tmux {
 
     /// Connects a control client to the server, starting the server with its holder
     /// session only when `may_start` is set; otherwise tmux -N refuses an ended server. A
-    /// teammates host starts its server through [`Self::start_in`] and always connects with
-    /// -N, so its client, inside the lead's profile, never starts one. Takes whether it may
-    /// start one. Output: the control, or a plain code.
+    /// confined host always connects with -N, so its client, inside the lead's profile, never
+    /// starts a server: a teammates host starts its server through [`Self::start_in`], and a
+    /// lead's own server starts under its keeper (KEEPER (b), `Servers`). Takes whether it
+    /// may start one. Output: the control, or a plain code.
     fn connect(&self, may_start: bool) -> Result<Control, HostError> {
         let executable = self
             .executable
@@ -410,12 +552,12 @@ impl Tmux {
         let mut child = crate::spawn_gate::spawn(
             command
                 .args(["-u", "-f", "/dev/null"])
-                .args((!may_start || self.starts_in.is_some()).then_some("-N"))
+                .args((!may_start || self.confined.is_some()).then_some("-N"))
                 .arg("-S")
                 .arg(&socket)
                 .args(["-C", "new-session", "-A", "-s", SESSION, "-n", HOLDER])
                 .args(HOLDER_SHELL)
-                .arg(HOLDER_COMMAND)
+                .arg(self.holder())
                 .env_clear()
                 .env("PATH", SERVER_PATH)
                 .current_dir(&self.folder)
@@ -458,6 +600,12 @@ impl Tmux {
             return Err(failure("terminal_tmux_unsupported"));
         };
         control.capture = capture;
+        if let Some(pin) = &self.pin
+            && let Err(refused) = pinned(&control, pin)
+        {
+            control.stop();
+            return Err(refused);
+        }
         for option in [
             format!("set-option -g default-terminal {TERMINAL_TYPE}"),
             "set-option -gw allow-rename off".into(),
@@ -694,6 +842,40 @@ fn variable_names(lines: &[Vec<u8>]) -> Vec<String> {
         .filter_map(|line| line.split_once('=').map(|(name, _)| name.to_owned()))
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+/// Pins a teammates' server to the pid it first answered with (PLC c): a server under
+/// another pid at the same socket, such as one a process bound there after the teammates'
+/// server ended, is refused, so no listing or input of its is taken for the lead's team.
+/// The pin is read from its record before the first check and recorded before the first pid
+/// is taken (PC-L1). Takes the new control and the socket's pin. Returns Ok,
+/// `terminal_command_failed` for an unreadable pid, `terminal_own_server_unavailable` for a
+/// record that cannot be read or kept, or `terminal_teammates_server_replaced`.
+fn pinned(control: &Control, pin: &ServerPin) -> Result<(), HostError> {
+    let lines = control.ask(&format!("display-message -p '#{{pid}}{FORMAT_END}'"))?;
+    let pid = lines
+        .first()
+        .and_then(|line| std::str::from_utf8(line).ok())
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| failure("terminal_command_failed"))?;
+    let mut kept = pin
+        .pid
+        .lock()
+        .map_err(|_| failure("terminal_unavailable"))?;
+    if kept.is_none() {
+        *kept = super::teammates_server_pid(&pin.root, &pin.lead, &pin.socket)?;
+    }
+    match *kept {
+        None => {
+            super::keep_teammates_server_pid(&pin.root, &pin.lead, &pin.socket, pid)?;
+            *kept = Some(pid);
+        }
+        Some(first) if first != pid => return Err(failure(TEAMMATES_SERVER_REPLACED)),
+        Some(_) => {}
+    }
+    assert_eq!(*kept, Some(pid));
+    Ok(())
 }
 
 impl Drop for Control {
@@ -980,6 +1162,8 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
 /// server (see `Tmux::lead_environment`) with `pane_env` set over it in the lead's pane only.
 /// The lead's window becomes the session's current one, since tmux puts a split the lead's
 /// app runs without a target into the current window, which would otherwise be the holder.
+/// A command the engine put under its pane keeper is taken back out of it first
+/// (`crate::sandbox::unkept_pane`): the keeper cannot run inside the server's sandbox.
 /// Takes the agent, the command, the server's profile and those variables. Returns the line,
 /// or `terminal_command_invalid` for any other command or a variable name not plain.
 fn confined_line(
@@ -990,17 +1174,22 @@ fn confined_line(
 ) -> Result<String, HostError> {
     let invalid = || failure("terminal_command_invalid");
     let cwd = checked(command)?;
+    #[cfg(target_os = "macos")]
+    let unkept = crate::sandbox::unkept_pane(&command.argv);
+    #[cfg(not(target_os = "macos"))]
+    let unkept: Option<Vec<String>> = None;
+    let argv = unkept.as_deref().unwrap_or(&command.argv);
     let profile = profile.to_str().ok_or_else(invalid)?;
     let confined = [crate::sandbox::SANDBOX_EXEC, "-f", profile];
-    if command.argv.len() <= confined.len()
-        || command.argv[..confined.len()]
+    if argv.len() <= confined.len()
+        || argv[..confined.len()]
             .iter()
             .zip(confined)
             .any(|(arg, wanted)| arg != wanted)
     {
         return Err(invalid());
     }
-    let program = &command.argv[confined.len()..];
+    let program = &argv[confined.len()..];
     let first = &program[0];
     if first.is_empty() || first.starts_with('-') || first.contains('=') {
         return Err(invalid());
@@ -1146,6 +1335,182 @@ fn pane_info(line: &[u8]) -> Option<PaneInfo> {
         pid,
         dead,
     })
+}
+
+impl Tmux {
+    /// Closes panes with one tmux command, then ends what they leave in their process groups
+    /// (FINDING bridge orphan): tmux only hangs up a closing pane, which a busy Codex
+    /// app-server the tools-on bridge started in the background outlives, still working on
+    /// the user's account. `kill`, `kill_pane` and the server's close go through here. Takes
+    /// the control, the open panes the command closes and the command. Returns the command's
+    /// answer at once; a reaper ends the groups (r1 SG-L2).
+    fn close_panes(
+        &self,
+        control: &Control,
+        panes: &[PaneInfo],
+        line: &str,
+    ) -> Result<(), HostError> {
+        let groups = pane_groups(&self.served(panes));
+        let closed = control.run(line).map(drop);
+        self.reap(groups);
+        closed
+    }
+
+    /// Ends groups on a thread of their own, so a caller such as the team tick never waits
+    /// out the hangup grace and stops in a row share one grace; `close` waits for every
+    /// reaper. Past `REAPERS_MAX`, or when no thread starts, the caller waits instead.
+    /// Takes the holds on the groups, which the reaper gets once its thread runs.
+    fn reap(&self, groups: Vec<Ending>) {
+        if groups.is_empty() {
+            return;
+        }
+        let Ok(mut reapers) = self.reapers.lock() else {
+            end_groups(groups);
+            return;
+        };
+        reapers.retain(|reaper| !reaper.is_finished());
+        if reapers.len() >= REAPERS_MAX {
+            let _ = reapers.remove(0).join();
+        }
+        let (hand, take) = std::sync::mpsc::channel::<Vec<Ending>>();
+        match std::thread::Builder::new()
+            .name("tmux-reaper".into())
+            .spawn(move || {
+                if let Ok(groups) = take.recv() {
+                    end_groups(groups);
+                }
+            }) {
+            Ok(reaper) => {
+                reapers.push(reaper);
+                if let Err(std::sync::mpsc::SendError(groups)) = hand.send(groups) {
+                    end_groups(groups);
+                }
+            }
+            Err(_) => end_groups(groups),
+        }
+        assert!(reapers.len() <= REAPERS_MAX);
+    }
+
+    /// Waits until every reaper this host started has ended its groups. Takes the host.
+    fn join_reapers(&self) {
+        let reapers = self
+            .reapers
+            .lock()
+            .map(|mut reapers| std::mem::take(&mut *reapers))
+            .unwrap_or_default();
+        for reaper in reapers {
+            let _ = reaper.join();
+        }
+    }
+
+    /// Ends every terminal not in `keep` and, with none kept, the server itself, unless the
+    /// listing found it ended, as a lead's own server its keeper ended; `close` runs it and
+    /// then waits for the reapers. Takes the names to keep. Returns the first failure.
+    fn end_server(&self, keep: &[AgentId]) -> Result<(), HostError> {
+        if self.executable.is_none() || !self.running() {
+            return Ok(());
+        }
+        end_except(self, keep)?;
+        if !keep.is_empty() || !self.running() {
+            return Ok(());
+        }
+        let control = self.control_with(self.confined.is_none())?;
+        let panes: Vec<PaneInfo> = control
+            .ask(&format!("list-panes -a -F '{PANE_FIELDS}{FORMAT_END}'"))
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter_map(|line| pane_info(line))
+                    .take(PANES_LISTED_MAX)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _ = self.close_panes(&control, &panes, "kill-server");
+        control.close();
+        if let Ok(mut slot) = self.control.lock() {
+            *slot = None;
+        }
+        self.forget_server()
+    }
+}
+
+/// The process groups of open panes, read before they close: tmux starts each pane's first
+/// process as the leader of its own session and group, where the processes it starts in the
+/// background stay. A pane whose first process ended or leads no group of its own gives
+/// none, so a stop never signals a group it did not read from its pane. A group another
+/// path holds, as the session stop that ends this pane, is left to that path, so one group
+/// is signalled from one path only (CB-2 one signal). Takes the panes. Returns the holds on
+/// their groups.
+fn pane_groups(panes: &[PaneInfo]) -> Vec<Ending> {
+    assert!(panes.len() <= PANES_LISTED_MAX);
+    let own = rustix::process::getpgrp();
+    panes
+        .iter()
+        .filter(|pane| !pane.dead)
+        .filter_map(|pane| {
+            let leader = rustix::process::Pid::from_raw(i32::try_from(pane.pid).ok()?)?;
+            let leads = leader.as_raw_nonzero().get() > 1
+                && leader != own
+                && rustix::process::getpgid(Some(leader)) == Ok(leader);
+            if leads { Ending::claim(pane.pid) } else { None }
+        })
+        .collect()
+}
+
+/// Waits for the groups of closed panes to end on the hangup, for at most `HANGUP_GRACE`,
+/// then kills what is left until no group answers, for at most `GROUP_KILL_WAIT`. macOS
+/// answers EPERM for a group whose last member it just reaped, so only ESRCH ends a group,
+/// and a group that answered ESRCH once is never tested or signalled again: its number may
+/// lead a new group by then (r1 SG-L1); its hold is marked gone and dropped then, so the
+/// number stays refused to later paths (CB-2 r1 F1). Takes the holds `pane_groups` took
+/// before their panes closed.
+fn end_groups(groups: Vec<Ending>) {
+    end_groups_with(
+        groups,
+        |group| rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH),
+        |group| {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        },
+    );
+}
+
+/// Ends the groups as `end_groups` describes, through `left`, which tells whether a group
+/// still answers, and `kill`, which sends it KILL. Takes the holds and both calls.
+fn end_groups_with(
+    groups: Vec<Ending>,
+    mut left: impl FnMut(rustix::process::Pid) -> bool,
+    mut kill: impl FnMut(rustix::process::Pid),
+) {
+    let mut groups = groups;
+    let hung_up = Instant::now() + HANGUP_GRACE;
+    loop {
+        keep_left(&mut groups, &mut left);
+        if groups.is_empty() || Instant::now() >= hung_up {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let killed = Instant::now() + GROUP_KILL_WAIT;
+    while !groups.is_empty() && Instant::now() < killed {
+        for group in &groups {
+            kill(group.pid());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        keep_left(&mut groups, &mut left);
+    }
+}
+
+/// Keeps the holds whose group still answers `left` and marks every other one gone, so
+/// its number stays refused to later paths once dropped (CB-2 r1 F1). Takes the holds and
+/// the test.
+fn keep_left(groups: &mut Vec<Ending>, left: &mut impl FnMut(rustix::process::Pid) -> bool) {
+    groups.retain_mut(|group| {
+        let answers = left(group.pid());
+        if !answers {
+            group.gone();
+        }
+        answers
+    });
 }
 
 /// Reads an attach's pane line: its ids, cursor, size, input modes, history size, and its
@@ -1526,6 +1891,14 @@ impl Tmux {
 }
 
 impl Tmux {
+    /// Has a server that runs in the foreground, as a lead's own server under its keeper
+    /// does, end once its last session ends, as a server a client started does (FBTMUX-P1),
+    /// since `tmux -D` turns exit-empty off. Its control, connecting, makes the holder
+    /// session first. Output: Ok, or the code the control or the command failed with.
+    pub(super) fn exit_when_empty(&self) -> Result<(), HostError> {
+        self.control()?.run("set-option -s exit-empty on").map(drop)
+    }
+
     /// Starts an agent's terminal as [`Host::spawn`] does, the pane of a lead's own server
     /// also starting with `pane_env` set over what the server hands it, such as the
     /// variables that point a native lead's app at its teammates' server. Takes the agent,
@@ -1572,8 +1945,17 @@ impl Tmux {
         let pid = pid
             .parse::<u32>()
             .ok()
-            .filter(|pid| *pid > 0 && pane.starts_with('%'))
+            .filter(|pid| *pid > 1 && pane.starts_with('%'))
             .ok_or_else(|| failure("terminal_command_failed"))?;
+        let first = PaneInfo {
+            id: pane.to_owned(),
+            pid,
+            dead: false,
+        };
+        if self.served(&[first]).is_empty() {
+            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+            return Err(failure("terminal_command_failed"));
+        }
         if self.confined.is_some() {
             let tagged = pane_id_valid(pane)
                 && control
@@ -1706,12 +2088,16 @@ impl Host for Tmux {
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
         let control = self.live_control()?;
         if self.confined.is_some() {
-            let pane = self.agent_target(&control, agent)?;
-            return control.run(&format!("kill-pane -t {pane}")).map(drop);
+            let pane = self.own_pane(agent)?;
+            let line = format!("kill-pane -t {}", pane.id);
+            return self.close_panes(&control, &[pane], &line);
         }
-        control
-            .run(&format!("kill-window -t {}", target(agent)))
-            .map(drop)
+        let panes = self.panes(agent)?;
+        self.close_panes(
+            &control,
+            &panes,
+            &format!("kill-window -t {}", target(agent)),
+        )
     }
 
     fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
@@ -1731,12 +2117,45 @@ impl Host for Tmux {
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
         let pane = self.member_pane(agent, pane)?;
-        if self.panes(agent)?.len() < 2 {
+        let panes = self.panes(agent)?;
+        if panes.len() < 2 {
             return Err(failure("terminal_pane_unknown"));
         }
-        self.live_control()?
-            .run(&format!("kill-pane -t {pane}"))
-            .map(drop)
+        let closed: Vec<PaneInfo> = panes
+            .into_iter()
+            .filter(|listed| listed.id == pane)
+            .collect();
+        self.close_panes(
+            &*self.live_control()?,
+            &closed,
+            &format!("kill-pane -t {pane}"),
+        )
+    }
+    fn unkept(&self, _agent: &AgentId) -> bool {
+        self.confined.is_some()
+    }
+
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        let pane = if self.confined.is_some() {
+            self.own_pane(agent)?
+        } else {
+            self.panes(agent)?
+                .into_iter()
+                .min_by_key(|pane| {
+                    pane.id
+                        .get(1..)
+                        .and_then(|digits| digits.parse::<u32>().ok())
+                        .unwrap_or(u32::MAX)
+                })
+                .ok_or_else(|| failure("terminal_command_failed"))?
+        };
+        (pane.pid > 1)
+            .then(|| {
+                self.served(std::slice::from_ref(&pane))
+                    .first()
+                    .map(|pane| pane.pid)
+            })
+            .ok_or_else(|| failure("terminal_command_failed"))
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
@@ -1756,20 +2175,13 @@ impl Host for Tmux {
     }
 
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
-        if self.executable.is_none() || !self.running() {
-            return Ok(());
-        }
-        end_except(self, keep)?;
-        if !keep.is_empty() {
-            return Ok(());
-        }
-        let control = self.control_with(self.starts_in.is_none())?;
-        let _ = control.run("kill-server");
-        control.close();
-        if let Ok(mut slot) = self.control.lock() {
-            *slot = None;
-        }
-        self.forget_server()
+        let ended = self.end_server(keep);
+        self.join_reapers();
+        ended
+    }
+
+    fn renew(&self, until: SystemTime) -> Result<(), HostError> {
+        renew_socket(&self.socket, until)
     }
 }
 

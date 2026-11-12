@@ -47,7 +47,7 @@ const CONFLICT_SUFFIX = " (conflicts with your branch)";
 const UNREAD = " (CrazyAgent couldn't read these changes)";
 const TOO_LARGE = " (too large to show here)";
 const REFUSALS = {
-    changes_owner_dirty: "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again.",
+    changes_owner_dirty: "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again.",
     changes_detached_head: "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again.",
     changes_git_busy: "Git is in the middle of a merge, rebase, cherry-pick or bisect in your project folder. Finish or stop it, then accept again.",
     changes_conflict: "These changes conflict with your branch. Ask the agent to update, or discard.",

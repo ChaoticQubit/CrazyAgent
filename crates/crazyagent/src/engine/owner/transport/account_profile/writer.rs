@@ -324,10 +324,61 @@ fn drain_errors(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
 
+    /// Returns whether one process has exited and waits to be reaped, read from the state
+    /// letter in its `/proc` stat line. Input: the process id. Output: false also when it is
+    /// gone.
+    #[cfg(target_os = "linux")]
+    fn exited_unreaped(process: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{process}/stat")).is_ok_and(|stat| {
+            stat.rsplit(')')
+                .next()
+                .is_some_and(|rest| rest.starts_with(" Z"))
+        })
+    }
+
+    /// The Linux twin of `exited_unreaped_writer_group_settles_cleanly`. A group whose only
+    /// member exited and is not reaped still takes signal 0 there, so the cleanup reaps the
+    /// writer first and settles once the group answers ESRCH.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_unreaped_writer_group_answers_until_the_reap_and_settles_cleanly() {
+        let child = crate::spawn_gate::spawn(
+            Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .process_group(0),
+        )
+        .unwrap();
+        let group = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let deadline = WallInstant::now() + Duration::from_secs(5);
+        while !exited_unreaped(child.id()) {
+            assert!(
+                WallInstant::now() < deadline,
+                "writer did not become an exited unreaped group"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(rustix::process::test_kill_process_group(group), Ok(()));
+        let mut supervised = Supervised {
+            work: None,
+            child: Some(child),
+            group: Some(group),
+            settled: false,
+        };
+        assert!(supervised.cleanup());
+        assert!(supervised.settled);
+        assert_eq!(
+            rustix::process::test_kill_process_group(group),
+            Err(rustix::io::Errno::SRCH)
+        );
+    }
+
+    /// macOS only: it waits for the EPERM that macOS alone answers for a group whose members
+    /// all exited and are not reaped. Linux answers Ok until the reap; its twin row covers that.
+    #[cfg(target_os = "macos")]
     #[test]
     fn exited_unreaped_writer_group_settles_cleanly() {
         let child = crate::spawn_gate::spawn(

@@ -214,13 +214,15 @@ pub(in crate::tui) fn pool_choices(config: &EffectiveConfig) -> Vec<PoolChoice> 
 }
 
 /// States whether a harness is on this machine and CrazyAgent can start it.
-/// CantStart is installed but cannot run team agents yet; Unknown is used until the engine's catalog arrives.
+/// CantStart is installed but cannot run team agents yet; MasterOnly runs only as the
+/// project master; Unknown is used until the engine's catalog arrives.
 /// The catalog's own words decide; the wizard never guesses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum HarnessState {
     Ready,
     NotInstalled,
     CantStart,
+    MasterOnly,
     Unknown,
 }
 
@@ -393,7 +395,9 @@ impl Wizard {
             picker: None,
             note: None,
             phase: Phase::Editing,
-            access: AgentAccess::NEW_PROJECT,
+            access: Some(AgentAccess::NEW_PROJECT)
+                .filter(|level| level.unavailable().is_none())
+                .unwrap_or_default(),
         };
         wizard.assert_consistent();
         wizard
@@ -432,13 +436,14 @@ impl Wizard {
         let (Some(harnesses), Some(team)) = (&self.harnesses, &self.team) else {
             return;
         };
-        let missing = |id: &str| {
+        let missing = |id: &str, master: bool| {
             harnesses.iter().any(|h| {
                 same_harness(&h.id, id)
-                    && matches!(
-                        h.state,
-                        HarnessState::NotInstalled | HarnessState::CantStart
-                    )
+                    && match h.state {
+                        HarnessState::NotInstalled | HarnessState::CantStart => true,
+                        HarnessState::MasterOnly => !master,
+                        HarnessState::Ready | HarnessState::Unknown => false,
+                    }
             })
         };
         let ready = || harnesses.iter().filter(|h| h.state == HarnessState::Ready);
@@ -450,11 +455,11 @@ impl Wizard {
             return;
         };
         let mut fitted = team.clone();
-        if missing(&fitted.master) {
+        if missing(&fitted.master, true) {
             fitted.master = best.clone();
         }
         for slot in &mut fitted.sub_harnesses {
-            if missing(&slot.harness) {
+            if missing(&slot.harness, false) {
                 slot.harness = best.clone();
             }
         }
@@ -563,7 +568,8 @@ impl Wizard {
 
     /// Applies the engine's catalog: choices, limits and the smart team defaults.
     /// Takes the pool and research it was read for and the engine result.
-    /// Returns nothing; a team the owner edited is kept.
+    /// Returns nothing; a team the owner edited is kept, and a team the catalog replaces
+    /// closes the harness picker opened over it.
     pub fn apply_catalog(
         &mut self,
         pool: Option<CredentialRef>,
@@ -579,6 +585,7 @@ impl Wizard {
                 self.catalog_problem = None;
                 let current = key == (self.pool.clone(), self.research_sorted());
                 if current && !self.team_edited {
+                    self.picker = None;
                     self.set_team(catalog.default_team.clone());
                     self.fit_team();
                 }
@@ -793,14 +800,17 @@ impl Wizard {
         let max = parse(&self.max, Control::Max)?;
         assert_eq!((min, max), (team.min_agents, team.max_agents));
         if let Some(harnesses) = &self.harnesses {
-            let blocked = std::iter::once(&team.master)
-                .chain(team.sub_harnesses.iter().map(|slot| &slot.harness))
-                .find_map(|id| {
+            let blocked = std::iter::once((&team.master, true))
+                .chain(team.sub_harnesses.iter().map(|slot| (&slot.harness, false)))
+                .find_map(|(id, master)| {
                     let state = harnesses.iter().find(|h| same_harness(&h.id, id))?.state;
                     let problem = match state {
                         HarnessState::NotInstalled => "is not installed",
                         HarnessState::CantStart => "can't run team agents yet",
-                        HarnessState::Ready | HarnessState::Unknown => return None,
+                        HarnessState::MasterOnly if !master => "runs only as the master",
+                        HarnessState::MasterOnly | HarnessState::Ready | HarnessState::Unknown => {
+                            return None;
+                        }
                     };
                     Some((id, problem))
                 });
@@ -1574,10 +1584,12 @@ impl Wizard {
                 let Some(choice) = choices.get(picker.cursor) else {
                     return Reply::Handled;
                 };
-                if matches!(
-                    choice.state,
-                    HarnessState::NotInstalled | HarnessState::CantStart
-                ) {
+                let refused = match choice.state {
+                    HarnessState::NotInstalled | HarnessState::CantStart => true,
+                    HarnessState::MasterOnly => picker.target != PickFor::Master,
+                    HarnessState::Ready | HarnessState::Unknown => false,
+                };
+                if refused {
                     return Reply::Handled;
                 }
                 let (target, id) = (picker.target, choice.id.clone());
@@ -1624,6 +1636,13 @@ impl Wizard {
         if let Some(team) = &self.team {
             assert!(team.sub_harnesses.len() <= SUB_HARNESSES_MAX);
             assert!(self.team_row <= team.sub_harnesses.len() + 1);
+            if let Some(Picker {
+                target: PickFor::Slot(index),
+                ..
+            }) = &self.picker
+            {
+                assert!(*index < team.sub_harnesses.len());
+            }
         }
     }
 }

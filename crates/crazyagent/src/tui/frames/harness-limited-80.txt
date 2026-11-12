@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
                                                                                 
- ↑↓ Move  r Check again  Shift-←→ Sections  Esc Home                     ? Help 
+ ↑↓ Move  r Check again  i Install  Shift-←→ Sections  Esc Home          ? Help 

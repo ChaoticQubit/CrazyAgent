@@ -7,27 +7,52 @@ import { watchUnconfirmed, leavesProfileUnconfirmed } from "./engine-client";
 import type { ActionReceipt, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
 import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
 import type { InputChoice } from "./screens/team/terminal-io";
+import { QUESTIONS_SHOWN_DEFAULT, questionsShown } from "./api-questions";
+import type { QuestionsShown } from "./api-questions";
 export type Loaded<T> = { kind: "loading" } | Result<T>;
 export type ThemeChoice = "system" | "light" | "dark";
 export type ProjectRow = ProjectPage["items"][number];
 
 const THEME_KEY = "crazyagent.theme";
-const MASTER_INPUT_KEY = "crazyagent.master-input";
+const TERMINAL_INPUT_KEY = "crazyagent.terminal-input";
+const QUESTIONS_SHOWN_KEY = "crazyagent.questions-shown";
 
-/** Reads where the owner types to a live master, as kept in this app (not in the engine).
- * Output: the choice; the default when storage is unavailable or holds something else. */
-export function readMasterInput(): InputChoice {
+/** Reads where a waiting question shows on a project page, as kept in this app (not in the
+ * engine). Output: the choice; the default when storage is unavailable or holds something
+ * else. */
+export function readQuestionsShown(): QuestionsShown {
   try {
-    return inputChoice(window.localStorage.getItem(MASTER_INPUT_KEY));
+    return questionsShown(window.localStorage.getItem(QUESTIONS_SHOWN_KEY));
+  } catch {
+    return QUESTIONS_SHOWN_DEFAULT;
+  }
+}
+
+/** Remembers where a waiting question shows on a project page. Input: the choice. Output:
+ * none. */
+export function saveQuestionsShown(choice: QuestionsShown): void {
+  try {
+    window.localStorage.setItem(QUESTIONS_SHOWN_KEY, choice);
+  } catch {
+    return;
+  }
+}
+
+/** Reads where the owner types to every agent's terminal, as kept in this app (not in the
+ * engine). The old Master input key is ignored on purpose: a live trial left Both in it.
+ * Output: the choice; the default when storage is unavailable or holds something else. */
+export function readTerminalInput(): InputChoice {
+  try {
+    return inputChoice(window.localStorage.getItem(TERMINAL_INPUT_KEY));
   } catch {
     return INPUT_DEFAULT;
   }
 }
 
-/** Remembers where the owner types to a live master. Input: the choice. Output: none. */
-export function saveMasterInput(choice: InputChoice): void {
+/** Remembers where the owner types to every agent's terminal. Input: the choice. Output: none. */
+export function saveTerminalInput(choice: InputChoice): void {
   try {
-    window.localStorage.setItem(MASTER_INPUT_KEY, choice);
+    window.localStorage.setItem(TERMINAL_INPUT_KEY, choice);
   } catch {
     return;
   }
@@ -313,6 +338,98 @@ export function sharedLoad<T>(key: string | null, fresh: boolean, read: () => Pr
   return started;
 }
 
+/** A choice the owner saved on a control, the read value it replaced and, once its save was
+ * applied, how many reads had started by the time it answered. */
+export interface Held<T> {
+  choice: T;
+  from: T;
+  answered?: number;
+}
+
+let readsStarted = 0;
+const readStarts = new WeakMap<object, number>();
+
+/** Numbers one engine read as it starts, so a hold can tell a read begun after its save
+ * answered from one already on its way. Output: the read's number. */
+export function startRead(): number {
+  readsStarted += 1;
+  return readsStarted;
+}
+
+/** Notes which read produced a result and its value, keeping the first note when mounts share
+ * one answer. Inputs: the result and the read's number from startRead. */
+export function stampRead(result: Result<unknown>, started: number) {
+  if (!(Number.isSafeInteger(started) && started > 0 && started <= readsStarted)) throw new Error(`a read number comes from startRead: ${started}`);
+  for (const read of [result, result.kind === "ok" ? result.value : null]) {
+    if (typeof read === "object" && read !== null && !readStarts.has(read)) readStarts.set(read, started);
+  }
+}
+
+/** The hold an applied save leaves: the pick, noted with the reads started by the time the save
+ * answered, so a read begun later can end it; nothing after a refused or unconfirmed save.
+ * Inputs: the held choice and the save's note. Output: the hold to keep, or null. */
+export function answeredHold<T>(held: Held<T>, note: string): Held<T> | null {
+  const kept = afterSave(held, note);
+  return kept === null ? null : { ...kept, answered: readsStarted };
+}
+
+/** Whether a held pick lets go: once a read moves the value it replaced, or once its save
+ * answered and a read that started after that answer lands, whatever it shows, so another
+ * writer putting the old value back is not hidden. Inputs: the hold, the read value, how two
+ * values compare and the read it came from. Output: true when it lets go. */
+export function holdEnds<T>(held: Held<T> | null, current: T, same: (a: T, b: T) => boolean, read: unknown): boolean {
+  if (held === null) return false;
+  if (!same(held.from, current)) return true;
+  if (held.answered === undefined || typeof read !== "object" || read === null) return false;
+  const started = readStarts.get(read);
+  return started !== undefined && started > held.answered;
+}
+
+/** What a control keeps after a save: the choice once the engine applied it, so the control
+ * never flips back to the old value while the reload is on its way, and nothing after a refused
+ * or unconfirmed save, so the read value shows again. Inputs: the held choice and the save's
+ * note, empty when the engine applied it. Output: the choice to keep, or null. */
+export function afterSave<T>(held: Held<T>, note: string): Held<T> | null {
+  return note === "" ? held : null;
+}
+
+/** The value a control shows: the held choice while the read still holds the value it replaced,
+ * otherwise the read value, once a reload or another window moved it. Inputs: the held choice or
+ * null, the read value and how two values compare. Output: the value. */
+export function shownChoice<T>(held: Held<T> | null, current: T, same: (a: T, b: T) => boolean = Object.is): T {
+  return held !== null && same(held.from, current) ? held.choice : current;
+}
+
+/** Whether two plain values read the same, for a held setting made of several fields. Inputs: the
+ * two values. Output: true when they do. */
+export function sameJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Starts holding a picked value and gives the call that settles it with the save's note. */
+export type Hold<T> = (choice: T) => (note: string) => void;
+
+/** Keeps a control on the owner's pick from the moment of the pick until a read moves the value
+ * it replaced, until its save is refused or, given the read the value came from, until a read
+ * that started after the save answered lands: without this a control falls back to the old read
+ * value after its save, and a native select cannot be picked back to the value it already shows.
+ * Inputs: the value read, how two values compare and the read it came from. Output: the value
+ * to show and `hold`. */
+export function useHeld<T>(current: T, same: (a: T, b: T) => boolean = Object.is, read?: unknown): [T, Hold<T>] {
+  const [held, setHeld] = useState<Held<T> | null>(null);
+  const moved = holdEnds(held, current, same, read);
+  useEffect(() => { if (moved) setHeld(null); }, [moved]);
+  const hold: Hold<T> = (choice) => {
+    const kept = { choice, from: current };
+    setHeld(kept);
+    return (note) => {
+      const answered = answeredHold(kept, note);
+      setHeld((now) => now === kept ? answered : now);
+    };
+  };
+  return [moved ? current : shownChoice(held, current, same), hold];
+}
+
 /** Loads one engine read for a screen and reloads it when the session revision or the given
  * keys change. A read given a cache name first shows its last good reply from an earlier mount,
  * then refreshes in the background; a failed refresh shows its error as an uncached read does.
@@ -331,11 +448,13 @@ export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = [],
     const same = shownKey.current === key;
     shownKey.current = key;
     setValue((old) => cached ?? (old.kind === "ok" && same ? old : { kind: "loading" }));
+    const started = startRead();
     const reading = sharedLoad(key === null ? null : `${key}\n${session?.revision ?? 0}`, fresh.current, read);
     fresh.current = false;
     void reading.then((result) => {
       if (!live) return;
       const noted = session ? session.noteResult(result) : result;
+      stampRead(noted, started);
       if (key !== null) cacheLoad(key, noted);
       setValue(noted);
     });

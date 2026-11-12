@@ -32,11 +32,11 @@ use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::master_session::{
-    Context as MasterContext, Event as MasterEvent, Job as MasterJob, State as MasterState,
-    Submission as MasterSubmission,
+    Context as MasterContext, Event as MasterEvent, Job as MasterJob, NEW_SESSION_STARTING,
+    RENEWAL_NOT_STARTED, State as MasterState, Submission as MasterSubmission,
 };
 use crate::tui::seam::{Arrival, NOT_READY, PoolChange, Request};
-use crate::tui::text::{styled, wrap};
+use crate::tui::text::{cut, styled, wrap};
 use crate::tui::theme::Role;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -54,7 +54,8 @@ const CHANGED_NOTE: &str =
     "That was your copy in the project folder. The agent's version lands there when you accept.";
 const IMPORT_MODAL_WIDTH: u16 = 72;
 const IMPORT_ROWS_MAX: usize = 12;
-const BANNER_ROWS_MAX: usize = 3;
+pub(in crate::tui) const BANNER_ROWS_MAX: usize = 3;
+const BANNER_BRANCH_CELLS: usize = 32;
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -216,6 +217,7 @@ pub(in crate::tui) struct ProjectPage {
     master: MasterState,
     master_sent: Vec<MasterSent>,
     waiting: Option<Waiting>,
+    starting: Option<Message>,
     retried: bool,
     renewed: bool,
     schedule_asked: bool,
@@ -224,11 +226,13 @@ pub(in crate::tui) struct ProjectPage {
     covered: bool,
     from_master: bool,
     reopen_master: bool,
+    master_entry: bool,
     import: Option<Vec<ImportFile>>,
     import_asked: bool,
     import_sent: Option<ProcessQuery>,
     moved: Option<Vec<ImportFile>>,
     uncommitted: Vec<String>,
+    uncommitted_branch: Option<String>,
     uncommitted_asked: bool,
 }
 
@@ -258,6 +262,29 @@ fn import_problem(code: &str) -> String {
     }
 }
 
+/// The banner text shown while an instruction import's move stays uncommitted (DEC-106
+/// addendum): the files and the checked-out branch merges into are refused, or "this
+/// branch" without one; a name wider than `BANNER_BRANCH_CELLS` is cut with the ellipsis,
+/// so "are refused" stays within the banner's rows. Inputs: the paths, the branch and the
+/// ellipsis glyph. Output: the text, sanitized.
+pub(in crate::tui) fn move_banner(
+    files: &[String],
+    branch: Option<&str>,
+    ellipsis: &str,
+) -> String {
+    assert!(!files.is_empty());
+    let files: Vec<String> = files.iter().map(|path| sanitize(path)).collect();
+    let target = branch.map_or_else(
+        || "this branch".to_owned(),
+        |name| cut(&sanitize(name), BANNER_BRANCH_CELLS, ellipsis),
+    );
+    assert!(crate::tui::text::width(&target) <= BANNER_BRANCH_CELLS);
+    format!(
+        "Git still shows {} as deleted after the instruction import, so merges into {target} are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
+        files.join(", ")
+    )
+}
+
 impl ProjectPage {
     /// Opens a project on one tab.
     /// Takes the project id and name from Home, the tab and the shell context.
@@ -280,6 +307,7 @@ impl ProjectPage {
             master: MasterState::default(),
             master_sent: Vec::new(),
             waiting: None,
+            starting: None,
             retried: false,
             renewed: false,
             schedule_asked: false,
@@ -288,11 +316,13 @@ impl ProjectPage {
             covered: false,
             from_master: false,
             reopen_master: false,
+            master_entry: tab == ProjectTab::Conversation,
             import: None,
             import_asked: false,
             import_sent: None,
             moved: None,
             uncommitted: Vec::new(),
+            uncommitted_branch: None,
             uncommitted_asked: false,
         };
         page.refresh_pool(ctx);
@@ -330,7 +360,12 @@ impl ProjectPage {
                         access,
                         toolchains: Vec::new(),
                         ide_git_hooks: false,
+                        tool_cache: Default::default(),
+                        ide_agent_files: Default::default(),
+                        shared_folders: Default::default(),
                         network: crate::sandbox::policy::AgentNetwork::default(),
+                        apply_changes: Default::default(),
+                        grants: Vec::new(),
                     },
                 },
                 generation,
@@ -405,8 +440,9 @@ impl ProjectPage {
             && *project == self.screen.project
         {
             self.uncommitted_asked = false;
-            if let Ok(ProcessReply::Paths(paths)) = result {
-                self.uncommitted = paths.clone();
+            if let Ok(ProcessReply::Uncommitted(waiting)) = result {
+                self.uncommitted = waiting.files.clone();
+                self.uncommitted_branch = waiting.branch.clone();
             }
             return;
         }
@@ -472,16 +508,16 @@ impl ProjectPage {
     }
 
     /// The banner rows shown above the tabs while an instruction import's move stays
-    /// uncommitted: the files, why it matters and the Ctrl-G action. Inputs: the width and
-    /// the context. Output: the rows, none when no move waits.
+    /// uncommitted: the files, the branch merges into are refused and the Ctrl-G action.
+    /// Inputs: the width and the context. Output: the rows, none when no move waits.
     fn banner(&self, width: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         if self.uncommitted.is_empty() || width < 8 {
             return Vec::new();
         }
-        let files: Vec<String> = self.uncommitted.iter().map(|path| sanitize(path)).collect();
-        let text = format!(
-            "Git still shows {} as deleted after the instruction import, so merges into this branch are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
-            files.join(", ")
+        let text = move_banner(
+            &self.uncommitted,
+            self.uncommitted_branch.as_deref(),
+            ctx.glyphs.ellipsis,
         );
         wrap(&text, width - 2)
             .into_iter()
@@ -566,10 +602,13 @@ impl ProjectPage {
     }
 
     /// Reads the team graph for the panel beside the master, while this page is on top on
-    /// the Conversation tab: at most one read out at a time, at most one every
+    /// the Conversation tab, and once on any tab while no read stands, at the first read and
+    /// each time the page comes back on top off that tab, so the next entry to that tab knows
+    /// Live terminal: at most one read out at a time, at most one every
     /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     fn ask_team(&mut self, ctx: &mut Ctx) {
-        if self.covered || self.screen.tab != Tab::Conversation || ctx.link != Link::Ready {
+        let wanted = self.screen.tab == Tab::Conversation || matches!(self.screen.team, Load::Idle);
+        if self.covered || !wanted || ctx.link != Link::Ready {
             return;
         }
         let now = now_ms();
@@ -625,6 +664,9 @@ impl ProjectPage {
 
     fn sync_master(&mut self, ctx: &mut Ctx) {
         self.select_master(ctx);
+        if let Some(reason) = self.master.take_renewal_problem() {
+            ctx.say(Message::warning(RENEWAL_NOT_STARTED, &reason));
+        }
         self.master
             .show_sessions(self.screen.tab == Tab::Conversation);
         if self.master_sent.len() < MASTER_SENT_MAX
@@ -637,6 +679,15 @@ impl ProjectPage {
         if let Some(listed) = self.master.sessions() {
             self.screen.sessions.set(super::sessions::rows_of(listed));
         }
+        let reading = self
+            .screen
+            .sessions
+            .reading()
+            .and_then(|session| crate::protocol::SessionId::new(session).ok());
+        self.master.open_messages(reading);
+        self.screen
+            .sessions
+            .set_messages(self.master.opened_messages());
     }
 
     fn transcript(&self) -> Option<Transcript> {
@@ -645,6 +696,7 @@ impl ProjectPage {
             session: session.map(|session| session.phase),
             turns,
             inputs: self.master.inputs(),
+            messages: self.master.messages(),
         };
         let harness = match session {
             Some(session) => backend_name(session.selection.backend),
@@ -669,7 +721,10 @@ impl ProjectPage {
                 text: waiting.text.clone(),
                 error: false,
             });
-            transcript.status = MasterStatus::Thinking { since_ms: None };
+            transcript.status = MasterStatus::Thinking {
+                since_ms: None,
+                activity: Vec::new(),
+            };
         }
         Some(transcript)
     }
@@ -838,13 +893,20 @@ impl ProjectPage {
     /// waiting message, a conversation ended for a renewal opens a new one, a session
     /// switch the owner started from the live master view opens that view again, and a new
     /// session of a master that runs live turns the live switch on, so the live master
-    /// starts on the fresh session. Takes the confirmed action and the context.
+    /// starts on the fresh session. A new session also clears the error that said it was
+    /// already starting, while that error still shows. Takes the confirmed action and the
+    /// context.
     fn confirmed(&mut self, action: &MasterOwnerAction, ctx: &mut Ctx) {
         match action {
             MasterOwnerAction::NewSession { .. } | MasterOwnerAction::Resume { .. } => {
                 if self.from_master {
                     self.from_master = false;
                     self.reopen_master = true;
+                }
+                if matches!(action, MasterOwnerAction::NewSession { .. })
+                    && let Some(said) = self.starting.take()
+                {
+                    ctx.unsay(&said);
                 }
                 if matches!(action, MasterOwnerAction::NewSession { .. })
                     && self.screen.live_master()
@@ -931,6 +993,19 @@ impl ProjectPage {
         self.screen.now_ms = now_ms();
         self.screen.apply(&query, event.result.clone());
         let applied = matches!(event.result, Ok(SetupView::Changed(OwnerResult::Applied)));
+        if matches!(query, SetupQuery::MoveHome { .. }) {
+            if matches!(&event.result, Err(code) if code == "move_project_old_folder_left") {
+                ctx.request(Request::Projects);
+            }
+            if applied {
+                ctx.request(Request::Projects);
+                ctx.say(Message::success(
+                    &format!("{} is now in your CrazyAgent folder.", self.screen.name),
+                    "Start the team again from Team.",
+                ));
+            }
+            return;
+        }
         if matches!(query, SetupQuery::AgentPolicy { .. })
             && let Some(access) = self.access_wanted.take()
         {
@@ -1122,6 +1197,7 @@ impl ProjectPage {
         }
         let action = SetupAction::Update {
             project_id: setup.project_id.clone(),
+            kept: None,
             expected_revision: setup.revision,
             name: None,
             setup: ProjectSetup {
@@ -1172,6 +1248,11 @@ impl ProjectPage {
     fn pump(&mut self, ctx: &mut Ctx) {
         if let Some(query) = self.screen.recovery.next_query(now_ms()) {
             ctx.request(Request::Recovery(Box::new(query)));
+        }
+        if matches!(self.screen.tab, Tab::Overview | Tab::Settings)
+            && let Some(query) = self.screen.roadmap.next_query(now_ms())
+        {
+            ctx.request(Request::Roadmap(Box::new(query)));
         }
         if self.screen.tab == Tab::Changes
             && let Some(query) = self.screen.changes.next_query(now_ms())
@@ -1226,6 +1307,44 @@ impl ProjectPage {
         }
         self.sent.push(query.clone());
         ctx.request(Request::Setup(query));
+    }
+
+    /// Notes a key's move onto or off the Conversation tab: entering the tab offers the live
+    /// master view, a key typed on the tab or leaving it withdraws the offer.
+    /// Inputs: the tab before the key and the flow the key gave. Output: the flow to apply.
+    fn entered(&mut self, before: Tab, flow: Flow) -> Flow {
+        self.master_entry = self.screen.tab == Tab::Conversation && before != Tab::Conversation;
+        self.offer_master(flow)
+    }
+
+    /// Opens the master view on the Conversation tab just entered, once the stored plan and a
+    /// team read are in, when its master runs live (Codex or Claude Code) and Live terminal is
+    /// not Off, as the desktop shows that master's terminal there; another master keeps the
+    /// console. Off keeps the entry, so a read showing On opens the view until a key withdraws
+    /// it (DEC-117 Q4). Input: the flow so far. Output: that flow, or the master view.
+    fn offer_master(&mut self, flow: Flow) -> Flow {
+        if !matches!(flow, Flow::Handled)
+            || !self.master_entry
+            || self.covered
+            || self.screen.setup.is_none()
+        {
+            return flow;
+        }
+        if !self.screen.live_master() {
+            self.master_entry = false;
+            return flow;
+        }
+        let unread = matches!(self.screen.team, Load::Idle | Load::Loading);
+        let off = (self.screen.team.ready()).is_some_and(|graph| !graph.master_live_terminal);
+        if unread || off {
+            return flow;
+        }
+        self.master_entry = false;
+        self.covered = true;
+        Flow::Open(Place::Master {
+            id: self.screen.project.clone(),
+            name: self.screen.name.clone(),
+        })
     }
 
     fn reply(&mut self, reply: ProjectReply, ctx: &mut Ctx) -> Flow {
@@ -1310,7 +1429,11 @@ impl ProjectPage {
                     .transcript()
                     .is_some_and(|(session, _, _)| session.is_some());
                 if let Err(problem) = super::sessions::act(&mut self.master, &action) {
-                    ctx.say(Message::error("The session did not switch.", &problem));
+                    let said = Message::error("The session did not switch.", &problem);
+                    if problem == NEW_SESSION_STARTING {
+                        self.starting = Some(said.clone());
+                    }
+                    ctx.say(said);
                 } else if matches!(action, super::sessions::SessionsAction::New { .. })
                     && !in_view
                     && self.screen.live_master()
@@ -1323,7 +1446,16 @@ impl ProjectPage {
                 self.retry_master(ctx);
                 Flow::Handled
             }
+            ProjectReply::RefreshOverview => {
+                let project = self.screen.project.clone();
+                self.send(SetupQuery::RefreshOverview { project }, ctx);
+                Flow::Handled
+            }
             ProjectReply::Team => Flow::Open(Place::Team {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
+            ProjectReply::TeamSettings => Flow::Open(Place::TeamSettings {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
@@ -1339,9 +1471,25 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Memory => Flow::Open(Place::ProjectMemory {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
             ProjectReply::Usage => Flow::Open(Place::Usage),
             ProjectReply::AccountOrder(strategy) => {
                 self.set_order(strategy, ctx);
+                Flow::Handled
+            }
+            ProjectReply::MoveHome(mode) => {
+                let generation = ctx.next_generation();
+                self.send(
+                    SetupQuery::MoveHome {
+                        project: self.screen.project.clone(),
+                        mode,
+                        generation,
+                    },
+                    ctx,
+                );
                 Flow::Handled
             }
         };
@@ -1424,6 +1572,7 @@ impl ProjectPage {
             && self.screen.folders.is_none()
             && self.screen.general.is_none()
             && !self.screen.confirm_remove
+            && !self.screen.confirm_move
             && !self.screen.changes.editing()
             && !self.typing()
     }
@@ -1514,6 +1663,7 @@ impl Screen for ProjectPage {
             || self.screen.edit.is_some()
             || self.screen.adding.is_some()
             || self.screen.folders.is_some()
+            || self.screen.hidden.is_some()
             || self.screen.access.is_some()
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
@@ -1524,6 +1674,7 @@ impl Screen for ProjectPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let before = self.screen.tab;
         if self.moved.is_some() {
             return self.moved_key(key, ctx);
         }
@@ -1612,6 +1763,7 @@ impl Screen for ProjectPage {
             },
         };
         let flow = self.reply(reply, ctx);
+        let flow = self.entered(before, flow);
         self.covered = matches!(&flow, Flow::Open(place) if Some(place) != self.place().as_ref());
         self.ask_team(ctx);
         self.ask_files(ctx);
@@ -1624,8 +1776,10 @@ impl Screen for ProjectPage {
         } else {
             KeyCode::Left
         };
+        let before = self.screen.tab;
         let reply = self.screen.key(KeyEvent::new(code, KeyModifiers::SHIFT));
-        self.reply(reply, ctx)
+        let flow = self.reply(reply, ctx);
+        self.entered(before, flow)
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
@@ -1639,7 +1793,7 @@ impl Screen for ProjectPage {
                     Err(code) => Load::Failed(code.clone()),
                 };
                 self.redraw(ctx);
-                return Flow::Handled;
+                return self.offer_master(Flow::Handled);
             }
             Arrival::ProjectFiles {
                 project,
@@ -1667,6 +1821,9 @@ impl Screen for ProjectPage {
                 OwnerEvent::Questions(event) => self.screen.questions.apply(event),
                 OwnerEvent::Recovery(event) if event.query.project() == &self.screen.project => {
                     self.screen.recovery.apply(event);
+                }
+                OwnerEvent::Roadmap(event) if event.query.project() == &self.screen.project => {
+                    self.screen.roadmap.apply(event);
                 }
                 OwnerEvent::Process(event) => {
                     self.import_arrived(event, ctx);
@@ -1721,7 +1878,7 @@ impl Screen for ProjectPage {
                 name: self.screen.name.clone(),
             });
         }
-        Flow::Handled
+        self.offer_master(Flow::Handled)
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
@@ -1729,6 +1886,7 @@ impl Screen for ProjectPage {
         ctx.request(Request::PoolProjects);
         self.schedule_asked = false;
         self.covered = false;
+        self.screen.setup_due = true;
         if let Some((_, code)) = ctx
             .sessions_key
             .take_if(|(project, _)| *project == self.screen.project)
@@ -1741,6 +1899,15 @@ impl Screen for ProjectPage {
                 .screen
                 .key(KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE));
             let _ = self.reply(reply, ctx);
+        }
+        if let Some((_, forward)) = ctx
+            .project_step
+            .take_if(|(project, _)| *project == self.screen.project)
+        {
+            let _ = self.step(forward, ctx);
+        }
+        if self.screen.tab != Tab::Conversation {
+            self.screen.team = Load::Idle;
         }
         self.ask_team(ctx);
         self.ask_import(ctx);
@@ -1775,12 +1942,14 @@ impl Screen for ProjectPage {
         assert!(rows == 0 || !self.uncommitted.is_empty());
         self.screen.width = area.width;
         self.screen.now_ms = now_ms();
+        self.screen.changes.painting(true);
         self.view = project_screen(
             &mut self.screen,
             area.width,
             area.height.saturating_add(4),
             &look(ctx),
         );
+        self.screen.changes.painting(false);
         paint(frame, area, &self.view)
     }
 
@@ -1880,6 +2049,7 @@ impl Screen for ProjectPage {
         self.screen.edit.is_some()
             || self.screen.general.is_some()
             || self.screen.folders.is_some()
+            || self.screen.hidden.is_some()
             || self.screen.access.is_some()
             || !self.screen.input.value().trim().is_empty()
     }
@@ -1891,6 +2061,8 @@ impl Screen for ProjectPage {
             "Your project changes will be lost."
         } else if self.screen.folders.is_some() {
             "Your read-only folders will not be saved."
+        } else if self.screen.hidden.is_some() {
+            "Your hidden folders will not be saved."
         } else if self.screen.access.is_some() {
             "Your agent access changes will not be saved."
         } else {

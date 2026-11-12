@@ -156,6 +156,7 @@ impl Case {
 fn friday(question: &str) -> Ask {
     Ask {
         question: question.into(),
+        kind: QuestionKind::Single,
         options: vec!["Yes".into(), "No".into()],
         recommended: Some("Yes".into()),
         context: Some("CI is green.".into()),
@@ -165,6 +166,7 @@ fn friday(question: &str) -> Ask {
 fn bare(question: &str) -> Ask {
     Ask {
         question: question.into(),
+        kind: QuestionKind::Text,
         options: vec![],
         recommended: None,
         context: None,
@@ -177,6 +179,7 @@ fn sample(id: u64, status: QuestionStatus, question: &str) -> Question {
         project: ProjectId::new(PROJECT).unwrap(),
         asker: MASTER.name(),
         question: question.into(),
+        kind: QuestionKind::Text,
         options: vec![],
         recommended: None,
         context: None,
@@ -186,6 +189,7 @@ fn sample(id: u64, status: QuestionStatus, question: &str) -> Question {
         answered_by: None,
         created_ms: 1,
         settled_ms: None,
+        closed_by: None,
     }
 }
 
@@ -301,7 +305,16 @@ fn an_answer_reaches_the_asker_once_and_a_restart_never_repeats_it() {
     let id = case.ask(&MASTER, "Ship on Friday?");
     assert!(case.messages().is_empty());
     assert_eq!(
-        answer(&case.db, id, 0, &Answer::Option(0)).unwrap(),
+        answer(
+            &case.db,
+            id,
+            0,
+            &Answer {
+                picks: vec![0],
+                comment: None
+            }
+        )
+        .unwrap(),
         Settlement::Settled
     );
     let delivered = [(
@@ -313,8 +326,24 @@ fn an_answer_reaches_the_asker_once_and_a_restart_never_repeats_it() {
 
     let restarted = open(&case.root).unwrap();
     for settled in [
-        answer(&restarted, id, 0, &Answer::Text("No".into())),
-        answer(&restarted, id, 1, &Answer::Text("No".into())),
+        answer(
+            &restarted,
+            id,
+            0,
+            &Answer {
+                picks: Vec::new(),
+                comment: Some("No".into()),
+            },
+        ),
+        answer(
+            &restarted,
+            id,
+            1,
+            &Answer {
+                picks: Vec::new(),
+                comment: Some("No".into()),
+            },
+        ),
         dismiss(&restarted, id, 1),
     ] {
         assert_eq!(settled.unwrap(), Settlement::Stale);
@@ -357,17 +386,44 @@ fn a_second_answer_to_the_same_version_is_stale() {
     };
     assert_eq!((read(&case.db), read(&second)), (0, 0));
     assert_eq!(
-        answer(&case.db, id, 0, &Answer::Text("Postgres".into())).unwrap(),
+        answer(
+            &case.db,
+            id,
+            0,
+            &Answer {
+                picks: Vec::new(),
+                comment: Some("Postgres".into())
+            }
+        )
+        .unwrap(),
         Settlement::Settled
     );
     assert_eq!(
-        answer(&second, id, 0, &Answer::Option(1)).unwrap(),
+        answer(
+            &second,
+            id,
+            0,
+            &Answer {
+                picks: vec![1],
+                comment: None
+            }
+        )
+        .unwrap(),
         Settlement::Stale
     );
     assert_eq!(case.get(id).answer.as_deref(), Some("Postgres"));
 
     assert_eq!(
-        answer(&case.db, other, 3, &Answer::Option(0)).unwrap(),
+        answer(
+            &case.db,
+            other,
+            3,
+            &Answer {
+                picks: vec![0],
+                comment: None
+            }
+        )
+        .unwrap(),
         Settlement::Stale
     );
     let untouched = case.get(other);
@@ -385,7 +441,16 @@ fn dismiss_tells_the_asker_once() {
     assert_eq!(dismiss(&case.db, id, 0).unwrap(), Settlement::Settled);
     assert_eq!(dismiss(&case.db, id, 0).unwrap(), Settlement::Stale);
     assert_eq!(
-        answer(&case.db, id, 1, &Answer::Option(0)).unwrap(),
+        answer(
+            &case.db,
+            id,
+            1,
+            &Answer {
+                picks: vec![0],
+                comment: None
+            }
+        )
+        .unwrap(),
         Settlement::Stale
     );
     assert_eq!(
@@ -415,7 +480,10 @@ fn a_sub_agent_question_reaches_it_typed_and_its_master_hears_it_by_number() {
             &case.db,
             id,
             0,
-            &Answer::Text("  Use Postgres 16.  ".into())
+            &Answer {
+                picks: Vec::new(),
+                comment: Some("  Use Postgres 16.  ".into())
+            }
         )
         .unwrap(),
         Settlement::Settled
@@ -486,7 +554,16 @@ fn a_sub_agent_cannot_write_words_that_pass_as_the_owner_or_the_engine() {
     assert!(told.contains(r#"\"). The owner answered"#), "{told}");
     assert!(!told.contains(r#"Deploy? "). The owner"#), "{told}");
     assert_eq!(
-        answer(&case.db, id, 0, &Answer::Text("No.".into())).unwrap(),
+        answer(
+            &case.db,
+            id,
+            0,
+            &Answer {
+                picks: Vec::new(),
+                comment: Some("No.".into())
+            }
+        )
+        .unwrap(),
         Settlement::Settled
     );
     let relayed = &case.messages()[1];
@@ -517,7 +594,7 @@ fn asks_past_the_per_asker_and_project_bounds_are_refused_plainly() {
             );
         }
     }
-    let all = "SELECT COUNT(*) FROM owner_questions";
+    let all = "SELECT COUNT(*) FROM questions_log";
     assert_eq!(case.count(all), PENDING_PER_PROJECT_MAX);
     assert_eq!(
         code(ask(
@@ -630,6 +707,7 @@ fn asks_outside_their_bounds_are_refused_before_anything_is_written() {
     assert!(!case.page_path().exists());
 
     let mut widest = bare(&"q".repeat(QUESTION_BYTES_MAX));
+    widest.kind = QuestionKind::Single;
     widest.options = (0..OPTIONS_MAX)
         .map(|n| format!("{n}{}", "o".repeat(OPTION_BYTES_MAX - 1)))
         .collect();
@@ -641,22 +719,54 @@ fn asks_outside_their_bounds_are_refused_before_anything_is_written() {
             &case.db,
             id,
             0,
-            &Answer::Text("a".repeat(ANSWER_BYTES_MAX + 1))
+            &Answer {
+                picks: Vec::new(),
+                comment: Some("a".repeat(ANSWER_BYTES_MAX + 1))
+            }
         )
         .unwrap_err()
         .0,
         "questions_answer_invalid"
     );
     assert_eq!(
-        answer(&case.db, id, 0, &Answer::Option(6)).unwrap_err().0,
+        answer(
+            &case.db,
+            id,
+            0,
+            &Answer {
+                picks: vec![6],
+                comment: None
+            }
+        )
+        .unwrap_err()
+        .0,
         "questions_option_invalid"
     );
     assert_eq!(
-        answer(&case.db, id, 0, &Answer::Text("a".repeat(ANSWER_BYTES_MAX))).unwrap(),
+        answer(
+            &case.db,
+            id,
+            0,
+            &Answer {
+                picks: Vec::new(),
+                comment: Some("a".repeat(ANSWER_BYTES_MAX))
+            }
+        )
+        .unwrap(),
         Settlement::Settled
     );
     assert_eq!(
-        answer(&case.db, 999, 0, &Answer::Option(0)).unwrap_err().0,
+        answer(
+            &case.db,
+            999,
+            0,
+            &Answer {
+                picks: vec![0],
+                comment: None
+            }
+        )
+        .unwrap_err()
+        .0,
         "questions_not_found"
     );
 }
@@ -786,7 +896,16 @@ fn a_settle_notice_quoting_a_masters_own_question_is_never_an_owner_turn() {
     let answered = case.ask(&MASTER, "Rename the app?");
     assert_eq!(dismiss(&case.db, planted, 0).unwrap(), Settlement::Settled);
     assert_eq!(
-        answer(&case.db, answered, 0, &Answer::Text("Yes, Friday.".into())).unwrap(),
+        answer(
+            &case.db,
+            answered,
+            0,
+            &Answer {
+                picks: Vec::new(),
+                comment: Some("Yes, Friday.".into())
+            }
+        )
+        .unwrap(),
         Settlement::Settled
     );
     let notices: Vec<i64> = case
@@ -871,11 +990,20 @@ fn an_engine_question_is_raised_once_and_its_answer_is_noted_without_blocking() 
     let set = raise(&case.db, &case.project, &landing, &bare("Squash cs-12?")).unwrap();
     assert_ne!(set, id);
     assert_eq!(case.get(set).asker, "engine:landing:cs-12");
-    assert_eq!(case.count("SELECT COUNT(*) FROM owner_questions"), 2);
+    assert_eq!(case.count("SELECT COUNT(*) FROM questions_log"), 2);
     assert!(case.messages().is_empty());
 
     assert_eq!(
-        answer(&case.db, id, 0, &Answer::Option(1)).unwrap(),
+        answer(
+            &case.db,
+            id,
+            0,
+            &Answer {
+                picks: vec![1],
+                comment: None
+            }
+        )
+        .unwrap(),
         Settlement::Settled
     );
     assert_eq!(
@@ -893,7 +1021,15 @@ fn an_engine_question_is_raised_once_and_its_answer_is_noted_without_blocking() 
     case.fill();
     let waiting = case.messages().len();
     assert_eq!(
-        code(answer(&case.db, master, 0, &Answer::Option(0))),
+        code(answer(
+            &case.db,
+            master,
+            0,
+            &Answer {
+                picks: vec![0],
+                comment: None
+            }
+        )),
         "questions_delivery_full"
     );
     assert_eq!(
@@ -912,7 +1048,16 @@ fn an_engine_question_is_raised_once_and_its_answer_is_noted_without_blocking() 
         )
         .unwrap();
     assert_eq!(
-        answer(&case.db, master, 0, &Answer::Option(0)).unwrap(),
+        answer(
+            &case.db,
+            master,
+            0,
+            &Answer {
+                picks: vec![0],
+                comment: None
+            }
+        )
+        .unwrap(),
         Settlement::Settled
     );
     assert_eq!(case.messages().len(), waiting + 1);
@@ -933,7 +1078,16 @@ fn a_conversation_master_gets_each_note_once() {
     );
 
     assert_eq!(
-        answer(&case.db, answered, 0, &Answer::Option(0)).unwrap(),
+        answer(
+            &case.db,
+            answered,
+            0,
+            &Answer {
+                picks: vec![0],
+                comment: None
+            }
+        )
+        .unwrap(),
         Settlement::Settled
     );
     assert_eq!(
@@ -996,7 +1150,15 @@ fn terminal_questions_are_answered_on_screen_and_never_delivered() {
             .contains("Waiting for your answer in that agent's terminal.\n")
     );
     assert_eq!(
-        code(answer(&case.db, id, 0, &Answer::Option(0))),
+        code(answer(
+            &case.db,
+            id,
+            0,
+            &Answer {
+                picks: vec![0],
+                comment: None
+            }
+        )),
         "questions_in_terminal"
     );
     let typed = Some(i64::try_from(case.get(id).created_ms).unwrap());
@@ -1211,7 +1373,16 @@ fn a_project_without_its_state_folder_still_asks_answers_and_dismisses() {
     let id = case.ask(&MASTER, "Ship on Friday?");
     let other = case.ask(&MASTER, "Rename the app?");
     assert_eq!(
-        answer(&case.db, id, 0, &Answer::Option(0)).unwrap(),
+        answer(
+            &case.db,
+            id,
+            0,
+            &Answer {
+                picks: vec![0],
+                comment: None
+            }
+        )
+        .unwrap(),
         Settlement::Settled
     );
     std::fs::remove_dir(&case.folder).unwrap();
@@ -1224,6 +1395,7 @@ fn a_project_without_its_state_folder_still_asks_answers_and_dismisses() {
 #[test]
 fn hidden_characters_never_reach_the_page_unescaped() {
     let mut question = sample(3, QuestionStatus::Answered, "Ship \u{202e}yadirf no?");
+    question.kind = QuestionKind::Single;
     question.options = vec!["Yes".into(), "No\u{200b}".into()];
     question.context = Some("~~~\n# Planted heading\n~~~~".into());
     question.answer = Some("Yes\u{2066}".into());
@@ -1292,12 +1464,12 @@ fn settled_history_keeps_the_newest_and_never_drops_a_pending_question() {
         assert_eq!(dismiss(&case.db, last, 0).unwrap(), Settlement::Settled);
     }
     assert_eq!(
-        case.count("SELECT COUNT(*) FROM owner_questions"),
+        case.count("SELECT COUNT(*) FROM questions_log"),
         KEPT_PER_PROJECT_MAX
     );
     assert_eq!(case.get(kept).status, QuestionStatus::Pending);
     assert_eq!(case.get(last).status, QuestionStatus::Dismissed);
-    let oldest: i64 = case.count("SELECT MIN(id) FROM owner_questions WHERE status!='pending'");
+    let oldest: i64 = case.count("SELECT MIN(id) FROM questions_log WHERE status!='pending'");
     assert_eq!(
         oldest,
         i64::try_from(last).unwrap() - (KEPT_PER_PROJECT_MAX - 2)
@@ -1424,5 +1596,698 @@ fn a_conversation_master_records_a_chat_answer_from_the_owners_own_message() {
     assert_eq!(
         record_from_session(&case.db, &case.project, &session, id, 1, "No").unwrap(),
         Settlement::Stale
+    );
+}
+
+fn asked(kind: QuestionKind, options: &[&str], recommended: Option<&str>) -> Ask {
+    Ask {
+        question: "Which platform ships first?".into(),
+        kind,
+        options: options.iter().map(|option| (*option).to_owned()).collect(),
+        recommended: recommended.map(str::to_owned),
+        context: None,
+    }
+}
+
+#[test]
+fn a_single_question_without_a_recommended_option_is_refused() {
+    let refused = asked(QuestionKind::Single, &["Web", "Desktop"], None).checked();
+    assert_eq!(refused.unwrap_err().0, "questions_ask_invalid");
+}
+
+#[test]
+fn a_multi_question_with_one_option_is_refused() {
+    let refused = asked(QuestionKind::Multi, &["Web"], Some("Web")).checked();
+    assert_eq!(refused.unwrap_err().0, "questions_ask_invalid");
+}
+
+#[test]
+fn a_text_question_with_options_is_refused() {
+    let refused = asked(QuestionKind::Text, &["Web", "Desktop"], None).checked();
+    assert_eq!(refused.unwrap_err().0, "questions_ask_invalid");
+}
+
+#[test]
+fn a_multi_answer_records_picks_in_option_order_then_the_comment() {
+    let case = Case::new();
+    let question = asked(
+        QuestionKind::Multi,
+        &["Web", "Desktop", "Mobile"],
+        Some("Desktop"),
+    );
+    let id = ask(&case.db, &case.project, &MASTER, &question).unwrap();
+    let given = Answer {
+        picks: vec![2, 0],
+        comment: Some("Mobile after V1.".into()),
+    };
+    assert_eq!(
+        answer(&case.db, id, 0, &given).unwrap(),
+        Settlement::Settled
+    );
+    let settled = page(&case.db, &case.project, None).unwrap().items.remove(0);
+    assert_eq!(settled.kind, QuestionKind::Multi);
+    assert_eq!(
+        settled.answer.as_deref(),
+        Some("Web; Mobile\nComment: Mobile after V1.")
+    );
+    assert!(case.page().contains("Pick any:"));
+}
+
+#[test]
+fn a_single_answer_with_two_picks_is_refused() {
+    let case = Case::new();
+    let question = asked(QuestionKind::Single, &["Web", "Desktop"], Some("Web"));
+    let id = ask(&case.db, &case.project, &MASTER, &question).unwrap();
+    let given = Answer {
+        picks: vec![0, 1],
+        comment: None,
+    };
+    assert_eq!(
+        answer(&case.db, id, 0, &given).unwrap_err().0,
+        "questions_option_invalid"
+    );
+}
+
+#[test]
+fn a_pick_given_twice_or_past_the_options_is_refused() {
+    let case = Case::new();
+    let question = asked(
+        QuestionKind::Multi,
+        &["Web", "Desktop", "Mobile"],
+        Some("Web"),
+    );
+    let id = ask(&case.db, &case.project, &MASTER, &question).unwrap();
+    for picks in [vec![1, 1], vec![0, 3], vec![0; OPTIONS_MAX + 1]] {
+        let given = Answer {
+            picks,
+            comment: None,
+        };
+        assert_eq!(
+            answer(&case.db, id, 0, &given).unwrap_err().0,
+            "questions_option_invalid"
+        );
+    }
+    assert_eq!(case.get(id).status, QuestionStatus::Pending);
+}
+
+#[test]
+fn a_comment_alone_answers_a_single_question() {
+    let case = Case::new();
+    let question = asked(QuestionKind::Single, &["Web", "Desktop"], Some("Web"));
+    let id = ask(&case.db, &case.project, &MASTER, &question).unwrap();
+    let given = Answer {
+        picks: Vec::new(),
+        comment: Some("Neither, a CLI first.".into()),
+    };
+    assert_eq!(
+        answer(&case.db, id, 0, &given).unwrap(),
+        Settlement::Settled
+    );
+    let settled = page(&case.db, &case.project, None).unwrap().items.remove(0);
+    assert_eq!(settled.answer.as_deref(), Some("Neither, a CLI first."));
+}
+
+#[test]
+fn a_single_answer_with_a_pick_and_a_comment_records_both() {
+    let case = Case::new();
+    let question = asked(QuestionKind::Single, &["Web", "Desktop"], Some("Web"));
+    let id = ask(&case.db, &case.project, &MASTER, &question).unwrap();
+    let given = Answer {
+        picks: vec![0],
+        comment: Some("Ship the web first.".into()),
+    };
+    assert_eq!(
+        answer(&case.db, id, 0, &given).unwrap(),
+        Settlement::Settled
+    );
+    let settled = page(&case.db, &case.project, None).unwrap().items.remove(0);
+    assert_eq!(
+        settled.answer.as_deref(),
+        Some("Web\nComment: Ship the web first.")
+    );
+}
+
+#[test]
+fn a_comment_given_with_a_pick_is_bounded_and_a_text_question_takes_no_pick() {
+    let case = Case::new();
+    let question = asked(QuestionKind::Single, &["Web", "Desktop"], Some("Web"));
+    let id = ask(&case.db, &case.project, &MASTER, &question).unwrap();
+    let long = Answer {
+        picks: vec![0],
+        comment: Some("a".repeat(COMMENT_BYTES_MAX + 1)),
+    };
+    assert_eq!(
+        answer(&case.db, id, 0, &long).unwrap_err().0,
+        "questions_answer_invalid"
+    );
+    let hidden = Answer {
+        picks: vec![0],
+        comment: Some("fine\u{202e}".into()),
+    };
+    assert_eq!(
+        answer(&case.db, id, 0, &hidden).unwrap_err().0,
+        "questions_text_invalid"
+    );
+    let text = ask(
+        &case.db,
+        &case.project,
+        &MASTER,
+        &bare("What is it called?"),
+    )
+    .unwrap();
+    let picked = Answer {
+        picks: vec![0],
+        comment: Some("Atlas".into()),
+    };
+    assert_eq!(
+        answer(&case.db, text, 0, &picked).unwrap_err().0,
+        "questions_option_invalid"
+    );
+}
+
+#[test]
+fn an_answer_with_no_pick_and_no_comment_is_refused() {
+    let case = Case::new();
+    let question = asked(QuestionKind::Single, &["Web", "Desktop"], Some("Web"));
+    let id = ask(&case.db, &case.project, &MASTER, &question).unwrap();
+    let given = Answer {
+        picks: Vec::new(),
+        comment: None,
+    };
+    assert_eq!(
+        answer(&case.db, id, 0, &given).unwrap_err().0,
+        "questions_answer_invalid"
+    );
+}
+
+#[test]
+fn a_row_written_before_kinds_reads_as_single_with_options_and_text_without() {
+    let case = Case::new();
+    let first = asked(QuestionKind::Text, &[], None);
+    ask(&case.db, &case.project, &MASTER, &first).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms,kind)
+             VALUES ('alpha','engine:planning','engine','Old with options?','[\"A\",\"B\"]','pending',0,1,'')",
+            [],
+        )
+        .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms,kind)
+             VALUES ('alpha','engine:planning','engine','Old without?','[]','pending',0,1,'')",
+            [],
+        )
+        .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms,kind)
+             VALUES ('alpha','engine:planning','engine','From a later engine?','[\"A\",\"B\"]','pending',0,1,'ranked')",
+            [],
+        )
+        .unwrap();
+    let pending = pending(&case.db, &case.project).unwrap();
+    let kind_of = |text: &str| {
+        pending
+            .iter()
+            .find(|question| question.question == text)
+            .unwrap()
+            .kind
+    };
+    assert_eq!(kind_of("Old with options?"), QuestionKind::Single);
+    assert_eq!(kind_of("Old without?"), QuestionKind::Text);
+    assert_eq!(
+        kind_of("From a later engine?"),
+        QuestionKind::Single,
+        "a kind this engine does not know reads like a row from before kinds"
+    );
+    assert_eq!(kind_of("Which platform ships first?"), QuestionKind::Text);
+}
+
+#[test]
+fn a_log_made_before_kinds_gains_the_kind_column_and_keeps_its_rows() {
+    let case = Case::new();
+    let id = case.ask(&MASTER, "Ship on Friday?");
+    case.db
+        .execute_batch("ALTER TABLE questions_log DROP COLUMN kind")
+        .unwrap();
+    let old = case.get(id);
+    assert_eq!(old.kind, QuestionKind::Single);
+    assert_eq!(old.options, ["Yes", "No"]);
+    let multi = asked(QuestionKind::Multi, &["Web", "Desktop"], Some("Web"));
+    let next = ask(&case.db, &case.project, &MASTER, &multi).unwrap();
+    assert_eq!(case.get(next).kind, QuestionKind::Multi);
+}
+
+#[test]
+fn asks_from_json_keeps_valid_questions_and_drops_the_rest() {
+    let value = serde_json::json!({"questions": [
+        {"question": "Which platform ships first?", "kind": "single", "options": ["Web", "Desktop"], "recommended": "Web"},
+        {"question": "Missing its recommended one?", "kind": "single", "options": ["A", "B"]},
+        {"question": "What should the product be called?", "kind": "text"}
+    ]});
+    let asks = asks_from_json(&value, "Raised by the roadmap planning job.");
+    assert_eq!(asks.len(), 2);
+    assert_eq!(asks[0].kind, QuestionKind::Single);
+    assert_eq!(asks[1].kind, QuestionKind::Text);
+    assert_eq!(
+        asks[1].context.as_deref(),
+        Some("Raised by the roadmap planning job.")
+    );
+}
+
+#[test]
+fn asks_from_json_stops_at_the_cap_and_reads_nothing_from_another_shape() {
+    let one = serde_json::json!({"question": "Which name?", "kind": "text"});
+    let many = serde_json::json!({"questions": vec![one; ASKS_FROM_ONE_REPLY_MAX * 3]});
+    assert_eq!(asks_from_json(&many, "c").len(), ASKS_FROM_ONE_REPLY_MAX);
+    for other in [
+        serde_json::json!({"questions": "Which name?"}),
+        serde_json::json!(["Which name?"]),
+        serde_json::json!({"questions": [{"question": 7, "kind": "text"}]}),
+        serde_json::json!({"questions": [{"question": "Which?", "kind": "choice"}]}),
+        serde_json::json!({"questions": [{"question": "Which?", "kind": ""}]}),
+        serde_json::json!({"questions": [{"question": "Which?", "options": ["Web", "Desktop"], "recommended": "Web"}]}),
+        serde_json::json!({"questions": [{"question": "Which?", "kind": "single", "options": "Web"}]}),
+    ] {
+        assert!(asks_from_json(&other, "c").is_empty(), "{other}");
+    }
+}
+
+/// F14: a log made before this engine gains the link, closer, relay and re-ask columns,
+/// keeps its rows, and marks only the pending engine questions without options as due to
+/// be asked again as choices.
+#[test]
+fn an_old_log_gains_the_new_columns_and_marks_old_engine_text_questions_for_reask() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Connection::open(dir.path().join("engine.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE questions_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project TEXT NOT NULL,
+            asker TEXT NOT NULL,
+            source TEXT NOT NULL CHECK(source IN ('master','session','agent','engine','terminal')),
+            question TEXT NOT NULL,
+            options_json TEXT NOT NULL,
+            recommended TEXT,
+            context TEXT,
+            status TEXT NOT NULL CHECK(status IN ('pending','answered','dismissed','answered_in_terminal')),
+            answer TEXT,
+            answered_by TEXT CHECK(answered_by IN ('owner','chat')),
+            message INTEGER,
+            turn_floor INTEGER NOT NULL,
+            noted_ms INTEGER,
+            created_ms INTEGER NOT NULL,
+            settled_ms INTEGER,
+            kind TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms)
+        VALUES ('alpha','engine:planning','engine','Which stack?','[]','pending',0,1),
+               ('alpha','engine:planning','engine','Which host?','[\"A\",\"B\"]','pending',0,2),
+               ('alpha','master:4','master','Ship it?','[]','pending',0,3),
+               ('alpha','engine:research:market','engine','Old answered?','[]','answered',0,4);",
+    )
+    .unwrap();
+    initialize(&db).unwrap();
+    initialize(&db).unwrap();
+    let reask: Vec<(String, i64)> = db
+        .prepare("SELECT question, reask FROM questions_log ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        reask,
+        [
+            ("Which stack?".to_owned(), 1),
+            ("Which host?".to_owned(), 0),
+            ("Ship it?".to_owned(), 0),
+            ("Old answered?".to_owned(), 0),
+        ]
+    );
+    let columns: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('questions_log')
+             WHERE name IN ('coord_message','closed_by','relay_key_ms','reask')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 4);
+    let index: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='questions_log_coord'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index, 1);
+}
+
+/// F12, DEC-147.8: the owner dismisses many questions at once; one already settled comes
+/// back stale, and an empty or too long list is refused before anything is written.
+#[test]
+fn the_owner_dismisses_many_questions_at_once_and_each_reports_its_outcome() {
+    let case = Case::new();
+    let first = case.ask(&MASTER, "Ship on Friday?");
+    let second = case.ask(&Asker::Agent(7), "Which region?");
+    let gone = case.ask(&MASTER, "Rename the repo?");
+    assert_eq!(dismiss(&case.db, gone, 0).unwrap(), Settlement::Settled);
+    let outcome = dismiss_many(&case.db, &[(first, 0), (second, 0), (gone, 0)]).unwrap();
+    assert_eq!(outcome.settled, [first, second]);
+    assert_eq!(outcome.stale, [gone]);
+    assert!(outcome.refused.is_empty());
+    for id in [first, second] {
+        assert_eq!(case.get(id).status, QuestionStatus::Dismissed);
+    }
+    assert_eq!(code(dismiss_many(&case.db, &[])), "questions_bulk_invalid");
+    let many: Vec<(u64, u64)> = (1..=LISTED_MAX as u64 + 1).map(|id| (id, 0)).collect();
+    assert_eq!(
+        code(dismiss_many(&case.db, &many)),
+        "questions_bulk_invalid"
+    );
+}
+
+/// F12: a master withdraws its own question and a sub-agent's, never an engine step's or a
+/// terminal box; the master gets no message, the sub-agent is told once that the master
+/// withdrew it.
+#[test]
+fn a_master_withdraws_its_own_and_its_sub_agents_questions_only() {
+    let case = Case::new();
+    let own = case.ask(&MASTER, "Ship on Friday?");
+    let sub = case.ask(&Asker::Agent(7), "Which region?");
+    let engine = raise(
+        &case.db,
+        &case.project,
+        &EngineSource::Planning,
+        &bare("Which stack?"),
+    )
+    .unwrap();
+    let before = case.messages().len();
+    assert_eq!(
+        withdraw(&case.db, &case.project, &MASTER, own, 0).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        withdraw(&case.db, &case.project, &MASTER, sub, 0).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        case.messages().len(),
+        before,
+        "a withdrawal sends no chat message"
+    );
+    for id in [own, sub] {
+        let question = case.get(id);
+        assert_eq!(question.status, QuestionStatus::Dismissed);
+        assert_eq!(question.closed_by, Some(ClosedBy::Master));
+    }
+    assert_eq!(
+        code(withdraw(&case.db, &case.project, &MASTER, engine, 0)),
+        "questions_not_found"
+    );
+    assert_eq!(
+        withdraw(&case.db, &case.project, &MASTER, own, 0).unwrap(),
+        Settlement::Stale
+    );
+    let notes = agent_notes(&case.db, &case.project, 7).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].text.starts_with("The master withdrew"),
+        "{}",
+        notes[0].text
+    );
+    let session = Asker::Session(SessionId::new("session-1").unwrap());
+    let other = case.ask(&Asker::Master(42), "Other master?");
+    assert_eq!(
+        code(withdraw(&case.db, &case.project, &session, other, 0)),
+        "questions_not_found"
+    );
+    let page = case.page();
+    assert_eq!(
+        page.matches("\nWithdrawn by the master.\n").count(),
+        2,
+        "{page}"
+    );
+    assert!(!page.contains("Dismissed by the owner."), "{page}");
+}
+
+/// F12: the master reports an answer the owner typed into its terminal only after the
+/// owner typed there since the question was asked, one owner key time answers one
+/// question, and the record reads as the master's report, never as the owner's words.
+#[test]
+fn a_master_relays_an_answer_typed_in_its_terminal_once_per_owner_key() {
+    let case = Case::new();
+    let own = case.ask(&MASTER, "Ship on Friday?");
+    let sub = case.ask(&Asker::Agent(7), "Which region?");
+    let master = 41;
+    assert_eq!(
+        code(relay(
+            &case.db,
+            &case.project,
+            master,
+            own,
+            0,
+            "Yes, Friday.",
+            Some(1)
+        )),
+        "questions_owner_not_typed"
+    );
+    assert_eq!(
+        code(relay(
+            &case.db,
+            &case.project,
+            master,
+            own,
+            0,
+            "Yes, Friday.",
+            None
+        )),
+        "questions_owner_not_typed"
+    );
+    let key = now_ms() + 60_000;
+    assert_eq!(
+        relay(
+            &case.db,
+            &case.project,
+            master,
+            own,
+            0,
+            "Yes, Friday.",
+            Some(key)
+        )
+        .unwrap(),
+        Settlement::Settled
+    );
+    let relayed = case.get(own);
+    assert_eq!(relayed.status, QuestionStatus::AnsweredInTerminal);
+    assert_eq!(relayed.closed_by, Some(ClosedBy::Relay));
+    assert_eq!(relayed.answer.as_deref(), Some("Yes, Friday."));
+    assert_eq!(
+        relayed.answered_by, None,
+        "never stored as the owner's own answer"
+    );
+    assert_eq!(
+        code(relay(
+            &case.db,
+            &case.project,
+            master,
+            sub,
+            0,
+            "EU.",
+            Some(key)
+        )),
+        "questions_owner_turn_used"
+    );
+    assert_eq!(
+        relay(
+            &case.db,
+            &case.project,
+            master,
+            sub,
+            0,
+            "EU.",
+            Some(key + 1)
+        )
+        .unwrap(),
+        Settlement::Settled
+    );
+    let notes = agent_notes(&case.db, &case.project, 7).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].text.contains("in the master's terminal"),
+        "{}",
+        notes[0].text
+    );
+    assert!(notes[0].text.ends_with("EU."), "{}", notes[0].text);
+    let terminal = ask(
+        &case.db,
+        &case.project,
+        &Asker::Terminal(9),
+        &bare("Allow?"),
+    )
+    .unwrap();
+    assert_eq!(
+        code(relay(
+            &case.db,
+            &case.project,
+            master,
+            terminal,
+            0,
+            "Yes",
+            Some(key + 2)
+        )),
+        "questions_in_terminal"
+    );
+    let page = case.page();
+    assert!(
+        page.contains("\nAnswered by the owner in the master's terminal. The master reports:\n\n"),
+        "{page}"
+    );
+}
+
+/// F14, DEC-147.8: an old free-text engine question is asked again as a choice: the old one
+/// closes as re-asked with no message, the new one keeps the engine asker so its cap of 8
+/// is never crossed, and only a text question of the caller or an engine step is replaced
+/// by a single or multi question.
+#[test]
+fn an_old_free_text_question_is_asked_again_as_a_choice_under_its_engine_asker() {
+    let case = Case::new();
+    let mut old = Vec::new();
+    for n in 0..PENDING_PER_ASKER_MAX {
+        let text = format!("Which stack for part {n}?");
+        old.push(
+            raise(
+                &case.db,
+                &case.project,
+                &EngineSource::Planning,
+                &bare(&text),
+            )
+            .unwrap(),
+        );
+    }
+    let before = case.messages().len();
+    let choice = asked(QuestionKind::Single, &["Rust", "Go"], Some("Rust"));
+    let new = reask(&case.db, &case.project, &MASTER, &choice, old[0]).unwrap();
+    let closed = case.get(old[0]);
+    assert_eq!(closed.status, QuestionStatus::Dismissed);
+    assert_eq!(closed.closed_by, Some(ClosedBy::Replaced));
+    let asked_again = case.get(new);
+    assert_eq!(asked_again.asker, "engine:planning");
+    assert_eq!(asked_again.kind, QuestionKind::Single);
+    assert_eq!(asked_again.status, QuestionStatus::Pending);
+    assert_eq!(
+        case.messages().len(),
+        before,
+        "re-asking sends no chat message"
+    );
+    let text = asked(QuestionKind::Text, &[], None);
+    assert_eq!(
+        code(reask(&case.db, &case.project, &MASTER, &text, old[1])),
+        "questions_replace_invalid"
+    );
+    assert_eq!(
+        code(reask(&case.db, &case.project, &MASTER, &choice, new)),
+        "questions_replace_invalid",
+        "a choice question is never replaced"
+    );
+    assert_eq!(
+        code(reask(
+            &case.db,
+            &case.project,
+            &Asker::Agent(7),
+            &choice,
+            old[1]
+        )),
+        "questions_replace_invalid",
+        "a sub-agent never asks an engine step's question again"
+    );
+    assert_eq!(case.get(old[1]).status, QuestionStatus::Pending);
+    let mine_text = ask(&case.db, &case.project, &MASTER, &bare("Mine?")).unwrap();
+    let foreign_text = ask(
+        &case.db,
+        &case.project,
+        &Asker::Master(42),
+        &bare("Not mine?"),
+    )
+    .unwrap();
+    assert_eq!(
+        code(reask(
+            &case.db,
+            &case.project,
+            &MASTER,
+            &choice,
+            foreign_text
+        )),
+        "questions_replace_invalid"
+    );
+    let mine = reask(&case.db, &case.project, &MASTER, &choice, mine_text).unwrap();
+    assert_eq!(case.get(mine).asker, MASTER.name());
+    assert_eq!(
+        code(reask(&case.db, &case.project, &MASTER, &choice, 999_999)),
+        "questions_replace_invalid"
+    );
+    let page = case.page();
+    assert_eq!(
+        page.matches("\nAsked again as a choice question.\n")
+            .count(),
+        2,
+        "{page}"
+    );
+}
+
+/// F14, DEC-147.8: the master is sent one engine note per project listing the old
+/// free-text engine questions due, each once, with the words that tell it to use replaces.
+#[test]
+fn the_master_is_told_once_to_ask_the_old_free_text_questions_again() {
+    let case = Case::new();
+    let due = raise(
+        &case.db,
+        &case.project,
+        &EngineSource::Planning,
+        &bare("Which stack?"),
+    )
+    .unwrap();
+    let fresh = raise(
+        &case.db,
+        &case.project,
+        &EngineSource::Planning,
+        &bare("Which host?"),
+    )
+    .unwrap();
+    case.db
+        .execute(
+            "UPDATE questions_log SET reask=1 WHERE id=?1",
+            [column(due)],
+        )
+        .unwrap();
+    let before = case.messages().len();
+    let tx = case.db.unchecked_transaction().unwrap();
+    assert_eq!(send_reask_notes(&tx).unwrap(), 1);
+    assert_eq!(
+        send_reask_notes(&tx).unwrap(),
+        0,
+        "each question is listed once"
+    );
+    tx.commit().unwrap();
+    let messages = case.messages();
+    assert_eq!(messages.len(), before + 1);
+    let (author, text, _) = &messages[before];
+    assert_eq!(author, "engine");
+    assert!(text.contains(&format!("{due} \"Which stack?\"")), "{text}");
+    assert!(text.contains("replaces"), "{text}");
+    assert!(!text.contains("Which host?"), "{text}");
+    let reask: i64 = case
+        .db
+        .query_row(
+            "SELECT reask FROM questions_log WHERE id=?1",
+            [column(fresh)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        reask, 0,
+        "a new free-text question is never re-asked by itself"
     );
 }

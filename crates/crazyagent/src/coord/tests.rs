@@ -1,17 +1,26 @@
+#[cfg(unix)]
 use super::settings::{
     self, CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo, RoleSkills,
-    SkillRole, SubagentMode,
+    SkillRole, SubagentMode, TaskStart,
 };
+#[cfg(unix)]
 use super::store::Change;
+#[cfg(unix)]
 use super::tool_switches::{self, Switch};
 use super::*;
+#[cfg(unix)]
 use rusqlite::{Connection, params};
 
+#[cfg(unix)]
 const PROJECT: &str = "coord-units";
+#[cfg(unix)]
 const OTHER: &str = "coord-other";
+#[cfg(unix)]
 const NOW: i64 = 1_000_000_000;
+#[cfg(unix)]
 const MINUTE: i64 = 60_000;
 
+#[cfg(unix)]
 fn db() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     crate::storage::initialize_authority_schemas(&connection).unwrap();
@@ -33,10 +42,12 @@ fn db() -> Connection {
     connection
 }
 
+#[cfg(unix)]
 fn project() -> ProjectId {
     ProjectId::new(PROJECT).unwrap()
 }
 
+#[cfg(unix)]
 fn agent_in(
     connection: &Connection,
     project: &str,
@@ -53,6 +64,7 @@ fn agent_in(
     connection.last_insert_rowid()
 }
 
+#[cfg(unix)]
 fn agent(connection: &Connection, role: &str, parent: Option<AgentId>) -> AgentId {
     agent_in(connection, PROJECT, role, parent, "working")
 }
@@ -61,6 +73,7 @@ fn code(result: Result<impl std::fmt::Debug, crate::engine::EngineError>) -> Str
     result.unwrap_err().0
 }
 
+#[cfg(unix)]
 fn note(from: Party, to: Party, kind: MessageKind, body: &str) -> NewMessage {
     NewMessage {
         project: project(),
@@ -75,6 +88,7 @@ fn note(from: Party, to: Party, kind: MessageKind, body: &str) -> NewMessage {
     }
 }
 
+#[cfg(unix)]
 fn question(from: AgentId, target: QuestionFor, severity: Severity, body: &str) -> NewMessage {
     NewMessage {
         question: Some((target, severity)),
@@ -87,11 +101,13 @@ fn question(from: AgentId, target: QuestionFor, severity: Severity, body: &str) 
     }
 }
 
+#[cfg(unix)]
 fn routed(connection: &Connection, message: NewMessage) -> Party {
     let id = send(connection, message, NOW).unwrap();
     super::message(connection, id).unwrap().to
 }
 
+#[cfg(unix)]
 #[test]
 fn a_prompt_goes_to_its_agent_and_only_reply_answers_it() {
     let connection = db();
@@ -165,6 +181,7 @@ fn a_prompt_goes_to_its_agent_and_only_reply_answers_it() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_question_for_the_owner_is_answered_only_by_the_owner() {
     let connection = db();
@@ -194,6 +211,7 @@ fn a_question_for_the_owner_is_answered_only_by_the_owner() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_question_for_the_lead_goes_up_the_team_and_for_the_master_needs_one() {
     let connection = db();
@@ -278,6 +296,7 @@ fn a_question_for_the_lead_goes_up_the_team_and_for_the_master_needs_one() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_question_passed_up_keeps_its_severity_and_its_addressee() {
     let connection = db();
@@ -347,6 +366,7 @@ fn a_question_passed_up_keeps_its_severity_and_its_addressee() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_message_is_checked_and_a_repeated_key_returns_the_first_id() {
     let connection = db();
@@ -482,6 +502,7 @@ fn a_message_is_checked_and_a_repeated_key_returns_the_first_id() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_receipt_only_moves_forward_and_a_dead_agent_s_unread_mail_is_requeued() {
     let connection = db();
@@ -540,6 +561,7 @@ fn a_receipt_only_moves_forward_and_a_dead_agent_s_unread_mail_is_requeued() {
     assert!(Receipt::Sent.unread() && Receipt::Typed.unread() && !Receipt::Read.unread());
 }
 
+#[cfg(unix)]
 #[test]
 fn pending_lists_only_sent_mail_oldest_first_up_to_its_cap() {
     let connection = db();
@@ -570,6 +592,7 @@ fn pending_lists_only_sent_mail_oldest_first_up_to_its_cap() {
     assert_eq!(unread(&connection, sub, usize::MAX).unwrap()[0].id, ids[0]);
 }
 
+#[cfg(unix)]
 fn audits(connection: &Connection, work: WorkId) -> Vec<(String, i64, i64)> {
     let mut statement = connection
         .prepare("SELECT action,from_version,to_version FROM coord_audit WHERE work=?1 ORDER BY id")
@@ -581,6 +604,7 @@ fn audits(connection: &Connection, work: WorkId) -> Vec<(String, i64, i64)> {
         .unwrap()
 }
 
+#[cfg(unix)]
 fn held(connection: &Connection, agent: AgentId, work: WorkId) -> usize {
     connection
         .query_row(
@@ -591,6 +615,7 @@ fn held(connection: &Connection, agent: AgentId, work: WorkId) -> usize {
         .unwrap() as usize
 }
 
+#[cfg(unix)]
 #[test]
 fn work_moves_through_its_transfer_table_one_version_at_a_time() {
     let connection = db();
@@ -747,6 +772,1009 @@ fn work_moves_through_its_transfer_table_one_version_at_a_time() {
     );
 }
 
+/// OS-8: an agent's claim on work it finished as review-ready keeps overlapping another
+/// agent that starts on the same file until the change set holding it lands, when
+/// `release_set` releases it; then the same start overlaps nothing.
+#[cfg(unix)]
+#[test]
+fn a_review_ready_claim_keeps_overlapping_until_the_work_lands() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_work(
+        &connection,
+        &project(),
+        grace,
+        "Dependencies".into(),
+        vec!["pyproject.toml".into()],
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        finish(
+            &connection,
+            grace_work,
+            1,
+            Finish::ReviewReady,
+            "Green.".into(),
+            grace,
+            NOW,
+        )
+        .unwrap(),
+        2
+    );
+    let start = |title: &str| {
+        start_work(
+            &connection,
+            &project(),
+            ada,
+            title.into(),
+            vec!["pyproject.toml".into()],
+            NOW,
+        )
+        .unwrap()
+    };
+    let (ada_work, overlaps) = start("CLI");
+    assert_eq!(
+        overlaps.len(),
+        1,
+        "Grace's edits have not landed yet: {overlaps:?}"
+    );
+    assert_eq!(overlaps[0].theirs.agent, grace);
+    assert_eq!(overlaps[0].theirs.work, grace_work);
+    transfer(
+        &connection,
+        ada_work,
+        1,
+        Transfer::Release,
+        Party::Agent(ada),
+        NOW,
+    )
+    .unwrap();
+
+    let set = "0123456789abcdef0123456789abcdef";
+    assert_eq!(hold_for_set(&connection, grace, set).unwrap(), 1);
+    assert_eq!(release_set(&connection, set, NOW).unwrap(), 1);
+    assert_eq!(held(&connection, grace, grace_work), 0);
+    let (_, overlaps) = start("CLI again");
+    assert!(
+        overlaps.is_empty(),
+        "the landed work overlaps nothing: {overlaps:?}"
+    );
+}
+
+/// The two change set ids the hold rows below use.
+#[cfg(unix)]
+const SETS: [&str; 2] = [
+    "0123456789abcdef0123456789abcdef",
+    "fedcba9876543210fedcba9876543210",
+];
+
+/// Grace's review-ready work on pyproject.toml with its claim held for the first set.
+#[cfg(unix)]
+fn held_review(connection: &Connection) -> (AgentId, WorkId) {
+    let grace = agent(connection, "sub", None);
+    let (work_id, _) = start_work(
+        connection,
+        &project(),
+        grace,
+        "Dependencies".into(),
+        vec!["pyproject.toml".into()],
+        NOW,
+    )
+    .unwrap();
+    finish(
+        connection,
+        work_id,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(hold_for_set(connection, grace, SETS[0]).unwrap(), 1);
+    (grace, work_id)
+}
+
+/// OS-8: reopening ended work takes its claim off the change set that held it, so that set
+/// landing later frees none of the reopened work's later edits, which the next set holds.
+#[cfg(unix)]
+#[test]
+fn reopened_work_s_claims_wait_on_the_next_change_set_not_the_earlier_one() {
+    let connection = db();
+    let (grace, work_id) = held_review(&connection);
+    assert_eq!(
+        transfer(
+            &connection,
+            work_id,
+            2,
+            Transfer::Reopen,
+            Party::Agent(grace),
+            NOW,
+        )
+        .unwrap(),
+        3
+    );
+    finish(
+        &connection,
+        work_id,
+        3,
+        Finish::ReviewReady,
+        "Green again.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        hold_for_set(&connection, grace, SETS[1]).unwrap(),
+        1,
+        "the reopened work's claim waits on the next set"
+    );
+    assert_eq!(
+        release_set(&connection, SETS[0], NOW).unwrap(),
+        0,
+        "the earlier set's landing frees none of the later edits"
+    );
+    assert_eq!(held(&connection, grace, work_id), 1);
+    assert_eq!(release_set(&connection, SETS[1], NOW).unwrap(), 1);
+    assert_eq!(held(&connection, grace, work_id), 0);
+}
+
+/// A change-set hold names its set: an empty set id stops at the assertion.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "!set.is_empty()")]
+fn holding_claims_for_no_change_set_trips_the_assertion() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let _ = hold_for_set(&connection, grace, "");
+}
+
+/// A set's release frees exactly the claims it marked: a hold row marked released while
+/// its claim still holds is a broken store, and the release stops at its assertion.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "a set's release frees exactly the claims it marked")]
+fn a_release_meeting_a_released_hold_on_a_held_claim_trips_the_assertion() {
+    let connection = db();
+    held_review(&connection);
+    connection
+        .execute("UPDATE coord_held SET released=?1", [NOW])
+        .unwrap();
+    let _ = release_set(&connection, SETS[0], NOW);
+}
+
+/// A restore takes back exactly the claims its set released: a released hold row whose
+/// claim already holds is a broken store, and the restore stops at its assertion.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "a restore takes back exactly the claims its set released")]
+fn a_restore_meeting_a_released_hold_on_a_held_claim_trips_the_assertion() {
+    let connection = db();
+    held_review(&connection);
+    connection
+        .execute("UPDATE coord_held SET released=?1", [NOW])
+        .unwrap();
+    let _ = restore_set(&connection, SETS[0]);
+}
+
+/// Adds `count` claims `built/<i>.rs` to one agent's work, as a long backlog would.
+#[cfg(unix)]
+fn add_claims(connection: &Connection, who: AgentId, work: WorkId, count: i64) {
+    connection
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?4)
+             INSERT INTO coord_claims(project,agent,work,pattern,created)
+             SELECT ?1,?2,?3,'built/'||i||'.rs',?5 FROM n",
+            params![PROJECT, who, work, count, NOW],
+        )
+        .unwrap();
+}
+
+/// Sets one team agent's status, as the runtime does when it stops or resumes it.
+#[cfg(unix)]
+fn status_of(connection: &Connection, who: AgentId, status: &str) {
+    connection
+        .execute(
+            "UPDATE team_agents SET status=?2 WHERE id=?1",
+            params![who, status],
+        )
+        .unwrap();
+}
+
+/// OS-8 r2 M1: one agent's flood of claimed work fills only its own share: past its live
+/// claims limit its starts are refused with `coord_agent_claims_full`, and another agent
+/// still starts work.
+#[cfg(unix)]
+#[test]
+fn one_agent_s_flood_of_claimed_work_refuses_only_that_agent() {
+    let connection = db();
+    let flooder = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let mut refused = 0;
+    for unit in 0..64 {
+        let claims = (0..32)
+            .map(|file| format!("flood/{unit}/{file}.rs"))
+            .collect();
+        if let Err(problem) = start_work(
+            &connection,
+            &project(),
+            flooder,
+            format!("Flood {unit}"),
+            claims,
+            NOW,
+        ) {
+            assert_eq!(problem.0, "coord_agent_claims_full");
+            refused += 1;
+        }
+    }
+    assert_eq!(refused, 60, "four full units fill one agent's share");
+    let (_, overlaps) = start_work(
+        &connection,
+        &project(),
+        ada,
+        "Lexer".into(),
+        vec!["src/lexer.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    assert!(overlaps.is_empty(), "{overlaps:?}");
+}
+
+/// Land-7 r2: a master's finished work counts against its claims limit until its set closes,
+/// as a sub-agent's does, so past the limit its next start is refused.
+#[cfg(unix)]
+#[test]
+fn a_master_at_its_claims_limit_is_refused_new_work() {
+    let connection = db();
+    let master = agent(&connection, "master", None);
+    let claims = |unit: usize| -> Vec<String> {
+        (0..super::CLAIMS_PER_WORK_MAX)
+            .map(|file| format!("done/{unit}/{file}.rs"))
+            .collect()
+    };
+    for unit in 0..super::AGENT_CLAIMS_MAX / super::CLAIMS_PER_WORK_MAX {
+        let (work, _) = start_work(
+            &connection,
+            &project(),
+            master,
+            format!("Unit {unit}"),
+            claims(unit),
+            NOW,
+        )
+        .unwrap();
+        finish(
+            &connection,
+            work,
+            1,
+            Finish::Complete,
+            "Done.".into(),
+            master,
+            NOW,
+        )
+        .unwrap();
+    }
+    let refused = start_work(
+        &connection,
+        &project(),
+        master,
+        "One more".into(),
+        vec!["done/more.rs".into()],
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(refused.0, "coord_agent_claims_full");
+}
+
+/// OS-8 r2 M1: a stopped agent's claims on work it was still on leave the overlap check, so
+/// built-up claims of agents that never run again stop no one; they are not released, and
+/// they count and overlap again once the agent is resumed under its own id.
+#[cfg(unix)]
+#[test]
+fn a_stopped_agent_s_claims_on_active_work_leave_the_scan_until_it_resumes() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_work(
+        &connection,
+        &project(),
+        grace,
+        "Build".into(),
+        vec!["built/0.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    add_claims(&connection, grace, grace_work, 2100);
+    let start = |file: &str| {
+        start_work(
+            &connection,
+            &project(),
+            ada,
+            format!("Edit {file}"),
+            vec![file.into()],
+            NOW,
+        )
+    };
+    assert_eq!(code(start("src/a.rs")), "coord_claims_full");
+    status_of(&connection, grace, "stopped");
+    let (_, overlaps) = start("built/7.rs").unwrap();
+    assert!(
+        overlaps.is_empty(),
+        "a stopped agent's active claims are left out: {overlaps:?}"
+    );
+    assert_eq!(held(&connection, grace, grace_work), 2101, "and kept");
+    status_of(&connection, grace, "working");
+    assert_eq!(
+        code(start("src/b.rs")),
+        "coord_claims_full",
+        "a resumed agent's claims count again"
+    );
+}
+
+/// OS-8 r2 M1: the owner hears once when a project's live claims pass what one overlap
+/// check reads, not again while it stays full, and again only after it emptied and filled.
+#[cfg(unix)]
+#[test]
+fn the_owner_hears_once_when_a_project_fills_the_claims_scan() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let (grace_work, _) = start_work(
+        &connection,
+        &project(),
+        grace,
+        "Build".into(),
+        vec!["built/0.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    assert!(!claims_full_notice(&connection, &project(), NOW).unwrap());
+    add_claims(&connection, grace, grace_work, 2100);
+    assert!(claims_full_notice(&connection, &project(), NOW).unwrap());
+    assert!(
+        !claims_full_notice(&connection, &project(), NOW).unwrap(),
+        "told once while it stays full"
+    );
+    release_claims(&connection, grace, grace_work, NOW).unwrap();
+    assert!(!claims_full_notice(&connection, &project(), NOW).unwrap());
+    let (again, _) = start_work(
+        &connection,
+        &project(),
+        grace,
+        "Build again".into(),
+        vec!["built/0.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    add_claims(&connection, grace, again, 2100);
+    assert!(
+        claims_full_notice(&connection, &project(), NOW).unwrap(),
+        "a project that filled again is told again"
+    );
+}
+
+/// Sets the project's Overlapping edits option.
+#[cfg(unix)]
+fn overlaps_set(connection: &Connection, overlaps: Overlaps) {
+    settings::write(
+        connection,
+        &project(),
+        &CoordSettings {
+            overlaps,
+            ..CoordSettings::default()
+        },
+    )
+    .unwrap();
+}
+
+/// The engine's prompts to one agent, oldest first.
+#[cfg(unix)]
+fn prompts(connection: &Connection, agent: AgentId) -> Vec<String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT body FROM coord_messages WHERE from_kind='engine' AND to_agent=?1
+             AND kind='prompt' ORDER BY id",
+        )
+        .unwrap();
+    statement
+        .query_map([agent], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// How many units of work one agent owns.
+#[cfg(unix)]
+fn works_owned(connection: &Connection, agent: AgentId) -> i64 {
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_work WHERE owner_agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// One agent's start on one file.
+#[cfg(unix)]
+fn start_on(
+    connection: &Connection,
+    who: AgentId,
+    file: &str,
+) -> Result<(WorkId, Vec<Overlap>), crate::engine::EngineError> {
+    start_work(
+        connection,
+        &project(),
+        who,
+        format!("Edit {file}"),
+        vec![file.into()],
+        NOW,
+    )
+}
+
+/// The prompt a waiting agent gets once its file is free (OS-8, plan wording).
+#[cfg(unix)]
+const LEXER_FREE: &str = "src/lexer.rs is free now: start your work again.";
+
+/// OS-8 Wait: an agent starting on a file another agent's active work claims is refused
+/// with `coord_claim_waits` and starts nothing; review-ready work still holds the file, and
+/// once the change set holding it lands the waiting agent gets one prompt and starts.
+#[cfg(unix)]
+#[test]
+fn under_wait_an_overlapping_start_waits_and_its_agent_is_told_when_the_file_lands() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    assert_eq!(
+        works_owned(&connection, ada),
+        0,
+        "a waiting start starts nothing"
+    );
+    assert!(prompts(&connection, ada).is_empty());
+    finish(
+        &connection,
+        grace_work,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    assert!(
+        prompts(&connection, ada).is_empty(),
+        "review-ready work still holds the file"
+    );
+    assert_eq!(hold_for_set(&connection, grace, SETS[0]).unwrap(), 1);
+    assert_eq!(release_set(&connection, SETS[0], NOW).unwrap(), 1);
+    assert_eq!(prompts(&connection, ada), vec![LEXER_FREE.to_owned()]);
+    let (_, overlaps) = start_on(&connection, ada, "src/lexer.rs").unwrap();
+    assert!(overlaps.is_empty(), "{overlaps:?}");
+    assert_eq!(prompts(&connection, ada).len(), 1, "one prompt per wait");
+}
+
+/// OS-8 Wait, T9-R2-F2: a waiting start keeps its wait and nothing of the start, on its own
+/// and inside a caller's transaction, since the wait commits with the check that allowed it.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_waiting_start_keeps_only_its_wait_alone_or_nested() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    let claims = |who: AgentId| -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM coord_claims WHERE agent=?1",
+                [who],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let waited = Some((grace, grace_work, "src/lexer.rs".to_owned()));
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    assert_eq!(works_owned(&connection, ada), 0);
+    assert_eq!(claims(ada), 0);
+    assert_eq!(latest_wait(&connection, ada).unwrap(), waited);
+    connection.execute("DELETE FROM coord_waits", []).unwrap();
+    let outer = Change::begin(&connection).unwrap();
+    assert_eq!(
+        code(start_on(outer.db(), ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    outer.commit().unwrap();
+    assert_eq!(
+        works_owned(&connection, ada),
+        0,
+        "nested, the start is undone"
+    );
+    assert_eq!(claims(ada), 0, "nested, its claims are undone");
+    assert_eq!(
+        latest_wait(&connection, ada).unwrap(),
+        waited,
+        "nested, the wait stays"
+    );
+}
+
+/// OS-8 Wait: an owner releasing the held work wakes the agent waiting for its file.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_released_claim_wakes_the_agent_waiting_for_its_file() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    transfer(
+        &connection,
+        grace_work,
+        1,
+        Transfer::Release,
+        Party::Agent(grace),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(prompts(&connection, ada), vec![LEXER_FREE.to_owned()]);
+}
+
+/// OS-8 Wait never waits forever: once the holder stops, its active claim no longer holds
+/// the file, so the engine's sweep prompts the waiting agent once and keeps no wait.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_holder_that_stops_frees_its_waiter_at_the_next_sweep() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    assert_eq!(
+        wake_waiters(&connection, NOW).unwrap(),
+        0,
+        "Grace still works"
+    );
+    connection
+        .execute(
+            "UPDATE team_agents SET status='stopped' WHERE id=?1",
+            [grace],
+        )
+        .unwrap();
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 1);
+    assert_eq!(prompts(&connection, ada), vec![LEXER_FREE.to_owned()]);
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 0);
+    assert_eq!(prompts(&connection, ada).len(), 1);
+}
+
+/// OS-8 Wait: a holder already away does not hold the file, so the start goes ahead and
+/// reports the overlap as stale, as under Warn.
+#[cfg(unix)]
+#[test]
+fn under_wait_an_away_holder_never_makes_a_start_wait() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    connection
+        .execute(
+            "UPDATE coord_activity SET last_seen=?2 WHERE agent=?1",
+            params![grace, NOW - 31 * MINUTE],
+        )
+        .unwrap();
+    let (_, overlaps) = start_on(&connection, ada, "src/lexer.rs").unwrap();
+    assert_eq!(overlaps.len(), 1);
+    assert!(overlaps[0].theirs.stale);
+}
+
+/// OS-8: Warn, Block and Off keep starting the overlapping work, reporting the overlap, and
+/// prompt no one.
+#[cfg(unix)]
+#[test]
+fn warn_block_and_off_start_an_overlapping_work_and_prompt_no_one() {
+    for overlaps_option in [Overlaps::Warn, Overlaps::Block, Overlaps::Off] {
+        let connection = db();
+        overlaps_set(&connection, overlaps_option);
+        let grace = agent(&connection, "sub", None);
+        let ada = agent(&connection, "sub", None);
+        let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+        let (_, overlaps) = start_on(&connection, ada, "src/lexer.rs").unwrap();
+        assert_eq!(overlaps.len(), 1, "{overlaps_option:?}");
+        transfer(
+            &connection,
+            grace_work,
+            1,
+            Transfer::Release,
+            Party::Agent(grace),
+            NOW,
+        )
+        .unwrap();
+        assert!(prompts(&connection, ada).is_empty(), "{overlaps_option:?}");
+    }
+}
+
+/// OS-8 Wait: a waiting agent that stops is forgotten: the file's release prompts no one.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_waiter_that_stops_is_forgotten() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    connection
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=?1", [ada])
+        .unwrap();
+    transfer(
+        &connection,
+        grace_work,
+        1,
+        Transfer::Release,
+        Party::Agent(grace),
+        NOW,
+    )
+    .unwrap();
+    assert!(prompts(&connection, ada).is_empty());
+    let left: i64 = connection
+        .query_row("SELECT COUNT(*) FROM coord_waits", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+/// OS-8 Wait: one agent keeps at most 8 waits; a ninth refused start drops its oldest.
+#[cfg(unix)]
+#[test]
+fn under_wait_an_agent_keeps_at_most_eight_waits() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let ada = agent(&connection, "sub", None);
+    for index in 0..9 {
+        let holder = agent(&connection, "sub", None);
+        let file = format!("src/f{index}.rs");
+        start_on(&connection, holder, &file).unwrap();
+        assert_eq!(code(start_on(&connection, ada, &file)), "coord_claim_waits");
+    }
+    let files: Vec<String> = {
+        let mut statement = connection
+            .prepare("SELECT file FROM coord_waits WHERE agent=?1 ORDER BY file")
+            .unwrap();
+        statement
+            .query_map([ada], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(files.len(), 8, "{files:?}");
+    assert!(!files.contains(&"src/f0.rs".to_owned()), "{files:?}");
+}
+
+/// OS-8 Wait never waits forever: a holder that goes away after the start waited no longer
+/// holds the file, as a start would see it, so the next sweep prompts the waiting agent once;
+/// a holder only idle still holds it.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_holder_that_goes_away_frees_its_waiter_at_the_next_sweep() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    let quiet = |minutes: i64| {
+        connection
+            .execute(
+                "UPDATE coord_activity SET last_seen=?2 WHERE agent=?1",
+                params![grace, NOW - minutes * MINUTE],
+            )
+            .unwrap();
+    };
+    quiet(29);
+    assert_eq!(
+        wake_waiters(&connection, NOW).unwrap(),
+        0,
+        "an idle holder still holds the file"
+    );
+    quiet(31);
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 1);
+    assert_eq!(prompts(&connection, ada), vec![LEXER_FREE.to_owned()]);
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 0);
+    let (_, overlaps) = start_on(&connection, ada, "src/lexer.rs").unwrap();
+    assert!(overlaps[0].theirs.stale, "{overlaps:?}");
+}
+
+/// OS-8 Wait, DEC-117 Q7: finished work holds its files until its change set lands, so an
+/// away holder's review-ready work keeps its waiter waiting.
+#[cfg(unix)]
+#[test]
+fn under_wait_finished_work_of_an_away_holder_still_holds_the_file() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    finish(
+        &connection,
+        grace_work,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE coord_activity SET last_seen=?2 WHERE agent=?1",
+            params![grace, NOW - 31 * MINUTE],
+        )
+        .unwrap();
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 0);
+    assert!(prompts(&connection, ada).is_empty());
+}
+
+/// OS-8 Wait never closes a cycle: Ada waits for Grace's file, so Grace's start on Ada's
+/// file goes ahead as under Warn, reporting the overlap, and the owner hears of the pair
+/// once, however often it happens again.
+#[cfg(unix)]
+#[test]
+fn under_wait_two_agents_never_wait_on_each_other_and_the_owner_hears_once() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    start_on(&connection, ada, "src/parser.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    let (_, overlaps) = start_on(&connection, grace, "src/parser.rs")
+        .expect("waiting on Ada, who waits on Grace, would close a cycle");
+    assert_eq!(overlaps.len(), 1, "{overlaps:?}");
+    assert_eq!(works_owned(&connection, grace), 2);
+    assert_eq!(
+        wait_cycle_notices(&connection, &project(), NOW).unwrap(),
+        vec![(grace, ada, "src/parser.rs".to_owned())]
+    );
+    assert!(
+        wait_cycle_notices(&connection, &project(), NOW)
+            .unwrap()
+            .is_empty(),
+        "the owner hears once"
+    );
+    start_on(&connection, grace, "src/parser.rs").unwrap();
+    assert!(
+        wait_cycle_notices(&connection, &project(), NOW)
+            .unwrap()
+            .is_empty(),
+        "the same pair is not told again"
+    );
+}
+
+/// OS-8 Wait: a ring of three waits never closes either. Ada waits for Grace and Grace for
+/// Lin, so Lin's start on Ada's file goes ahead and the owner hears of Lin and Ada.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_ring_of_three_waits_never_closes() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let lin = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    start_on(&connection, ada, "src/parser.rs").unwrap();
+    start_on(&connection, lin, "src/main.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    assert_eq!(
+        code(start_on(&connection, grace, "src/main.rs")),
+        "coord_claim_waits",
+        "a chain that does not reach the starter still waits"
+    );
+    start_on(&connection, lin, "src/parser.rs").expect("the third wait would close the ring");
+    assert_eq!(
+        wait_cycle_notices(&connection, &project(), NOW).unwrap(),
+        vec![(lin, ada, "src/parser.rs".to_owned())]
+    );
+}
+
+/// OS-8 Wait: a chain of waits longer than one walk reads counts as a cycle, so the start
+/// at its far end goes ahead as under Warn rather than wait on a chain never read to its end.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_chain_past_the_walk_bound_goes_ahead_as_under_warn() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let agents: Vec<AgentId> = (0..super::claims::WAIT_WALK_MAX + 2)
+        .map(|_| agent(&connection, "sub", None))
+        .collect();
+    for (index, who) in agents.iter().enumerate() {
+        start_on(&connection, *who, &format!("src/f{index}.rs")).unwrap();
+    }
+    let mut went_ahead = Vec::new();
+    for index in (0..agents.len() - 1).rev() {
+        match start_on(
+            &connection,
+            agents[index],
+            &format!("src/f{}.rs", index + 1),
+        ) {
+            Ok(_) => went_ahead.push(index),
+            Err(problem) => assert_eq!(problem.0, "coord_claim_waits", "{index}"),
+        }
+    }
+    assert_eq!(went_ahead, vec![0]);
+}
+
+/// OS-8 Wait, T9-FU: a start whose wait would close a cycle goes ahead without the file
+/// another agent's live claim holds, so that holder keeps editing it and the starter's
+/// edits of it stay refused; the start's file in another folder is claimed, its overlap says
+/// the file was left out, and the owner hears who started and who holds the file.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_cycle_fallback_leaves_the_held_file_to_its_holder() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/parser.rs").unwrap();
+    start_on(&connection, ada, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, grace, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    let (work, overlaps) = start_work(
+        &connection,
+        &project(),
+        ada,
+        "Fix both".into(),
+        vec!["src/parser.rs".into(), "docs/notes.md".into()],
+        NOW,
+    )
+    .expect("waiting on Grace, who waits on Ada, would close a cycle");
+    assert_eq!(
+        overlaps
+            .iter()
+            .map(|overlap| (
+                overlap.theirs.work,
+                overlap.mine.pattern.as_str(),
+                overlap.left_out
+            ))
+            .collect::<Vec<_>>(),
+        vec![(grace_work, "src/parser.rs", true)]
+    );
+    let claimed: Vec<String> = connection
+        .prepare("SELECT pattern FROM coord_claims WHERE work=?1 ORDER BY pattern")
+        .unwrap()
+        .query_map([work], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(claimed, vec!["docs/notes.md".to_owned()]);
+    let holders = |who: AgentId| -> Vec<AgentId> {
+        overlapping(&connection, &project(), who, "src/parser.rs")
+            .unwrap()
+            .iter()
+            .map(|claim| claim.agent)
+            .collect()
+    };
+    assert_eq!(
+        holders(grace),
+        Vec::<AgentId>::new(),
+        "Grace keeps editing her own file"
+    );
+    assert_eq!(holders(ada), vec![grace], "Ada's edits of it stay refused");
+    assert_eq!(
+        wait_cycle_notices(&connection, &project(), NOW).unwrap(),
+        vec![(ada, grace, "src/parser.rs".to_owned())]
+    );
+}
+
+/// OS-8 Wait is at least as strong as Block: a start on a file another agent's folder or
+/// glob claim covers waits for that work, and its release prompts the waiting agent.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_start_on_a_file_a_held_folder_or_glob_covers_waits() {
+    for held in ["src/", "src/*.rs"] {
+        let connection = db();
+        overlaps_set(&connection, Overlaps::Wait);
+        let grace = agent(&connection, "sub", None);
+        let ada = agent(&connection, "sub", None);
+        let (grace_work, _) = start_on(&connection, grace, held).unwrap();
+        assert_eq!(
+            code(start_on(&connection, ada, "src/lexer.rs")),
+            "coord_claim_waits",
+            "{held}"
+        );
+        assert_eq!(
+            latest_wait(&connection, ada).unwrap(),
+            Some((grace, grace_work, "src/lexer.rs".to_owned())),
+            "{held}"
+        );
+        transfer(
+            &connection,
+            grace_work,
+            1,
+            Transfer::Release,
+            Party::Agent(grace),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            prompts(&connection, ada),
+            vec![LEXER_FREE.to_owned()],
+            "{held}"
+        );
+    }
+}
+
+/// OS-8 Wait is visible: a waiting agent's coordination state names the file it waits for
+/// until the wait settles.
+#[cfg(unix)]
+#[test]
+fn a_waiting_agent_s_state_names_the_file_it_waits_for() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    let waits = |connection: &Connection| -> Vec<(AgentId, Option<String>)> {
+        snapshot(connection, &project(), NOW)
+            .unwrap()
+            .agents
+            .into_iter()
+            .map(|state| (state.agent, state.waits_for))
+            .collect()
+    };
+    assert_eq!(
+        waits(&connection),
+        vec![(grace, None), (ada, Some("src/lexer.rs".to_owned()))]
+    );
+    transfer(
+        &connection,
+        grace_work,
+        1,
+        Transfer::Release,
+        Party::Agent(grace),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(waits(&connection), vec![(grace, None), (ada, None)]);
+}
+
+#[cfg(unix)]
 #[test]
 fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
     let connection = db();
@@ -786,20 +1814,29 @@ fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
         "coord_work_stale"
     );
     assert_eq!(end(1, Finish::ReviewReady, "Green.", sub).unwrap(), 2);
-    assert_eq!(held(&connection, sub, work_id), 0);
+    assert_eq!(
+        held(&connection, sub, work_id),
+        1,
+        "review-ready work keeps its claims until it lands (OS-8)"
+    );
     assert_eq!(
         work(&connection, work_id).unwrap().state,
         WorkState::ReviewReady
     );
     assert_eq!(
         code(end(2, Finish::ReviewReady, "Again.", sub)),
-        "coord_transfer_refused"
+        "coord_work_review_ready"
     );
     assert_eq!(
         code(end(2, Finish::Complete, "Mine.", other)),
         "coord_transfer_refused"
     );
     assert_eq!(end(2, Finish::Complete, "Reviewed.", lead).unwrap(), 3);
+    assert_eq!(
+        held(&connection, sub, work_id),
+        1,
+        "a reviewed sub-agent's claims hold until its change set closes (OS-8)"
+    );
     let evidence: String = connection
         .query_row(
             "SELECT evidence FROM coord_work WHERE id=?1",
@@ -927,6 +1964,7 @@ fn a_glob_star_stays_in_its_folder_and_a_double_star_crosses_folders() {
     );
 }
 
+#[cfg(unix)]
 fn overlap(mine: &str, theirs: &str) -> Vec<String> {
     let connection = db();
     let first = agent(&connection, "sub", None);
@@ -955,11 +1993,31 @@ fn overlap(mine: &str, theirs: &str) -> Vec<String> {
         .collect()
 }
 
+/// F31: overlap is file-level. Two agents claiming different files of one folder never
+/// overlap, so neither hears of the other, while a file inside a folder the other claims and
+/// the same file still do.
+#[cfg(unix)]
+#[test]
+fn two_files_of_one_folder_never_overlap_but_one_file_two_agents_claim_does() {
+    assert!(overlap("docs/design/inbox-ui.md", "docs/design/architecture.md").is_empty());
+    assert!(overlap("src/lexer.rs", "src/parser.rs").is_empty());
+    assert_eq!(
+        overlap("docs/design/inbox-ui.md", "docs/design/"),
+        ["docs/design/inbox-ui.md is inside docs/design/"]
+    );
+    assert_eq!(
+        overlap("docs/design/inbox-ui.md", "docs/design/inbox-ui.md"),
+        ["same file docs/design/inbox-ui.md"]
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn an_overlap_names_why_two_claims_meet() {
     for (mine, theirs, reason) in [
         ("src/a.rs", "src/a.rs", Some("same file src/a.rs")),
-        ("src/a.rs", "src/b.rs", Some("same folder src")),
+        ("src/a.rs", "src/b.rs", None),
+        ("docs/research/a.md", "docs/research/b.md", None),
         ("a.rs", "b.rs", None),
         ("src/ui/a.rs", "src/", Some("src/ui/a.rs is inside src/")),
         (
@@ -994,6 +2052,251 @@ fn an_overlap_names_why_two_claims_meet() {
     }
 }
 
+/// DEC-117 Q7: a claim on review-ready work never goes stale, since it holds until the work
+/// lands even after its agent's process ends, so the edit-time check still names it; a
+/// quiet agent's claim on work it is still on goes stale as before.
+#[cfg(unix)]
+#[test]
+fn a_quiet_agent_s_review_ready_claim_never_goes_stale_and_an_active_one_does() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let linus = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let claim = |who, title: &str| {
+        start_work(
+            &connection,
+            &project(),
+            who,
+            title.into(),
+            vec!["pyproject.toml".into()],
+            NOW,
+        )
+        .unwrap()
+        .0
+    };
+    let grace_work = claim(grace, "Dependencies");
+    claim(linus, "Lockfile");
+    finish(
+        &connection,
+        grace_work,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    let now = crate::team::now_ms();
+    for quiet in [grace, linus] {
+        connection
+            .execute(
+                "INSERT INTO coord_activity(agent,last_seen) VALUES (?1,?2)
+                 ON CONFLICT(agent) DO UPDATE SET last_seen=?2",
+                params![quiet, now - 31 * MINUTE],
+            )
+            .unwrap();
+    }
+    let mut by: Vec<(AgentId, bool)> = overlapping(&connection, &project(), ada, "pyproject.toml")
+        .unwrap()
+        .iter()
+        .map(|claim| (claim.agent, claim.stale))
+        .collect();
+    by.sort();
+    assert_eq!(by, vec![(grace, false), (linus, true)]);
+}
+
+/// OS-8 M1: the master's review that completes or closes a sub-agent's review-ready work
+/// keeps that work's claims, so the next agent starting on the same file still hears the
+/// overlap while the sub-agent's change set waits for the owner.
+#[cfg(unix)]
+#[test]
+fn the_master_completing_or_closing_review_ready_work_keeps_the_sub_agent_s_claims() {
+    let connection = db();
+    let master = agent(&connection, "master", None);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    for (outcome, file) in [
+        (Finish::Complete, "pyproject.toml"),
+        (Finish::Closed, "uv.lock"),
+    ] {
+        let start = |who, title: &str| {
+            start_work(
+                &connection,
+                &project(),
+                who,
+                title.into(),
+                vec![file.into()],
+                NOW,
+            )
+            .unwrap()
+        };
+        let (work, _) = start(grace, "Dependencies");
+        finish(
+            &connection,
+            work,
+            1,
+            Finish::ReviewReady,
+            "Green.".into(),
+            grace,
+            NOW,
+        )
+        .unwrap();
+        finish(
+            &connection,
+            work,
+            2,
+            outcome,
+            "Reviewed.".into(),
+            master,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(held(&connection, grace, work), 1, "{outcome:?}");
+        let (_, overlaps) = start(ada, "CLI");
+        assert_eq!(
+            overlaps.len(),
+            1,
+            "{outcome:?}: Grace's change set has not closed: {overlaps:?}"
+        );
+        assert_eq!(overlaps[0].theirs.work, work);
+    }
+}
+
+/// T5-R2-L1: the master's own finished work holds its claims at every end, as any agent's
+/// does, until the change set carrying it lands or its turn ends with nothing to land.
+#[cfg(unix)]
+#[test]
+fn a_master_s_own_finished_work_keeps_its_claims_at_every_end() {
+    let connection = db();
+    let master = agent(&connection, "master", None);
+    for (index, outcome) in [Finish::ReviewReady, Finish::Complete, Finish::Closed]
+        .into_iter()
+        .enumerate()
+    {
+        let (work, _) = start_work(
+            &connection,
+            &project(),
+            master,
+            "Plan".into(),
+            vec![format!("docs/plan-{index}.md")],
+            NOW,
+        )
+        .unwrap();
+        finish(&connection, work, 1, outcome, "Done.".into(), master, NOW).unwrap();
+        assert_eq!(held(&connection, master, work), 1, "{outcome:?}");
+    }
+}
+
+/// Seeds `count` claims on one unit of work an agent finished as review-ready, as many
+/// waiting change sets would hold them, each on its own file under `held/`. Takes the
+/// database, the agent and the count. Returns the work.
+#[cfg(unix)]
+fn held_claims(connection: &Connection, who: AgentId, count: usize) -> WorkId {
+    let (work, _) = start_work(
+        connection,
+        &project(),
+        who,
+        "Backlog".into(),
+        vec!["held/0.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    finish(
+        connection,
+        work,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        who,
+        NOW,
+    )
+    .unwrap();
+    connection
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?4)
+             INSERT INTO coord_claims(project,agent,work,pattern,created)
+             SELECT ?1,?2,?3,'held/'||i||'.rs',?5 FROM n",
+            params![PROJECT, who, work, count as i64 - 1, NOW],
+        )
+        .unwrap();
+    assert_eq!(held(connection, who, work), count);
+    work
+}
+
+/// F3: claims held for waiting change sets never crowd a newer claim out of the overlap
+/// check, so a start on a file another agent claimed after 600 held claims still hears it,
+/// and the edit-time check still names it.
+#[cfg(unix)]
+#[test]
+fn a_newer_claim_still_overlaps_behind_more_than_512_held_ones() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let linus = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    held_claims(&connection, grace, 600);
+    let (linus_work, _) = start_work(
+        &connection,
+        &project(),
+        linus,
+        "Lexer".into(),
+        vec!["src/lexer.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    let (_, overlaps) = start_work(
+        &connection,
+        &project(),
+        ada,
+        "Parser".into(),
+        vec!["src/lexer.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(overlaps.len(), 1, "{overlaps:?}");
+    assert_eq!(overlaps[0].theirs.work, linus_work);
+    let holders: Vec<AgentId> = overlapping(&connection, &project(), ada, "src/lexer.rs")
+        .unwrap()
+        .iter()
+        .map(|claim| claim.agent)
+        .collect();
+    assert_eq!(holders, vec![linus]);
+}
+
+/// F3: past the claims one overlap check reads, the check fails closed: a new start is
+/// refused with a plain code and the file check says so, never a silent miss.
+#[cfg(unix)]
+#[test]
+fn a_project_past_the_claims_one_check_reads_refuses_new_work_and_the_file_check() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    held_claims(&connection, grace, 9_000);
+    assert_eq!(
+        code(start_work(
+            &connection,
+            &project(),
+            ada,
+            "Parser".into(),
+            vec!["src/parser.rs".into()],
+            NOW,
+        )),
+        "coord_claims_full"
+    );
+    assert_eq!(
+        code(overlapping(&connection, &project(), ada, "src/parser.rs")),
+        "coord_claims_full"
+    );
+    let works: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_work WHERE owner_agent=?1",
+            [ada],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(works, 0, "the refused start stored nothing");
+}
+
+#[cfg(unix)]
 #[test]
 fn a_lead_and_its_own_sub_agent_never_overlap_and_a_quiet_claim_goes_stale() {
     let connection = db();
@@ -1116,6 +2419,7 @@ fn a_broad_claim_says_why_it_should_be_split() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn presence_follows_the_last_activity_and_a_wait_keeps_its_start() {
     let connection = db();
@@ -1190,6 +2494,32 @@ fn presence_follows_the_last_activity_and_a_wait_keeps_its_start() {
     }
 }
 
+/// COUNT-13-L1: a tool call's count and its chart hour are one write, so a failure between
+/// them leaves neither, never a total the chart does not show.
+#[cfg(unix)]
+#[test]
+fn a_tool_call_whose_chart_hour_fails_leaves_no_count_either() {
+    let connection = db();
+    let lead = agent(&connection, "sub", None);
+    let sub = agent(&connection, "sub", Some(lead));
+    connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER no_hour BEFORE INSERT ON coord_tool_hours
+             BEGIN SELECT RAISE(ABORT, 'no_hour'); END;",
+        )
+        .unwrap();
+    assert!(record_tool(&connection, sub, "graphify", NOW).is_err());
+    let counted: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_tool_use WHERE agent=?1",
+            [sub],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(counted, 0);
+}
+
+#[cfg(unix)]
 #[test]
 fn a_snapshot_counts_chosen_tools_orders_owner_questions_and_sums_unread_edges() {
     let connection = db();
@@ -1284,6 +2614,7 @@ fn a_snapshot_counts_chosen_tools_orders_owner_questions_and_sums_unread_edges()
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn coordination_settings_default_validate_and_keep_each_harness_column() {
     let connection = db();
@@ -1350,17 +2681,15 @@ fn coordination_settings_default_validate_and_keep_each_harness_column() {
             Delivery::Auto
         );
     }
-    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
-        assert_eq!(
-            code(settings::set_mode(
-                &connection,
-                &project,
-                harness,
-                SubagentMode::Native
-            )),
-            "coord_native_unsupported"
-        );
-    }
+    assert_eq!(
+        code(settings::set_mode(
+            &connection,
+            &project,
+            HarnessKind::Rcli,
+            SubagentMode::Native
+        )),
+        "coord_native_unsupported"
+    );
     assert_eq!(
         code(settings::set_mode(
             &connection,
@@ -1403,9 +2732,51 @@ fn coordination_settings_default_validate_and_keep_each_harness_column() {
     assert_eq!(HarnessKind::from_harness("gemini"), None);
 }
 
+/// T3-15: the Task-start reminder is On for a new project and for a row saved before the
+/// setting existed, Off saves and reads back, and each option keeps its stored name and the
+/// words settings show.
+#[test]
+fn the_task_start_reminder_is_on_by_default_and_for_older_rows_and_off_round_trips() {
+    let connection = db();
+    let project = project();
+    assert_eq!(CoordSettings::default().task_start, TaskStart::On);
+    assert_eq!(
+        settings::read(&connection, &project).unwrap().task_start,
+        TaskStart::On
+    );
+    let off = CoordSettings {
+        task_start: TaskStart::Off,
+        ..CoordSettings::default()
+    };
+    settings::write(&connection, &project, &off).unwrap();
+    assert_eq!(settings::read(&connection, &project).unwrap(), off);
+    connection
+        .execute(
+            "UPDATE coord_settings SET json=?2 WHERE project=?1",
+            params![
+                PROJECT,
+                r#"{"questions_to":"lead","overlaps":"warn","nudges":"off","counted_tools":[]}"#
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        settings::read(&connection, &project).unwrap().task_start,
+        TaskStart::On,
+        "a row saved before the setting existed reads On"
+    );
+    assert_eq!(
+        TaskStart::ALL.map(|option| (option.as_str(), option.words())),
+        [("on", "On"), ("off", "Off")]
+    );
+    for option in TaskStart::ALL {
+        assert_eq!(TaskStart::parse(option.as_str()), Some(option));
+    }
+}
+
 /// DEC-111 R3: each team role's skill choice validates with the skill name rule, keeps its
 /// order through a save, and a row saved before the choice existed reads as All approved
 /// skills for every role.
+#[cfg(unix)]
 #[test]
 fn role_skill_choices_validate_save_and_default_for_rows_saved_before_them() {
     let connection = db();
@@ -1467,9 +2838,107 @@ fn role_skill_choices_validate_save_and_default_for_rows_saved_before_them() {
     );
 }
 
+/// DEC-141: a row saved while the display was the Claude Code display holds it as
+/// `claude_display`. It reads as the project's terminal display, so the owner's Fullscreen is
+/// kept, the next save stores it as `terminal_display` only, a row with neither name reads as
+/// Classic, each display is stored by its own name and reads back, and a row holding both
+/// names is refused instead of one silently winning.
+#[cfg(unix)]
+#[test]
+fn a_stored_claude_display_reads_as_the_terminal_display() {
+    use settings::TerminalDisplay;
+    let connection = db();
+    let project = project();
+    settings::write(&connection, &project, &CoordSettings::default()).unwrap();
+    let stored = |json: &str| {
+        connection
+            .execute(
+                "UPDATE coord_settings SET json=?2 WHERE project=?1",
+                params![PROJECT, json],
+            )
+            .unwrap();
+        settings::read(&connection, &project)
+    };
+    let raw = || -> String {
+        connection
+            .query_row(
+                "SELECT json FROM coord_settings WHERE project=?1",
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let old = |display: &str| {
+        format!(
+            r#"{{"questions_to":"lead","overlaps":"warn","nudges":"off","counted_tools":["graphify"]{display}}}"#
+        )
+    };
+    assert_eq!(
+        stored(&old("")).unwrap().terminal_display,
+        TerminalDisplay::Classic
+    );
+    for (name, display) in [
+        ("classic", TerminalDisplay::Classic),
+        ("fullscreen", TerminalDisplay::Fullscreen),
+    ] {
+        let kept = stored(&old(&format!(r#","claude_display":"{name}""#))).unwrap();
+        assert_eq!(kept.terminal_display, display, "{name}");
+        settings::write(&connection, &project, &kept).unwrap();
+        let saved = raw();
+        assert!(
+            saved.contains(&format!(r#""terminal_display":"{name}""#)),
+            "{saved}"
+        );
+        assert!(!saved.contains("claude_display"), "{saved}");
+        assert_eq!(
+            settings::read(&connection, &project)
+                .unwrap()
+                .terminal_display,
+            display,
+            "{name}"
+        );
+        let chosen = CoordSettings {
+            terminal_display: display,
+            ..CoordSettings::default()
+        };
+        settings::write(&connection, &project, &chosen).unwrap();
+        assert_eq!(settings::read(&connection, &project).unwrap(), chosen);
+    }
+    let both = old(r#","claude_display":"fullscreen","terminal_display":"classic""#);
+    assert_eq!(stored(&both).unwrap_err().0, "coord_settings_invalid");
+    let unknown = old(r#","terminal_display":"sideways""#);
+    assert_eq!(stored(&unknown).unwrap_err().0, "coord_settings_invalid");
+}
+
+/// DEC-141: the coordination view names, for every harness kind, the terminal displays its
+/// terminals can draw, so the one Terminal display setting can say which kind stays Classic.
+#[cfg(unix)]
+#[test]
+fn the_coordination_view_names_the_displays_each_harness_kind_can_draw() {
+    use settings::TerminalDisplay;
+    let connection = db();
+    let view = crate::team::coordination(&connection, &project()).unwrap();
+    let seen: Vec<(HarnessKind, Vec<TerminalDisplay>)> = view
+        .harnesses
+        .iter()
+        .map(|row| (row.harness, row.displays.clone()))
+        .collect();
+    let both = TerminalDisplay::ALL.to_vec();
+    assert_eq!(
+        seen,
+        [
+            (HarnessKind::ClaudeCode, both.clone()),
+            (HarnessKind::Codex, both),
+            (HarnessKind::Rcli, vec![TerminalDisplay::Classic]),
+        ]
+    );
+    assert_eq!(view.settings.terminal_display, TerminalDisplay::Classic);
+}
+
 /// Settings saved before the nudge options (DEC-111 R4) held `nudges` as a bool: a stored
 /// `true` reads as TenMinutes and `false` as Off, each option is stored by its own name and
 /// reads back, and a name this build does not know is refused.
+#[cfg(unix)]
 #[test]
 fn an_old_true_nudge_setting_reads_as_ten_minutes() {
     let connection = db();
@@ -1519,6 +2988,7 @@ fn an_old_true_nudge_setting_reads_as_ten_minutes() {
     assert_eq!(code(stored(&old(r#""hourly""#))), "coord_settings_invalid");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_project_tool_switch_overrides_the_global_one_and_restores_by_scope() {
     let connection = db();
@@ -1592,6 +3062,7 @@ fn a_project_tool_switch_overrides_the_global_one_and_restores_by_scope() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_coord_write_inside_a_caller_s_transaction_rolls_back_with_it() {
     let connection = db();
@@ -1658,6 +3129,7 @@ fn a_coord_write_inside_a_caller_s_transaction_rolls_back_with_it() {
     assert!(connection.is_autocommit());
 }
 
+#[cfg(unix)]
 #[test]
 fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
     let connection = db();
@@ -1704,6 +3176,12 @@ fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
             .execute(
                 "INSERT INTO coord_tool_use(agent,tool,count,last) VALUES (?1,'graphify',1,?2)",
                 params![ended, NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO coord_tool_hours(hour_ms,agent,tool,count) VALUES (0,?1,'graphify',1)",
+                [ended],
             )
             .unwrap();
         settings::write(&connection, project, &CoordSettings::default()).unwrap();
@@ -1778,7 +3256,7 @@ fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
             )
             .unwrap()
     };
-    for table in ["coord_activity", "coord_tool_use"] {
+    for table in ["coord_activity", "coord_tool_use", "coord_tool_hours"] {
         assert!(!kept(table, ended), "{table}");
         assert!(kept(table, live), "a live agent keeps its {table}");
         assert!(
@@ -1799,4 +3277,170 @@ fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
         (switches(PROJECT), switches(OTHER), switches("")),
         (0, 1, 1)
     );
+}
+
+/// b19 P2 r2: a coordination database made before `coord_messages.turn` gets the column
+/// when the engine opens it, every message kept as it was, and a second open changes
+/// nothing.
+#[cfg(unix)]
+#[test]
+fn a_database_made_before_the_turn_column_gets_it_on_open_and_keeps_its_messages() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE coord_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                from_kind TEXT NOT NULL,
+                from_agent INTEGER,
+                to_kind TEXT NOT NULL,
+                to_agent INTEGER,
+                kind TEXT NOT NULL,
+                q_for TEXT,
+                q_severity TEXT,
+                work INTEGER,
+                reply_to INTEGER,
+                body TEXT NOT NULL,
+                idem_key TEXT,
+                receipt TEXT NOT NULL,
+                created INTEGER NOT NULL,
+                receipt_at INTEGER NOT NULL,
+                UNIQUE(from_agent, idem_key)
+            );
+            INSERT INTO coord_messages(project,from_kind,to_kind,to_agent,kind,body,receipt,created,receipt_at)
+            VALUES ('coord-units','engine','agent',7,'note','kept','delivered',1,2);",
+        )
+        .unwrap();
+    let row = |connection: &Connection| -> rusqlite::Result<(String, i64, Option<String>)> {
+        connection.query_row(
+            "SELECT receipt, receipt_at, turn FROM coord_messages WHERE body='kept'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+    };
+    for _ in 0..2 {
+        ensure(&connection).unwrap();
+        assert_eq!(
+            row(&connection).ok(),
+            Some(("delivered".to_owned(), 2, None)),
+            "the open added the turn column and kept the message"
+        );
+    }
+}
+
+/// SECAUDIT coord-delivery-raw-body-forges-owner-line r2: a claim reaches other agents in the
+/// engine's overlap note, so one holding a line or paragraph separator is refused.
+#[test]
+fn a_claim_holding_a_line_separator_is_refused_by_name() {
+    let normalize = super::claims::normalize;
+    for raw in ["a\u{2028}b", "a\u{2029}b"] {
+        assert_eq!(code(normalize(raw)), "coord_claim_invalid", "{raw:?}");
+    }
+}
+
+/// DEC-141 PA-12: every harness kind on every account kind gets each team protection or
+/// says why not, in one table both clients show. Claude Code on a sign-in and Codex on any
+/// account get receipts, the owner's hooks and the edit guard alike; Claude Code on an API
+/// key or URL account starts bare and says so; an rcli master has no hooks and says so.
+#[test]
+fn every_harness_kind_gets_each_protection_or_says_why_not() {
+    use super::settings::Protection;
+    for kind in HarnessKind::ALL {
+        for endpoint in [false, true] {
+            for protection in Protection::ALL {
+                let lacks = kind.lacks(endpoint, protection);
+                let case = format!("{kind:?} endpoint={endpoint} {protection:?}");
+                match kind {
+                    HarnessKind::Codex => assert_eq!(lacks, None, "{case}"),
+                    HarnessKind::ClaudeCode => assert_eq!(lacks.is_some(), endpoint, "{case}"),
+                    HarnessKind::Rcli => assert_eq!(
+                        lacks.is_some(),
+                        protection != Protection::Receipts,
+                        "{case}"
+                    ),
+                }
+                if let Some(words) = lacks {
+                    assert!(
+                        words.ends_with('.') && !words.contains('\u{2014}'),
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        HarnessKind::ClaudeCode.lacks(true, Protection::EditGuard),
+        Some(super::settings::BARE_NO_HOOKS)
+    );
+    assert!(super::settings::BARE_NO_HOOKS.contains("API key or URL account"));
+    assert_eq!(
+        super::settings::BARE_NO_RECEIPTS,
+        format!("Receipts are {}.", super::adoption::HOOKLESS_WORDS)
+    );
+}
+
+/// DEC-141 parity for the Native sub-agent mode (PA-7): every harness kind has an answer,
+/// the setting stores Native exactly for a kind that runs native sub-agents, a kind that
+/// cannot gives its own reason, and threads say what the app cannot show of them (r1).
+#[cfg(unix)]
+#[test]
+fn every_harness_kind_answers_the_native_sub_agent_mode() {
+    use super::settings::NativeSubAgents;
+    let connection = db();
+    let project = project();
+    for harness in HarnessKind::ALL {
+        let answer = settings::native_sub_agents(harness);
+        let stored = settings::set_mode(&connection, &project, harness, SubagentMode::Native);
+        let scope = settings::native_scope(harness);
+        match answer {
+            NativeSubAgents::Threads => {
+                let scope = scope.expect("threads say what the app cannot show of them");
+                assert!(scope.starts_with(harness_name(harness)), "{scope}");
+                for shown in ["graph", "counts", "Stop", "team tool calls", "No limit"] {
+                    assert!(scope.contains(shown), "{shown}: {scope}");
+                }
+            }
+            NativeSubAgents::Teams | NativeSubAgents::Unavailable(_) => {
+                assert_eq!(scope, None, "{harness:?}");
+            }
+        }
+        match answer {
+            NativeSubAgents::Teams | NativeSubAgents::Threads => {
+                stored.unwrap();
+                assert!(settings::native_supported(harness), "{harness:?}");
+                assert_eq!(
+                    settings::mode(&connection, &project, harness).unwrap(),
+                    SubagentMode::Native
+                );
+            }
+            NativeSubAgents::Unavailable(reason) => {
+                assert_eq!(code(stored), "coord_native_unsupported", "{harness:?}");
+                assert!(!settings::native_supported(harness), "{harness:?}");
+                assert!(reason.contains(harness_name(harness)), "{reason}");
+                assert!(reason.ends_with('.'), "{reason}");
+            }
+        }
+        settings::set_mode(&connection, &project, harness, SubagentMode::AppSpawned).unwrap();
+    }
+    assert_eq!(
+        settings::native_sub_agents(HarnessKind::ClaudeCode),
+        NativeSubAgents::Teams
+    );
+    assert_eq!(
+        settings::native_sub_agents(HarnessKind::Codex),
+        NativeSubAgents::Threads
+    );
+    assert_eq!(
+        settings::native_sub_agents(HarnessKind::Rcli),
+        NativeSubAgents::Unavailable(settings::RCLI_NATIVE_UNAVAILABLE)
+    );
+}
+
+#[cfg(unix)]
+fn harness_name(harness: HarnessKind) -> &'static str {
+    match harness {
+        HarnessKind::ClaudeCode => "Claude Code",
+        HarnessKind::Codex => "Codex",
+        HarnessKind::Rcli => "RCLI",
+    }
 }

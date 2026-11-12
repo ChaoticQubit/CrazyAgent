@@ -559,6 +559,27 @@ async fn agent_writes_flow(root: &Path) -> Result<(), Box<dyn Error>> {
         bridge.memories(None, None, None).await?.agent_writes,
         AgentWrites::Save
     );
+
+    use crazyagent::memory::library::AgentScope;
+    assert_eq!(
+        bridge.memories(None, None, None).await?.agent_scope,
+        AgentScope::Project,
+        "F34: agent memories stay in their project until the owner chooses"
+    );
+    let chose = bridge.set_agent_memory_scope(AgentScope::Agent, 8).await?;
+    assert!(matches!(chose.outcome, ActionOutcome::Applied), "{chose:?}");
+    assert_eq!(
+        bridge.memories(None, None, None).await?.agent_scope,
+        AgentScope::Agent
+    );
+    let kept = bridge
+        .set_agent_memory_scope(AgentScope::Project, 9)
+        .await?;
+    assert!(matches!(kept.outcome, ActionOutcome::Applied), "{kept:?}");
+    assert_eq!(
+        bridge.memories(None, None, None).await?.agent_scope,
+        AgentScope::Project
+    );
     assert!(bridge.pending_intent()?.is_none());
     Ok(())
 }
@@ -708,6 +729,25 @@ async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
     );
     let again = bridge.approve_memory(&memory, 5).await?;
     assert_eq!(again.rejection.as_deref(), Some("memory_not_requested"));
+
+    connection.execute(
+        "INSERT INTO memory_library(id,project,origin,text) VALUES ('agent-wide',NULL,?1,'Recipes scale by servings.')",
+        [serde_json::json!({"kind": "agent", "agent": label}).to_string()],
+    )?;
+    let refused = bridge.move_memory(&memory, &id, 6).await?;
+    assert_eq!(refused.rejection.as_deref(), Some("memory_not_movable"));
+    let moved = bridge.move_memory("agent-wide", &id, 7).await?;
+    assert!(matches!(moved.outcome, ActionOutcome::Applied), "{moved:?}");
+    let listed = bridge.memories(Some(&id), None, None).await?;
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.id == "agent-wide" && item.scope == "project"),
+        "F34: the moved memory now belongs to the project: {:?}",
+        listed.items
+    );
+    assert!(bridge.memories(None, None, None).await?.items.is_empty());
     assert!(bridge.pending_intent()?.is_none());
     Ok(())
 }

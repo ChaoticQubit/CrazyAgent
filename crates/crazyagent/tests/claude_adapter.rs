@@ -2,6 +2,7 @@ use crazyagent::adapters::claude::NODES_MAX;
 use crazyagent::adapters::claude::{ClaudeProtocol, ProtocolError, State};
 use crazyagent::adapters::events::{Capability, EventKind, Support, TurnOutcome};
 use crazyagent::adapters::{FIELD_BYTES_MAX, LINE_BYTES_MAX, NativeAction, NativeHarness};
+use crazyagent::master_frame_limit::{BYTES_MAX, FrameSize};
 use crazyagent::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId, SessionId};
 use serde_json::{Value, json};
 
@@ -37,7 +38,10 @@ fn init() -> Value {
 }
 
 fn ready() -> ClaudeProtocol {
-    let mut p = protocol();
+    ready_from(protocol())
+}
+
+fn ready_from(mut p: ClaudeProtocol) -> ClaudeProtocol {
     p.receive(&wire(init())).unwrap();
     assert_eq!(p.state(), State::Idle);
     p
@@ -339,6 +343,33 @@ fn frame_output_and_event_counts_are_bounded() {
     assert_eq!(p.receive(&bytes), Err(ProtocolError::Capacity));
 }
 
+/// One small stream message with its own 36 byte id, the length of Claude Code's ids.
+/// Input: the message's number. Output: its line.
+fn numbered(index: usize) -> Vec<u8> {
+    let uuid = format!("00000000-0000-4000-8000-{index:012}");
+    assert_eq!(uuid.len(), 36);
+    wire(json!({"type":"user","uuid":uuid,"session_id":"native-session"}))
+}
+
+/// A stream has no message count limit (OB-5d): 20,000 messages, each with its own 36 byte
+/// id, are all taken, where the 4,097th id used to be refused as over capacity. The ids are
+/// remembered by bytes: the oldest is forgotten and taken again, and one sent 10,000
+/// messages ago is still refused as sent twice.
+#[test]
+fn a_stream_of_any_length_is_taken_and_a_recent_duplicate_is_still_refused() {
+    let mut p = active();
+    for index in 0..20_000 {
+        let events = p.receive(&numbered(index)).unwrap();
+        assert_eq!(events.len(), 1, "message {index}");
+    }
+    assert_eq!(p.state(), State::Active);
+    let again = p.receive(&numbered(0)).unwrap();
+    assert_eq!(again.len(), 1, "the oldest id was forgotten");
+    let twice = p.receive(&numbered(10_000));
+    assert_eq!(twice, Err(ProtocolError::StaleMessage));
+    assert_eq!(p.state(), State::Failed);
+}
+
 #[test]
 fn malformed_usage_and_missing_native_identity_never_become_zero_or_success() {
     for bad in [json!(-1), json!(1.5), json!("5"), json!(null)] {
@@ -607,4 +638,45 @@ fn events_that_expand_past_their_line_are_still_bounded() {
     line["session_id"] = captured(0)["session_id"].clone();
     line["user_message_uuid"] = json!("u".repeat(LINE_BYTES_MAX / 16));
     assert_eq!(p.receive(&wire(line)), Err(ProtocolError::Capacity));
+}
+
+#[test]
+fn a_master_frame_limit_lets_each_option_carry_a_prompt_up_to_its_bytes() {
+    assert_eq!(protocol().frame_limit(), FRAME_BYTES_MAX);
+    for limit in FrameSize::ALL {
+        let bytes = limit.bytes();
+        let mut p = ready_from(protocol().with_frame_limit(bytes));
+        assert_eq!(p.frame_limit(), bytes);
+        let escaped = format!("x{}", "\n".repeat(bytes / 2));
+        assert_eq!(
+            p.start_turn(RequestId::new("escaped").unwrap(), &escaped),
+            Err(ProtocolError::FrameTooLarge)
+        );
+        assert_eq!(
+            p.start_turn(RequestId::new("over").unwrap(), &"x".repeat(bytes + 1)),
+            Err(ProtocolError::FrameTooLarge)
+        );
+        assert_eq!(p.state(), State::Idle);
+        let text = "x".repeat(bytes - 1024);
+        let frame = p
+            .start_turn(RequestId::new("large").unwrap(), &text)
+            .unwrap();
+        assert!(frame.len() <= bytes, "{}", frame.len());
+        assert!(frame.len() > bytes - 1024, "{}", frame.len());
+        let value: Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["message"]["content"], json!(text));
+        assert_eq!(p.state(), State::Active);
+    }
+}
+
+#[test]
+#[should_panic]
+fn a_claude_frame_limit_below_the_wire_size_is_refused() {
+    let _ = protocol().with_frame_limit(FRAME_BYTES_MAX - 1);
+}
+
+#[test]
+#[should_panic]
+fn a_claude_frame_limit_past_the_ceiling_is_refused() {
+    let _ = protocol().with_frame_limit(BYTES_MAX + 1);
 }

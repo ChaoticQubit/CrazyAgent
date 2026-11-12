@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { Route } from "../../ui";
 import { displayText } from "../conversation";
 import {
@@ -13,11 +13,21 @@ import "./console.css";
  * call, a hand-off to a sub-agent or a failure. */
 export type ConsoleLineKind = "owner" | "reply" | "engine" | "tool" | "delegate" | "error";
 
-/** One transcript line, with an id that stays the same while the line is shown. */
+/** One transcript line, with an id that stays the same while the line is shown. A running
+ * turn's status line may carry its activity lines, listed behind Show activity under it. */
 export interface ConsoleLine {
   id: string;
   kind: ConsoleLineKind;
   text: string;
+  activity?: readonly string[];
+}
+
+/** One drawn row of the transcript: a line or one of the owner's notes, keyed for React. */
+interface Entry {
+  key: string;
+  kind: ConsoleLineKind;
+  text: string;
+  activity?: readonly string[];
 }
 
 /** The console's inputs: the project, its transcript, the `@` agents (see agentMentions) and
@@ -57,14 +67,14 @@ type Choice = { kind: "command"; command: ConsoleCommand } | { kind: "mention"; 
 /** The transcript in order, the owner's notes placed after the line they followed, and lines up
  * to the last `/clear` hidden. Inputs: the lines, the notes and the id of the line `/clear`
  * hid through. Output: the shown entries. */
-function shown(lines: readonly ConsoleLine[], notes: readonly Note[], cleared: string | null): { key: string; kind: ConsoleLineKind; text: string }[] {
+function shown(lines: readonly ConsoleLine[], notes: readonly Note[], cleared: string | null): Entry[] {
   const from = cleared === null ? 0 : lines.findIndex((line) => line.id === cleared) + 1;
   const visible = lines.slice(from);
   const ids = new Set(visible.map((line) => line.id));
-  const entry = (note: Note): { key: string; kind: ConsoleLineKind; text: string } => ({ key: `note-${note.id}`, kind: "engine", text: note.text });
+  const entry = (note: Note): Entry => ({ key: `note-${note.id}`, kind: "engine", text: note.text });
   const leads = (note: Note) => note.after === null || note.after === cleared;
   const entries = notes.filter(leads).map(entry);
-  for (const line of visible) entries.push({ key: line.id, kind: line.kind, text: line.text }, ...notes.filter((note) => note.after === line.id).map(entry));
+  for (const line of visible) entries.push({ key: line.id, kind: line.kind, text: line.text, activity: line.activity }, ...notes.filter((note) => note.after === line.id).map(entry));
   entries.push(...notes.filter((note) => !leads(note) && !ids.has(note.after ?? "")).map(entry));
   return entries;
 }
@@ -198,10 +208,16 @@ export function Console({ projectId, lines, agents, files = null, canSend = true
       onScroll={(event) => { const box = event.currentTarget; stick.current = box.scrollHeight - box.scrollTop - box.clientHeight < STICK_PX; }}>
       {entries.map((entry) => entry.kind === "reply"
         ? <div key={entry.key} className="cs-line cs-reply"><MarkdownView source={entry.text} onOpenLink={openLink} /></div>
-        : <p key={entry.key} className={`cs-line cs-${entry.kind}`}>
-          {MARKS[entry.kind] ? <span className="cs-mark" aria-hidden="true">{MARKS[entry.kind]}</span> : null}
-          {entry.kind === "owner" || entry.kind === "delegate" ? tagged(entry.text, known) : displayText(entry.text)}
-        </p>)}
+        : <Fragment key={entry.key}>
+          <p className={`cs-line cs-${entry.kind}`}>
+            {MARKS[entry.kind] ? <span className="cs-mark" aria-hidden="true">{MARKS[entry.kind]}</span> : null}
+            {entry.kind === "owner" || entry.kind === "delegate" ? tagged(entry.text, known) : displayText(entry.text)}
+          </p>
+          {entry.activity && entry.activity.length > 0 && <details className="cs-activity">
+            <summary>Show activity ({entry.activity.length})</summary>
+            <ol>{entry.activity.map((text, index) => <li key={index}>{displayText(text)}</li>)}</ol>
+          </details>}
+        </Fragment>)}
     </div>
     <div className="cs-entry">
       {open && <ul className="cs-menu" id={menuId} role="listbox" aria-label={mention ? "Tags" : "Commands"}>

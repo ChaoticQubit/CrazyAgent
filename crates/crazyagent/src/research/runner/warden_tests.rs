@@ -82,6 +82,7 @@ fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> Result<ReadOnlyEnding,
     let account = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "local-model".into(),
+        key: None,
     };
     runner.run_read_only(
         &ReadOnlyRun {
@@ -92,6 +93,7 @@ fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> Result<ReadOnlyEnding,
             prompt: "Describe this repository.",
             account: &account,
             wall_time: Duration::from_secs(60),
+            output_tokens: None,
         },
         stop,
     )
@@ -256,6 +258,7 @@ fn an_untrusted_onboarding_run_hides_the_repository_agent_files_and_project_docs
     let account = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "local-model".into(),
+        key: None,
     };
     let project = ProjectId::new("alpha").unwrap();
     let answer = |name: &str| {
@@ -267,6 +270,7 @@ fn an_untrusted_onboarding_run_hides_the_repository_agent_files_and_project_docs
             prompt: "Map this repository.",
             account: &account,
             wall_time: Duration::from_secs(60),
+            output_tokens: None,
         };
         match runner.run_read_only(&run, &|| false).unwrap() {
             ReadOnlyEnding::Answered(text) => text,

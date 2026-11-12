@@ -25,5 +25,4 @@ pub mod settings;
 pub mod terminal;
 #[cfg(unix)]
 pub mod token;
-pub mod trust;
 pub mod workspace;

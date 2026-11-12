@@ -3,6 +3,8 @@ use super::{ClaudeHostLimits, Fault, Phase, Status, Turn, validate_command};
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use crate::protocol::ProjectId;
 use crate::sandbox::InstalledSandbox;
 use crate::sandbox::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -48,9 +50,11 @@ struct PendingInput {
 struct Process {
     child: Child,
     warden: Option<Warden>,
+    follower: Option<Follower>,
     group: Pid,
     group_absent: bool,
     profile: Option<NativeProfileUse>,
+    project: ProjectId,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
@@ -69,15 +73,19 @@ struct Process {
     events: usize,
     completed_turns: usize,
     frame: Vec<u8>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     record: StreamDiagnostic,
     kept: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
 
+/// Runs one Claude Code master under custody until it retires. Inputs: the command, its
+/// sandbox, the account lease with the project whose leftover setting and owner view what
+/// it leaves running follow, the turn's home, the protocol, the limits and the channels.
+/// Output: none; the status channel reports how it ended.
 pub(super) fn run(
     mut command: Command,
     sandbox: InstalledSandbox,
-    profile: NativeProfileUse,
+    (profile, project): (NativeProfileUse, ProjectId),
     home: PathBuf,
     protocol: ClaudeProtocol,
     limits: ClaudeHostLimits,
@@ -139,6 +147,14 @@ pub(super) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
+    let Some(token) = LineageToken::new() else {
+        report.send_replace(Status {
+            phase: Phase::Retired,
+            fault: Some(Fault::Host("claude_host_spawn_failed")),
+        });
+        return;
+    };
+    command.env(LINEAGE_VARIABLE, token.as_str());
     let (child, warden) = match warden::spawn(&mut command) {
         Ok(started) => started,
         Err(_) => {
@@ -151,12 +167,17 @@ pub(super) fn run(
     };
     assert!(child.id() > 1);
     group.store(child.id(), Ordering::Release);
+    let follower = sandbox
+        .is_unconfined()
+        .then(|| Follower::start(child.id(), Some(token)));
     let mut process = Process {
         group: Pid::from_child(&child),
         group_absent: false,
         child,
         warden,
+        follower,
         profile: Some(profile),
+        project,
         stdin: None,
         stdout: None,
         stderr: None,
@@ -175,7 +196,7 @@ pub(super) fn run(
         events: 0,
         completed_turns: 0,
         frame: Vec::new(),
-        deadline: Instant::now() + limits.run_time,
+        deadline: limits.run_time.map(|time| Instant::now() + time),
         record: StreamDiagnostic::default(),
         kept: diagnostic,
     };
@@ -223,7 +244,7 @@ impl Process {
             if self.stop.load(Ordering::Acquire) {
                 return;
             }
-            if Instant::now() >= self.deadline {
+            if self.late() {
                 self.fail(Fault::Host("claude_host_deadline"));
                 return;
             }
@@ -303,7 +324,7 @@ impl Process {
         }
         let pending = self.pending.as_mut().expect("retained native input");
         assert!(pending.written < pending.bytes.len());
-        assert!(pending.bytes.len() <= crate::protocol::FRAME_BYTES_MAX);
+        assert!(pending.bytes.len() <= self.protocol.frame_limit());
         let Some(stdin) = self.stdin.as_mut() else {
             self.fail(Fault::Host("claude_host_input_closed"));
             return;
@@ -359,7 +380,7 @@ impl Process {
                     if decode && self.fault.is_none() {
                         self.decode(&buffer[..count]);
                     }
-                    assert!(self.events <= self.limits.events);
+                    assert!(self.events <= self.stdout_bytes);
                     assert!(count <= buffer.len());
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
@@ -402,18 +423,13 @@ impl Process {
             };
             self.frame.clear();
             for event in events {
-                if self.events == self.limits.events {
-                    self.fail(Fault::Host("claude_host_event_limit"));
-                    return;
-                }
                 self.events += 1;
                 if matches!(&event.kind, EventKind::TurnFinished { .. }) {
                     self.completed_turns += 1;
                     self.stdin = None;
                 }
                 let refused_tool = !self.tools && matches!(&event.kind, EventKind::ToolUse { .. });
-                if self.output.try_send(event.into()).is_err() {
-                    self.fail(Fault::Host("claude_host_event_delivery_failed"));
+                if !self.deliver(event.into()) {
                     return;
                 }
                 if refused_tool {
@@ -424,6 +440,42 @@ impl Process {
         }
         assert!(self.frame.len() <= FRAME_LINE_MAX);
         assert!(self.completed_turns <= self.events);
+    }
+
+    /// Whether the host's wall clock ran out; never with no clock, the owner's choice of no
+    /// master time limit (OB-5c). Input: the process. Output: the answer.
+    fn late(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// Hands one event to the turn's reader, waiting while the reader's queue is full, so a
+    /// burst of frames is never a failed turn (OB-5b); the harness waits on its pipe
+    /// meanwhile. The wait ends at the host's stop, at its deadline, which is recorded as the
+    /// fault, or with `claude_host_event_delivery_failed` when the reader is gone.
+    /// Input: the event. Output: whether the reader has it.
+    fn deliver(&mut self, event: ObservedEvent) -> bool {
+        assert!(self.events >= 1);
+        assert!(self.completed_turns <= self.events);
+        let mut waiting = event;
+        loop {
+            match self.output.try_send(waiting) {
+                Ok(()) => return true,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.fail(Fault::Host("claude_host_event_delivery_failed"));
+                    return false;
+                }
+                Err(mpsc::error::TrySendError::Full(event)) => waiting = event,
+            }
+            if self.stop.load(Ordering::Acquire) {
+                return false;
+            }
+            if self.late() {
+                self.fail(Fault::Host("claude_host_deadline"));
+                return false;
+            }
+            std::thread::sleep(POLL_TIME);
+        }
     }
 
     fn read_stderr(&mut self) {
@@ -525,7 +577,14 @@ impl Process {
         }
     }
 
+    /// Ends the harness and everything it left in its group, then releases the account
+    /// lease. At Full access no warden reaches processes that left the group, so the
+    /// harness's lineage, followed from its start, is taken before the kill and checked after
+    /// it; while some still run, the turn ends with their code and a hold ends them by the
+    /// default leftover setting, keeping the lease until none run or the owner signs the
+    /// account out. Takes nothing; records the run's last status.
     fn cleanup(&mut self) {
+        let lineage = self.follower.take().map(Follower::stop);
         self.report.send_replace(Status {
             phase: Phase::Closing,
             fault: self.fault,
@@ -601,6 +660,23 @@ impl Process {
         assert!(self.group_absent || uncertain);
         if self.protocol.state() == State::Active && !self.stop.load(Ordering::Acquire) {
             self.fail(Fault::Host("claude_host_incomplete_turn"));
+        }
+        if let Some(lineage) = lineage
+            && let Err(unstopped) = lineage.and_then(Lineage::settle)
+        {
+            self.fail(Fault::Host(unstopped.code()));
+            if let (Unstopped::Left(left), Some(profile)) = (unstopped, self.profile.take()) {
+                let project = self.project.as_str();
+                left.hold(
+                    Some(profile.account().clone()),
+                    profile,
+                    crate::harnesses::leftovers::HoldBy {
+                        project: Some(project.to_owned()),
+                        who: "a Claude host turn".to_owned(),
+                    },
+                    crate::harnesses::leftovers::mode_of(Some(project)),
+                );
+            }
         }
         self.profile = None;
         self.record.fault = self.fault.map(|fault| fault.error().0);

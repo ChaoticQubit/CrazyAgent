@@ -1,7 +1,7 @@
 use super::{BridgeError, NativeAuthReply, NativeAuthView, bounded, failure};
 use crazyagent::adapters::{claude, codex};
 use crazyagent::engine::owner::{
-    NativeAuthAccount, NativeAuthAction, NativeAuthMethod, NativeAuthPhase,
+    NativeAuthAccount, NativeAuthAction, NativeAuthChallenge, NativeAuthMethod, NativeAuthPhase,
 };
 use serde::Serialize;
 
@@ -14,6 +14,7 @@ pub enum Challenge {
     CodexDeviceCode {
         user_code: String,
         verification_url: String,
+        left_s: Option<u64>,
     },
     ClaudeOfficial {
         auth_url: String,
@@ -77,10 +78,7 @@ pub(super) fn project(ticket: &str, reply: NativeAuthReply) -> Result<NativeAuth
             None
         }
     } else {
-        reply
-            .challenge
-            .as_ref()
-            .and_then(|value| challenge(value.codex()))
+        reply.challenge.as_ref().and_then(challenge)
     };
     let has_challenge = reply.challenge.is_some() || reply.claude_challenge.is_some();
     let mut view = NativeAuthView {
@@ -134,8 +132,8 @@ fn exact(value: &str) -> bool {
     })
 }
 
-fn challenge(value: &codex::LoginChallenge) -> Option<Challenge> {
-    match value {
+fn challenge(value: &NativeAuthChallenge) -> Option<Challenge> {
+    match value.codex() {
         codex::LoginChallenge::Browser { auth_url, .. } if exact(auth_url.expose()) => {
             Some(Challenge::CodexBrowser {
                 auth_url: auth_url.expose().into(),
@@ -149,6 +147,7 @@ fn challenge(value: &codex::LoginChallenge) -> Option<Challenge> {
             Some(Challenge::CodexDeviceCode {
                 user_code: user_code.expose().into(),
                 verification_url: verification_url.expose().into(),
+                left_s: value.left().map(|left| left.as_secs()),
             })
         }
         _ => None,

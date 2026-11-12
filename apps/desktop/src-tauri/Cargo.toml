@@ -42,5 +42,6 @@ tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "sync", 
 trackwright-core = { path = "../../../crates/trackwright-core" }
 
 [dev-dependencies]
+tauri = { version = "=2.12.4", features = ["test"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["backup"] }
 tempfile = "=3.27.0"

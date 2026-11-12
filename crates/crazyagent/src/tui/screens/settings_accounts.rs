@@ -96,6 +96,22 @@ fn attention_rank(status: AccountStatus) -> u8 {
     }
 }
 
+/// Ids of the pools an account is in, in pool order, which tell apart pools that share a
+/// name. Inputs: the account id and the context. Output: the ids.
+pub fn pool_ids(id: &CredentialRef, ctx: &Ctx) -> Vec<CredentialRef> {
+    ctx.store
+        .pools
+        .ready()
+        .map(|pools| {
+            pools
+                .iter()
+                .filter(|pool| pool.members.iter().any(|member| &member.id == id))
+                .map(|pool| pool.id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Names of the pools an account is in, in pool order.
 /// Inputs: the account id and the context. Output: the names.
 pub fn pool_names(id: &CredentialRef, ctx: &Ctx) -> Vec<String> {
@@ -179,6 +195,7 @@ pub fn account_row(account: &AccountView) -> AccountRow {
         name: account.name.clone(),
         provider: provider_word(account.provider).into(),
         status: account.status_label.clone(),
+        no_window: crate::usage::no_window(account.method, account.provider),
     }
 }
 
@@ -318,7 +335,7 @@ impl Accounts {
 
     fn rows_visible(ctx: &Ctx) -> usize {
         (ctx.height as usize)
-            .saturating_sub(4 + 2 + CHROME_ROWS)
+            .saturating_sub(4 + 2 + CHROME_ROWS + ctx.extra_hint_rows())
             .max(1)
     }
 
@@ -696,6 +713,10 @@ pub fn plain(code: &str) -> &'static str {
 }
 
 impl Screen for Accounts {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Accounts".into()]
     }
@@ -951,6 +972,7 @@ pub struct AccountDetails {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Action {
     SignIn,
+    CheckSignIn,
     ReplaceKey,
     CheckAgain,
     Rename,
@@ -961,6 +983,7 @@ impl Action {
     fn label(self) -> &'static str {
         match self {
             Self::SignIn => "Sign in again",
+            Self::CheckSignIn => super::settings_add_account::CHECK_TITLE,
             Self::ReplaceKey => "Replace key",
             Self::CheckAgain => "Check again",
             Self::Rename => "Rename",
@@ -985,13 +1008,14 @@ impl AccountDetails {
     }
 
     fn actions(&self) -> Vec<Action> {
-        let first = match self.account.method {
-            SignInMethod::Subscription => Some(Action::SignIn),
-            SignInMethod::ApiKey => Some(Action::ReplaceKey),
-            SignInMethod::Url => Some(Action::CheckAgain),
+        let first: &[Action] = match self.account.method {
+            SignInMethod::Subscription => &[Action::SignIn, Action::CheckSignIn],
+            SignInMethod::ApiKey => &[Action::ReplaceKey],
+            SignInMethod::Url => &[Action::CheckAgain],
         };
         first
-            .into_iter()
+            .iter()
+            .copied()
             .chain([Action::Rename, Action::Remove])
             .collect()
     }
@@ -1008,6 +1032,9 @@ impl AccountDetails {
         match action {
             Action::SignIn => Flow::Replace(Box::new(
                 super::settings_add_account::AddAccount::again(self.account.clone()),
+            )),
+            Action::CheckSignIn => Flow::Replace(Box::new(
+                super::settings_add_account::AddAccount::check(self.account.clone()),
             )),
             Action::ReplaceKey => {
                 let field = TextField::secret("New API key", KEY_CHARS_MAX)
@@ -1042,7 +1069,7 @@ impl AccountDetails {
     }
 
     fn used_by(&self, ctx: &Ctx) -> String {
-        let pools = pool_names(&self.account.id, ctx);
+        let pools = pool_ids(&self.account.id, ctx);
         let projects: Vec<String> = ctx
             .store
             .projects
@@ -1050,7 +1077,11 @@ impl AccountDetails {
             .map(|cards| {
                 cards
                     .iter()
-                    .filter(|card| card.pool.as_ref().is_some_and(|pool| pools.contains(pool)))
+                    .filter(|card| {
+                        card.pool_id
+                            .as_ref()
+                            .is_some_and(|pool| pools.contains(pool))
+                    })
                     .map(|card| card.name.clone())
                     .collect()
             })
@@ -1263,6 +1294,10 @@ impl AccountDetails {
 }
 
 impl Screen for AccountDetails {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec![
             "Settings".into(),

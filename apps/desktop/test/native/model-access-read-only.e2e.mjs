@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { click, finishWelcome, observeModelAccess, pick, says, settingsTab, shot, shown, type, until } from "./settings-steps.mjs";
+import { click, finishWelcome, observeModelAccess, pick, says, settingsTab, shot, shown, text, type, until } from "./settings-steps.mjs";
 
 const READ_ONLY = "Settings can't be changed in this engine. Start it with writable settings.";
 
@@ -28,14 +28,12 @@ describe("Settings, Accounts and Pools on the real desktop app and a read-only e
     await click("dialog[open] button[aria-label='Close']");
   });
 
-  it("saving a new pool is refused in plain words and nothing is saved", async () => {
+  it("a new pool with no account to add stays a draft and nothing is saved", async () => {
     await settingsTab("Pools");
     await click("button=New pool");
-    await type("#pool-name", "Refused pool");
-    await click("button=Save pool");
-    await until(() => says("main .notice[role=alert]", `Couldn't save this pool. ${READ_ONLY}`), 15000, "the pool refusal was not shown");
-    assert.equal(await $("#pool-name").getValue(), "Refused pool", "the editor stays open with the owner's input");
-    await shot("pool-refused");
+    await until(() => says("main .pool-item.on .pool-item-label", "New pool"), 15000, "the new pool was not selected at once");
+    await until(async () => (await text(".pool-add")).includes("Add an account first, then put it in a pool."), 15000, "the add panel did not say to add an account first");
+    await shot("pool-draft-read-only");
     await nothingSaved();
   });
 });

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 const BRANCH_PREFIX: &str = "agent/";
-const LINKED_PREFIX: &str = "crazyagent/";
+pub(crate) const LINKED_PREFIX: &str = "crazyagent/";
 const FOLDER_BYTES_MAX: usize = 64;
 const TEAMMATE_SEPARATOR: &str = "--";
 const NAME_BYTES_MAX: usize = 48;
@@ -9,6 +9,8 @@ const NAME_BYTES_MAX: usize = 48;
 /// `<clone>/.worktrees/<teammate>` each, which landing leaves out of the harness's change
 /// set and cleanup removes with the clone.
 pub const TEAMMATES_FOLDER: &str = ".worktrees";
+/// The line an agent clone's `info/exclude` keeps the project graph out of git with.
+pub const GRAPH_EXCLUDE: &str = "/graphify-out/";
 /// The most bytes of a native teammate's name, which names its worktree folder.
 pub const WORKTREE_NAME_BYTES_MAX: usize = 64;
 const CLAUDE_LEAD_NAME: &str = "team-lead";
@@ -116,6 +118,18 @@ pub fn is_teammate_branch(task: &str, branch: &str) -> bool {
         .is_some_and(|name| !name.is_empty())
 }
 
+/// Tells whether a branch is the one a named native teammate works on inside a harness's
+/// clone (DEC-111 Q17): `<task branch>--<name>` with the name as the teammate gives it, or
+/// as [`teammate_branch`] spells it. Inputs: the task branch, the teammate's name and the
+/// branch. Output: the answer.
+pub fn is_teammates_own_branch(task: &str, teammate: &str, branch: &str) -> bool {
+    branch
+        .strip_prefix(task)
+        .and_then(|rest| rest.strip_prefix(TEAMMATE_SEPARATOR))
+        == Some(teammate)
+        || teammate_branch(task, teammate).as_deref() == Some(branch)
+}
+
 /// Says whether a native teammate's name can name its worktree folder under
 /// `TEAMMATES_FOLDER`: 1 to `WORKTREE_NAME_BYTES_MAX` bytes of letters, digits, `-`, `_`
 /// and `.`, not starting with a dot, and not the name Claude Code gives the lead. Input:
@@ -146,3 +160,21 @@ fn plain_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// What the last line of one ignore file about the graph folder says, read as git reads it
+/// with only trailing spaces trimmed (T3-L1): ignored, for a line that is one of the usual
+/// spellings, or taken back into git, for any `!` line naming the folder in any pattern.
+/// Input: the text. Output: the answer, none when no line is about the folder.
+pub fn graph_rule(text: &str) -> Option<bool> {
+    text.lines()
+        .map(|line| line.trim_end_matches(' '))
+        .filter_map(|line| match line.strip_prefix('!') {
+            Some(pattern) => pattern.contains("graphify-out").then_some(false),
+            None => matches!(
+                line,
+                "graphify-out" | "graphify-out/" | "/graphify-out" | "/graphify-out/"
+            )
+            .then_some(true),
+        })
+        .next_back()
+}

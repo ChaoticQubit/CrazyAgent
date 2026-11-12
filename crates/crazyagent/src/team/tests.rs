@@ -79,6 +79,14 @@ fn access(project: &str, members: &[&str]) -> ModelAccess {
                     credential_ref: reference("key-reference"),
                 },
             ),
+            connection(
+                "anthropic-keyed",
+                "https://api.anthropic.com/v1",
+                "anthropic-messages",
+                ModelAuthentication::ApiKey {
+                    credential_ref: reference("anthropic-key-reference"),
+                },
+            ),
         ],
         pools: vec![AccountPool {
             id: reference("team-pool"),
@@ -134,75 +142,6 @@ fn database() -> (tempfile::TempDir, Connection) {
     crate::project_setup::initialize(&connection).unwrap();
     crate::coord::ensure(&connection).unwrap();
     (directory, connection)
-}
-
-#[test]
-fn delegation_lines_are_read_from_a_master_reply() {
-    let reply = "I will split this.\nDELEGATE: Write apple.txt\n- delegate codex: List the files\n`DELEGATE claude-code: Review the notes`\nDELEGATE Bad Name: nope\nDELEGATE:   \nNot a DELEGATE: line";
-    assert_eq!(
-        parse_delegations(reply),
-        [
-            Delegation {
-                harness: None,
-                prompt: "Write apple.txt".into(),
-                role: None,
-            },
-            Delegation {
-                harness: Some("codex".into()),
-                prompt: "List the files".into(),
-                role: None,
-            },
-            Delegation {
-                harness: Some("claude-code".into()),
-                prompt: "Review the notes".into(),
-                role: None,
-            },
-        ]
-    );
-    let many = (0..20)
-        .map(|i| format!("DELEGATE: task {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(parse_delegations(&many).len(), DELEGATIONS_PER_REPLY_MAX);
-    let long = format!("DELEGATE: {}", "x".repeat(TASK_PROMPT_BYTES_MAX + 1));
-    assert!(parse_delegations(&long).is_empty());
-}
-
-/// A master that is not live wakes a finished sub-agent with a reply line (WK-R5): `WAKE`,
-/// the agent's name or number, a colon and the text, in any case and list form.
-#[test]
-fn wake_lines_are_read_from_a_master_reply() {
-    let reply = "Two of them know this.
-WAKE @onboarding-fix: Fix the copy again
-- wake Sub-agent 4: Add the footer
-`WAKE Ada: Check the title`
-WAKEUP Ada: nope
-WAKE : no name
-WAKE Ada:   
-WAKE Ada no colon
-Not a WAKE Ada: line";
-    let line = |agent: &str, text: &str| WakeLine {
-        agent: agent.into(),
-        text: text.into(),
-    };
-    assert_eq!(
-        parse_wakes(reply),
-        [
-            line("@onboarding-fix", "Fix the copy again"),
-            line("Sub-agent 4", "Add the footer"),
-            line("Ada", "Check the title"),
-        ]
-    );
-    let many = (0..20)
-        .map(|i| format!("WAKE Sub-agent {i}: task {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(parse_wakes(&many).len(), DELEGATIONS_PER_REPLY_MAX);
-    let long = format!("WAKE Ada: {}", "x".repeat(TASK_PROMPT_BYTES_MAX + 1));
-    assert!(parse_wakes(&long).is_empty());
-    let named = format!("WAKE {}: text", "a".repeat(WAKE_NAME_BYTES_MAX + 1));
-    assert!(parse_wakes(&named).is_empty());
-    assert!(parse_delegations(reply).is_empty());
 }
 
 /// Finished agents (DEC-102, narrowed after the DEC-104 trial) are the stopped and failed
@@ -427,11 +366,18 @@ fn a_finished_agent_sharing_a_running_agent_s_name_shows_by_number_in_the_team_s
 }
 
 #[test]
-fn only_keyless_endpoint_accounts_that_fit_the_harness_are_eligible() {
+fn endpoint_accounts_with_or_without_a_key_are_eligible_by_wire_format() {
     let project = ProjectId::new("team-accounts").unwrap();
     let all = access(
         "team-accounts",
-        &["local-a", "keyed", "anthropic-local", "local-b", "local-a"],
+        &[
+            "local-a",
+            "keyed",
+            "anthropic-local",
+            "anthropic-keyed",
+            "local-b",
+            "local-a",
+        ],
     );
     let Accounts::Usable(codex) = eligible_accounts(&all, &project, "codex") else {
         panic!("pool assigned");
@@ -441,17 +387,32 @@ fn only_keyless_endpoint_accounts_that_fit_the_harness_are_eligible() {
             .iter()
             .map(|a| a.connection.as_str())
             .collect::<Vec<_>>(),
-        ["local-a", "local-b"]
+        ["local-a", "keyed", "local-b"]
     );
     let Accounts::Usable(claude) = eligible_accounts(&all, &project, "claude-code") else {
         panic!("pool assigned");
     };
     assert_eq!(
-        claude
-            .iter()
-            .map(|a| a.connection.as_str())
-            .collect::<Vec<_>>(),
-        ["anthropic-local"]
+        claude,
+        [
+            TeamAccount {
+                connection: reference("anthropic-local"),
+                reach: TeamReach::Endpoint {
+                    base_url: "http://127.0.0.1:11434".into(),
+                    model: "qwen2.5:0.5b".into(),
+                    key: None,
+                },
+            },
+            TeamAccount {
+                connection: reference("anthropic-keyed"),
+                reach: TeamReach::Endpoint {
+                    base_url: "https://api.anthropic.com".into(),
+                    model: "qwen2.5:0.5b".into(),
+                    key: Some(reference("anthropic-key-reference")),
+                },
+            },
+        ],
+        "Claude Code adds /v1/messages itself, so the stored /v1 is dropped"
     );
     assert_eq!(
         eligible_accounts(&all, &ProjectId::new("other").unwrap(), "codex"),
@@ -477,6 +438,7 @@ fn managed_profiles_are_listed_only_for_their_own_harness() {
                 reach: TeamReach::Endpoint {
                     base_url: "http://127.0.0.1:11434/v1".into(),
                     model: "qwen2.5:0.5b".into(),
+                    key: None,
                 },
             },
             TeamAccount {
@@ -484,6 +446,14 @@ fn managed_profiles_are_listed_only_for_their_own_harness() {
                 reach: TeamReach::Managed {
                     profile_ref: reference("codex-signed-in-profile"),
                     model: Some("gpt-5.5".into()),
+                },
+            },
+            TeamAccount {
+                connection: reference("keyed"),
+                reach: TeamReach::Endpoint {
+                    base_url: "https://api.example.org/v1".into(),
+                    model: "qwen2.5:0.5b".into(),
+                    key: Some(reference("key-reference")),
                 },
             },
         ]
@@ -501,6 +471,53 @@ fn managed_profiles_are_listed_only_for_their_own_harness() {
             },
         }],
         "the claude alias maps to Claude Code and native-default leaves the model to the account"
+    );
+}
+
+/// A kept master conversation resumes on the same account of any kind, and across accounts
+/// only from one native subscription of the pool to another (ND14-L1): never onto an
+/// endpoint, never from an endpoint, and never from an account no longer in the pool.
+#[test]
+fn a_kept_conversation_moves_only_between_subscriptions_of_the_pool() {
+    let subscription = |id: &str| TeamAccount {
+        connection: reference(id),
+        reach: TeamReach::Managed {
+            profile_ref: reference(&format!("{id}-profile")),
+            model: None,
+        },
+    };
+    let endpoint = |id: &str| TeamAccount {
+        connection: reference(id),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        },
+    };
+    let pool = [
+        subscription("claude-a"),
+        subscription("claude-b"),
+        endpoint("local-a"),
+        endpoint("local-b"),
+    ];
+    assert!(resumes_on(&pool, &pool[1], "claude-a"));
+    assert!(resumes_on(&pool, &pool[0], "claude-a"));
+    assert!(resumes_on(&pool, &pool[2], "local-a"));
+    assert!(
+        !resumes_on(&pool, &pool[2], "claude-a"),
+        "never onto an endpoint"
+    );
+    assert!(
+        !resumes_on(&pool, &pool[0], "local-a"),
+        "never from an endpoint"
+    );
+    assert!(
+        !resumes_on(&pool, &pool[3], "local-a"),
+        "never between endpoints"
+    );
+    assert!(
+        !resumes_on(&pool, &pool[0], "claude-gone"),
+        "never from an account no longer in the pool"
     );
 }
 
@@ -562,6 +579,145 @@ fn work_spreads_across_pool_members_and_skips_paused_accounts() {
             &crate::scheduling::Choice::default()
         )
         .is_none()
+    );
+}
+
+#[test]
+fn work_that_holds_an_account_keeps_it_on_a_tie_and_leaves_it_only_for_one_clearly_before() {
+    let project = ProjectId::new("team-held").unwrap();
+    let Accounts::Usable(accounts) = eligible_accounts(
+        &access("team-held", &["local-a", "local-b"]),
+        &project,
+        "codex",
+    ) else {
+        panic!("pool assigned");
+    };
+    let held = reference("local-b");
+    let pick = |choice: &crate::scheduling::Choice,
+                paused: &BTreeSet<CredentialRef>,
+                held: Option<&CredentialRef>| {
+        pick_account_held(&accounts, &|_| 0, paused, choice, held)
+            .map(|account| account.connection.as_str().to_owned())
+    };
+    let mut paused = BTreeSet::new();
+    let tie = crate::scheduling::Choice::default();
+    assert_eq!(
+        pick(&tie, &paused, None).as_deref(),
+        Some("local-a"),
+        "new work takes pool order"
+    );
+    assert_eq!(
+        pick(&tie, &paused, Some(&held)).as_deref(),
+        Some("local-b"),
+        "the held account wins a tie"
+    );
+    let mut behind = crate::scheduling::Choice::default();
+    behind
+        .schedule
+        .accounts
+        .push(crate::scheduling::AccountEntry {
+            connection: held.clone(),
+            plan: crate::scheduling::AccountPlan {
+                pin: Some(crate::scheduling::Pin::UseLast),
+                ..crate::scheduling::AccountPlan::default()
+            },
+        });
+    assert_eq!(
+        pick(&behind, &paused, Some(&held)).as_deref(),
+        Some("local-a"),
+        "an account a Use last pin puts clearly before the held one wins"
+    );
+    let mut ranked = crate::scheduling::Choice {
+        strategy: crate::scheduling::Strategy::ManualRank,
+        ..crate::scheduling::Choice::default()
+    };
+    ranked
+        .schedule
+        .accounts
+        .push(crate::scheduling::AccountEntry {
+            connection: reference("local-a"),
+            plan: crate::scheduling::AccountPlan {
+                rank: Some(1),
+                ..crate::scheduling::AccountPlan::default()
+            },
+        });
+    assert_eq!(
+        pick(&ranked, &paused, Some(&held)).as_deref(),
+        Some("local-a"),
+        "an account the owner ranked first wins over an unranked held one"
+    );
+    let busy = |connection: &CredentialRef| usize::from(connection == &held) * 3;
+    assert_eq!(
+        pick_account_held(&accounts, &busy, &paused, &tie, Some(&held))
+            .map(|account| account.connection.as_str()),
+        Some("local-b"),
+        "more live agents on the held account never move running work"
+    );
+    paused.insert(held.clone());
+    assert_eq!(
+        pick(&tie, &paused, Some(&held)).as_deref(),
+        Some("local-a"),
+        "a held account that rests gives way"
+    );
+}
+
+#[test]
+fn under_spread_work_on_a_shared_account_leaves_it_only_for_an_unused_one_clearly_before() {
+    let project = ProjectId::new("team-spread").unwrap();
+    let Accounts::Usable(accounts) = eligible_accounts(
+        &access("team-spread", &["local-a", "local-b"]),
+        &project,
+        "codex",
+    ) else {
+        panic!("pool assigned");
+    };
+    let (shared, free) = (reference("local-a"), reference("local-b"));
+    let used = BTreeSet::from([&shared]);
+    let paused = BTreeSet::new();
+    let pick = |choice: &crate::scheduling::Choice, held: Option<&CredentialRef>| {
+        let first = spread_candidates(&accounts, &used, held);
+        pick_account_held(&first, &|_| 0, &paused, choice, held)
+            .map(|account| account.connection.as_str().to_owned())
+    };
+    let used_last = |connection: &CredentialRef| {
+        let mut choice = crate::scheduling::Choice::default();
+        choice
+            .schedule
+            .accounts
+            .push(crate::scheduling::AccountEntry {
+                connection: connection.clone(),
+                plan: crate::scheduling::AccountPlan {
+                    pin: Some(crate::scheduling::Pin::UseLast),
+                    ..crate::scheduling::AccountPlan::default()
+                },
+            });
+        choice
+    };
+    let level = crate::scheduling::Choice::default();
+    assert_eq!(
+        pick(&level, None).as_deref(),
+        Some("local-b"),
+        "new work takes the account no agent of the project uses"
+    );
+    assert_eq!(
+        pick(&level, Some(&shared)).as_deref(),
+        Some("local-a"),
+        "work that shares its account stays while the unused one is no better"
+    );
+    assert_eq!(
+        pick(&used_last(&free), Some(&shared)).as_deref(),
+        Some("local-a"),
+        "it never leaves a shared account for a worse unused one"
+    );
+    assert_eq!(
+        pick(&used_last(&shared), Some(&shared)).as_deref(),
+        Some("local-b"),
+        "it moves to an unused account that is clearly before its own"
+    );
+    assert_eq!(
+        pick(&level, Some(&free)).as_deref(),
+        Some("local-b"),
+        "work alone on its account keeps it"
     );
 }
 
@@ -856,6 +1012,9 @@ fn an_empty_plan_hands_work_to_any_runnable_harness_with_an_account() {
     );
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_empty_plan_runs_more_than_one_sub_agent_at_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -956,8 +1115,8 @@ type Setting = (
 /// Every owner team setting change names the team settings version the owner's screen read:
 /// one from the current version applies and moves it on by one; one from an older read is
 /// refused as stale and the newer value survives. Covers keep warm, the time limits with the
-/// idle stop, the harness switch setting, the live master switch and where finished agents
-/// show (V2SYNC-2).
+/// idle stop, the harness switch setting, the live master switch, where finished agents show
+/// (V2SYNC-2) and when a saved master harness change applies (I1).
 #[test]
 fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_survives() {
     let (_directory, mut connection) = database();
@@ -985,7 +1144,7 @@ fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_surviv
         0,
         "team settings nobody saved are at version 0"
     );
-    let settings: [Setting; 5] = [
+    let settings: [Setting; 6] = [
         (
             "keep warm",
             |project_id, version, newer| TeamAction::KeepWarm {
@@ -1046,6 +1205,19 @@ fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_surviv
             },
             |status| status.show_finished.to_string(),
         ),
+        (
+            "apply harness switch",
+            |project_id, version, newer| TeamAction::ApplyHarnessSwitch {
+                project_id,
+                mode: if newer {
+                    SwitchApply::NextStart
+                } else {
+                    SwitchApply::WhenIdle
+                },
+                version,
+            },
+            |status| format!("{:?}", status.apply_harness_switch),
+        ),
     ];
     for (name, change, value) in settings {
         let read = settings_version(&connection, &project).unwrap();
@@ -1092,6 +1264,83 @@ fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_surviv
         assert_ne!(value(&changed), value(&newer), "{name}");
         assert_eq!(changed.settings_version, read + 2, "{name}");
     }
+}
+
+/// Team settings stay versioned on a database an earlier b19 build wrote, whose
+/// `team_settings_revision` table this engine neither reads nor writes: the old revision is
+/// not read, a change from the current read applies, one from the read before it is refused
+/// as stale, and the old table keeps its row (I3).
+#[test]
+fn team_settings_stay_versioned_on_a_database_with_the_b19_revision_table() {
+    let setup = stored(
+        "team-b19",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    let project = setup.project_id.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let mut connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_settings_revision (
+                 project TEXT PRIMARY KEY,
+                 revision INTEGER NOT NULL CHECK(revision > 0)
+             );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_settings_revision VALUES (?1, 4)",
+            [project.as_str()],
+        )
+        .unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    crate::coord::ensure(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![project.as_str(), serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    let pool = access("team-b19", &["local-a"]);
+    assert_eq!(
+        status(&connection, &setup).unwrap().settings_version,
+        0,
+        "the old revision is not read"
+    );
+    let warm = |on, version| TeamAction::KeepWarm {
+        project_id: project.clone(),
+        on,
+        version,
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &warm(true, 0)).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        execute(&tx, &pool, &warm(false, 0)).unwrap(),
+        Outcome::Rejected {
+            code: STALE_CODE.into()
+        },
+        "a change from the read before the applied one"
+    );
+    tx.commit().unwrap();
+    let shown = status(&connection, &setup).unwrap();
+    assert!(shown.keep_warm);
+    assert_eq!(shown.settings_version, 1);
+    let old: i64 = connection
+        .query_row(
+            "SELECT revision FROM team_settings_revision WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old, 4, "the old table keeps its row");
 }
 
 #[test]
@@ -1288,6 +1537,24 @@ fn set_live_on_clears_problem_and_off_clears_only_wait_line() {
     );
 }
 
+/// LMS-1: the line that the live master waits for its account's profile is a wait line
+/// too: turning the live master off clears it, as it clears the sign-in wait line.
+#[test]
+fn set_live_off_clears_the_profile_wait_line() {
+    let (_directory, connection) = database();
+    let setup = stored("live-profile-wait", Vec::new());
+    let project = &setup.project_id;
+    master::set_live(&connection, project, true).unwrap();
+    assert!(master::problem(&connection, project, Some(master::PROFILE_IN_USE)).unwrap());
+    master::set_live(&connection, project, false).unwrap();
+    let team = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (team.live_master, team.live_problem),
+        (Some(false), None),
+        "a profile wait line no longer applies once the master is off"
+    );
+}
+
 #[test]
 fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
     let (_directory, mut connection) = database();
@@ -1436,7 +1703,11 @@ fn the_owner_hands_off_plan_steps_the_master_proposed() {
         &tx,
         &project,
         MessageAuthor::Master,
-        "Two steps:\nDELEGATE: Write apple.txt\nDELEGATE gemini: Write pear.txt",
+        &format!(
+            "Two steps:\n{}\nDELEGATE: Not a block\n{}",
+            task_block(r#"{"task": "Write apple.txt"}"#),
+            task_block(r#"{"task": "Write pear.txt", "harness": "gemini"}"#)
+        ),
         MessageState::Reply,
         10,
     )
@@ -1498,7 +1769,7 @@ fn the_owner_hands_off_plan_steps_the_master_proposed() {
         &tx,
         &project,
         MessageAuthor::Owner,
-        "DELEGATE: Not a master step",
+        &task_block(r#"{"task": "Not a master step"}"#),
         MessageState::Pending,
         12,
     )
@@ -1524,7 +1795,7 @@ fn the_owner_hands_off_plan_steps_the_master_proposed() {
         &tx,
         &project,
         MessageAuthor::Master,
-        "DELEGATE: Write plum.txt",
+        &task_block(r#"{"task": "Write plum.txt"}"#),
         MessageState::Reply,
         13,
     )
@@ -1553,6 +1824,12 @@ fn the_owner_hands_off_plan_steps_the_master_proposed() {
     );
     assert_eq!(team.plan.len(), 1, "the plan is the latest master reply");
     assert_eq!(team.plan[0].task, Some(plum.id));
+}
+
+/// Writes one `crazyagent-task` block around a JSON object, as a master without team
+/// tools hands out work (L6). Takes the object. Returns the block.
+fn task_block(object: &str) -> String {
+    format!("{}\n{object}\n```", tool::BLOCK_FENCE)
 }
 
 #[test]
@@ -1636,6 +1913,29 @@ fn team_plan_harness_names_map_to_launch_adapters_and_delegation_paths() {
     assert_eq!(delegation_path("claude", false), DelegationPath::Reply);
     assert_eq!(delegation_path("codex", true), DelegationPath::Tool);
     assert_eq!(delegation_path("gemini", true), DelegationPath::Unavailable);
+}
+
+/// DEC-141 PA-15: every harness kind the Coordination settings list either runs sub-agents
+/// or carries the reason it cannot, and the reason follows the launch adapters, so a kind
+/// gains live rows the moment an adapter can launch it.
+#[test]
+fn every_coordination_harness_kind_runs_sub_agents_or_says_why_not() {
+    use crate::coord::settings::HarnessKind;
+    for kind in HarnessKind::ALL {
+        let reason = sub_agents_unavailable(kind);
+        assert_eq!(
+            reason.is_none(),
+            launch_harness(kind.as_str()).is_some(),
+            "{kind:?}"
+        );
+        assert!(reason.is_none_or(|text| text == NO_SUB_AGENTS), "{kind:?}");
+    }
+    assert_eq!(sub_agents_unavailable(HarnessKind::ClaudeCode), None);
+    assert_eq!(sub_agents_unavailable(HarnessKind::Codex), None);
+    assert_eq!(
+        sub_agents_unavailable(HarnessKind::Rcli),
+        Some(NO_SUB_AGENTS)
+    );
 }
 
 #[test]
@@ -1734,6 +2034,9 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
 /// The owner moved the project folder away before the master started. The agent and the
 /// owner's note name the plain code of the failed file step, never the system's error text
 /// or a path.
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_master_whose_project_folder_is_gone_names_the_plain_file_code() {
     let directory = tempfile::tempdir().unwrap();
@@ -1929,23 +2232,38 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
     team.shutdown().unwrap();
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
-    warm_agents_ended(b"#!/bin/sh\nexit 1\n");
+    warm_agents_ended(b"#!/bin/sh\nexit 1\n", false);
 }
 
-/// The second warm sub-agent dies 2 s after the first has turned keeping warm off: it still
-/// ends Failed, and nothing starts again in its place.
+/// The second warm sub-agent is still alive after the first has died and turned keeping
+/// warm off, as the team status shows before the test lets the second go on; it then dies,
+/// still ends Failed, and nothing starts again in its place. A file the test removes holds
+/// that order, not a sleep a loaded machine could outlast (rv-code WAD-L1).
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_warm_agent_that_dies_after_keeping_warm_went_off_still_ends_failed() {
     warm_agents_ended(
-        b"#!/bin/sh\ncase \"$CODEX_HOME\" in */agent-1/*) exit 1 ;; esac\n/bin/sleep 2\nexit 1\n",
+        b"#!/bin/sh\ncase \"$CODEX_HOME\" in */agent-1/*) exit 1 ;; esac\n: > \"$CODEX_HOME/waiting\"\nwhile [ -e \"$CODEX_HOME/waiting\" ]; do /bin/sleep 0.1; done\nexit 1\n",
+        true,
     );
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
-    let cold = warm_agents_ended(b"#!/bin/sh\nread line\necho not-json\nexec /bin/sleep 30\n");
+    let cold = warm_agents_ended(
+        b"#!/bin/sh\nread line\necho not-json\nexec /bin/sleep 30\n",
+        false,
+    );
     for agent in &cold.agents {
         assert_eq!(
             agent.problem.as_deref(),
@@ -1963,8 +2281,12 @@ fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
 
 /// Runs a project that keeps its two codex sub-agents warm on a stand-in harness until a
 /// warm agent that ended before any work turns keeping warm off and both agents have ended.
-/// Input: the stand-in harness script. Output: the team status once both agents ended.
-fn warm_agents_ended(script: &[u8]) -> TeamStatus {
+/// When held, the second agent's script waits while a `waiting` file it wrote in its home
+/// exists; the test checks the first has ended and turned keeping warm off while the second
+/// is alive, then removes the file. Input: the stand-in harness script and whether it holds.
+/// Output: the team status once both agents ended.
+#[cfg(target_os = "macos")]
+fn warm_agents_ended(script: &[u8], held: bool) -> TeamStatus {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
@@ -2034,10 +2356,35 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
     )
     .unwrap();
 
+    let waiting = |id: i64| runtime::agent_home(&base.join("team"), id).join("waiting");
+    let mut released = !held;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         team.tick().unwrap();
         let now = status(&connection, &setup).unwrap();
+        if !released && waiting(2).exists() && (!now.keep_warm || waiting(1).exists()) {
+            for id in [1, 2] {
+                if waiting(id).exists() {
+                    std::fs::remove_file(waiting(id)).unwrap();
+                }
+            }
+            released = true;
+            let ended = |id: i64| {
+                now.agents
+                    .iter()
+                    .find(|a| a.id == id)
+                    .map(|a| matches!(a.status, AgentStatus::Stopped | AgentStatus::Failed))
+            };
+            assert!(
+                !now.keep_warm && ended(1) == Some(true) && ended(2) == Some(false),
+                "the first warm sub-agent ended and turned keeping warm off while the second was alive: keep_warm={} {:?}",
+                now.keep_warm,
+                now.agents
+                    .iter()
+                    .map(|a| (a.id, a.status.name()))
+                    .collect::<Vec<_>>()
+            );
+        }
         if !now.keep_warm
             && now
                 .agents
@@ -2049,6 +2396,10 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
         assert!(std::time::Instant::now() < deadline, "{now:#?}");
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    assert!(
+        released,
+        "the held second warm sub-agent ended only after the test let it go"
+    );
     for _ in 0..10 {
         team.tick().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2091,6 +2442,9 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
     cold
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
     let directory = tempfile::tempdir().unwrap();
@@ -2222,13 +2576,28 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         .join(format!("agent-{}", master.id))
         .join("tmp")
         .join(tool::DROP_FILE);
+    let mailbox = record.with_file_name(tool::MAILBOX_FOLDER);
     assert_eq!(
         server["args"],
         toml::Value::Array(vec![
             tool::SERVER_COMMAND.into(),
-            record.to_str().unwrap().into()
+            record.to_str().unwrap().into(),
+            mailbox.to_str().unwrap().into()
         ]),
         "the master records its calls in its own private temporary folder"
+    );
+    assert!(
+        std::fs::symlink_metadata(&mailbox).is_ok_and(|metadata| metadata.is_dir()),
+        "the engine made the mailbox the master's memory tools write to"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&mailbox)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "only the engine's user can read or write the master's memory calls"
     );
     team.shutdown().unwrap();
 }
@@ -2448,6 +2817,9 @@ fn concurrent_agent_setups_create_one_project_repository() {
     assert_eq!(exclude.matches("/worktrees/").count(), 1, "{exclude}");
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() {
     use crate::agents::AgentState;
@@ -2880,7 +3252,7 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
     let turn = RequestId::new("conversation-turn").unwrap();
     let mut admitted = Vec::new();
     for project in teams.iter().chain([&unplanned]) {
-        tool::serve(calls.as_bytes(), Vec::new(), &drop).unwrap();
+        tool::serve(calls.as_bytes(), Vec::new(), &drop, None, &[]).unwrap();
         let proposed = tool::take(&drop);
         assert_eq!(proposed.len(), 2);
         assert!(!drop.exists());
@@ -3051,6 +3423,9 @@ fn a_resolve_reaches_the_team_master_as_an_engine_message_and_a_sub_agent_as_one
     );
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_live_and_stopped() {
     use crate::agents::tests::{alive, until};
@@ -3383,7 +3758,7 @@ fn a_team_with_long_task_texts_still_fits_one_owner_reply() {
     }
     let full = status(&connection, &setup).unwrap();
     assert!(serde_json::to_vec(&full).unwrap().len() > STATUS_REPLY_BYTES_MAX);
-    let read = owner_status(&connection, &setup).unwrap();
+    let read = owner_status(&connection, &setup, None).unwrap();
     assert!(serde_json::to_vec(&read).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
     assert_eq!(read.tasks.len(), full.tasks.len());
     for (task, whole) in read.tasks.iter().zip(&full.tasks) {
@@ -3393,7 +3768,7 @@ fn a_team_with_long_task_texts_still_fits_one_owner_reply() {
     }
     let cut = read.tasks[0].result.as_deref().unwrap();
     assert!(cut.ends_with(" more bytes]"), "{cut}");
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     assert!(serde_json::to_vec(&graph).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
 }
 
@@ -3519,6 +3894,87 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
     );
 }
 
+#[test]
+fn a_team_settings_change_from_an_old_read_is_refused_and_the_newer_change_stays() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-stale",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-stale", &["local-a"]);
+    let old = status(&connection, &setup).unwrap().settings_version;
+    let limits = |session_secs, version| TeamAction::TimeLimits {
+        project_id: project.clone(),
+        turn_secs: None,
+        session_secs,
+        idle_secs: Some(IDLE_STOP_DEFAULT_SECS),
+        version,
+    };
+    let switch = |mode, version| TeamAction::OnHarnessSwitch {
+        project_id: project.clone(),
+        mode,
+        version,
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &limits(Some(7200), old)).unwrap(),
+        Outcome::Applied,
+        "the desktop change from the current read applies"
+    );
+    tx.commit().unwrap();
+    let newer = status(&connection, &setup).unwrap().settings_version;
+    assert_ne!(newer, old, "an applied change moves the version");
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &limits(None, old)).unwrap(),
+        rejected("stale_revision"),
+        "a TUI change from the read before the desktop change is refused"
+    );
+    assert_eq!(
+        execute(&tx, &pool, &switch(SwitchMode::Fresh, old)).unwrap(),
+        rejected("stale_revision"),
+        "the On harness switch setting from the old read is refused too"
+    );
+    tx.commit().unwrap();
+    let shown = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (shown.session_limit_secs, shown.on_harness_switch),
+        (Some(7200), SwitchMode::Carry),
+        "the desktop session limit survives and the switch setting is unchanged"
+    );
+    assert_eq!(
+        shown.settings_version, newer,
+        "a refusal leaves the version"
+    );
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &switch(SwitchMode::Fresh, newer)).unwrap(),
+        Outcome::Applied,
+        "a change from the current read applies"
+    );
+    tx.commit().unwrap();
+    let shown = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (shown.session_limit_secs, shown.on_harness_switch),
+        (Some(7200), SwitchMode::Fresh)
+    );
+    assert_ne!(shown.settings_version, newer);
+}
+
 /// Fills a project's team with long history: `before` finished tasks, two queued tasks,
 /// `after` more finished tasks, 80 stopped sub-agents with long problems, 50 long messages,
 /// 25 long unseen escalations, 50 long events and three long waiting questions; every long
@@ -3578,7 +4034,7 @@ fn a_team_with_120_tasks_and_long_escalations_still_reads_within_one_owner_reply
     let full = status(&connection, &setup).unwrap();
     assert_eq!(full.tasks.len(), 100);
     assert!(!full.partial);
-    let read = owner_status(&connection, &setup).unwrap();
+    let read = owner_status(&connection, &setup, None).unwrap();
     assert!(serde_json::to_vec(&read).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
     assert!(read.partial, "older history was left out to fit");
     assert!(read.tasks.len() < full.tasks.len());
@@ -3617,7 +4073,7 @@ fn a_team_with_120_tasks_and_long_escalations_still_reads_within_one_owner_reply
             "{text}"
         );
     }
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     assert!(serde_json::to_vec(&graph).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
 }
 
@@ -3701,6 +4157,102 @@ fn the_team_status_counts_an_agent_stored_under_a_harness_alias_as_live() {
     );
 }
 
+/// T3-15: while the Task-start reminder is On, a native teammate's first prompt and its
+/// first prompt after it rested get the lead's reminder, a prompt mid-task and a lead whose
+/// launch names nothing give none, and with the setting Off no prompt gets it.
+#[test]
+fn a_native_teammate_gets_the_task_start_reminder_on_the_first_prompt_of_each_task_while_on() {
+    const TEXT: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and call the Skill tool for each one that applies: `crazyagent:tdd`.";
+    let (_directory, connection) = database();
+    let project = crate::protocol::ProjectId::new("tidepool").unwrap();
+    connection
+        .execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('tidepool','{}');")
+        .unwrap();
+    let add = |role: &str, parent: Option<i64>, pane: Option<&str>| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,pane)
+                 VALUES (?1,?2,'claude-code',1,'acct','working',1,1,?3,?4)",
+                rusqlite::params![project.as_str(), role, parent, pane],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let lead = add("sub", None, None);
+    add("teammate", Some(lead), Some("%7"));
+    add("teammate", Some(lead), Some("%8"));
+    let report = |pane: &str, request: &[u8], starts: &mut crate::coord::relay::TaskStarts| {
+        let mut answer = Vec::new();
+        crate::coord::relay::answer(
+            &connection,
+            crate::coord::relay::ForLead {
+                project: &project,
+                id: lead,
+                starts,
+            },
+            pane,
+            request,
+            &mut answer,
+            10,
+        )
+        .unwrap();
+        String::from_utf8(answer).unwrap()
+    };
+    let given = format!("ok\n{TEXT}");
+    let mut starts = crate::coord::relay::TaskStarts {
+        text: Some(TEXT.into()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        report("%7", b"prompt other", &mut starts),
+        given,
+        "a teammate's first prompt"
+    );
+    assert_eq!(
+        report("%7", b"prompt typed", &mut starts),
+        "ok\n",
+        "a prompt mid-task"
+    );
+    assert_eq!(report("%7", b"post own Read", &mut starts), "ok\n");
+    assert_eq!(
+        report("%8", b"prompt typed", &mut starts),
+        given,
+        "the other teammate's first prompt"
+    );
+    assert_eq!(report("%7", b"stop own", &mut starts), "ok\n");
+    assert_eq!(
+        report("%7", b"prompt other", &mut starts),
+        given,
+        "the first prompt after it rested"
+    );
+    assert_eq!(report("%7", b"prompt other", &mut starts), "ok\n");
+
+    let mut nothing = crate::coord::relay::TaskStarts::default();
+    assert_eq!(report("%7", b"stop own", &mut nothing), "ok\n");
+    assert_eq!(
+        report("%7", b"prompt other", &mut nothing),
+        "ok\n",
+        "a lead whose launch names nothing"
+    );
+
+    crate::coord::settings::write(
+        &connection,
+        &project,
+        &crate::coord::settings::CoordSettings {
+            task_start: crate::coord::settings::TaskStart::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report("%8", b"stop own", &mut starts), "ok\n");
+    assert_eq!(
+        report("%8", b"prompt other", &mut starts),
+        "ok\n",
+        "Off gives none"
+    );
+}
+
 #[test]
 fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_works_again() {
     let (directory, connection) = database();
@@ -3721,13 +4273,29 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
     let mailbox = directory.path().join("agent").join("tmp").join("mailbox");
     std::fs::create_dir_all(&mailbox).unwrap();
     std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let rests = mailbox.join("00000000000000000000000000000008.idle");
     let status = |id: i64| -> String {
         connection
             .query_row("SELECT status FROM team_agents WHERE id=?1", [id], |row| {
                 row.get(0)
             })
             .unwrap()
+    };
+    let report = |pane: &str, request: &[u8], now: i64| -> Vec<u8> {
+        let mut answer = Vec::new();
+        crate::coord::relay::answer(
+            &connection,
+            crate::coord::relay::ForLead {
+                project: &project,
+                id: lead,
+                starts: &mut crate::coord::relay::TaskStarts::default(),
+            },
+            pane,
+            request,
+            &mut answer,
+            now,
+        )
+        .unwrap();
+        answer
     };
     let tick = |now: i64| {
         crate::coord::relay::serve(
@@ -3736,14 +4304,14 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
             lead,
             directory.path(),
             &mailbox,
+            crate::coord::relay::Layout::Split,
             false,
             now,
         )
         .unwrap();
     };
 
-    std::fs::write(&rests, b"").unwrap();
-    tick(10);
+    report("%7", b"stop own", 10);
     assert_eq!(
         status(mate),
         "idle",
@@ -3759,15 +4327,14 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
     assert_eq!(
         status(mate),
         "idle",
-        "the mark stays until its own hook clears it"
+        "it rests until its own hook reports work"
     );
 
-    std::fs::remove_file(&rests).unwrap();
-    tick(12);
+    report("%7", b"post own Read", 12);
     assert_eq!(
         status(mate),
         "working",
-        "it works again once the mark is gone"
+        "it works again once its own hook reports work"
     );
 
     connection
@@ -3776,8 +4343,7 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
             [other],
         )
         .unwrap();
-    std::fs::write(mailbox.join("00000000000000000000000000000009.idle"), b"").unwrap();
-    tick(13);
+    report("%8", b"stop own", 13);
     assert_eq!(
         status(other),
         "stopped",
@@ -3785,14 +4351,14 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
     );
 }
 
-/// The late team columns of `team_agents` and `team_tasks` an engine database has. Takes
-/// the connection. Returns (table, column) pairs in name order.
+/// The late team columns of `team_agents`, `team_tasks` and `team_task_pins` an engine
+/// database has. Takes the connection. Returns (table, column) pairs in name order.
 fn late_columns(connection: &Connection) -> Vec<(String, String)> {
     let mut statement = connection
         .prepare(
             "SELECT m.name,p.name FROM sqlite_schema m, pragma_table_info(m.name) p
-             WHERE m.type='table' AND m.name IN ('team_agents','team_tasks')
-             AND p.name IN ('pane','mode','hookless') ORDER BY 1,2",
+             WHERE m.type='table' AND m.name IN ('team_agents','team_tasks','team_task_pins')
+             AND p.name IN ('pane','mode','hookless','held') ORDER BY 1,2",
         )
         .unwrap();
     statement
@@ -3824,8 +4390,12 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
                 created_ms INTEGER NOT NULL, started_ms INTEGER, finished_ms INTEGER,
                 session TEXT, parent INTEGER
             );
+            CREATE TABLE team_task_pins (
+                task INTEGER PRIMARY KEY, project TEXT NOT NULL, agent INTEGER NOT NULL
+            );
             INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
-                VALUES ('old','sub','claude-code',1,'stopped',1,1);",
+                VALUES ('old','sub','claude-code',1,'stopped',1,1);
+            INSERT INTO team_task_pins(task,project,agent) VALUES (7,'old',1);",
         )
         .unwrap();
     assert!(late_columns(&connection).is_empty());
@@ -3833,6 +4403,7 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         ("team_agents", "hookless"),
         ("team_agents", "mode"),
         ("team_agents", "pane"),
+        ("team_task_pins", "held"),
         ("team_tasks", "mode"),
     ]
     .iter()
@@ -3850,6 +4421,15 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         )
         .unwrap();
     assert_eq!(old, (None, None, 0));
+    let held: i64 = connection
+        .query_row("SELECT held FROM team_task_pins WHERE task=7", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        held, 0,
+        "a pin from before the mark counts as its task's own"
+    );
 }
 
 #[test]
@@ -3933,6 +4513,91 @@ fn a_lead_keeps_the_mode_it_first_started_in_whatever_the_setting_says_later() {
         lead_mode(&connection, &project, unknown).unwrap_err().0,
         "team_lead_mode_invalid"
     );
+}
+
+/// A stop keeps the highest standing of those who made it, down the stopped agent's lead
+/// tree: a lead's or a master's stop is not the owner's, the owner's stop of such an agent
+/// is, and a later master's stop leaves it the owner's (HB-S5-B).
+#[test]
+fn a_stop_keeps_the_highest_standing_of_who_made_it() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-stop").unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent) VALUES
+             (7,'team-stop','sub','claude-code',1,'working',1,1,NULL),
+             (8,'team-stop','master','claude-code',1,'working',1,1,NULL),
+             (9,'team-stop','sub','claude-code',1,'working',1,1,7);",
+        )
+        .unwrap();
+    let recorded = || -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_owner_stops WHERE agent IN (7,9)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(recorded(), 0);
+    assert_eq!(
+        agent_stop(&connection, &project, 100, StoppedBy::Master, 1).unwrap(),
+        Err("team_agent_not_found")
+    );
+    assert_eq!(
+        agent_stop(&connection, &project, 8, StoppedBy::Master, 1).unwrap(),
+        Err("team_stop_master")
+    );
+    for by in [StoppedBy::Lead, StoppedBy::Master] {
+        agent_stop(&connection, &project, 7, by, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded(), 2, "{by:?} stops the agent and its worker");
+        assert!(!owner_stopped(&connection, 7).unwrap(), "{by:?}");
+        assert!(!owner_stopped(&connection, 9).unwrap(), "{by:?}");
+    }
+    assert_eq!(
+        stop_of(&connection, 7).unwrap(),
+        Some((StoppedBy::Master, 1)),
+        "the master's stop rises over the lead's"
+    );
+    agent_stop(&connection, &project, 7, StoppedBy::Lead, 2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stop_of(&connection, 7).unwrap(),
+        Some((StoppedBy::Master, 2)),
+        "a lead's later stop does not lower the master's, and its time stands"
+    );
+    owner_stop(&connection, &project, 7, 2).unwrap();
+    assert!(owner_stopped(&connection, 7).unwrap());
+    assert!(owner_stopped(&connection, 9).unwrap());
+    agent_stop(&connection, &project, 7, StoppedBy::Master, 3)
+        .unwrap()
+        .unwrap();
+    assert!(owner_stopped(&connection, 7).unwrap());
+    assert_eq!(
+        stop_of(&connection, 7).unwrap(),
+        Some((StoppedBy::Owner, 3))
+    );
+}
+
+/// A stop recorded before stops named their maker was the owner's own, so an engine DB from
+/// then keeps it locked to the owner once it gains the column.
+#[test]
+fn a_stop_recorded_before_makers_were_kept_stays_the_owners() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_owner_stops (
+                agent INTEGER PRIMARY KEY, project TEXT NOT NULL, stopped_ms INTEGER NOT NULL
+             );
+             INSERT INTO team_owner_stops(agent,project,stopped_ms) VALUES (7,'team-stop',1);",
+        )
+        .unwrap();
+    initialize(&connection).unwrap();
+    assert!(owner_stopped(&connection, 7).unwrap());
 }
 
 #[test]
@@ -4039,6 +4704,14 @@ fn stop_agent_on_teammate_records_an_owner_stop_and_stop_teammate_marks_its_pane
     );
 }
 
+#[test]
+#[should_panic(expected = "the owner stops through owner_stop")]
+fn the_owner_never_stops_through_agent_stop() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-stop").unwrap();
+    let _ = agent_stop(&connection, &project, 7, StoppedBy::Owner, 1);
+}
+
 /// RSF2-L2: clearing one agent's owner stop takes a stored agent id; id 0, which no
 /// agent row has, trips the assertion before any row is touched.
 #[test]
@@ -4118,22 +4791,61 @@ fn add_late_columns_upgrades_an_old_database_once() {
     let agents = columns("team_agents");
     let tasks = columns("team_tasks");
     assert_eq!(
-        agents[agents.len() - 3..],
-        ["pane".to_owned(), "mode".to_owned(), "hookless".to_owned()]
+        agents[agents.len() - 4..],
+        [
+            "pane".to_owned(),
+            "mode".to_owned(),
+            "hookless".to_owned(),
+            "pane_pid".to_owned()
+        ]
     );
-    assert_eq!(tasks.last().map(String::as_str), Some("mode"));
-    let kept: (String, Option<String>, Option<String>, bool) = connection
+    assert_eq!(
+        tasks[tasks.len() - 3..],
+        ["mode".to_owned(), "cancel_by".to_owned(), "wait".to_owned()]
+    );
+    let kept: (String, Option<String>, Option<String>, bool, Option<i64>) = connection
         .query_row(
-            "SELECT harness,pane,mode,hookless FROM team_agents WHERE project='team-old'",
+            "SELECT harness,pane,mode,hookless,pane_pid FROM team_agents WHERE project='team-old'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .unwrap();
-    assert_eq!(kept, ("claude-code".to_owned(), None, None, false));
-    let task_mode: Option<String> = connection
-        .query_row("SELECT mode FROM team_tasks", [], |row| row.get(0))
+    assert_eq!(kept, ("claude-code".to_owned(), None, None, false, None));
+    type OldTask = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let old_task: OldTask = connection
+        .query_row(
+            "SELECT status,error,mode,cancel_by,wait FROM team_tasks WHERE project='team-old'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
         .unwrap();
-    assert_eq!(task_mode, None);
+    assert_eq!(
+        old_task,
+        ("done".to_owned(), None, None, None, None),
+        "the old task keeps its status and error, with no cancel request or wait reason"
+    );
 
     initialize(&connection).unwrap();
     assert_eq!(columns("team_agents"), agents, "a second open adds nothing");
@@ -4248,7 +4960,7 @@ fn the_owner_graph_reads_its_tree_presence_unread_messages_and_overlaps_from_the
         "an unrelated agent claiming src/login.rs overlaps the lead and its worker"
     );
 
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     let lead_node = format!("team-{lead}");
     let worker_node = format!("team-{worker}");
     let other_node = format!("team-{other}");
@@ -4373,7 +5085,7 @@ fn the_owner_messages_one_agent_through_the_coordination_layer_and_bad_text_is_r
             crate::coord::Receipt::Sent
         )]
     );
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     assert_eq!(graph.messages.len(), 1);
     assert_eq!(graph.messages[0].to, format!("team-{lead}"));
 }
@@ -4418,7 +5130,7 @@ fn a_lead_s_idle_workers_stay_in_view_and_keep_their_tasks_once_every_agent_stop
     );
     let lead_node = format!("team-{lead}");
     let worker_nodes: Vec<String> = workers.iter().map(|id| format!("team-{id}")).collect();
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     let tree: Vec<(&str, Option<&str>)> = graph
         .nodes
         .iter()
@@ -4473,7 +5185,7 @@ fn a_lead_s_idle_workers_stay_in_view_and_keep_their_tasks_once_every_agent_stop
         "{:#?}",
         stopped.agents
     );
-    let hidden = owner_graph(&connection, &setup).unwrap();
+    let hidden = owner_graph(&connection, &setup, None).unwrap();
     assert!(
         hidden.nodes.iter().all(|node| !node.kind.agent()),
         "Hide leaves only the master: {:#?}",
@@ -4559,16 +5271,16 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     let defaults = coordination(&connection, &project).unwrap();
     assert_eq!(defaults.settings, CoordSettings::default());
     assert_eq!(defaults.harnesses.len(), HarnessKind::ALL.len());
-    assert_eq!(
-        row(&defaults, HarnessKind::ClaudeCode),
-        (SubagentMode::AppSpawned, Delivery::Auto, true)
-    );
-    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
+    for harness in [HarnessKind::ClaudeCode, HarnessKind::Codex] {
         assert_eq!(
             row(&defaults, harness),
-            (SubagentMode::AppSpawned, Delivery::Auto, false)
+            (SubagentMode::AppSpawned, Delivery::Auto, true)
         );
     }
+    assert_eq!(
+        row(&defaults, HarnessKind::Rcli),
+        (SubagentMode::AppSpawned, Delivery::Auto, false)
+    );
     assert_eq!(
         status(&connection, &setup).unwrap().coordination,
         Some(defaults)
@@ -4589,15 +5301,19 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     };
     assert_eq!(too_many.validate().unwrap_err().0, "coord_settings_invalid");
     assert_eq!(act(too_many).unwrap_err(), "coord_settings_invalid");
-    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
-        let native = TeamAction::HarnessMode {
-            project_id: project.clone(),
-            harness,
-            mode: SubagentMode::Native,
-        };
-        assert_eq!(native.validate().unwrap_err().0, "coord_native_unsupported");
-        assert_eq!(act(native).unwrap_err(), "coord_native_unsupported");
-    }
+    let native = TeamAction::HarnessMode {
+        project_id: project.clone(),
+        harness: HarnessKind::Rcli,
+        mode: SubagentMode::Native,
+    };
+    assert_eq!(native.validate().unwrap_err().0, "coord_native_unsupported");
+    assert_eq!(act(native).unwrap_err(), "coord_native_unsupported");
+    let codex = TeamAction::HarnessMode {
+        project_id: project.clone(),
+        harness: HarnessKind::Codex,
+        mode: SubagentMode::Native,
+    };
+    assert!(codex.validate().is_ok());
 
     let chosen = CoordSettings {
         questions_to: QuestionsTo::Me,
@@ -4608,6 +5324,13 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
             worker: Some(vec!["release-notes".into()]),
             ..Default::default()
         },
+        terminal_display: crate::coord::settings::TerminalDisplay::Fullscreen,
+        task_start: crate::coord::settings::TaskStart::Off,
+        heavy_lane: crate::coord::settings::HeavyLane::Two,
+        shared_resources: vec![crate::coord::settings::SharedResource {
+            name: "ollama".into(),
+            slots: 1,
+        }],
     };
     for action in [
         TeamAction::CoordSettings {
@@ -4639,7 +5362,7 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     );
     assert_eq!(
         row(&saved, HarnessKind::Codex),
-        (SubagentMode::AppSpawned, Delivery::Auto, false)
+        (SubagentMode::AppSpawned, Delivery::Auto, true)
     );
     let other = stored("team-coord-other", vec![]);
     assert_eq!(
@@ -4771,6 +5494,217 @@ fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
         assert!(!paused(&connection, &project).unwrap());
         assert!(!budget_stop(&connection, &project, now_ms()).unwrap());
     }
+}
+
+#[test]
+fn a_budget_stays_valid_after_the_recount_is_used() {
+    let (directory, mut connection, project) = team_database("team-budget-recount");
+    crate::usage::initialize(&connection).unwrap();
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(BUDGET_CHOICES[0]),
+        },
+    );
+    used_tokens(&connection, &project, "s1", now_ms(), 400, 0);
+    let before = budget(&connection, &project).unwrap().unwrap();
+    let home = directory.path().join("recount-home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-11-09T02:00:00.000Z",
+                "message": {"id": "msg_a", "model": "claude-opus-4-5", "usage": {"input_tokens": 1, "output_tokens": 0}}
+            })
+        ),
+    )
+    .unwrap();
+    crate::usage::recount::tests_support::recount_and_use(
+        &connection,
+        &home,
+        project.as_str(),
+        now_ms(),
+    );
+    let after = budget(&connection, &project).unwrap().unwrap();
+    assert_eq!(after.tokens, before.tokens);
+    assert!(after.used <= before.used);
+    assert!(!after.reached);
+}
+
+#[test]
+fn a_budget_can_rise_after_the_recount_is_used_and_says_it_was_reached() {
+    let (directory, mut connection, project) = team_database("team-budget-recount-up");
+    crate::usage::initialize(&connection).unwrap();
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(BUDGET_CHOICES[0]),
+        },
+    );
+    used_tokens(&connection, &project, "s1", now_ms(), 400, 0);
+    let before = budget(&connection, &project).unwrap().unwrap();
+    assert!(!before.reached);
+    let home = directory.path().join("recount-home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"id": "msg_a", "model": "claude-opus-4-5", "usage": {"input_tokens": BUDGET_CHOICES[0] + 1, "output_tokens": 0}}
+            })
+        ),
+    )
+    .unwrap();
+    crate::usage::recount::tests_support::recount_and_use(
+        &connection,
+        &home,
+        project.as_str(),
+        now_ms(),
+    );
+    assert!(
+        budget_stop(&connection, &project, now_ms()).unwrap(),
+        "the team's next step stops it"
+    );
+    let after = budget(&connection, &project).unwrap().unwrap();
+    assert!(after.used > before.used);
+    assert!(after.reached);
+}
+
+/// A budget reads tokens only, so the estimated dollars on a row never spend it.
+#[test]
+fn a_budget_spends_the_same_tokens_whatever_the_rows_cost() {
+    let (_directory, mut connection, project) = team_database("team-budget-dollars");
+    crate::usage::initialize(&connection).unwrap();
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(BUDGET_CHOICES[0]),
+        },
+    );
+    used_tokens(&connection, &project, "work", now_ms(), 40, 2);
+    let before = budget(&connection, &project).unwrap().unwrap().used;
+    connection
+        .execute(
+            "UPDATE usage_tokens SET cost_nanos=999999999 WHERE session='work'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(budget(&connection, &project).unwrap().unwrap().used, before);
+    assert_eq!(before, 42);
+}
+
+/// A token budget spends the headline count (DEC-117 Q6): new input, cache writes and
+/// output reach it, and cache re-reads, however many, never do.
+#[test]
+fn a_token_budget_spends_new_input_cache_writes_and_output_but_never_cache_reads() {
+    let (_directory, mut connection, project) = team_database("team-budget-headline");
+    crate::usage::initialize(&connection).unwrap();
+    let tokens = BUDGET_CHOICES[0];
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(tokens),
+        },
+    );
+    let now = now_ms();
+    let headline = i64::try_from(tokens).unwrap() - 1;
+    connection
+        .execute(
+            "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+             VALUES (?1,'agent',?2,'pool-a','account-a','7','claude-code','cached',?3,?4,?5,?6)",
+            params![
+                hour_of(now),
+                project.as_str(),
+                headline - 30,
+                10,
+                i64::try_from(tokens).unwrap() * 40,
+                20
+            ],
+        )
+        .unwrap();
+    let read = budget(&connection, &project).unwrap().unwrap();
+    assert_eq!(read.used, tokens - 1);
+    assert!(!budget_stop(&connection, &project, now).unwrap());
+    used_tokens(&connection, &project, "last", now, 1, 0);
+    assert!(budget_stop(&connection, &project, now).unwrap());
+}
+
+/// The plan's known run (Task 13, T13-L1): one real capture of a Claude transcript that
+/// holds a message written three times and one that re-read 17.5 M tokens from cache spends
+/// the team's token budget by exactly the headline the usage report shows for that agent:
+/// new input, cache writes and output, once per message id.
+#[test]
+fn a_captured_run_spends_the_budget_by_the_headline_its_usage_row_shows() {
+    let (_directory, mut connection, project) = team_database("team-budget-known-run");
+    crate::usage::initialize(&connection).unwrap();
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(BUDGET_CHOICES[0]),
+        },
+    );
+    let message = |id: &str, input: u64, output: u64, read: u64, written: u64| {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"id": id, "usage": {
+                    "input_tokens": input, "output_tokens": output,
+                    "cache_read_input_tokens": read, "cache_creation_input_tokens": written
+                }}
+            })
+        )
+    };
+    let mut transcript = message("k1", 100, 70_000, 182_114, 150_000).repeat(3);
+    transcript.push_str(&message("k2", 94, 69_484, 17_482_981, 138_322));
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/f/k.jsonl");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(&record, transcript).unwrap();
+    let now = now_ms();
+    let ken = crate::usage::capture::Attribution {
+        kind: crate::usage::capture::RunKind::Agent,
+        project: Some(project.clone()),
+        pool: None,
+        account: Some(crate::protocol::CredentialRef::new("claude-1").unwrap()),
+        agent: "team-ken".into(),
+        harness: "claude-code".into(),
+    };
+    crate::usage::capture::scan_home(
+        &connection,
+        home.path(),
+        crate::usage::capture::Format::Claude,
+        &ken,
+        now,
+    )
+    .unwrap();
+    let report =
+        crate::usage::report::report(&connection, Some(&project), None, 0, now, &[]).unwrap();
+    let row = report
+        .agents
+        .iter()
+        .find(|row| row.key == "team-ken")
+        .unwrap();
+    assert_eq!(row.tokens.cache_read, 182_114 + 17_482_981);
+    assert_eq!(
+        row.tokens.headline(),
+        (100 + 70_000 + 150_000) + (94 + 69_484 + 138_322)
+    );
+    let read = budget(&connection, &project).unwrap().unwrap();
+    assert_eq!(read.used, row.tokens.headline());
+    assert!(!read.reached);
 }
 
 /// Inserts one agent row. Takes the connection, the project, the role, its lead and its
@@ -5133,4 +6067,1492 @@ fn every_new_folder_limit_choice_is_saved_and_shown() {
         NEW_FOLDER_FILES_DEFAULT,
         "the choice is per project"
     );
+}
+/// The six Messages settings (MSG-E) start at the proposed defaults, an owner save through the
+/// team action is stored whole and read back in the team status, a value outside the listed
+/// choices is refused before any row is written, and the choice is per project.
+#[test]
+fn messages_settings_start_at_the_defaults_save_whole_per_project_and_refuse_unlisted_values() {
+    use agent_messages::{MessageSettings, ResultsShown};
+    let (_directory, mut connection) = database();
+    let setup = stored("team-messages", vec![]);
+    let other = stored("team-messages-other", vec![]);
+    for stored in [&setup, &other] {
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                params![
+                    stored.project_id.as_str(),
+                    serde_json::to_string(stored).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        status(&connection, &setup).unwrap().message_settings,
+        MessageSettings {
+            keep_master_messages: true,
+            kept_per_project: 2000,
+            progress_shown: true,
+            results: ResultsShown::FirstLine,
+            owner_items_shown: true,
+            page_size: 50,
+        },
+        "the proposal's defaults until the owner saves"
+    );
+    let save = |connection: &mut Connection, settings: MessageSettings| {
+        let tx = connection.transaction().unwrap();
+        let outcome = execute(
+            &tx,
+            &access("team-messages", &["local-a"]),
+            &TeamAction::MessageSettings {
+                project_id: setup.project_id.clone(),
+                settings,
+            },
+        );
+        tx.commit().unwrap();
+        outcome
+    };
+    let chosen = MessageSettings {
+        keep_master_messages: false,
+        kept_per_project: 5000,
+        progress_shown: false,
+        results: ResultsShown::Full,
+        owner_items_shown: false,
+        page_size: 100,
+    };
+    assert_eq!(save(&mut connection, chosen).unwrap(), Outcome::Applied);
+    assert_eq!(
+        status(&connection, &setup).unwrap().message_settings,
+        chosen
+    );
+    for kept in agent_messages::KEPT_CHOICES {
+        for page_size in agent_messages::PAGE_CHOICES {
+            let listed = MessageSettings {
+                kept_per_project: kept,
+                page_size,
+                ..chosen
+            };
+            assert_eq!(save(&mut connection, listed).unwrap(), Outcome::Applied);
+            assert_eq!(
+                status(&connection, &setup).unwrap().message_settings,
+                listed
+            );
+        }
+    }
+    let last = status(&connection, &setup).unwrap().message_settings;
+    for unlisted in [
+        MessageSettings {
+            kept_per_project: 1000,
+            ..chosen
+        },
+        MessageSettings {
+            kept_per_project: 0,
+            ..chosen
+        },
+        MessageSettings {
+            page_size: 30,
+            ..chosen
+        },
+        MessageSettings {
+            page_size: 0,
+            ..chosen
+        },
+        MessageSettings {
+            page_size: 200,
+            ..chosen
+        },
+    ] {
+        assert_eq!(
+            save(&mut connection, unlisted).unwrap_err().0,
+            "team_message_settings_invalid"
+        );
+        assert_eq!(status(&connection, &setup).unwrap().message_settings, last);
+    }
+    assert_eq!(
+        status(&connection, &other).unwrap().message_settings,
+        MessageSettings::default(),
+        "the choice is per project"
+    );
+}
+
+/// Re-ask empty reply is On for a project with no choice saved, the team status keeps the
+/// owner's Off and then On again, and the choice is per project (DEC-111).
+#[test]
+fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-reask",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-reask", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert!(
+        status(&connection, &setup).unwrap().reask_empty_reply,
+        "On is the default"
+    );
+    for on in [false, true, false] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::ReaskEmptyReply {
+                    project_id: project.clone(),
+                    on,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().reask_empty_reply, on);
+    }
+    assert!(
+        reask_empty_reply(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        "the choice is per project"
+    );
+}
+
+/// End a turn after done is 10 min for a project with no choice saved; the team status keeps
+/// each owner choice, Off, 2 min, 10 min and 1 h; a time outside the choices is refused; and
+/// the choice is per project (F15).
+#[test]
+fn end_a_turn_after_done_keeps_every_owner_choice_and_refuses_any_other() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-done-quiet",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-done-quiet", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert_eq!(
+        status(&connection, &setup).unwrap().done_quiet_secs,
+        Some(DONE_QUIET_DEFAULT_SECS),
+        "10 min is the default"
+    );
+    for secs in [None, Some(120), Some(600), Some(3600)] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::DoneQuiet {
+                    project_id: project.clone(),
+                    secs,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().done_quiet_secs, secs);
+    }
+    for secs in [Some(0), Some(1), Some(300)] {
+        let action = TeamAction::DoneQuiet {
+            project_id: project.clone(),
+            secs,
+        };
+        assert_eq!(
+            action.validate().unwrap_err().0,
+            "team_done_quiet_invalid",
+            "{secs:?}"
+        );
+    }
+    assert_eq!(
+        done_quiet(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        Some(DONE_QUIET_DEFAULT_SECS),
+        "the choice is per project"
+    );
+}
+
+/// Each "Stop the master when idle after" choice gives its own time against the engine's
+/// bound, and with no choice each kind of master keeps what it did (DEC-117 Q4).
+#[test]
+fn master_idle_stop_choices_give_their_own_time() {
+    let bound = std::time::Duration::from_secs(MASTER_IDLE_STOP_SECS.into());
+    assert_eq!(
+        MasterIdleStop::FifteenMinutes.after(bound),
+        Some(std::time::Duration::from_secs(900))
+    );
+    assert_eq!(
+        MasterIdleStop::OneHour.after(bound),
+        Some(std::time::Duration::from_secs(3600))
+    );
+    assert_eq!(MasterIdleStop::Off.after(bound), None);
+    assert_eq!(
+        MasterIdleStop::effective(None, false),
+        MasterIdleStop::FifteenMinutes,
+        "a master that is not live stops as it always did"
+    );
+    assert_eq!(
+        MasterIdleStop::effective(None, true),
+        MasterIdleStop::Off,
+        "a live master was never stopped as idle"
+    );
+    for choice in [
+        MasterIdleStop::Off,
+        MasterIdleStop::FifteenMinutes,
+        MasterIdleStop::OneHour,
+    ] {
+        assert_eq!(MasterIdleStop::named(choice.name()), Some(choice));
+        assert_eq!(MasterIdleStop::effective(Some(choice), false), choice);
+        assert_eq!(MasterIdleStop::effective(Some(choice), true), choice);
+    }
+    assert_eq!(MasterIdleStop::named("soon"), None);
+}
+
+/// The team status says what stops a master with no choice saved, by whether it is live,
+/// then keeps each of the owner's choices whatever the master runs as, and the choice is
+/// per project (DEC-117 Q4).
+#[test]
+fn master_idle_stop_shows_each_kind_until_the_owner_chooses() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-idle-stop",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-idle-stop", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::FifteenMinutes,
+        "no choice and no live master"
+    );
+    master::set_live(&connection, &project, true).unwrap();
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::Off,
+        "no choice and a live master"
+    );
+    for choice in [
+        MasterIdleStop::OneHour,
+        MasterIdleStop::Off,
+        MasterIdleStop::FifteenMinutes,
+    ] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::MasterIdleStop {
+                    project_id: project.clone(),
+                    choice,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            status(&connection, &setup).unwrap().master_idle_stop,
+            choice
+        );
+    }
+    master::set_live(&connection, &project, false).unwrap();
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::FifteenMinutes,
+        "the owner's choice stays when the live master ends"
+    );
+    assert_eq!(
+        master_idle_stop(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        None,
+        "the choice is per project"
+    );
+}
+
+/// "Live terminal" is on until the owner turns it off and is per project. Off makes a master
+/// count as not live whatever its run flag says, the run flag stays as it was, and with no
+/// idle stop choice saved that master then stops as any other does (DEC-117 Q4).
+#[test]
+fn live_terminal_is_on_until_the_owner_turns_it_off_and_off_means_not_live() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-live-terminal",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-live-terminal", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert!(
+        status(&connection, &setup).unwrap().master_live_terminal,
+        "on with nothing saved"
+    );
+    master::set_live(&connection, &project, true).unwrap();
+    assert!(master::live(&connection, &project).unwrap());
+    for on in [false, true, false] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::MasterLiveTerminal {
+                    project_id: project.clone(),
+                    on,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            status(&connection, &setup).unwrap().master_live_terminal,
+            on
+        );
+        assert_eq!(master::live(&connection, &project).unwrap(), on);
+    }
+    assert_eq!(
+        master::switch(&connection, &project).unwrap().0,
+        Some(true),
+        "the run flag stays as it was"
+    );
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::FifteenMinutes,
+        "a master that is not live stops as any other does"
+    );
+    let elsewhere = ProjectId::new("team-elsewhere").unwrap();
+    master::set_live(&connection, &elsewhere, true).unwrap();
+    assert!(
+        master::live(&connection, &elsewhere).unwrap(),
+        "the setting is per project"
+    );
+}
+
+/// "Catch up with main" is On for a project with no choice saved and for a store with no
+/// team tables, reads the owner's Off and On again, and the choice is per project (OS-8).
+#[test]
+fn catch_up_main_defaults_to_on_and_reads_the_saved_choice() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-catch-up").unwrap();
+    assert_eq!(
+        catch_up_main(&connection, &project).unwrap(),
+        CatchUpMain::On,
+        "On is the default"
+    );
+    for value in [CatchUpMain::Off, CatchUpMain::On, CatchUpMain::Off] {
+        set_catch_up_main(&connection, &project, value).unwrap();
+        assert_eq!(catch_up_main(&connection, &project).unwrap(), value);
+    }
+    assert_eq!(
+        catch_up_main(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        CatchUpMain::On,
+        "the choice is per project"
+    );
+    let bare = Connection::open_in_memory().unwrap();
+    assert_eq!(
+        catch_up_main(&bare, &project).unwrap(),
+        CatchUpMain::On,
+        "a store with no team tables reads On"
+    );
+}
+
+/// The owner's Catch up with main action saves Off and On again for the project and the
+/// team status shows each choice (OS-8).
+#[test]
+fn the_catch_up_with_main_action_is_saved_and_shown_in_the_team_status() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-catch-up-action",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-catch-up-action", &["local-a"]);
+    assert_eq!(
+        status(&connection, &setup).unwrap().catch_up_main,
+        CatchUpMain::On,
+        "On is the default"
+    );
+    for mode in [CatchUpMain::Off, CatchUpMain::On] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::CatchUpMain {
+                    project_id: setup.project_id.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().catch_up_main, mode);
+    }
+}
+
+/// "Landing" is Squash for a project with no choice saved and for a store with no team
+/// tables, reads the owner's Merge commit and Squash again, the choice is per project, and
+/// a stored name it does not know is refused (DEC-147.6).
+#[test]
+fn landing_mode_defaults_to_squash_and_reads_the_saved_choice() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-landing-mode").unwrap();
+    assert_eq!(
+        landing_mode(&connection, &project).unwrap(),
+        LandingMode::Squash,
+        "Squash is the default"
+    );
+    for value in [LandingMode::Merge, LandingMode::Squash, LandingMode::Merge] {
+        set_landing_mode(&connection, &project, value).unwrap();
+        assert_eq!(landing_mode(&connection, &project).unwrap(), value);
+    }
+    assert_eq!(
+        landing_mode(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        LandingMode::Squash,
+        "the choice is per project"
+    );
+    let bare = Connection::open_in_memory().unwrap();
+    assert_eq!(
+        landing_mode(&bare, &project).unwrap(),
+        LandingMode::Squash,
+        "a store with no team tables reads Squash"
+    );
+    assert_eq!(LandingMode::named("rebase"), None);
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO team_landing_mode(project,mode) VALUES ('team-odd','rebase')",
+                [],
+            )
+            .is_err(),
+        "the table refuses a mode it does not know"
+    );
+}
+
+/// The owner's Landing action saves Merge commit and Squash again for the project and the
+/// team status shows each choice (DEC-147.6).
+#[test]
+fn the_landing_mode_action_is_saved_and_shown_in_the_team_status() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-landing-action",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-landing-action", &["local-a"]);
+    assert_eq!(
+        status(&connection, &setup).unwrap().landing_mode,
+        LandingMode::Squash,
+        "Squash is the default"
+    );
+    for mode in [LandingMode::Merge, LandingMode::Squash] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::LandingMode {
+                    project_id: setup.project_id.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().landing_mode, mode);
+    }
+}
+
+/// Owner 2026-11-05: under Native only the team status and graph say "Can't receive
+/// messages" on a tools-off Codex sub-agent of a keyless endpoint account, which runs a kept
+/// session with no bridge, and on no other agent: not one on a signed-in profile, woken per
+/// turn, nor one with tools on, another harness, the master, one whose account is gone, or
+/// any agent once the setting is Auto.
+#[test]
+fn only_a_tools_off_codex_agent_on_a_keyless_endpoint_says_it_cannot_receive_messages() {
+    use crate::coord::delivery::NO_CHANNEL;
+    use crate::coord::settings::{Delivery, HarnessKind, set_delivery};
+    let (_directory, connection) = database();
+    let setup = stored("team-no-channel", Vec::new());
+    let project = setup.project_id.clone();
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);",
+        )
+        .unwrap();
+    connection
+        .execute("INSERT INTO projects VALUES (?1,'{}')", [project.as_str()])
+        .unwrap();
+    let access = access(
+        project.as_str(),
+        &["local-b", "codex-signed-in", "anthropic-local"],
+    );
+    let agent = |role: &str, harness: &str, tools: bool, account: &str| -> i64 {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+                 VALUES (?1,?2,?3,?4,?5,'idle',1,1)",
+                params![project.as_str(), role, harness, tools, account],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let kept = agent("sub", "codex", false, "local-b");
+    agent("sub", "codex", false, "codex-signed-in");
+    agent("sub", "codex", true, "local-b");
+    agent("sub", "claude-code", false, "anthropic-local");
+    agent("master", "codex", false, "local-b");
+    agent("sub", "codex", false, "gone-account");
+    set_delivery(
+        &connection,
+        &project,
+        HarnessKind::Codex,
+        Delivery::NativeOnly,
+    )
+    .unwrap();
+    type Noted = (Vec<(i64, String)>, Vec<(Option<i64>, String)>);
+    let noted = |access: Option<&ModelAccess>| -> Noted {
+        let status = owner_status(&connection, &setup, access).unwrap();
+        let graph = owner_graph(&connection, &setup, access).unwrap();
+        (
+            status
+                .agents
+                .iter()
+                .filter_map(|a| Some((a.id, a.message_note.clone()?)))
+                .collect(),
+            graph
+                .nodes
+                .iter()
+                .filter_map(|n| Some((n.agent, n.message_note.clone()?)))
+                .collect(),
+        )
+    };
+    assert_eq!(
+        noted(Some(&access)),
+        (
+            vec![(kept, NO_CHANNEL.to_owned())],
+            vec![(Some(kept), NO_CHANNEL.to_owned())]
+        )
+    );
+    assert_eq!(noted(None), (Vec::new(), Vec::new()));
+    for delivery in [Delivery::Auto, Delivery::TypingOnly] {
+        set_delivery(&connection, &project, HarnessKind::Codex, delivery).unwrap();
+        assert_eq!(
+            noted(Some(&access)),
+            (Vec::new(), Vec::new()),
+            "{delivery:?}"
+        );
+    }
+}
+
+/// Owner 2026-11-07 (OS-4): Terminals per window is Six for a project with no choice saved,
+/// the team status and the reader keep each saved choice of 4, 6 and 9, the choice is per
+/// project, and any other count is refused before it reaches the engine.
+#[test]
+fn terminals_per_window_is_six_until_the_owner_picks_four_or_nine_and_reads_each_choice() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-wall",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-wall", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert_eq!(
+        status(&connection, &setup).unwrap().terminals_per_window,
+        TerminalsPerWindow::Six,
+        "Six is the default"
+    );
+    for choice in [
+        TerminalsPerWindow::Four,
+        TerminalsPerWindow::Nine,
+        TerminalsPerWindow::Six,
+        TerminalsPerWindow::Four,
+    ] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::TerminalsPerWindow {
+                    project_id: project.clone(),
+                    per_window: choice,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(terminals_per_window(&connection, &project).unwrap(), choice);
+        assert_eq!(
+            status(&connection, &setup).unwrap().terminals_per_window,
+            choice
+        );
+    }
+    assert_eq!(
+        terminals_per_window(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        TerminalsPerWindow::Six,
+        "the choice is per project"
+    );
+    assert_eq!(
+        [4u8, 6, 9].map(|count| serde_json::to_string(
+            &TerminalsPerWindow::try_from(count).unwrap()
+        )
+        .unwrap()),
+        ["4", "6", "9"]
+    );
+    for count in ["0", "5", "8", "10", "\"six\""] {
+        assert!(
+            serde_json::from_str::<TerminalsPerWindow>(count).is_err(),
+            "{count} is not a choice"
+        );
+    }
+}
+
+#[test]
+fn master_lands_defaults_to_merges_at_full_access_and_is_always_waits_otherwise() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let connection = Connection::open_in_memory().unwrap();
+    initialize(&connection).unwrap();
+    let project = ProjectId::new("lands").unwrap();
+    let access = |level: AgentAccess| {
+        let policy = AgentPolicy {
+            access: level,
+            ..AgentPolicy::default()
+        };
+        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+    };
+    access(AgentAccess::Full);
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Merges,
+        "Full access with no choice saved merges"
+    );
+    set_master_lands(&connection, &project, MasterLands::Waits).unwrap();
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Waits
+    );
+    set_master_lands(&connection, &project, MasterLands::Merges).unwrap();
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Merges
+    );
+    for level in [AgentAccess::OwnBranch, AgentAccess::Sandboxed] {
+        access(level);
+        assert_eq!(
+            master_lands(&connection, &project).unwrap(),
+            MasterLands::Waits,
+            "{level:?} never lets the master merge into main"
+        );
+    }
+    let unset = ProjectId::new("unset").unwrap();
+    set_master_lands(&connection, &unset, MasterLands::Merges).unwrap();
+    assert_eq!(
+        master_lands(&connection, &unset).unwrap(),
+        MasterLands::Waits,
+        "a project with no saved access is Sandboxed"
+    );
+    assert_eq!(MasterLands::named("merges"), Some(MasterLands::Merges));
+    assert_eq!(MasterLands::named("waits"), Some(MasterLands::Waits));
+    assert_eq!(MasterLands::named("Merges"), None);
+}
+
+/// The owner's choice of what a Full-access master does with its own conflict fixes is saved
+/// per project, and the team status shows it only while the project is at Full access
+/// (DEC-117 Q2).
+#[test]
+fn a_master_lands_change_is_saved_and_shown_only_at_full_access() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let (_directory, mut connection) = database();
+    let setup = stored("team-lands", Vec::new());
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-lands", &["local-a"]);
+    let project = setup.project_id.clone();
+    let level = |connection: &Connection, access: AgentAccess| {
+        let policy = AgentPolicy {
+            access,
+            ..AgentPolicy::default()
+        };
+        crate::sandbox::policy::save(connection, project.as_str(), &policy).unwrap();
+    };
+    level(&connection, AgentAccess::Full);
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_lands,
+        Some(MasterLands::Merges),
+        "Merges is the default at Full access"
+    );
+    for mode in [MasterLands::Waits, MasterLands::Merges, MasterLands::Waits] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::MasterLands {
+                    project_id: project.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            status(&connection, &setup).unwrap().master_lands,
+            Some(mode)
+        );
+        assert_eq!(master_lands(&connection, &project).unwrap(), mode);
+    }
+    level(&connection, AgentAccess::OwnBranch);
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_lands,
+        None,
+        "below Full access the choice is not offered"
+    );
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Waits
+    );
+}
+
+/// DEC-119 (HackerBlog held turns): a project with no saved Background commands at task end
+/// choice gives its agents' background commands a grace time of 30 minutes, the time also
+/// offered when the owner first picks a grace time; every saved choice still reads back.
+#[test]
+fn background_commands_at_task_end_default_to_a_thirty_minute_grace() {
+    let connection = Connection::open_in_memory().unwrap();
+    initialize(&connection).unwrap();
+    let project = ProjectId::new("background").unwrap();
+    let thirty_minutes = BackgroundAtEnd::Grace { secs: 1800 };
+    assert_eq!(BackgroundAtEnd::default(), thirty_minutes);
+    assert_eq!(BACKGROUND_GRACE_SECS_DEFAULT, 1800);
+    assert!(BACKGROUND_GRACE_CHOICES_SECS.contains(&BACKGROUND_GRACE_SECS_DEFAULT));
+    assert_eq!(
+        background_at_end(&connection, &project).unwrap(),
+        thirty_minutes
+    );
+    for choice in [
+        BackgroundAtEnd::Wait,
+        BackgroundAtEnd::Grace { secs: 10 },
+        BackgroundAtEnd::Stop,
+    ] {
+        let (mode, secs) = choice.stored();
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO team_background(project,mode,grace_secs) VALUES (?1,?2,?3)",
+                rusqlite::params![project.as_str(), mode, secs],
+            )
+            .unwrap();
+        assert_eq!(background_at_end(&connection, &project).unwrap(), choice);
+    }
+}
+
+/// DEC-147.4: a project with no saved Leftover processes choice ends them; every saved
+/// choice reads back, and the store refuses any other name.
+#[test]
+fn leftover_processes_default_to_end_them_and_each_choice_reads_back() {
+    let connection = Connection::open_in_memory().unwrap();
+    initialize(&connection).unwrap();
+    let project = ProjectId::new("leftovers").unwrap();
+    assert_eq!(
+        leftover_mode(&connection, project.as_str()).unwrap(),
+        LeftoverMode::End
+    );
+    for mode in [LeftoverMode::Keep, LeftoverMode::Ask, LeftoverMode::End] {
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO team_leftovers(project,mode) VALUES (?1,?2)",
+                rusqlite::params![project.as_str(), mode.stored()],
+            )
+            .unwrap();
+        assert_eq!(leftover_mode(&connection, project.as_str()).unwrap(), mode);
+    }
+    assert!(
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO team_leftovers(project,mode) VALUES (?1,'kill')",
+                [project.as_str()],
+            )
+            .is_err()
+    );
+    let other = ProjectId::new("leftovers-other").unwrap();
+    assert_eq!(
+        leftover_mode(&connection, other.as_str()).unwrap(),
+        LeftoverMode::End
+    );
+}
+
+/// The owner's leftover setting is saved through its team action and read back in the team
+/// status with the project's holds; End and Keep on a hold that is gone, or belongs to
+/// another project, are refused and change nothing (DEC-147.4).
+#[test]
+fn the_leftover_setting_is_saved_and_end_or_keep_of_a_gone_hold_is_refused() {
+    let (_directory, mut connection) = database();
+    let setup = stored("team-leftovers", Vec::new());
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-leftovers", &["local-a"]);
+    let project = setup.project_id.clone();
+    let before = status(&connection, &setup).unwrap();
+    assert_eq!(before.leftovers, LeftoverMode::End);
+    assert!(before.leftover_holds.is_empty());
+    for mode in [LeftoverMode::Ask, LeftoverMode::Keep, LeftoverMode::End] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::LeftoversAtEnd {
+                    project_id: project.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().leftovers, mode);
+    }
+    for action in [
+        TeamAction::EndLeftovers {
+            project_id: project.clone(),
+            key: u64::MAX,
+        },
+        TeamAction::KeepLeftovers {
+            project_id: project.clone(),
+            key: u64::MAX,
+        },
+    ] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap(),
+            rejected("leftovers_gone")
+        );
+        tx.commit().unwrap();
+    }
+}
+
+/// Opening the team runtime makes the usage tables once, so a turn end writes its token and
+/// turn rows without making them again (AL4 r2).
+#[test]
+fn opening_the_runtime_makes_the_usage_tables_its_turn_ends_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    drop(Connection::open(&database).unwrap());
+    let _team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(|| None),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+    let connection = Connection::open(&database).unwrap();
+    let tables: Vec<String> = connection
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('usage_tokens','usage_turns') ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(tables, ["usage_tokens", "usage_turns"]);
+}
+
+/// A team database with one project of a one-slot codex plan, the engine's projects table,
+/// the activity tables and the owner's pool. Returns the folder, the connection, the setup
+/// and the pool.
+fn audited_team(project: &str) -> (tempfile::TempDir, Connection, StoredSetup, ModelAccess) {
+    let (directory, connection) = database();
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .unwrap();
+    crate::activity::initialize(&connection).unwrap();
+    let setup = stored(
+        project,
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access(project, &["local-a"]);
+    (directory, connection, setup, pool)
+}
+
+/// The owner's team actions a project's activity shows, oldest first, as (actor, text).
+fn owner_actions(connection: &Connection, project: &ProjectId) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = crate::activity::listed(connection, project, 50)
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|item| item.kind == crate::activity::ActivityKind::TeamAction)
+        .map(|item| (item.actor, item.text))
+        .collect();
+    rows.reverse();
+    rows
+}
+
+/// F17: every cancel path and owner request has its own reason, so no path reads as another,
+/// and only a Cancel of one waiting task reads "Cancelled by you".
+#[test]
+fn each_cancel_path_and_owner_request_names_its_own_reason() {
+    let requests = [Some(CancelBy::Task), Some(CancelBy::All), None];
+    let paths = [
+        CancelPath::Waiting,
+        CancelPath::Running,
+        CancelPath::Held,
+        CancelPath::Closed,
+    ];
+    let mut seen = std::collections::BTreeMap::new();
+    for path in paths {
+        for by in requests {
+            let reason = cancel_reason(by, path);
+            assert!(!reason.is_empty() && reason.len() <= 120, "{reason}");
+            assert!(!reason.contains('\u{2014}'), "{reason}");
+            let kept = by.unwrap_or(CancelBy::Task);
+            let shared = by.is_none() && path != CancelPath::Running;
+            if !shared {
+                assert_eq!(
+                    seen.insert(reason, (path, kept)),
+                    None,
+                    "{reason} names two paths"
+                );
+            }
+        }
+    }
+    assert_eq!(seen.len(), 9);
+    assert_eq!(
+        cancel_reason(Some(CancelBy::Task), CancelPath::Waiting),
+        "Cancelled by you"
+    );
+    assert_eq!(
+        cancel_reason(Some(CancelBy::All), CancelPath::Waiting),
+        "Cancelled when you paused all agents"
+    );
+    assert_eq!(
+        cancel_reason(None, CancelPath::Running),
+        "Stopped when CrazyAgent stopped its agent"
+    );
+    assert_eq!(CancelBy::named(Some("all")), CancelBy::All);
+    assert_eq!(CancelBy::named(Some("task")), CancelBy::Task);
+    assert_eq!(CancelBy::named(None), CancelBy::Task);
+}
+
+/// F17: Pause all, a Cancel that names no task, marks every waiting task with its own reason,
+/// keeps which request it was on a running task for the runtime, and logs the owner's action
+/// with its counts; a Cancel of one task keeps "Cancelled by you" and logs that task.
+#[test]
+fn pause_all_and_a_one_task_cancel_each_keep_their_reason_and_an_owner_action_row() {
+    let (_directory, mut connection, setup, pool) = audited_team("team-audit");
+    let project = setup.project_id.clone();
+    let tx = connection.transaction().unwrap();
+    for prompt in [
+        "Write login.md",
+        "Write signup.md",
+        "Write reset.md",
+        "Write help.md",
+    ] {
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::Delegate {
+                    project_id: project.clone(),
+                    harness: None,
+                    prompt: prompt.into(),
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+    }
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Cancel {
+                project_id: project.clone(),
+                task: Some(1),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.execute("UPDATE team_tasks SET status='running' WHERE id=2", [])
+        .unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Cancel {
+                project_id: project.clone(),
+                task: None,
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    type Row = (i64, String, Option<String>, bool, Option<String>);
+    let rows: Vec<Row> = connection
+        .prepare("SELECT id,status,error,cancel_requested,cancel_by FROM team_tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (
+                1,
+                "cancelled".into(),
+                Some("Cancelled by you".into()),
+                false,
+                Some("task".into())
+            ),
+            (2, "running".into(), None, true, Some("all".into())),
+            (
+                3,
+                "cancelled".into(),
+                Some("Cancelled when you paused all agents".into()),
+                false,
+                Some("all".into())
+            ),
+            (
+                4,
+                "cancelled".into(),
+                Some("Cancelled when you paused all agents".into()),
+                false,
+                Some("all".into())
+            ),
+        ]
+    );
+    assert_eq!(
+        owner_actions(&connection, &project),
+        [
+            (
+                crate::activity::OWNER_ACTOR.to_owned(),
+                "You cancelled task 1: Write login.md".to_owned()
+            ),
+            (
+                crate::activity::OWNER_ACTOR.to_owned(),
+                "You paused all agents: 2 waiting tasks cancelled, 1 running task stopping"
+                    .to_owned()
+            ),
+        ]
+    );
+}
+
+/// F17: the owner's stop of a sub-agent, Stop all and the start again are each logged as the
+/// owner's own team action, in the order they were made.
+#[test]
+fn owner_stops_and_the_team_start_again_are_logged_as_owner_actions() {
+    let (_directory, mut connection, setup, pool) = audited_team("team-audit-stop");
+    let project = setup.project_id.clone();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','codex',0,'idle',1,1)",
+            [project.as_str()],
+        )
+        .unwrap();
+    let agent = connection.last_insert_rowid();
+    let named = crate::activity::agent_actor(&connection, agent).unwrap();
+    let tx = connection.transaction().unwrap();
+    for action in [
+        TeamAction::StopAgent {
+            project_id: project.clone(),
+            agent,
+        },
+        TeamAction::Pause {
+            project_id: project.clone(),
+        },
+        TeamAction::Resume {
+            project_id: project.clone(),
+        },
+    ] {
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap(),
+            Outcome::Applied,
+            "{action:?}"
+        );
+    }
+    tx.commit().unwrap();
+    let owner = crate::activity::OWNER_ACTOR.to_owned();
+    assert_eq!(
+        owner_actions(&connection, &project),
+        [
+            (owner.clone(), format!("You stopped {named}")),
+            (owner.clone(), OWNER_STOPPED_TEAM.to_owned()),
+            (owner, OWNER_RESUMED_TEAM.to_owned()),
+        ]
+    );
+}
+
+/// F17: a task the owner asked to cancel that still ran when CrazyAgent closed ends at the
+/// next start with the reason of the request the owner made, Pause all or Cancel of that one
+/// task, never another path's.
+#[test]
+fn a_cancel_left_running_at_close_names_the_owner_request_at_the_next_start() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    initialize(&connection).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms,cancel_requested,cancel_by) VALUES
+               ('team-closed','owner','codex',0,'one','running',1,1,1,'task'),
+               ('team-closed','owner','codex',0,'all','running',1,1,1,'all'),
+               ('team-closed','owner','codex',0,'old','running',1,1,1,NULL);",
+        )
+        .unwrap();
+    let reopened = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(|| None),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+    drop(reopened);
+    let rows: Vec<(String, String, Option<String>, Option<i64>)> = connection
+        .prepare("SELECT prompt,status,error,agent FROM team_tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let closed = |by| Some(cancel_reason(Some(by), CancelPath::Closed).to_owned());
+    assert_eq!(
+        rows,
+        [
+            (
+                "one".into(),
+                "cancelled".into(),
+                closed(CancelBy::Task),
+                None
+            ),
+            (
+                "all".into(),
+                "cancelled".into(),
+                closed(CancelBy::All),
+                None
+            ),
+            (
+                "old".into(),
+                "cancelled".into(),
+                closed(CancelBy::Task),
+                None
+            ),
+        ]
+    );
+}
+
+/// F11: each waiting task carries why it waits, in one text for every client: the pool line,
+/// the stored reason, or the queue line before dispatch looked at it; a running task none.
+#[test]
+fn a_waiting_task_says_why_it_waits_in_one_text_for_every_client() {
+    assert_eq!(
+        wait_line(TaskStatus::NeedsPool, Some("stale")).as_deref(),
+        Some(events::WAIT_NEEDS_POOL)
+    );
+    assert_eq!(
+        wait_line(TaskStatus::Queued, None).as_deref(),
+        Some(events::WAIT_UNSEEN)
+    );
+    assert_eq!(
+        wait_line(TaskStatus::Queued, Some("Waits:  codex\nis not installed")).as_deref(),
+        Some("Waits: codex is not installed")
+    );
+    let long = "x".repeat(WAIT_BYTES_MAX * 2);
+    assert!(wait_line(TaskStatus::Queued, Some(&long)).unwrap().len() <= WAIT_BYTES_MAX + 3);
+    for status in [
+        TaskStatus::Running,
+        TaskStatus::Done,
+        TaskStatus::Failed,
+        TaskStatus::Cancelled,
+    ] {
+        assert_eq!(wait_line(status, Some("stale")), None, "{status:?}");
+    }
+}
+
+/// F11: the runtime stores why a queued task waits and the clients read it: an account the
+/// harness cannot start on, then a team the owner stopped; the reason clears once the task
+/// leaves the queue.
+#[test]
+fn the_runtime_stores_why_a_queued_task_waits_and_the_team_status_shows_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-waits",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    setup.folder = folder.to_str().unwrap().into();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-waits", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Delegate {
+                project_id: project.clone(),
+                harness: None,
+                prompt: "Write page.md".into(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let source = pool.clone();
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+    let wait = |connection: &Connection| {
+        let team = status(connection, &setup).unwrap();
+        assert_eq!(team.tasks.len(), 1);
+        (team.tasks[0].status, team.tasks[0].wait.clone())
+    };
+    team.tick().unwrap();
+    assert_eq!(
+        wait(&connection),
+        (
+            TaskStatus::Queued,
+            Some("Waits: codex is not installed".to_owned())
+        )
+    );
+    let told = events::status(&connection, &project).unwrap().text();
+    assert!(
+        told.contains("Tasks waiting to start, oldest first:\n- task 1 \"Write page.md\": Waits: codex is not installed\n"),
+        "{told}"
+    );
+
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Pause {
+                project_id: project.clone(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    team.tick().unwrap();
+    assert_eq!(
+        wait(&connection),
+        (
+            TaskStatus::Queued,
+            Some("Waits until you start the team again".to_owned())
+        )
+    );
+    connection
+        .execute("UPDATE team_tasks SET status='failed'", [])
+        .unwrap();
+    assert_eq!(
+        wait(&connection),
+        (TaskStatus::Failed, None),
+        "only a waiting task shows a wait"
+    );
+    team.shutdown().unwrap();
+}
+
+/// F11: the master reads the agent limits the owner set, read only, with No limit for an
+/// unset cap, and each waiting task with its reason, oldest first; a lead never sees
+/// another lead's waiting tasks.
+#[test]
+fn the_master_reads_the_owner_s_agent_limits_and_each_waiting_task() {
+    let (_directory, mut connection, setup, pool) = audited_team("team-limits");
+    let project = setup.project_id.clone();
+    let tx = connection.transaction().unwrap();
+    for action in [
+        TeamAction::MaxHarnesses {
+            project_id: project.clone(),
+            max: Some(4),
+        },
+        TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write login.md".into(),
+        },
+        TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write signup.md".into(),
+        },
+    ] {
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap(),
+            Outcome::Applied,
+            "{action:?}"
+        );
+    }
+    tx.execute(
+        "UPDATE team_tasks SET wait='Waits for a free codex slot: the team plan runs 1 at once and 1 run now' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    tx.execute("UPDATE team_tasks SET status='needs_pool' WHERE id=2", [])
+        .unwrap();
+    tx.commit().unwrap();
+    let read = events::status(&connection, &project).unwrap();
+    assert_eq!(
+        read.limits.as_deref(),
+        Some(
+            "Limits the owner sets (read only; ask the owner to change them): team plan 3 sub-agents at once, per harness: codex 1; Max harnesses per project: 4; Max teammates per harness: No limit."
+        )
+    );
+    assert_eq!(
+        read.queued
+            .iter()
+            .map(|queued| queued.line.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "- task 1 \"Write login.md\": Waits for a free codex slot: the team plan runs 1 at once and 1 run now",
+            "- task 2 \"Write signup.md\": Waits for an account pool for this project",
+        ]
+    );
+    let text = read.text();
+    assert!(text.contains(read.limits.as_deref().unwrap()), "{text}");
+    assert!(text.contains(&read.queued[1].line), "{text}");
 }

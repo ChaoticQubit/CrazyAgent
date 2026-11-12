@@ -100,6 +100,27 @@ fn run_in(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) 
     crazyagent::spawn_gate::output(&mut command).unwrap()
 }
 
+fn path_of(command: &std::process::Command) -> String {
+    command
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn node_harness(prefix: &Path) -> PathBuf {
+    let node = prefix.join("bin").join("node");
+    write(&node, "#!/bin/sh\necho \"node beside codex ran $1\"\n");
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+    let script = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+    write(&script, "#!/usr/bin/env node\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
 fn quoted(path: &Path) -> String {
     let text = path.to_str().unwrap();
     assert!(!text.contains('\''));
@@ -499,6 +520,53 @@ fn an_agent_builds_and_tests_a_tiny_crate_offline_with_the_owner_toolchain() {
 }
 
 #[test]
+fn an_agent_compiles_links_and_runs_git_without_an_xcrun_cache_error() {
+    let case = case();
+    let homes = ToolHomes::owner().unwrap();
+    write(
+        &case.project.join("Cargo.toml"),
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    );
+    write(
+        &case.project.join("src/main.rs"),
+        "fn main() {\n    println!(\"tiny ran\");\n}\n",
+    );
+    write(
+        &case.project.join("hello.c"),
+        "int main(void) {\n    return 0;\n}\n",
+    );
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    toolchains::prepare_cargo_home(&case.home, &homes).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_tools(&Toolchains::detect(&case.project, &homes))
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap();
+    let profile = case.profiles.join("compile.sb");
+
+    let output = run(
+        &sandbox,
+        &profile,
+        "cc -o hello hello.c && ./hello && cargo run --offline && git --version",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("tiny ran"), "{stdout}");
+    assert!(stdout.contains("git version"), "{stdout}");
+    for refused in ["couldn't create cache file", "xcrun: error"] {
+        assert!(!stderr.contains(refused), "{refused}: {stderr}");
+    }
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
+#[test]
 fn a_missing_toolchain_is_never_installed_by_an_agent() {
     let case = case();
     let homes = ToolHomes::owner().unwrap();
@@ -693,7 +761,7 @@ impl AgentGit {
         let case = case();
         let tmp = toolchains::make_tmp(&case.home).unwrap();
         if lead {
-            toolchains::lead_git(&tmp).unwrap();
+            toolchains::lead_git(&tmp, true).unwrap();
         }
         let git = tmp.join("bin/git");
         let metadata = fs::symlink_metadata(&git).unwrap();
@@ -886,7 +954,7 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
     assert_eq!(agent_git_script(&tmp), script);
     assert_ne!(fs::symlink_metadata(&git).unwrap().ino(), first.ino());
 
-    toolchains::lead_git(&tmp).unwrap();
+    toolchains::lead_git(&tmp, true).unwrap();
     assert!(agent_git_script(&tmp).contains("\nlead=1\n"));
     toolchains::make_tmp(&case.home).unwrap();
     assert_eq!(agent_git_script(&tmp), script);
@@ -904,13 +972,246 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
             .file_type()
             .is_symlink()
     );
-    assert!(toolchains::lead_git(&tmp).is_err());
+    assert!(toolchains::lead_git(&tmp, true).is_err());
     assert!(names(&elsewhere).is_empty());
     assert_eq!(
         toolchains::with_agent_git(&case.home, "/usr/bin:/bin".to_owned()),
         "/usr/bin:/bin"
     );
     toolchains::remove_tmp(&case.home).unwrap();
+}
+
+/// A native lead's own temp folder starts empty and private on every start (TPH-2
+/// residual): what an earlier start left is gone, a planted file or link at its name is
+/// replaced by a fresh folder and the link's target keeps its files, and a short temp folder
+/// open to others is refused.
+#[test]
+fn a_native_lead_s_own_temp_folder_starts_empty_and_private_and_never_follows_a_planted_link() {
+    use std::os::unix::fs::MetadataExt;
+    let case = case();
+    let shared = toolchains::make_tmp(&case.home).unwrap();
+    let own = toolchains::fresh_native_lead_tmp(&shared).unwrap();
+    assert_eq!(own, toolchains::native_lead_tmp(&shared));
+    assert_eq!(own.parent(), Some(shared.as_path()));
+    let private = |path: &Path| {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.mode() & 0o777 == 0o700
+            && names(path).is_empty()
+    };
+    assert!(private(&own));
+
+    fs::create_dir(own.join("left")).unwrap();
+    fs::write(own.join("left").join("staged.txt"), "earlier").unwrap();
+    fs::set_permissions(&own, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(toolchains::fresh_native_lead_tmp(&shared).unwrap(), own);
+    assert!(private(&own));
+
+    let elsewhere = case.tmp.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join("kept.txt"), "kept").unwrap();
+    fs::remove_dir(&own).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &own).unwrap();
+    assert_eq!(toolchains::fresh_native_lead_tmp(&shared).unwrap(), own);
+    assert!(private(&own));
+    assert_eq!(names(&elsewhere), ["kept.txt"]);
+
+    fs::remove_dir(&own).unwrap();
+    fs::write(&own, "planted").unwrap();
+    assert_eq!(toolchains::fresh_native_lead_tmp(&shared).unwrap(), own);
+    assert!(private(&own));
+
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        toolchains::fresh_native_lead_tmp(&shared)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert!(private(&own));
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o700)).unwrap();
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
+#[test]
+fn a_node_script_harness_runs_with_the_node_beside_it_inside_the_sandbox() {
+    let case = case();
+    let prefix = case
+        .tools
+        .join("nvm")
+        .join("versions")
+        .join("node")
+        .join("v22.11.0");
+    let script = node_harness(&prefix);
+    let node = prefix.join("bin").join("node");
+    let bin = prefix.join("bin");
+    let bin = bin.to_str().unwrap();
+    let plain = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_node_for(&node)
+    .unwrap();
+    let profile = case.profiles.join("plain.sb");
+    plain.install(&profile).unwrap();
+    assert!(!path_of(&plain.command(&profile, Path::new("/bin/sh"))).contains(bin));
+
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(script.parent().unwrap())
+    .unwrap()
+    .allow_exec(&script)
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let profile = case.profiles.join("node.sb");
+    sandbox.install(&profile).unwrap();
+    let mut harness = std::process::Command::new(&script);
+    harness.current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    let path = path_of(&wrapped);
+    let folders: Vec<&str> = path.split(':').collect();
+    let node_at = folders.iter().position(|folder| *folder == bin).unwrap();
+    assert!(
+        node_at
+            < folders
+                .iter()
+                .position(|folder| *folder == "/usr/bin")
+                .unwrap(),
+        "{path}"
+    );
+    assert_eq!(
+        path_of(&sandbox.command(&profile, Path::new("/bin/sh")))
+            .split(':')
+            .next(),
+        Some(bin)
+    );
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("node beside codex ran {}", script.display())
+    );
+}
+
+#[test]
+fn a_node_harness_reads_its_node_and_package_but_no_npm_credential_or_other_package() {
+    let case = case();
+    let prefix = case.tools.join("nvm/versions/node/v22.11.0");
+    let script = node_harness(&prefix);
+    let node = prefix.join("bin/node");
+    let package = prefix.join("lib/node_modules/@openai/codex");
+    let vendor = package.join("vendor/codex.txt");
+    write(&vendor, "VENDOR-READABLE\n");
+    let planted = [
+        prefix.join("etc/npmrc"),
+        prefix.join(".npmrc"),
+        package.join(".npmrc"),
+        package.join("node_modules/dep/.npmrc"),
+        prefix.join("lib/node_modules/other/token.txt"),
+    ];
+    for (index, path) in planted.iter().enumerate() {
+        write(path, &format!("FIXTURE-NODE-SECRET-{index}\n"));
+    }
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(script.parent().unwrap())
+    .unwrap()
+    .allow_exec(&script)
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    assert!(!sandbox.read_roots().contains(&prefix));
+    assert_eq!(sandbox.tool_roots(), [prefix.join("bin"), package.clone()]);
+    let mut probe = format!(
+        "cat {} >/dev/null && echo node-read\ncat {}\n",
+        quoted(&node),
+        quoted(&vendor)
+    );
+    for path in &planted {
+        probe.push_str(&format!(
+            "cat {} 2>/dev/null || echo refused\n",
+            quoted(path)
+        ));
+    }
+    let profile = case.profiles.join("node-secrets.sb");
+    let output = run(&sandbox, &profile, &probe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("node-read"), "{stdout}");
+    assert!(stdout.contains("VENDOR-READABLE"), "{stdout}");
+    assert_eq!(stdout.matches("refused").count(), planted.len(), "{stdout}");
+    assert!(!stdout.contains("FIXTURE-NODE-SECRET"), "{stdout}");
+    let mut harness = std::process::Command::new(&script);
+    harness.current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("node beside codex ran {}", script.display())
+    );
+}
+
+#[test]
+fn a_node_prefix_in_the_project_an_agent_worktree_or_the_agent_home_gives_no_path_entry() {
+    let case = case();
+    for prefix in [
+        case.project
+            .join(".crazyagent/worktrees/agent-2/nvm/versions/node/v22.11.0"),
+        case.project.join("tools/nvm/versions/node/v22.11.0"),
+        case.home.join("nvm/versions/node/v22.11.0"),
+    ] {
+        let script = node_harness(&prefix);
+        let sandbox = ProjectSandbox::new(
+            &case.project,
+            &case.home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_node_for(&script)
+        .unwrap();
+        let profile = case.profiles.join("agent-node.sb");
+        sandbox.install(&profile).unwrap();
+        let bin = prefix.join("bin");
+        assert!(
+            !path_of(&sandbox.command(&profile, Path::new("/bin/sh")))
+                .contains(bin.to_str().unwrap()),
+            "{}",
+            prefix.display()
+        );
+        assert!(sandbox.tool_roots().is_empty(), "{}", prefix.display());
+    }
 }
 
 #[test]
@@ -993,6 +1294,91 @@ fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() 
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         format!("{}\none\n", agent_bin.join("git").display())
+    );
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
+#[test]
+fn a_sandboxed_harness_git_runs_its_helpers_from_its_own_toolchain_not_the_xcrun_shims() {
+    let case = case();
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap();
+    let profile = case.profiles.join("git.sb");
+    sandbox.install(&profile).unwrap();
+    let real = real_git_of(&agent_git_script(&tmp));
+    let upstream = case.home.join("upstream");
+    fs::create_dir(&upstream).unwrap();
+    for (folder, subject) in [(&case.project, "one"), (&upstream, "upstream")] {
+        for arguments in [
+            &["init", "-q", "--template="][..],
+            &[
+                "-c",
+                "user.name=A",
+                "-c",
+                "user.email=a@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                subject,
+            ],
+        ] {
+            let mut owner = std::process::Command::new(&real);
+            owner
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &case.home)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(arguments)
+                .current_dir(folder)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let made = crazyagent::spawn_gate::output(&mut owner).unwrap();
+            assert!(made.status.success(), "{made:?}");
+        }
+    }
+    let mut harness = std::process::Command::new("/bin/sh");
+    harness
+        .arg("-c")
+        .arg(format!(
+            "GIT_TRACE=1 git fetch -q '{}' HEAD && git log -1 --format=%s FETCH_HEAD",
+            upstream.display()
+        ))
+        .current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "upstream\n");
+    let helpers = real
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("libexec/git-core");
+    assert!(
+        stderr.contains(&format!(
+            "resolved executable path from Darwin stack: {}\n",
+            helpers.join("git-upload-pack").display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("start_command: /usr/bin/") && !stderr.contains("xcrun"),
+        "{stderr}"
     );
     toolchains::remove_tmp(&case.home).unwrap();
 }
@@ -1190,6 +1576,232 @@ fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket(
     assert_eq!(engine.join().unwrap(), roles.len());
 }
 
+/// A native lead's teammates neither read nor change the lead's part of the relay mailbox,
+/// where the engine keeps the lead's letters, reports, asks and answers: reading a letter,
+/// listing the part, taking a letter by rename, planting an entry, and removing or moving
+/// the part are all refused, and only the roster the engine keeps there is readable. The
+/// same reads, plants and moves spelled in another letter case, and a hard link of a
+/// letter out of the part, are refused too (relay RC-1). The lead reads and takes its own
+/// letters (DEC-111 relay mailbox forgery, C1).
+#[test]
+fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+    fs::create_dir(&part).unwrap();
+    fs::set_permissions(&part, fs::Permissions::from_mode(0o700)).unwrap();
+    let letter = part.join(format!("{:032x}.inbox", 5));
+    fs::write(&letter, b"letter for the lead").unwrap();
+    fs::write(part.join("relay.json"), b"{}").unwrap();
+    let (l, r, p) = (
+        quoted(&letter),
+        quoted(&part.join("relay.json")),
+        quoted(&part),
+    );
+    let shown = quoted(&part.join(format!("{:032x}.shown", 5)));
+    let away = quoted(&mailbox.join("away"));
+    let upper = mailbox
+        .join(crazyagent::coord::relay::LEAD_PART.to_uppercase())
+        .join(letter.file_name().unwrap());
+    let mixed = mailbox.join("Lead");
+    let linked = mailbox.join("linked");
+    let calls = team
+        .case
+        .tmp
+        .join(crazyagent::team::tool::MAILBOX_FOLDER.to_uppercase());
+    assert!(
+        upper.is_file() && mixed.is_dir() && calls.is_dir(),
+        "the volume finds the part and the mailbox in any letter case"
+    );
+    let (u, x, k, c) = (
+        quoted(&upper),
+        quoted(&mixed),
+        quoted(&linked),
+        quoted(&calls),
+    );
+    let gone = quoted(&team.case.tmp.join("calls-away"));
+    let probed = team.teammate(&format!(
+        "/bin/cat {l}; echo read=$?\n/bin/cat {r} >/dev/null; echo roster=$?\n/bin/ls {p}; echo list=$?\n/bin/mv {l} {shown}; echo take=$?\n/usr/bin/touch {p}/planted; echo plant=$?\n/bin/rm -r {p}; echo rm=$?\n/bin/mv {p} {away}; echo move=$?\n/bin/cat {u}; echo read_case=$?\n/usr/bin/touch {x}/planted; echo plant_case=$?\n/bin/ln {l} {k}; echo link=$?\n/bin/mv {c} {gone}; echo move_case=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&probed.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&probed.stderr);
+    assert!(
+        !text.contains("letter for the lead"),
+        "a teammate read the lead's letter: {text}"
+    );
+    for name in [
+        "read",
+        "list",
+        "take",
+        "plant",
+        "rm",
+        "move",
+        "read_case",
+        "plant_case",
+        "link",
+        "move_case",
+    ] {
+        assert_ne!(
+            status_of(&text, name),
+            "0",
+            "the teammate's {name} in the lead's part succeeded: {errors}"
+        );
+    }
+    assert_eq!(status_of(&text, "roster"), "0", "{errors}");
+    assert!(
+        letter.is_file()
+            && !part.join("planted").exists()
+            && fs::symlink_metadata(&linked).is_err()
+            && mailbox.is_dir(),
+        "the lead's part is as the engine left it"
+    );
+
+    let lead = team.as_lead(&format!(
+        "/bin/cat {l} >/dev/null; echo read=$?\n/bin/mv {l} {shown}; echo take=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&lead.stdout).into_owned();
+    for name in ["read", "take"] {
+        assert_eq!(
+            status_of(&text, name),
+            "0",
+            "{}",
+            String::from_utf8_lossy(&lead.stderr)
+        );
+    }
+}
+
+#[test]
+fn native_teammates_never_move_the_folders_holding_the_leads_part_of_the_relay_mailbox() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+    fs::create_dir(&part).unwrap();
+    fs::set_permissions(&part, fs::Permissions::from_mode(0o700)).unwrap();
+    let letter = part.join(format!("{:032x}.inbox", 5));
+    fs::write(&letter, b"letter for the lead").unwrap();
+    let (m, t) = (quoted(&mailbox), quoted(&team.case.tmp));
+    let shifted = quoted(&team.case.tmp.join("shifted"));
+    let uprooted = quoted(&team.case.project.join("uprooted"));
+    let probed = team.teammate(&format!(
+        "/bin/mv {m} {shifted}; echo shift=$?\n/bin/mv {t} {uprooted}; echo uproot=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&probed.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&probed.stderr);
+    for name in ["shift", "uproot"] {
+        assert_ne!(
+            status_of(&text, name),
+            "0",
+            "the teammate's {name} of a folder holding the lead's part succeeded: {errors}"
+        );
+    }
+    assert!(
+        letter.is_file(),
+        "the lead's letter stays where the engine left it"
+    );
+}
+
+/// A native lead in a project that hides as many folders as a project may save still gets
+/// its teammates' sandbox, which hides the lead's part of the relay mailbox and the lead's
+/// own temp folder besides (relay C1 merged with lead-own-tmp).
+#[test]
+fn a_native_team_starts_in_a_project_hiding_as_many_folders_as_it_may() {
+    let case = case();
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let mates_home = team_homes(&case.home);
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap();
+    for index in 0..crazyagent::sandbox::hidden_paths::HIDDEN_PATHS_MAX {
+        sandbox = sandbox
+            .hide(&case.project.join(format!("hidden-{index}")))
+            .unwrap();
+    }
+    let team = sandbox.native_team(
+        &tmp.join("tmux.sock"),
+        &tmp.join("teammates-0123456789abcdef.sock"),
+        &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+        &tmux,
+        &mates_home,
+    );
+    assert!(team.is_ok(), "{:?}", team.as_ref().err());
+}
+
+/// Neither a native lead nor its teammates can place, remove or move a node at the name the
+/// engine binds its caller socket at before one rename moves it over the caller socket's
+/// path (rv-secreview RH2R2-1): with the name free, a listener, a folder or a file either
+/// places there is refused, and once the engine binds there, removing or moving its node
+/// is refused, so no agent swaps its own listener in for the one the engine moves.
+#[test]
+fn neither_a_native_lead_nor_its_teammates_touch_the_caller_socket_s_binding_name() {
+    let team = LiveTeam::start();
+    let binding = crazyagent::team::caller::binding_path(&team.callers);
+    assert!(binding != team.callers && binding.parent() == team.callers.parent());
+    let b = quoted(&binding);
+    let roles: [(&str, Probe); 2] = [
+        ("lead", LiveTeam::as_lead),
+        ("teammate", LiveTeam::teammate),
+    ];
+    for (role, run) in roles {
+        let free = run(
+            &team,
+            &format!(
+                "{}; echo bind=$?\nmkdir {b}; echo mkdir=$?\n/usr/bin/touch {b}; echo file=$?\n",
+                team.session(&binding, "planted")
+            ),
+        );
+        let _ = tmux_at(&team.tmux, &binding, &["kill-server"]);
+        let text = String::from_utf8_lossy(&free.stdout).into_owned();
+        for name in ["bind", "mkdir", "file"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} at the free binding name succeeded: {}",
+                String::from_utf8_lossy(&free.stderr)
+            );
+        }
+        assert!(
+            fs::symlink_metadata(&binding).is_err(),
+            "the {role} left a node at the binding name"
+        );
+    }
+
+    let listener = crazyagent::spawn_gate::bind_unix_std(&binding).unwrap();
+    let node = || {
+        fs::symlink_metadata(&binding)
+            .ok()
+            .map(|meta| std::os::unix::fs::MetadataExt::ino(&meta))
+    };
+    let bound = node();
+    assert!(bound.is_some());
+    for (role, run) in roles {
+        let taken = run(
+            &team,
+            &format!("rm -f {b}; echo rm=$?\nmv -f {b} {b}.away; echo mv=$?\n"),
+        );
+        let text = String::from_utf8_lossy(&taken.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&taken.stderr);
+        for name in ["rm", "mv"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} at the binding name succeeded: {errors}"
+            );
+        }
+        assert_eq!(node(), bound, "the engine's node survives the {role}");
+    }
+    drop(listener);
+}
+
 /// Reads one `name=status` line a probe script printed. Takes the output text and the name.
 /// Returns the status, panicking when the line is missing.
 fn status_of(text: &str, name: &str) -> String {
@@ -1313,6 +1925,10 @@ impl LiveTeam {
         let own = tmp.join("tmux.sock");
         let mates = tmp.join("teammates-0123456789abcdef.sock");
         let callers = tmp.join(crazyagent::team::caller::CALLER_SOCKET);
+        let mates_home = team_homes(&case.home);
+        let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+        fs::create_dir(&mailbox).unwrap();
+        fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
         let (lead, teammates) = ProjectSandbox::new(
             &case.project,
             &case.home,
@@ -1322,7 +1938,7 @@ impl LiveTeam {
         .unwrap()
         .allow_scratch(&tmp)
         .unwrap()
-        .native_team(&own, &mates, &callers, &tmux)
+        .native_team(&own, &mates, &callers, &tmux, &mates_home)
         .unwrap();
         let team = Self {
             case,
@@ -1541,4 +2157,294 @@ fn a_link_at_the_caller_socket_path_never_reaches_the_lead_s_server() {
         );
     }
     assert_eq!(team.sessions(&team.own), "lead\n");
+}
+
+/// Makes the folders a native lead's two sandboxes need beside its home, as the engine makes
+/// them: the team folders Claude Code shares in the lead's home and the teammates' private
+/// home beside it. Takes the lead's home. Returns the teammates' home.
+fn team_homes(home: &Path) -> PathBuf {
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(home.join(folder)).unwrap();
+    }
+    let mates = home.with_file_name("mates-home");
+    fs::create_dir_all(&mates).unwrap();
+    fs::set_permissions(&mates, fs::Permissions::from_mode(0o700)).unwrap();
+    mates
+}
+
+/// A native lead's teammates' home sits beside the lead's, and no root the teammates write
+/// holds the lead's home (TPH-2 C): `native_team` refuses a teammates' home inside the
+/// lead's, and a lead's home inside the project folder its teammates write, and builds the
+/// engine's shape.
+#[test]
+fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project_holds() {
+    let case = case();
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    let team = |home: &Path, mates_home: &Path| {
+        ProjectSandbox::new(
+            &case.project,
+            home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_scratch(&tmp)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            mates_home,
+        )
+    };
+    let beside = team_homes(&case.home);
+    let inside = case.home.join("mates-home");
+    fs::create_dir_all(&inside).unwrap();
+    fs::set_permissions(&inside, fs::Permissions::from_mode(0o700)).unwrap();
+    let held = case.project.join("agent").join("home");
+    fs::create_dir_all(&held).unwrap();
+    fs::set_permissions(&held, fs::Permissions::from_mode(0o700)).unwrap();
+    let held_mates = team_homes(&held);
+
+    let refused = |made: Result<(ProjectSandbox, ProjectSandbox), SandboxError>| match made {
+        Err(SandboxError::Invalid(reason)) => reason,
+        other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
+    };
+    assert_eq!(
+        refused(team(&case.home, &inside)),
+        "the teammates' home must sit beside the lead's"
+    );
+    assert_eq!(
+        refused(team(&held, &held_mates)),
+        "a teammates' writable root holds the lead's home"
+    );
+    assert!(team(&case.home, &beside).is_ok());
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
+/// SECAUDIT team-mailbox-reply-forgery-shared-native-lead: no agent of a native team makes or
+/// changes an answer in the tool mailbox the team shares, by any route or spelling or by
+/// moving the folder itself, so the answer another agent reads is the engine's. Reading and
+/// listing stay open. Each door has its own name and every door left open is listed at once.
+#[test]
+fn no_agent_of_a_native_team_can_forge_or_change_an_answer_in_the_tool_mailbox() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let folded = team
+        .case
+        .tmp
+        .join(crazyagent::team::tool::MAILBOX_FOLDER.to_uppercase());
+    let volume_folds = folded.exists();
+    let attempts = |id: u32| {
+        let at = |suffix: &str| quoted(&mailbox.join(format!("{id:032x}{suffix}")));
+        let (forge, upper, moved, linked) = (
+            at("-forge.reply"),
+            at("-upper.REPLY"),
+            at("-moved.reply"),
+            at("-linked.reply"),
+        );
+        let (symlinked, cloned, part) = (
+            at("-symlinked.reply"),
+            at("-cloned.reply"),
+            at(".reply-part"),
+        );
+        let (side, other, control) = (at(".side"), at(".other"), at(".control"));
+        let engine = quoted(&mailbox.join(format!("{:032x}.reply", id + 1)));
+        let in_case = quoted(&folded.join(format!("{id:032x}-case.reply")));
+        let spelled = quoted(&folded);
+        format!(
+            "swap() {{ /usr/bin/perl -e '$r = syscall(488, -2, $ARGV[0], -2, $ARGV[1], 2); exit($r == 0 ? 0 : 1)' \"$1\" \"$2\"; }}\n\
+             printf forged > {forge}; echo forge=$?\n\
+             printf forged > {upper}; echo upper=$?\n\
+             printf forged > {side}; /bin/mv {side} {moved}; echo moved=$?\n\
+             printf forged > {side}; /bin/ln {side} {linked}; echo linked=$?\n\
+             /bin/ln -s {side} {symlinked}; echo symlinked=$?\n\
+             printf forged >> {engine}; echo changed=$?\n\
+             /usr/bin/touch {part}; echo plant=$?\n\
+             /bin/cat {engine} > /dev/null; echo read=$?\n\
+             printf forged > {side}; /bin/cp -c {side} {control}; echo cloneok=$?\n\
+             /bin/cp -c {side} {cloned}; echo cloned=$?\n\
+             /bin/mv -f {side} {engine}; echo overwrote=$?\n\
+             printf forged > {side}; printf other > {other}; swap {side} {other}; echo swapok=$?\n\
+             swap {side} {engine}; echo swapped=$?\n\
+             printf forged > {in_case}; echo foldercase=$?\n\
+             /bin/ls {spelled} > /dev/null; echo resolves=$?\n"
+        )
+    };
+    let moves = |id: u32, who: &str| {
+        let answer = format!("{id:032x}-folder.reply");
+        let place = |name: &str| team.case.tmp.join(format!("{name}-{who}"));
+        let (aside, made) = (place("aside"), place("built"));
+        let (aside_answer, made_answer) =
+            (quoted(&aside.join(&answer)), quoted(&made.join(&answer)));
+        let (aside, made, gone, again) = (
+            quoted(&aside),
+            quoted(&made),
+            quoted(&place("gone")),
+            quoted(&place("again")),
+        );
+        let (folder, spelled) = (quoted(&mailbox), quoted(&folded));
+        format!(
+            "/bin/mv {folder} {aside}; echo aside=$?\n\
+             printf forged > {aside_answer}; /bin/mv {aside} {folder}; echo back=$?\n\
+             /bin/mkdir {made}; echo built=$?; printf forged > {made_answer}\n\
+             /bin/mv {folder} {gone}; echo away=$?\n\
+             /usr/bin/perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' {made} {folder}; echo replaced=$?\n\
+             /bin/mv {spelled} {again}; echo asidecase=$?\n"
+        )
+    };
+    let mut open = Vec::new();
+    for (who, id) in [("teammate", 20_u32), ("lead", 30_u32)] {
+        let engine = mailbox.join(format!("{:032x}.reply", id + 1));
+        fs::write(&engine, b"engine").unwrap();
+        let run = |script: &str| {
+            if who == "lead" {
+                team.as_lead(script)
+            } else {
+                team.teammate(script)
+            }
+        };
+        let output = run(&attempts(id));
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&output.stderr).into_owned();
+        for name in [
+            "forge",
+            "upper",
+            "moved",
+            "linked",
+            "symlinked",
+            "changed",
+            "plant",
+            "cloned",
+            "overwrote",
+            "swapped",
+            "foldercase",
+        ] {
+            if status_of(&text, name) == "0" {
+                open.push(format!("{who} {name}"));
+            }
+        }
+        for name in ["read", "cloneok", "swapok"] {
+            assert_eq!(status_of(&text, name), "0", "{who} {name}: {errors}");
+        }
+        assert_eq!(
+            status_of(&text, "resolves") == "0",
+            volume_folds,
+            "{who}: {errors}"
+        );
+        for name in [
+            "-forge.reply",
+            "-upper.REPLY",
+            "-moved.reply",
+            "-linked.reply",
+            "-symlinked.reply",
+            "-cloned.reply",
+            ".reply-part",
+            "-case.reply",
+        ] {
+            if fs::symlink_metadata(mailbox.join(format!("{id:032x}{name}"))).is_ok() {
+                open.push(format!("{who} made {name}"));
+            }
+        }
+        if fs::read(&engine).unwrap() != b"engine" {
+            open.push(format!("{who} engine bytes"));
+        }
+        let output = run(&moves(id, who));
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&output.stderr).into_owned();
+        for name in ["aside", "back", "away", "replaced", "asidecase"] {
+            if status_of(&text, name) == "0" {
+                open.push(format!("{who} {name}"));
+            }
+        }
+        if who == "lead" {
+            assert_eq!(status_of(&text, "built"), "0", "{who}: {errors}");
+        }
+        if mailbox.join(format!("{id:032x}-folder.reply")).exists() {
+            open.push(format!("{who} folder forged"));
+        }
+    }
+    assert_eq!(open, Vec::<String>::new(), "doors left open");
+}
+
+/// SECAUDIT-8-R2-L1: an empty tool mailbox is as fixed as one holding answers. `rename` can
+/// replace an empty folder, so neither agent of a native team replaces it or swaps it with a
+/// folder of its own. Each first moves that folder, so the refusal is the mailbox's own.
+#[test]
+fn no_agent_of_a_native_team_replaces_or_swaps_an_empty_tool_mailbox() {
+    use std::os::unix::fs::MetadataExt;
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let pinned = fs::metadata(&mailbox).unwrap().ino();
+    assert_eq!(fs::read_dir(&mailbox).unwrap().count(), 0);
+    for who in ["teammate", "lead"] {
+        let place = |name: &str| team.case.tmp.join(format!("{name}-{who}"));
+        let (made, moved) = (place("made"), place("moved"));
+        fs::create_dir(&made).unwrap();
+        fs::set_permissions(&made, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(made.join("forged.reply"), b"forged").unwrap();
+        let (from, to, folder) = (quoted(&made), quoted(&moved), quoted(&mailbox));
+        let script = format!(
+            "swap() {{ /usr/bin/perl -e '$r = syscall(488, -2, $ARGV[0], -2, $ARGV[1], 2); exit($r == 0 ? 0 : 1)' \"$1\" \"$2\"; }}\n\
+             rename() {{ /usr/bin/perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \"$1\" \"$2\"; }}\n\
+             rename {from} {to}; echo control=$?\n\
+             rename {to} {folder}; echo replaced=$?\n\
+             swap {to} {folder}; echo swappedfolder=$?\n"
+        );
+        let output = if who == "lead" {
+            team.as_lead(&script)
+        } else {
+            team.teammate(&script)
+        };
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert_eq!(status_of(&text, "control"), "0", "{who}: {errors}");
+        for name in ["replaced", "swappedfolder"] {
+            assert_ne!(status_of(&text, name), "0", "{who} {name}: {errors}");
+        }
+        assert_eq!(fs::metadata(&mailbox).unwrap().ino(), pinned, "{who}");
+        assert_eq!(fs::read_dir(&mailbox).unwrap().count(), 0, "{who}");
+    }
+}
+
+/// What the tool server of each agent of a native team does stays open beside those rules:
+/// it sends a call and removes the answer it has read.
+#[test]
+fn native_team_agents_still_send_a_call_and_remove_the_answer_they_read() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    for (who, number) in [("teammate", 40_u32), ("lead", 50_u32)] {
+        let id = format!("{number:032x}");
+        let answer = mailbox.join(format!("{id}.reply"));
+        fs::write(&answer, b"{}").unwrap();
+        let call = mailbox.join(format!("{id}.call"));
+        let (part, sent, reply) = (
+            quoted(&mailbox.join(format!("{id}.part"))),
+            quoted(&call),
+            quoted(&answer),
+        );
+        let script = format!(
+            "/usr/bin/touch {part}; echo part=$?\n\
+             /bin/mv {part} {sent}; echo call=$?\n\
+             /bin/cat {reply} > /dev/null; echo read=$?\n\
+             /bin/rm {reply}; echo removed=$?\n"
+        );
+        let output = if who == "lead" {
+            team.as_lead(&script)
+        } else {
+            team.teammate(&script)
+        };
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&output.stderr);
+        for name in ["part", "call", "read", "removed"] {
+            assert_eq!(status_of(&text, name), "0", "{who} {name}: {errors}");
+        }
+        assert!(call.exists(), "{who}");
+        assert!(!answer.exists(), "{who}");
+    }
 }
