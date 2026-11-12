@@ -1409,7 +1409,12 @@ fn a_lead_may_read_and_start_only_the_bundled_tmux_file_never_its_app_folder() {
         .parent()
         .unwrap()
         .join("Applications/CrazyAgent.app/Contents/MacOS");
-    for name in ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux"] {
+    for name in [
+        "crazyagent",
+        "crazyagent-rcli",
+        "crazyagent-runner",
+        "crazyagent-tmux",
+    ] {
         write(&macos.join(name), "#!/bin/sh\n");
         fs::set_permissions(macos.join(name), fs::Permissions::from_mode(0o755)).unwrap();
     }
