@@ -305,7 +305,8 @@ fn bridge(
             }
             match newer {
                 Some(newer) => {
-                    if let Err(problem) = warn_newer(db, project, agent, newer, refused, now) {
+                    note_refusal(refused, agent, None);
+                    if let Err(problem) = warn_newer(db, project, agent, newer, now) {
                         eprintln!(
                             "codex bridge newer release notice not kept for agent {agent}: {}",
                             crate::protocol::plain_code(&problem.0)
@@ -330,40 +331,32 @@ fn bridge(
     Ok(None)
 }
 
-/// The code [`warn_newer`] keeps in the memory of refused bridges for an agent whose bridge
-/// runs on a newer Codex release, so its notice is written once.
-const BRIDGE_NEWER: &str = "codex_bridge_version_newer";
-
 /// Leaves one engine notice in a Codex agent's Messages timeline, and one engine log line,
-/// when its bridge runs on a release newer than the checked ones (F38); the same release
-/// on later deliveries writes nothing until a refusal or a checked release replaces it.
-/// Takes the database, the project, the agent, the release, the memory of refused bridges
-/// and the time. Returns whether the notice was written now.
+/// when its bridge runs on a release newer than the checked ones (F38): once per agent and
+/// release while the notice is kept, read from the timeline, so a bridge refusal in between
+/// or an engine restart writes no second one. Takes the database, the project, the agent,
+/// the release and the time. Returns whether the notice was written now.
 fn warn_newer(
     db: &Connection,
     project: &ProjectId,
     agent: AgentId,
     newer: (u64, u64, u64),
-    refused: &mut BTreeMap<AgentId, &'static str>,
     now: i64,
 ) -> Result<bool, EngineError> {
     assert!(agent > 0);
-    if !note_refusal(refused, agent, Some(BRIDGE_NEWER)) {
+    let notice = codex::newer_notice(newer);
+    let said = crate::team::agent_messages::Said::Notice;
+    let tx = db.unchecked_transaction().map_err(state)?;
+    if crate::team::agent_messages::said_before(&tx, project, agent, said, &notice)? {
         return Ok(false);
     }
+    crate::team::agent_messages::record(&tx, project, agent, said, &notice, now)?;
+    assert!(crate::team::agent_messages::said_before(
+        &tx, project, agent, said, &notice
+    )?);
+    tx.commit().map_err(state)?;
     let (major, minor, patch) = newer;
     eprintln!("codex bridge runs on a newer release for agent {agent}: {major}.{minor}.{patch}");
-    let tx = db.unchecked_transaction().map_err(state)?;
-    crate::team::agent_messages::record(
-        &tx,
-        project,
-        agent,
-        crate::team::agent_messages::Said::Notice,
-        &codex::newer_notice(newer),
-        now,
-    )?;
-    tx.commit().map_err(state)?;
-    assert_eq!(refused.get(&agent), Some(&BRIDGE_NEWER));
     Ok(true)
 }
 

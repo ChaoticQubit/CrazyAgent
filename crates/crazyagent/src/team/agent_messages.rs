@@ -450,6 +450,34 @@ pub(crate) fn record(
     Ok(id)
 }
 
+/// Tells whether the same thing is still kept as said to a sub-agent: a row by the same
+/// speaker and kind whose text is this text made plain and bounded as [`record`] keeps it.
+/// Takes the connection, the project, the agent, what was said and the text. Returns
+/// whether such a row is kept.
+pub(crate) fn said_before(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    said: Said,
+    text: &str,
+) -> Result<bool, EngineError> {
+    assert!(agent > 0);
+    let text = bound_text(&events::plain_agent_text(text), SAID_BYTES_MAX);
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_agent_messages WHERE project=?1 AND agent=?2 AND author=?3 AND kind=?4 AND text=?5)",
+            params![
+                project.as_str(),
+                agent,
+                said.author().name(),
+                said.kind().name(),
+                text
+            ],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
 /// Reads one page of a project sub-agent's Messages timeline as the owner gets it: `read`,
 /// fitted to one owner reply by `fit`. Takes the connection, the project, the agent, the
 /// cursor of the newest entry not wanted and the page size, none for the project's setting.
