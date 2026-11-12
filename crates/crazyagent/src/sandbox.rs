@@ -4193,7 +4193,7 @@ mod access_grant_tests {
                 SandboxRemote::Loopback(47_821)
             ])
         );
-        assert_eq!(sandbox.granted_sockets(), [socket.clone()]);
+        assert_eq!(sandbox.granted_sockets(), std::slice::from_ref(&socket));
         assert_eq!(sandbox.owner_tmp(), Some(owner_tmp.as_path()));
         assert!(sandbox.writes(&owner_tmp.join("note.txt")));
         let text = sandbox.profile();
