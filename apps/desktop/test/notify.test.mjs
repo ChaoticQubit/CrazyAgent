@@ -123,3 +123,31 @@ test("the alerts read every 10 s also drives the banner watch, which has no time
   assert.doesNotMatch(app, /questionWatch/);
   assert.doesNotMatch(source, /setTimeout|setInterval/, "the watch has no timer of its own");
 });
+
+test("the engine lost report goes once when the engine runs again after it ran and was lost, never on the first connect", () => {
+  const start = { ran: false, lost: false };
+  const connecting = notify.engineLostStep(start, "connecting");
+  assert.deepEqual(connecting, { watch: start, report: false });
+  const neverRan = notify.engineLostStep(start, "down");
+  assert.deepEqual(neverRan, { watch: { ran: false, lost: false }, report: false }, "an engine that never ran was not lost");
+  const first = notify.engineLostStep(neverRan.watch, "running");
+  assert.deepEqual(first, { watch: { ran: true, lost: false }, report: false }, "the first connect reports nothing");
+  const down = notify.engineLostStep(first.watch, "down");
+  assert.deepEqual(down, { watch: { ran: true, lost: true }, report: false });
+  const retrying = notify.engineLostStep(down.watch, "connecting");
+  assert.deepEqual(retrying.watch, { ran: true, lost: true });
+  const back = notify.engineLostStep(retrying.watch, "running");
+  assert.deepEqual(back, { watch: { ran: true, lost: false }, report: true });
+  assert.equal(notify.engineLostStep(back.watch, "running").report, false, "one report per loss");
+  assert.deepEqual(notify.engineLostStep(first.watch, "outdated"), { watch: first.watch, report: false }, "another engine version is not a loss");
+});
+
+test("the app reports an update it found and an engine it lost and found again to the store", () => {
+  const source = readFileSync(new URL("../src/notify.ts", import.meta.url), "utf8");
+  const updates = readFileSync(new URL("../src/screens/settings/updates.tsx", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../src/app.tsx", import.meta.url), "utf8");
+  assert.match(source, /sendNotice\(\{ report: \{ report \} \}\)/);
+  assert.match(updates, /if \(result\.value\) void reportNotice\(\{ kind: "app_update_ready", version: result\.value\.version \}\);/, "every check that finds one; the engine keeps one item per version");
+  assert.equal(app.match(/useEngineLostReport\(session\.engine\);/g)?.length, 1);
+  assert.match(app, /if \(step\.report\) void reportNotice\(\{ kind: "engine_lost" \}\);/);
+});
