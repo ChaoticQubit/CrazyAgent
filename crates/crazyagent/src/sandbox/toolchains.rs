@@ -9,8 +9,24 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 const RUST_MARKERS: &[&str] = &["Cargo.toml", "rust-toolchain", "rust-toolchain.toml"];
-const NODE_MARKERS: &[&str] = &["package.json"];
-const PYTHON_MARKERS: &[&str] = &["pyproject.toml"];
+const NODE_MARKERS: &[&str] = &["package.json", ".nvmrc", ".node-version"];
+const PYTHON_MARKERS: &[&str] = &[
+    "pyproject.toml",
+    "uv.lock",
+    ".python-version",
+    "requirements.txt",
+];
+/// The most folders directly in a project that toolchain detection looks into for a marker
+/// file, so a project whose `Cargo.toml` or `package.json` sits one folder down is found.
+const MARKER_FOLDERS_MAX: usize = 64;
+/// Folders directly in a project that never hold a project's own marker files.
+const MARKER_SKIPPED: &[&str] = &["node_modules", "target", "worktrees", "graphify-out"];
+/// Where `xcode-select` keeps the developer folder the owner picked.
+const XCODE_SELECT_LINK: &str = "/private/var/db/xcode_select_link";
+/// The compilers of an Xcode app, below its developer folder.
+const XCODE_TOOLCHAIN_BIN: &str = "Toolchains/XcodeDefault.xctoolchain/usr/bin";
+/// The macOS SDK of an Xcode app, below its developer folder.
+const XCODE_SDK: &str = "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
 const NODE_HOMES: &[&str] = &[".nvm", ".volta", ".local/share/fnm"];
 const PYTHON_HOMES: &[&str] = &[".pyenv", ".local/share/uv/python"];
 /// Where the default pack's `uv tool install graphifyy` keeps graphify's own environment.
@@ -237,13 +253,19 @@ pub struct ToolHomes {
     rustup: PathBuf,
     cargo: PathBuf,
     developer: PathBuf,
+    xcode: Option<PathBuf>,
 }
 
 impl ToolHomes {
-    /// The owner's tool homes: `~/.rustup` and `~/.cargo` in the account's home folder.
-    /// Takes nothing. Returns the homes, or the refusal when the owner account is unknown.
+    /// The owner's tool homes: `~/.rustup` and `~/.cargo` in the account's home folder,
+    /// and the Xcode app `xcode-select` picked, if it picked one (F26). Takes nothing.
+    /// Returns the homes, or the refusal when the owner account is unknown.
     pub fn owner() -> Result<Self, SandboxError> {
-        Ok(Self::at(&owner_home()?))
+        let homes = Self::at(&owner_home()?);
+        Ok(match xcode_from_link(Path::new(XCODE_SELECT_LINK)) {
+            Some(xcode) => homes.with_xcode(&xcode),
+            None => homes,
+        })
     }
 
     /// The tool homes inside one home folder, with the Command Line Tools at their system
@@ -254,7 +276,21 @@ impl ToolHomes {
             rustup: home.join(".rustup"),
             cargo: home.join(".cargo"),
             developer: PathBuf::from(DEVELOPER_TOOLS),
+            xcode: None,
         }
+    }
+
+    /// These tool homes with an Xcode app's developer folder, read-only to agents, whose
+    /// compilers and macOS SDK they use when the Command Line Tools lack `cc`. Input: the
+    /// canonical developer folder. Output: the homes.
+    pub fn with_xcode(mut self, developer: &Path) -> Self {
+        self.xcode = Some(developer.to_path_buf());
+        self
+    }
+
+    /// The Xcode app's developer folder agents read, if any.
+    pub fn xcode(&self) -> Option<&Path> {
+        self.xcode.as_deref()
     }
 
     /// These tool homes with the Command Line Tools looked for in `developer` instead.
@@ -313,16 +349,35 @@ impl Toolchain {
         }
     }
 
-    /// Tells whether a project uses this toolchain: one of its marker files (`Cargo.toml`
-    /// or `rust-toolchain*`, `package.json`, `pyproject.toml`) sits at the project root.
-    /// Input: the project folder. Output: true when used.
+    /// Tells whether a project uses this toolchain: one of its marker files (`Cargo.toml` or
+    /// `rust-toolchain*`; `package.json`, `.nvmrc` or `.node-version`; `pyproject.toml`,
+    /// `uv.lock`, `.python-version` or `requirements.txt`) sits at the project root or in
+    /// one of the first [`MARKER_FOLDERS_MAX`] plain folders directly in it (F26). Input: the
+    /// project folder. Output: true when used.
     pub fn used_by(self, project: &Path) -> bool {
         let markers = match self {
             Self::Rust => RUST_MARKERS,
             Self::Node => NODE_MARKERS,
             Self::Python => PYTHON_MARKERS,
         };
-        markers.iter().any(|name| project.join(name).is_file())
+        let holds = |folder: &Path| markers.iter().any(|name| folder.join(name).is_file());
+        if holds(project) {
+            return true;
+        }
+        let Ok(entries) = fs::read_dir(project) else {
+            return false;
+        };
+        entries
+            .flatten()
+            .take(MARKER_FOLDERS_MAX)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| !name.starts_with('.') && !MARKER_SKIPPED.contains(&name))
+            })
+            .any(|entry| holds(&entry.path()))
     }
 
     /// Tells whether the owner has this toolchain in their home: one of its version-manager
@@ -370,10 +425,12 @@ impl Toolchains {
 
     /// Grants the chosen toolchains read-only: Rust grants rustup's toolchains and settings
     /// and cargo's proxies, registry and git checkouts; Node grants nvm, Volta and fnm;
-    /// Python grants pyenv and uv's Pythons. Homebrew is already a system root. Inputs: the
-    /// tool homes and the chosen toolchains. Output: the existing grants.
+    /// Python grants pyenv and uv's Pythons. Homebrew is already a system root, and the
+    /// Xcode app `xcode-select` picked is granted with every choice, as the Command Line
+    /// Tools are a system root (F26). Inputs: the tool homes and the chosen toolchains.
+    /// Output: the existing grants.
     pub fn grant(homes: &ToolHomes, chosen: &[Toolchain]) -> Self {
-        let mut roots = Vec::new();
+        let mut roots: Vec<PathBuf> = homes.xcode.iter().cloned().collect();
         let mut files = Vec::new();
         for toolchain in Toolchain::ALL {
             if chosen.contains(&toolchain) {
@@ -432,9 +489,9 @@ fn existing(path: &Path, folder: bool) -> Option<PathBuf> {
 
 /// The toolchain variables every agent process gets: a writable `CARGO_HOME` in the
 /// agent's own home, the owner's rustup home read-only in `RUSTUP_HOME`,
-/// [`AUTO_INSTALL_ENV`], and `SDKROOT` at the Command Line Tools' SDK when `developer_bin`
-/// finds their `cc`, so rustc and the cc crate never ask xcrun. Inputs: the agent home and
-/// the owner's tool homes. Output: the variables in order.
+/// [`AUTO_INSTALL_ENV`], and `SDKROOT` at the macOS SDK of the developer tools
+/// [`developer`] picks, so rustc and the cc crate never ask xcrun. Inputs: the agent home
+/// and the owner's tool homes. Output: the variables in order.
 pub fn agent_env(home: &Path, homes: &ToolHomes) -> Vec<(&'static str, OsString)> {
     let mut env = vec![
         ("CARGO_HOME", home.join(".cargo").into_os_string()),
@@ -446,26 +503,54 @@ pub fn agent_env(home: &Path, homes: &ToolHomes) -> Vec<(&'static str, OsString)
             .map(|(name, value)| (*name, OsString::from(value))),
     );
     env.extend(
-        developer_bin(homes)
-            .map(|_| homes.developer.join("SDKs").join("MacOSX.sdk"))
+        developer(homes)
+            .map(|(_, sdk)| sdk)
             .filter(|sdk| sdk.is_dir())
             .map(|sdk| ("SDKROOT", sdk.into_os_string())),
     );
     env
 }
 
-/// The Command Line Tools' program folder when it holds `cc`. Every lookup by an xcrun shim
-/// under an agent's own home misses xcrun's cache, whose write in the per-user temp folder
-/// the sandbox denies (R7-XCRUN), so an agent runs these programs directly. Takes the tool
-/// homes. Returns the folder, none when the tools are absent.
-fn developer_bin(homes: &ToolHomes) -> Option<String> {
-    let bin = homes.developer.join("usr").join("bin");
-    if !bin.join("cc").is_file() {
-        return None;
-    }
-    bin.to_str()
-        .filter(|text| !text.contains(':'))
-        .map(str::to_owned)
+/// The program folder and macOS SDK of the developer tools an agent runs: the Command Line
+/// Tools when their folder holds `cc`, else the picked Xcode app's default toolchain when
+/// it holds `cc` (F26). Every lookup by an xcrun shim under an agent's own home misses
+/// xcrun's cache, whose write in the per-user temp folder the sandbox denies (R7-XCRUN), so
+/// an agent runs these programs directly. Takes the tool homes. Returns the folder and the
+/// SDK path, none when neither has the tools.
+fn developer(homes: &ToolHomes) -> Option<(String, PathBuf)> {
+    let tools = (
+        homes.developer.join("usr").join("bin"),
+        homes.developer.join("SDKs").join("MacOSX.sdk"),
+    );
+    let xcode = homes
+        .xcode
+        .as_ref()
+        .map(|xcode| (below(xcode, XCODE_TOOLCHAIN_BIN), below(xcode, XCODE_SDK)));
+    let (bin, sdk) = std::iter::once(tools)
+        .chain(xcode)
+        .find(|(bin, _)| bin.join("cc").is_file())?;
+    let text = bin.to_str().filter(|text| !text.contains(':'))?.to_owned();
+    Some((text, sdk))
+}
+
+/// The developer folder of the Xcode app the link `xcode-select` keeps names: its canonical
+/// `<name>.app/Contents/Developer`, never the Command Line Tools, a link that leads nowhere,
+/// or a path with a character a sandbox profile or search path cannot hold. Takes the link.
+/// Returns the folder, none otherwise.
+fn xcode_from_link(link: &Path) -> Option<PathBuf> {
+    let real = canonical(link).ok()?;
+    let in_app = real.ends_with("Contents/Developer")
+        && real
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::extension)
+            .is_some_and(|extension| extension == "app");
+    let plain = real.to_str().is_some_and(|text| {
+        !text
+            .chars()
+            .any(|c| c.is_control() || matches!(c, ':' | '"' | '\\' | '\''))
+    });
+    (in_app && plain && real.is_dir() && real != Path::new(DEVELOPER_TOOLS)).then_some(real)
 }
 
 /// The read-only folders graphify needs in an agent's sandbox when the default pack
@@ -495,7 +580,7 @@ pub fn graphify(homes: &ToolHomes) -> Vec<PathBuf> {
 }
 
 /// A tools-on agent's search path: the owner's cargo proxies and Homebrew's rustup proxies
-/// where they hold `cargo`, then `base` with `developer_bin` just before its `/usr/bin`,
+/// where they hold `cargo`, then `base` with [`developer`]'s folder just before its `/usr/bin`,
 /// then graphify's own program folder when the default pack installed it (see
 /// [`graphify`]), last so it never shadows a toolchain's `python3`. Inputs: the tool homes
 /// and the base path. Output: the joined path.
@@ -509,7 +594,7 @@ pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
                 .map(str::to_owned)
         })
         .collect();
-    let mut developer = developer_bin(homes);
+    let mut developer = developer(homes).map(|(bin, _)| bin);
     for entry in base.split(':') {
         if entry == SYSTEM_BIN {
             parts.extend(developer.take());

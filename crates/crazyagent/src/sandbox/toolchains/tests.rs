@@ -428,3 +428,127 @@ fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
     );
     assert!(!stderr.contains("crazyagent/main"), "{stderr}");
 }
+
+/// F26: a project's toolchains are found by the newer marker names (`.nvmrc`,
+/// `.node-version`, `uv.lock`, `.python-version`, `requirements.txt`) and one folder down,
+/// never inside a hidden folder, `node_modules`, `target` or the older agents root.
+#[test]
+fn toolchains_are_found_by_every_marker_name_and_one_folder_down() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path();
+    for toolchain in Toolchain::ALL {
+        assert!(
+            !toolchain.used_by(project),
+            "{toolchain:?} in an empty project"
+        );
+    }
+    for (name, toolchain) in [
+        (".nvmrc", Toolchain::Node),
+        (".node-version", Toolchain::Node),
+        ("uv.lock", Toolchain::Python),
+        (".python-version", Toolchain::Python),
+        ("requirements.txt", Toolchain::Python),
+        ("rust-toolchain.toml", Toolchain::Rust),
+    ] {
+        let one = tempfile::tempdir().unwrap();
+        fs::write(one.path().join(name), "x\n").unwrap();
+        assert!(toolchain.used_by(one.path()), "{name}");
+    }
+    for skipped in [
+        ".crazyagent",
+        "node_modules",
+        "target",
+        "worktrees",
+        ".hidden",
+    ] {
+        fs::create_dir_all(project.join(skipped)).unwrap();
+        fs::write(project.join(skipped).join("Cargo.toml"), "[package]\n").unwrap();
+    }
+    assert!(
+        !Toolchain::Rust.used_by(project),
+        "skipped folders hold no project marker"
+    );
+    fs::create_dir_all(project.join("bot")).unwrap();
+    fs::write(project.join("bot").join("Cargo.toml"), "[package]\n").unwrap();
+    assert!(
+        Toolchain::Rust.used_by(project),
+        "a crate one folder down is found"
+    );
+    fs::create_dir_all(project.join("web").join("app")).unwrap();
+    fs::write(project.join("web").join("app").join("package.json"), "{}\n").unwrap();
+    assert!(
+        !Toolchain::Node.used_by(project),
+        "two folders down is not looked at"
+    );
+}
+
+/// F26: without the Command Line Tools' `cc`, an agent runs the picked Xcode app's compilers
+/// and its macOS SDK, and that app's developer folder is granted read-only with every choice.
+#[test]
+fn without_the_command_line_tools_an_agent_uses_the_picked_xcode_compilers_and_sdk() {
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path().canonicalize().unwrap();
+    let home = root.join("home");
+    let developer = root.join("developer");
+    fs::create_dir_all(developer.join("usr").join("bin")).unwrap();
+    let xcode = root.join("Xcode.app").join("Contents").join("Developer");
+    let bin = below(&xcode, XCODE_TOOLCHAIN_BIN);
+    let sdk = below(&xcode, XCODE_SDK);
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&sdk).unwrap();
+    fs::write(bin.join("cc"), "cc fixture\n").unwrap();
+    let homes = ToolHomes::at(&home)
+        .with_developer(&developer)
+        .with_xcode(&xcode);
+    let env = agent_env(&home, &homes);
+    assert!(
+        env.contains(&("SDKROOT", sdk.clone().into_os_string())),
+        "{env:?}"
+    );
+    let path = agent_path(&homes, "/usr/bin:/bin");
+    assert!(
+        path.ends_with(&format!("{}:/usr/bin:/bin", bin.display())),
+        "{path}"
+    );
+    let granted = Toolchains::grant(&homes, &[]);
+    assert_eq!(granted.roots(), [xcode.clone()]);
+    fs::write(developer.join("usr").join("bin").join("cc"), "cc fixture\n").unwrap();
+    let env = agent_env(&home, &homes);
+    assert!(
+        env.iter()
+            .all(|(name, value)| *name != "SDKROOT" || *value != sdk.clone().into_os_string()),
+        "the Command Line Tools win when they hold cc: {env:?}"
+    );
+}
+
+/// F26: the xcode-select link names an Xcode app's developer folder only when it leads to a
+/// real `<name>.app/Contents/Developer`; the Command Line Tools, another folder and a
+/// dangling link name none.
+#[cfg(unix)]
+#[test]
+fn the_xcode_select_link_names_only_an_xcode_app_developer_folder() {
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path().canonicalize().unwrap();
+    let xcode = root
+        .join("Xcode-beta.app")
+        .join("Contents")
+        .join("Developer");
+    fs::create_dir_all(&xcode).unwrap();
+    let other = root.join("Tools").join("Developer");
+    fs::create_dir_all(&other).unwrap();
+    let link = |name: &str, target: &Path| {
+        let link = root.join(name);
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        link
+    };
+    assert_eq!(xcode_from_link(&link("app", &xcode)), Some(xcode.clone()));
+    assert_eq!(xcode_from_link(&link("other", &other)), None);
+    assert_eq!(
+        xcode_from_link(&link("gone", &root.join("missing.app"))),
+        None
+    );
+    assert_eq!(
+        xcode_from_link(&link("tools", Path::new(DEVELOPER_TOOLS))),
+        None
+    );
+}

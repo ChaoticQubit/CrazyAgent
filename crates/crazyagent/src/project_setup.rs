@@ -2590,7 +2590,9 @@ fn set_hidden_paths(
 }
 
 /// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
-/// choices, when the owner's screen showed the current version. Takes the transaction,
+/// choices, when the owner's screen showed the current version. The first save of a new
+/// project that names no toolchain records the ones it uses or the owner has installed
+/// ([`crate::sandbox::policy::recorded_toolchains`], F26). Takes the transaction,
 /// project, the version the screen read and the policy. Returns Applied, or a plain
 /// rejection for an unknown project, an invalid policy, a level this computer cannot run or
 /// a policy that changed since it was read (`stale_revision`).
@@ -2616,10 +2618,26 @@ fn set_agent_policy(
     if policy.access.unavailable().is_some() {
         return Ok(rejected("agent_access_unavailable"));
     }
+    let first = !crate::sandbox::policy::saved(tx, project_id.as_str()).map_err(error)?;
     let item = crate::storage::versioned::agent_policy_item(project_id);
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
+    let recorded;
+    let policy = match load_setup(tx, project_id)? {
+        Some(setup) if first && policy.toolchains.is_empty() => {
+            let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
+            recorded = crate::sandbox::policy::AgentPolicy {
+                toolchains: crate::sandbox::policy::recorded_toolchains(
+                    &setup.project_folder(),
+                    homes.as_ref(),
+                ),
+                ..policy.clone()
+            };
+            &recorded
+        }
+        _ => policy,
+    };
     crate::sandbox::policy::save(tx, project_id.as_str(), policy).map_err(error)?;
     Ok(Outcome::Applied)
 }

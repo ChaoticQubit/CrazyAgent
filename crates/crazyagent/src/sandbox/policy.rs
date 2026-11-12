@@ -570,6 +570,38 @@ pub struct ToolchainView {
     pub allowed: bool,
 }
 
+/// The toolchain choices a project records when it is made (F26): every family the project
+/// uses now or the owner has installed, allowed, so a project that starts empty still gets
+/// the owner's Rust, Node.js and Python once its code lands; a family neither used nor
+/// installed keeps following the project. The owner can turn each one off later. Inputs:
+/// the project folder and the owner's tool homes, none when unknown. Output: the choices in
+/// display order.
+pub fn recorded_toolchains(project: &Path, homes: Option<&ToolHomes>) -> Vec<ToolchainChoice> {
+    let recorded: Vec<ToolchainChoice> = Toolchain::ALL
+        .into_iter()
+        .filter(|toolchain| {
+            toolchain.used_by(project) || homes.is_some_and(|homes| toolchain.installed(homes))
+        })
+        .map(|toolchain| ToolchainChoice {
+            toolchain,
+            allowed: true,
+        })
+        .collect();
+    assert!(recorded.len() <= Toolchain::ALL.len());
+    recorded
+}
+
+/// Whether a project's agent policy was ever saved. Inputs: the open connection or
+/// transaction and the project id. Output: the answer, or the database error.
+pub fn saved(connection: &Connection, project: &str) -> rusqlite::Result<bool> {
+    connection.execute(TABLE, [])?;
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_agent_policy WHERE project=?1)",
+        [project],
+        |row| row.get(0),
+    )
+}
+
 /// Replaces a project's agent policy. Inputs: the open connection or transaction, the
 /// project id and a validated policy. Output: done, or the database error.
 pub fn save(connection: &Connection, project: &str, policy: &AgentPolicy) -> rusqlite::Result<()> {
@@ -692,6 +724,45 @@ mod tests {
                 ("shared", "Shared by agents with the same access"),
                 ("per_agent", "One per agent")
             ]
+        );
+    }
+
+    /// F26: a new project records every family it uses or the owner has installed, so an
+    /// empty project still gets the owner's toolchains later; a family neither used nor
+    /// installed keeps following the project.
+    #[test]
+    fn a_new_project_records_the_toolchains_it_uses_or_the_owner_has_installed() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let homes = ToolHomes::at(home.path());
+        assert!(recorded_toolchains(project.path(), Some(&homes)).is_empty());
+        assert!(recorded_toolchains(project.path(), None).is_empty());
+        std::fs::create_dir_all(home.path().join(".nvm")).unwrap();
+        std::fs::write(project.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let recorded = recorded_toolchains(project.path(), Some(&homes));
+        assert_eq!(
+            recorded,
+            vec![
+                ToolchainChoice {
+                    toolchain: Toolchain::Rust,
+                    allowed: true
+                },
+                ToolchainChoice {
+                    toolchain: Toolchain::Node,
+                    allowed: true
+                },
+            ]
+        );
+        let policy = AgentPolicy {
+            toolchains: recorded,
+            ..AgentPolicy::default()
+        };
+        assert!(policy.validate().is_ok());
+        std::fs::remove_file(project.path().join("Cargo.toml")).unwrap();
+        assert_eq!(
+            policy.allowed(project.path()),
+            vec![Toolchain::Rust, Toolchain::Node],
+            "a recorded family stays granted after its marker goes"
         );
     }
 
