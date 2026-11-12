@@ -341,8 +341,17 @@ pub fn rcli_entry(
             .map(|file| folder.join(file))
             .find(|entry| executable_file(entry).is_some())
     };
-    let _ = places;
-    given.or_else(beside)
+    let resolved = || {
+        executable_names(RCLI_EXECUTABLE)
+            .iter()
+            .find_map(|name| crate::tools::resolve(name, places).ok())
+            .map(|found| found.entry)
+    };
+    given.or_else(|| {
+        let found = beside().or_else(resolved);
+        assert!(found.as_deref().is_none_or(Path::is_absolute));
+        found
+    })
 }
 
 /// How the team runtime, usage upkeep, research and onboarding find a harness the engine did
