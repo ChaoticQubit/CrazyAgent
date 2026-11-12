@@ -3,6 +3,7 @@ use crate::app_plugins::Origin;
 use crate::app_plugins::manifest::{self, Purpose, Runs};
 use crate::app_plugins::store::Loaded;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 
 const KEY: &str = "sk-test-key-0001";
 
@@ -132,24 +133,24 @@ fn the_key_url_and_headers_go_only_to_curl_stdin_never_to_its_arguments_or_envir
 #[test]
 fn a_loopback_plugin_uses_plain_http_and_pins_localhost_to_127_0_0_1() {
     let plugin = loaded(&near("http://localhost:9000/embed", "localhost"));
-    let config = String::from_utf8(
+    let pinned = String::from_utf8(
         config(spec(&plugin), &[], std::path::Path::new("/tmp/x/request")).unwrap(),
     )
     .unwrap();
-    assert!(config.contains("resolve = \"localhost:9000:127.0.0.1\"\n"));
-    assert!(!config.contains("Authorization"));
-    let arguments = arguments(&command(spec(&plugin)));
+    assert!(pinned.contains("resolve = \"localhost:9000:127.0.0.1\"\n"));
+    assert!(!pinned.contains("Authorization"));
+    let plain_arguments = arguments(&command(spec(&plugin)));
     assert!(
-        arguments
+        plain_arguments
             .windows(2)
             .any(|window| window == ["--proto", "=http"])
     );
     let plain = loaded(&near("http://127.0.0.1:9000/embed", "127.0.0.1"));
-    let config = String::from_utf8(
+    let plain_config = String::from_utf8(
         config(spec(&plain), &[], std::path::Path::new("/tmp/x/request")).unwrap(),
     )
     .unwrap();
-    assert!(!config.contains("resolve"));
+    assert!(!plain_config.contains("resolve"));
 }
 
 #[test]
@@ -244,6 +245,12 @@ fn embed_posts_the_inputs_to_a_loopback_plugin_and_reads_its_vectors() {
     assert_eq!(got.len(), 2);
     assert!((got[0][1] - 1.0).abs() < 1e-6 && (got[1][0] - 1.0).abs() < 1e-6);
     let served = served.join().unwrap();
+    let scratch = root.path().join(SCRATCH);
+    assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::symlink_metadata(&scratch).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
     assert_eq!(served.request_line, "POST /embed HTTP/1.1");
     assert_eq!(
         served.body,
