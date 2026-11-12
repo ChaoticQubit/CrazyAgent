@@ -1687,3 +1687,67 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
     drop(pty);
     engine.stop();
 }
+
+/// Starts an engine with a saved profile and projects folder, and the TUI on it at Home.
+/// Input: the scratch prefix. Output: the engine, the TUI and the projects folder's parent,
+/// which the caller keeps until the test ends.
+fn tui_at_home(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
+    let engine = Engine::start(prefix);
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            owner.controller.detach();
+        });
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| screen.contains("New project"));
+    (engine, pty, disk)
+}
+
+/// Opens a place through Go to: Ctrl-K, the query, then Enter once Go to lists the place
+/// first. Inputs: the TUI past first run, the query and the place's Go to label. Output:
+/// none; panics when Go to never opens or never lists the place first.
+fn go_to(pty: &Pty, query: &str, label: &str) {
+    pty.keys(&["C-k"]);
+    pty.until("Ctrl-K opens Go to", |screen| {
+        screen.contains("Enter Go") && screen.contains("Esc Close")
+    });
+    pty.text(query);
+    let first = format!("> {label}");
+    pty.until("Go to lists the place first", |screen| {
+        screen.contains(&first)
+    });
+    pty.keys(&["Enter"]);
+    pty.until("Go to closes", |screen| !screen.contains("Esc Close"));
+}
+
+/// DEC-155 step 3: Settings, Checks opens from Go to on a real engine and reads as the
+/// desktop's: its purpose, the Check rules section with when a change applies, and its keys.
+#[test]
+fn settings_checks_opens_from_go_to_with_the_desktop_words() {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-checks-");
+    go_to(&pty, "Settings / Checks", "Settings / Checks");
+    let screen = pty.until("Settings, Checks reads its rules", |screen| {
+        screen.contains("Accept gate")
+    });
+    for words in [
+        "The check settings every project starts from",
+        "Check rules",
+        "Changes apply to check runs queued after you save and to the next Accept.",
+        "Enter Change",
+        "Esc Back",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    assert!(!screen.contains("Not ready yet"), "{screen}");
+    drop(pty);
+    engine.stop();
+}

@@ -37,6 +37,19 @@ const MODAL_WIDTH: u16 = 58;
 const FIELD_INDENT: usize = 4;
 const FIELD_CELLS: usize = 11;
 
+/// The page's words, the desktop's (Settings, Checks and Project Settings, Checks on
+/// feat/v3-screens): the title, the app page's purpose, the Check rules section with when a
+/// change applies and the project's line, and the profiles' notice and empty line. The app
+/// purpose names the Tests tab, where a TUI project sets its own values.
+const TITLE: &str = "Checks";
+const PURPOSE: &str = "The check settings every project starts from, until a project sets its own from its Tests tab.";
+const RULES: &str = "Check rules";
+const EFFECT: &str = "Changes apply to check runs queued after you save and to the next Accept.";
+const PROJECT_EFFECT: &str = "A value set here wins over the app value for this project only.";
+const PROFILES: &str = "Check profiles";
+const PROFILES_NOTICE: &str = "A check runs only under a profile you approved. Agents can propose one; nothing runs until you approve it here.";
+const NO_PROFILE: &str = "No check profile yet. An agent can propose one for you to approve, or you propose one with crazyagent checks.";
+
 #[derive(Debug, PartialEq)]
 enum State {
     Loading,
@@ -475,24 +488,23 @@ impl CheckSettingsPage {
     fn body(&self, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let glyphs = ctx.glyphs;
-        let (title, intro) = match &self.scope {
-            Scope::App => (
-                "Check settings".to_owned(),
-                "Every project follows these unless it sets its own.".to_owned(),
-            ),
-            Scope::Project { name, .. } => (
-                format!("Check settings for {name}"),
-                format!(
-                    "Only {name} follows the values set here; the rest follow Settings / Checks."
-                ),
-            ),
-        };
-        let mut lines = vec![styled(title, Role::Accent, theme)];
-        lines.extend(
-            wrap(&intro, limit)
+        let muted = |text: &str| {
+            wrap(text, limit)
                 .into_iter()
-                .map(|part| styled(part, Role::Muted, theme)),
-        );
+                .map(|part| styled(part, Role::Muted, theme))
+                .collect::<Vec<_>>()
+        };
+        let mut lines = vec![styled(TITLE, Role::Heading, theme)];
+        let effect = match &self.scope {
+            Scope::App => {
+                lines.extend(muted(PURPOSE));
+                EFFECT.to_owned()
+            }
+            Scope::Project { .. } => format!("{EFFECT} {PROJECT_EFFECT}"),
+        };
+        lines.push(Line::default());
+        lines.push(styled(RULES, Role::Heading, theme));
+        lines.extend(muted(&effect));
         lines.push(Line::default());
         let view = match &self.state {
             State::Loading => {
@@ -575,7 +587,12 @@ impl CheckSettingsPage {
 
     fn profile_lines(&self, first: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
-        let mut lines = vec![styled("Check profiles", Role::Accent, theme)];
+        let mut lines = vec![styled(PROFILES, Role::Heading, theme)];
+        lines.extend(
+            wrap(PROFILES_NOTICE, limit)
+                .into_iter()
+                .map(|part| styled(part, Role::Muted, theme)),
+        );
         if let Some(problem) = &self.profiles_problem {
             lines.extend(
                 wrap(&format!("Could not read the profiles. {problem}"), limit)
@@ -586,12 +603,9 @@ impl CheckSettingsPage {
         }
         if self.profiles.is_empty() {
             lines.extend(
-                wrap(
-                    "No profile yet. A master or agent proposes one, or you propose one with crazyagent checks; it asks you before it runs anything.",
-                    limit,
-                )
-                .into_iter()
-                .map(|part| styled(part, Role::Muted, theme)),
+                wrap(NO_PROFILE, limit)
+                    .into_iter()
+                    .map(|part| styled(part, Role::Muted, theme)),
             );
             return lines;
         }
@@ -644,6 +658,10 @@ impl CheckSettingsPage {
 }
 
 impl Screen for CheckSettingsPage {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         match &self.scope {
             Scope::App => vec!["Settings".into(), "Checks".into()],
