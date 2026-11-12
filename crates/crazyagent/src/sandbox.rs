@@ -3435,7 +3435,7 @@ pub(crate) fn sbpl_overlong(profile: &str) -> Vec<&str> {
         .copied()
         .filter(|part| part.len() > SBPL_STRING_MAX)
         .collect();
-    if parts.len() % 2 == 0 {
+    if parts.len().is_multiple_of(2) {
         overlong.push(parts[parts.len() - 1]);
     }
     overlong
