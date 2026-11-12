@@ -62,7 +62,11 @@ fn models(rows: [Row; 3], owned: &[(&str, Origin)]) -> Models {
 
 fn plain_models() -> Models {
     models(
-        [unset(Slot::Master), unset(Slot::Agent), unset(Slot::Allowed)],
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
         &[],
     )
 }
@@ -194,7 +198,12 @@ fn enter_and_the_arrows_choose_a_master_model_and_enter_sends_it_with_the_versio
 fn choosing_the_account_s_own_model_sends_a_reset_never_a_null() {
     let section = models(
         [
-            row(Slot::Master, Some(json!("opus")), json!("opus"), Source::App),
+            row(
+                Slot::Master,
+                Some(json!("opus")),
+                json!("opus"),
+                Source::App,
+            ),
             unset(Slot::Agent),
             unset(Slot::Allowed),
         ],
@@ -202,7 +211,10 @@ fn choosing_the_account_s_own_model_sends_a_reset_never_a_null() {
     );
     let mut shell = app_page(section);
     press(&mut shell, &[Key::Enter]);
-    assert!(screen(&mut shell).contains("opus"), "the choice starts on the stored id");
+    assert!(
+        screen(&mut shell).contains("opus"),
+        "the choice starts on the stored id"
+    );
     let count = crate::model_choice::catalog(HARNESS).len();
     let at = crate::model_choice::catalog(HARNESS)
         .iter()
@@ -223,7 +235,11 @@ fn choosing_the_account_s_own_model_sends_a_reset_never_a_null() {
         }]
     );
     press(&mut shell, &[Key::Down, Key::Enter, Key::Enter]);
-    assert_eq!(requests(&mut shell), vec![], "an unchanged choice sends nothing");
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "an unchanged choice sends nothing"
+    );
 }
 
 #[test]
@@ -231,7 +247,12 @@ fn x_resets_a_stored_slot_and_says_there_is_nothing_to_reset_otherwise() {
     let section = models(
         [
             unset(Slot::Master),
-            row(Slot::Agent, Some(json!("sonnet")), json!("sonnet"), Source::App),
+            row(
+                Slot::Agent,
+                Some(json!("sonnet")),
+                json!("sonnet"),
+                Source::App,
+            ),
             unset(Slot::Allowed),
         ],
         &[],
@@ -256,9 +277,22 @@ fn x_resets_a_stored_slot_and_says_there_is_nothing_to_reset_otherwise() {
 fn space_ticks_allowed_models_and_enter_sends_them_in_page_order() {
     let mut shell = app_page(plain_models());
     press(&mut shell, &[Key::Down, Key::Down, Key::Enter]);
-    assert!(screen(&mut shell).contains("[ ] opus"), "{}", screen(&mut shell));
+    assert!(
+        screen(&mut shell).contains("[ ] opus"),
+        "{}",
+        screen(&mut shell)
+    );
     let ids = crate::model_choice::catalog(HARNESS);
-    press(&mut shell, &[Key::Down, Key::Char(' '), Key::Up, Key::Char(' '), Key::Enter]);
+    press(
+        &mut shell,
+        &[
+            Key::Down,
+            Key::Char(' '),
+            Key::Up,
+            Key::Char(' '),
+            Key::Enter,
+        ],
+    );
     assert_eq!(
         requests(&mut shell),
         vec![ModelChoiceQuery::Set {
@@ -276,16 +310,23 @@ fn a_pending_or_failed_id_cannot_be_ticked_and_a_seventeenth_does_not_fit() {
     let owned = [("mine-a", Origin::Pending), ("mine-c", Origin::Failed)];
     let ids = crate::model_choice::catalog(HARNESS);
     let section = models(
-        [unset(Slot::Master), unset(Slot::Agent), unset(Slot::Allowed)],
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
         &owned,
     );
     let mut shell = app_page(section);
     press(&mut shell, &[Key::Down, Key::Down, Key::Enter]);
-    let text = screen(&mut shell);
-    assert!(text.contains("mine-a") && text.contains("Waiting for its test launch"), "{text}");
     for _ in 0..ids.len() {
         shell.key(Key::Down);
     }
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("mine-a") && text.contains("Waiting for its test launch"),
+        "{text}"
+    );
     shell.key(Key::Char(' '));
     assert_eq!(lead(&shell), "mine-a can't be ticked yet.");
     shell.key(Key::Down);
@@ -297,9 +338,16 @@ fn a_pending_or_failed_id_cannot_be_ticked_and_a_seventeenth_does_not_fit() {
     let many: Vec<(String, Origin)> = (0..ALLOWED_MAX + 1)
         .map(|n| (format!("own-{n:02}"), Origin::Verified))
         .collect();
-    let owned: Vec<(&str, Origin)> = many.iter().map(|(id, origin)| (id.as_str(), *origin)).collect();
+    let owned: Vec<(&str, Origin)> = many
+        .iter()
+        .map(|(id, origin)| (id.as_str(), *origin))
+        .collect();
     let mut shell = app_page(models(
-        [unset(Slot::Master), unset(Slot::Agent), unset(Slot::Allowed)],
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
         &owned,
     ));
     press(&mut shell, &[Key::Down, Key::Down, Key::Enter]);
@@ -322,7 +370,10 @@ fn unticking_every_model_on_a_project_sends_an_own_empty_list() {
     );
     let mut shell = opened(project_scope(), section);
     let text = screen(&mut shell);
-    assert!(!text.contains("Pick rule") && !text.contains("Add a model id"), "{text}");
+    assert!(
+        !text.contains("Pick rule") && !text.contains("Add a model id"),
+        "{text}"
+    );
     press(&mut shell, &[Key::Down, Key::Down, Key::Enter]);
     let at = crate::model_choice::catalog(HARNESS)
         .iter()
@@ -349,17 +400,28 @@ fn the_project_page_offers_the_app_value_and_says_where_each_value_comes_from() 
     let section = models(
         [
             row(Slot::Master, None, json!("opus"), Source::App),
-            row(Slot::Agent, Some(json!("sonnet")), json!("sonnet"), Source::Project),
+            row(
+                Slot::Agent,
+                Some(json!("sonnet")),
+                json!("sonnet"),
+                Source::Project,
+            ),
             unset(Slot::Allowed),
         ],
         &[],
     );
     let mut shell = opened(project_scope(), section);
     let text = screen(&mut shell);
-    assert!(text.contains("Claude Code models for Fieldnotes Mobile"), "{text}");
+    assert!(
+        text.contains("Claude Code models for Fieldnotes Mobile"),
+        "{text}"
+    );
     assert!(text.contains("App") && text.contains("Project"), "{text}");
     press(&mut shell, &[Key::Enter]);
-    assert!(screen(&mut shell).contains(APP_VALUE), "the first choice keeps the app value");
+    assert!(
+        screen(&mut shell).contains(APP_VALUE),
+        "the first choice keeps the app value"
+    );
     press(&mut shell, &[Key::Esc, Key::Down, Key::Char('x')]);
     assert_eq!(
         requests(&mut shell),
@@ -399,10 +461,17 @@ fn typing_an_id_adds_it_and_an_id_the_rule_refuses_never_leaves() {
     };
     assert_eq!(requests(&mut shell), vec![add.clone()]);
     let after = models(
-        [unset(Slot::Master), unset(Slot::Agent), unset(Slot::Allowed)],
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
         &[("my-model-1", Origin::Pending)],
     );
-    shell.arrive(arrival(add, Ok(ModelChoiceReply::Added(ModelAdded::Pending, after))));
+    shell.arrive(arrival(
+        add,
+        Ok(ModelChoiceReply::Added(ModelAdded::Pending, after)),
+    ));
     assert_eq!(lead(&shell), "Added my-model-1.");
     assert!(screen(&mut shell).contains("Waiting for its test launch"));
 }
@@ -410,7 +479,11 @@ fn typing_an_id_adds_it_and_an_id_the_rule_refuses_never_leaves() {
 #[test]
 fn x_on_an_own_id_removes_it() {
     let section = models(
-        [unset(Slot::Master), unset(Slot::Agent), unset(Slot::Allowed)],
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
         &[("my-model-1", Origin::Pending)],
     );
     let mut shell = app_page(section);
@@ -423,58 +496,65 @@ fn x_on_an_own_id_removes_it() {
         model: "my-model-1".into(),
     };
     assert_eq!(requests(&mut shell), vec![remove.clone()]);
-    shell.arrive(arrival(remove, Ok(ModelChoiceReply::Removed(true, plain_models()))));
+    shell.arrive(arrival(
+        remove,
+        Ok(ModelChoiceReply::Removed(true, plain_models())),
+    ));
     assert_eq!(lead(&shell), "Removed my-model-1.");
-    assert!(!screen(&mut shell).contains("my-model-1"));
+    assert!(
+        !screen(&mut shell).contains("Yours"),
+        "no owner id row is left"
+    );
 }
 
 #[test]
 fn each_pick_and_fallback_option_sends_its_rule_with_the_version_read() {
     let mut shell = app_page(plain_models());
-    press(&mut shell, &[Key::Down, Key::Down, Key::Down, Key::Enter, Key::Right, Key::Enter]);
-    press(&mut shell, &[Key::Enter, Key::Right, Key::Right, Key::Enter]);
-    press(&mut shell, &[Key::Down, Key::Enter, Key::Right, Key::Enter]);
-    press(&mut shell, &[Key::Enter, Key::Right, Key::Right, Key::Enter]);
-    press(&mut shell, &[Key::Enter, Key::Enter]);
-    let sent = requests(&mut shell);
-    assert_eq!(
-        sent,
-        vec![
-            ModelChoiceQuery::SetRule {
-                rule: Rule::Pick(PickRule::Hint),
-                version: 2
-            },
-            ModelChoiceQuery::SetRule {
-                rule: Rule::Fallback(FallbackRule::Stop),
-                version: 5
-            },
-        ],
-        "one request at a time; the rest wait for the answer"
-    );
-    let saved = rules(PickRule::Hint, FallbackRule::Notice);
-    shell.arrive(arrival(
-        sent[0].clone(),
-        Ok(ModelChoiceReply::RuleWritten(RuleWritten::Saved {
-            rules: saved.clone(),
-        })),
-    ));
-    assert_eq!(lead(&shell), "Saved.");
-    assert!(screen(&mut shell).contains("Any offered model"));
-    for (keys, rule) in [
-        (vec![Key::Up, Key::Enter, Key::Right, Key::Enter], Rule::Pick(PickRule::Default)),
-        (vec![Key::Down, Key::Enter, Key::Right, Key::Right, Key::Enter], Rule::Fallback(FallbackRule::Silent)),
-    ] {
-        press(&mut shell, &keys);
-        let sent = requests(&mut shell);
-        assert_eq!(sent.len(), 1, "{rule:?}");
-        let ModelChoiceQuery::SetRule { rule: got, .. } = &sent[0] else {
-            panic!("{sent:?}");
+    let mut current = rules(PickRule::Strict, FallbackRule::Notice);
+    press(&mut shell, &[Key::Down, Key::Down, Key::Down]);
+    let steps = [
+        (Rule::Pick(PickRule::Hint), "Any offered model"),
+        (Rule::Pick(PickRule::Default), "Always the default"),
+        (Rule::Pick(PickRule::Strict), "Only the allowed list"),
+        (Rule::Fallback(FallbackRule::Stop), "Stop and say why"),
+        (Rule::Fallback(FallbackRule::Silent), "Quietly"),
+        (Rule::Fallback(FallbackRule::Notice), "Tell me"),
+    ];
+    for (index, (rule, words)) in steps.into_iter().enumerate() {
+        if index == 3 {
+            shell.key(Key::Down);
+        }
+        press(&mut shell, &[Key::Enter, Key::Right, Key::Enter]);
+        let version = match rule {
+            Rule::Pick(_) => current.pick_version,
+            Rule::Fallback(_) => current.fallback_version,
         };
-        assert_eq!(*got, rule);
+        let sent = requests(&mut shell);
+        assert_eq!(
+            sent,
+            vec![ModelChoiceQuery::SetRule { rule, version }],
+            "{words}"
+        );
+        press(&mut shell, &[Key::Enter, Key::Right, Key::Enter]);
+        assert_eq!(requests(&mut shell), vec![], "one request at a time");
+        match rule {
+            Rule::Pick(pick) => {
+                current.pick = pick;
+                current.pick_version += 1;
+            }
+            Rule::Fallback(fallback) => {
+                current.fallback = fallback;
+                current.fallback_version += 1;
+            }
+        }
         shell.arrive(arrival(
             sent[0].clone(),
-            Ok(ModelChoiceReply::RuleWritten(RuleWritten::Saved { rules: saved.clone() })),
+            Ok(ModelChoiceReply::RuleWritten(RuleWritten::Saved {
+                rules: current.clone(),
+            })),
         ));
+        assert_eq!(lead(&shell), "Saved.");
+        assert!(screen(&mut shell).contains(words), "{words}");
     }
 }
 
@@ -523,7 +603,12 @@ fn a_stale_or_refused_write_replaces_the_row_and_says_why() {
     let mut shell = app_page(plain_models());
     press(&mut shell, &[Key::Enter, Key::Right, Key::Enter]);
     let sent = requests(&mut shell);
-    let newer = row(Slot::Master, Some(json!("sonnet")), json!("sonnet"), Source::App);
+    let newer = row(
+        Slot::Master,
+        Some(json!("sonnet")),
+        json!("sonnet"),
+        Source::App,
+    );
     shell.arrive(arrival(
         sent[0].clone(),
         Ok(ModelChoiceReply::Written(Written::Stale { row: newer })),

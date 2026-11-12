@@ -223,6 +223,11 @@ pub enum Place {
         name: String,
         project: Option<(ProjectId, String)>,
     },
+    Models {
+        harness: String,
+        name: String,
+        project: Option<(ProjectId, String)>,
+    },
     ProjectHarnesses {
         id: ProjectId,
         name: String,
@@ -401,6 +406,7 @@ pub trait Screen {
             | Place::ProjectMemory { id, .. } => Some(id),
             Place::Onboarding { project, .. } => project,
             Place::HarnessSettings { project, .. }
+            | Place::Models { project, .. }
             | Place::CheckSettings { project }
             | Place::TicketSettings { project } => project.map(|(id, _)| id),
             Place::Home
@@ -455,6 +461,21 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
             name,
             project,
         } => Box::new(settings::harness_page::HarnessPage::new(
+            harness.clone(),
+            name.clone(),
+            match project {
+                None => process::Scope::App,
+                Some((id, name)) => process::Scope::Project {
+                    id: id.clone(),
+                    name: name.clone(),
+                },
+            },
+        )),
+        Place::Models {
+            harness,
+            name,
+            project,
+        } => Box::new(settings::models_page::ModelsPage::new(
             harness.clone(),
             name.clone(),
             match project {
