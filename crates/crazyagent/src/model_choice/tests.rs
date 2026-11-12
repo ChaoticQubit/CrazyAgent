@@ -580,3 +580,63 @@ fn every_refusal_code_is_listed() {
         assert!(MODEL_CHOICE_CODES.contains(&code), "{code}");
     }
 }
+
+#[test]
+fn each_launch_harness_ships_a_checked_model_catalog() {
+    for harness in ["claude-code", "codex"] {
+        let shipped = shipped(harness).unwrap();
+        assert_eq!(shipped.harness, harness);
+        assert!(!shipped.qualified_versions.is_empty());
+        assert!(!shipped.sources.is_empty());
+        assert!(!shipped.models.is_empty());
+        assert_eq!(catalog(harness), shipped.models);
+    }
+    assert!(catalog("codex").contains(&"gpt-6.1-sol".to_owned()));
+    assert!(catalog("claude-code").contains(&"opus[1m]".to_owned()));
+    assert_eq!(catalog("claude"), catalog("claude-code"));
+    assert!(shipped("rcli").is_none());
+    assert!(catalog("rcli").is_empty());
+    assert!(catalog("no-such-harness").is_empty());
+}
+
+#[test]
+fn a_model_catalog_out_of_contract_is_refused() {
+    let good = json!({
+        "harness": "codex",
+        "qualified_versions": ["0.164.0"],
+        "sources": ["https://developers.openai.com/codex/models"],
+        "models": ["gpt-6.1-sol", "gpt-6-luna"],
+    });
+    assert_eq!(
+        parse_catalog(good.to_string().as_bytes()).unwrap().models,
+        vec!["gpt-6.1-sol".to_owned(), "gpt-6-luna".to_owned()]
+    );
+    let broken = |field: &str, value: Value| {
+        let mut catalog = good.clone();
+        catalog[field] = value;
+        catalog.to_string()
+    };
+    let too_many: Vec<String> = (0..=CATALOG_MODELS_MAX)
+        .map(|n| format!("gpt-{n}"))
+        .collect();
+    for bad in [
+        broken("harness", json!("rcli")),
+        broken("harness", json!("no-such-harness")),
+        broken("qualified_versions", json!([])),
+        broken("qualified_versions", json!(["latest"])),
+        broken("sources", json!([])),
+        broken(
+            "sources",
+            json!(["http://developers.openai.com/codex/models"]),
+        ),
+        broken("models", json!([])),
+        broken("models", json!(["-gpt"])),
+        broken("models", json!(["opus[1m]"])),
+        broken("models", json!(["gpt-6-luna", "gpt-6-luna"])),
+        broken("models", json!(too_many)),
+        broken("extra", json!(1)),
+        "not json".to_owned(),
+    ] {
+        assert!(parse_catalog(bad.as_bytes()).is_none(), "{bad}");
+    }
+}
