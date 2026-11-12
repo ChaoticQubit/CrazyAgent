@@ -77,6 +77,7 @@ fn a_pasted_prompt_mark_is_cut_from_the_subject_of_a_set_without_agent_commits()
 #[test]
 fn an_agent_summary_names_the_set_and_lists_its_commit_subjects() {
     let case = Case::new();
+    case.start();
     case.edit("README", "one\ntwo\nthree\nfour\n");
     case.agent_commit("Add the fourth line");
     case.edit("README", "one\ntwo\nthree\nfour\nfive\n");

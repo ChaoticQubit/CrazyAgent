@@ -7567,13 +7567,11 @@ fn a_change_set_the_owner_landed_in_part_by_hand_shows_only_the_rest_until_all_o
     case.landed_outside(&id, &head);
 }
 
-/// Makes the activity tables the rows of a change set's closing need. Input: the case.
+/// Makes the activity tables the rows of a change set's closing need, with the case's
+/// project kept in them, as the engine keeps it, so a poll judges its sets (F24).
+/// Input: the case.
 fn closing_tables(case: &Case) {
-    case.db
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
-        )
-        .unwrap();
+    with_projects(case, &[case.workspace.project.as_str()]);
     crate::coord::ensure(&case.db).unwrap();
     crate::activity::initialize(&case.db).unwrap();
 }
@@ -7804,13 +7802,7 @@ fn a_change_set_whose_worktree_was_deleted_outside_the_app_closes_as_removed_out
 #[test]
 fn restoring_a_discarded_set_and_closing_one_removed_outside_the_app_are_recorded() {
     let case = Case::new();
-    case.db
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
-        )
-        .unwrap();
-    crate::coord::ensure(&case.db).unwrap();
-    crate::activity::initialize(&case.db).unwrap();
+    closing_tables(&case);
     case.edit("src/new.rs", "fn main() {}\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let head = case.view(&id).head;
