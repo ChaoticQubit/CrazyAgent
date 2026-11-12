@@ -96,3 +96,44 @@ fn esc_keeps_the_accounts_step() {
     assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
     assert_eq!(shell.depth(), 1);
 }
+
+const LEARN: &str = "A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets. Its first step is an optional demo project.";
+
+#[test]
+fn the_learn_offer_shows_ticked_under_the_buttons_and_space_unticks_it() {
+    for (width, height) in [(80, 24), (120, 36)] {
+        let mut shell = step(width, height);
+        let rows = render(&mut shell, width, height);
+        let buttons = rows
+            .iter()
+            .position(|row| row.contains("[> Add account ]"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        let heading = rows
+            .iter()
+            .position(|row| row.trim() == "Learn CrazyAgent")
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(buttons < heading, "the offer sits under the buttons: {rows:#?}");
+        assert!(words(&rows).contains(LEARN), "{rows:#?}");
+        assert!(shows(&rows, "[x] Show the guide on Home"), "{rows:#?}");
+        assert!(bar(&rows).contains("Space Untick"), "{}", bar(&rows));
+        assert!(
+            rows.iter()
+                .all(|row| row.chars().count() <= usize::from(width)),
+            "{rows:#?}"
+        );
+
+        shell.key(Key::Char(' '));
+        let rows = render(&mut shell, width, height);
+        assert!(shows(&rows, "[ ] Show the guide on Home"), "{rows:#?}");
+        assert!(bar(&rows).contains("Space Tick"), "{}", bar(&rows));
+        assert!(
+            shows(&rows, "[> Add account ]   [ Skip for now ]"),
+            "Space keeps the focused button: {rows:#?}"
+        );
+        shell.key(Key::Char(' '));
+        assert!(shows(
+            &render(&mut shell, width, height),
+            "[x] Show the guide on Home"
+        ));
+    }
+}
