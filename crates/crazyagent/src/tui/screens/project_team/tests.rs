@@ -1958,12 +1958,13 @@ fn stored() -> crate::project_setup::StoredSetup {
 /// Team settings name the saved master harness on the plan line and, after the On harness
 /// switch choice, when a saved change reaches the running master; at 80 columns too, where a
 /// setting of its own would fold the first settings row away. In a short window the focused
-/// agent's Tools and Working copy rows give way first, then the plan line, as `draw` orders
-/// them. At 80 by 25 and 80 by 24 the plan line shows, the settings packed by first fit
-/// (BL-TUI-8024-PLANLINE), and every setting, Left running included, shows at both.
+/// agent's Tools and Working copy rows give way first, then the settings rows after the first
+/// scroll, as `draw` orders them, so the plan line shows at 80 by 25 and 80 by 24
+/// (BL-TUI-8024-PLANLINE, gate row 26). The settings pack in order (backlog 42): at 80 by 25
+/// every setting shows, and at 80 by 24 Left running is one PgDn away.
 #[test]
 fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_master() {
-    let view = loaded();
+    let mut view = loaded();
     let tall = frame(&view, 160, 36);
     assert!(find(&tall, "Working copy").contains("agent-1"));
     assert!(find(&tall, "Tools").contains("On, inside the project folder"));
@@ -1993,7 +1994,21 @@ fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_m
             .contains("On harness switch  Carry over, when the master is idle")
     );
     assert!(find(&short, "Max teammates").contains("Max teammates  No limit"));
-    assert!(find(&short, "Left running").contains("Left running  End them"));
+    assert!(
+        find(&frame(&view, 80, 25), "Left running").contains("Left running  End them"),
+        "every setting fits at 80 by 25"
+    );
+    assert!(find(&short, "more settings").contains("PgDn  more settings below"));
+    assert!(
+        !short
+            .iter()
+            .any(|row| row.contains("Left running  End them"))
+    );
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let scrolled = frame(&view, 80, 24);
+    assert!(find(&scrolled, "leads.").contains("Codex leads."));
+    assert!(find(&scrolled, "Left running").contains("Left running  End them"));
+    assert_eq!(view.key(press(KeyCode::PageUp)), TeamReply::Handled);
     let mut later = team();
     later.apply_harness_switch = crate::team::SwitchApply::NextStart;
     let mut view = TeamView::new(project());
@@ -5056,10 +5071,74 @@ fn x_ends_and_k_keeps_the_oldest_hold_and_each_hold_has_a_row() {
     );
 }
 
-/// Checks a frame of the `team()` fixture: the plan line shows once and every setting shows
-/// once and whole, label and value on one row. Takes the rendered rows. Returns nothing;
-/// panics with the frame on a miss.
-fn every_setting_once_beside_the_plan_line(rows: &[String]) {
+/// The 25 settings of the `team()` fixture, label and value, in the order they pack.
+const FIXTURE_SETTINGS: [&str; 25] = [
+    "Keep warm  Off",
+    "Task  Off",
+    "Session  Off",
+    "Idle stop  Off",
+    "On harness switch  Carry over, when the master is idle",
+    "Sub-agent depth  2",
+    "Worker lands  When the lead accepts",
+    "Agent branches  Named branch",
+    "Max harnesses  No limit",
+    "Live terminal  On",
+    "Max teammates  No limit",
+    "Sub-agent rounds  Until the goal is done",
+    "Master run time  7 days",
+    "Spread accounts  Off",
+    "Token budget  Off",
+    "Master's branch  Repository default",
+    "Land on  Master's branch",
+    "Master accepts change sets  Itself",
+    "Re-ask empty reply  On",
+    "End a turn after done  10 min",
+    "New folder limit  1000 files",
+    "Master idle stop  15 min",
+    "Terminals per window  6",
+    "Background commands  Wait",
+    "Left running  End them",
+];
+
+/// Where each setting shows in a frame, as a row and a byte column, or none when it is
+/// scrolled out of view; a setting shown twice fails. Takes the rendered rows and the settings
+/// as label and value. Returns one place per setting, in the settings' order.
+fn setting_places(rows: &[String], settings: &[&str]) -> Vec<Option<(usize, usize)>> {
+    settings
+        .iter()
+        .map(|setting| {
+            let found: Vec<(usize, usize)> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(at, row)| row.find(setting).map(|column| (at, column)))
+                .collect();
+            assert!(
+                found.len() <= 1,
+                "{setting:?} shows twice:\n{}",
+                rows.join("\n")
+            );
+            found.first().copied()
+        })
+        .collect()
+}
+
+/// Checks that the settings in view read in their one fixed order, by row and then column.
+/// Takes the rendered rows and the settings. Returns which settings show.
+fn settings_in_order(rows: &[String], settings: &[&str]) -> Vec<bool> {
+    let places = setting_places(rows, settings);
+    let seen: Vec<(usize, usize)> = places.iter().flatten().copied().collect();
+    assert!(
+        seen.windows(2).all(|pair| pair[0] < pair[1]),
+        "the settings read out of order:\n{}",
+        rows.join("\n")
+    );
+    places.iter().map(Option::is_some).collect()
+}
+
+/// Checks one 80 column frame of the `team()` fixture: the plan line once, the settings in
+/// view in their fixed order and none twice, every row within 80 columns. Takes the rendered
+/// rows. Returns which settings show.
+fn plan_line_and_settings_in_order(rows: &[String]) -> Vec<bool> {
     let shown = rows.join("\n");
     assert_eq!(
         rows.iter()
@@ -5068,56 +5147,51 @@ fn every_setting_once_beside_the_plan_line(rows: &[String]) {
         1,
         "{shown}"
     );
-    for setting in [
-        "Keep warm  Off",
-        "Task  Off",
-        "Session  Off",
-        "Idle stop  Off",
-        "On harness switch  Carry over, when the master is idle",
-        "Sub-agent depth  2",
-        "Worker lands  When the lead accepts",
-        "Agent branches  Named branch",
-        "Max harnesses  No limit",
-        "Live terminal  On",
-        "Max teammates  No limit",
-        "Sub-agent rounds  Until the goal is done",
-        "Master run time  7 days",
-        "Spread accounts  Off",
-        "Token budget  Off",
-        "Master's branch  Repository default",
-        "Land on  Master's branch",
-        "Master accepts change sets  Itself",
-        "Re-ask empty reply  On",
-        "End a turn after done  10 min",
-        "New folder limit  1000 files",
-        "Master idle stop  15 min",
-        "Terminals per window  6",
-        "Background commands  Wait",
-        "Left running  End them",
-    ] {
-        assert_eq!(
-            rows.iter().filter(|row| row.contains(setting)).count(),
-            1,
-            "{setting:?} shows once, whole:\n{shown}"
-        );
-    }
     assert!(rows.iter().all(|row| row.chars().count() <= 80), "{shown}");
+    settings_in_order(rows, &FIXTURE_SETTINGS)
 }
 
-/// At 80 by 24 the team view keeps its plan line beside every setting (backlog
-/// BL-TUI-8024-PLANLINE): Left running after a stop took the plan line's row there, so the
-/// settings pack tighter and "Codex leads." shows with all of them.
-#[test]
-fn the_team_view_at_80_by_24_keeps_the_plan_line_and_every_setting() {
-    every_setting_once_beside_the_plan_line(&frame(&loaded(), 80, 24));
+/// Checks that a frame before PgDn and one after it show every setting between them. Takes
+/// which settings each frame shows.
+fn every_setting_across(top: &[bool], bottom: &[bool]) {
+    for (at, setting) in FIXTURE_SETTINGS.iter().enumerate() {
+        assert!(top[at] || bottom[at], "{setting:?} is reached with PgDn");
+    }
 }
 
-/// Team settings drawn by the shell at 80 by 24 keep the plan line beside every setting
-/// (backlog BL-TUI-8024-PLANLINE): the screen wraps its hint bar to three rows there, so its
-/// body has the same 18 rows as the Agents tab and the settings must pack as tight.
+/// At 80 by 24 the team view keeps its plan line in view (backlog BL-TUI-8024-PLANLINE) and
+/// the settings keep their one order (backlog 42 TUI-SETTINGS-SCROLL): the settings rows after
+/// the first scroll, a muted marker names PgDn, and PgDn brings the rest, Left running
+/// included, while the counts row and the plan line stay.
 #[test]
-fn team_settings_at_80_by_24_keep_the_plan_line_and_every_setting() {
+fn the_team_view_at_80_by_24_keeps_the_plan_line_and_scrolls_to_every_setting() {
+    let mut view = loaded();
+    let top = frame(&view, 80, 24);
+    let above = plan_line_and_settings_in_order(&top);
+    assert!(find(&top, "more settings").contains("PgDn  more settings below"));
+    assert!(above[0], "the counts row stays");
+    assert!(
+        !above[24],
+        "Left running sits behind PgDn:\n{}",
+        top.join("\n")
+    );
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let bottom = frame(&view, 80, 24);
+    let below = plan_line_and_settings_in_order(&bottom);
+    assert!(find(&bottom, "more settings").contains("PgUp  more settings above"));
+    assert!(below[0], "the counts row stays");
+    every_setting_across(&above, &below);
+    assert_eq!(view.key(press(KeyCode::PageUp)), TeamReply::Handled);
+    assert_eq!(frame(&view, 80, 24), top, "PgUp goes back to the top");
+}
+
+/// Team settings drawn by the shell at 80 by 24 keep the plan line in view and reach every
+/// setting with PgDn (backlog BL-TUI-8024-PLANLINE, backlog 42): the screen wraps its hint bar
+/// to three rows there, so its body has the same 18 rows as the Agents tab.
+#[test]
+fn team_settings_at_80_by_24_keep_the_plan_line_and_scroll_to_every_setting() {
     use crate::tui::client::{OwnerEvent, SetupEvent};
+    use crate::tui::keys::Key;
     use crate::tui::screens::settings_accounts::tests::{ctx, render};
     use crate::tui::screens::team_settings::TeamSettings;
     use crate::tui::seam::{Arrival, Request};
@@ -5139,5 +5213,107 @@ fn team_settings_at_80_by_24_keep_the_plan_line_and_every_setting() {
             result: Ok(SetupView::Team(Box::new(team()))),
         },
     )))));
-    every_setting_once_beside_the_plan_line(&render(&mut shell, 80, 24));
+    let top = render(&mut shell, 80, 24);
+    let above = plan_line_and_settings_in_order(&top);
+    assert!(find(&top, "more settings").contains("PgDn  more settings below"));
+    shell.key(Key::PageDown);
+    let bottom = render(&mut shell, 80, 24);
+    let below = plan_line_and_settings_in_order(&bottom);
+    assert!(find(&bottom, "more settings").contains("PgUp  more settings above"));
+    every_setting_across(&above, &below);
+}
+
+/// The settings keep one order at every width and when a value widens a row (backlog 42):
+/// they pack in order only, so a resize or a key never moves a setting ahead of an earlier
+/// one, and a window tall enough for every row shows no marker.
+#[test]
+fn the_settings_keep_one_order_at_every_width_and_when_a_value_widens() {
+    let view = loaded();
+    for width in [80, 100, 120, 160] {
+        let rows = frame(&view, width, 60);
+        let shown = settings_in_order(&rows, &FIXTURE_SETTINGS);
+        assert!(shown.iter().all(|seen| *seen), "{}", rows.join("\n"));
+        assert!(
+            !rows.iter().any(|row| row.contains("more settings")),
+            "nothing scrolls at {width} columns when every row fits"
+        );
+    }
+    let mut wide = team();
+    wide.ask_before_merge = true;
+    wide.leftovers = LeftoverMode::Keep;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(wide))));
+    let mut settings = FIXTURE_SETTINGS;
+    settings[17] = "Master accepts change sets  Only when I click or say accept all";
+    settings[24] = "Left running  Keep running";
+    for width in [80, 100] {
+        let rows = frame(&view, width, 60);
+        let shown = settings_in_order(&rows, &settings);
+        assert!(shown.iter().all(|seen| *seen), "{}", rows.join("\n"));
+    }
+}
+
+/// PgDn and PgUp clamp to the frame they were pressed under: after a resize a stale position
+/// never eats a key press, the marker says which way more settings are, and with nothing to
+/// scroll the keys are left to the screen.
+#[test]
+fn a_resize_never_leaves_a_scroll_position_that_eats_a_key() {
+    let mut view = loaded();
+    frame(&view, 80, 24);
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let bottom = frame(&view, 80, 24);
+    assert!(find(&bottom, "more settings").contains("PgUp  more settings above"));
+    let shorter = frame(&view, 80, 23);
+    assert!(
+        find(&shorter, "more settings").contains("PgUp PgDn  more settings above and below"),
+        "{}",
+        shorter.join("\n")
+    );
+    assert_eq!(view.key(press(KeyCode::PageUp)), TeamReply::Handled);
+    let back = frame(&view, 80, 23);
+    assert!(find(&back, "more settings").contains("PgDn  more settings below"));
+    plan_line_and_settings_in_order(&back);
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let tall = frame(&view, 80, 60);
+    assert!(!tall.iter().any(|row| row.contains("more settings")));
+    assert_eq!(
+        view.key(press(KeyCode::PageDown)),
+        TeamReply::Ignored,
+        "with nothing to scroll PgDn is left to the screen"
+    );
+    let again = frame(&view, 80, 24);
+    assert!(
+        find(&again, "more settings").contains("PgDn  more settings below"),
+        "a key pressed with nothing to scroll leaves the settings at the top"
+    );
+}
+
+/// The counts row and the Left running hold rows never scroll: a hold whose keys act stays in
+/// view at both ends of the scrolled settings.
+#[test]
+fn hold_rows_stay_in_view_while_the_settings_scroll() {
+    use crate::harnesses::leftovers::{HeldView, HoldState};
+    let mut view = loaded();
+    let mut stored = team();
+    stored.leftover_holds = vec![HeldView {
+        key: 4,
+        who: "the master".to_owned(),
+        names: "4 node".to_owned(),
+        state: HoldState::Held,
+        since_ms: NOW,
+        holds_account: true,
+    }];
+    reread(&mut view, stored, NOW + 60_000);
+    let top = frame(&view, 80, 24);
+    assert!(find(&top, "the master: 4 node").contains("Left running  the master: 4 node"));
+    assert!(find(&top, "more settings").contains("PgDn  more settings below"));
+    assert!(find(&top, "Keep warm").contains("Keep warm  Off"));
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let bottom = frame(&view, 80, 24);
+    assert!(find(&bottom, "the master: 4 node").contains("Left running  the master: 4 node"));
+    assert!(find(&bottom, "Keep warm").contains("Keep warm  Off"));
+    assert!(find(&bottom, "Left running  End them").contains("Left running  End them"));
+    assert!(find(&bottom, "leads.").contains("Codex leads."));
 }
