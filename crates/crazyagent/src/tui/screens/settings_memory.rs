@@ -1537,6 +1537,8 @@ impl Screen for Memory {
     fn busy(&self, _ctx: &Ctx) -> bool {
         self.waiting
             || self.setting
+            || self.scoping
+            || self.moving
             || self.approving
             || self.deleting
             || self.adding
