@@ -227,7 +227,7 @@ struct KeyForm {
 
 enum Open {
     None,
-    Add(AddForm),
+    Add(Box<AddForm>),
     Trust {
         yaml: Option<String>,
         trust: Box<TrustView>,
@@ -941,7 +941,7 @@ impl Screen for AppPluginsPage {
                         if let Some(yaml) = yaml.clone() {
                             let mut form = add_form();
                             form.yaml.set(&yaml);
-                            self.open = Open::Add(form);
+                            self.open = Open::Add(Box::new(form));
                         }
                     }
                     _ => {}
@@ -959,7 +959,7 @@ impl Screen for AppPluginsPage {
             Key::Enter | Key::Char(' ') if idle => self.activate(ctx),
             Key::Char('a') if matches!(self.state, State::Ready(_)) && self.pending.is_none() => {
                 self.failure = None;
-                self.open = Open::Add(add_form());
+                self.open = Open::Add(Box::new(add_form()));
             }
             Key::Char('x') if idle => self.remove(ctx),
             Key::Char('k') if idle => self.key_form(ctx),
