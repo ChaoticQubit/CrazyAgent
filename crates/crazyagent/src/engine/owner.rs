@@ -796,6 +796,7 @@ pub enum OwnerRead {
     MasterFrameSettings,
     ProjectsHome,
     SetupStatus,
+    LearningProgress,
     FoundProjects,
     FolderSize {
         path: String,
@@ -899,6 +900,7 @@ impl OwnerRead {
             | Self::MasterFrameSettings
             | Self::ProjectsHome
             | Self::SetupStatus
+            | Self::LearningProgress
             | Self::FoundProjects
             | Self::Onboarding { .. }
             | Self::Memory { .. }
@@ -1353,6 +1355,9 @@ pub enum OwnerData {
     },
     SetupStatus {
         status: crate::setup::SetupStatus,
+    },
+    LearningProgress {
+        progress: crate::learning::LearningProgress,
     },
     ProjectsHome {
         home: crate::projects_home::ProjectsHome,

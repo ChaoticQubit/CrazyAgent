@@ -162,8 +162,18 @@ struct Signal {
 /// several tables appear on first use. Input: the read transaction. Output: every step in
 /// order, or the storage failure.
 pub(crate) fn progress(tx: &Transaction<'_>) -> Result<LearningProgress, EngineError> {
-    let _ = (tx, STEPS.len());
-    Ok(LearningProgress { steps: Vec::new() })
+    let mut steps = Vec::with_capacity(STEPS.len());
+    for (id, topic, title, body, signal) in STEPS {
+        let count = signal.map(|signal| count(tx, signal)).transpose()?;
+        steps.push(LearningStep {
+            id,
+            topic,
+            title: title.to_owned(),
+            body: body.to_owned(),
+            count,
+        });
+    }
+    Ok(LearningProgress { steps })
 }
 
 /// Counts up to `COUNT_MAX` rows of one signal. Inputs: the transaction and the signal.

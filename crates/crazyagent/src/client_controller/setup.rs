@@ -19,6 +19,17 @@ impl OwnerController {
         }
     }
 
+    /// Reads the Learn CrazyAgent steps: their words and how many engine rows show each done.
+    /// Takes nothing. Returns the steps in order.
+    pub async fn learning_progress(
+        &mut self,
+    ) -> Result<crate::learning::LearningProgress, EngineError> {
+        match self.read(OwnerRead::LearningProgress).await?.data {
+            OwnerData::LearningProgress { progress } => Ok(progress),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Installs the missing tools and the ticked default-pack entries; the ticked
     /// MCP servers count as approved by the owner.
     /// Takes the ticked entry ids and the client generation.
