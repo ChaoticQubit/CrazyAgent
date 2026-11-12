@@ -744,6 +744,8 @@ pub struct TeamRuntime {
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
     terminal_probe: Option<TerminalProbe>,
+    tools_refresh: fn(),
+    live_switched_on: BTreeSet<ProjectId>,
     swept: Option<Instant>,
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
@@ -1085,6 +1087,8 @@ impl TeamRuntime {
             agents: None,
             terminal: None,
             terminal_probe: None,
+            tools_refresh: crate::tools::probe::refresh_now,
+            live_switched_on: BTreeSet::new(),
             swept: None,
             events: None,
             watch: super::events::Watch::default(),
@@ -1236,6 +1240,14 @@ impl TeamRuntime {
     /// Takes the probe. Returns the runtime.
     pub fn with_terminal_probe(mut self, probe: TerminalProbe) -> Self {
         self.terminal_probe = Some(probe);
+        self
+    }
+
+    /// Replaces what the runtime runs to look for tools again when the owner switches a live
+    /// master on, for a row that counts those looks. Takes the function. Returns the runtime.
+    #[cfg(test)]
+    fn with_tools_refresh(mut self, refresh: fn()) -> Self {
+        self.tools_refresh = refresh;
         self
     }
 
