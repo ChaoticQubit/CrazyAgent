@@ -1231,6 +1231,7 @@ mod live {
             access: plan.access,
             toolchains: plan.toolchains.clone(),
             network: plan.network,
+            grants: plan.grants.clone(),
             layout: plan.layout,
             git_identity: plan.git_identity.clone(),
             limits: plan.limits,
