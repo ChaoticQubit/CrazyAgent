@@ -3529,6 +3529,8 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
     let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn"), None).unwrap();
     fs::write(prepared.cwd.join("MORE.md"), "More from the master.\n").unwrap();
     let more = crate::landing_turns::record(&db, &workspace, &end("more-turn"), None).unwrap();
+    fs::write(prepared.cwd.join("LAST.md"), "Last from the master.\n").unwrap();
+    let last = crate::landing_turns::record_news(&db, &workspace, &end("last-turn"), None).unwrap();
     drop(db);
     drop(prepared);
     case.finish().await;
@@ -3542,6 +3544,11 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
         more,
         Landed::Added(sets[0].id.clone()),
         "a later turn adds to the same set"
+    );
+    assert_eq!(
+        last,
+        (Landed::Added(sets[0].id.clone()), false),
+        "edits added to a set already pending for the owner are no news (F31)"
     );
     assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
     assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));

@@ -592,25 +592,21 @@ impl OwnerRuntimeHandle {
                 worktree,
                 git_dir: crate::worktrees::lease_git_dir(&db, &lease)?,
             };
-            let landed = crate::landing_turns::record(&db, &workspace, &end, settings.as_ref())?;
+            let (landed, news) =
+                crate::landing_turns::record_news(&db, &workspace, &end, settings.as_ref())?;
             let merged = match &landed {
                 crate::landing_turns::Landed::Added(id) => master_landed_note(&db, id),
                 _ => None,
             };
-            Ok((landed, merged))
+            Ok((news, merged))
         })
         .await
         .unwrap_or_else(|_| Err(failure("changes_unavailable")));
         let note = match landed {
-            Ok((
-                crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
-                _,
-            )) => {
+            Ok((false, None)) => {
                 return turn;
             }
-            Ok((crate::landing_turns::Landed::Added(_), merged)) => {
-                merged.unwrap_or_else(|| CHANGES_WAITING.to_owned())
-            }
+            Ok((_, merged)) => merged.unwrap_or_else(|| CHANGES_WAITING.to_owned()),
             Err(error) => format!(
                 "{CHANGES_NOT_KEPT} ({})",
                 crate::landing::refusal_code(&error)

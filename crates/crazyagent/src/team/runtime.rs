@@ -9111,7 +9111,7 @@ impl TeamRuntime {
         };
         let landed = crate::landing::open(&self.root).and_then(|db| {
             let landed =
-                crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref());
+                crate::landing_turns::record_news(&db, &workspace, &ended, self.settings.as_ref());
             if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
                 eprintln!(
                     "landing_settle_failed cause={}",
@@ -9122,12 +9122,10 @@ impl TeamRuntime {
         });
         let kept = landed.is_ok();
         let note = match landed {
-            Ok(
-                crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
-            ) => {
+            Ok((_, false)) => {
                 return Ok(true);
             }
-            Ok(crate::landing_turns::Landed::Added(_)) => {
+            Ok((_, true)) => {
                 let note = format!("The edits from {what} are waiting for you in Changes.");
                 let told = match lands {
                     Some(super::ChildLanding::Lead) => LEAD_MERGES,
