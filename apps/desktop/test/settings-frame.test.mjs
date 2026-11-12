@@ -96,15 +96,15 @@ test("the list stops sticking up to 1070px, past the 1052px wrap point with room
 test("real Tab keys walk every Settings link in list order with a visible ring, then enter the panel", async () => {
   const walked = await onFrame("accounts", 1180, async ({ evaluate, send }) => {
     const seen = [];
-    for (let at = 0; at < 18; at += 1) {
+    for (let at = 0; at < 14; at += 1) {
       for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
       seen.push(await evaluate("Fixture.focused()"));
     }
     return seen;
   });
-  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "GitHub", "Profile", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents", "Quitting", "Master",
-    "Projects folder", "Sandbox", "Team alerts", "Updates", "In the panel"]);
-  assert.deepEqual([...new Set(walked.slice(1, 17).map((item) => item.outline))], ["solid"]);
+  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents", "Quitting", "Master",
+    "Sandbox", "Team alerts", "In the panel"]);
+  assert.deepEqual([...new Set(walked.slice(1, 13).map((item) => item.outline))], ["solid"]);
 });
 
 test("a real Enter on a focused link opens that section's address", async () => {

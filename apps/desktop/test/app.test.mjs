@@ -129,7 +129,8 @@ test("routes reach Settings tabs and the project screens", () => {
   assert.match(settings, /<h1>Settings<\/h1>/);
   assert.match(settings, /<nav class="settings-nav" aria-label="Settings sections">/);
   assert.match(settings, /<a class="settings-nav-item" href="#\/settings\/pools" aria-current="page">Pools<\/a>/);
-  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory", "Profile"]) assert.match(settings, new RegExp(`>${label}</a>`));
+  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory"]) assert.match(settings, new RegExp(`>${label}</a>`));
+  for (const moved of ["GitHub", "Profile", "Projects folder", "Updates"]) assert.doesNotMatch(settings, new RegExp(`>${moved}</a>`), `${moved} lives in the user menu`);
   const project = render({ projects: { kind: "ok", value: [{ id: "p-1", name: "Harbor Notes", repository_count: 1 }] } }, { name: "project", id: "p-1", tab: "overview" });
   assert.match(project, /<h1>Harbor Notes<\/h1>/);
   assert.match(project, /role="tablist" aria-label="Project"/);
