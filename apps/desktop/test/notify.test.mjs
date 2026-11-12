@@ -4,6 +4,7 @@ import test from "node:test";
 import "./load-source.mjs";
 
 const notify = await import("../src/notify.ts");
+const ENGINE = readFileSync(new URL("../../../crates/crazyagent/src/notifications.rs", import.meta.url), "utf8");
 
 const available = { kind: "ok", value: "available" };
 const unavailable = { kind: "ok", value: "unavailable" };
@@ -29,13 +30,15 @@ test("an app start notifies nothing already in the store and starts after its ne
   assert.deepEqual(notify.bannerQuery(null), { filter: "all", project_id: null, kind: null, fold: false, before: null, after: null, limit: 1 });
   const start = notify.freshNotices(null, page([3, 4], 9), true, notify.NOTIFY_PER_READ_MAX);
   assert.deepEqual(start, { kept: 9, send: [] });
-  assert.deepEqual(notify.bannerQuery(9), { filter: "all", project_id: null, kind: null, fold: false, before: 60, after: 9, limit: 50 }, "one page of ids just past the cursor, the oldest first");
+  assert.deepEqual(notify.bannerQuery(9), { filter: "all", project_id: null, kind: null, fold: false, before: 22, after: 9, limit: 12 }, "a window of ids just past the cursor, the oldest first");
+  assert.equal(notify.BANNER_WINDOW_IDS, 12);
+  assert.match(ENGINE, /pub const WINDOW_IDS_MAX: u16 = 12;/, "the engine promises a window this wide is never cut by bytes");
 });
 
 test("each new item the engine marks for a banner is sent once, oldest first", () => {
   const next = notify.freshNotices(4, page([6, 5]), true, notify.NOTIFY_PER_READ_MAX);
   assert.deepEqual(next, { kept: 6, send: [5, 6] });
-  assert.deepEqual(notify.freshNotices(next.kept, page([6, 5]), true, notify.NOTIFY_PER_READ_MAX).send, [], "an item read again is not sent again");
+  assert.deepEqual(notify.freshNotices(next.kept, page([], 6), true, notify.NOTIFY_PER_READ_MAX).send, [], "the next window starts past them, so an item is never sent again");
 });
 
 test("an item without a banner, already read or already resolved is passed over, never sent later", () => {
@@ -60,7 +63,7 @@ test("the cursor moves past the store's newest id once every listed item is hand
 test("a focused window sends nothing and leaves nothing waiting", () => {
   const focused = notify.freshNotices(0, page([1, 2, 3, 4]), false, notify.NOTIFY_PER_READ_MAX);
   assert.deepEqual(focused, { kept: 4, send: [] });
-  assert.deepEqual(notify.freshNotices(focused.kept, page([1, 2, 3, 4]), true, notify.NOTIFY_PER_READ_MAX).send, [], "an item seen while focused is never sent later");
+  assert.deepEqual(notify.freshNotices(focused.kept, page([], 4), true, notify.NOTIFY_PER_READ_MAX).send, [], "an item seen while focused is never sent later");
 });
 
 test("a store whose newest id fell below the cursor, purged or replaced, starts over from it and sends nothing old", () => {
@@ -91,13 +94,18 @@ test("a backlog past one page goes out oldest first over windows and looks, and 
 });
 
 test("one look reads at most a few windows of the store and the next look goes on from there", async () => {
-  assert.equal(notify.BANNER_WINDOWS_PER_READ_MAX, 4);
+  assert.equal(notify.BANNER_WINDOWS_PER_READ_MAX, 8);
   const { load, reads } = store(upTo(300), [290]);
   const first = await notify.pickBanners(0, true, load);
-  assert.deepEqual(first, { kept: 200, send: [] });
-  assert.equal(reads.length, 4, "a look is bounded");
-  assert.deepEqual(reads.map((query) => [query.after, query.before, query.limit]), [[0, 51, 50], [50, 101, 50], [100, 151, 50], [150, 201, 50]]);
-  assert.deepEqual(await notify.pickBanners(first.kept, true, load), { kept: 300, send: [290] });
+  assert.deepEqual(first, { kept: 96, send: [] });
+  assert.equal(reads.length, 8, "a look is bounded");
+  assert.deepEqual(reads.slice(0, 2).map((query) => [query.after, query.before, query.limit]), [[0, 13, 12], [12, 25, 12]]);
+  assert.deepEqual([reads[7].after, reads[7].before], [84, 97]);
+  const second = await notify.pickBanners(first.kept, true, load);
+  assert.deepEqual(second, { kept: 192, send: [] });
+  const third = await notify.pickBanners(second.kept, true, load);
+  assert.deepEqual(third, { kept: 288, send: [] });
+  assert.deepEqual(await notify.pickBanners(third.kept, true, load), { kept: 300, send: [290] });
 });
 
 test("the first look and a focused window read once and send nothing, and a failed read keeps what came before it", async () => {
@@ -107,13 +115,13 @@ test("the first look and a focused window read once and send nothing, and a fail
   assert.equal(reads.length, 2);
   let served = 0;
   const failing = async (query) => (served++ === 0 ? load(query) : { kind: "error", code: "engine_unreachable", message: "" });
-  assert.deepEqual(await notify.pickBanners(0, true, failing), { kept: 50, send: [7] }, "the next look starts after the first window");
+  assert.deepEqual(await notify.pickBanners(0, true, failing), { kept: 12, send: [7] }, "the next look starts after the first window");
   assert.deepEqual(await notify.pickBanners(0, true, async () => ({ kind: "not_ready" })), { kept: 0, send: [] });
 });
 
-test("a window lists only ids past the cursor, never more than one page of them", () => {
+test("a window lists only ids past the cursor, never more than a window of them", () => {
   assert.throws(() => notify.freshNotices(3, page([2], 9), true, notify.NOTIFY_PER_READ_MAX), /past the cursor/);
-  assert.throws(() => notify.freshNotices(3, page([60]), true, notify.NOTIFY_PER_READ_MAX), /past the cursor/);
+  assert.throws(() => notify.freshNotices(3, page([16]), true, notify.NOTIFY_PER_READ_MAX), /past the cursor/);
   assert.throws(() => notify.freshNotices(3, page([4]), true, 0), /at least one/);
 });
 

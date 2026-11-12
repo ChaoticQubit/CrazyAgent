@@ -1463,10 +1463,51 @@ fn item_text_shown_again_is_unchanged() {
         format!("first line\npassword: {secret}"),
         format!("-----BEGIN PRIVATE KEY-----\n{secret}\n-----END PRIVATE KEY-----"),
         format!("token: {secret} and /Users/me/work/app/notes.md"),
+        format!("pushed with {secret}\n9f8e7d6c5b4a3210 to main"),
         "x".repeat(400),
     ] {
         let once = shown(&text);
         assert!(!once.contains(&secret), "{once}");
         assert_eq!(shown(&once), once, "shown twice differs for {text:?}");
     }
+}
+
+#[test]
+fn a_token_wrapped_onto_the_next_line_loses_its_tail_too() {
+    let secret = token();
+    let tail = "9f8e7d6c5b4a3210";
+    let text = shown(&format!("pushed with {secret}\n{tail} to main"));
+    assert_eq!(text, "pushed with [hidden] [hidden] to main");
+    assert!(!text.contains(tail));
+}
+
+#[test]
+fn a_window_of_window_ids_max_unfolded_ids_is_never_cut_by_bytes() {
+    let (_folder, mut connection) = store();
+    let long = format!("Sub-agent {} finished", "\u{200b}x".repeat(120));
+    let tx = connection.transaction().unwrap();
+    for at in 0..usize::from(WINDOW_IDS_MAX) + 4 {
+        record(
+            &tx,
+            &InfoNotice {
+                kind: NoticeKind::AgentFinished,
+                project_id: Some(&project("p1")),
+                subject: &format!("agent:{at}"),
+                text: &long,
+                target: NoticeTarget::Agents {
+                    project_id: project("p1"),
+                },
+            },
+            NOW_MS,
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let mut window = query(NoticeFilter::All);
+    window.after = Some(0);
+    window.before = Some(i64::from(WINDOW_IDS_MAX) + 1);
+    window.limit = WINDOW_IDS_MAX;
+    let page = listed(&connection, &window);
+    assert_eq!(page.items.len(), usize::from(WINDOW_IDS_MAX));
+    assert!(!page.more);
 }
