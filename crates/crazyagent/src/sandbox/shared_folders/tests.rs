@@ -259,6 +259,84 @@ fn engine_state_in_the_project_folder_is_never_kept_out_offered_or_opened_for_wr
     assert!(local_folders(&modern).contains(&"context".to_owned()));
 }
 
+/// L4 r1 M1: Read-write never opens a hidden folder the owner's own tools run unconfined
+/// (.venv, .vscode, .claude, .codex) or the engine's graphify-out, while a program folder such
+/// as node_modules opens; graphify-out is never kept out or offered, and the sandbox refuses a
+/// write grant for any of them.
+#[cfg(unix)]
+#[test]
+fn read_write_keeps_hidden_and_engine_folders_read_only() {
+    let (_temp, root) = project();
+    for path in [
+        ".venv/bin/python",
+        ".vscode/tasks.json",
+        ".claude/settings.json",
+        ".codex/config.toml",
+        "graphify-out/graph.json",
+        "node_modules/left-pad/index.js",
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "x\n").unwrap();
+    }
+    let write = SharedFolders {
+        access: SharedAccess::ReadWrite,
+        ..SharedFolders::default()
+    };
+    let opened = plan(&root, &write).unwrap();
+    assert!(opened.writes.contains(&root.join("program")), "{opened:?}");
+    assert!(
+        opened.writes.contains(&root.join("node_modules")),
+        "{opened:?}"
+    );
+    for closed in [".venv", ".vscode", ".claude", ".codex", "graphify-out"] {
+        assert!(
+            !opened.writes.contains(&root.join(closed)),
+            "{closed}: {opened:?}"
+        );
+        assert!(never_written(&root, closed), "{closed}");
+    }
+    let none = SharedFolders {
+        scope: SharedScope::None,
+        ..SharedFolders::default()
+    };
+    let kept = plan(&root, &none).unwrap();
+    assert!(
+        kept.kept_out
+            .iter()
+            .all(|path| !path.starts_with(root.join("graphify-out"))),
+        "{kept:?}"
+    );
+    assert!(!local_folders(&root).contains(&"graphify-out".to_owned()));
+    let agent = tempfile::tempdir().unwrap();
+    let agent_root = agent.path().canonicalize().unwrap();
+    let home = agent_root.join("home");
+    let tmp = agent_root.join("tmp");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &root.join(".crazyagent").join("worktrees").join("agent-1"),
+        &home,
+        &tmp,
+        super::super::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(&root)
+    .unwrap()
+    .keep_project_secrets(&root, &[])
+    .unwrap();
+    for closed in [".venv", ".claude", "graphify-out"] {
+        assert!(
+            sandbox
+                .clone()
+                .allow_shared_write(&root.join(closed))
+                .is_err(),
+            "{closed}"
+        );
+    }
+    assert!(sandbox.allow_shared_write(&root.join("program")).is_ok());
+}
+
 /// Chosen folders keeps out only the untracked paths under folders the owner did not pick.
 #[cfg(unix)]
 #[test]

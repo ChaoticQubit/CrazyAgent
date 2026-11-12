@@ -1569,8 +1569,8 @@ impl ProjectSandbox {
 
     /// Lets the agent write one shared top-level folder of the project folder that git does
     /// not track (DEC-147.9 Read-write) as one more writable root, pinned in place; the secret
-    /// names inside it stay closed, and every older deny still wins. Never a folder named
-    /// `context`, which holds the engine's context files. Input: a canonical existing folder
+    /// names inside it stay closed, and every older deny still wins. Never a hidden folder, an
+    /// engine folder or one named `context` ([`shared_folders::never_written`]). Input: a canonical existing folder
     /// directly inside the folder [`Self::keep_project_secrets`] named, clear of
     /// [`Self::secret_paths`] and of every other writable root. Output: the widened sandbox, or
     /// `Invalid`; only Seatbelt holds it.
@@ -1582,11 +1582,13 @@ impl ProjectSandbox {
             .project_secrets
             .as_ref()
             .is_some_and(|root| folder.parent() == Some(root.as_path()));
-        let engine_context = folder
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name.eq_ignore_ascii_case("context"));
-        if !in_project || engine_context {
+        let kept_read_only = match (self.project_secrets.as_ref(), folder.file_name()) {
+            (Some(root), Some(name)) => name
+                .to_str()
+                .is_none_or(|name| shared_folders::never_written(root, name)),
+            _ => true,
+        };
+        if !in_project || kept_read_only {
             return Err(invalid(
                 "a shared writable folder must be a top-level project folder kept under its secret rule",
             ));

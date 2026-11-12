@@ -104,7 +104,7 @@ export const SHARED_SCOPE_CHOICES: { scope: SharedScope; label: string; help: st
  * each lets agents do, the same in the TUI. */
 export const SHARED_ACCESS_CHOICES: { access: SharedAccess; label: string; help: string }[] = [
   { access: "read_only", label: "Read-only", help: "Agents read shared folders and never change them." },
-  { access: "read_write", label: "Read-write", help: "Agents may also change files in shared top-level folders git does not track. Tracked files change only in their worktree." },
+  { access: "read_write", label: "Read-write", help: "Agents may also change files in shared top-level folders git does not track, but not in hidden folders such as .venv or .vscode. Folders inside stay in place: agents can't move or delete them. Tracked files change only in their worktree." },
 ];
 
 /** What stays closed in shared folders, the same in the TUI. */

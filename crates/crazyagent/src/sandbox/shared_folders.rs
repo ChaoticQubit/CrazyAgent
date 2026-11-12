@@ -15,7 +15,7 @@ pub const SHARED_WRITES_MAX: usize = 32;
 pub const LOCAL_FOLDERS_MAX: usize = 64;
 const NAME_BYTES_MAX: usize = 255;
 const SECRET_PATH_BYTES_MAX: usize = 512;
-const ENGINE_NAMES: [&str; 2] = [".git", ".crazyagent"];
+const ENGINE_NAMES: [&str; 3] = [".git", ".crazyagent", "graphify-out"];
 /// What the engine keeps directly in a project folder made before the projects home, whose
 /// state folder is the project folder itself ([`crate::projects_home::state_folder`]).
 const LEGACY_STATE_NAMES: [&str; 4] = ["context", "worktrees", "research", "brief.md"];
@@ -157,7 +157,7 @@ impl SharedAccess {
         match self {
             Self::ReadOnly => "Agents read shared folders and never change them.",
             Self::ReadWrite => {
-                "Agents may also change files in shared top-level folders git does not track. Tracked files change only in their worktree."
+                "Agents may also change files in shared top-level folders git does not track, but not in hidden folders such as .venv or .vscode. Folders inside stay in place: agents can't move or delete them. Tracked files change only in their worktree."
             }
         }
     }
@@ -262,11 +262,10 @@ pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
         let folder = root.join(top);
         let plain_folder = std::fs::symlink_metadata(&folder)
             .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
-        let engine_context = top.eq_ignore_ascii_case(CONTEXT_NAME);
         if shared.access == SharedAccess::ReadWrite
             && whole_folder
             && plain_folder
-            && !engine_context
+            && !never_written(root, top)
         {
             writes.push(folder);
         }
@@ -382,7 +381,7 @@ pub fn context_section(
         if shared.scope != SharedScope::None {
             text.push_str(match shared.access {
                 SharedAccess::ReadOnly => "They are read-only to you.\n",
-                SharedAccess::ReadWrite => "You may change files in the shared top-level folders git does not track; tracked files change only in your worktree.\n",
+                SharedAccess::ReadWrite => "You may change files in the shared top-level folders git does not track, never in hidden ones (.venv, .vscode) or graphify-out, and you can't move or delete folders there; tracked files change only in your worktree.\n",
             });
         }
         text.push_str("Secret files there (.env files, keys, certificates, credential files) stay closed unless the owner shared them.\n");
@@ -396,8 +395,21 @@ pub fn context_section(
 pub const SECTION_BYTES_MAX: usize = 3072;
 const CHOSEN_LIST_BYTES_MAX: usize = 512;
 
-/// The top-level names in the project folder `root` that belong to the engine: `.git` and
-/// `.crazyagent`, and in a project made before the projects home, the state it keeps there.
+/// Whether the top-level folder `name` of the project folder `root` stays read-only under
+/// Read-write (L4 r1 M1): a hidden folder, which the owner's own tools load and run unconfined
+/// (`.venv`, `.vscode`, `.claude`, `.codex`), the engine's `context` and every engine name.
+/// Takes the project folder and the name. Returns true when agents never write it.
+pub(crate) fn never_written(root: &Path, name: &str) -> bool {
+    name.starts_with('.')
+        || name.eq_ignore_ascii_case(CONTEXT_NAME)
+        || engine_names(root)
+            .iter()
+            .any(|engine| engine.eq_ignore_ascii_case(name))
+}
+
+/// The top-level names in the project folder `root` that belong to the engine: `.git`,
+/// `.crazyagent` and `graphify-out`, and in a project made before the projects home, the
+/// state it keeps there.
 /// Takes the project folder. Returns the names.
 fn engine_names(root: &Path) -> Vec<&'static str> {
     let mut names = ENGINE_NAMES.to_vec();
