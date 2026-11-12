@@ -117,3 +117,19 @@ test("Search: each action is a direct bridge call that names the host the confir
   const page = readFileSync(new URL("../src/screens/settings/search.tsx", import.meta.url), "utf8");
   assert.match(page, /saveSearch\(\{ kind: "plugin", name: option\.name \}, hostOf\(option\.runs\.url\), /u, "the confirmed host is the one the dialog named");
 });
+
+test("Search (PUD-M1): the page reads again while the model downloads or a usable chosen plugin is still embedding, and stops once nothing moves", () => {
+  assert.equal(typeof api.searchPolling, "function", "searchPolling is exported");
+  assert.equal(typeof api.SEARCH_POLL_MS, "number", "SEARCH_POLL_MS is exported");
+  assert.ok(api.SEARCH_POLL_MS >= 1000 && api.SEARCH_POLL_MS <= 5000, "a read every 1 to 5 seconds");
+  const downloading = { state: "downloading", done_bytes: 1000, size_bytes: SIZE };
+  assert.equal(api.searchPolling(view({ model: downloading, choice: { kind: "full_text" } })), true, "a running download moves");
+  assert.equal(api.searchPolling(view()), true, "120 of 480 embedded with the usable built-in model chosen");
+  assert.equal(api.searchPolling(view({ progress: { embedded: 480, total: 480 } })), false, "all embedded, model ready");
+  assert.equal(api.searchPolling(view({ choice: { kind: "full_text" } })), false, "full text has no embedding to watch");
+  assert.equal(api.searchPolling(view({ choice: { kind: "plugin", name: "voyage" } })), false, "an unusable plugin embeds nothing");
+  assert.equal(api.searchPolling(view({ model: { state: "failed", size_bytes: SIZE, problem: { code: "x", line: null, field: null, message: "m" } }, choice: { kind: "full_text" } })), false);
+  const page = readFileSync(new URL("../src/screens/settings/search.tsx", import.meta.url), "utf8");
+  assert.match(page, /const polling = search\.kind === "ok" && searchPolling\(search\.value\);/u);
+  assert.match(page, /useEffect\(\(\) => \{\n    if \(!polling\) return;\n    const timer = window\.setInterval\(reload, SEARCH_POLL_MS\);\n    return \(\) => window\.clearInterval\(timer\);\n  \}, \[polling\]\);/u);
+});
