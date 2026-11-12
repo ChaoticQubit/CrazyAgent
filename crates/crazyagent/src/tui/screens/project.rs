@@ -769,7 +769,18 @@ impl ProjectScreen {
     /// report suggestion being read on Context, or the open tab's own ask. Output: true
     /// while n answers something here, so the shell leaves n to it.
     pub fn asking(&self) -> bool {
-        false
+        if self.boxed() || self.confirm_plan.is_some() {
+            return true;
+        }
+        match self.tab {
+            Tab::Overview => self.overview_cursor < self.suggested().len(),
+            Tab::Context => self.reading && self.report_suggestion().is_some(),
+            Tab::Conversation => !self.typing && self.sessions.asking(),
+            Tab::Changes => self.changes.asking(),
+            Tab::Questions => self.questions.asking(),
+            Tab::Settings => self.plugins.asking(),
+            Tab::Agents | Tab::Tests | Tab::Tickets => false,
+        }
     }
 
     /// Opens a project on its Overview tab.

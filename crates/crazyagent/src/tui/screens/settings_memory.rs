@@ -1223,6 +1223,10 @@ impl Screen for Memory {
         self.filtering || matches!(self.mode, Mode::Add { .. } | Mode::Import { .. })
     }
 
+    fn asking(&self) -> bool {
+        matches!(self.mode, Mode::Suggestion { .. })
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match self.mode {
             Mode::Delete { .. } => return self.delete_key(key, ctx),

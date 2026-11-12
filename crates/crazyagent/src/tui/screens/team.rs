@@ -83,7 +83,7 @@ const LIVE_TERMINAL_HOW: &str =
 const HELD_KEYS_MAX: usize = 4096;
 /// The master view header's session keys, widest first; the state picks the widest that
 /// fits beside it whole.
-const MASTER_CONTROLS: [&str; 2] = ["n New session  l Sessions", "n New session"];
+const MASTER_CONTROLS: [&str; 2] = ["+ New session  l Sessions", "+ New session"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -629,7 +629,7 @@ impl Team {
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
-            Key::Char(code @ ('n' | 'l')) => {
+            Key::Char(code @ ('+' | 'l')) => {
                 ctx.sessions_key = Some((self.project.clone(), *code));
                 self.detach(ctx);
                 return Flow::Back;
@@ -1180,7 +1180,7 @@ impl Team {
     /// saved one that waits for its next start, where the live session's master harness
     /// last switched, last its time left and the rounds of the current goal while a live
     /// master runs (F01, F09), and the session keys at the right edge. The state is kept whole: when
-    /// it does not fit beside both keys, only n New session shows and l Sessions stays in
+    /// it does not fit beside both keys, only + New session shows and l Sessions stays in
     /// the hints. Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
         let switch = self.switch.as_ref();
@@ -1450,7 +1450,7 @@ impl Screen for Team {
             {
                 hints.push(hint("Enter", "Terminal"));
             }
-            hints.push(hint("n", "New session"));
+            hints.push(hint("+", "New session"));
             hints.push(hint("l", "Sessions"));
             hints.push(hint("Esc", "Back"));
             hints.push(hint("r", "Refresh"));
@@ -1529,6 +1529,16 @@ impl Screen for Team {
 
     fn typing(&self) -> bool {
         self.settings.as_ref().is_some_and(TeamView::typing) || self.questions.typing()
+    }
+
+    fn asking(&self) -> bool {
+        if self.focus == Focus::Terminal || self.master {
+            return false;
+        }
+        match &self.settings {
+            Some(view) => view.asking(),
+            None => self.messages.is_none() && self.cleanup.asking(),
+        }
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {

@@ -33,4 +33,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
- n New project   a Add project   Enter Open   s Settings   / Filter   Ctrl-K Go to   Ctrl-Q Quit                 ? Help 
+ p New project   a Add project   Enter Open   s Settings   / Filter   Ctrl-K Go to   Ctrl-Q Quit                 ? Help 

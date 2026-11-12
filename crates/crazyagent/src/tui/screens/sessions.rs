@@ -102,7 +102,7 @@ impl Sessions {
     /// Says whether the stop-or-delete question is open, so n answers it (DEC-136a key n).
     /// Input: none. Output: true while the question waits for y or n.
     pub fn asking(&self) -> bool {
-        false
+        self.confirm.is_some()
     }
 
     /// Takes a fresh engine list, newest activity first, keeping the cursor on the same
@@ -250,7 +250,7 @@ impl Sessions {
         }
         let count = self.rows.as_ref().map_or(0, Vec::len);
         match key.code {
-            KeyCode::Char('n') => self.ask(
+            KeyCode::Char('+') => self.ask(
                 SessionsAction::New {
                     cancel_running: false,
                 },
@@ -341,7 +341,7 @@ impl Sessions {
     /// The help keys the Conversation tab adds while the list is closed.
     /// Output: New session and Sessions.
     pub fn conversation_help() -> Help {
-        vec![("n", "New session"), ("l", "Sessions")]
+        vec![("+", "New session"), ("l", "Sessions")]
     }
 
     /// The body and help drawn in place of the conversation while `showing` is true.
@@ -415,7 +415,7 @@ impl Sessions {
                 ("Enter", "Resume"),
                 ("m", "Messages"),
                 ("d", "Delete"),
-                ("n", "New session"),
+                ("+", "New session"),
                 ("Esc", "Back"),
             ]
         };

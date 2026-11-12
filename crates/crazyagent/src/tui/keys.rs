@@ -176,6 +176,7 @@ pub fn global(key: &Key, typing: bool) -> Option<Global> {
         Key::Char('?') if !typing => Some(Global::Help),
         Key::Char('[') if !typing => Some(Global::PreviousSection),
         Key::Char(']') if !typing => Some(Global::NextSection),
+        Key::Char('n') if !typing => Some(Global::Notifications),
         _ => None,
     }
 }

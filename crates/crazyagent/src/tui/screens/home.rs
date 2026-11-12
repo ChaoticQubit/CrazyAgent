@@ -777,7 +777,7 @@ impl Home {
             self.panel = Panel::Projects;
         }
         match key {
-            Key::Char('n') => Flow::Open(Place::NewProject),
+            Key::Char('p') => Flow::Open(Place::NewProject),
             Key::Char('a') => Flow::Open(Place::AddProject),
             Key::Char('f') => Flow::Open(Place::HomeFolder { first_run: false }),
             Key::Char('s') => Flow::Open(Place::Settings(SettingsSection::Accounts)),
@@ -927,7 +927,7 @@ impl Screen for Home {
         if self.panel == Panel::Setup && Self::panel_visible(ctx) {
             return vec![
                 hint("Enter", Self::items(ctx)[self.setup_selected].1),
-                hint("n", "New project"),
+                hint("p", "New project"),
                 hint("a", "Add project"),
                 hint(&arrows, "Move"),
                 hint("Tab", "Switch panel"),
@@ -937,7 +937,7 @@ impl Screen for Home {
             ];
         }
         let mut hints = vec![
-            hint("n", "New project"),
+            hint("p", "New project"),
             hint("a", "Add project"),
             hint("Enter", "Open"),
         ];
@@ -955,7 +955,7 @@ impl Screen for Home {
 
     fn keys(&self, _ctx: &Ctx) -> Vec<Hint> {
         vec![
-            hint("n", "New project"),
+            hint("p", "New project"),
             hint("a", "Add project"),
             hint("s", "Settings"),
             hint("Enter", "Open project"),

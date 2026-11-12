@@ -145,7 +145,7 @@ impl Cleanup {
     /// Says whether the cleanup box is open, where n closes it (DEC-136a key n).
     /// Input: none. Output: true while the box reads or asks.
     pub(super) fn asking(&self) -> bool {
-        false
+        self.open()
     }
 
     /// Cleanup with nothing read and no box open.

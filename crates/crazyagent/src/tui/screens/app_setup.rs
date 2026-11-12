@@ -2073,6 +2073,10 @@ impl Screen for AppSetup {
         )
     }
 
+    fn asking(&self) -> bool {
+        self.ask.is_some()
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if let Some(ask) = self.ask.take() {
             self.ask_key(ask, key, ctx);

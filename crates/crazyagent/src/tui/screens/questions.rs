@@ -67,7 +67,7 @@ impl ProjectQuestions {
     /// Says whether the dismiss question is open, so n answers it (DEC-136a key n).
     /// Input: none. Output: true while the question waits for y or n.
     pub fn asking(&self) -> bool {
-        false
+        matches!(self.settling, Some(Settling::Dismiss { .. }))
     }
 
     /// Opens one project's Questions tab with nothing read yet. Input: the project.

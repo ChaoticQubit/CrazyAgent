@@ -631,6 +631,10 @@ impl Screen for AddFolder {
         self.focus == Focus::Folder
     }
 
+    fn asking(&self) -> bool {
+        self.sent.is_some() || self.icloud.is_some() || self.question.is_some() || self.confirming
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if self.sent.is_some() {
             return Flow::Handled;

@@ -74,7 +74,7 @@ impl ProjectPlugins {
     /// Says whether the remove or approve question is open, so n answers it (DEC-136a
     /// key n). Input: none. Output: true while a question waits for y or n.
     pub fn asking(&self) -> bool {
-        false
+        self.confirm.is_some() || self.removing.is_some()
     }
 
     /// Opens one project's plugins with nothing read yet.

@@ -90,6 +90,10 @@ impl Screen for TeamSettings {
         self.view.typing()
     }
 
+    fn asking(&self) -> bool {
+        self.view.asking()
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let reply = match key {
             Key::Paste(text) => {

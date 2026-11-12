@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
                                                                                 
- n New project  a Add project  Enter Open  s Settings  / Filter          ? Help 
+ p New project  a Add project  Enter Open  s Settings  / Filter          ? Help 

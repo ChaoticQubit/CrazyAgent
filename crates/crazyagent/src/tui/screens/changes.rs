@@ -231,7 +231,7 @@ impl ProjectChanges {
     /// Says whether the accept or discard question is open, so n answers it (DEC-136a
     /// key n). Input: none. Output: true while the question waits for y or n.
     pub fn asking(&self) -> bool {
-        false
+        self.asking.is_some()
     }
 
     /// Opens one project's Changes view with nothing read yet.
