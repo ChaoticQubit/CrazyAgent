@@ -288,6 +288,7 @@ fn agent_text(case: &Hostile) -> String {
         folder: Some(case.repo.clone()),
         mode: crazyagent::instruction_files::Mode::Both,
         trust: case.trust(),
+        repeated: crazyagent::agent_home::Repeated::LeaveOut,
     })
     .unwrap();
     assert!(given.files.is_empty() && given.section_bytes == 0);
@@ -1330,7 +1331,7 @@ async fn agent_terminal_output_with_osc_52_never_reaches_the_owner_clipboard() {
         }
     }
     host.kill(&agent).unwrap();
-    terminal::quit(host.as_ref()).unwrap();
+    terminal::quit(host.as_ref(), true).unwrap();
     let has = |needle: &[u8]| seen.windows(needle.len()).any(|window| window == needle);
     record(
         "agent_terminal_output_with_osc_52_never_reaches_the_owner_clipboard",
