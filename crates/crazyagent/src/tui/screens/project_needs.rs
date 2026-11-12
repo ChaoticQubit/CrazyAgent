@@ -133,6 +133,15 @@ impl NeedsYou {
         rows
     }
 
+    /// Whether a row asks for more than the project's pool, which the unassigned Overview's
+    /// pool picker answers by itself. Input: none. Output: true when any row targets
+    /// something other than the project's pool.
+    pub(in crate::tui) fn beyond_pool(&self) -> bool {
+        self.rows()
+            .iter()
+            .any(|row| !matches!(row.target, NoticeTarget::ProjectPool { .. }))
+    }
+
     /// The rows the Overview lists, at most `SHOWN_MAX`. Input: none. Output: the rows.
     pub(in crate::tui) fn shown(&self) -> Vec<Notice> {
         let mut rows = self.rows();

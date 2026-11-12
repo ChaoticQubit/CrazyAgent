@@ -2214,7 +2214,7 @@ impl ProjectScreen {
                 });
             }
             KeyCode::Enter
-                if !self.pool.as_ref().is_some_and(|p| p.assigned) && needs.is_empty() =>
+                if !self.pool.as_ref().is_some_and(|p| p.assigned) && !self.needs.beyond_pool() =>
             {
                 return self.pool_reply();
             }

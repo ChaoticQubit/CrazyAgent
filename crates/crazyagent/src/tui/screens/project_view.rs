@@ -1180,7 +1180,7 @@ fn overview(
         ];
         return (lines, None, vec![TABS, ("Esc", "Home")]);
     }
-    if !assigned && screen.pool_ready && screen.needs.rows().is_empty() {
+    if !assigned && screen.pool_ready && !screen.needs.beyond_pool() {
         let picked = screen
             .pool
             .as_ref()
