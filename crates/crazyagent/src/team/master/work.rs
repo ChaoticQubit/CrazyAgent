@@ -355,16 +355,7 @@ pub(super) fn update_work(
         let earlier = sending
             .reply_to
             .expect("the tool requires reply_to for a reply");
-        return Ok(match coord::reply(connection, from, earlier, text, now) {
-            Ok(id) => {
-                let waits = waits_for(connection, project, coord::message(connection, id)?.to)?;
-                (
-                    format!("Sent reply #{id} to message #{earlier}.{waits}"),
-                    false,
-                )
-            }
-            Err(problem) => refused("Not sent", problem)?,
-        });
+        return reply_and_wake(connection, answering, agent, master, earlier, text, now);
     }
     if sending.kind == Update::Question {
         let (target, severity) = sending
@@ -470,6 +461,69 @@ pub(super) fn update_work(
     }
     tx.commit().map_err(state)?;
     Ok((format!("Sent #{id}. {said}"), false))
+}
+
+/// Sends an `update_work` reply and wakes its receiver when that is a stopped agent the
+/// caller leads, as the master or the agent's own lead, the way a message does, so an
+/// answer to a finished worker never waits unseen (F16, HB "my reply didn't wake him").
+/// The reply and the wake share one transaction: a refused wake stores nothing and is
+/// answered "Not sent". Takes the database, what the answers need, the caller, whether it
+/// is the master, the message answered, the text and the time. Returns the sentence and
+/// whether it is a refusal.
+fn reply_and_wake(
+    connection: &mut Connection,
+    answering: &Answering<'_>,
+    agent: i64,
+    master: bool,
+    earlier: i64,
+    text: String,
+    now: i64,
+) -> Result<(String, bool), EngineError> {
+    let project = &answering.stored.project_id;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(state)?;
+    let id = match coord::reply(&tx, Party::Agent(agent), earlier, text, now) {
+        Ok(id) => id,
+        Err(problem) => return refused("Not sent", problem),
+    };
+    let to = coord::message(&tx, id)?.to;
+    let stopped_worker = match to {
+        Party::Agent(target) if target != agent && !running(&tx, project, target)? => {
+            (master || super::is_worker(&tx, project, agent, target)?).then_some(target)
+        }
+        _ => None,
+    };
+    let Some(target) = stopped_worker else {
+        let waits = waits_for(&tx, project, to)?;
+        tx.commit().map_err(state)?;
+        return Ok((
+            format!("Sent reply #{id} to message #{earlier}.{waits}"),
+            false,
+        ));
+    };
+    let shown = target.to_string();
+    let (said, refusal) = if master {
+        super::wake_in(
+            &tx,
+            answering.access,
+            answering.stored,
+            &shown,
+            WAKE_TASK,
+            true,
+            StoppedBy::Master,
+        )?
+    } else {
+        super::lead_wake(&tx, answering, agent, &shown, WAKE_TASK)?
+    };
+    if refusal {
+        return Ok((not_sent(&said), true));
+    }
+    tx.commit().map_err(state)?;
+    Ok((
+        format!("Sent reply #{id} to message #{earlier}. {said}"),
+        false,
+    ))
 }
 
 /// Says that a message waits for an agent that has stopped or failed, which keeps it for

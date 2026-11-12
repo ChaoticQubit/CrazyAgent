@@ -2992,6 +2992,81 @@ fn a_message_to_a_finished_agent_that_cannot_wake_is_refused_and_not_stored() {
     assert_eq!(count("SELECT COUNT(*) FROM team_tasks"), 0);
 }
 
+/// A master's reply to a message from a worker that has since finished wakes that worker,
+/// as a message does, and the wake and the reply are one transaction: a worker whose
+/// worktree is gone stores neither (F16, HB "my reply didn't wake him").
+#[cfg(target_os = "macos")]
+#[test]
+fn a_reply_to_a_finished_worker_wakes_it_and_a_refused_wake_stores_no_reply() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let asked = |fixture: &Fixture, role: &str| -> (i64, i64) {
+        let agent = named_sub(fixture, role, "idle");
+        let message = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Agent(agent),
+                to: crate::coord::Party::Agent(MASTER),
+                kind: crate::coord::MessageKind::Prompt,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: "Which footer should I add?".to_owned(),
+                idempotency_key: None,
+            },
+            NOW,
+        )
+        .unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET status='stopped', stopped_ms=?2 WHERE id=?1",
+                params![agent, NOW + 1],
+            )
+            .unwrap();
+        (agent, message)
+    };
+    let (agent, message) = asked(&fixture, "page-writer");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "reply", "reply_to": message, "text": "The plain one."}),
+    );
+    assert!(
+        !refused
+            && said.starts_with("Sent reply #")
+            && said.contains(&format!("to message #{message}. Waking {label}:")),
+        "{said}"
+    );
+    let woken = pinned(&fixture, agent);
+    assert_eq!(woken.len(), 1, "the reply pins one wake task");
+    let (waiting, _) = crate::coord::delivery::next_turn(&fixture.connection, agent).unwrap();
+    assert_eq!(waiting.matches("The plain one.").count(), 1, "{waiting}");
+    let (gone, earlier) = asked(&fixture, "old-job");
+    no_worktree(&fixture, gone);
+    let replies = |fixture: &Fixture| -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM coord_messages WHERE reply_to=?1",
+                [earlier],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "reply", "reply_to": earlier, "text": "Pick it up again."}),
+    );
+    assert!(refused && said.starts_with("Not sent: "), "{said}");
+    assert_eq!(replies(&fixture), 0, "a refused wake keeps no reply");
+    assert!(pinned(&fixture, gone).is_empty());
+}
+
 /// Runs git in `dir` with an isolated home and no system config, as the owner or an agent
 /// would in a merge test. Takes the folder and the arguments. Returns standard output.
 #[cfg(target_os = "macos")]
