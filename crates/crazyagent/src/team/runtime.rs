@@ -1192,11 +1192,20 @@ impl TeamRuntime {
     /// account, so the agent goes on without a relaunch; every other team pane ends and its
     /// project hears why. Takes the host. Returns the runtime, or the host's plain code.
     pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, EngineError> {
+        self.attach_terminal(host)?;
+        Ok(self)
+    }
+
+    /// Makes `host` the terminal team agents run in, at engine start or when a live master
+    /// start finds one the engine started without, and takes over or ends the panes an
+    /// earlier engine left there ([`TeamRuntime::with_terminal`]). Takes the host. Returns
+    /// the host's plain code when it cannot list its panes, with no host kept.
+    fn attach_terminal(&mut self, host: Arc<dyn Host>) -> Result<(), EngineError> {
         let records = self.pane_records()?;
+        let alive = host.alive()?;
         self.terminal = Some(host.clone());
         let access = (self.access)().unwrap_or_default();
-        let panes: BTreeMap<i64, AgentId> = host
-            .alive()?
+        let panes: BTreeMap<i64, AgentId> = alive
             .into_iter()
             .filter_map(|agent| agent.team_agent().map(|id| (id, agent)))
             .collect();
@@ -1218,7 +1227,8 @@ impl TeamRuntime {
                 self.closed_note(id, &reason)?;
             }
         }
-        Ok(self)
+        assert!(self.terminal.is_some());
+        Ok(())
     }
 
     /// Lets a runtime with no terminal host look for one again each time a live master is
@@ -4183,8 +4193,6 @@ impl TeamRuntime {
             return self.move_when_idle(stored, access, paused, id);
         }
         let harness = stored.team.master.clone();
-        let live_capable = launch_harness(&harness)
-            .is_some_and(|launch| self.live_master(project, AgentRole::Master, launch));
         let planned = self.master_restarts.remove(project);
         let left = self.master_moves.remove(project);
         assert!(left.is_none() || planned, "a move is a planned restart");
@@ -4196,6 +4204,22 @@ impl TeamRuntime {
             self.live_starts.remove(project);
             return self.note(project, &live_gone(&harness));
         }
+        if on && self.terminal.is_none() {
+            let Some(host) = self.terminal_probe.as_ref().and_then(|probe| probe()) else {
+                return self.live_ended(project, super::master::TERMINAL_MISSING);
+            };
+            if let Err(problem) = self.attach_terminal(host) {
+                return self.live_off(
+                    project,
+                    &format!(
+                        "its terminal could not open: {}",
+                        bound_text(&problem.0, 300)
+                    ),
+                );
+            }
+        }
+        let live_capable = launch_harness(&harness)
+            .is_some_and(|launch| self.live_master(project, AgentRole::Master, launch));
         if !on || !live_capable || self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
         }
@@ -8785,10 +8809,16 @@ impl TeamRuntime {
             .parent()
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
+        let resolved =
+            crate::tools::resolve_entry(&program, &crate::tools::Places::from_environment(None));
         sandbox = sandbox
             .allow_read(&install)
             .and_then(|sandbox| sandbox.allow_exec(&program))
             .and_then(|sandbox| sandbox.allow_node_for(&program))
+            .and_then(|sandbox| match &resolved {
+                Ok(resolved) => sandbox.allow_interpreters(resolved),
+                Err(_) => Ok(sandbox),
+            })
             .map_err(sandboxed)?;
         if let Some(engine) = &self.delegation_tool {
             let engine = engine
@@ -13388,8 +13418,9 @@ pub fn agent_teammates_server_pid(state: &Path, id: i64) -> PathBuf {
 /// Takes the runtime folder, both settings files, the launch executables by harness, the
 /// engine executable that serves masters their `delegate` tool, the engine's agent register
 /// that lists every team agent with its owner controls, the terminal host agents run in,
-/// the engine-start re-proof's flag, so agents wait for its sign-in re-checks (DEC-108),
-/// and the engine's lookup of a harness it pinned after it started.
+/// the look for that host again when the engine started without one, the engine-start
+/// re-proof's flag, so agents wait for its sign-in re-checks (DEC-108), and the engine's
+/// lookup of a harness it pinned after it started.
 /// Returns the service, or a plain reason.
 #[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
@@ -13400,6 +13431,7 @@ pub fn start_for_engine(
     engine: Option<&Path>,
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
+    probe: Option<TerminalProbe>,
     reproving: Option<Arc<AtomicBool>>,
     lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<TeamService, String> {
@@ -13444,6 +13476,10 @@ pub fn start_for_engine(
     };
     let runtime = match terminal {
         Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
+        None => runtime,
+    };
+    let runtime = match probe {
+        Some(probe) => runtime.with_terminal_probe(probe),
         None => runtime,
     };
     let runtime = runtime.with_events(super::events::HANDLERS);

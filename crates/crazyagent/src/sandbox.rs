@@ -1427,6 +1427,42 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets a script harness's interpreters run as the tool resolver found them
+    /// ([`crate::tools::Resolved::grants`]), such as the `node` an npm-built Codex asks `env`
+    /// for from nvm, volta or Homebrew: each interpreter's folder becomes readable as a
+    /// toolchain folder unless a system or granted folder covers it. Input: the resolved
+    /// harness. Output: the sandbox, or a refusal for an interpreter in the project or in a
+    /// folder the agent can write.
+    pub fn allow_interpreters(
+        mut self,
+        resolved: &crate::tools::Resolved,
+    ) -> Result<Self, SandboxError> {
+        for file in resolved.grants().into_iter().skip(1) {
+            let folder = file
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| invalid("an interpreter must sit in a folder"))?;
+            let agents = crate::harnesses::in_crazyagent_folder(&folder)
+                || folder.starts_with(&self.project_root)
+                || self
+                    .writable_roots()
+                    .any(|root| folder.starts_with(root) || root.starts_with(&folder));
+            if agents {
+                return Err(invalid("an interpreter sits where the agent can write"));
+            }
+            let covered = SYSTEM_READ_ROOTS
+                .iter()
+                .map(Path::new)
+                .chain(self.read_roots.iter().map(PathBuf::as_path))
+                .chain(self.tool_roots.iter().map(PathBuf::as_path))
+                .any(|root| folder.starts_with(root));
+            if !covered {
+                self = self.allow_node_folder(&folder)?;
+            }
+        }
+        Ok(self)
+    }
+
     /// Grants one folder of a Node script harness read-only: under Seatbelt as a toolchain
     /// folder, so every credential name below it stays denied, elsewhere as a read root.
     /// Input: a canonical existing folder. Output: the widened sandbox, or a refusal when the

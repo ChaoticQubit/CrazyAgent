@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { intakeCopy, loadSetupStatus, runSetup } from "../../api-intake";
-import type { PackEntry, SetupStatus } from "../../engine-client";
+import { installDependency, intakeCopy, loadSetupStatus, runSetup } from "../../api-intake";
+import type { Dependency, PackEntry, SetupStatus } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Icon, Skeleton, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { NotReady } from "../project/shared";
-import { SETUP_READS, approvalLine, dependencyView, entryIcon, entryName, foldSetupRead, installed, packGroups, packStateView, packTicks, retryTicks, setupBusy, setupPollMs, setupProgress, toolsChecking } from "./intake";
+import { SETUP_READS, approvalLine, dependencyView, entryIcon, entryName, foldSetupRead, installed, packGroups, packStateView, packTicks, retryTicks, rowInstall, setupBusy, setupPollMs, setupProgress, toolsChecking } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -27,9 +27,9 @@ function PackRow({ entry, ticked, onTick, locked }: { entry: PackEntry; ticked: 
  * version, the default pack as ticks grouped like the manifest, the sentence naming the ticked MCP
  * servers that continuing approves, progress while setup installs, and Try again once a run ended
  * with failures. Inputs: the setup read, the ticked ids and their handler, flags, the last problem,
- * the failed refresh line (empty when the last read worked) and the Run, Try again and Continue
- * handlers. */
-export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, stale = "", onRun, onRetry = () => undefined, onContinue }: {
+ * the failed refresh line (empty when the last read worked), the Run, Try again and Continue
+ * handlers and, when given, the one-tool Install handler. */
+export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, stale = "", onRun, onRetry = () => undefined, onContinue, onInstall }: {
   status: Loaded<SetupStatus>;
   ticks: string[];
   onTick: (id: string, on: boolean) => void;
@@ -40,6 +40,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
   onRun: () => void;
   onRetry?: () => void;
   onContinue: () => void;
+  onInstall?: (dependency: Dependency) => void;
 }) {
   if (status.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (status.kind === "not_ready") return <div className="pj-stack-s">
@@ -63,7 +64,8 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
         return <li className="in-row" key={dependency.name}>
           <span className="in-row-main"><span className="pj-row"><Icon name="wrench" size={14} /><strong>{row.title}</strong></span><span className="pj-small pj-secondary">{row.about}</span>
             {row.line && <span className={`pj-small ${dependency.state.state === "failed" ? "pj-error" : "pj-muted"}`}>{row.line}</span>}</span>
-          <StatusBadge word={row.word} tone={row.tone} />
+          <span className="pj-row"><StatusBadge word={row.word} tone={row.tone} />
+            {onInstall && rowInstall(dependency, status.value) && <Button size="small" icon="wrench" disabled={busy} onClick={() => onInstall(dependency)}>Install</Button>}</span>
         </li>;
       })}</ul>
       {notes?.map((note) => <p className="pj-small pj-error" key={note}>{displayText(note)}</p>)}
@@ -133,11 +135,22 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
     setStarted(true);
   };
 
+  const install = async (dependency: Dependency) => {
+    if (busy) return;
+    setBusy(true);
+    setProblem("");
+    const result = await installDependency(dependency.name);
+    setBusy(false);
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Installing tools isn't in this build." : intakeCopy(result)); return; }
+    setKnown((old) => ({ ...old, latest: result.value, failures: 0, line: "" }));
+  };
+
   const tick = (id: string, on: boolean) => setTicks((old) => {
     const list = old ?? [];
     return on ? (list.includes(id) ? list : [...list, id]) : list.filter((item) => item !== id);
   });
 
   return <ToolsSetupView status={status} ticks={ticks ?? []} onTick={tick} busy={busy} started={started} problem={problem} stale={known.line} onRun={() => void run()}
-    onRetry={() => void run(value === null || ticks === null ? null : retryTicks(value, ticks))} onContinue={onContinue} />;
+    onRetry={() => void run(value === null || ticks === null ? null : retryTicks(value, ticks))} onContinue={onContinue}
+    onInstall={(dependency) => void install(dependency)} />;
 }

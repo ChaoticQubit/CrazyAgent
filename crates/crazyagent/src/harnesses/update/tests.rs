@@ -15,10 +15,17 @@ impl Machine {
         }
     }
     fn roots(&self) -> Roots {
+        let npm = self.root.path().join("brew/bin/npm");
+        let engine = self.root.path().join("harnesses");
         Roots {
             home: self.root.path().join("home"),
             brew_prefixes: vec![self.root.path().join("brew")],
             casks: true,
+            npm: npm.exists().then(|| NpmInstall {
+                program: npm,
+                search: vec![self.root.path().join("brew/bin"), engine.join("bin")],
+                prefix: engine,
+            }),
         }
     }
     fn program(&self, relative: &str, mode: u32) -> PathBuf {
@@ -1141,8 +1148,64 @@ fn npm_installs_into_the_prefix_the_harness_was_found_in_whatever_the_owners_npm
     let install = install_command("codex", &machine.roots()).unwrap();
     assert_eq!(install.program, machine.root.path().join("brew/bin/npm"));
     assert!(run(&install, &home, CHECK_TIME).unwrap().success);
-    assert!(machine.root.path().join("brew/installed").exists());
+    assert!(machine.root.path().join("harnesses/installed").exists());
+    assert!(!machine.root.path().join("brew/installed").exists());
     assert!(!elsewhere.join("installed").exists());
+}
+
+#[test]
+fn an_npm_install_goes_to_the_engine_prefix_with_the_found_npm_and_never_to_a_homebrew_prefix() {
+    let machine = Machine::new();
+    machine.program("brew/bin/brew", 0o755);
+    let npm = machine.npm("brew");
+    executable(&npm, NPM_LIKE);
+    let engine = machine.root.path().join("harnesses");
+    let fixed = install_command("gemini-cli", &machine.roots()).unwrap();
+    assert_eq!(fixed.program, npm);
+    assert_eq!(fixed.args, ["install", "-g", "@google/gemini-cli"]);
+    assert_eq!(fixed.prefix.as_deref(), Some(engine.as_path()));
+    assert_eq!(
+        fixed.search,
+        vec![machine.root.path().join("brew/bin"), engine.join("bin")]
+    );
+    let home = machine.roots().home;
+    std::fs::create_dir_all(&home).unwrap();
+    assert!(run(&fixed, &home, CHECK_TIME).unwrap().success);
+    assert!(engine.join("installed").exists());
+    assert!(!machine.root.path().join("brew/installed").exists());
+    let no_node = Roots {
+        npm: None,
+        ..machine.roots()
+    };
+    assert_eq!(
+        install_command("gemini-cli", &no_node).unwrap_err(),
+        NEEDS_NODE
+    );
+}
+
+#[test]
+fn a_harness_npm_put_in_the_engine_prefix_updates_and_checks_with_the_found_npm() {
+    let machine = Machine::new();
+    let npm = machine.npm("brew");
+    let engine = machine.root.path().join("harnesses");
+    std::fs::create_dir_all(engine.join("lib/node_modules")).unwrap();
+    let real = machine.program(
+        "harnesses/lib/node_modules/@google/gemini-cli/dist/index.js",
+        0o755,
+    );
+    let update = update_command("gemini-cli", &real, &real, &machine.roots()).unwrap();
+    assert_eq!(update.program, npm);
+    assert_eq!(update.prefix.as_deref(), Some(engine.as_path()));
+    assert_eq!(
+        update.search,
+        vec![machine.root.path().join("brew/bin"), engine.join("bin")]
+    );
+    let check = check_command("gemini-cli", &real, &machine.roots())
+        .unwrap()
+        .unwrap();
+    assert_eq!(check.program, npm);
+    assert_eq!(check.args, ["view", "@google/gemini-cli", "version"]);
+    assert_eq!(check.prefix.as_deref(), Some(engine.as_path()));
 }
 
 /// The groups this user is in, as `/usr/bin/id -G` lists them.
@@ -1775,25 +1838,53 @@ fn an_unrecognized_install_of_a_harness_crazyagent_cannot_start_is_never_run() {
     assert!(system.machine.root.path().join("ran").exists());
 }
 
+/// The roots of a machine whose npm is the one setup's Node test finds on the resolver's
+/// folders under that machine's HOME only, so this Mac's own Node never counts.
+fn home_node_roots(machine: &Machine) -> Roots {
+    let home = machine.roots().home;
+    let folders: Vec<PathBuf> = crate::tools::Places::engine(None, None, Some(home.clone()), None)
+        .folders()
+        .iter()
+        .filter(|folder| folder.starts_with(&home))
+        .cloned()
+        .collect();
+    let places = crate::tools::Places::new(folders, Some(home));
+    Roots {
+        npm: super::state::engine_npm_at(machine.root.path(), &places),
+        ..machine.roots()
+    }
+}
+
 #[test]
 fn node_the_tool_resolver_finds_outside_homebrew_is_not_called_missing() {
-    let machine = Machine::new();
-    machine.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o755);
-    assert_eq!(
-        install_command("codex", &machine.roots()).unwrap_err(),
-        NO_INSTALLER
-    );
-    let volta = Machine::new();
-    volta.program("home/.volta/tools/image/node/22.11.0/bin/node", 0o755);
-    assert_eq!(
-        install_command("codex", &volta.roots()).unwrap_err(),
-        NO_INSTALLER,
-        "a volta Node is found through its real install, not its shim"
-    );
+    for (bin, why) in [
+        ("home/.nvm/versions/node/v22.11.0/bin", "an nvm Node"),
+        (
+            "home/.volta/tools/image/node/22.11.0/bin",
+            "a volta Node, found through its real install, not its shim",
+        ),
+    ] {
+        let machine = Machine::new();
+        machine.program(&format!("{bin}/node"), 0o755);
+        assert_eq!(
+            install_command("codex", &home_node_roots(&machine)).unwrap_err(),
+            NEEDS_NODE,
+            "{why} without npm is not a usable Node"
+        );
+        let npm = machine.program(&format!("{bin}/npm"), 0o755);
+        let fixed = install_command("codex", &home_node_roots(&machine)).unwrap();
+        assert_eq!(fixed.program, npm, "{why}");
+        assert_eq!(
+            fixed.prefix.as_deref(),
+            Some(machine.root.path().join("harnesses").as_path()),
+            "{why} installs into the engine prefix"
+        );
+    }
     let other = Machine::new();
     other.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o777);
+    other.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
     assert_eq!(
-        install_command("codex", &other.roots()).unwrap_err(),
+        install_command("codex", &home_node_roots(&other)).unwrap_err(),
         NEEDS_NODE,
         "a node anyone can change is not one the resolver uses"
     );

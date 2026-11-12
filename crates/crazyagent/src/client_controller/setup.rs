@@ -64,6 +64,19 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Installs one missing tool alone, such as Node when a picked harness needs it.
+    /// Takes the tool and the client generation. Returns the actual owner response; a
+    /// rejection carries a plain code, `setup_busy` while a setup run goes on.
+    pub async fn install_dependency(
+        &mut self,
+        name: crate::setup::Dependency,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.setup_status().await?;
+        self.begin_mutation(OwnerMutation::InstallDependency { name }, generation)?;
+        self.send_pending().await
+    }
+
     /// Turns one installed default-pack entry on or off for every project.
     /// Takes the entry id, on or off, the pack version the screen showed and the client
     /// generation. Returns the actual owner response; a rejection carries a plain code,

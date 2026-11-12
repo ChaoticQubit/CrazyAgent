@@ -137,6 +137,7 @@
     "allow-desktop-icloud-cancel",
     "allow-desktop-setup-status",
     "allow-desktop-run-setup",
+    "allow-desktop-install-dependency",
     "allow-desktop-set-pack-entry",
     "allow-desktop-remove-pack-entry",
     "allow-desktop-project-memories",

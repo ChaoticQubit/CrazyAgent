@@ -8,7 +8,7 @@ use crazyagent::onboarding::OnboardingView;
 use crazyagent::projects_home::icloud::Progress;
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId};
-use crazyagent::setup::SetupStatus;
+use crazyagent::setup::{Dependency, SetupStatus};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -672,6 +672,18 @@ impl NativeBridge {
     ) -> Result<SetupStatus, BridgeError> {
         let pack = pack_ids(pack)?;
         self.setup_change(OwnerMutation::RunSetup { pack }, generation)
+            .await
+    }
+
+    /// Installs one missing tool alone, such as Node for the harnesses npm installs, as one
+    /// owner intent. Inputs: the tool and a fresh draft generation. Output: the status as
+    /// the install starts; a refusal comes back as its plain code.
+    pub async fn install_dependency(
+        &mut self,
+        name: Dependency,
+        generation: u64,
+    ) -> Result<SetupStatus, BridgeError> {
+        self.setup_change(OwnerMutation::InstallDependency { name }, generation)
             .await
     }
 

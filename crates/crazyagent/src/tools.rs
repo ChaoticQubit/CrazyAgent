@@ -74,7 +74,8 @@ impl Places {
         }
     }
 
-    /// Builds the engine's places: the app's own folder, the engine's setup folder, the PATH
+    /// Builds the engine's places: the app's own folder, the engine's setup folder and its
+    /// npm harness prefix's `bin` folder, the PATH
     /// folders other than the system ones, Homebrew on Apple silicon and Intel, the HOME
     /// folders the harness catalog uses (nvm, fnm, pnpm, ~/.local/bin, ~/.cargo/bin and
     /// more), the real installs of volta, asdf, mise and fnm, each harness's own install
@@ -91,6 +92,7 @@ impl Places {
         let mut folders: Vec<PathBuf> = Vec::new();
         folders.extend(app_folder.map(Path::to_path_buf));
         folders.extend(engine_root.map(|root| root.join("setup").join("bin")));
+        folders.extend(engine_root.map(|root| root.join("harnesses").join("bin")));
         if let Some(path) = path {
             folders.extend(
                 std::env::split_paths(path)

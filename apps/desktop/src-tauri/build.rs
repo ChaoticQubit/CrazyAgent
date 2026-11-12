@@ -135,6 +135,7 @@ fn main() {
         "desktop_icloud_cancel",
         "desktop_setup_status",
         "desktop_run_setup",
+        "desktop_install_dependency",
         "desktop_set_pack_entry",
         "desktop_remove_pack_entry",
         "desktop_project_memories",

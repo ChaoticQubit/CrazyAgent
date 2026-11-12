@@ -165,13 +165,25 @@ pub struct UpdateSettings {
 }
 
 /// The folders an install is recognized by: the owner's home, the Homebrew prefixes in the
-/// order they are tried, and whether Homebrew casks can be installed on this platform.
+/// order they are tried, whether Homebrew casks can be installed on this platform, and the
+/// npm that installs npm harnesses into the engine's own prefix, when a usable Node is found.
 /// Tests pass temp folders; the engine passes the real ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roots {
     pub home: PathBuf,
     pub brew_prefixes: Vec<PathBuf>,
     pub casks: bool,
+    pub npm: Option<NpmInstall>,
+}
+
+/// The npm an npm harness installs with, found by the one Node test of setup
+/// (`crate::setup::node::usable`), the folders its run puts first (Node's own, then the
+/// prefix's `bin`) and the engine-owned prefix it installs into, never a global one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmInstall {
+    pub program: PathBuf,
+    pub search: Vec<PathBuf>,
+    pub prefix: PathBuf,
 }
 
 /// One command the engine may start: an absolute program, arguments that are all strings of
@@ -731,6 +743,27 @@ fn npm_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
     }
 }
 
+/// The npm command for one npm prefix: the engine's npm with its search folders when the
+/// prefix is the engine's own, else the npm in that prefix's `bin`. Inputs: the prefix, the
+/// roots and the arguments. Output: the command, not yet checked.
+fn npm_for(prefix: &Path, roots: &Roots, args: Vec<&'static str>) -> Fixed {
+    match roots.npm.as_ref().filter(|engine| engine.prefix == prefix) {
+        Some(engine) => engine_npm_fixed(engine, args),
+        None => npm_fixed(prefix, args),
+    }
+}
+
+fn engine_npm_fixed(engine: &NpmInstall, args: Vec<&'static str>) -> Fixed {
+    assert!(!engine.search.is_empty() && engine.search.len() <= 2);
+    assert!(engine.prefix.is_absolute());
+    Fixed {
+        program: engine.program.clone(),
+        args,
+        search: engine.search.clone(),
+        prefix: Some(engine.prefix.clone()),
+    }
+}
+
 fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
     let mut args = vec!["install", "-g"];
     args.extend(npm.flags);
@@ -783,7 +816,7 @@ pub fn update_command(
             modules,
             npm,
         } => {
-            let fixed = checked(npm_fixed(&prefix, npm_install_args(npm)))?;
+            let fixed = checked(npm_for(&prefix, roots, npm_install_args(npm)))?;
             if owned(&modules) {
                 Ok(fixed)
             } else {
@@ -806,41 +839,20 @@ pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixe
             };
             checked(brew_fixed(prefix, args)).map(Some)
         }
-        Found::Npm { prefix, npm, .. } => {
-            checked(npm_fixed(&prefix, vec!["view", npm.package, "version"])).map(Some)
-        }
+        Found::Npm { prefix, npm, .. } => checked(npm_for(
+            &prefix,
+            roots,
+            vec!["view", npm.package, "version"],
+        ))
+        .map(Some),
     }
-}
-
-/// Tells whether the tool resolver finds no Node.js in the roots' Homebrew folders or in
-/// the resolver's own folders under the roots' HOME: nvm, fnm and the real installs of
-/// volta, asdf and mise, never their shims. Input: the roots. Output: true when no usable
-/// node is there.
-fn node_missing(roots: &Roots) -> bool {
-    let mut folders: Vec<PathBuf> = roots
-        .brew_prefixes
-        .iter()
-        .map(|prefix| prefix.join("bin"))
-        .collect();
-    if roots.home.is_absolute() {
-        let engine = crate::tools::Places::engine(None, None, Some(roots.home.clone()), None);
-        folders.extend(
-            engine
-                .folders()
-                .iter()
-                .filter(|folder| folder.starts_with(&roots.home))
-                .cloned(),
-        );
-    }
-    let places = crate::tools::Places::new(folders, Some(roots.home.clone()));
-    crate::tools::resolve("node", &places).is_err()
 }
 
 /// Builds the one install command of a harness that is not installed: Homebrew first with
-/// the table's installable name (casks only where `roots.casks`), else npm with the table's
-/// package and the vendor's flags. A missing or untrusted tool is skipped; an npm harness on a
-/// Mac with no npm and no Node the tool resolver finds is refused as needing Node.
-/// Inputs: the harness id and the roots. Output: the command, or the refusal code.
+/// the table's installable name (casks only where `roots.casks`), else the found npm
+/// (`roots.npm`) with the table's package and the vendor's flags into the engine's prefix.
+/// An untrusted tool is skipped; an npm harness with no usable Node is refused as needing
+/// Node. Inputs: the harness id and the roots. Output: the command, or the refusal code.
 pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
     let id = harnesses::canonical(id);
     if id == BUNDLED {
@@ -860,18 +872,10 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
     });
     let with_npm = || {
         let npm = recipe.npm.as_ref()?;
-        roots.brew_prefixes.iter().find_map(|prefix| {
-            let fixed = checked(npm_fixed(prefix, npm_install_args(npm))).ok()?;
-            owned(&prefix.join("lib").join(MODULES)).then_some(fixed)
-        })
+        let engine = roots.npm.as_ref()?;
+        checked(engine_npm_fixed(engine, npm_install_args(npm))).ok()
     };
-    let no_npm = || {
-        roots
-            .brew_prefixes
-            .iter()
-            .all(|prefix| std::fs::symlink_metadata(prefix.join("bin").join("npm")).is_err())
-    };
-    let refusal = if recipe.npm.is_some() && no_npm() && node_missing(roots) {
+    let refusal = if recipe.npm.is_some() && roots.npm.is_none() {
         NEEDS_NODE
     } else {
         NO_INSTALLER

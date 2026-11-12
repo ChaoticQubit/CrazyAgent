@@ -29,18 +29,22 @@ const LOCALE: &str = "en_US.UTF-8";
 /// TUI runs alone as before. Arguments: the Codex program, the conversation to resume or
 /// an empty word, then the `-c` settings both take. The app-server ends with the TUI.
 const CODEX_BRIDGE_SCRIPT: &str = r#"e=$1; r=$2; shift 2
+n=$CRAZYAGENT_INTERPRETER
 s=$CODEX_HOME/app-server-control/app-server-control.sock
 /bin/rm -f "$s"
-"$e" app-server --listen unix:// "$@" </dev/null >/dev/null 2>&1 &
+${n:+"$n"} "$e" app-server --listen unix:// "$@" </dev/null >/dev/null 2>&1 &
 a=$!
 i=0
 while [ ! -S "$s" ] && kill -0 "$a" 2>/dev/null && [ "$i" -lt 50 ]; do /bin/sleep 0.1; i=$((i+1)); done
 if [ -S "$s" ]; then set -- --remote unix:// "$@"; else kill "$a" 2>/dev/null; fi
-if [ -n "$r" ]; then "$e" "$@" resume "$r"; else "$e" "$@"; fi
+if [ -n "$r" ]; then ${n:+"$n"} "$e" "$@" resume "$r"; else ${n:+"$n"} "$e" "$@"; fi
 c=$?
 kill "$a" 2>/dev/null
 exit "$c"
 "#;
+/// The variable that hands [`CODEX_BRIDGE_SCRIPT`] the absolute interpreter of a Codex that
+/// asks `env` for `node`, so the bridge runs it with no search path.
+const BRIDGE_INTERPRETER: &str = "CRAZYAGENT_INTERPRETER";
 /// Runs a tools-off Codex agent's TUI on its own app server instead of the shared one: the
 /// shared app server keeps unified exec on, and Codex 0.164 refuses it to a session whose
 /// tools-off settings turn unified exec off, so that agent would exit at its first line.
@@ -367,7 +371,7 @@ pub fn command(
                 .map(|(name, value)| (name.to_owned(), value.to_owned())),
         );
     }
-    let executable = text(&request.executable)?;
+    let launch = launch_words(&request.executable)?;
     let native_lead =
         harness_id(request) == "claude-code" && installed.and_then(Installed::native).is_some();
     let display = installed
@@ -382,17 +386,24 @@ pub fn command(
             };
             let settings = codex(request, installed, &cwd, key_file.as_deref(), display)?;
             if request.tools {
+                let (script, interpreter) = match launch.as_slice() {
+                    [program] => (program.clone(), None),
+                    [interpreter, script] => (script.clone(), Some(interpreter.clone())),
+                    _ => return Err(failure("launch_interpreter_arguments_unsupported")),
+                };
                 argv.extend([
                     "/bin/sh".to_owned(),
                     "-c".to_owned(),
                     CODEX_BRIDGE_SCRIPT.to_owned(),
                     "codex-bridge".to_owned(),
-                    executable,
+                    script,
                     resume.unwrap_or_default(),
                 ]);
                 argv.extend(settings);
+                env.extend(interpreter.map(|path| (BRIDGE_INTERPRETER.to_owned(), path)));
             } else {
-                argv.extend([executable, CODEX_NO_DAEMON.to_owned()]);
+                argv.extend(launch);
+                argv.push(CODEX_NO_DAEMON.to_owned());
                 argv.extend(settings);
                 if let Some(resume) = resume {
                     argv.extend(["resume".to_owned(), resume]);
@@ -407,7 +418,7 @@ pub fn command(
             }
         }
         "claude-code" => {
-            argv.push(executable);
+            argv.extend(launch);
             argv.extend(claude(request, installed, run, key_file.as_deref())?);
             let team = installed.and_then(Installed::native);
             if let Some(team) = team {
@@ -438,7 +449,7 @@ pub fn command(
             }
         }
         id => {
-            argv.push(executable);
+            argv.extend(launch);
             argv.extend(plain(id, request, installed)?);
             Transcript::Unavailable
         }
@@ -510,6 +521,30 @@ fn moved(to: &Path, rest: &Path) -> Result<String, LaunchError> {
     } else {
         text(&to.join(rest))
     }
+}
+
+/// The words that start a harness with no search path, as the tool resolver reads its file
+/// ([`crate::tools::Resolved::argv`]): the file itself, or for a script that asks `env` for
+/// its interpreter, such as an npm-built Codex asking for `node`, that interpreter's
+/// absolute file, its words and then the script. A file the resolver cannot read stays
+/// one word, so the launch reports it as before. Input: the harness file. Output: the
+/// words, or the resolver's owner line when the interpreter is missing.
+pub(crate) fn launch_words(executable: &Path) -> Result<Vec<String>, LaunchError> {
+    let places = crate::tools::Places::from_environment(None);
+    let words = match crate::tools::resolve_entry(executable, &places) {
+        Ok(resolved) if resolved.argv().len() > 1 => resolved.argv(),
+        Ok(_) => return Ok(vec![text(executable)?]),
+        Err(missing) if missing.reason == crate::tools::Reason::NeedsInterpreter => {
+            return Err(LaunchError(missing.line(), None));
+        }
+        Err(_) => return Ok(vec![text(executable)?]),
+    };
+    let words = words
+        .iter()
+        .map(|word| text(Path::new(word)))
+        .collect::<Result<Vec<String>, LaunchError>>()?;
+    assert!(words.len() >= 2);
+    Ok(words)
 }
 
 fn text(path: &Path) -> Result<String, LaunchError> {
@@ -859,7 +894,10 @@ pub fn write_teammate_command(
     } else {
         0
     };
-    let executable = built.argv.get(start).ok_or_else(refused)?;
+    if built.argv.get(start).is_none() {
+        return Err(refused());
+    }
+    let launch = launch_words(&request.executable)?;
     let instructions = text(&team.instructions)?;
     let mates = crate::launch_context::mates_home(home);
     let tmp =
@@ -881,11 +919,8 @@ pub fn write_teammate_command(
         };
         words.push(format!("{name}={value}"));
     }
-    words.extend([
-        executable.clone(),
-        CLAUDE_INSTRUCTIONS_FLAG.to_owned(),
-        instructions,
-    ]);
+    words.extend(launch);
+    words.extend([CLAUDE_INSTRUCTIONS_FLAG.to_owned(), instructions]);
     if built.argv[start..]
         .iter()
         .any(|argument| argument == CLAUDE_BARE)

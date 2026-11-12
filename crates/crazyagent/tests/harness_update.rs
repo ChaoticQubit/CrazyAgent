@@ -98,6 +98,7 @@ impl FakeNative {
             home: self.home(),
             brew_prefixes: Vec::new(),
             casks: true,
+            npm: None,
         }
     }
 
@@ -208,6 +209,7 @@ impl FakeBrew {
             home: self.home(),
             brew_prefixes: vec![self.prefix()],
             casks: true,
+            npm: None,
         }
     }
 
