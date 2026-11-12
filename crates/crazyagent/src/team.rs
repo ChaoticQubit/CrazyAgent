@@ -17,6 +17,7 @@ pub mod events;
 pub mod graph;
 pub mod history;
 pub mod master;
+pub mod master_limits;
 pub mod names;
 pub mod questions;
 pub mod runtime;
@@ -815,6 +816,14 @@ pub enum TeamAction {
         project_id: ProjectId,
         max: Option<u8>,
     },
+    MasterRounds {
+        project_id: ProjectId,
+        max: Option<u8>,
+    },
+    MasterRunTime {
+        project_id: ProjectId,
+        secs: Option<u32>,
+    },
     TokenBudget {
         project_id: ProjectId,
         tokens: Option<u64>,
@@ -998,6 +1007,14 @@ impl TeamAction {
                 .is_none_or(|max| CAP_CHOICES.contains(&max))
                 .then_some(())
                 .ok_or_else(|| failure("team_cap_invalid")),
+            Self::MasterRounds { max, .. } => max
+                .is_none_or(|max| master_limits::ROUND_CHOICES.contains(&max))
+                .then_some(())
+                .ok_or_else(|| failure("team_rounds_invalid")),
+            Self::MasterRunTime { secs, .. } => secs
+                .is_none_or(|secs| master_limits::RUN_CHOICES_SECS.contains(&secs))
+                .then_some(())
+                .ok_or_else(|| failure("team_run_time_invalid")),
             Self::TokenBudget { tokens, .. } => tokens
                 .is_none_or(|tokens| BUDGET_CHOICES.contains(&tokens))
                 .then_some(())
@@ -1104,6 +1121,8 @@ impl TeamAction {
             | Self::MessageAgent { project_id, .. }
             | Self::MaxHarnesses { project_id, .. }
             | Self::MaxTeammates { project_id, .. }
+            | Self::MasterRounds { project_id, .. }
+            | Self::MasterRunTime { project_id, .. }
             | Self::TokenBudget { project_id, .. }
             | Self::AnswerQuestion { project_id, .. }
             | Self::SpreadAccounts { project_id, .. }
@@ -1736,6 +1755,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     events::initialize(connection)?;
     agent_messages::initialize(connection)?;
     master::initialize(connection)?;
+    master_limits::initialize(connection)?;
     names::initialize(connection)?;
     questions::initialize(connection)?;
     direct::erase_typed_input(connection)
@@ -1913,7 +1933,8 @@ fn any_slot(
 }
 
 /// Admits one task for a sub-agent against the project's team plan and pool.
-/// Takes the transaction, live model access, stored setup, the proposed harness and task, its source and the master reply id.
+/// Takes the transaction, live model access, stored setup, the proposed harness and task, its
+/// source and the master's hand-off key: its reply id, or a live turn's negative key.
 /// Returns the new task id, or a plain refusal code when the plan does not allow it.
 #[allow(clippy::too_many_arguments)]
 pub fn admit(
@@ -2386,7 +2407,25 @@ pub fn execute(
     access: &ModelAccess,
     action: &TeamAction,
 ) -> Result<Outcome, EngineError> {
-    perform(tx, access, action, true)
+    let outcome = perform(tx, access, action, true)?;
+    owner_acted(tx, action, outcome)
+}
+
+/// Renews the project's live master run time once an owner team action applied, an answer
+/// to an agent's question as much as a message or a setting (F01), so a master the owner
+/// just acted for is not stopped as left alone. Takes the transaction, the action and its
+/// outcome. Returns the outcome, or any SQLite failure.
+fn owner_acted(
+    tx: &Transaction<'_>,
+    action: &TeamAction,
+    outcome: Outcome,
+) -> Result<Outcome, EngineError> {
+    if outcome == Outcome::Applied
+        && let Some(project) = action.project()
+    {
+        master_limits::owner_acted(tx, project, now_ms())?;
+    }
+    Ok(outcome)
 }
 
 /// Executes one owner team action whose message an engine surface framed around the
@@ -2399,7 +2438,8 @@ pub(crate) fn execute_framed(
     access: &ModelAccess,
     action: &TeamAction,
 ) -> Result<Outcome, EngineError> {
-    perform(tx, access, action, false)
+    let outcome = perform(tx, access, action, false)?;
+    owner_acted(tx, action, outcome)
 }
 
 /// Executes one owner team action, recording its message as an owner turn only when the
@@ -2823,6 +2863,14 @@ fn perform(
                 params![project.as_str(), max],
             )
             .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MasterRounds { max, .. } => {
+            master_limits::set_rounds(tx, project, *max)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MasterRunTime { secs, .. } => {
+            master_limits::set_run_time(tx, project, *secs)?;
             Ok(Outcome::Applied)
         }
         TeamAction::TokenBudget { tokens, .. } => {
@@ -3516,6 +3564,16 @@ pub struct TeamStatus {
     #[serde(default)]
     pub max_teammates: Option<u8>,
     #[serde(default)]
+    pub master_rounds: Option<u8>,
+    #[serde(default)]
+    pub rounds_used: u32,
+    #[serde(default)]
+    pub rounds_kept_going: bool,
+    #[serde(default = "run_secs_default")]
+    pub master_run_secs: Option<u32>,
+    #[serde(default)]
+    pub master_deadline_ms: Option<i64>,
+    #[serde(default)]
     pub token_budget: Option<u64>,
     #[serde(default)]
     pub budget_used: Option<u64>,
@@ -3549,6 +3607,10 @@ pub struct TeamStatus {
 
 fn depth_default() -> u8 {
     DEPTH_DEFAULT
+}
+
+fn run_secs_default() -> Option<u32> {
+    Some(master_limits::RUN_DEFAULT_SECS)
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -5389,12 +5451,17 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
-    let live_idle_stopped =
-        live_master == Some(false) && live_problem.as_deref().is_some_and(master::idle_stopped);
+    let live_idle_stopped = live_master == Some(false)
+        && live_problem
+            .as_deref()
+            .is_some_and(|line| master::idle_stopped(line) || master_limits::run_stopped(line));
     let limits = time_limits(connection, project)?;
     let nested = nesting(connection, project)?;
     let limited = caps::read(connection, project)?;
     let spend = budget(connection, project)?;
+    let rounds = master_limits::rounds(connection, project)?;
+    let master_run_secs = master_limits::read(connection, project)?.run_secs;
+    let master_deadline_ms = master_limits::run_deadline(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
@@ -5429,6 +5496,11 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         paused: paused(connection, project)?,
         max_harnesses: limited.harnesses,
         max_teammates: limited.teammates,
+        master_rounds: rounds.max,
+        rounds_used: rounds.used,
+        rounds_kept_going: rounds.kept_going,
+        master_run_secs,
+        master_deadline_ms,
         token_budget: spend.map(|spend| spend.tokens),
         budget_used: spend.map(|spend| spend.used),
         budget_reached: spend.is_some_and(|spend| spend.reached),

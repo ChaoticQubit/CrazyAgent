@@ -385,8 +385,9 @@ pub(super) fn inspect_work(
 /// agent with a short task, and the message itself reaches it once, with the waiting
 /// messages that task's prompt carries. The wake decision, the message and the wake share
 /// one transaction, so a wake refused, as for an agent the owner stopped or whose worktree
-/// is gone, stores nothing and is answered "Not sent". Delivery to a running agent is the
-/// coordination layer's too. Takes the database, what the answers need, the caller,
+/// is gone, stores nothing and is answered "Not sent". A master's wake is a hand-off of its
+/// live turn, keyed like its spawns, so past the owner's Sub-agent rounds it stores nothing
+/// either. Delivery to a running agent is the coordination layer's too. Takes the database, what the answers need, the caller,
 /// whether it is the master and the call. Returns the sentence.
 pub(super) fn update_work(
     connection: &mut Connection,
@@ -501,7 +502,17 @@ pub(super) fn update_work(
     }
     let shown = target.to_string();
     let (said, refusal) = if master {
-        super::wake_in(
+        let key = crate::team::master_limits::live_key(&tx, project)?;
+        let rounds = crate::team::master_limits::rounds(&tx, project)?;
+        if !rounds.open() && !crate::team::master_limits::joins_round(&tx, project, key)? {
+            return Ok((rounds.refusal(), true));
+        }
+        let before: i64 = tx
+            .query_row("SELECT COALESCE(MAX(id),0) FROM team_tasks", [], |row| {
+                row.get(0)
+            })
+            .map_err(state)?;
+        let woken = super::wake_in(
             &tx,
             answering.access,
             answering.stored,
@@ -509,7 +520,14 @@ pub(super) fn update_work(
             WAKE_TASK,
             true,
             StoppedBy::Master,
-        )?
+        )?;
+        tx.execute(
+            "UPDATE team_tasks SET turn=?2 WHERE project=?1 AND id>?3 AND turn IS NULL
+             AND source='master' AND parent IS NULL",
+            params![project.as_str(), key, before],
+        )
+        .map_err(state)?;
+        woken
     } else {
         super::lead_wake(&tx, answering, agent, &shown, WAKE_TASK)?
     };

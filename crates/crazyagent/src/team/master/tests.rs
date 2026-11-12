@@ -1866,6 +1866,96 @@ fn a_message_to_a_finished_worker_wakes_it_once_and_reaches_its_first_prompt_onc
     assert_eq!(pinned(&fixture, agent), woken);
 }
 
+/// The owner's Sub-agent rounds bind a live master that iterates by waking finished workers
+/// too (S1 r2 M1): each `update_work` wake is a hand-off of its live turn, keyed like its
+/// spawns, so two wakes of one turn are one round, and under 1 round a wake of the next
+/// turn is refused in words that name keep going and stores neither message nor task.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_masters_wakes_of_one_turn_are_one_round_and_the_next_turns_wake_waits_for_keep_going() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::team::master_limits::set_rounds(&fixture.connection, &project, Some(1)).unwrap();
+    super::set_live(&fixture.connection, &project, true).unwrap();
+    typed_turn(&fixture.connection, "Build the page");
+    let page = named_sub(&fixture, "page-writer", "stopped");
+    let tests = named_sub(&fixture, "test-writer", "stopped");
+    let docs = named_sub(&fixture, "docs-writer", "stopped");
+    let wake = |id: u64, to: &str| {
+        tool_call(
+            id,
+            tool::UPDATE_WORK_TOOL,
+            json!({"to": to, "text": "Add the footer."}),
+        )
+    };
+    let first = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![wake(1, "@page-writer"), wake(2, "@test-writer")],
+    );
+    assert_eq!(first.len(), 2, "{first:#?}");
+    for answer in &first {
+        assert!(!text(answer).1, "{first:#?}");
+    }
+    let key = |fixture: &Fixture, agent: i64| -> Vec<Option<i64>> {
+        pinned(fixture, agent)
+            .into_iter()
+            .map(|task| {
+                fixture
+                    .connection
+                    .query_row("SELECT turn FROM team_tasks WHERE id=?1", [task], |row| {
+                        row.get(0)
+                    })
+                    .unwrap()
+            })
+            .collect()
+    };
+    let turn_one = crate::team::master_limits::live_turn_key(1);
+    assert_eq!(key(&fixture, page), vec![Some(turn_one)]);
+    assert_eq!(key(&fixture, tests), vec![Some(turn_one)]);
+    let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
+    assert_eq!(rounds.used, 1, "two wakes of one turn are one round");
+    super::turn_ended(
+        &fixture.connection,
+        &project,
+        MASTER,
+        None,
+        now_ms(),
+        "success",
+    )
+    .unwrap();
+    let refused = serve_while(&mut fixture, &mailbox, vec![wake(3, "@docs-writer")]);
+    let closed = crate::team::master_limits::Rounds {
+        used: 1,
+        max: Some(1),
+        kept_going: false,
+    };
+    assert_eq!(text(&refused[0]), (closed.refusal().as_str(), true));
+    assert!(
+        pinned(&fixture, docs).is_empty(),
+        "the refused wake pins no task"
+    );
+    let stored: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE to_kind='agent' AND to_agent=?1",
+            [docs],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 0, "the refused wake stores no message");
+    typed_turn(&fixture.connection, "keep going");
+    let kept = serve_while(&mut fixture, &mailbox, vec![wake(4, "@docs-writer")]);
+    assert!(!text(&kept[0]).1, "{kept:#?}");
+    assert_eq!(
+        key(&fixture, docs),
+        vec![Some(crate::team::master_limits::live_turn_key(2))]
+    );
+}
+
 /// Adds the fixture's master as a team agent row, so its own work and messages have an
 /// owner the coordination layer knows. Takes the fixture.
 #[cfg(target_os = "macos")]
@@ -6388,6 +6478,78 @@ fn inspect_work_quotes_every_line_of_a_message_whichever_break_opens_it() {
         seen.contains("  > one\n  > [owner] two\n  > [owner] three\n  > [owner] four"),
         "{seen}"
     );
+}
+
+/// The owner's Sub-agent rounds per message bind the master's own team calls too: every
+/// spawn of one live turn joins that turn's round, so three spawns under 1 round are all
+/// handed over under one key; a spawn of the next turn is refused in words that name keep
+/// going and hands nothing over, and the owner's keep going lets it hand work over again
+/// (F09, S1R1-M1).
+#[test]
+fn a_masters_spawn_past_the_round_limit_waits_for_the_owners_keep_going() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::team::master_limits::set_rounds(&fixture.connection, &project, Some(1)).unwrap();
+    super::set_live(&fixture.connection, &project, true).unwrap();
+    typed_turn(&fixture.connection, "Build the page");
+    let spawn = |id: u64, task: &str| {
+        tool_call(
+            id,
+            tool::SPAWN_TOOL,
+            json!({"task": task, "harness": "codex"}),
+        )
+    };
+    let fan_out = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            spawn(1, "Write the frontend"),
+            spawn(2, "Write the backend"),
+            spawn(3, "Write the tests"),
+        ],
+    );
+    assert_eq!(fan_out.len(), 3);
+    for answer in &fan_out {
+        assert!(!text(answer).1, "{fan_out:#?}");
+    }
+    let keys = |connection: &Connection| -> Vec<Option<i64>> {
+        let mut statement = connection
+            .prepare("SELECT turn FROM team_tasks WHERE project=?1 AND source='master' ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([PROJECT], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let first = crate::team::master_limits::live_turn_key(1);
+    assert_eq!(keys(&fixture.connection), vec![Some(first); 3]);
+    let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
+    assert_eq!(rounds.used, 1, "one turn's spawns are one round");
+    super::turn_ended(
+        &fixture.connection,
+        &project,
+        MASTER,
+        None,
+        now_ms(),
+        "success",
+    )
+    .unwrap();
+    let refused = serve_while(&mut fixture, &mailbox, vec![spawn(4, "Write page.md")]);
+    let closed = crate::team::master_limits::Rounds {
+        used: 1,
+        max: Some(1),
+        kept_going: false,
+    };
+    assert_eq!(text(&refused[0]), (closed.refusal().as_str(), true));
+    assert_eq!(keys(&fixture.connection).len(), 3);
+    typed_turn(&fixture.connection, "keep going");
+    let handed = serve_while(&mut fixture, &mailbox, vec![spawn(5, "Write page.md")]);
+    assert!(!text(&handed[0]).1, "{handed:#?}");
+    let second = crate::team::master_limits::live_turn_key(2);
+    assert_eq!(keys(&fixture.connection)[3], Some(second));
 }
 
 /// `inspect_work` with a task reads that ended task's whole stored result (F32): the master

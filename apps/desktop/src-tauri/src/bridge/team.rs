@@ -779,6 +779,32 @@ impl NativeBridge {
             .await
     }
 
+    /// Sets Sub-agent rounds per message, None for Until the goal is done (F09). Takes the
+    /// project id, the choice and the client generation. Returns the actual commit receipt.
+    pub async fn team_master_rounds(
+        &mut self,
+        id: &str,
+        max: Option<u8>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MasterRounds { project_id, max }, generation)
+            .await
+    }
+
+    /// Sets Master run time in seconds, None for No limit (F01). Takes the project id, the
+    /// choice and the client generation. Returns the actual commit receipt.
+    pub async fn team_master_run_time(
+        &mut self,
+        id: &str,
+        secs: Option<u32>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MasterRunTime { project_id, secs }, generation)
+            .await
+    }
+
     /// Sets the project's Token budget: once its agents use that many tokens from now, the
     /// engine stops the whole team and notifies the owner. None turns it off. Takes the
     /// project id, the budget and the client generation. Returns the actual commit receipt.

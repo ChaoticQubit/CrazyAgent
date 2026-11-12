@@ -1296,6 +1296,36 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_max_teammates(&id, max, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_master_rounds" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                max: Option<u8>,
+                generation: u64,
+            }
+            let Args { id, max, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_master_rounds(&id, max, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_master_run_time" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                secs: Option<u32>,
+                generation: u64,
+            }
+            let Args { id, secs, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_master_run_time(&id, secs, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_token_budget" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

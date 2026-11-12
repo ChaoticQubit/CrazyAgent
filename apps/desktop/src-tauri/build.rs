@@ -73,6 +73,8 @@ fn main() {
         "desktop_coord_send",
         "desktop_team_max_harnesses",
         "desktop_team_max_teammates",
+        "desktop_team_master_rounds",
+        "desktop_team_master_run_time",
         "desktop_team_spread_accounts",
         "desktop_team_token_budget",
         "desktop_team_graph",
