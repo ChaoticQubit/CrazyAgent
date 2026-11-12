@@ -619,6 +619,55 @@ async fn a_found_codex_that_fails_the_pin_checks_is_refused_with_its_code_not_mi
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn check_again_passes_over_a_group_writable_or_empty_codex_and_pins_a_good_one_later() {
+    registry_case(|host, tools| async move {
+        let group = tools.join("group-writable");
+        let empty = tools.join("empty");
+        let good = tools.join("good");
+        for folder in [&group, &empty, &good] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let writable = physical_file(&group, "codex", b"group-writable-codex");
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let nothing = physical_file(&empty, "codex", b"");
+        let safe = physical_file(&good, "codex", b"good-codex");
+        let path = std::env::join_paths([group, empty, good]).unwrap();
+        let space =
+            crate::harnesses::finding::AgentSpace::open(&tools.join("no-engine-here")).unwrap();
+        let mut passed = Vec::new();
+        let picked = crate::harnesses::finding::pick_noting(
+            "codex",
+            &on(&path),
+            None,
+            &space,
+            |file, error| {
+                passed.push((file.to_path_buf(), error.0.clone()));
+            },
+        );
+        assert_eq!(picked.and_then(Result::ok), Some(safe.clone()));
+        let unsafe_code = "native_auth_host_executable_unsafe".to_owned();
+        assert_eq!(
+            passed,
+            vec![(writable, unsafe_code.clone()), (nothing, unsafe_code)]
+        );
+        assert_eq!(
+            host.find_harness("codex", None, &on(&path), Some(&path))
+                .unwrap(),
+            Found::Registered { path: safe.clone() }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            safe
+        );
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn an_nvm_codex_is_pinned_by_the_shared_search() {
     registry_case(|host, root| async move {
         let home = root.join("home");

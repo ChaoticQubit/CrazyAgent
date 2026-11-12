@@ -123,6 +123,13 @@ impl ExecutableIdentity {
     }
 }
 
+/// The pin's file rule alone, so a harness search refuses exactly the files a pin would
+/// ([`ExecutableIdentity::of`]). Input: the real file's metadata. Output: Ok, or
+/// `native_auth_host_executable_unsafe`.
+pub(crate) fn pinnable(metadata: &Metadata) -> Result<(), EngineError> {
+    ExecutableIdentity::of(metadata).map(|_| ())
+}
+
 pub(crate) struct RegisteredNativeAuthHost {
     path: PathBuf,
     file: File,
