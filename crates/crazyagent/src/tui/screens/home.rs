@@ -1665,6 +1665,18 @@ pub(in crate::tui) mod tests {
     }
 
     #[test]
+    fn node_is_not_a_tool_home_waits_for_as_only_npm_harnesses_need_it() {
+        assert_eq!(
+            missing_tools(&tools(&[Dependency::Node])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            missing_tools(&tools(&[Dependency::Uv, Dependency::Node])),
+            ["uv"]
+        );
+    }
+
+    #[test]
     fn get_set_up_stays_until_tools_are_found_and_opens_setup() {
         let mut ctx = ctx(80, 24);
         ctx.store.projects = Load::Ready(Vec::new());
