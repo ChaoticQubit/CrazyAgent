@@ -1,5 +1,5 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMasterRounds, setMasterRunTime, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
@@ -145,6 +145,16 @@ export const LANDING_OPTIONS: SelectOption[] = [
  * engine's own list. */
 export const CAP_CHOICES = [1, 2, 3, 4, 5, 6, 8, 10, 15] as const;
 
+/** The Sub-agent rounds per message choices besides Until the goal is done, the engine's own
+ * list (F09). */
+export const ROUND_CHOICES = [1, 2, 3, 5, 10, 20] as const;
+
+/** The Master run time choices besides No limit, the engine's own list, in seconds (F01). */
+export const RUN_CHOICES_SECS = [86_400, 259_200, 604_800, 1_209_600, 2_592_000] as const;
+
+/** The Master run time a project has until the owner picks one: 7 days. */
+export const RUN_DEFAULT_SECS = 604_800;
+
 /** The Token budget choices besides Off, the engine's own list, in tokens. */
 export const BUDGET_CHOICES = [10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000] as const;
 
@@ -160,6 +170,24 @@ export function tokenWords(tokens: number): string {
  * value is the number, or "off". */
 export function capOptions(): SelectOption[] {
   return [{ value: NO_LIMIT, label: "No limit" }, ...CAP_CHOICES.map((cap) => ({ value: String(cap), label: String(cap) }))];
+}
+
+/** The Sub-agent rounds per message choices: Until the goal is done first, then each of
+ * `ROUND_CHOICES`. Output: options whose value is the number, or "off". */
+export function roundOptions(): SelectOption[] {
+  return [{ value: NO_LIMIT, label: "Until the goal is done" }, ...ROUND_CHOICES.map((max) => ({ value: String(max), label: max === 1 ? "1 round" : `${max} rounds` }))];
+}
+
+/** Words a Master run time in whole days. Input: the seconds. Output: such as "1 day" or "7 days". */
+export function runWords(secs: number): string {
+  const days = Math.round(secs / 86_400);
+  return days === 1 ? "1 day" : `${days} days`;
+}
+
+/** The Master run time choices: each of `RUN_CHOICES_SECS`, then No limit. Output: options whose
+ * value is the seconds, or "off". */
+export function runOptions(): SelectOption[] {
+  return [...RUN_CHOICES_SECS.map((secs) => ({ value: String(secs), label: runWords(secs) })), { value: NO_LIMIT, label: "No limit" }];
 }
 
 /** The Token budget choices: Off first, then each of `BUDGET_CHOICES`. Output: options whose
@@ -262,7 +290,7 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
     rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", ...PER_HARNESS_ROWS] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
-    rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"] },
+    rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget", "Master run time", "Sub-agent rounds per message"] },
 ];
 
 function findWords(query: string): string {
@@ -513,6 +541,8 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses), Object.is, status);
   const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates), Object.is, status);
   const [tokenBudget, holdTokenBudget] = useHeld(capValue(status.token_budget), Object.is, status);
+  const [masterRounds, holdMasterRounds] = useHeld(capValue(status.master_rounds), Object.is, status);
+  const [masterRun, holdMasterRun] = useHeld(capValue(status.master_run_secs === undefined ? RUN_DEFAULT_SECS : status.master_run_secs), Object.is, status);
   const [backgroundShown, holdBackground] = useHeld(backgroundChoice(status), sameBackground, status);
   const [masterBranchSaved, holdMasterBranch] = useHeld(status.master_branch ?? null, Object.is, status);
   const [landOnSaved, holdLandOn] = useHeld(status.land_on ?? null, Object.is, status);
@@ -560,6 +590,18 @@ export function TeamControls({ projectId, status, reload, data, group }: {
     if (max === undefined) return;
     if (which === "harnesses") void change(() => setMaxHarnesses(projectId, max), "the Max harnesses setting", () => holdMaxHarnesses(value));
     else void change(() => setMaxTeammates(projectId, max), "the Max teammates setting", () => holdMaxTeammates(value));
+  }
+
+  function chooseRounds(value: string) {
+    const max = chosen(value, ROUND_CHOICES);
+    if (max === undefined) return;
+    void change(() => setMasterRounds(projectId, max), "the Sub-agent rounds setting", () => holdMasterRounds(value));
+  }
+
+  function chooseRun(value: string) {
+    const secs = chosen(value, RUN_CHOICES_SECS);
+    if (secs === undefined) return;
+    void change(() => setMasterRunTime(projectId, secs), "the Master run time setting", () => holdMasterRun(value));
   }
 
   const chooseSpread = (choice: "off" | "on") => change(() => setSpreadAccounts(projectId, choice === "on"), "the account spread setting", () => holdSpread(choice));
@@ -752,6 +794,16 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               helper={tokenBudget === NO_LIMIT
                 ? "Off lets the agents use tokens as their accounts allow. A budget counts new input, cache writes and output; re-reads from cache are not counted. It counts from when you set it or start the team again."
                 : `Used ${tokenWords(status.budget_used ?? 0)} of ${tokenWords(Number(tokenBudget))}. At the budget the engine stops every agent and notifies you.`} />
+          </SettingRow>
+          <SettingRow label="Master run time">
+            <Select id={`tg-master-run-${projectId}`} label="Master run time" value={masterRun} options={runOptions()}
+              onValue={chooseRun}
+              helper="How long the live master works on without a message or a key from you. It never stops while it waits for you. Each message from you starts the time again. 7 days is the default." />
+          </SettingRow>
+          <SettingRow label="Sub-agent rounds per message">
+            <Select id={`tg-master-rounds-${projectId}`} label="Sub-agent rounds per message" value={masterRounds} options={roundOptions()}
+              onValue={chooseRounds}
+              helper="How many times the master may hand work to sub-agents for one message from you. Until the goal is done is the default. At a limit, reply keep going to let it finish that goal." />
           </SettingRow>
         </SettingGroup>
         {note && <p className="pj-note warn set-note" role="alert">{displayText(note)}</p>}

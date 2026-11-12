@@ -377,8 +377,9 @@ pub(crate) fn clear_problem(
     Ok(())
 }
 
-/// Records that a live master's pane runs, so engine input finds it. Takes the engine
-/// database, the project and the team agent id. Returns any SQLite failure.
+/// Records that a live master's pane runs, so engine input finds it, and starts its Master
+/// run time clock now, on a launch and an adopt alike (F01). Takes the engine database, the
+/// project and the team agent id. Returns any SQLite failure.
 pub(crate) fn pane_ready(
     connection: &Connection,
     project: &ProjectId,
@@ -390,11 +391,13 @@ pub(crate) fn pane_ready(
             params![project.as_str(), agent],
         )
         .map_err(state)?;
+    super::master_limits::clock_started(connection, project, agent, now_ms())?;
     release_input(connection, agent)
 }
 
-/// Records that a live master's pane ended; another agent's entry is left alone.
-/// Takes the engine database, the project and the team agent id. Returns any SQLite failure.
+/// Records that a live master's pane ended and drops its Master run time clock; another
+/// agent's entry and clock are left alone. Takes the engine database, the project and the
+/// team agent id. Returns any SQLite failure.
 pub(crate) fn pane_ended(
     connection: &Connection,
     project: &ProjectId,
@@ -406,6 +409,7 @@ pub(crate) fn pane_ended(
             params![project.as_str(), agent],
         )
         .map_err(state)?;
+    super::master_limits::clock_ended(connection, project, agent)?;
     release_input(connection, agent)
 }
 

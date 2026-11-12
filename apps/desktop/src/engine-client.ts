@@ -952,6 +952,11 @@ export interface TeamStatus {
   paused: boolean;
   max_harnesses?: number | null;
   max_teammates?: number | null;
+  master_rounds?: number | null;
+  rounds_used?: number;
+  rounds_kept_going?: boolean;
+  master_run_secs?: number | null;
+  master_deadline_ms?: number | null;
   token_budget?: number | null;
   budget_used?: number | null;
   budget_reached?: boolean;

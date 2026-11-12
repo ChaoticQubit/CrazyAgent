@@ -349,7 +349,7 @@ impl TerminalSession {
             reader,
             queue: VecDeque::new(),
             limits,
-            deadline: Instant::now() + record.run_time_left(limits.run_time),
+            deadline: Some(Instant::now() + record.run_time_left(limits.run_time)),
             checked: Instant::now(),
             events,
             ready: !on_menu,

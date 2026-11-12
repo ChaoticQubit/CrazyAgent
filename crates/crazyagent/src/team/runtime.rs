@@ -65,7 +65,6 @@ const LEAD_MERGES: &str = "Merge them into your task branch with merge(agent) on
 const OWNER_ACCEPTS: &str = "The owner accepts them in Changes; you do not merge them.";
 const _: () = assert!(RESULTS_MESSAGE_BYTES_MAX + 8 <= super::master::INPUT_TEXT_MAX);
 const _: () = assert!(RESULT_IN_MESSAGE_BYTES_MAX * 2 + 256 < RESULTS_MESSAGE_BYTES_MAX);
-const DELEGATION_ROUNDS_MAX: i64 = 3;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
@@ -2719,6 +2718,7 @@ impl TeamRuntime {
         self.send_reasks(&stored, access, &paused)?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
+        self.end_master_run(&stored)?;
         self.reap_idle(&stored)
     }
 
@@ -5072,11 +5072,12 @@ impl TeamRuntime {
         if ready.is_empty() {
             return Ok(());
         }
-        let (text, held) = results_message(&ready);
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        let round = super::master_limits::rounds(&tx, project)?.next_line();
+        let (text, held) = results_message(&ready, &round);
         if append_message(
             &tx,
             project,
@@ -5793,6 +5794,45 @@ impl TeamRuntime {
         worker.stopping = true;
         let _ = worker.orders.send(Order::Stop);
         Ok(true)
+    }
+
+    /// Turns a project's live master off once it passed its Master run time while it does not
+    /// wait on the owner (F01): the clock counts from its pane's start, the owner's last team
+    /// message or the owner's last key in its terminal, whichever is latest. A master with no
+    /// turn open and no team work in flight waits on the owner and is never stopped by it. The
+    /// stop turns the live switch off with one note, as the idle stop does, so the master is
+    /// not started again until the owner starts it. Takes the setup. Returns any SQLite
+    /// failure.
+    fn end_master_run(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let Some(id) = self
+            .workers
+            .iter()
+            .find(|(_, w)| {
+                &w.project == project && w.role == AgentRole::Master && w.live && !w.stopping
+            })
+            .map(|(id, _)| *id)
+        else {
+            return Ok(());
+        };
+        let Some(deadline) = super::master_limits::run_deadline(&self.connection, project)? else {
+            return Ok(());
+        };
+        if now_ms() < deadline {
+            return Ok(());
+        }
+        let turn_open = self.workers[&id].turn_started.is_some();
+        if !turn_open && !self.work_in_flight(project)? {
+            return Ok(());
+        }
+        let secs = super::master_limits::read(&self.connection, project)?
+            .run_secs
+            .expect("a deadline comes from a run time");
+        let worker = self.workers.get_mut(&id).expect("worker exists");
+        assert!(worker.live && worker.role == AgentRole::Master);
+        worker.stopping = true;
+        let _ = worker.orders.send(Order::Stop);
+        self.live_ended(project, &super::master_limits::run_stopped_line(secs))
     }
 
     /// Stops agents idle past their bound, except the sub-agents the owner keeps warm and,
@@ -9334,14 +9374,7 @@ impl TeamRuntime {
             Ok(reply) => reply,
             Err(_) => return tx.commit().map_err(error),
         };
-        let rounds: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM team_messages WHERE project=?1 AND author='engine' AND state<>'note'
-                 AND id > COALESCE((SELECT MAX(id) FROM team_messages WHERE project=?1 AND author='owner'),0)",
-                [project.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(error)?;
+        let rounds = super::master_limits::rounds(&tx, project)?;
         let wakes = parse_wakes(text);
         if text.trim().is_empty() && proposed.is_empty() {
             let _ = append_message(
@@ -9365,12 +9398,12 @@ impl TeamRuntime {
         }
         delegations.truncate(DELEGATIONS_PER_REPLY_MAX);
         let mut refused = Vec::new();
-        if (!delegations.is_empty() || !wakes.is_empty()) && rounds >= DELEGATION_ROUNDS_MAX {
+        if (!delegations.is_empty() || !wakes.is_empty()) && !rounds.open() {
             let _ = append_message(
                 &tx,
                 project,
                 MessageAuthor::Engine,
-                "The master asked for more sub-agent rounds than one owner message allows. Send another message to continue.",
+                &rounds.limit_note(),
                 MessageState::Note,
                 now,
             )?;
@@ -9768,7 +9801,7 @@ fn live(
                     Ok(request) => request,
                     Err(problem) => return Some(problem),
                 };
-            let credential = match profile.hand_to_agent(&home, plan.limits.run_time, &plan.entry) {
+            let credential = match profile.hand_to_turn(&home, None, &plan.entry) {
                 Ok(credential) => credential,
                 Err(problem) => {
                     return Some(with_code(
@@ -9847,11 +9880,7 @@ fn live_adopted(
         }
     };
     let Grant { profile, .. } = *grant;
-    let credential = match profile.hand_to_agent(
-        &managed.home,
-        record.run_time_left(limits.run_time),
-        &managed.executable,
-    ) {
+    let credential = match profile.hand_to_turn(&managed.home, None, &managed.executable) {
         Ok(credential) => credential,
         Err(problem) => {
             let _ = end_left_pane(host.as_ref(), &agent, "team");
@@ -9895,9 +9924,10 @@ fn live_adopted(
 /// ends is tried again on the next pass, except Codex's folder access step running out,
 /// which ends the session. A turn left open that is none any more (see
 /// `TerminalSession::turn_stale`) is reported as `Report::NoTurn`, and starts again as a
-/// turn when the model works in it after all. Takes the session, the worker's channels and
-/// flags, whether a later engine may take the pane over, and the account's credential copy
-/// and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
+/// turn when the model works in it after all. The launch's run time does not bound the
+/// pane: the runtime's Master run time does (F01). Takes the session, the worker's channels
+/// and flags, whether a later engine may take the pane over, and the account's credential
+/// copy and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
 /// Returns the problem that ended it, if any, a stop's own problem first.
 fn live_serve(
     mut session: TerminalSession,
@@ -9909,6 +9939,7 @@ fn live_serve(
     held: Option<Held>,
 ) -> Option<String> {
     session.follow_every_turn();
+    session.clear_deadline();
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
         pane: session.record().filter(|_| keep).cloned().map(Box::new),
@@ -11034,11 +11065,13 @@ type QueuedTask = (
 
 /// Writes one results message for the finished master tasks that fit, oldest first: each
 /// task's line, then its problem and its result on lines of their own, every agent-written
-/// line quoted by `events::agent_text` so none can pose as the owner's. Takes the ready
-/// tasks, at least one.
+/// line quoted by `events::agent_text` so none can pose as the owner's, closed by the round
+/// line of the owner's goal (F09). Takes the ready tasks, at least one, and the round line.
 /// Returns the text, at most `RESULTS_MESSAGE_BYTES_MAX` bytes, and how many tasks it holds.
-fn results_message(ready: &[ReadyTask]) -> (String, usize) {
-    results_within(ready, RESULTS_MESSAGE_BYTES_MAX, RESULTS_TRAILER)
+fn results_message(ready: &[ReadyTask], round: &str) -> (String, usize) {
+    assert!(round.len() <= super::master_limits::ROUND_LINE_BYTES_MAX);
+    let trailer = format!("{RESULTS_TRAILER}{round}");
+    results_within(ready, RESULTS_MESSAGE_BYTES_MAX, &trailer)
 }
 
 /// Writes one results message as `results_message` does, within `max` bytes and closed by

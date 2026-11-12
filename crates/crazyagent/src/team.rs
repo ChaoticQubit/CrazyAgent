@@ -17,6 +17,7 @@ pub mod events;
 pub mod graph;
 pub mod history;
 pub mod master;
+pub mod master_limits;
 pub mod names;
 pub mod questions;
 pub mod runtime;
@@ -807,6 +808,14 @@ pub enum TeamAction {
         project_id: ProjectId,
         max: Option<u8>,
     },
+    MasterRounds {
+        project_id: ProjectId,
+        max: Option<u8>,
+    },
+    MasterRunTime {
+        project_id: ProjectId,
+        secs: Option<u32>,
+    },
     TokenBudget {
         project_id: ProjectId,
         tokens: Option<u64>,
@@ -986,6 +995,14 @@ impl TeamAction {
                 .is_none_or(|max| CAP_CHOICES.contains(&max))
                 .then_some(())
                 .ok_or_else(|| failure("team_cap_invalid")),
+            Self::MasterRounds { max, .. } => max
+                .is_none_or(|max| master_limits::ROUND_CHOICES.contains(&max))
+                .then_some(())
+                .ok_or_else(|| failure("team_rounds_invalid")),
+            Self::MasterRunTime { secs, .. } => secs
+                .is_none_or(|secs| master_limits::RUN_CHOICES_SECS.contains(&secs))
+                .then_some(())
+                .ok_or_else(|| failure("team_run_time_invalid")),
             Self::TokenBudget { tokens, .. } => tokens
                 .is_none_or(|tokens| BUDGET_CHOICES.contains(&tokens))
                 .then_some(())
@@ -1091,6 +1108,8 @@ impl TeamAction {
             | Self::MessageAgent { project_id, .. }
             | Self::MaxHarnesses { project_id, .. }
             | Self::MaxTeammates { project_id, .. }
+            | Self::MasterRounds { project_id, .. }
+            | Self::MasterRunTime { project_id, .. }
             | Self::TokenBudget { project_id, .. }
             | Self::AnswerQuestion { project_id, .. }
             | Self::SpreadAccounts { project_id, .. }
@@ -1719,6 +1738,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     events::initialize(connection)?;
     agent_messages::initialize(connection)?;
     master::initialize(connection)?;
+    master_limits::initialize(connection)?;
     names::initialize(connection)?;
     questions::initialize(connection)?;
     direct::erase_typed_input(connection)
@@ -2779,6 +2799,14 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::MasterRounds { max, .. } => {
+            master_limits::set_rounds(tx, project, *max)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MasterRunTime { secs, .. } => {
+            master_limits::set_run_time(tx, project, *secs)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::TokenBudget { tokens, .. } => {
             match tokens {
                 None => {
@@ -3316,6 +3344,16 @@ pub struct TeamStatus {
     #[serde(default)]
     pub max_teammates: Option<u8>,
     #[serde(default)]
+    pub master_rounds: Option<u8>,
+    #[serde(default)]
+    pub rounds_used: u32,
+    #[serde(default)]
+    pub rounds_kept_going: bool,
+    #[serde(default = "run_secs_default")]
+    pub master_run_secs: Option<u32>,
+    #[serde(default)]
+    pub master_deadline_ms: Option<i64>,
+    #[serde(default)]
     pub token_budget: Option<u64>,
     #[serde(default)]
     pub budget_used: Option<u64>,
@@ -3349,6 +3387,10 @@ pub struct TeamStatus {
 
 fn depth_default() -> u8 {
     DEPTH_DEFAULT
+}
+
+fn run_secs_default() -> Option<u32> {
+    Some(master_limits::RUN_DEFAULT_SECS)
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -5105,6 +5147,9 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     let nested = nesting(connection, project)?;
     let limited = caps::read(connection, project)?;
     let spend = budget(connection, project)?;
+    let rounds = master_limits::rounds(connection, project)?;
+    let master_run_secs = master_limits::read(connection, project)?.run_secs;
+    let master_deadline_ms = master_limits::run_deadline(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
@@ -5138,6 +5183,11 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         paused: paused(connection, project)?,
         max_harnesses: limited.harnesses,
         max_teammates: limited.teammates,
+        master_rounds: rounds.max,
+        rounds_used: rounds.used,
+        rounds_kept_going: rounds.kept_going,
+        master_run_secs,
+        master_deadline_ms,
         token_budget: spend.map(|spend| spend.tokens),
         budget_used: spend.map(|spend| spend.used),
         budget_reached: spend.is_some_and(|spend| spend.reached),

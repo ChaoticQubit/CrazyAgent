@@ -129,6 +129,7 @@ struct LiveSwitch {
     saved: Option<String>,
     running: Option<String>,
     version: u64,
+    limits: Option<crate::team::master_limits::LimitsView>,
 }
 
 struct Attached {
@@ -442,6 +443,15 @@ impl Team {
                         .find(|agent| agent.role == AgentRole::Master && agent.status.live())
                         .map(|agent| agent.harness.clone()),
                     version: status.settings_version,
+                    limits: Some(crate::team::master_limits::LimitsView {
+                        rounds: crate::team::master_limits::Rounds {
+                            used: status.rounds_used,
+                            max: status.master_rounds,
+                            kept_going: status.rounds_kept_going,
+                        },
+                        run_secs: status.master_run_secs,
+                        deadline_ms: status.master_deadline_ms,
+                    }),
                 };
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
@@ -486,9 +496,10 @@ impl Team {
                 Ok(view) => {
                     self.want = None;
                     let last = self.switch.take();
-                    let (switched, saved, running) = last.map_or((None, None, None), |switch| {
-                        (switch.switched, switch.saved, switch.running)
-                    });
+                    let (switched, saved, running, limits) = last
+                        .map_or((None, None, None, None), |switch| {
+                            (switch.switched, switch.saved, switch.running, switch.limits)
+                        });
                     self.switch = Some(LiveSwitch {
                         on: Some(*on),
                         problem: None,
@@ -497,6 +508,7 @@ impl Team {
                         saved,
                         running,
                         version: version + 1,
+                        limits,
                     });
                     if let SetupView::LiveWithoutSession(why) = view {
                         ctx.say(Message::error(MASTER_NO_SESSION, &unopened(why)));
@@ -1165,8 +1177,9 @@ impl Team {
     }
 
     /// The master view's header: whether the live master is on, the harness it runs and a
-    /// saved one that waits for its next start, where the live session's master harness
-    /// last switched, and the session keys at the right edge. The state is kept whole: when
+    /// saved one that waits for its next start, its time left and the rounds of the current
+    /// goal while on (F01, F09), where the live session's master harness last switched, and
+    /// the session keys at the right edge. The state is kept whole: when
     /// it does not fit beside both keys, only n New session shows and l Sessions stays in
     /// the hints. Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
@@ -1186,7 +1199,11 @@ impl Team {
         };
         let harness = switch
             .and_then(|switch| harness_words(switch.saved.as_deref(), switch.running.as_deref()));
-        let state = [Some(lead), harness.as_deref(), rest]
+        let limits = switch
+            .and_then(|switch| switch.limits)
+            .filter(|_| !self.paused && !off)
+            .map(|view| view.words(crate::team::now_ms()));
+        let state = [Some(lead), harness.as_deref(), limits.as_deref(), rest]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()

@@ -1438,10 +1438,14 @@ fn every_result_of_a_large_fan_out_reaches_the_master_across_whole_messages() {
     );
     for text in &texts {
         assert!(text.len() <= RESULTS_MESSAGE_BYTES_MAX, "{}", text.len());
-        assert!(text.ends_with(RESULTS_TRAILER));
+        assert!(text.contains(RESULTS_TRAILER));
+        assert!(
+            text.ends_with(" for the owner's current goal. No round limit."),
+            "each results message names its round (F09): {text}"
+        );
         let (typed, _) = live_input("", "engine", text);
         assert!(
-            typed.ends_with(RESULTS_TRAILER),
+            typed.ends_with("No round limit."),
             "the typed text keeps its tail"
         );
     }
@@ -29887,4 +29891,575 @@ fn a_project_hold_is_in_the_holding_projects_paused_set_only() {
         ["claude-c", "claude-d"],
         "another project still picks the held account"
     );
+}
+
+const RUN_DAY_MS: i64 = 86_400_000;
+
+/// Saves the owner's Sub-agent rounds per message. Inputs: the fixture and the choice, none
+/// for Until the goal is done. Output: none.
+#[cfg(target_os = "macos")]
+fn choose_rounds(fixture: &Fixture, max: Option<u8>) {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::MasterRounds {
+            project_id: fixture.setup.project_id.clone(),
+            max,
+        }],
+    );
+}
+
+/// Saves the owner's Master run time. Inputs: the fixture and the choice in seconds, none
+/// for No limit. Output: none.
+#[cfg(target_os = "macos")]
+fn choose_run_time(fixture: &Fixture, secs: Option<u32>) {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::MasterRunTime {
+            project_id: fixture.setup.project_id.clone(),
+            secs,
+        }],
+    );
+}
+
+/// Writes one message of the project's team conversation. Inputs: the fixture, its author,
+/// its text and its state. Output: the message id.
+#[cfg(target_os = "macos")]
+fn owner_goal(fixture: &Fixture, author: MessageAuthor, text: &str, state: MessageState) -> i64 {
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    let id = append_message(
+        &tx,
+        &fixture.setup.project_id,
+        author,
+        text,
+        state,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    id
+}
+
+/// Counts the tasks the master handed over. Input: the fixture. Output: the count.
+#[cfg(target_os = "macos")]
+fn handed_over(fixture: &Fixture) -> i64 {
+    count(
+        &fixture.connection,
+        "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND source='master'",
+    )
+}
+
+/// Runs one owner goal under a Sub-agent rounds choice: the master hands one task over in
+/// each reply and a results message reaches it after each round, so it hands over exactly
+/// the chosen number of rounds, and its next hand-off is refused with one note that names
+/// the limit and keep going. Input: the choice. Output: none.
+#[cfg(target_os = "macos")]
+fn rounds_row(max: Option<u8>) {
+    let fixture = Fixture::new(1);
+    choose_rounds(&fixture, max);
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    let mut answering = owner_goal(
+        &fixture,
+        MessageAuthor::Owner,
+        "Build the page",
+        MessageState::Pending,
+    );
+    let replies = max.map_or(25, |max| u32::from(max) + 1);
+    for round in 0..replies {
+        team.finish_message(
+            &project,
+            answering,
+            &format!("On it.\nDELEGATE codex: Step {round}"),
+            TurnEnd::Success,
+            None,
+            vec![],
+        )
+        .unwrap();
+        let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
+        assert_eq!((rounds.used, rounds.max), (round, max));
+        if max.is_none_or(|max| round < u32::from(max)) {
+            assert_eq!(handed_over(&fixture), i64::from(round) + 1, "round {round}");
+        } else {
+            assert_eq!(handed_over(&fixture), i64::from(round), "round {round}");
+            assert_eq!(noted(&fixture, &rounds.limit_note()), 1);
+            assert!(!rounds.open());
+        }
+        answering = owner_goal(
+            &fixture,
+            MessageAuthor::Engine,
+            &format!(
+                "Results from your sub-agents:\n\nTask {round}: Done{}",
+                rounds.next_line()
+            ),
+            MessageState::Pending,
+        );
+    }
+    let status = fixture.status();
+    assert_eq!(status.master_rounds, max);
+    assert_eq!(status.rounds_used, replies);
+}
+
+/// Until the goal is done, the default, never stops the master's hand-offs (F09).
+#[cfg(target_os = "macos")]
+#[test]
+fn rounds_until_the_goal_is_done_never_stop_the_masters_hand_offs() {
+    rounds_row(None);
+}
+
+/// 1 sub-agent round per owner message (F09).
+#[cfg(target_os = "macos")]
+#[test]
+fn rounds_one_stops_the_masters_hand_offs_after_one_round() {
+    rounds_row(Some(1));
+}
+
+/// 2 sub-agent rounds per owner message (F09).
+#[cfg(target_os = "macos")]
+#[test]
+fn rounds_two_stop_the_masters_hand_offs_after_two_rounds() {
+    rounds_row(Some(2));
+}
+
+/// 3 sub-agent rounds per owner message (F09).
+#[cfg(target_os = "macos")]
+#[test]
+fn rounds_three_stop_the_masters_hand_offs_after_three_rounds() {
+    rounds_row(Some(3));
+}
+
+/// 5 sub-agent rounds per owner message (F09).
+#[cfg(target_os = "macos")]
+#[test]
+fn rounds_five_stop_the_masters_hand_offs_after_five_rounds() {
+    rounds_row(Some(5));
+}
+
+/// 10 sub-agent rounds per owner message (F09).
+#[cfg(target_os = "macos")]
+#[test]
+fn rounds_ten_stop_the_masters_hand_offs_after_ten_rounds() {
+    rounds_row(Some(10));
+}
+
+/// 20 sub-agent rounds per owner message (F09).
+#[cfg(target_os = "macos")]
+#[test]
+fn rounds_twenty_stop_the_masters_hand_offs_after_twenty_rounds() {
+    rounds_row(Some(20));
+}
+
+/// The owner's keep going lifts the limit once for the rest of the goal, and the owner's
+/// next message starts a new goal with the limit back (F09).
+#[cfg(target_os = "macos")]
+#[test]
+fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit_back() {
+    let fixture = Fixture::new(1);
+    choose_rounds(&fixture, Some(1));
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    let first = owner_goal(
+        &fixture,
+        MessageAuthor::Owner,
+        "Build the page",
+        MessageState::Pending,
+    );
+    team.finish_message(
+        &project,
+        first,
+        "DELEGATE codex: Step 0",
+        TurnEnd::Success,
+        None,
+        vec![],
+    )
+    .unwrap();
+    let results = owner_goal(
+        &fixture,
+        MessageAuthor::Engine,
+        "Results one",
+        MessageState::Pending,
+    );
+    team.finish_message(
+        &project,
+        results,
+        "DELEGATE codex: Step 1",
+        TurnEnd::Success,
+        None,
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(handed_over(&fixture), 1, "the limit held the second round");
+    let kept = owner_goal(
+        &fixture,
+        MessageAuthor::Owner,
+        "Keep going.",
+        MessageState::Pending,
+    );
+    let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
+    assert!(rounds.kept_going && rounds.open());
+    assert!(
+        rounds
+            .next_line()
+            .contains("The owner said keep going, so no round limit.")
+    );
+    team.finish_message(
+        &project,
+        kept,
+        "DELEGATE codex: Step 1",
+        TurnEnd::Success,
+        None,
+        vec![],
+    )
+    .unwrap();
+    for round in 2..6 {
+        let results = owner_goal(
+            &fixture,
+            MessageAuthor::Engine,
+            "Results",
+            MessageState::Pending,
+        );
+        team.finish_message(
+            &project,
+            results,
+            &format!("DELEGATE codex: Step {round}"),
+            TurnEnd::Success,
+            None,
+            vec![],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        handed_over(&fixture),
+        6,
+        "keep going lifted the limit for the goal"
+    );
+    assert!(fixture.status().rounds_kept_going);
+    let next = owner_goal(
+        &fixture,
+        MessageAuthor::Owner,
+        "Now the footer",
+        MessageState::Pending,
+    );
+    team.finish_message(
+        &project,
+        next,
+        "DELEGATE codex: Footer",
+        TurnEnd::Success,
+        None,
+        vec![],
+    )
+    .unwrap();
+    let results = owner_goal(
+        &fixture,
+        MessageAuthor::Engine,
+        "Results",
+        MessageState::Pending,
+    );
+    team.finish_message(
+        &project,
+        results,
+        "DELEGATE codex: Footer again",
+        TurnEnd::Success,
+        None,
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(handed_over(&fixture), 7, "the new goal has the limit back");
+    let status = fixture.status();
+    assert!(!status.rounds_kept_going);
+    assert_eq!(status.rounds_used, 1);
+}
+
+/// The master reads its round counter at the end of every results message, with the limit
+/// of the owner's goal (F09).
+#[test]
+fn a_results_message_ends_with_the_round_of_the_owners_goal() {
+    let ready: Vec<ReadyTask> =
+        vec![(7, "codex".into(), "done".into(), Some("Built".into()), None)];
+    let rounds = crate::team::master_limits::Rounds {
+        used: 1,
+        max: Some(3),
+        kept_going: false,
+    };
+    let (text, held) = results_message(&ready, &rounds.next_line());
+    assert_eq!(held, 1);
+    assert!(
+        text.ends_with(&format!(
+            "{RESULTS_TRAILER}\nSub-agent round 2 of 3 for the owner's current goal."
+        )),
+        "{text}"
+    );
+    let last = crate::team::master_limits::Rounds { used: 2, ..rounds };
+    let (text, _) = results_message(&ready, &last.next_line());
+    assert!(
+        text.ends_with("hand over no new work until the owner writes."),
+        "{text}"
+    );
+}
+
+/// Moves the live master's start, the owner's messages and the owner's last key in its
+/// terminal back to one time, as if the owner had left it alone since. Inputs: the fixture
+/// and the time in milliseconds. Output: none.
+#[cfg(target_os = "macos")]
+fn owner_last_seen(fixture: &Fixture, at_ms: i64) {
+    for sql in [
+        "UPDATE team_master_clocks SET since_ms=?2 WHERE project=?1",
+        "UPDATE team_live_masters SET typed_ms=?2 WHERE project=?1",
+        "UPDATE team_messages SET created_ms=?2 WHERE project=?1 AND author='owner'",
+    ] {
+        fixture
+            .connection
+            .execute(sql, params![PROJECT, at_ms])
+            .unwrap();
+    }
+}
+
+/// Adds work in flight that no agent runs, a task left running without an agent, so a live
+/// master past its run time is not waiting on the owner. Input: the fixture. Output: none.
+#[cfg(target_os = "macos")]
+fn stand_in_work(fixture: &Fixture) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms,started_ms) VALUES (?1,'master','codex',0,'Long step','running',?2,?2)",
+            params![PROJECT, now_ms()],
+        )
+        .unwrap();
+}
+
+/// One Master run time choice end to end (F01): a live master the owner left alone for a
+/// minute less than its run time runs on with work in flight and shows the time left, and
+/// past its run time the engine stops it, turns its switch off and says why once. Input:
+/// the choice, none for the unset default. Output: none.
+#[cfg(target_os = "macos")]
+fn run_time_row(choice: Option<u32>) {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    if choice.is_some() {
+        choose_run_time(&fixture, choice);
+    }
+    let secs = choice.unwrap_or(crate::team::master_limits::RUN_DEFAULT_SECS);
+    let run_ms = i64::from(secs) * 1000;
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(3600));
+    stand_in_work(&fixture);
+    owner_last_seen(&fixture, now_ms() - run_ms + 60_000);
+    tick_for(&mut team, Duration::from_secs(1));
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "a minute before its run time"
+    );
+    let status = fixture.status();
+    assert_eq!(status.master_run_secs, Some(secs));
+    let left = status.master_deadline_ms.unwrap() - now_ms();
+    assert!((0..=60_000).contains(&left), "{left} ms left");
+    owner_last_seen(&fixture, now_ms() - run_ms - 1000);
+    fixture.until(&mut team, "the live master stops at its run time", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    assert!(
+        !super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap(),
+        "its switch went off"
+    );
+    idle_ticks(&mut team);
+    assert_eq!(masters(&fixture.connection), [id], "it did not start again");
+    let line = crate::team::master_limits::run_stopped_line(secs);
+    assert_eq!(noted(&fixture, &line), 1);
+    let status = fixture.status();
+    assert_eq!(status.live_problem.as_deref(), Some(line.as_str()));
+    assert_eq!(status.master_deadline_ms, None);
+    team.shutdown().unwrap();
+}
+
+/// 7 days, the default before the owner picks (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unset_run_time_stops_the_live_master_after_seven_days_without_the_owner() {
+    run_time_row(None);
+}
+
+/// 1 day (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_one_day_run_time_stops_the_live_master_after_a_day_without_the_owner() {
+    run_time_row(Some(86_400));
+}
+
+/// 3 days (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_three_day_run_time_stops_the_live_master_after_three_days_without_the_owner() {
+    run_time_row(Some(259_200));
+}
+
+/// 7 days picked by the owner (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_seven_day_run_time_stops_the_live_master_after_seven_days_without_the_owner() {
+    run_time_row(Some(604_800));
+}
+
+/// 14 days (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_fourteen_day_run_time_stops_the_live_master_after_fourteen_days_without_the_owner() {
+    run_time_row(Some(1_209_600));
+}
+
+/// 30 days (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_thirty_day_run_time_stops_the_live_master_after_thirty_days_without_the_owner() {
+    run_time_row(Some(2_592_000));
+}
+
+/// No limit keeps a live master with work in flight running a year without the owner and
+/// shows no time left (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_on_no_limit_runs_on_without_the_owner() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    choose_run_time(&fixture, None);
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(3600));
+    stand_in_work(&fixture);
+    owner_last_seen(&fixture, now_ms() - 365 * RUN_DAY_MS);
+    tick_for(&mut team, Duration::from_secs(2));
+    assert_eq!(fixture.agent_status(id).0, AgentStatus::Idle);
+    assert!(super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap());
+    let status = fixture.status();
+    assert_eq!(
+        (status.master_run_secs, status.master_deadline_ms),
+        (None, None)
+    );
+    team.shutdown().unwrap();
+}
+
+/// A live master past its run time that waits on the owner, no turn open and no work in
+/// flight, is not stopped; once work is in flight again it is (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_waiting_on_the_owner_is_not_stopped_past_its_run_time() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    choose_run_time(&fixture, Some(86_400));
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(3600));
+    owner_last_seen(&fixture, now_ms() - 2 * RUN_DAY_MS);
+    tick_for(&mut team, Duration::from_secs(2));
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "it waits on the owner"
+    );
+    assert!(super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap());
+    stand_in_work(&fixture);
+    fixture.until(
+        &mut team,
+        "work in flight past the run time stops it",
+        |f| f.agent_status(id).0 == AgentStatus::Stopped,
+    );
+    team.shutdown().unwrap();
+}
+
+/// An owner message renews the live master's run time, so a master the owner just wrote to
+/// runs on with work in flight though its pane started long before (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_message_renews_the_live_masters_run_time() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    choose_run_time(&fixture, Some(86_400));
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(3600));
+    owner_last_seen(&fixture, now_ms() - 2 * RUN_DAY_MS);
+    assert!(fixture.status().master_deadline_ms.unwrap() < now_ms());
+    let wrote = now_ms();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Message {
+            project_id: fixture.setup.project_id.clone(),
+            text: "Also check the footer".into(),
+        }],
+    );
+    assert!(fixture.status().master_deadline_ms.unwrap() >= wrote + RUN_DAY_MS);
+    stand_in_work(&fixture);
+    tick_for(&mut team, Duration::from_secs(2));
+    assert_ne!(fixture.agent_status(id).0, AgentStatus::Stopped);
+    assert!(super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap());
+    assert_eq!(
+        noted(
+            &fixture,
+            &crate::team::master_limits::run_stopped_line(86_400)
+        ),
+        0
+    );
+    team.shutdown().unwrap();
+}
+
+/// A restarted engine that adopts the live master starts its run time afresh: neither the
+/// pane's start before the restart nor the old 24 h pane deadline carries over, so a pane
+/// that started 25 h earlier, under a 1 day run time with work in flight, runs on (F01).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_restarted_engine_gives_the_adopted_live_master_a_fresh_run_time() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    choose_run_time(&fixture, Some(86_400));
+    let limits = TeamLimits {
+        master_idle_stop: Duration::from_secs(3600),
+        ..TeamLimits::default()
+    };
+    let (mut team, id) = idle_live_master(&fixture, &host, limits.master_idle_stop);
+    owner_last_seen(&fixture, now_ms() - 2 * RUN_DAY_MS);
+    assert!(fixture.status().master_deadline_ms.unwrap() < now_ms());
+    assert_eq!(team.shutdown().unwrap(), names(&[id]));
+    assert_eq!(host.alive().unwrap(), names(&[id]));
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_panes SET record=json_set(record,'$.since_ms',json_extract(record,'$.since_ms')-?2) WHERE agent=?1",
+            params![id, 25 * 3_600_000_i64],
+        )
+        .unwrap();
+    owner_last_seen(&fixture, now_ms() - 2 * RUN_DAY_MS);
+    let restarted = now_ms();
+    let access = fixture.access.clone();
+    let mut again = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", fixture.base.join("bin").join("codex"))]),
+        Box::new(move || Some(access.clone())),
+        limits,
+    )
+    .unwrap()
+    .with_terminal(host.clone())
+    .unwrap();
+    fixture.until(&mut again, "the next engine adopts the live master", |f| {
+        f.agent_status(id) == (AgentStatus::Idle, None) && f.recorded(id)
+    });
+    let since: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT since_ms FROM team_master_clocks WHERE project=?1 AND agent=?2",
+            params![PROJECT, id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(since >= restarted, "the adopt started the clock again");
+    assert!(fixture.status().master_deadline_ms.unwrap() >= restarted + RUN_DAY_MS);
+    stand_in_work(&fixture);
+    tick_for(&mut again, Duration::from_secs(2));
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "the adopted master runs on past its old pane deadline and old run time"
+    );
+    assert!(super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap());
+    assert_eq!(
+        noted(
+            &fixture,
+            &crate::team::master_limits::run_stopped_line(86_400)
+        ),
+        0
+    );
+    again.shutdown().unwrap();
 }

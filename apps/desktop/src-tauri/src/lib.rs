@@ -1518,6 +1518,36 @@ async fn desktop_team_max_teammates(
 }
 
 #[tauri::command]
+async fn desktop_team_master_rounds(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    max: Option<u8>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_master_rounds(&id, max, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_master_run_time(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    secs: Option<u32>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_master_run_time(&id, secs, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_token_budget(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4566,6 +4596,8 @@ native_commands! {
     desktop_team_stop_teammate,
     desktop_team_max_harnesses,
     desktop_team_max_teammates,
+    desktop_team_master_rounds,
+    desktop_team_master_run_time,
     desktop_team_token_budget,
     desktop_team_spread_accounts,
     desktop_team_graph,

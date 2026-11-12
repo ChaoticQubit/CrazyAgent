@@ -17,7 +17,7 @@ const GROUPS = [
   ["access", "Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
   ["tools", "Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
   ["coord", "Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]],
-  ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
+  ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget", "Master run time", "Sub-agent rounds per message"]],
 ];
 const MASTER_GROUPS = [
   ["Master", ["Harness", "Account", "Live terminal"]],
@@ -274,4 +274,23 @@ test("Overlapping edits and the merge choice take the row's full width with the 
     assert.ok(words >= 0 && choices >= 0, `${label} has its help and its choices`);
     assert.ok(words < choices, `${label}: the help sits above the choices`);
   }
+});
+
+test("Master run time lists every engine choice, then No limit (F01)", () => {
+  assert.deepEqual(controls.runOptions().map((option) => [option.value, option.label]), [
+    ["86400", "1 day"], ["259200", "3 days"], ["604800", "7 days"], ["1209600", "14 days"], ["2592000", "30 days"], ["off", "No limit"],
+  ]);
+  assert.equal(controls.RUN_DEFAULT_SECS, 604_800);
+  for (const secs of controls.RUN_CHOICES_SECS) assert.equal(controls.chosen(String(secs), controls.RUN_CHOICES_SECS), secs);
+  assert.equal(controls.chosen("off", controls.RUN_CHOICES_SECS), null, "No limit saves as null");
+  assert.equal(controls.chosen("3600", controls.RUN_CHOICES_SECS), undefined, "an unlisted time is never sent");
+});
+
+test("Sub-agent rounds per message lists Until the goal is done first, then every engine choice (F09)", () => {
+  assert.deepEqual(controls.roundOptions().map((option) => [option.value, option.label]), [
+    ["off", "Until the goal is done"], ["1", "1 round"], ["2", "2 rounds"], ["3", "3 rounds"], ["5", "5 rounds"], ["10", "10 rounds"], ["20", "20 rounds"],
+  ]);
+  for (const max of controls.ROUND_CHOICES) assert.equal(controls.chosen(String(max), controls.ROUND_CHOICES), max);
+  assert.equal(controls.chosen("off", controls.ROUND_CHOICES), null, "Until the goal is done saves as null");
+  assert.equal(controls.chosen("4", controls.ROUND_CHOICES), undefined);
 });

@@ -735,6 +735,8 @@ impl TeamView {
             KeyCode::Char('p') => self.ask_teammate(),
             KeyCode::Char('v') => self.cap(Cap::Harnesses),
             KeyCode::Char('u') => self.cap(Cap::Teammates),
+            KeyCode::Char('O') => self.master_rounds(),
+            KeyCode::Char('D') => self.master_run_time(),
             KeyCode::Char('T') => self.token_budget(),
             KeyCode::Char('P') => self.spread_accounts(),
             KeyCode::Char('m') => {
@@ -934,6 +936,50 @@ impl TeamView {
             ),
         };
         self.change(&done, action)
+    }
+
+    /// Moves Sub-agent rounds per message to its next choice: Until the goal is done, then each
+    /// of `ROUND_CHOICES`, then Until the goal is done again (F09). Returns the change, or
+    /// Handled while the team loads or saves.
+    fn master_rounds(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let max = next_choice(
+            &crate::team::master_limits::ROUND_CHOICES,
+            status.master_rounds,
+        );
+        let project_id = self.project.clone();
+        self.change(
+            &format!(
+                "Sub-agent rounds per message is now {}.",
+                rounds_choice(max)
+            ),
+            TeamAction::MasterRounds { project_id, max },
+        )
+    }
+
+    /// Moves Master run time to its next choice: each of `RUN_CHOICES_SECS`, then No limit,
+    /// then the first again (F01). Returns the change, or Handled while the team loads or
+    /// saves.
+    fn master_run_time(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let secs = next_choice(
+            &crate::team::master_limits::RUN_CHOICES_SECS,
+            status.master_run_secs,
+        );
+        let project_id = self.project.clone();
+        self.change(
+            &format!(
+                "Master run time is now {}.",
+                crate::team::master_limits::run_words(secs)
+            ),
+            TeamAction::MasterRunTime { project_id, secs },
+        )
     }
 
     /// Turns Spread harnesses across accounts on or off: on, a new or woken agent prefers a
@@ -3212,6 +3258,11 @@ impl TeamView {
         });
         let middle = [
             setting("Max teammates", cap_words(status.max_teammates)),
+            setting("Sub-agent rounds", rounds_choice(status.master_rounds)),
+            setting(
+                "Master run time",
+                crate::team::master_limits::run_words(status.master_run_secs),
+            ),
             setting(
                 "Spread accounts",
                 if status.spread_accounts { "On" } else { "Off" }.to_owned(),
@@ -3612,6 +3663,8 @@ impl TeamView {
             ("b", "Agent branches"),
             ("v", "Max harnesses"),
             ("u", "Max teammates"),
+            ("O", "Sub-agent rounds"),
+            ("D", "Master run time"),
             ("T", "Token budget"),
             ("P", "Spread accounts"),
             ("z", "Stop agent"),
@@ -3698,6 +3751,15 @@ fn next_choice<T: Copy + PartialEq>(choices: &[T], current: Option<T>) -> Option
             .and_then(|at| choices.get(at + 1))
             .copied(),
     }
+}
+
+/// Words a Sub-agent rounds per message choice. Takes the choice, None for Until the goal is
+/// done. Returns the words.
+fn rounds_choice(max: Option<u8>) -> String {
+    max.map_or_else(
+        || "Until the goal is done".to_owned(),
+        |max| max.to_string(),
+    )
 }
 
 /// Words a cap on running agents. Takes the cap, None for No limit. Returns the words.
@@ -4018,6 +4080,10 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_stop_master" => "The master stops with Stop all.".into(),
         "team_teammate_not_found" => "That teammate has already ended.".into(),
         "team_cap_invalid" => "Pick a listed limit, or No limit.".into(),
+        "team_rounds_invalid" => {
+            "Pick a listed number of sub-agent rounds, or Until the goal is done.".into()
+        }
+        "team_run_time_invalid" => "Pick a listed master run time, or No limit.".into(),
         "team_budget_invalid" => "Pick a listed token budget, or Off.".into(),
         "coord_native_unsupported" => NATIVE_UNSUPPORTED.into(),
         "coord_settings_invalid" => {

@@ -1354,6 +1354,18 @@ export function setMaxTeammates(id: string, max: number | null): Promise<Result<
   return call<IntentReceipt>("desktop_team_max_teammates", { id, max, generation: nextGeneration() });
 }
 
+/** Sets Sub-agent rounds per message, null for Until the goal is done (F09). Inputs: the project
+ * id and the choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterRounds(id: string, max: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_rounds", { id, max, generation: nextGeneration() });
+}
+
+/** Sets Master run time in seconds, null for No limit (F01). Inputs: the project id and the
+ * choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterRunTime(id: string, secs: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_run_time", { id, secs, generation: nextGeneration() });
+}
+
 /** Sets the project's Token budget, null for Off: once its agents use that many tokens from now,
  * the engine stops the whole team. Inputs: the project id and the tokens. Output: the engine
  * receipt, not ready, or a plain error. */
