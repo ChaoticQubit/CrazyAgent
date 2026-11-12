@@ -2013,3 +2013,26 @@ fn a_shim_harness_starts_its_real_install_or_else_itself_unless_agents_can_write
     let places = crate::tools::Places::new(Vec::new(), Some(inside_home));
     assert!(launch_tool(&inside, &places).is_err());
 }
+
+/// F2 (r2): a pinned harness file inside a project is refused with a line that names the
+/// file and says agents can change it there, never that the harness is missing with how to
+/// install it: the file is right there.
+#[test]
+fn a_pinned_harness_inside_a_project_is_refused_by_name_not_reported_missing() {
+    let scratch = tempfile::tempdir().unwrap();
+    let project = scratch.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let entry = project.join("bin").join("codex");
+    stand_in(&entry);
+    let places = crate::tools::Places::from_environment(None);
+    let missing = crate::tools::resolve_entry(&entry, &places).unwrap_err();
+    assert_eq!(missing.reason, crate::tools::Reason::Refused);
+    assert_eq!(
+        missing.refused.map(|refused| refused.why),
+        Some(crate::tools::Refusal::AgentsCanWrite)
+    );
+    let LaunchError(line, _) = launch_tool(&entry, &places).unwrap_err();
+    assert!(line.contains(&entry.display().to_string()), "{line}");
+    assert!(line.contains("agents can change it"), "{line}");
+    assert!(!line.contains("missing"), "{line}");
+}

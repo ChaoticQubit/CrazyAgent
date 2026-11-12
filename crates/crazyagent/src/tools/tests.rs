@@ -576,3 +576,40 @@ fn linuxbrew_and_nixos_profile_tools_are_found_and_a_link_into_a_project_is_refu
         Reason::NotFound
     );
 }
+
+/// The macOS group every local user is in and the resolver does not trust for writes.
+#[cfg(target_os = "macos")]
+const STAFF: u32 = 20;
+
+/// F2 (r2): a tmux the resolver passes over, here in a Homebrew folder the staff group can
+/// write, is reported as refused with the file and the folder to fix, never as missing with
+/// how to install it: brew would answer that it is installed and Try again would loop.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refused_tool_names_its_file_and_why_and_never_says_it_is_missing() {
+    let (_folder, home) = scratch();
+    let bin = home.join("opt/homebrew/bin");
+    let tmux = program(&bin.join("tmux"), NODE);
+    std::os::unix::fs::chown(&bin, None, Some(STAFF)).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let missing = resolve("tmux", &Places::new(vec![bin.clone()], Some(home))).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused,
+        Some(Refused {
+            file: tmux.clone(),
+            why: Refusal::OthersCanChange(bin.clone()),
+        })
+    );
+    let line = missing.line();
+    assert_ne!(line, TMUX_MISSING);
+    assert!(
+        !line.contains("missing") && !line.contains("brew install"),
+        "{line}"
+    );
+    assert!(line.contains(&tmux.display().to_string()), "{line}");
+    assert!(
+        line.contains(&format!("change {}.", bin.display())),
+        "{line}"
+    );
+}
