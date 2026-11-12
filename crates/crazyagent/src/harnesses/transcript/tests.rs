@@ -1749,12 +1749,12 @@ fn injected_instructions_and_summaries_are_never_typed_and_keep_their_own_roles(
     );
 }
 
-/// A model the harness says does not exist, or the account may not use, is told apart from
-/// any other turn error (DEC-150 F8), by the code each harness writes and never by text:
-/// Claude Code's API error line with `model_not_found`, and a Codex rollout error whose
-/// `codex_error_info` is `model_not_found`. Any other code is a plain turn error.
+/// A refusal code in a transcript is only a turn error (Q-6): the agent can write its own
+/// transcript, so neither Claude Code's API error line with `model_not_found` nor a Codex
+/// rollout error whose `codex_error_info` is `model_not_found` marks the model refused. A
+/// refusal is read only from the harness stream the engine reads itself (`launch`).
 #[test]
-fn a_model_refusal_is_told_from_its_harness_code_alone() {
+fn a_refusal_code_written_in_a_transcript_never_marks_the_model_refused() {
     let case = Case::new();
     let (file, mut reader) = case.claude();
     append(
@@ -1774,7 +1774,6 @@ fn a_model_refusal_is_told_from_its_harness_code_alone() {
         reader.read().unwrap(),
         vec![
             TranscriptEvent::TurnStarted,
-            TranscriptEvent::ModelRefused,
             TranscriptEvent::TurnError {
                 rate_limited: false
             },
@@ -1789,12 +1788,9 @@ fn a_model_refusal_is_told_from_its_harness_code_alone() {
     let refused = serde_json::json!({"type":"event_msg","payload":{"type":"error","message":"The model gpt-x does not exist","codex_error_info":"model_not_found"}});
     assert_eq!(
         codex_facts(&refused, false),
-        vec![
-            TranscriptEvent::ModelRefused,
-            TranscriptEvent::TurnError {
-                rate_limited: false
-            },
-        ]
+        vec![TranscriptEvent::TurnError {
+            rate_limited: false
+        }]
     );
     let other = serde_json::json!({"type":"event_msg","payload":{"type":"error","message":"model_not_found","codex_error_info":"bad_request"}});
     assert_eq!(
