@@ -68,8 +68,9 @@ const FACT_LINE_BYTES_MAX: usize = 160;
 /// The most bytes of the engine's facts about an ended task in a results message: its
 /// change set line, its tests heading and quoted line, and its open items line (F32).
 const FACTS_BYTES_MAX: usize = 4 * (FACT_LINE_BYTES_MAX + 1);
-/// How a results message says where a task's whole result is when its text was cut (F32).
-const WHOLE_RESULT: &str = "Whole result: inspect_work with task";
+/// How a results message says where a task's whole result is when its text was cut (F32):
+/// a master without the team tools reads it through the owner, who sees it in the Team view.
+const WHOLE_RESULT: &str = "Whole result: the owner's Team view, or inspect_work with task";
 /// The engine's line over a result whose start was cut so its end, which says how the
 /// work ended, still fits (F32).
 const RESULT_CUT: &str = "The start of this result was cut; its end follows:";

@@ -2649,9 +2649,9 @@ pub fn woke(tx: &Transaction<'_>, wake: &Wake, cold: bool, now: i64) -> Result<i
 }
 
 /// Settles a project's queued change set ready events that no longer say anything true
-/// (F20): the agent has no pending or conflicting change set made at or before the event,
-/// because the set landed, was discarded or went back to its agent, or a newer set replaced
-/// it. A database without the change set table settles none. Takes the connection and the
+/// (F20): the agent has no open change set, one neither accepted nor discarded, made at or
+/// before the event, because the set landed, was discarded or went back to its agent, or a
+/// newer set replaced it. A database without the change set table settles none. Takes the connection and the
 /// project. Returns how many it settled, or the SQLite failure.
 fn settle_landed(connection: &Connection, project: &ProjectId) -> Result<usize, EngineError> {
     let landing: bool = connection
@@ -2670,7 +2670,7 @@ fn settle_landed(connection: &Connection, project: &ProjectId) -> Result<usize, 
              AND kind='change_set_ready' AND NOT EXISTS (
                  SELECT 1 FROM landing_change_sets c WHERE c.project=team_events.project
                  AND c.agent_kind='sub' AND c.agent_id=CAST(team_events.agent AS TEXT)
-                 AND c.state IN ('pending','conflict') AND c.created_ms<=team_events.created_ms)",
+                 AND c.state NOT IN ('accepted','discarded') AND c.created_ms<=team_events.created_ms)",
             [project.as_str()],
         )
         .map_err(error)?;

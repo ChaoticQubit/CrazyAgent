@@ -1742,6 +1742,44 @@ fn a_change_set_ready_event_whose_set_already_landed_is_settled_not_delivered() 
     );
 }
 
+/// F20: a change set the engine is updating onto a new base is still open, so its ready
+/// event stays queued; once it is accepted the event is settled.
+#[test]
+fn a_change_set_ready_event_stays_queued_while_its_set_is_updating() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    drop(crate::landing::open(&fixture.base).unwrap());
+    let ada = fixture.agent(PROJECT, "sub", "codex", "idle");
+    connection
+        .execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+             VALUES ('ada-1',?1,'sub',?2,'label','/repo','/worktrees/ada-1','/repo/.git','b','h','updating','succeeded','task-1','line',1,1,0,'[]',10,10)",
+            params![PROJECT, ada.to_string()],
+        )
+        .unwrap();
+    record(
+        connection,
+        &project(),
+        ada,
+        Some(4),
+        EventKind::ChangeSetReady,
+        "The edits wait in Changes.",
+        11,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(settle_landed(connection, &project()).unwrap(), 0);
+    assert_eq!(event_states(connection), [(EventState::Queued, None)]);
+    connection
+        .execute(
+            "UPDATE landing_change_sets SET state='accepted' WHERE id='ada-1'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(settle_landed(connection, &project()).unwrap(), 1);
+    assert_eq!(event_states(connection), [(EventState::Settled, None)]);
+}
+
 /// F20: without the change set table, as in a database the landing store never opened, a
 /// change set ready event is delivered as before.
 #[test]
