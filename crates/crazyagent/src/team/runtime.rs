@@ -430,6 +430,7 @@ struct Worker {
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
     ready: bool,
+    model: Option<String>,
 }
 
 impl Worker {
@@ -469,6 +470,7 @@ pub struct TeamRuntime {
     resuming: Option<(i64, Resume)>,
     settled: bool,
     naming: Option<i64>,
+    run_model: Option<String>,
     deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
     reproving: Option<Arc<AtomicBool>>,
@@ -634,6 +636,7 @@ impl TeamRuntime {
             resuming: None,
             settled: false,
             naming: None,
+            run_model: None,
             deliveries: crate::coord::delivery::Deliveries::default(),
             #[cfg(unix)]
             callers: BTreeMap::new(),
@@ -1856,7 +1859,7 @@ impl TeamRuntime {
             },
         };
         let paused = self.paused()?;
-        let started = match self.account_for(access, &project, &harness, &paused) {
+        let started = match self.account_for(access, &project, &harness, &paused, None) {
             Ok(None) => return self.note(&project, AGENT_RESTART_CHECKING),
             Ok(Some(account)) if role == AgentRole::Sub => {
                 match self.wake(&stored, reference, &harness, tools, &account, again)? {
@@ -2349,9 +2352,10 @@ impl TeamRuntime {
             .count()
     }
 
-    /// Picks the pool account an agent of a harness starts on. Takes the live access, the
-    /// project, the harness and the paused accounts. Returns the account; none while no
-    /// account can take the agent yet but one still waits for this engine run's sign-in
+    /// Picks the pool account an agent of a harness starts on, among those that can run the
+    /// model given (DEC-150). Takes the live access, the project, the harness, the paused
+    /// accounts and the model, none for any account's own. Returns the account; none while
+    /// no account can take the agent yet but one still waits for this engine run's sign-in
     /// re-check (DEC-108), so the caller waits instead of failing; or the plain refusal.
     fn account_for(
         &self,
@@ -2359,6 +2363,7 @@ impl TeamRuntime {
         project: &ProjectId,
         harness: &str,
         paused: &BTreeSet<CredentialRef>,
+        model: Option<&str>,
     ) -> Result<Option<TeamAccount>, String> {
         let Some(launch) = launch_harness(harness) else {
             return Err(format!("{harness} cannot run team agents yet"));
@@ -2367,12 +2372,19 @@ impl TeamRuntime {
         if accounts != Accounts::NoPool && !self.executables.contains_key(launch) {
             return Err(format!("{harness} is not installed"));
         }
-        let Accounts::Usable(fitting) = accounts else {
+        let Accounts::Usable(mut fitting) = accounts else {
             return Err("Needs a pool".into());
         };
         if fitting.is_empty() {
             return Err(format!(
                 "No account in this project's pool can run {harness}"
+            ));
+        }
+        fitting.retain(|account| super::model_pick::can_run(&account.reach, model));
+        if fitting.is_empty() {
+            return Err(format!(
+                "No account in this project's pool can run {harness} on {}",
+                model.unwrap_or_default()
             ));
         }
         let mut refused = Vec::new();
@@ -2458,6 +2470,49 @@ impl TeamRuntime {
             return Err("Every account in this project's pool is at its usage limit, held in reserve or set to Never use".into());
         }
         Err("Every account in this project's pool is resting after a rate limit".into())
+    }
+
+    /// Picks the account a task's agent starts on and the model it runs (DEC-150): an account
+    /// that can run the model wanted; when none can, any account on its own model, telling
+    /// the owner and the master once (`model_pick::fell_back`). A pick that finds an account
+    /// for the model clears a told fallback. Takes the live access, the project, the harness,
+    /// the paused accounts, the model wanted, none for any account's own, and the task.
+    /// Returns the account and the model it runs, none while no account can take the agent
+    /// yet, or a SQLite failure.
+    fn account_with_model(
+        &mut self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        harness: &str,
+        paused: &BTreeSet<CredentialRef>,
+        wanted: Option<String>,
+        task: i64,
+    ) -> Result<Option<(TeamAccount, Option<String>)>, EngineError> {
+        let Some(wanted) = wanted else {
+            let account = self.account_for(access, project, harness, paused, None);
+            return Ok(account.ok().flatten().map(|account| (account, None)));
+        };
+        match self.account_for(access, project, harness, paused, Some(&wanted)) {
+            Ok(Some(account)) => {
+                super::model_pick::ran(&self.connection, project, harness, &wanted)?;
+                assert!(super::model_pick::can_run(&account.reach, Some(&wanted)));
+                Ok(Some((account, Some(wanted))))
+            }
+            Ok(None) => Ok(None),
+            Err(_) => {
+                let Ok(Some(account)) = self.account_for(access, project, harness, paused, None)
+                else {
+                    return Ok(None);
+                };
+                let tx = self
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(error)?;
+                super::model_pick::fell_back(&tx, project, harness, &wanted, task, now_ms())?;
+                tx.commit().map_err(error)?;
+                Ok(Some((account, None)))
+            }
+        }
     }
 
     /// Tells why an account cannot take agent work now: endpoints always can, managed
@@ -2727,7 +2782,7 @@ impl TeamRuntime {
             None if self.panes(project) >= PANES_PER_PROJECT_MAX => return Ok(()),
             None => {
                 let harness = stored.team.master.clone();
-                let started = match self.account_for(access, project, &harness, paused) {
+                let started = match self.account_for(access, project, &harness, paused, None) {
                     Ok(None) => return Ok(()),
                     Ok(Some(account)) => self.spawn(
                         stored,
@@ -2941,7 +2996,7 @@ impl TeamRuntime {
                 ),
             );
         }
-        let account = match self.account_for(access, project, &harness, paused) {
+        let account = match self.account_for(access, project, &harness, paused, None) {
             Ok(Some(account)) => account,
             Ok(None) => {
                 if planned {
@@ -4010,7 +4065,7 @@ impl TeamRuntime {
             let Some((harness, tools)) = row else {
                 continue;
             };
-            let started = match self.account_for(access, project, &harness, paused) {
+            let started = match self.account_for(access, project, &harness, paused, None) {
                 Ok(Some(account)) => self
                     .wake(stored, id, &harness, tools, &account, None)?
                     .map(|_| ()),
@@ -4082,6 +4137,10 @@ impl TeamRuntime {
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         let harness_cap = super::caps::read(&self.connection, project)?.harnesses;
         for (task, harness, prompt, pin, by_master, parent, mode) in queued {
+            let wanted = match pin {
+                Some(_) => None,
+                None => super::model_pick::wanted(&self.connection, task, project, &harness)?,
+            };
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
             } else {
@@ -4107,7 +4166,7 @@ impl TeamRuntime {
                         && w.own_turn.is_none()
                         && !w.stopping
                         && !paused.contains(&w.connection)
-                        && pin.map_or(w.parent == parent, |pin| pin == **id)
+                        && pin.map_or(w.parent == parent && w.model == wanted, |pin| pin == **id)
                         && mode
                             .as_deref()
                             .is_none_or(|mode| self.stored_mode(**id).as_deref() == Some(mode))
@@ -4140,10 +4199,26 @@ impl TeamRuntime {
                     {
                         continue;
                     }
-                    let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
+                    let own = super::model_pick::agent_model(&self.connection, pinned)?;
+                    let Some((account, run)) = self.account_with_model(
+                        access,
+                        project,
+                        &harness,
+                        paused,
+                        own.clone(),
+                        task,
+                    )?
                     else {
                         continue;
                     };
+                    if run != own {
+                        super::model_pick::record_agent(
+                            &self.connection,
+                            project,
+                            pinned,
+                            run.as_deref(),
+                        )?;
+                    }
                     match self.wake(stored, pinned, &harness, slot.tools, &account, None)? {
                         Ok((agent, resumed)) => {
                             woken_fresh = !resumed;
@@ -4170,11 +4245,19 @@ impl TeamRuntime {
                     {
                         continue;
                     }
-                    let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
+                    let Some((account, run)) = self.account_with_model(
+                        access,
+                        project,
+                        &harness,
+                        paused,
+                        wanted.clone(),
+                        task,
+                    )?
                     else {
                         continue;
                     };
                     self.naming = Some(task);
+                    self.run_model = run;
                     let spawned = self.spawn(
                         stored,
                         AgentRole::Sub,
@@ -4184,6 +4267,7 @@ impl TeamRuntime {
                         parent,
                     );
                     self.naming = None;
+                    self.run_model = None;
                     match spawned? {
                         Ok(agent) => {
                             assert!(self.live(project, AgentRole::Sub, None) <= subs_max);
@@ -4343,7 +4427,8 @@ impl TeamRuntime {
                 && self.panes(project) < PANES_PER_PROJECT_MAX
                 && !self.harnesses_full(project, harness_cap)
             {
-                let Ok(Some(account)) = self.account_for(access, project, &slot.harness, paused)
+                let Ok(Some(account)) =
+                    self.account_for(access, project, &slot.harness, paused, None)
                 else {
                     break;
                 };
@@ -4624,6 +4709,15 @@ impl TeamRuntime {
         assert!(id > 0);
         if role == AgentRole::Sub {
             names::assign_persona(&self.connection, &stored.project_id, id)?;
+        }
+        if let Some(model) = self.run_model.take() {
+            assert!(super::model_pick::can_run(&account.reach, Some(&model)));
+            super::model_pick::record_agent(
+                &self.connection,
+                &stored.project_id,
+                id,
+                Some(&model),
+            )?;
         }
         self.launch(stored, id, role, harness, tools, account, again, None)
     }
@@ -5006,6 +5100,7 @@ impl TeamRuntime {
             .optional()
             .map_err(error)?
             .flatten();
+        let model = super::model_pick::agent_model(&self.connection, id)?;
         self.workers.insert(
             id,
             Worker {
@@ -5047,6 +5142,7 @@ impl TeamRuntime {
                 told_finished: BTreeSet::new(),
                 parent,
                 ready: false,
+                model,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -5415,7 +5511,13 @@ impl TeamRuntime {
                 (own_home, remote, Some(model.clone()))
             }
             TeamReach::Managed { model, .. } => {
-                (own_home, SandboxRemote::AnyHost(443), model.clone())
+                let chosen = super::model_pick::agent_model(&self.connection, id)
+                    .map_err(|e| with_code("the agent's model could not be read", Some(&e.0)))?;
+                (
+                    own_home,
+                    SandboxRemote::AnyHost(443),
+                    chosen.or_else(|| model.clone()),
+                )
             }
         };
         let hookless = crate::coord::settings::HarnessKind::from_harness(launch)

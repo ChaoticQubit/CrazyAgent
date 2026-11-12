@@ -79,14 +79,7 @@ pub(crate) fn pin(
 /// left the model to the default. Takes the database and the task. Returns the pick, or a
 /// SQLite failure.
 pub(crate) fn pinned(db: &Connection, task: i64) -> Result<Option<ModelPick>, EngineError> {
-    let exists: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_task_models')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(super::error)?;
-    if !exists {
+    if !table(db, "team_task_models")? {
         return Ok(None);
     }
     db.query_row(
@@ -102,3 +95,172 @@ pub(crate) fn pinned(db: &Connection, task: i64) -> Result<Option<ModelPick>, En
     .optional()
     .map_err(super::error)
 }
+
+const RUN_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_agent_models (
+    agent INTEGER PRIMARY KEY,
+    project TEXT NOT NULL,
+    model TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS team_model_fallbacks (
+    project TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    model TEXT NOT NULL,
+    noticed_ms INTEGER NOT NULL,
+    PRIMARY KEY (project, harness, model)
+) WITHOUT ROWID;";
+
+/// Reads the model a task's agent should start on (DEC-150): the spawn's pinned pick,
+/// else the project's agent default for the harness, else the app's, none for the
+/// account's own model. Takes the database, the task, the project and the harness.
+/// Returns the model, or a store or SQLite failure.
+pub(crate) fn wanted(
+    db: &Connection,
+    task: i64,
+    project: &ProjectId,
+    harness: &str,
+) -> Result<Option<String>, EngineError> {
+    if let Some(pick) = pinned(db, task)? {
+        return Ok(Some(pick.model));
+    }
+    let catalog = crate::model_choice::catalog(harness);
+    store::launch_model(
+        db,
+        harness,
+        &catalog,
+        Some(project),
+        crate::model_choice::Slot::Agent,
+    )
+}
+
+/// Tells whether a pool account can run a model: any account runs its own, a keyless
+/// endpoint runs only the one model it serves, a managed profile any model its harness
+/// takes. Takes the account's reach and the model, none for the account's own. Returns
+/// the answer.
+pub(crate) fn can_run(reach: &super::TeamReach, model: Option<&str>) -> bool {
+    match (reach, model) {
+        (_, None) => true,
+        (super::TeamReach::Endpoint { model: own, .. }, Some(model)) => own == model,
+        (super::TeamReach::Managed { .. }, Some(_)) => true,
+    }
+}
+
+/// Records the model an agent starts on, so its restarts and wakes keep it and an idle
+/// agent takes only tasks for the same model; none removes the record, so the account's
+/// own model runs. Takes the database, the project, the agent and the model. Returns a
+/// SQLite failure.
+pub(crate) fn record_agent(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    model: Option<&str>,
+) -> Result<(), EngineError> {
+    assert!(agent > 0);
+    db.execute_batch(RUN_SCHEMA).map_err(super::error)?;
+    let changed = match model {
+        Some(model) => db
+            .execute(
+                "INSERT INTO team_agent_models(agent,project,model) VALUES (?1,?2,?3)
+                 ON CONFLICT(agent) DO UPDATE SET model=excluded.model",
+                params![agent, project.as_str(), model],
+            )
+            .map_err(super::error)?,
+        None => db
+            .execute("DELETE FROM team_agent_models WHERE agent=?1", [agent])
+            .map_err(super::error)?,
+    };
+    assert!(changed <= 1);
+    Ok(())
+}
+
+/// Reads the model an agent was started on, none for the account's own. Takes the
+/// database and the agent. Returns the model, or a SQLite failure.
+pub(crate) fn agent_model(db: &Connection, agent: i64) -> Result<Option<String>, EngineError> {
+    if !table(db, "team_agent_models")? {
+        return Ok(None);
+    }
+    db.query_row(
+        "SELECT model FROM team_agent_models WHERE agent=?1",
+        [agent],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(super::error)
+}
+
+/// Tells the owner and the master once that no pool account could run a model chosen for
+/// a harness's agents, so a task runs on the default (DEC-150): one owner notification and
+/// one engine message to the master, then nothing more for that project, harness and
+/// model until it runs again (`ran`). Takes the transaction, the project, the harness, the
+/// model, the task and the time. Returns whether this call told them, or a SQLite failure.
+pub(crate) fn fell_back(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    harness: &str,
+    model: &str,
+    task: i64,
+    now: i64,
+) -> Result<bool, EngineError> {
+    tx.execute_batch(RUN_SCHEMA).map_err(super::error)?;
+    let inserted = tx
+        .execute(
+            "INSERT OR IGNORE INTO team_model_fallbacks(project,harness,model,noticed_ms)
+             VALUES (?1,?2,?3,?4)",
+            params![project.as_str(), harness, model, now],
+        )
+        .map_err(super::error)?;
+    assert!(inserted <= 1);
+    if inserted == 0 {
+        return Ok(false);
+    }
+    let harness = super::bound_text(harness, 64);
+    let text = format!(
+        "No account in this project's pool can run {model} for {harness} agents now, so task {task} runs on the default model. You are told again only after {model} runs once more."
+    );
+    super::events::notify(
+        tx,
+        project,
+        super::events::NotificationKind::ModelFallback,
+        &text,
+        now,
+    )?;
+    let _ = super::append_message(
+        tx,
+        project,
+        super::MessageAuthor::Engine,
+        &format!("{text} (model_fallback)"),
+        super::MessageState::Pending,
+        now,
+    )?;
+    Ok(true)
+}
+
+/// Forgets a told fallback once a model runs again, so a later fallback is told anew.
+/// Takes the database, the project, the harness and the model. Returns a SQLite failure.
+pub(crate) fn ran(
+    db: &Connection,
+    project: &ProjectId,
+    harness: &str,
+    model: &str,
+) -> Result<(), EngineError> {
+    if !table(db, "team_model_fallbacks")? {
+        return Ok(());
+    }
+    db.execute(
+        "DELETE FROM team_model_fallbacks WHERE project=?1 AND harness=?2 AND model=?3",
+        params![project.as_str(), harness, model],
+    )
+    .map_err(super::error)?;
+    Ok(())
+}
+
+fn table(db: &Connection, name: &str) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(super::error)
+}
+
+#[cfg(all(test, unix))]
+mod tests;

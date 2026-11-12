@@ -9610,6 +9610,7 @@ fn between_turns(
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,
+        model: None,
     }
 }
 
