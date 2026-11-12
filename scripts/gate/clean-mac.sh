@@ -4,6 +4,7 @@ set -uo pipefail
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 gate="${CRAZYAGENT_CLEAN_MAC_DIR:-$repo/.local-state/gate/clean-mac/$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$gate"
+gate="$(cd "$gate" && pwd)"
 summary="$gate/summary.txt"
 : > "$summary"
 
@@ -15,6 +16,8 @@ refuse() {
 [ "$(uname -s)" = "Darwin" ] || refuse "macOS only"
 grep -Eq '^clean-mac-gate[[:space:]]*=' "$repo/crates/crazyagent/Cargo.toml" \
   || refuse "the engine has no clean-mac-gate feature (system-root remap), so a run would see this Mac's real Homebrew"
+TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)" || refuse "no private temp folder for this user"
+export TMPDIR
 
 log="$gate/cargo-test.log"
 CRAZYAGENT_CLEAN_MAC_DIR="$gate" cargo test --manifest-path "$repo/Cargo.toml" -p crazyagent \

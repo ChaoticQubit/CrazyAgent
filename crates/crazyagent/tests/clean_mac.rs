@@ -29,6 +29,7 @@ const SYSTEM_ROOT_VARIABLE: &str = "CRAZYAGENT_GATE_SYSTEM_ROOT";
 const GATE_DIR_VARIABLE: &str = "CRAZYAGENT_CLEAN_MAC_DIR";
 const HOST_TMUX: [&str; 2] = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"];
 const REFUSED: &str = "gate refused";
+const RESTARTS_ONLY: &str = "had to start";
 const READY_TIME: Duration = Duration::from_secs(30);
 const SETTLE_TIME: Duration = Duration::from_secs(30);
 const LIVE_TIME: Duration = Duration::from_secs(90);
@@ -144,7 +145,8 @@ fn link(target: &str, at: &Path) {
 
 /// The node stand-in: answers `--version` for itself and for the Codex script it is
 /// handed, else leaves a marker naming the node and script it ran as, in the first of the
-/// agent's temp, home or working folder it may write, says so on its pane and stays open.
+/// agent's home, working or temp folder it may write (the first two sit inside the gate's
+/// private Mac, the agent's temp folder may not), says so on its pane and stays open.
 fn node_text() -> String {
     format!(
         "#!/bin/sh\n\
@@ -157,7 +159,7 @@ fn node_text() -> String {
          \x20   exit 0\n\
          \x20 fi\n\
          done\n\
-         for folder in \"$TMPDIR\" \"$HOME\" \"$PWD\"; do\n\
+         for folder in \"$HOME\" \"$PWD\" \"$TMPDIR\"; do\n\
          \x20 if [ -n \"$folder\" ] && printf 'node=%s\\nscript=%s\\n' \"$0\" \"$1\" > \"$folder/{MARKER_FILE}\" 2>/dev/null; then\n\
          \x20   break\n\
          \x20 fi\n\
@@ -187,10 +189,17 @@ impl Mac {
     fn new(shape: Shape) -> Self {
         let temp = tempfile::Builder::new()
             .prefix("cm-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
             .unwrap();
         let run = temp.path().canonicalize().unwrap();
         fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
+        if let Some(entry) = crazyagent::service::changeable_by_others(&run) {
+            panic!(
+                "{REFUSED}: other users can change {}, so the engine passes over every stand-in in {}; set TMPDIR to a folder only you can change",
+                entry.display(),
+                run.display()
+            );
+        }
         let home = run.join("home");
         let system = run.join("system");
         let root = run.join("engine");
@@ -695,11 +704,17 @@ async fn live_outcome(owner: &mut Owner, mac: &Mac) -> Live {
     Live::Waiting(last)
 }
 
-/// Whether a stopped start says which tool is missing or how the harness ended, in a typed
-/// line naming the tool, never only that the master had to start again.
-fn names_tool(line: &str, tools: &[&str]) -> bool {
-    let line = line.to_lowercase();
-    tools.iter().any(|tool| line.contains(tool))
+/// Whether a stopped start says which tool is missing in the resolver's typed line: the
+/// exact tmux line, or a line that starts with the missing tool's name, never one that only
+/// says the master had to start again. Inputs: the line and the tools it may name.
+/// Output: true for a typed reason.
+fn typed_reason(line: &str, tools: &[&str]) -> bool {
+    let tmux = tools.contains(&"tmux") && line == crazyagent::tools::TMUX_MISSING;
+    let named = tools
+        .iter()
+        .filter(|tool| **tool != "tmux")
+        .any(|tool| line.starts_with(&format!("{tool} ")));
+    (tmux || named) && !line.contains(RESTARTS_ONLY)
 }
 
 fn real(path: &str) -> PathBuf {
@@ -751,8 +766,8 @@ async fn a_nothing_installed_mac_says_what_is_missing_and_never_waits_forever() 
     owner.live_on().await;
     match live_outcome(&mut owner, &mac).await {
         Live::Stopped(line) => assert!(
-            names_tool(&line, &["tmux", "codex"]),
-            "the stop line names no missing tool: {line}"
+            typed_reason(&line, &["tmux", "codex"]),
+            "the stop line is not a typed missing-tool line: {line}"
         ),
         other => panic!("a Mac with nothing installed must stop with a typed reason: {other:?}"),
     }
@@ -827,8 +842,8 @@ async fn tmux_installed_after_the_engine_started_is_used_without_an_engine_resta
     owner.live_on().await;
     match live_outcome(&mut owner, &mac).await {
         Live::Stopped(line) => assert!(
-            names_tool(&line, &["tmux"]),
-            "the stop line does not say tmux is missing: {line}"
+            typed_reason(&line, &["tmux"]),
+            "the stop line is not the typed tmux line: {line}"
         ),
         other => panic!("a start before tmux is installed must say tmux is missing: {other:?}"),
     }
