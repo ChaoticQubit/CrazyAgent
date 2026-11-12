@@ -156,6 +156,18 @@ fn opened_local(root: &Path) -> Option<Arc<local::LocalModel>> {
     }
 }
 
+/// What identifies the local runtime's files on disk: per pinned file its size, inode where
+/// the platform has one, and modified time.
+pub(crate) type Stamp = Vec<(u64, u64, Option<std::time::SystemTime>)>;
+
+/// The stamp of the local runtime's files when both are plain files at their pinned sizes,
+/// read from metadata only, so a deleted or replaced model is never served from the cache
+/// (rv-code2 HYB2-L1). Input: the engine root. Output: the stamp, or none.
+pub(crate) fn local_stamp(root: &Path) -> Option<Stamp> {
+    let _ = root;
+    unimplemented!("rv-code2 HYB2-L1")
+}
+
 /// Whether both pinned files of the local runtime are on disk at their pinned sizes, read
 /// from metadata only. Input: the engine root. Output: the answer.
 fn local_present(root: &Path) -> bool {

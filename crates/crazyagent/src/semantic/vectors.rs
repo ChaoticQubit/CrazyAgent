@@ -126,6 +126,46 @@ pub(crate) const BOUNDS: Bounds = Bounds {
     sweep_rows: SWEEP_ROUND_MAX,
 };
 
+/// The first wait after a failed send to an HTTP plugin.
+pub(crate) const BACKOFF_FIRST_MS: i64 = 30_000;
+/// The longest wait after failed sends to an HTTP plugin.
+pub(crate) const BACKOFF_MAX_MS: i64 = 60 * 60 * 1000;
+
+/// How long sends to one HTTP plugin wait after failing: the plugin key, the failures in a
+/// row and the time before which nothing is sent (rv-code2 HYB2-M1).
+#[derive(Debug, Default)]
+pub(crate) struct Backoff {
+    held: Option<(String, u32, i64)>,
+}
+
+impl Backoff {
+    /// No wait. Output: the backoff.
+    pub(crate) const fn new() -> Self {
+        Self { held: None }
+    }
+
+    /// Whether a send to the plugin may go now. Inputs: the key and the time. Output: the
+    /// answer; another key is never held.
+    pub(crate) fn ready(&self, key: &str, now_ms: i64) -> bool {
+        let _ = (key, now_ms);
+        unimplemented!("rv-code2 HYB2-M1")
+    }
+
+    /// Records a failed send: the wait doubles from [`BACKOFF_FIRST_MS`] up to
+    /// [`BACKOFF_MAX_MS`]. Inputs: the key and the time. Output: none.
+    pub(crate) fn failed(&mut self, key: &str, now_ms: i64) {
+        let _ = (key, now_ms);
+        unimplemented!("rv-code2 HYB2-M1")
+    }
+
+    /// Records a send that worked, ending the wait for that key. Input: the key. Output:
+    /// none.
+    pub(crate) fn succeeded(&mut self, key: &str) {
+        let _ = key;
+        unimplemented!("rv-code2 HYB2-M1")
+    }
+}
+
 /// The chosen embedding plugin as vectors see it: the key its vectors are stored under, the
 /// dimensions every vector has and the most texts one call takes.
 #[derive(Debug, Clone, PartialEq, Eq)]

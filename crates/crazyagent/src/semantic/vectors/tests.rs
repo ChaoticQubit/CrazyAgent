@@ -497,6 +497,112 @@ fn queries_are_bounded_per_plugin_and_per_round_and_a_failed_send_is_dropped() {
 }
 
 #[test]
+fn ask_query_and_cached_query_mask_the_query_themselves() {
+    let mut db = db();
+    let acme = plugin('a');
+    let raw = "  password=hunter2 deploy axis3 ";
+    ask_query(&db, &acme.key, raw, 100).unwrap();
+    let stored: String = db
+        .query_row("SELECT query FROM search_query_vectors", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(!stored.contains("hunter2"), "{stored}");
+    assert_eq!(Some(stored.clone()), query_text(raw));
+    let mut seen = Vec::new();
+    assert_eq!(embed_queries(&mut db, &acme, &mut by_axis(&mut seen)), 1);
+    assert!(seen.iter().all(|text| !text.contains("hunter2")));
+    assert!(
+        cached_query(&db, &acme, raw).is_some(),
+        "the raw query finds its masked row"
+    );
+    ask_query(&db, &acme.key, "   ", 200).unwrap();
+    let rows: i64 = db
+        .query_row("SELECT COUNT(*) FROM search_query_vectors", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1, "a query with nothing left is not stored");
+}
+
+#[test]
+fn an_http_backoff_grows_per_failure_is_capped_and_resets_on_success() {
+    let mut backoff = Backoff::new();
+    let key = plugin('a').key;
+    assert!(backoff.ready(&key, 0));
+    backoff.failed(&key, 0);
+    assert!(!backoff.ready(&key, BACKOFF_FIRST_MS - 1));
+    assert!(backoff.ready(&key, BACKOFF_FIRST_MS));
+    backoff.failed(&key, BACKOFF_FIRST_MS);
+    assert!(
+        !backoff.ready(&key, 3 * BACKOFF_FIRST_MS - 1),
+        "the second wait is twice the first"
+    );
+    assert!(backoff.ready(&key, 3 * BACKOFF_FIRST_MS));
+    for _ in 0..40 {
+        backoff.failed(&key, 0);
+    }
+    assert!(!backoff.ready(&key, BACKOFF_MAX_MS - 1));
+    assert!(backoff.ready(&key, BACKOFF_MAX_MS), "the wait is capped");
+    assert!(
+        backoff.ready(&plugin('b').key, 0),
+        "another plugin is not held"
+    );
+    backoff.succeeded(&key);
+    assert!(backoff.ready(&key, 0));
+    backoff.failed(&key, 0);
+    assert!(
+        backoff.ready(&key, BACKOFF_FIRST_MS),
+        "a success starts the waits over"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_local_model_stamp_follows_the_files_so_a_deleted_or_replaced_model_is_dropped() {
+    use crate::semantic::local;
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(crate::semantic::local_stamp(root.path()), None);
+    let place = local::folder(root.path());
+    std::fs::create_dir_all(&place).unwrap();
+    let make = || {
+        for pin in local::PINNED {
+            std::fs::File::create(place.join(pin.name))
+                .unwrap()
+                .set_len(pin.bytes)
+                .unwrap();
+        }
+    };
+    make();
+    let first =
+        crate::semantic::local_stamp(root.path()).expect("both files at their pinned sizes");
+    let held = std::fs::File::open(place.join(local::MODEL.name)).unwrap();
+    for pin in local::PINNED {
+        std::fs::remove_file(place.join(pin.name)).unwrap();
+    }
+    assert_eq!(
+        crate::semantic::local_stamp(root.path()),
+        None,
+        "a deleted model is never served from the cache"
+    );
+    make();
+    let second = crate::semantic::local_stamp(root.path()).unwrap();
+    assert_ne!(second, first, "a new download is a new model");
+    std::fs::File::options()
+        .write(true)
+        .open(place.join(local::TOKENIZER.name))
+        .unwrap()
+        .set_len(1)
+        .unwrap();
+    assert_eq!(
+        crate::semantic::local_stamp(root.path()),
+        None,
+        "a file off its pinned size is not the model"
+    );
+    drop(held);
+}
+
+#[test]
 fn fusion_adds_reciprocal_ranks_with_k_60_and_keeps_full_text_order_on_ties() {
     assert_eq!(fuse(&[1, 2, 3], &[3, 4]), [3, 1, 2, 4]);
     assert_eq!(fuse(&[1, 2], &[]), [1, 2]);
