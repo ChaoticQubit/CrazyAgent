@@ -83,11 +83,10 @@ const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 pub(crate) const RUN_NAME_USED: &str = "run name already used";
 const CONTEXT_BUSY: &str = "launch_home_busy";
 const PANE_PREFIX: &str = "research-";
-const PANE_EVENTS_MAX: usize = 200_000;
 /// Gives a tools-off Claude Code run one model turn, as it has no tools to take a second.
 /// It does not stop Claude Code 2.1.309 from continuing an answer cut at the output limit:
 /// it sends up to three more requests for that answer outside the turn count, so the
-/// output cap and the caller's wall time bound such a run.
+/// output token cap and the caller's wall time bound such a run.
 const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
 /// The variable that caps the output tokens of each Claude Code request.
 const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
@@ -106,7 +105,9 @@ const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
 /// and a reader of a stored report reads up to this many.
 pub const REPORT_BYTES_MAX: u64 = 512 * 1024;
 
-/// Bounds every research run obeys.
+/// Bounds every research run obeys. `output_bytes_max` is the most bytes kept in each agent
+/// log and read back from it; output past it is counted, never a reason to end the run
+/// (owner 11-11).
 #[derive(Debug, Clone)]
 pub struct ResearchLimits {
     pub wall_time: Duration,
@@ -117,7 +118,7 @@ pub struct ResearchLimits {
 }
 
 impl Default for ResearchLimits {
-    /// Twenty minutes, 4 MiB of agent output, a report of [`REPORT_BYTES_MAX`], three
+    /// Twenty minutes, 4 MiB kept of each agent log, a report of [`REPORT_BYTES_MAX`], three
     /// agents per project at once and two attempts per job.
     fn default() -> Self {
         Self {
@@ -322,7 +323,6 @@ struct JobPlace {
 enum Ending {
     Exited(bool),
     TimedOut,
-    Overflowed,
     Cancelled,
     Interrupted,
     RateLimited,
@@ -712,7 +712,6 @@ impl ResearchRunner {
                 }
                 let reason = match ending {
                     Ending::TimedOut => "Agent ran out of time",
-                    Ending::Overflowed => "Agent output exceeded the limit",
                     Ending::RateLimited => "The account hit its rate limit",
                     _ => "Agent stopped with an error",
                 };
@@ -1010,10 +1009,6 @@ impl ResearchRunner {
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
-                    output_bytes: usize::try_from(self.limits.output_bytes_max)
-                        .unwrap_or(usize::MAX)
-                        .min(64 * 1024 * 1024),
-                    events: PANE_EVENTS_MAX,
                     ..LaunchLimits::default()
                 },
             };
@@ -1260,9 +1255,6 @@ impl ResearchRunner {
             if self.is_stopping() {
                 break Ending::Interrupted;
             }
-            if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
-                break Ending::Overflowed;
-            }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
                 match jobs.heartbeat(job, counted.load(Ordering::Relaxed)) {
@@ -1306,9 +1298,6 @@ impl ResearchRunner {
             if self.is_stopping() {
                 break Ending::Interrupted;
             }
-            if counted > self.limits.output_bytes_max {
-                break Ending::Overflowed;
-            }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
                 match jobs.heartbeat(job, counted) {
@@ -1334,7 +1323,6 @@ impl ResearchRunner {
                 Err(problem) => {
                     break match problem.0.as_str() {
                         "launch_deadline" => Ending::TimedOut,
-                        "launch_output_limit" | "launch_event_limit" => Ending::Overflowed,
                         _ => Ending::Exited(false),
                     };
                 }
@@ -1706,9 +1694,6 @@ impl ResearchRunner {
             }
             if stop() || self.is_stopping() {
                 break Some(ReadOnlyEnding::Stopped);
-            }
-            if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
-                break Some(ReadOnlyEnding::Failed("Agent wrote too much output".into()));
             }
             std::thread::sleep(POLL);
         };

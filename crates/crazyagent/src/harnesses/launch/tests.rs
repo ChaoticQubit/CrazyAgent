@@ -968,3 +968,68 @@ fn a_path_without_a_hold_only_watches_and_never_claims() {
         "the group ran until the test ended it"
     );
 }
+
+/// Collects what an output reader hands the session until it ends, a skipped line as
+/// `skipped` and the end as `closed`. Takes the receiver. Returns the items in order.
+#[cfg(unix)]
+fn handed(lines: std::sync::mpsc::Receiver<super::Line>) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| match line {
+            super::Line::Bytes(bytes) => String::from_utf8(bytes).unwrap(),
+            super::Line::Skipped => "skipped".to_owned(),
+            super::Line::Closed => "closed".to_owned(),
+        })
+        .collect()
+}
+
+/// Owner 11-11, no output cap: a harness stdout line longer than `LINE_BYTES_MAX` is passed
+/// over to its newline and reported once as skipped, the line after it still arrives, and
+/// output past the old 8 MiB total never ends the session.
+#[cfg(unix)]
+#[test]
+fn a_stdout_line_past_the_line_bound_is_skipped_and_the_next_line_arrives() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "head -c {} /dev/zero | tr '\\0' x; printf '\\nnext\\n'",
+            2 * super::LINE_BYTES_MAX + 1
+        ))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, lines) = std::sync::mpsc::sync_channel(super::LINES_AHEAD_MAX);
+    let reader = std::thread::spawn(move || super::forward(stdout, sender));
+    let got = handed(lines);
+    reader.join().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(got, ["skipped", "next\n", "closed"]);
+}
+
+/// Owner 11-11: a durable harness output file with a line longer than `LINE_BYTES_MAX` is
+/// read on past it, the line after it arrives, and a file that ends inside a skipped line
+/// hands none of its rest.
+#[cfg(unix)]
+#[test]
+fn a_durable_output_line_past_the_line_bound_is_skipped_and_never_handed_in_part() {
+    let folder = tempfile::tempdir().unwrap();
+    let long = "x".repeat(2 * super::LINE_BYTES_MAX + 1);
+    for (body, want) in [
+        (
+            format!("{long}\nnext\n"),
+            vec!["skipped", "next\n", "closed"],
+        ),
+        (long.clone(), vec!["skipped", "closed"]),
+    ] {
+        let path = folder.path().join("output");
+        std::fs::write(&path, &body).unwrap();
+        let output = std::fs::File::open(&path).unwrap();
+        let probe = std::fs::File::open(&path).unwrap();
+        let (sender, lines) = std::sync::mpsc::sync_channel(super::LINES_AHEAD_MAX);
+        let reader = std::thread::spawn(move || super::tail(output, probe, sender));
+        let got = handed(lines);
+        reader.join().unwrap();
+        assert_eq!(got, want, "{} bytes", body.len());
+    }
+}

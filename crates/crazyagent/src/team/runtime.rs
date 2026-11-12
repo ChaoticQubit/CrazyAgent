@@ -88,7 +88,6 @@ const MOVE_DWELL: Duration = Duration::from_secs(crate::scheduling::MOVE_DWELL_S
 /// desktop master area shows.
 const LIVE_MASTER_MOVED: &str = "The live master moved to the account that is now first in this pool's order and started again there (Live master account: Move when idle).";
 const SWEEP_EVERY: Duration = Duration::from_secs(2);
-const SESSION_EVENTS_MAX: usize = 200_000;
 const HISTORY_MESSAGES_MAX: i64 = 12;
 const HISTORY_MESSAGE_BYTES_MAX: usize = 1500;
 const HISTORY_BYTES_MAX: usize = 6000;
@@ -124,14 +123,13 @@ const REASK_EMPTY: &str = "Your master got no reply text from your last turn. Re
 
 /// Bounds every team agent obeys. The task, session and sub-agent idle limits are the
 /// owner's team settings, read per project when a turn or an agent starts or an idle agent
-/// is checked, so none is set here. `output_bytes` caps the harness output of one process,
-/// `attempts_max` the tries per task, `master_idle_stop` the bound for an idle master, which
+/// is checked, so none is set here. No count of a process's output ends it (owner 11-11).
+/// `attempts_max` caps the tries per task, `master_idle_stop` the bound for an idle master, which
 /// the project's choice scales, once no work is in flight and `rate_limit_pause` how long an account that hit its limit
 /// is skipped. `stale_turn` is how long a live master's turn may stay open with no new byte
 /// in its session record, on a pane whose app waits, before the engine closes it as no turn.
 #[derive(Debug, Clone, Copy)]
 pub struct TeamLimits {
-    pub output_bytes: usize,
     pub attempts_max: i64,
     pub master_idle_stop: Duration,
     pub rate_limit_pause: Duration,
@@ -142,7 +140,6 @@ pub struct TeamLimits {
 impl Default for TeamLimits {
     fn default() -> Self {
         Self {
-            output_bytes: 8 * 1024 * 1024,
             attempts_max: 2,
             master_idle_stop: Duration::from_secs(super::MASTER_IDLE_STOP_SECS.into()),
             rate_limit_pause: Duration::from_secs(10 * 60),
@@ -154,8 +151,7 @@ impl Default for TeamLimits {
 
 impl TeamLimits {
     fn validate(&self) -> Result<(), EngineError> {
-        let ok = (1..=64 * 1024 * 1024).contains(&self.output_bytes)
-            && (1..=10).contains(&self.attempts_max)
+        let ok = (1..=10).contains(&self.attempts_max)
             && !self.master_idle_stop.is_zero()
             && !self.stale_turn.is_zero()
             && self.stop_grace <= Duration::from_secs(30);
@@ -457,7 +453,6 @@ enum TurnEnd {
     Failed,
     RateLimited,
     TimedOut,
-    TooLong,
     Cancelled,
     Interrupted,
     Closed,
@@ -472,7 +467,6 @@ impl TurnEnd {
             Self::Failed => "failed",
             Self::RateLimited => "rate_limited",
             Self::TimedOut => "timed_out",
-            Self::TooLong => "too_long",
             Self::Cancelled => "cancelled",
             Self::Interrupted => "interrupted",
             Self::Closed => "closed",
@@ -8264,13 +8258,11 @@ impl TeamRuntime {
     /// The bounds of one agent process: the longest a launched harness may run. The owner's
     /// session limit is the engine's own clock on the agent, checked per turn and while it is
     /// idle, so it means the same for agents kept between turns and agents started for each
-    /// turn. Returns the bounds.
+    /// turn. No count of output bytes or events ends one (owner 11-11). Returns the bounds.
     fn launch_limits(&self) -> LaunchLimits {
         LaunchLimits {
             run_time: RUN_TIME_MAX,
             stop_grace: self.limits.stop_grace,
-            output_bytes: self.limits.output_bytes,
-            events: SESSION_EVENTS_MAX,
             stale_turn: self.limits.stale_turn,
         }
     }
@@ -9304,10 +9296,6 @@ impl TeamRuntime {
                 Some("The account hit its rate limit"),
             ),
             TurnEnd::TimedOut => (TaskStatus::Failed, Some(timed.as_str())),
-            TurnEnd::TooLong => (
-                TaskStatus::Failed,
-                Some("The sub-agent's output exceeded the limit"),
-            ),
             TurnEnd::Failed => (
                 if retry {
                     TaskStatus::Queued
@@ -10053,9 +10041,7 @@ fn live_serve(
                 });
             }
             Ok(Some(TranscriptEvent::Text { text: said })) => {
-                if text.len() + said.len() <= LIVE_REPLY_BYTES_MAX {
-                    text.push_str(&said);
-                }
+                push_trimmed(&mut text, &said, LIVE_REPLY_BYTES_MAX);
             }
             Ok(Some(TranscriptEvent::TurnError { rate_limited })) => limited |= rate_limited,
             Ok(Some(TranscriptEvent::Interrupted)) => interrupted = true,
@@ -10458,9 +10444,7 @@ fn report_own(session: &mut AgentSession, reports: &Sender<Report>, own: &mut Ow
                 });
             }
             TranscriptEvent::Text { text } if own.running => {
-                if own.text.len() + text.len() <= LIVE_REPLY_BYTES_MAX {
-                    own.text.push_str(&text);
-                }
+                push_trimmed(&mut own.text, &text, LIVE_REPLY_BYTES_MAX);
             }
             TranscriptEvent::TurnError { rate_limited } => own.limited |= rate_limited,
             TranscriptEvent::Interrupted => own.interrupted = true,
@@ -11068,6 +11052,32 @@ fn last_result(connection: &Connection, agent: i64) -> Result<Option<String>, En
 }
 
 const LIVE_REPLY_BYTES_MAX: usize = 64 * 1024;
+/// The most reply text one engine-typed turn holds in memory.
+const TURN_TEXT_BYTES_MAX: usize = super::RESULT_BYTES_MAX * 4;
+/// The mark a turn's reply text held in memory ends with once later text was left out to
+/// keep it within its bound: the turn goes on, only its text is trimmed (owner 11-11).
+const TRIMMED: &str = "\n[trimmed: later reply text was left out]";
+
+/// Adds a part of a turn's reply text to the text held so far, within `max` bytes: what does
+/// not fit is left out on a character boundary and the text ends with [`TRIMMED`] once, so a
+/// long reply never ends the agent. Takes the text, the part and the bound, which must
+/// leave room for the mark. Returns nothing.
+fn push_trimmed(text: &mut String, part: &str, max: usize) {
+    assert!(max > TRIMMED.len());
+    assert!(text.len() <= max);
+    if text.ends_with(TRIMMED) {
+        return;
+    }
+    let room = max - TRIMMED.len();
+    if text.len() + part.len() <= room {
+        text.push_str(part);
+        return;
+    }
+    let kept = part.floor_char_boundary(room.saturating_sub(text.len()));
+    text.push_str(&part[..kept]);
+    text.push_str(TRIMMED);
+    assert!(text.len() <= max);
+}
 const NOTE_PROMPT_BYTES_MAX: usize = 80;
 const NOTE_RESULT_BYTES_MAX: usize = 300;
 const NOTE_PROBLEM_BYTES_MAX: usize = 200;
@@ -11536,13 +11546,12 @@ fn edit_in_front(
     Some(edit)
 }
 
-/// How a turn ends on a launch error: the deadline and the output limits keep their own
-/// ends; any other error closes the agent and keeps its code, as does the deadline, so a
-/// cut turn can name the session limit. Input: the error. Output: the end and its code.
+/// How a turn ends on a launch error: the deadline keeps its own end; any other error
+/// closes the agent and keeps its code, as does the deadline, so a cut turn can name the
+/// session limit. Input: the error. Output: the end and its code.
 fn launch_end(problem: LaunchError) -> (TurnEnd, Option<String>) {
     match problem.0.as_str() {
         "launch_deadline" => (TurnEnd::TimedOut, Some(problem.0)),
-        "launch_output_limit" | "launch_event_limit" => (TurnEnd::TooLong, None),
         _ => (TurnEnd::Closed, Some(problem.0)),
     }
 }
@@ -11618,10 +11627,7 @@ fn turn(
         match session.next_event(EVENT_WAIT) {
             Ok(None) => {}
             Ok(Some(LaunchEvent::Text { text: part })) => {
-                if text.len() + part.len() > super::RESULT_BYTES_MAX * 4 {
-                    break TurnEnd::TooLong;
-                }
-                text.push_str(&part);
+                push_trimmed(&mut text, &part, TURN_TEXT_BYTES_MAX);
             }
             Ok(Some(LaunchEvent::TurnError { rate_limited })) => limited |= rate_limited,
             Ok(Some(LaunchEvent::Usage { tokens })) => {

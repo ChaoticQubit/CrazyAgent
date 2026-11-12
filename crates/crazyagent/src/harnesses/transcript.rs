@@ -211,6 +211,14 @@ impl TranscriptReader {
         self.consumed
     }
 
+    /// Counts the bytes of the open record past what this reader has read, so a caller can
+    /// bound a pass that reads the record to its end. Output: the bytes, none before the
+    /// record is open or when its length cannot be read.
+    pub fn unread(&self) -> Option<u64> {
+        let length = self.file.as_ref()?.metadata().ok()?.len();
+        Some(length.saturating_sub(self.start + self.consumed))
+    }
+
     /// Says how long ago the harness last wrote its record, by the modification time of the
     /// file this reader holds open. Output: the time since, none before the record is open,
     /// when the time cannot be read or when it lies in the future.

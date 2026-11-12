@@ -2079,15 +2079,40 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
+/// Owner 11-11, no output cap: a turn's reply text past its bound is trimmed on a character
+/// boundary and marked once, its start kept, and later parts are left out, never an end of
+/// the turn; text within the bound is kept whole.
+#[test]
+fn a_reply_text_past_its_bound_is_trimmed_with_one_mark_never_ended() {
+    let max = TRIMMED.len() + 10;
+    let mut text = String::new();
+    push_trimmed(&mut text, "abcde", max);
+    assert_eq!(text, "abcde");
+    push_trimmed(&mut text, "\u{e9}\u{e9}\u{e9}\u{e9}", max);
+    assert_eq!(text, format!("abcde\u{e9}\u{e9}{TRIMMED}"));
+    assert!(text.len() <= max);
+    push_trimmed(&mut text, "more", max);
+    assert_eq!(text, format!("abcde\u{e9}\u{e9}{TRIMMED}"));
+    assert_eq!(text.matches(TRIMMED).count(), 1);
+    let mut long = String::new();
+    for _ in 0..1000 {
+        push_trimmed(&mut long, &"x".repeat(1024), LIVE_REPLY_BYTES_MAX);
+    }
+    assert!(long.len() <= LIVE_REPLY_BYTES_MAX && long.ends_with(TRIMMED));
+    let mut turn = String::new();
+    push_trimmed(
+        &mut turn,
+        &"y".repeat(TURN_TEXT_BYTES_MAX * 2),
+        TURN_TEXT_BYTES_MAX,
+    );
+    assert_eq!(turn.len(), TURN_TEXT_BYTES_MAX);
+}
+
 #[test]
 fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its_task() {
     assert_eq!(
         launch_end(LaunchError("launch_deadline".into(), None)),
         (TurnEnd::TimedOut, Some("launch_deadline".to_owned()))
-    );
-    assert_eq!(
-        launch_end(LaunchError("launch_event_limit".into(), None)),
-        (TurnEnd::TooLong, None)
     );
     let (end, cause) = launch_end(LaunchError("launch_protocol_failed".into(), None));
     assert_eq!(end, TurnEnd::Closed);
