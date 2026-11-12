@@ -302,25 +302,37 @@ impl Team {
         }
     }
 
-    /// Whether the master view waits for a terminal that is coming: none yet or one the
-    /// engine has not attached, the team not stopped, no refused start and the switch not
-    /// off. Input: none. Output: true from the start until the terminal opens or it ends.
-    fn waiting(&self) -> bool {
+    /// Whether the master view expects a terminal it does not have open: none listed yet,
+    /// one not attached yet, or one that closed for any reason but a lost link, which
+    /// reattaches by itself; the team not stopped, no refused start and the switch not off.
+    /// Input: none. Output: true while the next terminal is awaited.
+    fn expecting(&self) -> bool {
         self.master
-            && self
-                .attached
-                .as_ref()
-                .is_none_or(|attached| !attached.started && attached.closed.is_none())
+            && self.attached.as_ref().is_none_or(|attached| {
+                (!attached.started && attached.closed.is_none())
+                    || attached.closed.as_deref().is_some_and(|code| !lost(code))
+            })
             && !self.paused
             && self.refused.is_none()
             && self.live_on() != Some(false)
     }
 
-    /// Whether that wait has lasted `OPEN_LIMIT_MS` since it began, so the view stops
+    /// Whether the master view waits for a terminal that is coming: expected and none closed,
+    /// so typed keys can wait for it. Input: none. Output: true from the start until the
+    /// terminal opens or the start ends.
+    fn waiting(&self) -> bool {
+        self.expecting()
+            && self
+                .attached
+                .as_ref()
+                .is_none_or(|attached| attached.closed.is_none())
+    }
+
+    /// Whether the terminal has been expected for `OPEN_LIMIT_MS`, so the view stops
     /// waiting in silence, keeps the keys and offers s to try again (owner 11-12).
     /// Input: none. Output: the answer at this moment.
     fn overdue(&self) -> bool {
-        self.waiting()
+        self.expecting()
             && self
                 .waiting_since
                 .is_some_and(|since| now_ms().saturating_sub(since) >= OPEN_LIMIT_MS)
@@ -332,11 +344,12 @@ impl Team {
         self.waiting() && !self.overdue()
     }
 
-    /// Starts the wait's clock when a wait begins and clears it once the terminal opened or
-    /// the start ended, so each wait for a terminal gets its own minute.
+    /// Starts the clock when the view begins to expect a terminal, at open or once one
+    /// closed with the switch on, and clears it once a terminal opened or the start ended,
+    /// so each wait gets its own minute, as the desktop's area does (DEC-141).
     /// Input: none. Output: none.
     fn time_wait(&mut self) {
-        if !self.waiting() {
+        if !self.expecting() {
             self.waiting_since = None;
         } else if self.waiting_since.is_none() {
             self.waiting_since = Some(now_ms());
@@ -1067,9 +1080,10 @@ impl Team {
     /// Takes a key while the terminal has the keys: Ctrl-] gives them back to the team or
     /// master view, any other key goes to the open terminal. While the master's terminal
     /// starts, keys wait for it and Esc goes back; past the limit, or with no terminal
-    /// coming, the master view has the keys, so s tries again. A terminal that closed keeps
-    /// the keys and drops them until Ctrl-], so keys typed as it closed never act on the
-    /// view, but for s after a stop with a line, which starts the master again.
+    /// coming, the master view has the keys, so s tries again. A terminal that closed, or
+    /// that the engine stopped before it opened, keeps the keys and drops them until Ctrl-],
+    /// so keys typed then never act on the view, but for s after a stop with a line, which
+    /// starts the master again.
     /// Inputs: the key and the context. Output: the flow.
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if *key == LEADER {
@@ -1094,6 +1108,8 @@ impl Team {
         if self.overdue() {
             return self.master_key(key, ctx);
         }
+        let stopped = self.stop_line().is_some();
+        let again = self.idle_stopped() || self.try_again();
         let Some(attached) = self.attached.as_mut() else {
             self.focus = Focus::Tree;
             if self.master {
@@ -1101,8 +1117,8 @@ impl Team {
             }
             return Flow::Handled;
         };
-        if attached.closed.is_some() {
-            if *key == Key::Char('s') && (self.idle_stopped() || self.try_again()) {
+        if attached.closed.is_some() || (stopped && !attached.started) {
+            if *key == Key::Char('s') && again {
                 self.start_live(ctx);
             }
             return Flow::Handled;
@@ -1426,11 +1442,22 @@ impl Team {
             boxed(frame, area, title, false, lines, ctx);
             return None;
         };
+        if let Some((lead, rest)) = stop.as_ref().filter(|_| !attached.started) {
+            let mut lines: Vec<Line<'static>> =
+                wrap(lead, limit).into_iter().map(Line::raw).collect();
+            lines.extend(
+                wrap(rest, limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            boxed(frame, area, &attached.label, false, lines, ctx);
+            return None;
+        }
         if let Some(waiting) = self
             .switch
             .as_ref()
             .and_then(|switch| switch.problem.as_deref())
-            .filter(|_| self.master && !self.paused && !attached.started && stop.is_none())
+            .filter(|_| self.master && !self.paused && !attached.started)
         {
             let lines = wrap(waiting, limit)
                 .into_iter()
@@ -1515,10 +1542,11 @@ impl Screen for Team {
             } else if self.try_again() {
                 hints.push(hint("s", "Try again"));
             }
-            if self
-                .attached
-                .as_ref()
-                .is_some_and(|attached| attached.closed.is_none())
+            if !self.overdue()
+                && self
+                    .attached
+                    .as_ref()
+                    .is_some_and(|attached| attached.closed.is_none())
             {
                 hints.push(hint("Enter", "Terminal"));
             }
