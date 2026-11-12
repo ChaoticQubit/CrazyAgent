@@ -2007,10 +2007,10 @@ fn option(row: &str) -> Option<(usize, &str, Option<char>)> {
 }
 
 /// Finds a question an agent's app waits on in its screen: a numbered choice list with the
-/// app's selection marker on one option, such as Claude Code's permission and question
-/// prompts and Codex's approval prompts, with the question line above it. A plain numbered
-/// list without a marker is not a question. Takes the screen bytes. Returns one bounded line
-/// with the question and its options, or none.
+/// app's selection marker on exactly one option, such as Claude Code's permission and
+/// question prompts and Codex's approval prompts, with the question line above it. A plain
+/// list, or one quoted with `> ` on every line, is not a question. Takes the screen bytes.
+/// Returns one bounded line with the question and its options, or none.
 pub fn question(screen: &[u8]) -> Option<String> {
     choice(screen).map(|choice| choice.line())
 }
@@ -2045,8 +2045,10 @@ impl Choice {
     }
 }
 
-/// Finds the choice an agent's app waits on in its screen, as `question` describes. Takes
-/// the screen bytes. Returns the question line and at least two options, or none.
+/// Finds the choice an agent's app waits on in its screen, as `question` describes: a real
+/// selection list has one cursor, so a list with every option marked, such as a message the
+/// engine typed with each line quoted as `> `, is no choice (F16). Takes the screen bytes.
+/// Returns the question line and at least two options, or none.
 pub fn choice(screen: &[u8]) -> Option<Choice> {
     let rows = shown_rows(screen);
     let rows = &rows[rows.len().saturating_sub(SCREEN_ROWS_SCANNED)..];
@@ -2055,6 +2057,7 @@ pub fn choice(screen: &[u8]) -> Option<Choice> {
         .rposition(|row| option(row).is_some_and(|(number, ..)| number == 1))?;
     let mut options = Vec::new();
     let mut marker = None;
+    let mut marked_options = 0_usize;
     let mut last = first;
     for (at, row) in rows.iter().enumerate().skip(first) {
         match option(row) {
@@ -2062,6 +2065,7 @@ pub fn choice(screen: &[u8]) -> Option<Choice> {
                 if number == options.len() + 1 && options.len() < OPTIONS_MAX =>
             {
                 marker = marker.or(marked);
+                marked_options += usize::from(marked.is_some());
                 last = at;
                 options.push(text.to_owned());
             }
@@ -2069,8 +2073,9 @@ pub fn choice(screen: &[u8]) -> Option<Choice> {
             None => {}
         }
     }
+    assert!(marked_options <= options.len() && options.len() <= OPTIONS_MAX);
     let marker = marker?;
-    if options.len() < 2 {
+    if options.len() < 2 || marked_options != 1 {
         return None;
     }
     let above = &rows[first.saturating_sub(QUESTION_ROWS_ABOVE)..first];
