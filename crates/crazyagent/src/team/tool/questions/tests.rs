@@ -131,7 +131,15 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, [super::super::TOOL_NAME, ASK_TOOL, RECORD_TOOL]);
+    assert_eq!(
+        names,
+        [
+            super::super::TOOL_NAME,
+            ASK_TOOL,
+            RECORD_TOOL,
+            super::super::WAKE_TOOL
+        ]
+    );
     assert_eq!(answered[0]["result"]["tools"][1], super::super::ask_tool());
     assert_eq!(
         answered[0]["result"]["tools"][2],

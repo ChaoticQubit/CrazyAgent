@@ -482,7 +482,11 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         ),
         (
             "a switched-off tool listed again",
-            served(&engine, &[&record, &mailbox]),
+            served(&engine, &[&record, &mailbox, Path::new("wake")]),
+        ),
+        (
+            "wake listed for a conversation master",
+            served(&engine, &[&record, &mailbox, Path::new("recall")]),
         ),
         (
             "an extra argument",
