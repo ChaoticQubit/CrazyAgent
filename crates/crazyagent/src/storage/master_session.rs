@@ -1212,8 +1212,10 @@ fn preparation(
     if record.attempt_id != attempt.request.id
         || record.auth.binding().connection != attempt.connection
         || matches!(record.auth, MasterBootstrapAuth::RcliConfigured(_))
-            && (record.auth.binding().config_id != session.config_id
-                || record.auth.binding().source_hash != session.source_hash)
+            && (
+                &record.auth.binding().config_id,
+                record.auth.binding().source_hash.as_str(),
+            ) != session.binding()
         || record.lease.project_id != session.project_id
         || record.lease.task_id != session.bootstrap_task_id
         || record.lease.owner_session != session.session_id
