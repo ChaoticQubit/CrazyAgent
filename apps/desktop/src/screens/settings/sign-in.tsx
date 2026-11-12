@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { knownError, listAccounts, nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
+import { knownError, listAccounts, nextGeneration, oneSelection, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
 import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
   CHECK_SIGN_IN, nativeAuthAllowed, nativeAuthFailureCode, nativeAuthRunningAccount, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth,
@@ -122,9 +122,13 @@ const SETTLE_MS = 500;
 
 /** Cancels the running sign-in of one account, outside any open sign-in panel: reads its
  * sign-in record, asks the engine to cancel that operation and waits up to 10 s for it to
- * stop, since the app refuses other changes until it has. Input: the account id. Output: ok
+ * stop, holding the bridge's one selection throughout. Input: the account id. Output: ok
  * once stopped or already stopped, otherwise the refusal in plain words. */
-export async function cancelSignIn(accountId: string): Promise<Result<void>> {
+export function cancelSignIn(accountId: string): Promise<Result<void>> {
+  return oneSelection(() => cancelSelected(accountId));
+}
+
+async function cancelSelected(accountId: string): Promise<Result<void>> {
   const record = await signInRecord(accountId);
   if (record.kind !== "ok") return record;
   try {
@@ -145,10 +149,14 @@ export async function cancelSignIn(accountId: string): Promise<Result<void>> {
 }
 
 /** Signs one subscription account out: reads its sign-in record, asks the engine to log the
- * harness out and waits up to 10 s for the engine to see it signed out. Input: the account
- * id. Output: ok once signed out, otherwise the refusal in plain words, such as
- * `native_profile_in_use` while an agent uses the account. */
-export async function signOut(accountId: string): Promise<Result<void>> {
+ * harness out and waits up to 10 s for it to read signed out, holding the bridge's one
+ * selection throughout. Input: the account id. Output: ok once signed out, otherwise the
+ * refusal in plain words, such as `native_profile_in_use` while an agent uses the account. */
+export function signOut(accountId: string): Promise<Result<void>> {
+  return oneSelection(() => signOutSelected(accountId));
+}
+
+async function signOutSelected(accountId: string): Promise<Result<void>> {
   const record = await signInRecord(accountId);
   if (record.kind !== "ok") return record;
   try {
