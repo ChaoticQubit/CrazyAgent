@@ -203,17 +203,24 @@ impl Places {
         std::iter::once(path).chain(real.as_deref()).any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
                 || in_project(self.home(), path)
-                || self
-                    .engine_roots
-                    .iter()
-                    .any(|root| path.starts_with(root) && !path.starts_with(root.join("setup")))
+                || in_engine_data(&self.engine_roots, path)
         })
     }
 }
 
+/// Whether a path lies in the engine's data folder outside its `setup` folder, where the
+/// agents' HOMEs, worktrees and team state live, which agents write. The one rule for the
+/// resolver and the harness pins. Inputs: the data folder as given and real
+/// ([`engine_roots`]) and the path. Output: the answer.
+pub(crate) fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
+    roots
+        .iter()
+        .any(|root| path.starts_with(root) && !path.starts_with(root.join("setup")))
+}
+
 /// The engine data folder as given and with its links resolved. Input: the folder, or
 /// none. Output: the folders.
-fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
+pub(crate) fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = root.map(Path::to_path_buf).into_iter().collect();
     if let Some(real) = root.and_then(|root| root.canonicalize().ok())
         && !roots.contains(&real)
