@@ -340,6 +340,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   quit_settings: "changing what quitting does to team agents",
   master_step_settings: "changing the master step limit",
   master_time_settings: "changing the master time limit",
+  master_frame_settings: "changing the master frame size limit",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
@@ -502,6 +503,25 @@ export function getMasterTimeSettings(): Promise<Result<MasterTimeSettings>> {
 /** Saves the master time limit. Input: the full setting. Output: ok once saved. */
 export function saveMasterTimeSettings(settings: MasterTimeSettings): Promise<Result<void>> {
   return change("desktop_set_master_time_settings", { settings, generation: nextGeneration() });
+}
+
+/** The largest one message the engine writes to a Claude or Codex master, the engine's
+ * `FrameSize`. */
+export type FrameSize = "kib64" | "kib256" | "mib1";
+
+/** The owner's master frame size limit setting, the engine's `MasterFrameSettings`. */
+export interface MasterFrameSettings {
+  limit: FrameSize;
+}
+
+/** Reads the master frame size limit. Output: the stored setting, or 64 KiB before the first save. */
+export function getMasterFrameSettings(): Promise<Result<MasterFrameSettings>> {
+  return call<MasterFrameSettings>("desktop_master_frame_settings");
+}
+
+/** Saves the master frame size limit. Input: the full setting. Output: ok once saved. */
+export function saveMasterFrameSettings(settings: MasterFrameSettings): Promise<Result<void>> {
+  return change("desktop_set_master_frame_settings", { settings, generation: nextGeneration() });
 }
 
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
@@ -1390,7 +1410,7 @@ export function setBackgroundAtEnd(id: string, choice: BackgroundAtEnd): Promise
   return call<IntentReceipt>("desktop_team_background", { id, choice, generation: nextGeneration() });
 }
 
-/** Turns the project's "Ask me before merging into the master's branch" setting on or off;
+/** Turns the project's "Master accepts change sets" setting on or off;
  * on, the master's merge of a finished harness waits for the owner's Accept in Changes.
  * Inputs: the project id and the switch. Output: the engine receipt, not ready, or a plain
  * error. */

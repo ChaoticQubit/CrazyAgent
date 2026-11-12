@@ -165,6 +165,19 @@ pub enum TurnOutcome {
     Cancelled,
 }
 
+/// What the last landing try of a change set did, kept apart from how its agent's turn
+/// went (F23): none yet, landed, conflicted with the branch it lands on, or refused before
+/// anything landed, such as for a dirty project folder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandingResult {
+    #[default]
+    None,
+    Landed,
+    Conflict,
+    Refused,
+}
+
 /// Where a change set stands. Pending waits for the owner; Conflict was refused by an
 /// Accept that conflicts; Updating holds the owner's branch merged in with conflict
 /// markers until the agent's next turn ends; Accepted and Discarded are final, except
@@ -248,7 +261,8 @@ pub struct TurnEnd {
 /// restorable). While open, `files`, `added` and `removed` count only what is not yet on
 /// the owner's branch. `number` is the set's number in its project, from 1 in the order the
 /// project's sets were added, None for a set an engine without numbers stored until the
-/// next engine start numbers it.
+/// next engine start numbers it. `last_outcome` is how the agent's last turn went and
+/// `landing_result` what the last landing try did, two separate facts (F23).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeSetView {
@@ -276,6 +290,8 @@ pub struct ChangeSetView {
     pub number: Option<u64>,
     #[serde(default)]
     pub regenerated: Vec<String>,
+    #[serde(default)]
+    pub landing_result: LandingResult,
 }
 
 /// How a file changed between a change set's base and head.
@@ -397,6 +413,10 @@ pub struct LeadGit<'a> {
 
 /// The most local branches a target listing carries.
 pub const BRANCHES_MAX: usize = 256;
+/// The most files the owner's blocking-file listing and a commit-first name (F21).
+pub const DIRTY_FILES_MAX: usize = 64;
+/// The most bytes one file name in a commit-first request may hold (F21).
+pub const DIRTY_PATH_BYTES_MAX: usize = 512;
 
 /// The longest branch name an Accept target may have, in bytes.
 pub const BRANCH_BYTES_MAX: usize = 255;
@@ -433,6 +453,50 @@ pub(crate) fn hold_repositories(
 
 const SUBJECT_CHARS_MAX: usize = 48;
 const COMMIT_SUBJECT_CHARS_MAX: usize = 72;
+/// The marks a pasted shell prompt or a list starts a line with, cut from a prompt line or a
+/// summary line before it names a change set (F22).
+#[cfg(unix)]
+const PROMPT_GLYPHS: [char; 13] = [
+    '\u{276F}', '\u{203A}', '\u{BB}', '\u{279C}', '\u{2192}', '\u{3BB}', '\u{2022}', '$', '%', '>',
+    '#', '*', '-',
+];
+/// The most leading words of prompt marks cut from one line.
+#[cfg(unix)]
+const PROMPT_WORDS_MAX: usize = 4;
+/// The most summary lines read for the one that names a change set.
+#[cfg(unix)]
+const SUMMARY_LINES_MAX: usize = 64;
+/// The most commit subjects a summarized message lists below its summary.
+#[cfg(unix)]
+const SUMMARY_LIST_LINES_MAX: usize = 512;
+
+/// The most distinct lines [`log_once`] keeps in one engine run.
+#[cfg(unix)]
+const LOGGED_ONCE_MAX: usize = 4096;
+
+/// The lines [`log_once`] wrote in this engine run.
+#[cfg(unix)]
+static LOGGED_ONCE: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Writes one line to the engine's error log once per engine run (F24), so a state every
+/// Changes poll meets again, such as a change set whose lead is gone, does not drown every
+/// other line; past `LOGGED_ONCE_MAX` kept lines a new one is written without being kept.
+/// Input: the line, codes and ids only. Output: none.
+#[cfg(unix)]
+pub(crate) fn log_once(line: &str) {
+    let mut kept = LOGGED_ONCE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if kept.contains(line) {
+        return;
+    }
+    if kept.len() < LOGGED_ONCE_MAX {
+        kept.insert(line.to_owned());
+    }
+    assert!(kept.len() <= LOGGED_ONCE_MAX);
+    eprintln!("{line}");
+}
 
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
@@ -1565,6 +1629,56 @@ pub fn owner_git_identity(
     }
 }
 
+/// The owner's files that keep an Accept from landing (F21): `files` are tracked and may be
+/// committed first, `untracked` are untracked or ignored files where the set adds one,
+/// which the owner moves or deletes and the engine never commits.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerDirty {
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub untracked: Vec<String>,
+}
+
+/// Lists the owner's files that keep a change set's Accept from landing (F21).
+/// Inputs: the store, the change set and the target branch, None for the Land on branch.
+/// Output: the tracked and untracked files, both empty when none blocks, or
+/// `changes_too_large`.
+pub fn owner_dirty(
+    db: &Connection,
+    id: &ChangeSetId,
+    target: Option<&str>,
+) -> Result<OwnerDirty, EngineError> {
+    #[cfg(unix)]
+    return owner::owner_dirty(db, id, target);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id, target);
+        Err(unavailable())
+    }
+}
+
+/// Commits the owner's files that keep a change set's Accept from landing, and nothing
+/// else, as one commit with the owner's message and identity on the branch the Accept lands
+/// on, so the owner can accept again (F21). Only files the engine finds blocking now may be
+/// named. Inputs: the store, the owner's home, the change set, the files, the message and
+/// the target branch, None for the Land on branch. Output: the commit and its branch.
+pub fn commit_owner_files(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+    files: &[String],
+    message: &str,
+    target: Option<&str>,
+) -> Result<(String, String), EngineError> {
+    #[cfg(unix)]
+    return owner::commit_owner_files(db, owner_home, id, files, message, target);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, owner_home, id, files, message, target);
+        Err(unavailable())
+    }
+}
+
 /// Discards a change set, keeping its commits restorable for `RESTORE_WINDOW_MS`, and
 /// points the agent's worktree at the owner's current commit. Inputs: the store, the
 /// change set, the head the owner reviewed and the time now. Output: the
@@ -1746,6 +1860,41 @@ pub fn open_set_line(set: &ChangeSetView) -> String {
     crate::memory::visible_text(&line.replace(char::is_control, "\u{fffd}"))
 }
 
+/// How an agent's last turn ended, as the owner reads it beside its change set, kept apart
+/// from what landing did (F23): a landed set whose turn failed or was stopped says both
+/// facts, so "failed" never reads as a failed landing. Input: the change set. Output: the
+/// line, None after a turn that succeeded.
+pub fn turn_line(set: &ChangeSetView) -> Option<&'static str> {
+    let landed = set.state == ChangeState::Accepted;
+    match (set.last_outcome, landed) {
+        (TurnOutcome::Succeeded, _) => None,
+        (TurnOutcome::Failed, false) => {
+            Some("The agent's last turn failed. These are the changes it made before it stopped.")
+        }
+        (TurnOutcome::Cancelled, false) => Some(
+            "The agent's last turn was stopped. These are the changes it made before it stopped.",
+        ),
+        (TurnOutcome::Failed, true) => Some(
+            "Last turn: failed. Landing: landed. How the turn ended does not change what landed.",
+        ),
+        (TurnOutcome::Cancelled, true) => Some(
+            "Last turn: stopped. Landing: landed. How the turn ended does not change what landed.",
+        ),
+    }
+}
+
+/// What the last landing try of an open change set did when nothing else on screen says
+/// it (F23): an Accept refused before anything landed. Input: the change set. Output: the
+/// line, None otherwise.
+pub fn landing_line(set: &ChangeSetView) -> Option<&'static str> {
+    let open = matches!(
+        set.state,
+        ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
+    );
+    (open && set.landing_result == LandingResult::Refused)
+        .then_some("Landing: the last Accept was refused, so nothing landed yet.")
+}
+
 /// The words a sentence names a change set by: "change set #16 (Wren: checkout UI, 7
 /// files)", or "the changes of Wren: checkout UI" while the engine has not numbered it.
 /// Inputs: its number, its agent's name, its commit message and its file count. Output:
@@ -1800,6 +1949,88 @@ pub(crate) fn commit_subject(text: &str, roots: &[&Path]) -> String {
     }
     assert!(subject.chars().count() <= COMMIT_SUBJECT_CHARS_MAX);
     subject
+}
+
+/// A line without the shell prompt or list marks in front of it, such as "\u{276F} ", "$ "
+/// or "- " (F22): each leading word made only of `PROMPT_GLYPHS` is cut, at most
+/// `PROMPT_WORDS_MAX` of them. Input: the text. Output: the text from its first other word,
+/// empty when it holds nothing else.
+#[cfg(unix)]
+pub(crate) fn unprompted(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    for _ in 0..PROMPT_WORDS_MAX {
+        let word = rest.split(char::is_whitespace).next().unwrap_or_default();
+        if word.is_empty() || !word.chars().all(|c| PROMPT_GLYPHS.contains(&c)) {
+            break;
+        }
+        rest = rest[word.len()..].trim_start();
+    }
+    rest
+}
+
+/// The subject an agent's own summary of its turn gives a change set (F22): its first line
+/// of at least two words once prompt and list marks are cut, as `commit_subject` makes it,
+/// so a heading such as "Summary" or a bare "Done." names nothing. Inputs: the summary and
+/// the folders, innermost first. Output: the subject, empty when no line fits.
+#[cfg(unix)]
+pub(crate) fn summary_subject(summary: &str, roots: &[&Path]) -> String {
+    summary
+        .lines()
+        .take(SUMMARY_LINES_MAX)
+        .map(|line| commit_subject(unprompted(line), roots))
+        .find(|subject| subject.split(' ').filter(|word| !word.is_empty()).count() >= 2)
+        .unwrap_or_default()
+}
+
+/// The message a change set proposes once its agent said what it did (F22): that summary
+/// subject first, then every commit subject of `proposed` as a list below it, or `proposed`
+/// alone without a summary. Inputs: the stored summary subject and the message made from
+/// the agent's commits. Output: the message.
+#[cfg(unix)]
+pub(crate) fn summarized(summary: &str, proposed: &str) -> String {
+    if summary.is_empty() {
+        return proposed.to_owned();
+    }
+    let mut message = summary.to_owned();
+    let mut listed = false;
+    for line in proposed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(SUMMARY_LIST_LINES_MAX)
+    {
+        message.push_str(if listed { "\n" } else { "\n\n" });
+        listed = true;
+        if !line.starts_with("- ") {
+            message.push_str("- ");
+        }
+        message.push_str(line);
+    }
+    message
+}
+
+/// Keeps what an agent said it did as the subject its change set goes by (F22), cut and
+/// cleaned as `summary_subject` makes it; a summary with no fitting line clears an older
+/// one, so the set goes by its newest commit subject again. Inputs: the store, the
+/// workspace the turn ended in, the change set and the summary. Output: Ok once stored.
+pub fn record_summary(
+    db: &Connection,
+    workspace: &Workspace,
+    id: &ChangeSetId,
+    summary: &str,
+) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    {
+        let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
+        let subject = summary_subject(summary, &roots);
+        assert!(subject.chars().count() <= COMMIT_SUBJECT_CHARS_MAX);
+        store::set_summary(db, id, &subject)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, workspace, id, summary);
+        Err(unavailable())
+    }
 }
 
 /// The message a change set goes by in Changes and in the project's activity, live or

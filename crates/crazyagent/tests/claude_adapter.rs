@@ -2,6 +2,7 @@ use crazyagent::adapters::claude::NODES_MAX;
 use crazyagent::adapters::claude::{ClaudeProtocol, ProtocolError, State};
 use crazyagent::adapters::events::{Capability, EventKind, Support, TurnOutcome};
 use crazyagent::adapters::{FIELD_BYTES_MAX, LINE_BYTES_MAX, NativeAction, NativeHarness};
+use crazyagent::master_frame_limit::{BYTES_MAX, FrameSize};
 use crazyagent::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId, SessionId};
 use serde_json::{Value, json};
 
@@ -37,7 +38,10 @@ fn init() -> Value {
 }
 
 fn ready() -> ClaudeProtocol {
-    let mut p = protocol();
+    ready_from(protocol())
+}
+
+fn ready_from(mut p: ClaudeProtocol) -> ClaudeProtocol {
     p.receive(&wire(init())).unwrap();
     assert_eq!(p.state(), State::Idle);
     p
@@ -634,4 +638,45 @@ fn events_that_expand_past_their_line_are_still_bounded() {
     line["session_id"] = captured(0)["session_id"].clone();
     line["user_message_uuid"] = json!("u".repeat(LINE_BYTES_MAX / 16));
     assert_eq!(p.receive(&wire(line)), Err(ProtocolError::Capacity));
+}
+
+#[test]
+fn a_master_frame_limit_lets_each_option_carry_a_prompt_up_to_its_bytes() {
+    assert_eq!(protocol().frame_limit(), FRAME_BYTES_MAX);
+    for limit in FrameSize::ALL {
+        let bytes = limit.bytes();
+        let mut p = ready_from(protocol().with_frame_limit(bytes));
+        assert_eq!(p.frame_limit(), bytes);
+        let escaped = format!("x{}", "\n".repeat(bytes / 2));
+        assert_eq!(
+            p.start_turn(RequestId::new("escaped").unwrap(), &escaped),
+            Err(ProtocolError::FrameTooLarge)
+        );
+        assert_eq!(
+            p.start_turn(RequestId::new("over").unwrap(), &"x".repeat(bytes + 1)),
+            Err(ProtocolError::FrameTooLarge)
+        );
+        assert_eq!(p.state(), State::Idle);
+        let text = "x".repeat(bytes - 1024);
+        let frame = p
+            .start_turn(RequestId::new("large").unwrap(), &text)
+            .unwrap();
+        assert!(frame.len() <= bytes, "{}", frame.len());
+        assert!(frame.len() > bytes - 1024, "{}", frame.len());
+        let value: Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["message"]["content"], json!(text));
+        assert_eq!(p.state(), State::Active);
+    }
+}
+
+#[test]
+#[should_panic]
+fn a_claude_frame_limit_below_the_wire_size_is_refused() {
+    let _ = protocol().with_frame_limit(FRAME_BYTES_MAX - 1);
+}
+
+#[test]
+#[should_panic]
+fn a_claude_frame_limit_past_the_ceiling_is_refused() {
+    let _ = protocol().with_frame_limit(BYTES_MAX + 1);
 }

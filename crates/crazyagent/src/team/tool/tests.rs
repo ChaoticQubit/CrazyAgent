@@ -756,6 +756,7 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_the_tools_left_on()
     let ask = left_on.len() - QUESTION_TOOLS.len();
     assert_eq!(tools[ask], ask_tool());
     assert_eq!(tools[ask + 1], record_tool());
+    assert_eq!(tools[ask + 2], withdraw_tool());
     assert_eq!(
         tools[ask]["inputSchema"]["properties"]["options"]["maxItems"],
         crate::questions::OPTIONS_MAX
@@ -812,6 +813,7 @@ fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_ch
         options: vec!["Yes".into(), "No, wait a week".into()],
         recommended: Some("Yes".into()),
         context: Some("One flaky test left.".into()),
+        replaces: None,
     };
     assert_eq!(
         ask(json!({
@@ -833,6 +835,7 @@ fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_ch
         options: vec![],
         recommended: Some("CrazyAgent, it is known.".into()),
         context: None,
+        replaces: None,
     };
     assert_eq!(
         ask(
@@ -905,6 +908,7 @@ fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_ch
         options: vec![],
         recommended: None,
         context: None,
+        replaces: None,
     };
     assert!(checked(planted).is_err());
     let planted = Call::RecordAnswer {
@@ -913,6 +917,98 @@ fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_ch
         owner_turn: -1,
     };
     assert_eq!(checked(planted), Err(RECORD_INVALID));
+}
+
+/// F12, F14: `record_answer` takes either an owner message number or an answer typed in the
+/// master's terminal, never both; `withdraw_question` takes a question and its version; `ask`
+/// may name the old question it replaces; the engine reads each the same way again.
+#[test]
+fn record_answer_takes_a_terminal_answer_withdraw_takes_two_numbers_and_ask_names_what_it_replaces()
+{
+    let record = |arguments: Value| live_call(RECORD_TOOL, Some(&arguments)).unwrap();
+    let withdraw = |arguments: Value| live_call(WITHDRAW_TOOL, Some(&arguments)).unwrap();
+    let ask = |arguments: Value| live_call(ASK_TOOL, Some(&arguments)).unwrap();
+    let relayed = Call::RelayAnswer {
+        question: 7,
+        version: 2,
+        answer: "Friday works.".into(),
+    };
+    assert_eq!(
+        record(json!({"question": 7, "version": 2, "answer": "  Friday works. "})),
+        Ok(relayed.clone())
+    );
+    assert_eq!(checked(relayed.clone()), Ok(relayed));
+    for arguments in [
+        json!({"question": 7, "version": 0, "answer": "   "}),
+        json!({"question": 7, "version": 0, "answer": 5}),
+        json!({"question": 7, "answer": "Yes"}),
+        json!({"question": 7, "version": 0, "answer": "y".repeat(crate::questions::ANSWER_BYTES_MAX + 1)}),
+    ] {
+        assert_eq!(
+            record(arguments.clone()),
+            Err(RECORD_INVALID),
+            "{arguments}"
+        );
+    }
+    assert_eq!(
+        checked(Call::RelayAnswer {
+            question: 7,
+            version: 0,
+            answer: " padded ".into(),
+        }),
+        Err(CALL_INVALID)
+    );
+
+    let withdrawn = Call::Withdraw {
+        question: 7,
+        version: 1,
+    };
+    assert_eq!(
+        withdraw(json!({"question": 7, "version": 1})),
+        Ok(withdrawn.clone())
+    );
+    assert_eq!(checked(withdrawn.clone()), Ok(withdrawn.clone()));
+    assert_eq!(withdrawn.name(), WITHDRAW_TOOL);
+    for arguments in [
+        json!({}),
+        json!({"question": 7}),
+        json!({"question": 0, "version": 0}),
+        json!({"question": 7, "version": -1}),
+        json!({"question": 7, "version": 0, "reason": "done"}),
+    ] {
+        assert_eq!(
+            withdraw(arguments.clone()),
+            Err(WITHDRAW_INVALID),
+            "{arguments}"
+        );
+    }
+
+    let again = ask(
+        json!({"question": "Pick?", "kind": "single", "options": ["a", "b"], "recommended": "a", "replaces": 9}),
+    );
+    assert!(
+        matches!(
+            &again,
+            Ok(Call::Ask {
+                replaces: Some(9),
+                ..
+            })
+        ),
+        "{again:?}"
+    );
+    let again = again.unwrap();
+    assert_eq!(checked(again.clone()), Ok(again));
+    assert!(matches!(
+        ask(json!({"question": "Pick?", "replaces": null})),
+        Ok(Call::Ask { replaces: None, .. })
+    ));
+    for replaces in [json!(0), json!(-3), json!("9"), json!(1.5)] {
+        assert_eq!(
+            ask(json!({"question": "Pick?", "replaces": replaces.clone()})),
+            Err(ASK_INVALID),
+            "{replaces}"
+        );
+    }
 }
 
 /// S1: `sessions` takes plain words up to `QUERY_BYTES_MAX` bytes or nothing; `session` takes
@@ -1181,8 +1277,8 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(!known_tools(&names(&["status"])));
     assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
     assert!(known_tools(&names(&QUESTION_TOOLS)));
-    assert!(known_tools(&names(&[STOP_TOOL; 15])));
-    assert!(!known_tools(&names(&[STOP_TOOL; 16])));
+    assert!(known_tools(&names(&[STOP_TOOL; 16])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 17])));
 }
 /// The words a tool name, description or schema field of the owner's Messages timeline read
 /// or its settings write would carry, lowercased.
@@ -1435,4 +1531,27 @@ fn an_ask_call_names_single_or_text_and_a_kind_that_does_not_fit_is_refused() {
         schema["inputSchema"]["properties"]["kind"]["enum"],
         json!(["single", "multi", "text"])
     );
+}
+
+/// DEC-147 S3.6: `discard` names a harness and gives a reason on one plain line; anything
+/// else is refused before the engine acts.
+#[test]
+fn a_discard_call_needs_a_harness_name_and_a_one_line_reason() {
+    assert!(matches!(
+        live_call(DISCARD_TOOL, Some(&json!({"agent": "@docs", "reason": " Not needed "}))),
+        Some(Ok(Call::Discard { agent, reason })) if agent == "@docs" && reason == "Not needed"
+    ));
+    let refused =
+        |arguments: Value| matches!(live_call(DISCARD_TOOL, Some(&arguments)), Some(Err(_)));
+    assert!(refused(json!({"agent": "@docs"})));
+    assert!(refused(json!({"agent": "@docs", "reason": "  "})));
+    assert!(refused(json!({"agent": "@docs", "reason": "two\nlines"})));
+    assert!(refused(
+        json!({"agent": "@docs", "reason": "x".repeat(DISCARD_REASON_BYTES_MAX + 1)})
+    ));
+    assert!(refused(json!({"reason": "Not needed"})));
+    assert!(refused(
+        json!({"agent": "@docs", "reason": "Not needed\u{200b}"})
+    ));
+    assert!(TEAM_TOOLS.contains(&DISCARD_TOOL) && !LEAD_TOOLS.contains(&DISCARD_TOOL));
 }

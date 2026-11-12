@@ -1,6 +1,7 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::engine::owner::{OwnerMutation, OwnerRead};
+use crazyagent::master_frame_limit::MasterFrameSettings;
 use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::owner_profile::OwnerProfile;
@@ -252,6 +253,47 @@ impl NativeBridge {
         self.controller()?
             .begin_mutation(
                 OwnerMutation::SetMasterTimeSettings { settings },
+                generation,
+            )
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
+    }
+
+    /// Reads the largest one message the engine writes to a configured master's harness.
+    /// Input: none. Output: the stored setting, or the default before the first save.
+    pub async fn master_frame_settings(&mut self) -> Result<MasterFrameSettings, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?
+            .master_frame_settings()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))
+    }
+
+    /// Saves the largest one message the engine writes to a configured master's harness, as
+    /// one retained owner intent. Inputs: the full setting and a fresh draft generation.
+    /// Output: the intent receipt.
+    pub async fn set_master_frame_settings(
+        &mut self,
+        settings: MasterFrameSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.allow_new_auth().await?;
+        if self.blocked() {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        self.controller()?
+            .read(OwnerRead::MasterFrameSettings)
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::SetMasterFrameSettings { settings },
                 generation,
             )
             .map_err(|error| caused("owner_not_ready", &error.0))?;

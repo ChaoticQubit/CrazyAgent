@@ -7558,12 +7558,14 @@ impl TeamRuntime {
         self.note_lead(project, lead, body)
     }
 
-    /// Tells whether a stored agent with tools runs on a harness kind whose native sub-agents
-    /// are threads of its own process (PA-7), read from its row; tools off runs none (r1).
-    /// Takes the agent. Returns the answer, false when unread.
-    fn native_threads_lead(&self, agent: i64) -> bool {
+    /// Tells whether a stored agent runs on a harness kind whose native sub-agents are
+    /// threads of its own process (PA-7), and if so whether it has tools, without which it
+    /// starts none (r1), read from its row. Takes the agent. Returns Some(tools) for such a
+    /// harness, None for any other harness or when unread.
+    fn threads_lead_tools(&self, agent: i64) -> Option<bool> {
         use crate::coord::settings::{HarnessKind, NativeSubAgents, native_sub_agents};
-        self.connection
+        let (harness, tools) = self
+            .connection
             .query_row(
                 "SELECT harness,tools FROM team_agents WHERE id=?1",
                 [agent],
@@ -7571,18 +7573,17 @@ impl TeamRuntime {
             )
             .optional()
             .ok()
-            .flatten()
-            .filter(|(_, tools)| *tools)
-            .and_then(|(harness, _)| HarnessKind::from_harness(&harness))
-            .map(native_sub_agents)
-            == Some(NativeSubAgents::Threads)
+            .flatten()?;
+        (HarnessKind::from_harness(&harness).map(native_sub_agents)
+            == Some(NativeSubAgents::Threads))
+        .then_some(tools)
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch,
     /// and for a native lead in its own clone (DEC-111 Q10) where its sub-agents work: each
     /// teammate in `.worktrees/<name>` on `<task branch>--<name>`, merged before it reports
-    /// done, or a Codex lead's sub-agents in its own worktree (PA-7). Takes the project and
-    /// the agent. Returns the line, empty for an agent with no task branch of its own.
+    /// done, or, for a Codex lead with tools, its sub-agents in its own worktree (PA-7).
+    /// Takes the project and the agent. Returns the line, empty with no task branch.
     fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
         let row: Option<(String, String)> = self
             .connection
@@ -7615,23 +7616,25 @@ impl TeamRuntime {
                 finish = super::tool::FINISH_WORK_TOOL
             );
         }
+        let plain = format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+        );
         if !matches!(
             super::lead_mode(&self.connection, project, agent),
             Ok(crate::coord::settings::SubagentMode::Native)
         ) {
-            return format!(
-                "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
-            );
+            return plain;
         }
-        if self.native_threads_lead(agent) {
-            return format!(
-                "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
-            );
+        match self.threads_lead_tools(agent) {
+            Some(false) => plain,
+            Some(true) => format!(
+                "{plain} Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
+            ),
+            None => format!(
+                "{plain} Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+                folder = crate::agent_git::TEAMMATES_FOLDER
+            ),
         }
-        format!(
-            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
-            folder = crate::agent_git::TEAMMATES_FOLDER
-        )
     }
 
     /// The branch a new sub-agent of a lead works on (DEC-104 K5b, Q32): `<the lead's task
@@ -8431,7 +8434,8 @@ impl TeamRuntime {
     /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched
     /// off or deleted for the project, for a sub-agent the owner's Sub-agent depth setting
     /// keeps from leading, `LEAD_TOOLS`, which the engine refuses it anyway, and for every
-    /// sub-agent `record_answer`, since only the master records an owner chat answer. Takes
+    /// sub-agent `record_answer`, since only the master records an owner chat answer, and
+    /// `discard`, since only the master discards a change set (DEC-147 S3.6). Takes
     /// the project, the agent and its role. Returns the names, or a SQLite failure.
     fn off_tools(
         &self,
@@ -8451,7 +8455,8 @@ impl TeamRuntime {
             }
         }
         if role != AgentRole::Master {
-            off.push(tool::RECORD_TOOL.to_owned());
+            off.extend(tool::MASTER_QUESTION_TOOLS.map(str::to_owned));
+            off.push(tool::DISCARD_TOOL.to_owned());
         }
         assert!(tool::known_tools(&off));
         Ok(off)
@@ -9159,6 +9164,18 @@ impl TeamRuntime {
         let task = turn
             .strip_prefix("task-")
             .and_then(|task| task.parse::<i64>().ok());
+        let summary = match task {
+            Some(task) => self
+                .connection
+                .query_row(
+                    "SELECT COALESCE(result,'') FROM team_tasks WHERE id=?1",
+                    [task],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(error)?,
+            None => None,
+        };
         let ended = crate::landing::TurnEnd {
             outcome: match end {
                 TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
@@ -9171,6 +9188,15 @@ impl TeamRuntime {
         let landed = crate::landing::open(&self.root).and_then(|db| {
             let landed =
                 crate::landing_turns::record_news(&db, &workspace, &ended, self.settings.as_ref());
+            if let (Ok((crate::landing_turns::Landed::Added(set), _)), Some(summary)) =
+                (&landed, &summary)
+                && let Err(problem) = crate::landing::record_summary(&db, &workspace, set, summary)
+            {
+                eprintln!(
+                    "landing_summary_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
             if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
                 eprintln!(
                     "landing_settle_failed cause={}",
@@ -9611,12 +9637,13 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
+            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat, and the same tool with answer in place of owner_turn records one the owner typed here in your terminal; {}(question, version) takes a question you no longer need off the owner's list. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
             tool::SERVER_NAME,
             tool::SPAWN_TOOL,
             tool::UPDATE_WORK_TOOL,
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
+            tool::WITHDRAW_TOOL,
             tool::INSPECT_WORK_TOOL
         )
     } else {

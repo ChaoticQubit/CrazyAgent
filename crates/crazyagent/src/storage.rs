@@ -1089,6 +1089,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::quit_settings::initialize(connection)?;
     crate::master_step_limit::initialize(connection)?;
     crate::master_time_limit::initialize(connection)?;
+    crate::master_frame_limit::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1438,6 +1439,7 @@ fn apply(
             | Command::OwnerAgentQuit { .. }
             | Command::OwnerMasterSteps { .. }
             | Command::OwnerMasterTime { .. }
+            | Command::OwnerMasterFrames { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1627,6 +1629,7 @@ fn execute(
         Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
         Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
         Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
+        Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -2787,6 +2790,7 @@ fn owner_read(
         OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
         OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
         OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,
+        OwnerRead::MasterFrameSettings => crate::master_frame_limit::read(&tx)?,
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },

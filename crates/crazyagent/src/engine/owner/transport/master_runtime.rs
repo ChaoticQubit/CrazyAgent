@@ -582,6 +582,7 @@ impl OwnerRuntimeHandle {
         });
         let lease = prepared.lease.clone();
         let settings = self.engine.settings_files();
+        let summary = turn.reply.as_ref().map(|reply| reply.text.clone());
         let landed = tokio::task::spawn_blocking(move || {
             let root = root.ok_or_else(|| failure("changes_unavailable"))?;
             let db = crate::landing::open(&root)?;
@@ -594,6 +595,14 @@ impl OwnerRuntimeHandle {
             };
             let (landed, news) =
                 crate::landing_turns::record_news(&db, &workspace, &end, settings.as_ref())?;
+            if let (crate::landing_turns::Landed::Added(id), Some(summary)) = (&landed, &summary)
+                && let Err(problem) = crate::landing::record_summary(&db, &workspace, id, summary)
+            {
+                eprintln!(
+                    "landing_summary_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
             let merged = match &landed {
                 crate::landing_turns::Landed::Added(id) => master_landed_note(&db, id),
                 _ => None,
@@ -837,6 +846,7 @@ impl OwnerRuntimeHandle {
                     account_ref,
                     prepared.time.run_time(),
                     resources,
+                    prepared.frames,
                 )
                 .await?,
             ))
@@ -851,6 +861,7 @@ impl OwnerRuntimeHandle {
                 prepared.time.run_time(),
                 resources,
                 &prepared.instructions,
+                prepared.frames,
             )
             .await?;
             if prepared.tools {
@@ -1469,6 +1480,7 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
         "codex_host_output_limit"
         | "codex_host_protocol_capacity"
+        | "claude_host_protocol_capacity"
         | "claude_host_stdout_limit"
         | "claude_host_stderr_limit"
         | "claude_host_output_limit"
@@ -1487,6 +1499,25 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
         "master_repository_missing" => MasterReason::RepositoryMissing,
         "master_instructions_too_large" => MasterReason::InstructionsTooLarge,
+        "codex_host_protocol_invalid_state"
+        | "codex_host_protocol_invalid_input"
+        | "codex_host_protocol_invalid_message"
+        | "codex_host_protocol_stale_message"
+        | "codex_host_protocol_disconnected"
+        | "claude_host_protocol_invalid_state"
+        | "claude_host_protocol_invalid_input"
+        | "claude_host_protocol_invalid_message"
+        | "claude_host_protocol_stale_message"
+        | "claude_host_protocol_disconnected"
+        | "claude_host_protocol_unsupported" => MasterReason::ProtocolFault,
+        "codex_host_protocol_frame_too_large"
+        | "claude_host_protocol_frame_too_large"
+        | "codex_host_input_limit"
+        | "claude_host_input_limit" => MasterReason::FrameLimit,
+        "master_session_scope_conflict"
+        | "master_project_scope_conflict"
+        | "master_bootstrap_scope_conflict" => MasterReason::ConnectionChanged,
+        "master_bootstrap_uncertain" => MasterReason::WorktreeUncertain,
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }
@@ -1989,6 +2020,68 @@ mod tests {
             (
                 "master_instructions_too_large",
                 MasterReason::InstructionsTooLarge,
+            ),
+        ] {
+            assert_eq!(
+                reason_for_error(&EngineError(code.into())),
+                expected,
+                "{code}"
+            );
+        }
+    }
+
+    /// F39, DEC-141: every protocol fault of the Claude Code and Codex master hosts, a frame
+    /// past the frame size limit, a session or bootstrap that no longer matches and a master
+    /// worktree the engine could not check each name a plain reason with an action, never
+    /// Unknown; the causes F39 found that already had one keep it.
+    #[test]
+    fn every_configured_master_failure_cause_names_a_plain_reason() {
+        for host in ["codex_host_protocol_", "claude_host_protocol_"] {
+            for (fault, expected) in [
+                ("invalid_state", MasterReason::ProtocolFault),
+                ("invalid_input", MasterReason::ProtocolFault),
+                ("invalid_message", MasterReason::ProtocolFault),
+                ("stale_message", MasterReason::ProtocolFault),
+                ("disconnected", MasterReason::ProtocolFault),
+                ("frame_too_large", MasterReason::FrameLimit),
+                ("capacity", MasterReason::OutputLimit),
+            ] {
+                let code = format!("{host}{fault}");
+                assert_eq!(
+                    reason_for_error(&EngineError(code.clone())),
+                    expected,
+                    "{code}"
+                );
+            }
+        }
+        for (code, expected) in [
+            (
+                "claude_host_protocol_unsupported",
+                MasterReason::ProtocolFault,
+            ),
+            ("codex_host_input_limit", MasterReason::FrameLimit),
+            ("claude_host_input_limit", MasterReason::FrameLimit),
+            (
+                "master_session_scope_conflict",
+                MasterReason::ConnectionChanged,
+            ),
+            (
+                "master_project_scope_conflict",
+                MasterReason::ConnectionChanged,
+            ),
+            (
+                "master_bootstrap_scope_conflict",
+                MasterReason::ConnectionChanged,
+            ),
+            (
+                "master_bootstrap_uncertain",
+                MasterReason::WorktreeUncertain,
+            ),
+            ("master_repository_missing", MasterReason::RepositoryMissing),
+            ("master_capture_incomplete", MasterReason::CaptureIncomplete),
+            (
+                "gateway_invalid_authentication",
+                MasterReason::InvalidAuthentication,
             ),
         ] {
             assert_eq!(

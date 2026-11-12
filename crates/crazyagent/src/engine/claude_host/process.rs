@@ -317,7 +317,7 @@ impl Process {
         }
         let pending = self.pending.as_mut().expect("retained native input");
         assert!(pending.written < pending.bytes.len());
-        assert!(pending.bytes.len() <= crate::protocol::FRAME_BYTES_MAX);
+        assert!(pending.bytes.len() <= self.protocol.frame_limit());
         let Some(stdin) = self.stdin.as_mut() else {
             self.fail(Fault::Host("claude_host_input_closed"));
             return;

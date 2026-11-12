@@ -172,7 +172,12 @@ pub fn serve_agent_calls(
             (Some(Ok(_)), None, _) => (CALLER_UNKNOWN.to_owned(), true),
             (Some(Ok(_)), Some(_), Ok(true) | Err(_)) => (SWITCHED_OFF.to_owned(), true),
             (
-                Some(Ok(Call::Spawn { .. } | Call::Stop { .. } | Call::Merge { .. })),
+                Some(Ok(
+                    Call::Spawn { .. }
+                    | Call::Stop { .. }
+                    | Call::Merge { .. }
+                    | Call::Discard { .. },
+                )),
                 Some((caller, _)),
                 Ok(false),
             ) if caller != id => (TEAMMATE_REFUSED.to_owned(), true),

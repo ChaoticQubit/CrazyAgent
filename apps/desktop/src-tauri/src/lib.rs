@@ -12,7 +12,7 @@ use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
 use bridge::notify::Notices;
 use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
-use bridge::questions::{QuestionCount, QuestionPage};
+use bridge::questions::{QuestionCount, QuestionPage, QuestionsDismissed};
 use bridge::terminal::Terminals;
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError, BridgeQueue,
@@ -35,7 +35,8 @@ use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
 use crazyagent::ide::extensions::{Approved, AskView};
-use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
+use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, OwnerDirty, TargetBranches};
+use crazyagent::master_frame_limit::MasterFrameSettings;
 use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::memory::ReviewDecision;
@@ -2870,6 +2871,29 @@ async fn desktop_set_master_time_settings(
 }
 
 #[tauri::command]
+async fn desktop_master_frame_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<MasterFrameSettings, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.master_frame_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_master_frame_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: MasterFrameSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_master_frame_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_pool_summaries(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3699,6 +3723,34 @@ async fn desktop_change_branches(
 }
 
 #[tauri::command]
+async fn desktop_change_owner_dirty(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    target: Option<String>,
+) -> Result<OwnerDirty, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.change_owner_dirty(id, target)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_commit_owner_files(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    files: Vec<String>,
+    message: String,
+    target: Option<String>,
+) -> Result<(String, String), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .commit_owner_files(id, files, message, target)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_discard_change(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3825,6 +3877,17 @@ async fn desktop_dismiss_question(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.dismiss_question(id, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_dismiss_questions(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    items: Vec<(u64, u64)>,
+) -> Result<QuestionsDismissed, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.dismiss_questions(items)?;
     call.await
 }
 
@@ -4680,6 +4743,8 @@ native_commands! {
     desktop_set_master_step_settings,
     desktop_master_time_settings,
     desktop_set_master_time_settings,
+    desktop_master_frame_settings,
+    desktop_set_master_frame_settings,
     desktop_pool_summaries,
     desktop_account_schedule,
     desktop_account_ranking,
@@ -4725,6 +4790,8 @@ native_commands! {
     desktop_change_diff,
     desktop_accept_change,
     desktop_change_branches,
+    desktop_change_owner_dirty,
+    desktop_commit_owner_files,
     desktop_discard_change,
     desktop_restore_change,
     desktop_undo_change,
@@ -4732,6 +4799,7 @@ native_commands! {
     desktop_questions,
     desktop_answer_question,
     desktop_dismiss_question,
+    desktop_dismiss_questions,
     desktop_question_counts,
     desktop_notify_question,
     desktop_notification_target,

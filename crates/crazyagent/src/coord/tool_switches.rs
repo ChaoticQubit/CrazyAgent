@@ -15,7 +15,7 @@ const GLOBAL: &str = "";
 
 /// The engine's own tools (Q11, Q12), in the order the Plugins page lists them, each with
 /// the one line it shows.
-pub const BUILTIN_TOOLS: [(&str, &str); 13] = [
+pub const BUILTIN_TOOLS: [(&str, &str); 14] = [
     (
         "start_work",
         "Start a unit of work and claim the files, modules or domains it touches.",
@@ -52,6 +52,10 @@ pub const BUILTIN_TOOLS: [(&str, &str); 13] = [
     (
         "log_activity",
         "Log a new phase of the work or a finished test run to the project activity.",
+    ),
+    (
+        "discard",
+        "Discard a finished harness's waiting change set; the owner can restore it for 7 days.",
     ),
 ];
 

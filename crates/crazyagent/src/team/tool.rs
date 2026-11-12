@@ -48,9 +48,15 @@ pub const SESSION_TOOL: &str = "session";
 /// The tool an agent logs a new phase of its work or a finished test run with, to the
 /// project activity the owner reads on Overview (OS-5).
 pub const ACTIVITY_TOOL: &str = "log_activity";
+/// The tool the master discards a finished harness's waiting change set with, restorable by
+/// the owner from Changes for seven days, noted for the owner and logged (DEC-147 S3.6).
+/// Master only: a sub-agent's server leaves it out and the engine refuses it.
+pub const DISCARD_TOOL: &str = "discard";
+/// The most bytes of the reason a `discard` call gives.
+pub const DISCARD_REASON_BYTES_MAX: usize = 400;
 /// The team tools a live master and a sub-agent with tools get (DEC-104), in the order of
 /// `coord::tool_switches::BUILTIN_TOOLS`, which the owner switches each one by.
-pub const TEAM_TOOLS: [&str; 13] = [
+pub const TEAM_TOOLS: [&str; 14] = [
     START_WORK_TOOL,
     INSPECT_WORK_TOOL,
     UPDATE_WORK_TOOL,
@@ -64,6 +70,7 @@ pub const TEAM_TOOLS: [&str; 13] = [
     SESSIONS_TOOL,
     SESSION_TOOL,
     ACTIVITY_TOOL,
+    DISCARD_TOOL,
 ];
 /// The team tools a master without its live terminal gets beside `delegate`, answered by the
 /// engine through its mailbox like a live master's.
@@ -73,10 +80,14 @@ pub const MEMORY_TOOLS: [&str; 2] = [REMEMBER_TOOL, RECALL_TOOL];
 pub const LEAD_TOOLS: [&str; 3] = [SPAWN_TOOL, STOP_TOOL, MERGE_TOOL];
 pub const ASK_TOOL: &str = "ask";
 pub const RECORD_TOOL: &str = "record_answer";
-/// The owner's questions tools (DEC-099 A) a server lists after `TEAM_TOOLS`: `ask` logs a
-/// question for the owner and `record_answer` records the owner's chat message that
-/// answered one of the master's own. A sub-agent's server leaves `record_answer` out.
-pub const QUESTION_TOOLS: [&str; 2] = [ASK_TOOL, RECORD_TOOL];
+pub const WITHDRAW_TOOL: &str = "withdraw_question";
+/// The owner's questions tools (DEC-099 A, F12) a server lists after `TEAM_TOOLS`: `ask`
+/// logs a question for the owner, `record_answer` records the owner's answer from chat or
+/// from the master's own terminal, and `withdraw_question` takes a question the master no
+/// longer needs off the owner's list. A sub-agent's server leaves the last two out.
+pub const QUESTION_TOOLS: [&str; 3] = [ASK_TOOL, RECORD_TOOL, WITHDRAW_TOOL];
+/// The questions tools only a master is given, left out of every sub-agent's server.
+pub const MASTER_QUESTION_TOOLS: [&str; 2] = [RECORD_TOOL, WITHDRAW_TOOL];
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -113,6 +124,7 @@ const INSPECT_INVALID: &str =
 const FINISH_INVALID: &str = "Not finished: give the work number, the version inspect_work shows, an outcome (review_ready, complete or closed) and evidence of plain text up to 4000 bytes.";
 const AGENT_INVALID: &str =
     "Not done: name the agent by its persona name, its @role handle or its number.";
+const DISCARD_INVALID: &str = "Not discarded: name the harness by its persona name, its @role handle or its number, and give the reason in plain words on one line of up to 400 bytes.";
 const SESSIONS_INVALID: &str =
     "Not searched: give plain words up to 256 bytes, or nothing to list the conversations.";
 const SESSION_INVALID: &str =
@@ -124,9 +136,19 @@ const ACTIVITY_INVALID: &str = "Not logged: give the goal on one plain line of u
 const CALL_INVALID: &str = "Not done: the engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters. For kind single or multi give 2 to 6 distinct one-line options of up to 200 bytes and one of them as recommended; for kind text give no options. Context may be up to 4096 bytes.";
-const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and the number of the owner's chat message that answers it.";
-const ASK_KEYS: [&str; 5] = ["question", "kind", "options", "recommended", "context"];
-const RECORD_KEYS: [&str; 3] = ["question", "version", "owner_turn"];
+const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and either the number of the owner's chat message that answers it or, for an answer the owner typed in your terminal, that answer in up to 4096 bytes.";
+const WITHDRAW_INVALID: &str =
+    "Not withdrawn: give the question number and the version you read (0 while it waits).";
+const ASK_KEYS: [&str; 6] = [
+    "question",
+    "kind",
+    "options",
+    "recommended",
+    "context",
+    "replaces",
+];
+const RECORD_KEYS: [&str; 4] = ["question", "version", "owner_turn", "answer"];
+const WITHDRAW_KEYS: [&str; 2] = ["question", "version"];
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
@@ -246,17 +268,32 @@ pub enum Call {
         text: String,
         kind: LogKind,
     },
+    Discard {
+        agent: String,
+        reason: String,
+    },
     Ask {
         question: String,
         kind: QuestionKind,
         options: Vec<String>,
         recommended: Option<String>,
         context: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces: Option<u64>,
     },
     RecordAnswer {
         question: u64,
         version: u64,
         owner_turn: i64,
+    },
+    RelayAnswer {
+        question: u64,
+        version: u64,
+        answer: String,
+    },
+    Withdraw {
+        question: u64,
+        version: u64,
     },
 }
 
@@ -278,8 +315,10 @@ impl Call {
             Self::Remember { .. } => REMEMBER_TOOL,
             Self::Recall { .. } => RECALL_TOOL,
             Self::LogActivity { .. } => ACTIVITY_TOOL,
+            Self::Discard { .. } => DISCARD_TOOL,
             Self::Ask { .. } => ASK_TOOL,
-            Self::RecordAnswer { .. } => RECORD_TOOL,
+            Self::RecordAnswer { .. } | Self::RelayAnswer { .. } => RECORD_TOOL,
+            Self::Withdraw { .. } => WITHDRAW_TOOL,
         };
         assert!(TEAM_TOOLS.contains(&name) || QUESTION_TOOLS.contains(&name));
         name
@@ -495,7 +534,11 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                     "additionalProperties": false,
                 },
             })];
-            tools.extend([questions::ask_listing(), questions::record_listing()]);
+            tools.extend([
+                questions::ask_listing(),
+                questions::record_listing(),
+                questions::withdraw_listing(),
+            ]);
             if mailbox.is_some() {
                 tools.extend(
                     MEMORY_TOOLS
@@ -504,7 +547,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                         .map(|name| spec(name)),
                 );
             }
-            assert!(tools.len() <= 3 + MEMORY_TOOLS.len());
+            assert!(tools.len() <= 4 + MEMORY_TOOLS.len());
             json!({ "tools": tools })
         }
         Some("tools/call") => match (mailbox, name) {
@@ -559,6 +602,9 @@ fn team_tools(off: &[String]) -> Value {
     }
     if on(RECORD_TOOL) {
         tools.push(record_tool());
+    }
+    if on(WITHDRAW_TOOL) {
+        tools.push(withdraw_tool());
     }
     assert!(tools.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len());
     json!({ "tools": tools })
@@ -632,6 +678,13 @@ fn spec(name: &str) -> Value {
             "Merge a finished agent's work locally, never pushed: the master merges a lead's task branch into the Master's branch, and a lead merges one of its own sub-agents' work into its own branch. The owner's settings may keep it for the owner's Accept in Changes instead; then this says so.",
             json!({"type": "object", "properties": {"agent": agent}, "required": ["agent"], "additionalProperties": false}),
         ),
+        DISCARD_TOOL => (
+            "Discard a finished harness's waiting change set when its work should not land, with the reason. Master only. The owner is told and can restore it from Changes for 7 days; the harness's branch goes back to the owner's branch.",
+            json!({"type": "object", "properties": {
+                "agent": agent,
+                "reason": {"type": "string", "description": "Why the work should not land, in plain words on one line of up to 400 bytes."},
+            }, "required": ["agent", "reason"], "additionalProperties": false}),
+        ),
         ACTIVITY_TOOL => (
             "Log to the project activity the owner reads on Overview: a new phase of the work or a finished test run, with the goal it serves and one line saying what happened.",
             json!({"type": "object", "properties": {
@@ -666,15 +719,34 @@ fn spec(name: &str) -> Value {
 pub fn record_tool() -> Value {
     json!({
         "name": RECORD_TOOL,
-        "description": "Record that the owner answered one of your own questions in this chat instead of in the Questions view. Name the owner's message; the engine takes the answer from that message, never from your words, and takes the question off the owner's list.",
+        "description": "Record that the owner answered a question of this project outside the Questions view, so it leaves the owner's list. For an answer in this chat, name the owner's message with owner_turn: the engine takes the answer from that message, never from your words. For an answer the owner typed in your own terminal, give it in answer, as close to the owner's words as you can: the engine takes it only after the owner typed in your terminal since the question was asked, one question per owner answer, and shows it as your report.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "question": {"type": "integer", "description": "The question number the ask tool gave you."},
+                "question": {"type": "integer", "description": "The question number."},
                 "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
-                "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
+                "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it. Leave out when you give answer."},
+                "answer": {"type": "string", "description": "The answer the owner typed in your terminal. Leave out when you give owner_turn."},
             },
-            "required": ["question", "version", "owner_turn"],
+            "required": ["question", "version"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// The MCP entry of the `withdraw_question` tool, the same for every master that is given
+/// it (F12). Output: the tool's name, description and input schema.
+pub fn withdraw_tool() -> Value {
+    json!({
+        "name": WITHDRAW_TOOL,
+        "description": "Take a question off the owner's list when it is no longer needed: one you asked, or one a sub-agent of this project asked. The owner sees it as withdrawn by you; a sub-agent that asked it is told once.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "integer", "description": "The question number."},
+                "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
+            },
+            "required": ["question", "version"],
             "additionalProperties": false,
         },
     })
@@ -694,6 +766,7 @@ pub fn ask_tool() -> Value {
                 "options": {"type": "array", "items": {"type": "string"}, "maxItems": crate::questions::OPTIONS_MAX, "description": "2 to 6 short one-line answers the owner can pick from, for kind single or multi."},
                 "recommended": {"type": "string", "description": "The answer you recommend: one of the options, or a short answer for kind text."},
                 "context": {"type": "string", "description": "What the owner needs to know to answer."},
+                "replaces": {"type": "integer", "description": "To ask an old free-text question again as a choice: its number. It must be your own or one an engine step asked, and kind must be single or multi."},
             },
             "required": ["question"],
             "additionalProperties": false,
@@ -910,6 +983,21 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(AGENT_INVALID),
         },
+        DISCARD_TOOL => match (argument("agent"), argument("reason")) {
+            (Some(agent), Some(reason))
+                if agent_name_valid(agent)
+                    && !reason.trim().is_empty()
+                    && reason.len() <= DISCARD_REASON_BYTES_MAX
+                    && !reason.chars().any(char::is_control)
+                    && !crate::memory::hidden_text(reason) =>
+            {
+                Ok(Call::Discard {
+                    agent: agent.trim().to_owned(),
+                    reason: reason.trim().to_owned(),
+                })
+            }
+            _ => Err(DISCARD_INVALID),
+        },
         SESSIONS_TOOL => match argument("query").unwrap_or_default() {
             query
                 if query.len() <= super::history::QUERY_BYTES_MAX
@@ -995,6 +1083,7 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
         }
         ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
         RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
+        WITHDRAW_TOOL => withdraw_call(arguments).ok_or(WITHDRAW_INVALID),
         _ => return None,
     })
 }
@@ -1029,6 +1118,10 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
         Some(Value::String(name)) if !name.is_empty() => QuestionKind::stored(name, options.len())?,
         Some(_) => return None,
     };
+    let replaces = match arguments.get("replaces") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_u64().filter(|id| *id > 0)?),
+    };
     let ask = crate::questions::Ask {
         question: text("question")??,
         kind,
@@ -1044,12 +1137,15 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
         options: ask.options,
         recommended: ask.recommended,
         context: ask.context,
+        replaces,
     })
 }
 
 /// Reads one `record_answer` call: the question number, the version the master read and
-/// the owner's chat message number. Takes the arguments. Returns the call, or none when a
-/// part is missing, unknown or not a number in range.
+/// either the owner's chat message number or, for an answer the owner typed in the master's
+/// own terminal (F12), that answer as plain text within `ANSWER_BYTES_MAX`. Takes the
+/// arguments. Returns the call, or none when a part is missing, unknown, both forms are
+/// given or a value is out of range.
 fn record_call(arguments: Option<&Value>) -> Option<Call> {
     let arguments = arguments?.as_object()?;
     if arguments
@@ -1061,14 +1157,45 @@ fn record_call(arguments: Option<&Value>) -> Option<Call> {
     let number = |key: &str| arguments.get(key).and_then(Value::as_u64);
     let question = number("question").filter(|id| *id > 0)?;
     let version = number("version")?;
-    let owner_turn = number("owner_turn")
-        .and_then(|turn| i64::try_from(turn).ok())
-        .filter(|turn| *turn > 0)?;
-    Some(Call::RecordAnswer {
-        question,
-        version,
-        owner_turn,
-    })
+    match (arguments.get("owner_turn"), arguments.get("answer")) {
+        (Some(_), None) => {
+            let owner_turn = number("owner_turn")
+                .and_then(|turn| i64::try_from(turn).ok())
+                .filter(|turn| *turn > 0)?;
+            Some(Call::RecordAnswer {
+                question,
+                version,
+                owner_turn,
+            })
+        }
+        (None, Some(Value::String(answer))) => {
+            let answer = answer.trim();
+            let fits = !answer.is_empty() && answer.len() <= crate::questions::ANSWER_BYTES_MAX;
+            fits.then(|| Call::RelayAnswer {
+                question,
+                version,
+                answer: answer.to_owned(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Reads one `withdraw_question` call: the question number and the version the master
+/// read. Takes the arguments. Returns the call, or none when a part is missing, unknown or
+/// not a number in range.
+fn withdraw_call(arguments: Option<&Value>) -> Option<Call> {
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !WITHDRAW_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let number = |key: &str| arguments.get(key).and_then(Value::as_u64);
+    let question = number("question").filter(|id| *id > 0)?;
+    let version = number("version")?;
+    Some(Call::Withdraw { question, version })
 }
 
 /// Checks a call the engine read from a mailbox, which the agent's side could have written.
@@ -1109,6 +1236,7 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             mode,
         } => json!({"task": task, "harness": harness, "role": role, "mode": mode}),
         Call::Stop { agent } | Call::Merge { agent } => json!({"agent": agent}),
+        Call::Discard { agent, reason } => json!({"agent": agent, "reason": reason}),
         Call::Sessions { query } => json!({"query": query}),
         Call::Session { id, offset } => json!({"id": id, "offset": offset}),
         Call::Remember { text, scope } => json!({"text": text, "scope": scope.as_str()}),
@@ -1122,14 +1250,23 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             options,
             recommended,
             context,
+            replaces,
         } => {
-            json!({"question": question, "kind": kind.as_str(), "options": options, "recommended": recommended, "context": context})
+            json!({"question": question, "kind": kind.as_str(), "options": options, "recommended": recommended, "context": context, "replaces": replaces})
         }
         Call::RecordAnswer {
             question,
             version,
             owner_turn,
         } => json!({"question": question, "version": version, "owner_turn": owner_turn}),
+        Call::RelayAnswer {
+            question,
+            version,
+            answer,
+        } => json!({"question": question, "version": version, "answer": answer}),
+        Call::Withdraw { question, version } => {
+            json!({"question": question, "version": version})
+        }
     };
     let again = live_call(call.name(), Some(&arguments)).expect("every call names a team tool")?;
     if again != call {
