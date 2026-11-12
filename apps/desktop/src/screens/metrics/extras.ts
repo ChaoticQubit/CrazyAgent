@@ -1,4 +1,7 @@
-import type { AccountExtras, LimitExtras, ResetKind } from "../../api-usage";
+import { useEffect, useRef } from "react";
+import { accountLabels, listAccounts } from "../../api";
+import { loadExtras, type AccountExtras, type LimitExtras, type ResetKind } from "../../api-usage";
+import type { Route } from "../../ui";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -19,6 +22,11 @@ export const FRESH_GAIN_MS = 15 * 60_000;
 
 /** The most new-reset notices one look tells, so a burst never floods the screen. */
 export const NOTICES_PER_LOOK_MAX = 3;
+
+/** How often the app reads the stored extras for the new free reset notice, in ms. */
+export const RESET_WATCH_MS = 60_000;
+
+const POOLS_ROUTE: Route = { name: "settings", tab: "pools" };
 
 /** When a free reset expires: "today 14:30" on the same local day, else "Nov 20". Inputs:
  * the expiry and now in ms since the epoch. Output: the words, the same as the TUI's. */
@@ -109,4 +117,49 @@ export function freshResets(known: ReadonlyMap<string, number> | null, rows: rea
     if (fresh && send.length < NOTICES_PER_LOOK_MAX) send.push({ account: row.account, count: resets.count });
   }
   return { known: seen, send };
+}
+
+/** The one toast for a look's new free resets: each account by its label, joined, never by
+ * its id. Inputs: the resets to tell, at most `NOTICES_PER_LOOK_MAX`, and the labels by
+ * account id. Output: the toast, or null when none arrived. */
+export function resetNotice(send: readonly NewReset[], labels: ReadonlyMap<string, string>): string | null {
+  if (send.length > NOTICES_PER_LOOK_MAX) throw new Error(`at most ${NOTICES_PER_LOOK_MAX} new free resets per look, got ${send.length}`);
+  if (send.length === 0) return null;
+  return send.map((item) => newResetLine(labels.get(item.account) ?? "An account", item.count)).join(" ");
+}
+
+/** Tells the owner when an account gains a free reset: while the engine runs, every
+ * `RESET_WATCH_MS` it reads what the engine stored, never the detail rows, and shows one
+ * toast with Open to Pools for the arrivals since the last look. Inputs: whether the engine
+ * runs and the toast action. */
+export function useResetNotice(running: boolean, showToast: (message: string, open?: Route) => void) {
+  const toast = useRef(showToast);
+  toast.current = showToast;
+  useEffect(() => {
+    if (!running) return;
+    let live = true;
+    let timer = 0;
+    let known: Map<string, number> | null = null;
+    const read = async () => {
+      if (!live) return;
+      const result = await loadExtras(false);
+      if (!live) return;
+      if (result.kind === "ok") {
+        const next = freshResets(known, result.value, Date.now());
+        known = next.known;
+        if (next.send.length > 0) {
+          const accounts = await listAccounts();
+          if (!live) return;
+          const notice = resetNotice(next.send, accountLabels(accounts.kind === "ok" ? accounts.value : []));
+          if (notice !== null) toast.current(notice, POOLS_ROUTE);
+        }
+      }
+      if (result.kind !== "not_ready") timer = window.setTimeout(read, RESET_WATCH_MS);
+    };
+    void read();
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [running]);
 }

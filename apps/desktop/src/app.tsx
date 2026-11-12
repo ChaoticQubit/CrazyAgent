@@ -12,6 +12,7 @@ import { AddFolder } from "./screens/intake/add-folder";
 import { CloneFromGitHub } from "./screens/intake/clone";
 import { OnboardingReview } from "./screens/intake/onboarding";
 import { AppMetrics } from "./screens/metrics";
+import { useResetNotice } from "./screens/metrics/extras";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
@@ -308,13 +309,15 @@ function useIdeFocus(running: boolean) {
 }
 
 /** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
- * notification and question watch and the TUI's "open in IDE" focus. */
+ * notification and question watch, the new free reset notice and the TUI's "open in IDE"
+ * focus. */
 export function App() {
   const session = useSession();
   const route = useRoute();
   useShortcuts();
   useUpdateWatch(session.showToast);
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
+  useResetNotice(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
   return <AppView session={session} route={route} alerts={alerts} working={working} />;
 }
