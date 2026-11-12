@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 const CURL: &str = "/usr/bin/curl";
+#[cfg(feature = "e2e-model-source")]
+const NO_CURL: &str = "/dev/null";
 const USER_AGENT: &str = "CrazyAgent";
 const CONNECT_SECONDS: &str = "15";
 const TRANSFER_SECONDS: &str = "3600";
@@ -86,9 +88,12 @@ fn lock(control: &Mutex<Control>) -> MutexGuard<'_, Control> {
 }
 
 impl Downloads {
-    /// The download of the pinned runtime through the system curl. Input: the engine root.
+    /// The download of the pinned runtime through the system curl, or through the test
+    /// model source in an engine built with the `e2e-model-source` feature. Input: the
+    /// engine root.
     pub fn new(root: PathBuf) -> Self {
-        Self::with_curl(root, PathBuf::from(CURL), PINNED)
+        let (curl, pins) = source();
+        Self::with_curl(root, curl, pins)
     }
 
     /// The download through a given curl and pins. Inputs: the engine root, the curl
@@ -232,8 +237,40 @@ impl Downloads {
 
 /// The variable a desktop end-to-end run sets to the folder its test model source lives in;
 /// only an engine built with the `e2e-model-source` feature reads it.
-#[cfg(any(test, feature = "e2e-model-source"))]
+#[cfg(feature = "e2e-model-source")]
 pub const SOURCE_ENV: &str = "CRAZYAGENT_E2E_MODEL_SOURCE";
+
+#[cfg(feature = "e2e-model-source")]
+static SOURCE: LazyLock<Result<Option<(PathBuf, [Pinned; 2])>, String>> = LazyLock::new(|| {
+    std::env::var_os(SOURCE_ENV)
+        .map_or(Ok(None), |folder| source_pins(Path::new(&folder)).map(Some))
+});
+
+/// Whether this engine downloads from a test model source: true when `SOURCE_ENV` names a
+/// usable one, false when it is not set, and why when the named folder cannot serve, so
+/// the engine refuses to start rather than reach the network. Output: that answer.
+#[cfg(feature = "e2e-model-source")]
+pub fn e2e_source() -> Result<bool, String> {
+    SOURCE.as_ref().map(Option::is_some).map_err(Clone::clone)
+}
+
+/// The curl and pins every download uses: the system curl and the shipped pins.
+#[cfg(not(feature = "e2e-model-source"))]
+fn source() -> (PathBuf, [Pinned; 2]) {
+    (PathBuf::from(CURL), PINNED)
+}
+
+/// The curl and pins every download uses: the test model source's when `SOURCE_ENV` names
+/// a usable one, the system curl and shipped pins when it is not set, and a curl that
+/// cannot run when the named source is unusable, so no download reaches the network.
+#[cfg(feature = "e2e-model-source")]
+fn source() -> (PathBuf, [Pinned; 2]) {
+    match &*SOURCE {
+        Ok(Some((curl, pins))) => (curl.clone(), *pins),
+        Ok(None) => (PathBuf::from(CURL), PINNED),
+        Err(_) => (PathBuf::from(NO_CURL), PINNED),
+    }
+}
 
 /// A test model source: a folder holding a stand-in `curl` and both pinned files. The pins
 /// keep their names and URLs and take the files' own sizes and sha256, so a download from
@@ -241,7 +278,36 @@ pub const SOURCE_ENV: &str = "CRAZYAGENT_E2E_MODEL_SOURCE";
 /// it cannot serve.
 #[cfg(any(test, feature = "e2e-model-source"))]
 pub(crate) fn source_pins(folder: &Path) -> Result<(PathBuf, [Pinned; 2]), String> {
-    Err(format!("{} is not read yet", folder.display()))
+    if !folder.is_absolute() {
+        return Err(format!(
+            "the test model source {} is not an absolute folder",
+            folder.display()
+        ));
+    }
+    let curl = folder.join("curl");
+    if !fs::symlink_metadata(&curl).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(format!(
+            "the test model source {} has no curl file",
+            folder.display()
+        ));
+    }
+    let mut pins = PINNED;
+    for pin in &mut pins {
+        let path = folder.join(pin.name);
+        let (bytes, digest) = File::open(&path)
+            .and_then(|mut file| {
+                let mut hasher = Sha256::new();
+                let bytes = std::io::copy(&mut file, &mut hasher)?;
+                Ok((bytes, hasher.finalize()))
+            })
+            .map_err(|error| format!("{} cannot be read: {error}", path.display()))?;
+        if bytes == 0 {
+            return Err(format!("{} is empty", path.display()));
+        }
+        pin.bytes = bytes;
+        pin.sha256 = String::leak(format!("{digest:x}"));
+    }
+    Ok((curl, pins))
 }
 
 fn for_root(root: &Path) -> Downloads {
