@@ -2,6 +2,7 @@ use super::events::{
     INSTRUCTIONS_RESTARTED, LEAD_STOPPED_AGENT, MASTER_STOPPED_AGENT, OWNER_RESTARTED,
     OWNER_STOPPED_AGENT, OWNER_WOKE,
 };
+use super::model_pick::Fallen;
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, CancelBy, CancelPath,
     DELEGATIONS_PER_REPLY_MAX, Delegation, MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy,
@@ -2693,9 +2694,11 @@ impl TeamRuntime {
             },
         };
         let paused = self.paused(&project)?;
-        let started = match self.account_for(access, &project, &harness, &paused, None) {
-            Ok(None) => return self.note(&project, AGENT_RESTART_CHECKING),
-            Ok(Some(account)) if role == AgentRole::Sub => {
+        let placed =
+            self.start_account(access, &project, &harness, &paused, role, reference, None)?;
+        let started = match placed {
+            Placed::Wait(None) => return self.note(&project, AGENT_RESTART_CHECKING),
+            Placed::Run(account, _) if role == AgentRole::Sub => {
                 match self.wake(&stored, reference, &harness, tools, &account, again)? {
                     Ok((id, resumed)) => {
                         super::owner_start(&self.connection, &project, id)?;
@@ -2705,7 +2708,7 @@ impl TeamRuntime {
                     Err(reason) => Err(reason),
                 }
             }
-            Ok(Some(account)) => {
+            Placed::Run(account, _) => {
                 match self.spawn_run(&stored, role, &harness, tools, &account, again, None)? {
                     Start::Started(id) => Ok(id),
                     Start::Held => {
@@ -2715,7 +2718,7 @@ impl TeamRuntime {
                     Start::Refused(reason) => Err(reason),
                 }
             }
-            Err(reason) => Err(reason),
+            Placed::Wait(Some(reason)) | Placed::Stop(reason) => Err(reason),
         };
         match started {
             Ok(_) => Ok(()),
@@ -3632,7 +3635,8 @@ impl TeamRuntime {
                     Err(reason) => return Ok(Placed::Wait(Some(reason))),
                 };
                 let shown = bound_text(harness, 64);
-                if !self.fallback_allowed(project, harness, &wanted, task)? {
+                let who = task.map_or(Fallen::Agent, Fallen::Task);
+                if !self.fallback_allowed(project, harness, &wanted, who)? {
                     return Ok(Placed::Stop(format!(
                         "No account in this project's pool can run {wanted} for {shown} agents, and the owner's fallback setting stops the task instead of running another model. Pick another model or leave model out."
                     )));
@@ -3645,14 +3649,14 @@ impl TeamRuntime {
     /// Applies the owner's fallback rule once no pool account can run a chosen model
     /// (DEC-150 Q2): Notice tells the owner and the master once, Silent tells no one, and
     /// both let the start run on an account's own model; Stop lets nothing start. Takes the
-    /// project, the harness, the model, and the task, none for the master. Returns whether
-    /// the start may run on another model, or a store or SQLite failure.
+    /// project, the harness, the model and who falls back. Returns whether the start may
+    /// run on another model, or a store or SQLite failure.
     fn fallback_allowed(
         &mut self,
         project: &ProjectId,
         harness: &str,
         model: &str,
-        task: Option<i64>,
+        who: Fallen,
     ) -> Result<bool, EngineError> {
         match crate::model_choice::rules::rules(&self.connection)?.fallback {
             crate::model_choice::rules::FallbackRule::Stop => Ok(false),
@@ -3662,7 +3666,7 @@ impl TeamRuntime {
                     .connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(error)?;
-                super::model_pick::fell_back(&tx, project, harness, model, task, now_ms())?;
+                super::model_pick::fell_back(&tx, project, harness, model, who, now_ms())?;
                 tx.commit().map_err(error)?;
                 Ok(true)
             }
@@ -3704,7 +3708,7 @@ impl TeamRuntime {
         }
         let picked = self.account_for(access, project, harness, paused, None);
         if let Ok(Some(_)) = &picked
-            && !self.fallback_allowed(project, harness, &wanted, None)?
+            && !self.fallback_allowed(project, harness, &wanted, Fallen::Master)?
         {
             let shown = bound_text(harness, 64);
             return Ok(Err(format!(
@@ -3712,6 +3716,43 @@ impl TeamRuntime {
             )));
         }
         Ok(picked)
+    }
+
+    /// Picks the account an agent starts on again outside dispatch (DEC-150 F2, F4): the
+    /// master through `master_account`, a sub-agent through `account_with_model` on the
+    /// model it was started on, recording the model it runs when the owner's fallback rule
+    /// moves it. Takes the live access, the project, the harness, the paused accounts, the
+    /// role, the agent and its task, none for none. Returns where it starts.
+    #[allow(clippy::too_many_arguments)]
+    fn start_account(
+        &mut self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        harness: &str,
+        paused: &BTreeSet<CredentialRef>,
+        role: AgentRole,
+        agent: i64,
+        task: Option<i64>,
+    ) -> Result<Placed, EngineError> {
+        assert!(role != AgentRole::Teammate && agent > 0);
+        if role == AgentRole::Master {
+            return Ok(
+                match self.master_account(access, project, harness, paused)? {
+                    Ok(Some(account)) => Placed::Run(account, None),
+                    Ok(None) => Placed::Wait(None),
+                    Err(reason) => Placed::Stop(reason),
+                },
+            );
+        }
+        let own = super::model_pick::start_model(&self.connection, project, agent, harness, false)?;
+        let placed =
+            self.account_with_model(access, project, harness, paused, own.clone(), task)?;
+        if let Placed::Run(_, model) = &placed
+            && *model != own
+        {
+            super::model_pick::record_agent(&self.connection, project, agent, model.as_deref())?;
+        }
+        Ok(placed)
     }
 
     /// Tells why an account cannot take agent work now: endpoints always can, managed
@@ -6210,15 +6251,17 @@ impl TeamRuntime {
             let Some((harness, tools)) = row else {
                 continue;
             };
-            let started = match self.account_for(access, project, &harness, paused, None) {
-                Ok(Some(account)) => self
+            let placed =
+                self.start_account(access, project, &harness, paused, AgentRole::Sub, id, None)?;
+            let started = match placed {
+                Placed::Run(account, _) => self
                     .wake(stored, id, &harness, tools, &account, None)?
                     .map(|_| ()),
-                Ok(None) => {
+                Placed::Wait(None) => {
                     self.instruction_restarts.insert(id, project.clone());
                     continue;
                 }
-                Err(reason) => Err(reason),
+                Placed::Wait(Some(reason)) | Placed::Stop(reason) => Err(reason),
             };
             match started {
                 Ok(()) => {

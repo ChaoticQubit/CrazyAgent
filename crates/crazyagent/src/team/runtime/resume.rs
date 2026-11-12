@@ -6,10 +6,10 @@ use crate::harnesses::interactive::{self, Support, Transcript};
 use crate::harnesses::terminal_session::{RecordSource, Resume};
 use crate::harnesses::transcript::{TranscriptReader, pending};
 use crate::project_setup::StoredSetup;
-use crate::protocol::{CredentialRef, ProjectId};
+use crate::protocol::CredentialRef;
 use crate::recovery::{self, HeldItem, Interrupted, RunState};
 use crate::team::master::{self, InputRefused};
-use crate::team::{AgentRole, AgentStatus, launch_harness, model_pick, names, now_ms};
+use crate::team::{AgentRole, AgentStatus, launch_harness, names, now_ms};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::collections::BTreeSet;
@@ -286,7 +286,20 @@ impl TeamRuntime {
         if self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
         }
-        let account = match self.resume_account(access, project, paused, run, busy)? {
+        let task = match busy {
+            Busy::Task(task) => Some(task),
+            Busy::Message(_) => None,
+        };
+        let placed = self.start_account(
+            access,
+            project,
+            &run.harness,
+            paused,
+            run.kind,
+            run.agent,
+            task,
+        )?;
+        let account = match placed {
             Placed::Run(account, _) => account,
             Placed::Wait(None) => return Ok(()),
             Placed::Wait(Some(reason)) | Placed::Stop(reason) => {
@@ -327,45 +340,6 @@ impl TeamRuntime {
             None,
         )?;
         self.hand(stored, access, run)
-    }
-
-    /// Picks the account a cut-short agent resumes on as a new start of it would (DEC-150 F2):
-    /// the master through `master_account`, any other agent on the model it was started on
-    /// through `account_with_model`, recording the model it runs when the owner's fallback
-    /// rule moves it. Takes the live access, the project, the paused accounts, the run and
-    /// its waiting work. Returns where it resumes, or a store or SQLite failure.
-    fn resume_account(
-        &mut self,
-        access: &ModelAccess,
-        project: &ProjectId,
-        paused: &BTreeSet<CredentialRef>,
-        run: &Interrupted,
-        busy: Busy,
-    ) -> Result<Placed, EngineError> {
-        assert!(run.kind != AgentRole::Teammate);
-        if run.kind == AgentRole::Master {
-            return Ok(
-                match self.master_account(access, project, &run.harness, paused)? {
-                    Ok(Some(account)) => Placed::Run(account, None),
-                    Ok(None) => Placed::Wait(None),
-                    Err(reason) => Placed::Stop(reason),
-                },
-            );
-        }
-        let own =
-            model_pick::start_model(&self.connection, project, run.agent, &run.harness, false)?;
-        let task = match busy {
-            Busy::Task(task) => Some(task),
-            Busy::Message(_) => None,
-        };
-        let placed =
-            self.account_with_model(access, project, &run.harness, paused, own.clone(), task)?;
-        if let Placed::Run(_, model) = &placed
-            && *model != own
-        {
-            model_pick::record_agent(&self.connection, project, run.agent, model.as_deref())?;
-        }
-        Ok(placed)
     }
 
     /// Hands a restarted agent its run's work with the note, once: the turn goes out with a
