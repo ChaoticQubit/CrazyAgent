@@ -156,6 +156,7 @@ fn an_untrusted_team_agent_launch_profile_keeps_every_repository_harness_file_un
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let plan = untrusted_launch(&runtime, &fixture, &account);
