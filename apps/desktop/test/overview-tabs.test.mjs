@@ -89,6 +89,18 @@ test("a tab not written yet says what will write it, by the refresh setting", ()
   assert.match(page({ selected: "features", overview: base() }), /Not written yet\. It is written after the next landed change set, or when you choose Refresh\./);
 });
 
+test("a refresh the engine queued says it is waiting to run, read from the engine, so it shows again when the view opens again", () => {
+  const queued = { ...base(), stale: true, checked_ms: NOW - 60 * 60_000 };
+  const html = page({ selected: "features", overview: queued });
+  assert.match(html, />Refresh waiting to run</);
+  assert.match(html, /A refresh is waiting to run\. This tab fills in when it ends\./);
+  assert.doesNotMatch(html, /after the next landed change set/);
+  assert.doesNotMatch(html, /Checked/);
+  for (const quiet of [{ ...queued, refresh: "off" }, { ...queued, running: true }, { ...queued, stale: false }]) {
+    assert.doesNotMatch(page({ selected: "features", overview: quiet }), /waiting to run/);
+  }
+});
+
 test("Refresh is disabled while a run is going and when the tabs are off", () => {
   assert.match(page({ selected: "features", overview: { ...base(), running: true } }), /<button[^>]*disabled=""[^>]*>Refresh<\/button>/);
   assert.match(page({ selected: "features", overview: { ...base(), refresh: "off" } }), /<button[^>]*disabled=""[^>]*>Refresh<\/button>/);
