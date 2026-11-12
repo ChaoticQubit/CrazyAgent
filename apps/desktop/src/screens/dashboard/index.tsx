@@ -10,7 +10,7 @@ import { displayText } from "../conversation";
 import { FoundProjects } from "../intake/found";
 import { SETUP_POLL_MS, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
 import { waitingLine } from "../project/research";
-import { LearnPanel, learnSteps } from "./learn";
+import { LearnPanel, learnSteps, useGuideShownAgain } from "./learn";
 
 export interface SetupItem {
   id: "accounts" | "pools" | "harnesses" | "tools";
@@ -280,8 +280,8 @@ export function useToolsStatus(): Loaded<SetupStatus> {
 
 /** Home: loads accounts, pools, harnesses, tool setup and the learning steps for the side panel,
  * each project's live work and the suggested memories for Needs you, and renders HomeView with
- * the session's projects. Hide guide sets the skipped mark and reads the steps again. Input:
- * each project's unseen team notification count, when the app watches them. */
+ * the session's projects. Hide guide, or the guide brought back from Profile, reads the steps
+ * again. Input: each project's unseen team notification count, when the app watches them. */
 export function Home({ alerts }: { alerts?: Map<string, number> } = {}) {
   const session = useAppSession();
   const [accounts] = useLoad(listAccounts, [], "accounts");
@@ -289,6 +289,8 @@ export function Home({ alerts }: { alerts?: Map<string, number> } = {}) {
   const [harnesses] = useLoad(harnessCatalog, [], "harness-catalog");
   const tools = useToolsStatus();
   const [learning, reloadLearning] = useLoad(loadLearningProgress, [], "learning-progress");
+  const shownAgain = useGuideShownAgain();
+  useEffect(() => { if (shownAgain > 0) reloadLearning(); }, [shownAgain]);
   const hideLearning = async () => {
     const hidden = await setLearningMark("skipped", true);
     if (hidden.kind === "error") session.showToast(hidden.message);

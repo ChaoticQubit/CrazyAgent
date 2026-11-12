@@ -156,6 +156,8 @@ fn planning_asks_before_it_can_replace_the_roadmap() {
         project_id: project.clone(),
         folder: "/Users/mira/Projects/notes-cli".into(),
         items,
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     };
     let brief = ContextItem {
         path: "context/brief.md".into(),

@@ -1,7 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import type { Result } from "../../api";
 import { setLearningMark, type LearningMark, type LearningProgress, type LearningStepId, type LearningTopic } from "../../api-learning";
 import type { Loaded, ProjectRow } from "../../state";
-import { Button, Icon, Panel, formatRoute, type IconName, type Route } from "../../ui";
+import { Button, Icon, Notice, Panel, SettingSection, formatRoute, navigate, type IconName, type Route } from "../../ui";
 import type { SetupItem } from "./index";
 
 /** The heading of each learning topic, the same words as the TUI's Home panel. */
@@ -146,4 +147,79 @@ export function LearnPanel({ model, onHide }: { model: LearnPanelModel; onHide?:
       </ol>
     </section>)}
   </Panel>;
+}
+
+let shownAgain = 0;
+const shownListeners = new Set<() => void>();
+
+function subscribeShownAgain(listener: () => void): () => void {
+  shownListeners.add(listener);
+  return () => { shownListeners.delete(listener); };
+}
+
+function readShownAgain(): number {
+  return shownAgain;
+}
+
+/** How many times this session the owner brought the learning guide back, so a Home that stayed
+ * mounted under the Profile dialog reads its steps again. Output: the count, rendering again on
+ * a change. */
+export function useGuideShownAgain(): number {
+  return useSyncExternalStore(subscribeShownAgain, readShownAgain, readShownAgain);
+}
+
+/** One Profile replay entry: show the learning guide on Home again, or run first run again. */
+export type Replay = "guide" | "first_run";
+
+/** What a replay needs: set or clear a learning mark, close the Profile dialog, open a page. */
+export interface ReplaySteps {
+  mark: (step: LearningMark, on: boolean) => Promise<Result<void>>;
+  close: () => void;
+  go: (route: Route) => void;
+}
+
+const REPLAY_FAILED: Record<Replay, string> = {
+  guide: "Couldn't show the guide again.",
+  first_run: "Couldn't run first-run setup again.",
+};
+
+/** Runs one Profile replay entry. Both clear the skipped mark first, so a guide the owner hid
+ * comes back; then the dialog closes and Home or first run opens. A refused clear stays on the
+ * dialog; an engine without learning marks still runs first run but has no guide to show.
+ * Inputs: the entry and its steps. Output: the sentence to show, or null once it moved on. */
+export async function replay(kind: Replay, steps: ReplaySteps): Promise<string | null> {
+  const cleared = await steps.mark("skipped", false);
+  if (cleared.kind === "error") return `${REPLAY_FAILED[kind]} ${cleared.message}`;
+  if (cleared.kind === "not_ready" && kind === "guide") return "The learning guide isn't ready in this build.";
+  shownAgain += 1;
+  for (const listener of shownListeners) listener();
+  steps.close();
+  steps.go(kind === "guide" ? { name: "home" } : { name: "welcome" });
+  return null;
+}
+
+/** The Learn CrazyAgent replay entries in the Profile dialog (DEC-153): Show the learning guide
+ * again and Run first-run setup again, each clearing a skipped guide. Input: what closes the
+ * dialog. Output: the section, with the reason when an entry did not go through. */
+export function LearningReplay({ onClose = () => undefined }: { onClose?: () => void }) {
+  const [busy, setBusy] = useState<Replay | null>(null);
+  const [failure, setFailure] = useState("");
+  const run = async (kind: Replay) => {
+    if (busy !== null) return;
+    setBusy(kind);
+    setFailure("");
+    const said = await replay(kind, { mark: setLearningMark, close: onClose, go: navigate });
+    setBusy(null);
+    if (said !== null) setFailure(said);
+  };
+  return <SettingSection title="Learn CrazyAgent">
+    <div className="set-body">
+      <p className="secondary">Bring back the guide on Home, or walk through first-run setup again with your saved answers.</p>
+      {failure && <Notice tone="danger" alert>{failure}</Notice>}
+      <span className="row">
+        <Button disabled={busy !== null} pending={busy === "guide"} pendingLabel="Showing..." onClick={() => void run("guide")}>Show the learning guide again</Button>
+        <Button disabled={busy !== null} pending={busy === "first_run"} pendingLabel="Opening..." onClick={() => void run("first_run")}>Run first-run setup again</Button>
+      </span>
+    </div>
+  </SettingSection>;
 }

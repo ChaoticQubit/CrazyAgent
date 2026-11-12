@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { chooseHome, clearWebStore } from "./run-layout.mjs";
 
 process.umask(0o077);
 const app = process.env.WD_APP;
@@ -16,7 +17,10 @@ for (const [name, path] of [["WD_APP", app], ["MS_ENGINE", engineBinary], ["MS_R
 assert(Number.isInteger(port) && port > 1024 && port < 65536, "WD_PORT must be a free local port");
 const runtime = join(root, "engine");
 const socket = join(runtime, "engine.sock");
-const home = join(root, "home");
+/** The HOME the engine, the app and the spec's WebKit store share: the prepared folder
+ * CRAZYAGENT_E2E_HOME names, as chooseHome checks it, else MS_ROOT/home as before.
+ * Input: the environment. Output: the folder. */
+export const home = chooseHome(join(root, "home")).home;
 assert(Buffer.byteLength(socket) < 100, "MS_ROOT must be short enough for the engine socket path");
 const ENGINE_READY_MS = 60000;
 const ENGINE_STOP_MS = 20000;
@@ -134,7 +138,7 @@ let engine;
  * rejects when it exits or never answers. */
 function startEngine() {
   mkdirSync(join(root, "bin"), { mode: 0o700 });
-  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: process.env.TMPDIR ?? "/tmp", LANG: "en_US.UTF-8" };
+  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(root, "codex"), TMPDIR: process.env.TMPDIR ?? "/tmp", LANG: "en_US.UTF-8" };
   const args = ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings",
     "--codex-executable", standIn("codex", CODEX), "--claude-executable", standIn("claude", CLAUDE)];
   engine = spawn(engineBinary, args, { cwd: runtime, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -201,7 +205,9 @@ export const config = {
     } catch {
       throw new Error(`MS_ROOT must name a new folder: ${root}`);
     }
-    mkdirSync(join(home, ".codex"), { recursive: true, mode: 0o700 });
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    mkdirSync(join(root, "codex"), { mode: 0o700 });
+    clearWebStore(home);
     mkdirSync(runtime, { mode: 0o700 });
     settings(runtime);
     try {

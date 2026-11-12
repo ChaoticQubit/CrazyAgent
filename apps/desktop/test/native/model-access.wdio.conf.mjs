@@ -22,6 +22,8 @@ const SPECS = {
   "first-run-skip-guide": "first-run-skip-guide.e2e.mjs",
   "models-app": "models-app.e2e.mjs",
   "models-project": "models-project.e2e.mjs",
+  "learning-replay-guide": "learning-replay-guide.e2e.mjs",
+  "learning-replay-first-run": "learning-replay-first-run.e2e.mjs",
 };
 assert(SPECS[process.env.CRAZYAGENT_DESKTOP_TEST_SUITE], "a suite this configuration runs");
 

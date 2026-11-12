@@ -27,7 +27,7 @@ const member = (id, status = "signed_in") => ({ id, kind: "claude", provider: "C
 const pool = (id, name, members) => ({ id, name, summary: "", members, project_count: 0 });
 const account = (id, name, status = "signed_in") => ({ id, name, provider: "claude", provider_name: "Claude", method: "subscription", method_label: "", url: null, model: null, status, status_label: status });
 const ok = (value) => ({ kind: "ok", value });
-const page = (props) => renderToStaticMarkup(createElement(DemoPageView, { picked: null, pending: false, error: null, onPick: idle, onCreate: idle, ...props }));
+const page = (props) => renderToStaticMarkup(createElement(DemoPageView, { picked: null, pending: false, error: null, onPick: idle, onCreate: idle, onRetry: idle, ...props }));
 const text = (html) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ");
 
 test("the demo page shows the cost note before any pool, and the note says any account in the pool may be used", () => {

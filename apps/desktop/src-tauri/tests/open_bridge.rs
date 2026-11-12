@@ -200,6 +200,8 @@ fn only_a_repo_file_the_engine_lists_as_linked_opens_from_the_project_folder() {
             item("docs/plan.md", true),
             item("repo/docs/unmarked.md", false),
         ],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     };
     assert_eq!(
         linked_item(&setup, &context, "repo/docs/plan.md").unwrap(),

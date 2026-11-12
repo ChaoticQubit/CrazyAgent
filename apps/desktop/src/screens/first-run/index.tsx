@@ -150,16 +150,17 @@ export function skipGuideNote(result: Result<void>): string | undefined {
 /** The first-run flow with no sidebar, in the order profile, projects folder, tools, accounts:
  * the brand, the step list and a short intro on the left, the step on the right. Finishing goes
  * to Home or to Add account, first skipping the guide when its box is unticked; the handlers get
- * the skip note when that did not save. Inputs: the saved handler, an optional skip handler used
- * when the engine has no profile support yet, and the step to start on. */
-export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
+ * the skip note when that did not save. Inputs: the saved handler, an optional skip handler, the
+ * step to start on, and the saved profile a replay from Profile starts the form with. */
+export function Welcome({ onSaved, onSkip, initialStep = "profile", profile = null }: {
   onSaved: (profile: OwnerProfile, next?: Route, note?: string) => void;
   onSkip?: (next?: Route, note?: string) => void;
   initialStep?: FirstRunStep;
+  profile?: OwnerProfile | null;
 }) {
   const [step, setStep] = useState<FirstRunStep>(initialStep);
   const [saved, setSaved] = useState<OwnerProfile | null>(null);
-  const [draft, setDraft] = useState(emptyProfileDraft);
+  const [draft, setDraft] = useState(() => profile ? draftFromProfile(profile) : emptyProfileDraft());
   const [errors, setErrors] = useState<ProfileErrors>({});
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<{ message: string; notReady: boolean }>();

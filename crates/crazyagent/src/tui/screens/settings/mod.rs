@@ -5,6 +5,7 @@ pub(in crate::tui) mod models_page;
 pub mod pool_editor;
 pub mod pools;
 pub mod profile;
+pub mod replay;
 pub mod spend;
 pub mod tickets;
 
