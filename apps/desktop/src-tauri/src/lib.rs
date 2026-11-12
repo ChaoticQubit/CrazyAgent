@@ -913,17 +913,17 @@ async fn desktop_set_project_agent_policy(
 
 #[tauri::command]
 async fn desktop_project_trust(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<crazyagent::trust::TrustView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.project_trust(&id).await
 }
 
 #[tauri::command]
 async fn desktop_set_project_trust(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     version: u64,
@@ -931,7 +931,7 @@ async fn desktop_set_project_trust(
     confirm_raise: bool,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_project_trust(&id, version, trust, confirm_raise, generation)
@@ -3598,26 +3598,26 @@ async fn desktop_restart_agent(
 
 #[tauri::command]
 async fn desktop_tests_read(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     op: String,
     args: serde_json::Value,
 ) -> Result<TestsReply, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state).await?.tests_read(project_id, op, args)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_checks(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
     op: String,
     args: serde_json::Value,
 ) -> Result<ChecksReply, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.checks(project_id, op, args)?;
     call.await
 }
@@ -3712,12 +3712,12 @@ async fn desktop_ide_focus(
 
 #[tauri::command]
 async fn desktop_tracker_op(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     op: String,
     args: serde_json::Value,
 ) -> Result<serde_json::Value, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = if bridge::tracker::writes(&op) {
         lock(&state).await?.tracker_op(op, args)?
     } else {
@@ -3728,35 +3728,35 @@ async fn desktop_tracker_op(
 
 #[tauri::command]
 async fn desktop_tracker_projects(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Vec<TrackedProject>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state).await?.tracker_projects()?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_tracker_attach(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     key: String,
     name: String,
 ) -> Result<TrackedProject, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.tracker_attach(project_id, key, name)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_tracker_open_change_set(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     change_set: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .tracker_open_change_set(project_id, change_set)?;
@@ -3765,24 +3765,24 @@ async fn desktop_tracker_open_change_set(
 
 #[tauri::command]
 async fn desktop_ticket_settings(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
 ) -> Result<TicketSettingsPage, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state).await?.ticket_settings(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_save_ticket_settings(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
     values: serde_json::Value,
     version: u64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .save_ticket_settings(project_id, values, version)?;
@@ -3933,23 +3933,23 @@ async fn desktop_usage_set_reset(
 
 #[tauri::command]
 async fn desktop_scorecard(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     offset_minutes: i32,
 ) -> Result<crazyagent::scorecard::Scorecard, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.scorecard_report(offset_minutes)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_scorecard_set(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     settings: crazyagent::scorecard::Settings,
     version: u64,
 ) -> Result<bridge::scorecard::ScorecardSave, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.scorecard_set(settings, version)?;
     call.await
 }
@@ -4195,19 +4195,19 @@ async fn desktop_system_notifications(webview: Webview) -> Result<&'static str, 
 
 #[tauri::command]
 async fn desktop_harness_settings(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     harness: String,
     project_id: Option<String>,
 ) -> Result<HarnessSettingsPage, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state).await?.harness_settings(harness, project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_set_harness_setting(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     harness: String,
     project_id: Option<String>,
@@ -4215,7 +4215,7 @@ async fn desktop_set_harness_setting(
     value: serde_json::Value,
     version: u64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .set_harness_setting(harness, project_id, key, value, version)?;
@@ -4224,14 +4224,14 @@ async fn desktop_set_harness_setting(
 
 #[tauri::command]
 async fn desktop_reset_harness_setting(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     harness: String,
     project_id: Option<String>,
     key: String,
     version: u64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .reset_harness_setting(harness, project_id, key, version)?;
