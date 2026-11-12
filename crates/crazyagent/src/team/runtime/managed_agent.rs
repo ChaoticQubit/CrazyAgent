@@ -1090,6 +1090,7 @@ impl ManagedAgent {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();

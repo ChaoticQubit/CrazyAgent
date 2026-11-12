@@ -15236,6 +15236,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         access: AgentAccess::Full,
         toolchains: Vec::new(),
         network: crate::sandbox::policy::AgentNetwork::Open,
+        grants: Vec::new(),
         layout,
         git_identity: None,
         limits: LaunchLimits::default(),
@@ -19094,6 +19095,7 @@ fn only_a_launch_with_no_conversation_to_continue_starts_its_worker_fresh() {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -22860,6 +22862,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         access: AgentAccess::OwnBranch,
         network: crate::sandbox::policy::AgentNetwork::Open,
+        grants: Vec::new(),
         layout: Layout::Linked,
         git_identity: None,
         limits: LaunchLimits::default(),
@@ -23721,6 +23724,7 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -23802,6 +23806,7 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -24058,6 +24063,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         };
         let (orders, ordered) = channel();
         let (reports, _reported) = channel();
@@ -24123,6 +24129,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
@@ -24582,6 +24589,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         sandbox_profile: PathBuf::from("/private/tmp/agent-1.sb"),
         access: AgentAccess::Sandboxed,
         network: crate::sandbox::policy::AgentNetwork::Open,
+        grants: Vec::new(),
         layout: Layout::Linked,
         git_identity: None,
         limits: LaunchLimits::default(),
