@@ -105,6 +105,7 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
         .unwrap();
     let typed = tmp.path().join("discord-ipc-0");
     assert!(typed.starts_with("/tmp"));
+    let _listener = std::os::unix::net::UnixListener::bind(&typed).unwrap();
     let kept = checked(
         &AccessGrant::Socket {
             path: typed.clone(),
@@ -284,13 +285,13 @@ fn a_held_grant_or_full_access_asks_nothing_and_requests_are_bounded() {
     );
     assert_eq!(again, Ok(Requested::AlreadyAllowed));
     for port in 1..=REQUESTS_PENDING_MAX as u16 {
-        case.ask_port(50_000 + port);
+        case.ask_port(40_000 + port);
     }
     let over = request(
         &case.db,
         &case.project,
         &Asker::Agent(3),
-        &AccessGrant::Port { port: 50_100 },
+        &AccessGrant::Port { port: 40_100 },
         "one more",
     );
     assert_eq!(over, Err("grant_requests_full".to_owned()));
@@ -298,7 +299,7 @@ fn a_held_grant_or_full_access_asks_nothing_and_requests_are_bounded() {
         &case.db,
         &case.project,
         &Asker::Agent(3),
-        &AccessGrant::Port { port: 50_101 },
+        &AccessGrant::Port { port: 40_101 },
         " ",
     );
     assert_eq!(blank, Err("grant_reason_invalid".to_owned()));
@@ -311,7 +312,7 @@ fn a_held_grant_or_full_access_asks_nothing_and_requests_are_bounded() {
         &case.db,
         &case.project,
         &Asker::Agent(3),
-        &AccessGrant::Port { port: 50_102 },
+        &AccessGrant::Port { port: 40_102 },
         "gateway",
     );
     assert_eq!(
@@ -365,4 +366,219 @@ fn an_owner_save_logs_each_grant_it_adds_and_removes_newest_first() {
         .unwrap();
     assert_eq!(kept, LOG_KEPT_MAX);
     assert_eq!(history(&case.db, PROJECT).unwrap().len(), LOG_LISTED_MAX);
+}
+
+/// Leader security add (3): a port grant never reaches a port the system lends out (where
+/// the IDE's server and proxy ports land) nor a port the engine recorded for a project's
+/// IDE, and a launch leaves out a saved port it keeps free for the owner's model endpoint.
+#[cfg(unix)]
+#[test]
+fn a_port_grant_never_reaches_the_ide_the_dynamic_range_or_a_kept_model_port() {
+    let data = tempfile::tempdir().unwrap();
+    let ide = data.path().join(crate::ide::FOLDER).join(PROJECT);
+    std::fs::create_dir_all(&ide).unwrap();
+    std::fs::set_permissions(&ide, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::ide::ports::record(
+        &ide,
+        crate::ide::ports::Ports {
+            server: 41_001,
+            proxy: 41_002,
+        },
+    )
+    .unwrap();
+    for port in [41_001, 41_002] {
+        assert_eq!(
+            checked(&AccessGrant::Port { port }, data.path()),
+            Err("grant_port_reserved"),
+            "IDE port {port}"
+        );
+    }
+    for port in [*DYNAMIC_PORTS.start(), 60_000, u16::MAX] {
+        assert_eq!(
+            checked(&AccessGrant::Port { port }, data.path()),
+            Err("grant_port_dynamic"),
+            "port {port}"
+        );
+    }
+    assert_eq!(
+        checked(&AccessGrant::Port { port: 49_151 }, data.path()),
+        Ok(AccessGrant::Port { port: 49_151 })
+    );
+    let saved = [
+        AccessGrant::Port { port: 8_080 },
+        AccessGrant::Port { port: 8_081 },
+    ];
+    assert_eq!(
+        held_now(&saved, &[8_081], data.path()),
+        [AccessGrant::Port { port: 8_080 }],
+        "a kept model port is left out at launch"
+    );
+}
+
+/// Leader security add (1): a socket that controls a container or VM host, or a key or
+/// password agent, is refused by its folder or file name even when it exists and is the
+/// user's own, one row per class.
+#[cfg(target_os = "macos")]
+#[test]
+fn host_escape_and_key_agent_sockets_are_refused_by_class() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-gx-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let data = Path::new("/nonexistent");
+    let rows: [(&str, &str); 14] = [
+        ("docker.sock", "grant_socket_host"),
+        (".docker/run/docker.sock", "grant_socket_host"),
+        ("containerd/containerd.sock", "grant_socket_host"),
+        ("podman/podman.sock", "grant_socket_host"),
+        (".colima/default/x.sock", "grant_socket_host"),
+        (".lima/default/sock/x.sock", "grant_socket_host"),
+        (".orbstack/run/x.sock", "grant_socket_host"),
+        (".rd/x.sock", "grant_socket_host"),
+        (".gnupg/S.gpg-agent", "grant_socket_keys"),
+        ("S.gpg-agent.ssh", "grant_socket_keys"),
+        ("2BUA8C4S2C.com.1password/t/agent.sock", "grant_socket_keys"),
+        (".1password/agent.sock", "grant_socket_keys"),
+        ("agent.sock", "grant_socket_keys"),
+        ("ssh-x/s.sock", "grant_socket_keys"),
+    ];
+    for (relative, code) in rows {
+        let path = base.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert_eq!(
+            checked(&AccessGrant::Socket { path }, data),
+            Err(code),
+            "{relative}"
+        );
+    }
+    let plain = base.join("lima-notes").join("app.sock");
+    assert_eq!(escape_class(&base.join("climate").join("app.sock")), None);
+    assert_eq!(escape_class(&plain), Some("grant_socket_host"));
+}
+
+/// Leader security add (1): only an existing socket the user owns, in a folder the user
+/// owns that no one else can write or in a sticky folder of the user or root, is held; a
+/// socket of root or another user, a plain file and a missing socket are refused.
+#[test]
+fn a_socket_must_exist_be_the_user_s_own_and_sit_where_no_one_else_can_swap_it() {
+    let me = 501;
+    let closed = (me, 0o040_700);
+    assert_eq!(ownership(Some((true, me)), closed, me), Ok(()));
+    assert_eq!(
+        ownership(Some((true, 0)), closed, me),
+        Err("grant_socket_owner"),
+        "root's socket"
+    );
+    assert_eq!(
+        ownership(Some((true, me + 1)), closed, me),
+        Err("grant_socket_owner"),
+        "another user's socket"
+    );
+    assert_eq!(
+        ownership(Some((true, me)), (me, 0o040_777), me),
+        Err("grant_socket_owner"),
+        "a folder others can write"
+    );
+    assert_eq!(
+        ownership(Some((true, me)), (me + 1, 0o040_700), me),
+        Err("grant_socket_owner"),
+        "another user's folder"
+    );
+    assert_eq!(
+        ownership(Some((true, me)), (0, 0o041_777), me),
+        Ok(()),
+        "/tmp"
+    );
+    assert_eq!(
+        ownership(Some((true, me)), (me + 1, 0o041_777), me),
+        Err("grant_socket_owner"),
+        "another user's sticky folder"
+    );
+    assert_eq!(
+        ownership(Some((false, me)), closed, me),
+        Err("grant_socket_missing"),
+        "a plain file"
+    );
+    assert_eq!(ownership(None, closed, me), Err("grant_socket_missing"));
+    #[cfg(target_os = "macos")]
+    {
+        let rooted = Path::new("/private/var/run/mDNSResponder");
+        if std::fs::symlink_metadata(rooted).is_ok() {
+            assert_eq!(
+                checked(
+                    &AccessGrant::Socket {
+                        path: rooted.to_path_buf()
+                    },
+                    Path::new("/nonexistent")
+                ),
+                Err("grant_socket_owner"),
+                "a real root-owned socket"
+            );
+        }
+        let tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let gone = tmp.path().join("app.sock");
+        assert_eq!(
+            checked(
+                &AccessGrant::Socket { path: gone },
+                Path::new("/nonexistent")
+            ),
+            Err("grant_socket_missing")
+        );
+    }
+}
+
+/// Leader security add (2): the agent's reason has its control characters made spaces, is
+/// cut to 300 bytes and shows as one quoted string; the question names the exact port.
+#[test]
+fn a_request_reason_is_stripped_cut_and_quoted_and_the_question_names_the_port() {
+    let case = Case::new();
+    let long = format!("line one\n\u{1b}[31mred\t\"quoted\" {}", "é".repeat(400));
+    let Requested::Asked(question) = request(
+        &case.db,
+        &case.project,
+        &Asker::Agent(3),
+        &AccessGrant::Port { port: 47_900 },
+        &long,
+    )
+    .unwrap() else {
+        panic!("no question was raised");
+    };
+    let stored: String = case
+        .db
+        .query_row(
+            "SELECT reason FROM access_requests WHERE question=?1",
+            [question as i64],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(stored.len() <= REASON_BYTES_MAX);
+    assert!(!stored.chars().any(char::is_control), "{stored:?}");
+    assert!(
+        stored.starts_with("line one [31mred \"quoted\" é"),
+        "{stored:?}"
+    );
+    let pending = crate::questions::pending(&case.db, &case.project).unwrap();
+    let asked = pending.iter().find(|q| q.id == question).unwrap();
+    assert!(
+        asked.question.contains("Port 47900 on this computer"),
+        "{}",
+        asked.question
+    );
+    let context = asked.context.as_deref().unwrap();
+    assert!(
+        context.contains(&serde_json::to_string(&stored).unwrap()),
+        "{context}"
+    );
+    assert_eq!(
+        request(
+            &case.db,
+            &case.project,
+            &Asker::Agent(3),
+            &AccessGrant::Port { port: 47_901 },
+            "\u{7}\n\t ",
+        ),
+        Err("grant_reason_invalid".to_owned())
+    );
 }

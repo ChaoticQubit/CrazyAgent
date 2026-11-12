@@ -8105,8 +8105,10 @@ impl TeamRuntime {
             .then(crate::sandbox::grants::owner_temp_folder)
             .transpose()
             .map_err(|code| with_code(crate::sandbox::grants::refusal_text(code), Some(code)))?;
+        let data = crate::sandbox::grants::data_root(&self.connection).unwrap_or_default();
+        let held = crate::sandbox::grants::held_now(&policy.grants, &kept, &data);
         sandbox = sandbox
-            .grant_access(&policy.grants, owner_tmp.as_deref())
+            .grant_access(&held, owner_tmp.as_deref())
             .map_err(sandboxed)?;
         let profile = agent_profile(&self.state, id);
         sandbox.install(&profile).map_err(sandboxed)?;

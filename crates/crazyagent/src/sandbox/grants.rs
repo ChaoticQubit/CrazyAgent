@@ -14,8 +14,11 @@ pub const LOG_KEPT_MAX: i64 = 256;
 pub const LOG_LISTED_MAX: usize = 20;
 /// The most access requests one project has waiting for the owner at once.
 pub const REQUESTS_PENDING_MAX: i64 = 4;
-/// The longest reason an agent may give with an access request.
-pub const REASON_BYTES_MAX: usize = 600;
+/// The longest reason an agent may give with an access request; a longer one is cut.
+pub const REASON_BYTES_MAX: usize = 300;
+/// The ports the system lends out by itself on macOS (IANA dynamic range): the IDE's server
+/// and proxy ports and other apps' picked ports live here, so no port grant falls in it.
+pub const DYNAMIC_PORTS: std::ops::RangeInclusive<u16> = 49_152..=65_535;
 /// The option an owner picks to allow a request, always the first.
 pub const ALLOW: &str = "Allow";
 /// The option an owner picks to refuse a request.
@@ -46,6 +49,32 @@ const REQUESTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS access_requests (
 const GRANT_JSON_BYTES_MAX: usize = 256;
 const LAUNCHD_LISTENERS: &str = "/private/tmp/com.apple.launchd.";
 const PER_USER_TEMP: &str = "/private/var/folders/";
+const IDE_FOLDERS_SCANNED_MAX: usize = 256;
+const HOST_ESCAPE_WORDS: [&str; 8] = [
+    "docker",
+    "containerd",
+    "podman",
+    "colima",
+    "orbstack",
+    "rancher",
+    "buildkit",
+    "nerdctl",
+];
+const HOST_ESCAPE_NAMES: [&str; 4] = ["lima", "finch", "rd", "utm"];
+const KEY_WORDS: [&str; 10] = [
+    "gnupg",
+    "1password",
+    "2bua8c4s2c",
+    "keychain",
+    "scdaemon",
+    "keyboxd",
+    "dirmngr",
+    "bitwarden",
+    "secretive",
+    "keepass",
+];
+const KEY_STARTS: [&str; 2] = ["gpg", "ssh"];
+const KEY_NAME_WORDS: [&str; 3] = ["agent", "gpg", "ssh"];
 
 const _: () = assert!(super::policy::GRANT_SOCKET_BYTES_MAX + 64 <= GRANT_JSON_BYTES_MAX);
 const _: () = assert!(GRANT_SOCKETS_MAX + GRANT_PORTS_MAX + 1 == super::policy::GRANTS_MAX);
@@ -126,8 +155,23 @@ pub fn refusal_text(code: &str) -> &'static str {
         "grant_socket_agent" => {
             "That socket hands out your SSH keys or other agents' terminals, so it is never allowed."
         }
+        "grant_socket_host" => {
+            "That socket controls containers or virtual machines (Docker, containerd, Podman, Colima, Lima, OrbStack and the like), which can reach your whole computer, so it is never allowed."
+        }
+        "grant_socket_keys" => {
+            "That socket belongs to a key or password agent (gpg-agent, 1Password, SSH or another agent), so it is never allowed."
+        }
+        "grant_socket_owner" => {
+            "That socket belongs to the system or another user, or sits in a folder other users can change, so it is never allowed."
+        }
+        "grant_socket_missing" => {
+            "There is no socket at that path now. Start the program that makes it, then allow it again."
+        }
         "grant_port_reserved" => {
-            "That port belongs to your sign-in or your local model, so it is never allowed."
+            "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), so it is never allowed."
+        }
+        "grant_port_dynamic" => {
+            "Ports from 49152 up are lent by the system to CrazyAgent's IDE and other apps for a while, so they are never allowed. Pick a fixed port below 49152."
         }
         "agent_grants_invalid" => {
             "A project allows at most 2 sockets, 4 ports and your temp folder, each once."
@@ -136,16 +180,17 @@ pub fn refusal_text(code: &str) -> &'static str {
         "grant_requests_full" => {
             "4 access requests of this project are still waiting for the owner."
         }
-        "grant_reason_invalid" => "Give a reason of one plain line up to 600 bytes.",
+        "grant_reason_invalid" => "Give a reason in plain words.",
         _ => "The request could not be recorded.",
     }
 }
 
-/// Checks one grant the owner or an agent named, as a save or an Allow takes it: a socket
-/// as the canonical path of an existing folder plus its name (the socket itself in its
-/// canonical form when it exists), never with the owner's credentials, in the engine's
-/// data folder, a launchd listener folder or a tmux folder; a port other than the owner's
-/// fixed ports and the model proxy ports; the temp folder only when it is the owner's
+/// Checks one grant the owner or an agent named, as a save, an Allow and each launch take
+/// it: a socket as the canonical path of an existing socket the user owns in a folder no
+/// other user can change, never with the owner's credentials, in the engine's data folder,
+/// a launchd listener or tmux folder, nor one of a container or VM host or a key agent; a
+/// port below the dynamic range other than the owner's fixed ports, the model proxy ports
+/// and every IDE port the engine recorded; the temp folder only when it is the owner's
 /// private one. Inputs: the grant and the engine's data folder. Output: the grant to keep,
 /// or a plain refusal code.
 pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'static str> {
@@ -172,20 +217,165 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
             if text.starts_with(LAUNCHD_LISTENERS) || folder.starts_with("tmux-") {
                 return Err("grant_socket_agent");
             }
+            if let Some(code) = escape_class(&real) {
+                return Err(code);
+            }
+            socket_fit(&real)?;
             let kept = AccessGrant::Socket { path: real };
             assert!(kept.plain());
             Ok(kept)
         }
         AccessGrant::Port { port } => {
-            let reserved =
-                OWNER_PORTS.contains(port) || super::model_proxy::PROXY_PORTS.contains(port);
-            if *port == 0 || reserved {
+            let reserved = *port == 0
+                || OWNER_PORTS.contains(port)
+                || super::model_proxy::PROXY_PORTS.contains(port)
+                || ide_ports(data_root).contains(port);
+            if reserved {
                 return Err("grant_port_reserved");
+            }
+            if DYNAMIC_PORTS.contains(port) {
+                return Err("grant_port_dynamic");
             }
             Ok(grant.clone())
         }
         AccessGrant::TempFolder => owner_temp_folder().map(|_| AccessGrant::TempFolder),
     }
+}
+
+/// The grants of a saved policy a launch builds into the profile now: each still passes
+/// [`checked`] unchanged, so a socket that is gone, changed hands or moved behind a link is
+/// left out, and no port is one the launch keeps free for the owner's model endpoints.
+/// Inputs: the saved grants, the ports the launch keeps free and the engine's data folder.
+/// Output: the grants to build in, in order.
+pub fn held_now(grants: &[AccessGrant], kept: &[u16], data_root: &Path) -> Vec<AccessGrant> {
+    assert!(grants.len() <= super::policy::GRANTS_MAX);
+    let held: Vec<AccessGrant> = grants
+        .iter()
+        .filter(|grant| checked(grant, data_root).is_ok_and(|now| now == **grant))
+        .filter(|grant| !matches!(grant, AccessGrant::Port { port } if kept.contains(port)))
+        .cloned()
+        .collect();
+    if held.len() < grants.len() {
+        eprintln!("agent_grants_left_out count={}", grants.len() - held.len());
+    }
+    held
+}
+
+/// The class of host-escape or key socket a path names, judged by its folder and file
+/// names, lowercased: a container or VM host, or a key or password agent. Input: the
+/// canonical path. Output: `grant_socket_host`, `grant_socket_keys` or none.
+fn escape_class(real: &Path) -> Option<&'static str> {
+    let words: Vec<String> = real
+        .components()
+        .filter_map(|part| part.as_os_str().to_str())
+        .map(|part| part.trim_start_matches('.').to_ascii_lowercase())
+        .collect();
+    let named = |word: &str| {
+        HOST_ESCAPE_NAMES.iter().any(|name| {
+            word == *name
+                || ["-", "_", "."]
+                    .iter()
+                    .any(|cut| word.starts_with(&format!("{name}{cut}")))
+        })
+    };
+    let host = words
+        .iter()
+        .any(|word| named(word) || HOST_ESCAPE_WORDS.iter().any(|mark| word.contains(mark)));
+    if host {
+        return Some("grant_socket_host");
+    }
+    let name = words.last().map(String::as_str).unwrap_or_default();
+    let keys = words.iter().any(|word| {
+        KEY_WORDS.iter().any(|mark| word.contains(mark))
+            || KEY_STARTS.iter().any(|start| word.starts_with(start))
+    }) || KEY_NAME_WORDS.iter().any(|mark| name.contains(mark));
+    keys.then_some("grant_socket_keys")
+}
+
+#[cfg(unix)]
+fn socket_fit(real: &Path) -> Result<(), &'static str> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let socket = std::fs::symlink_metadata(real)
+        .ok()
+        .map(|meta| (meta.file_type().is_socket(), meta.uid()));
+    let parent = real
+        .parent()
+        .and_then(|folder| std::fs::symlink_metadata(folder).ok())
+        .map(|meta| (meta.uid(), meta.mode()))
+        .ok_or("grant_socket_missing")?;
+    ownership(socket, parent, nix::unistd::getuid().as_raw())
+}
+
+#[cfg(not(unix))]
+fn socket_fit(_real: &Path) -> Result<(), &'static str> {
+    Err("grant_socket_needs_macos")
+}
+
+/// Judges who holds a socket: it must exist as a socket owned by the user, in a folder the
+/// user owns that no group or other user can write, or in a sticky folder of the user or
+/// root, where no other user can replace it. Inputs: the socket's kind and owner when it
+/// exists, its folder's owner and mode, and the user. Output: done or the refusal code.
+fn ownership(socket: Option<(bool, u32)>, parent: (u32, u32), me: u32) -> Result<(), &'static str> {
+    let Some((true, owner)) = socket else {
+        return Err("grant_socket_missing");
+    };
+    if owner != me {
+        return Err("grant_socket_owner");
+    }
+    let (folder_owner, mode) = parent;
+    let closed = folder_owner == me && mode & 0o022 == 0;
+    let sticky = mode & 0o1000 != 0 && (folder_owner == me || folder_owner == 0);
+    if !closed && !sticky {
+        return Err("grant_socket_owner");
+    }
+    Ok(())
+}
+
+/// The loopback ports the engine recorded for its projects' IDE servers and their proxies,
+/// read from at most `IDE_FOLDERS_SCANNED_MAX` project folders. Input: the engine's data
+/// folder. Output: the ports, none when there is no IDE folder.
+#[cfg(unix)]
+fn ide_ports(data_root: &Path) -> Vec<u16> {
+    let Ok(folders) = std::fs::read_dir(data_root.join(crate::ide::FOLDER)) else {
+        return Vec::new();
+    };
+    let ports: Vec<u16> = folders
+        .take(IDE_FOLDERS_SCANNED_MAX)
+        .filter_map(Result::ok)
+        .filter_map(|entry| crate::ide::ports::recorded(&entry.path()))
+        .flat_map(|ports| [ports.server, ports.proxy])
+        .collect();
+    assert!(ports.len() <= 2 * IDE_FOLDERS_SCANNED_MAX);
+    ports
+}
+
+#[cfg(not(unix))]
+fn ide_ports(_data_root: &Path) -> Vec<u16> {
+    Vec::new()
+}
+
+/// An agent's reason as the owner's question shows it: control characters become spaces,
+/// runs of space become one, and it is cut to `REASON_BYTES_MAX` bytes on a character
+/// boundary. Input: the agent's text. Output: the plain reason, or `grant_reason_invalid`
+/// when nothing is left.
+fn plain_reason(reason: &str) -> Result<String, &'static str> {
+    let spaced: String = reason
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut plain = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    if plain.len() > REASON_BYTES_MAX {
+        let mut end = REASON_BYTES_MAX;
+        while !plain.is_char_boundary(end) {
+            end -= 1;
+        }
+        plain.truncate(end);
+    }
+    if plain.is_empty() {
+        return Err("grant_reason_invalid");
+    }
+    assert!(plain.len() <= REASON_BYTES_MAX);
+    Ok(plain)
 }
 
 fn socket_path(grant: &AccessGrant, path: &Path) -> Result<PathBuf, &'static str> {
@@ -342,11 +532,7 @@ pub fn request(
     grant: &AccessGrant,
     reason: &str,
 ) -> Result<Requested, String> {
-    let reason = reason.trim();
-    if reason.is_empty() || reason.len() > REASON_BYTES_MAX || reason.chars().any(char::is_control)
-    {
-        return Err("grant_reason_invalid".into());
-    }
+    let reason = plain_reason(reason)?;
     let data = data_root(db).ok_or("grant_requests_unavailable")?;
     let grant = checked(grant, &data)?;
     let policy =
@@ -375,7 +561,7 @@ pub fn request(
     }
     db.execute(
         "INSERT INTO access_requests(project,asker,grant_json,reason,created_ms) VALUES (?1,?2,?3,?4,?5)",
-        params![project.as_str(), asker.name(), body, reason, crate::team::now_ms()],
+        params![project.as_str(), asker.name(), body, &reason, crate::team::now_ms()],
     )
     .map_err(|_| "grant_requests_unavailable")?;
     let id = db.last_insert_rowid();
@@ -390,9 +576,9 @@ pub fn request(
         options: vec![ALLOW.to_owned(), DONT_ALLOW.to_owned()],
         recommended: Some(DONT_ALLOW.to_owned()),
         context: Some(format!(
-            "{} Its reason, in its own words: \"{}\". Allow only if you trust it. Allowing adds it to this project's Agent access, where you can remove it; running agents restart at their next pause to use it.",
+            "{} Its reason, in its own words: {}. Allow only if you trust it. Allowing adds it to this project's Agent access, where you can remove it; running agents restart at their next pause to use it.",
             meaning(&grant),
-            reason
+            serde_json::to_string(&reason).map_err(|_| "grant_requests_unavailable")?
         )),
     };
     let source = EngineSource::Access(id.to_string());
