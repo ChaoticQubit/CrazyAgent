@@ -354,9 +354,21 @@ pub enum LaunchEvent {
     TurnFinished { success: bool },
     Usage { tokens: Tokens },
     TurnError { rate_limited: bool },
+    ModelRefused,
     Exited { code: Option<i32> },
     LateOutput { lines: u64 },
 }
+
+/// The code Claude Code 2.1.322 gives an API error for a model that does not exist or the
+/// account may not use, on its transcript line and its stream-json line alike (DEC-150 F8).
+pub(crate) const CLAUDE_MODEL_REFUSED: &str = "model_not_found";
+
+/// Codex 0.167.1's `codex_error_info` for that refusal on a rollout's error event
+/// (DEC-150 F8).
+pub(crate) const CODEX_MODEL_REFUSED: &str = "model_not_found";
+
+/// Codex 0.167.1's app-server `codexErrorInfo` for that refusal on a turn error (DEC-150 F8).
+pub(crate) const CODEX_SERVER_MODEL_REFUSED: &str = "modelNotFound";
 
 /// Tells whether a provider error message says the account hit a rate or usage limit.
 /// Takes the provider's error text, which is never stored or shown.
@@ -1064,12 +1076,7 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     }
     validate_home(request.account.home())?;
     if let Some(model) = &request.model
-        && (model.is_empty()
-            || model.len() > 256
-            || !model.as_bytes()[0].is_ascii_alphanumeric()
-            || !model
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/@+".contains(&byte)))
+        && !crate::model_choice::model_valid(harness_id(request), model)
     {
         return Err(failure("launch_model_invalid"));
     }
@@ -1396,7 +1403,14 @@ impl Driver {
                             );
                             events.push(LaunchEvent::ApprovalDenied);
                         }
-                        CodexEvent::TurnError { message, .. } => {
+                        CodexEvent::TurnError {
+                            message,
+                            model_refused,
+                            ..
+                        } => {
+                            if model_refused {
+                                events.push(LaunchEvent::ModelRefused);
+                            }
                             events.push(LaunchEvent::TurnError {
                                 rate_limited: rate_limited(&message),
                             });
@@ -1458,6 +1472,9 @@ impl Driver {
                                     events.push(LaunchEvent::ToolUse { name })
                                 }
                                 EventKind::AssistantError { code } => {
+                                    if code == CLAUDE_MODEL_REFUSED {
+                                        events.push(LaunchEvent::ModelRefused);
+                                    }
                                     events.push(LaunchEvent::TurnError {
                                         rate_limited: rate_limited(&code),
                                     })

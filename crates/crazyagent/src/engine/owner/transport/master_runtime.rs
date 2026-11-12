@@ -802,9 +802,9 @@ impl OwnerRuntimeHandle {
             ModelAuthentication::NativeManaged { profile_ref } => profile_ref.clone(),
             _ => return Err(failure("gateway_invalid_authentication")),
         };
-        let settings = self.master_settings(prepared).await?;
+        let (settings, model) = self.master_settings(prepared).await?;
         let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
-        let launch = self.prepare_master_host(prepared, &profile, settings)?;
+        let launch = self.prepare_master_host(prepared, &profile, settings, model.as_deref())?;
         let _folder = launch.folder;
         let _credential = launch.credential;
         let tool_record = launch.tool_record;

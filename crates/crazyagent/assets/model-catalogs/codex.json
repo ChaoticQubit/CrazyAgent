@@ -1,0 +1,15 @@
+{
+  "harness": "codex",
+  "qualified_versions": ["0.164.0", "0.167.1"],
+  "sources": [
+    "https://developers.openai.com/codex/models",
+    "https://learn.chatgpt.com/docs/models"
+  ],
+  "models": [
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6.1-terra",
+    "gpt-6-luna",
+    "gpt-6-sol"
+  ]
+}

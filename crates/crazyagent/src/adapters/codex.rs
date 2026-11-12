@@ -180,6 +180,7 @@ pub enum Event {
         turn_id: String,
         message: String,
         will_retry: bool,
+        model_refused: bool,
     },
     ApprovalRequired {
         id: WireId,
@@ -1481,10 +1482,13 @@ impl CodexProtocol {
                 let will_retry = params["willRetry"]
                     .as_bool()
                     .ok_or(ProtocolError::InvalidMessage)?;
+                let model_refused = params["error"]["codexErrorInfo"]
+                    == crate::harnesses::launch::CODEX_SERVER_MODEL_REFUSED;
                 Ok(Some(Event::TurnError {
                     turn_id,
                     message,
                     will_retry,
+                    model_refused,
                 }))
             }
             _ => Ok(Some(Event::UnsupportedNotification { method })),

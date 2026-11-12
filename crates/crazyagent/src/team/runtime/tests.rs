@@ -17259,6 +17259,7 @@ fn between_turns(
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,
+        model: None,
         reask: None,
         reasked: None,
         starts: crate::coord::relay::TaskStarts::default(),
@@ -21859,6 +21860,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 role: None,
                 mode: None,
                 ticket: None,
+                model: None,
             },
         ),
         (
@@ -21908,6 +21910,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 role: None,
                 mode: None,
                 ticket: None,
+                model: None,
             },
         ),
         ("%77", crate::team::tool::Call::InspectWork { task: None }),
@@ -21926,6 +21929,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 role: None,
                 mode: None,
                 ticket: None,
+                model: None,
             },
         ),
     ];
@@ -22105,6 +22109,7 @@ fn a_call_file_carrying_the_lead_s_pane_with_no_kernel_stamp_is_refused() {
         role: None,
         mode: None,
         ticket: None,
+        model: None,
     })
     .unwrap();
     call.as_object_mut()
@@ -22229,6 +22234,7 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
         role: None,
         mode: None,
         ticket: None,
+        model: None,
     })
     .unwrap();
     let swapped = format!("{:032x}", 1);
@@ -22781,6 +22787,7 @@ fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_pla
             role: None,
             mode: None,
             ticket: None,
+            model: None,
         },
         tool::Call::Remember {
             text: "The docs live in docs/guide.".into(),
@@ -26008,6 +26015,7 @@ fn lead_spawns(fixture: &Fixture, lead: i64, task: &str) -> String {
             role: None,
             mode: None,
             ticket: None,
+            model: None,
         },
     )
     .unwrap()
@@ -29391,6 +29399,563 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
     assert!(
         listed.iter().any(|pane| pane.id == teammate && !pane.dead),
         "the lead's teammate pane is listed for it: {listed:?}"
+    );
+}
+
+/// A master model no pool account can run starts the master on an account that can run
+/// the project, on that account's own model, and tells the owner and the master once;
+/// a master model the endpoint serves starts on it with no notice (DEC-150).
+#[test]
+fn a_master_model_no_pool_account_runs_falls_back_with_one_notice() {
+    use crate::model_choice::store::{self, Begun};
+    use crate::model_choice::{Slot, Written};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let paused = BTreeSet::new();
+    let project = fixture.setup.project_id.clone();
+    let master = |team: &mut TeamRuntime| {
+        let Ok(Some(account)) = team
+            .master_account(&fixture.access, &project, "codex", &paused)
+            .unwrap()
+        else {
+            panic!("the endpoint takes the master");
+        };
+        account.connection
+    };
+    let notices = || -> Vec<String> {
+        fixture
+            .connection
+            .prepare("SELECT text FROM owner_notices WHERE project=?1 AND kind='pool_failover' AND subject LIKE 'model_fallback:%' ORDER BY id")
+            .unwrap()
+            .query_map([PROJECT], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(master(&mut team), reference(ENDPOINT));
+    assert!(notices().is_empty());
+    let catalog = crate::model_choice::catalog("codex");
+    let set_master = |model: &str| {
+        let scope = crate::harness_settings::Scope::App;
+        let models = store::values(&fixture.connection, "codex", &catalog, &scope, None).unwrap();
+        let version = models
+            .rows
+            .iter()
+            .find(|row| row.slot == Slot::Master)
+            .unwrap()
+            .version;
+        assert_eq!(
+            store::custom_begin(&fixture.connection, "codex", &catalog, model).unwrap(),
+            Begun::Pending
+        );
+        store::custom_checked(&fixture.connection, "codex", model, true).unwrap();
+        let written = store::set(
+            &fixture.connection,
+            "codex",
+            &catalog,
+            &scope,
+            Slot::Master,
+            &serde_json::json!(model),
+            version,
+        )
+        .unwrap();
+        assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    };
+    set_master("gpt-a");
+    assert_eq!(master(&mut team), reference(ENDPOINT));
+    assert_eq!(master(&mut team), reference(ENDPOINT));
+    assert_eq!(
+        notices(),
+        vec![
+            "No account in this project's pool can run gpt-a for the codex master now, so the master runs on the default model. You are told again only after gpt-a runs once more."
+                .to_owned()
+        ]
+    );
+    let told: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_messages WHERE project=?1 AND text LIKE '%(model_fallback)'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(told, 1);
+    set_master("qwen2.5:0.5b");
+    assert_eq!(master(&mut team), reference(ENDPOINT));
+    assert_eq!(notices().len(), 1);
+}
+
+/// Sets one of the owner's model rules at its current version. Takes the fixture and the
+/// rule.
+fn model_rule(fixture: &Fixture, rule: crate::model_choice::rules::Rule) {
+    use crate::model_choice::rules::{self, Rule, RuleWritten};
+    let current = rules::rules(&fixture.connection).unwrap();
+    let version = match rule {
+        Rule::Pick(_) => current.pick_version,
+        Rule::Fallback(_) => current.fallback_version,
+    };
+    let written = rules::set_rule(&fixture.connection, rule, version).unwrap();
+    assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+}
+
+/// Adds one verified owner model for Codex and sets it in one app slot. Takes the fixture,
+/// the model and the slot.
+fn codex_model(fixture: &Fixture, model: &str, slot: crate::model_choice::Slot) {
+    use crate::model_choice::store::{self, Begun};
+    let catalog = crate::model_choice::catalog("codex");
+    let scope = crate::harness_settings::Scope::App;
+    if store::custom_begin(&fixture.connection, "codex", &catalog, model).unwrap() == Begun::Pending
+    {
+        store::custom_checked(&fixture.connection, "codex", model, true).unwrap();
+    }
+    let version = store::values(&fixture.connection, "codex", &catalog, &scope, None)
+        .unwrap()
+        .rows
+        .iter()
+        .find(|row| row.slot == slot)
+        .unwrap()
+        .version;
+    let written = store::set(
+        &fixture.connection,
+        "codex",
+        &catalog,
+        &scope,
+        slot,
+        &serde_json::json!(model),
+        version,
+    )
+    .unwrap();
+    assert!(
+        matches!(written, crate::model_choice::Written::Saved { .. }),
+        "{written:?}"
+    );
+}
+
+/// The owner's fallback rule decides what a master start does when no pool account can
+/// run the master model: Silent starts it on an account's own model with no notice, Stop
+/// starts nothing and gives the reason (DEC-150 Q2).
+#[test]
+fn the_fallback_rule_starts_the_master_silently_or_stops_it_with_the_reason() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let paused = BTreeSet::new();
+    let project = fixture.setup.project_id.clone();
+    codex_model(&fixture, "gpt-a", crate::model_choice::Slot::Master);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Silent));
+    let Ok(Some(account)) = team
+        .master_account(&fixture.access, &project, "codex", &paused)
+        .unwrap()
+    else {
+        panic!("a silent fallback starts the master on the endpoint");
+    };
+    assert_eq!(account.connection, reference(ENDPOINT));
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    let Err(reason) = team
+        .master_account(&fixture.access, &project, "codex", &paused)
+        .unwrap()
+    else {
+        panic!("a stop fallback starts no master");
+    };
+    assert!(reason.contains("gpt-a"), "{reason}");
+    let told: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM owner_notices WHERE project=?1 AND kind='pool_failover' AND subject LIKE 'model_fallback:%')
+                  + (SELECT COUNT(*) FROM team_messages WHERE project=?1 AND text LIKE '%(model_fallback)')",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(told, 0);
+}
+
+/// With the Stop fallback rule a task whose model no pool account can run fails with the
+/// reason instead of starting an agent on another model (DEC-150 Q2).
+#[test]
+fn a_stop_fallback_fails_a_task_no_pool_account_can_run_instead_of_starting_it() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    codex_model(&fixture, "gpt-a", crate::model_choice::Slot::Agent);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let (status, error): (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "failed");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("gpt-a")),
+        "{error:?}"
+    );
+    let agents: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agents, 0);
+}
+
+/// Under the Stop fallback rule a task whose model only a resting account can run waits
+/// for that account instead of failing, though another pool account is free on its own
+/// model (DEC-150 H1): Stop is for a model no pool account can run, not for a rate limit.
+#[test]
+fn a_stop_fallback_waits_while_the_accounts_that_can_run_the_model_rest() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let mut access = fixture.access.clone();
+    let mut other = access.connections[0].clone();
+    other.id = reference("local-b");
+    other.model.id = "other-model".into();
+    access.connections.push(other);
+    access.pools[0].members.push(reference("local-b"));
+    codex_model(&fixture, "qwen2.5:0.5b", crate::model_choice::Slot::Agent);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    let resting = BTreeSet::from([reference(ENDPOINT)]);
+    team.dispatch(&fixture.setup, &access, &resting).unwrap();
+    let (status, error, wait): (String, Option<String>, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error,wait FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "queued", "{error:?}");
+    assert!(
+        wait.as_deref()
+            .is_some_and(|wait| wait.contains("rate limit")),
+        "{wait:?}"
+    );
+    let agents: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agents, 0, "no agent on the other account's own model");
+}
+
+/// An agent whose harness refused its model (DEC-150 F8) records the refusal for its
+/// project, account and model, so the pool no longer counts that account as one that can
+/// run the model, and stops, so its next start picks again; the master starts again too.
+/// An agent on its account's own model records nothing.
+#[test]
+fn a_model_refusal_is_recorded_for_the_account_and_stops_the_agent_that_got_it() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = fixture.setup.project_id.clone();
+    let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mut worker = between_turns(&project, AgentRole::Sub, false, false);
+    worker.model = Some("gpt-a".to_owned());
+    team.workers.insert(sub, worker);
+    let own = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers
+        .insert(own, between_turns(&project, AgentRole::Sub, false, false));
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Working);
+    let mut worker = between_turns(&project, AgentRole::Master, false, false);
+    worker.model = Some("gpt-m".to_owned());
+    team.workers.insert(master, worker);
+
+    team.apply(sub, Report::ModelRefused).unwrap();
+    team.apply(own, Report::ModelRefused).unwrap();
+    team.apply(master, Report::ModelRefused).unwrap();
+
+    let now = now_ms();
+    let refused = |model: &str| {
+        super::super::model_pick::refused(
+            &fixture.connection,
+            &project,
+            &reference(ENDPOINT),
+            model,
+            now,
+        )
+        .unwrap()
+    };
+    assert!(refused("gpt-a"));
+    assert!(refused("gpt-m"));
+    assert!(team.workers[&sub].stopping);
+    assert_eq!(team.workers[&sub].stop_why, "engine_stop:model_refused");
+    assert!(
+        !team.workers[&own].stopping,
+        "an account's own model is not refused"
+    );
+    assert!(team.workers[&master].stopping);
+    assert!(team.master_restarts.contains(&project));
+}
+
+/// With idle agents kept for reuse, a task whose model no idle agent of its harness runs
+/// does not wait behind them forever (DEC-150 F3): when the harness slot is full, dispatch
+/// stops one idle agent on another model, so the task can start on its own model.
+#[test]
+fn a_task_for_a_model_no_idle_agent_runs_frees_a_full_slot_of_one_on_another_model() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    reuse_idle_on(&fixture);
+    codex_model(&fixture, "qwen2.5:0.5b", crate::model_choice::Slot::Agent);
+    let idle = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    team.workers.insert(
+        idle,
+        between_turns(&fixture.setup.project_id, AgentRole::Sub, false, false),
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    assert!(
+        team.workers[&idle].stopping,
+        "the idle agent on another model stops"
+    );
+    assert_eq!(team.workers[&idle].stop_why, "engine_stop:idle");
+    let status: String = fixture
+        .connection
+        .query_row("SELECT status FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "queued");
+}
+
+/// Under the Stop fallback rule a task whose model only a resting account can run stops
+/// no idle agent on another model while it waits (DEC-150 r2 P1): a stopped agent would
+/// leave a slot keep warm refills on the agent default, and dispatch would stop it again,
+/// launching a harness every cycle for the whole rest.
+#[test]
+fn a_task_waiting_on_a_resting_account_stops_no_idle_agent_so_keep_warm_launches_none() {
+    use crate::model_choice::Slot;
+    use crate::model_choice::rules::{FallbackRule, PickRule, Rule};
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.min_agents = 2;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    let mut team = fixture.runtime();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
+    reuse_idle_on(&fixture);
+    let mut access = fixture.access.clone();
+    let mut other = access.connections[0].clone();
+    other.id = reference("local-b");
+    other.model.id = "other-model".into();
+    access.connections.push(other);
+    access.pools[0].members.push(reference("local-b"));
+    model_rule(&fixture, Rule::Pick(PickRule::Hint));
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    codex_model(&fixture, "qwen2.5:0.5b", Slot::Agent);
+    codex_model(&fixture, "other-model", Slot::Agent);
+    let idle = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&fixture.setup.project_id, AgentRole::Sub, false, false);
+    worker.connection = reference("local-b");
+    worker.model = Some("other-model".to_owned());
+    team.workers.insert(idle, worker);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    let pinned = super::super::model_pick::pin(
+        &tx,
+        &fixture.setup.project_id,
+        task,
+        "codex",
+        Some(&crate::team::tool::ModelPick {
+            model: "qwen2.5:0.5b".into(),
+            reason: "the small model fits".into(),
+        }),
+    )
+    .unwrap();
+    assert!(pinned.is_ok(), "{pinned:?}");
+    tx.commit().unwrap();
+    let resting = BTreeSet::from([reference(ENDPOINT)]);
+    for _ in 0..3 {
+        team.dispatch(&fixture.setup, &access, &resting).unwrap();
+        assert!(
+            !team.workers[&idle].stopping,
+            "no idle agent stops while the task's account rests"
+        );
+        team.keep_warm(&fixture.setup, &access, &resting).unwrap();
+        assert_eq!(team.workers.len(), 1, "keep warm launches none");
+    }
+    let agents: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agents, 1);
+    let (status, wait): (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,wait FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "queued");
+    assert!(wait.is_some(), "the task says why it waits");
+}
+
+/// Keep warm starts its agents on the owner's agent default, so a task for that model
+/// takes one (DEC-150 F3), and starts none while an agent of the project still stops, so
+/// an agent dispatch stopped to free its slot is not replaced before the task starts.
+#[cfg(target_os = "macos")]
+#[test]
+fn keep_warm_starts_agents_on_the_agent_default_and_none_while_one_stops() {
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.min_agents = 2;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    let host = fixture.host();
+    let mut team = limited_runtime(
+        &fixture,
+        &host,
+        "#!/bin/sh\nexec /bin/sleep 300\n",
+        TeamLimits::default(),
+    );
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
+    codex_model(&fixture, "qwen2.5:0.5b", crate::model_choice::Slot::Agent);
+    let paused = BTreeSet::new();
+    let stopping = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&fixture.setup.project_id, AgentRole::Sub, false, false);
+    worker.stopping = true;
+    team.workers.insert(stopping, worker);
+    team.keep_warm(&fixture.setup, &fixture.access, &paused)
+        .unwrap();
+    assert_eq!(team.workers.len(), 1, "no warm agent while one stops");
+    team.workers.remove(&stopping);
+    team.keep_warm(&fixture.setup, &fixture.access, &paused)
+        .unwrap();
+    let warm: Vec<i64> = team.workers.keys().copied().collect();
+    assert_eq!(warm.len(), 1, "{warm:?}");
+    assert!(team.workers[&warm[0]].warm);
+    assert_eq!(
+        super::super::model_pick::agent_model(&fixture.connection, warm[0]).unwrap(),
+        Some("qwen2.5:0.5b".to_owned())
+    );
+    assert_eq!(
+        team.workers[&warm[0]].model.as_deref(),
+        Some("qwen2.5:0.5b")
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// The owner's Wake of a sub-agent started on a model no pool account can run now picks
+/// its account as a new start does (DEC-150 F4): under the Stop fallback rule it stays
+/// stopped and the team note names the model, instead of waking on the endpoint's own.
+#[test]
+fn an_owner_wake_of_an_agent_on_a_model_no_pool_account_runs_keeps_the_stop_rule() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    codex_model(&fixture, "gpt-a", crate::model_choice::Slot::Agent);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+            params![sub, PROJECT, format!("worktrees/agent-{sub}")],
+        )
+        .unwrap();
+    super::super::model_pick::record_agent(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        sub,
+        Some("gpt-a"),
+    )
+    .unwrap();
+    team.start_again(sub, None, &fixture.access).unwrap();
+    let status: String = fixture
+        .connection
+        .query_row("SELECT status FROM team_agents WHERE id=?1", [sub], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "stopped");
+    let notes: Vec<String> = fixture
+        .status()
+        .messages
+        .into_iter()
+        .filter(|message| message.state == MessageState::Note)
+        .map(|message| message.text)
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("The agent could not restart") && note.contains("gpt-a")),
+        "{notes:?}"
+    );
+    assert_eq!(
+        super::super::model_pick::agent_model(&fixture.connection, sub).unwrap(),
+        Some("gpt-a".to_owned()),
+        "the record keeps the owner's model"
     );
 }
 

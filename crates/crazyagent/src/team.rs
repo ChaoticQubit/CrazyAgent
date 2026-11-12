@@ -19,6 +19,7 @@ pub mod graph;
 pub mod history;
 pub mod master;
 pub mod master_limits;
+pub(crate) mod model_pick;
 pub mod names;
 pub mod questions;
 pub mod runtime;

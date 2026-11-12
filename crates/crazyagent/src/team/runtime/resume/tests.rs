@@ -1195,6 +1195,77 @@ done
         team.shutdown().unwrap();
         host.close(&[]).unwrap();
     }
+
+    /// A sub-agent cut short while it ran a model the owner chose resumes as a new start
+    /// would (DEC-150 F2): when no pool account can run that model and the owner's
+    /// fallback rule is Stop, it does not start again on another model, and its run gives
+    /// the reason and keeps its task for a later retry.
+    #[test]
+    fn a_resumed_agent_whose_model_no_pool_account_runs_keeps_the_owner_s_stop_rule() {
+        use crate::model_choice::rules::{self, FallbackRule, Rule, RuleWritten};
+        use crate::model_choice::store::{self, Begun};
+        use crate::model_choice::{Slot, Written};
+        let fixture = Team::new();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        let (task, sub) = fixture.hung(&mut team);
+        team.shutdown().unwrap();
+        drop(team);
+        host.kill(&AgentId::team(sub).unwrap()).unwrap();
+        let catalog = crate::model_choice::catalog("codex");
+        let scope = crate::harness_settings::Scope::App;
+        assert_eq!(
+            store::custom_begin(&fixture.connection, "codex", &catalog, "gpt-a").unwrap(),
+            Begun::Pending
+        );
+        store::custom_checked(&fixture.connection, "codex", "gpt-a", true).unwrap();
+        let version = store::values(&fixture.connection, "codex", &catalog, &scope, None)
+            .unwrap()
+            .rows
+            .iter()
+            .find(|row| row.slot == Slot::Agent)
+            .unwrap()
+            .version;
+        let written = store::set(
+            &fixture.connection,
+            "codex",
+            &catalog,
+            &scope,
+            Slot::Agent,
+            &serde_json::json!("gpt-a"),
+            version,
+        )
+        .unwrap();
+        assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+        crate::team::model_pick::record_agent(
+            &fixture.connection,
+            &fixture.project(),
+            sub,
+            Some("gpt-a"),
+        )
+        .unwrap();
+        let version = rules::rules(&fixture.connection).unwrap().fallback_version;
+        let written = rules::set_rule(
+            &fixture.connection,
+            Rule::Fallback(FallbackRule::Stop),
+            version,
+        )
+        .unwrap();
+        assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+
+        let mut team = fixture.runtime(&host);
+        fixture.until(&mut team, "the resume stops on the owner's rule", |f| {
+            f.runs()[0].state == RunState::Failed
+        });
+        let reason = fixture.runs()[0].reason.clone().unwrap_or_default();
+        assert!(reason.contains("gpt-a"), "{reason}");
+        fixture.idle(&mut team);
+        assert_eq!(fixture.launches(sub).len(), 1, "no start on another model");
+        assert_eq!(fixture.task(task).0, "queued", "held for a later retry");
+        assert_eq!(fixture.subs(), 1, "no other sub-agent took the task");
+        team.shutdown().unwrap();
+        host.close(&[]).unwrap();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1227,6 +1298,7 @@ mod live {
             entry: plan.entry.clone(),
             working_dir: plan.working_dir.clone(),
             model: plan.model.clone(),
+            chosen: plan.chosen.clone(),
             tools: plan.tools,
             sandbox_profile: plan.sandbox_profile.clone(),
             access: plan.access,

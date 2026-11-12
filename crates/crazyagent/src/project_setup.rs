@@ -2729,6 +2729,8 @@ fn remove(
     ] {
         crate::storage::versioned::retire(tx, &item)?;
     }
+    crate::model_choice::store::forget_project(tx, project_id)?;
+    crate::team::model_pick::forget_project(tx, project_id)?;
     crate::scheduling::forget_project(tx, project_id.as_str())?;
     crate::coord::forget_project(tx, project_id)?;
     crate::activity::forget_project(tx, project_id)?;

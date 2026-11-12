@@ -2599,10 +2599,13 @@ fn inspect_work_shows_a_lead_its_team_and_marks_what_it_read() {
     assert!(!plain.contains("Your team's work"), "{plain}");
     assert!(!plain.contains("Questions for the owner"), "{plain}");
     assert!(!plain.contains("Your workers"), "{plain}");
+    let models = crate::team::model_pick::MODELS_HEAD;
+    assert!(!plain.contains(models), "{plain}");
     let (master, refused) = as_master(&mut fixture, tool::INSPECT_WORK_TOOL, json!({}));
     assert!(!refused, "{master}");
     assert!(master.contains("Write the API"), "{master}");
     assert!(master.contains("The team:\n"), "{master}");
+    assert!(master.contains(&format!("{models}\n- codex: ")), "{master}");
 }
 
 /// update_work to a running agent stores the message Sent and wakes nothing, one key
@@ -4130,6 +4133,7 @@ fn delegate_refuses_past_sub_agent_depth() {
                     role: None,
                     mode: None,
                     ticket: None,
+                    model: None,
                 },
             )
             .unwrap()
@@ -4377,6 +4381,7 @@ fn delegate(task: &str) -> Call {
         role: None,
         mode: None,
         ticket: None,
+        model: None,
     }
 }
 
@@ -6040,6 +6045,202 @@ fn a_sub_agent_remembers_through_its_own_mailbox_under_its_name_and_ask_me_first
         ]
     );
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
+}
+
+/// Gives the owner's model choices for one harness at app scope (DEC-150): each id added
+/// and passed by its test launch, the allowed list ticked, and the agent default when one
+/// is named. Takes the fixture, the harness, the ids, the ticked ids and the default.
+fn owner_models(
+    fixture: &Fixture,
+    harness: &str,
+    ids: &[&str],
+    allowed: &[&str],
+    agent: Option<&str>,
+) {
+    use crate::model_choice::store::{self, Begun};
+    use crate::model_choice::{Slot, Written};
+    let db = &fixture.connection;
+    let catalog = crate::model_choice::catalog(harness);
+    for id in ids {
+        assert_eq!(
+            store::custom_begin(db, harness, &catalog, id).unwrap(),
+            Begun::Pending
+        );
+        store::custom_checked(db, harness, id, true).unwrap();
+    }
+    let scope = crate::harness_settings::Scope::App;
+    let mut sets = vec![(Slot::Allowed, json!(allowed))];
+    if let Some(agent) = agent {
+        sets.push((Slot::Agent, json!(agent)));
+    }
+    for (slot, value) in sets {
+        let written = store::set(db, harness, &catalog, &scope, slot, &value, 0).unwrap();
+        assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    }
+}
+
+/// Lists each team task's text with the model its spawn pinned and the reason, none when
+/// the spawn left the model to the default. Takes the fixture.
+fn task_models(fixture: &Fixture) -> Vec<(String, Option<(String, String)>)> {
+    let mut statement = fixture
+        .connection
+        .prepare("SELECT id,prompt FROM team_tasks ORDER BY id")
+        .unwrap();
+    let tasks: Vec<(i64, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    tasks
+        .into_iter()
+        .map(|(id, prompt)| {
+            let pinned = crate::team::model_pick::pinned(&fixture.connection, id)
+                .unwrap()
+                .map(|pick| (pick.model, pick.reason));
+            (prompt, pinned)
+        })
+        .collect()
+}
+
+/// The master picks an agent's model only from the owner's allowed list for its harness,
+/// or the harness's default (DEC-150): an allowed pick and the unticked default are pinned
+/// with their reasons and named in the reply, a pick off the list is refused with the list
+/// and the default and leaves no task, and no pick pins nothing.
+#[test]
+fn the_master_picks_an_agent_model_only_from_the_owner_s_allowed_list() {
+    let mut fixture = Fixture::new();
+    owner_models(
+        &fixture,
+        "codex",
+        &["gpt-a", "gpt-b", "gpt-c"],
+        &["gpt-a", "gpt-b"],
+        Some("gpt-c"),
+    );
+    let spawn = |fixture: &mut Fixture, task: &str, model: Option<&str>| {
+        let mut arguments = json!({"task": task, "harness": "codex"});
+        if let Some(model) = model {
+            arguments["model"] = json!(model);
+            arguments["reason"] = json!(format!("{model} fits {task}"));
+        }
+        as_master(fixture, tool::SPAWN_TOOL, arguments)
+    };
+    let (said, refused) = spawn(&mut fixture, "Write docs", Some("gpt-a"));
+    assert!(!refused, "{said}");
+    assert!(
+        said.contains(" is queued for a codex sub-agent on gpt-a."),
+        "{said}"
+    );
+    assert_eq!(
+        spawn(&mut fixture, "Write tests", Some("gpt-z")),
+        (
+            "Not handed off: gpt-z is not on the owner's list for codex agents: pick one of gpt-a, gpt-b, or leave model out to run the default gpt-c (model_not_allowed).".to_owned(),
+            true
+        )
+    );
+    let (said, refused) = spawn(&mut fixture, "Fix lint", Some("gpt-c"));
+    assert!(!refused, "{said}");
+    let (said, refused) = spawn(&mut fixture, "Plain task", None);
+    assert!(!refused, "{said}");
+    assert!(said.contains(" is queued for a codex sub-agent."), "{said}");
+    assert_eq!(
+        task_models(&fixture),
+        vec![
+            (
+                "Write docs".to_owned(),
+                Some(("gpt-a".to_owned(), "gpt-a fits Write docs".to_owned()))
+            ),
+            (
+                "Fix lint".to_owned(),
+                Some(("gpt-c".to_owned(), "gpt-c fits Fix lint".to_owned()))
+            ),
+            ("Plain task".to_owned(), None),
+        ]
+    );
+}
+
+/// With no allowed list the master may run only the default, and a harness whose model
+/// CrazyAgent does not choose refuses any pick; neither leaves a task (DEC-150).
+#[test]
+fn a_pick_with_nothing_ticked_or_on_an_unsupported_harness_is_refused() {
+    let mut fixture = Fixture::new();
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::SPAWN_TOOL,
+        json!({"task": "Write docs", "harness": "codex", "model": "gpt-a", "reason": "cheap"}),
+    );
+    assert!(refused);
+    assert_eq!(
+        said,
+        "Not handed off: the owner allows no other model for codex agents than the account's own model; leave model out (model_not_allowed)."
+    );
+    assert!(task_models(&fixture).is_empty());
+    let catalog = crate::model_choice::catalog("rcli");
+    let project = ProjectId::new(PROJECT).unwrap();
+    assert_eq!(
+        crate::model_choice::store::pick(
+            &fixture.connection,
+            "rcli",
+            &catalog,
+            &project,
+            Some("local")
+        )
+        .unwrap(),
+        crate::model_choice::store::Pick::Unsupported
+    );
+}
+
+/// A lead's spawn meets the same allowed list before anything else is checked: a pick off
+/// the list is refused in the lead's words, an allowed one goes on to the account check,
+/// and neither leaves a task (DEC-150).
+#[test]
+fn a_lead_s_model_pick_meets_the_owner_s_allowed_list() {
+    let mut fixture = Fixture::new();
+    owner_models(&fixture, "codex", &["gpt-a"], &["gpt-a"], None);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,'sub','codex',1,'working',?2,?2)",
+            params![PROJECT, NOW],
+        )
+        .unwrap();
+    let lead = fixture.connection.last_insert_rowid();
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    let call = |model: &str| {
+        tool::live_call(
+            tool::SPAWN_TOOL,
+            Some(&json!({"task": "Write the tests", "harness": "codex", "model": model, "reason": "tests"})),
+        )
+        .unwrap()
+        .unwrap()
+    };
+    assert_eq!(
+        answer_sub(&mut fixture.connection, &answering, lead, call("gpt-z")).unwrap(),
+        Some((
+            "Not started: gpt-z is not on the owner's list for codex agents: pick one of gpt-a, or leave model out to run the account's own model (model_not_allowed).".to_owned(),
+            true
+        ))
+    );
+    let (said, refused) = answer_sub(&mut fixture.connection, &answering, lead, call("gpt-a"))
+        .unwrap()
+        .unwrap();
+    assert!(refused);
+    assert!(
+        said.starts_with(
+            "Not started: no account in this project's pool that runs codex is signed in."
+        ),
+        "{said}"
+    );
+    assert!(task_models(&fixture).is_empty());
 }
 
 /// MSG-SEC-1: a live master can neither read a sub-agent's Messages timeline nor change the

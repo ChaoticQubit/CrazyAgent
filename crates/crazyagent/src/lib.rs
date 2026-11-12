@@ -46,6 +46,7 @@ pub mod master_sessions;
 pub mod master_step_limit;
 pub mod master_time_limit;
 pub mod memory;
+pub mod model_choice;
 pub mod model_gateway;
 pub mod notifications;
 pub mod onboarding;

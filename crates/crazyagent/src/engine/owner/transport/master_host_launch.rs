@@ -97,29 +97,26 @@ impl OwnerRuntimeHandle {
         allocate_master_capture(&self.authority.root)
     }
 
-    /// Reads the owner's harness settings one master turn applies on a blocking thread, so
-    /// the store read and a first version probe never hold the async runtime. Input: the
-    /// prepared turn. Output: the settings, none for an rcli master, or a
-    /// `HARNESS_SETTINGS_CODES` refusal.
+    /// Reads the owner's harness settings and master model (DEC-150) one master turn
+    /// applies on a blocking thread, so the store reads and a first version probe never
+    /// hold the async runtime. Input: the prepared turn. Output: the settings and the
+    /// master model, none for the account's own, both empty for an rcli master, or a
+    /// `HARNESS_SETTINGS_CODES` refusal or `model_choice_unavailable`.
     pub(super) async fn master_settings(
         &self,
         prepared: &PreparedMasterTurn,
-    ) -> Result<crate::harness_settings::apply::Applied, EngineError> {
+    ) -> Result<(crate::harness_settings::apply::Applied, Option<String>), EngineError> {
         let (harness, executable) = match prepared.session.selection.backend {
             MasterBackend::Codex => ("codex", self.registered_codex_executable()?),
             MasterBackend::Claude => ("claude-code", self.registered_claude_executable()?),
-            MasterBackend::Rcli => return Ok(Default::default()),
+            MasterBackend::Rcli => return Ok((Default::default(), None)),
         };
         let executable = executable.verified_path()?.to_path_buf();
         let root = super::changes::engine_root(&self.authority)?;
         let project = prepared.session.project_id.clone();
         tokio::task::spawn_blocking(move || {
-            crate::harness_settings::apply::for_launch(
-                &crate::storage::versioned::open(&root)?,
-                harness,
-                &executable,
-                Some(&project),
-            )
+            let db = crate::storage::versioned::open(&root)?;
+            master_choice(&db, harness, &executable, &project)
         })
         .await
         .map_err(|_| failure("harness_settings_unavailable"))?
@@ -130,8 +127,10 @@ impl OwnerRuntimeHandle {
         prepared: &PreparedMasterTurn,
         profile: &NativeProfileUse,
         settings: crate::harness_settings::apply::Applied,
+        model: Option<&str>,
     ) -> Result<MasterHostLaunch, EngineError> {
         validate_master_binding(prepared)?;
+        let connection = master_connection(&prepared.attempt.connection, model);
         let binding = prepared.profile.binding();
         let host = self.identity();
         if binding.database_instance != host.db_instance
@@ -195,7 +194,7 @@ impl OwnerRuntimeHandle {
                 &place,
                 profile,
                 executable.verified_path()?,
-                &prepared.attempt.connection,
+                &connection,
                 &master_prompt(&prepared.instructions, &process.text),
                 wall_time,
                 delegate,
@@ -208,7 +207,7 @@ impl OwnerRuntimeHandle {
                 &place,
                 profile,
                 executable.verified_path()?,
-                &prepared.attempt.connection,
+                &connection,
                 wall_time,
                 delegate,
                 &prepared.tools_off,
@@ -438,6 +437,19 @@ pub(super) fn claude_master_turn(
         credential,
         tool_record,
     })
+}
+
+/// Gives a master turn the owner's master model for its harness (DEC-150) in place of the
+/// account's model, which a managed profile may change, so the turn's command pins it; no
+/// master model keeps the account's. Inputs: the attempt's connection and the master
+/// model. Output: the connection the turn launches with.
+fn master_connection(connection: &ModelConnection, model: Option<&str>) -> ModelConnection {
+    let mut chosen = connection.clone();
+    if let Some(model) = model {
+        assert!(!model.is_empty() && model.len() <= crate::model_choice::MODEL_BYTES_MAX);
+        chosen.model.id = model.to_owned();
+    }
+    chosen
 }
 
 /// Builds one Codex master turn in a private home in the turn folder holding a no-refresh copy of
@@ -3047,3 +3059,31 @@ mod codex_turn_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/untrusted_tests.rs"]
 mod untrusted_tests;
+
+/// Reads the owner's harness settings and master model (DEC-150) for one Claude Code or
+/// Codex master turn: the master slot for the harness in the project, then the app's.
+/// Inputs: the engine database, the harness id, its registered executable and the project.
+/// Output: the settings and the model, none for the account's own, or a
+/// `HARNESS_SETTINGS_CODES` refusal or `model_choice_unavailable`.
+fn master_choice(
+    db: &rusqlite::Connection,
+    harness: &str,
+    executable: &Path,
+    project: &crate::protocol::ProjectId,
+) -> Result<(crate::harness_settings::apply::Applied, Option<String>), EngineError> {
+    assert!(matches!(harness, "claude-code" | "codex"));
+    let settings =
+        crate::harness_settings::apply::for_launch(db, harness, executable, Some(project))?;
+    let model = crate::model_choice::store::launch_model(
+        db,
+        harness,
+        &crate::model_choice::catalog(harness),
+        Some(project),
+        crate::model_choice::Slot::Master,
+    )?;
+    Ok((settings, model))
+}
+
+#[cfg(all(test, unix))]
+#[path = "master_host_launch/model_tests.rs"]
+mod model_tests;

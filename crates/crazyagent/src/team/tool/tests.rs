@@ -520,6 +520,7 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             role: Some("page-writer".into()),
             mode: None,
             ticket: None,
+            model: None,
         })
     );
     assert_eq!(
@@ -530,6 +531,7 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             role: None,
             mode: None,
             ticket: None,
+            model: None,
         })
     );
     for role in ["@", "???", &"r".repeat(65)] {
@@ -709,6 +711,7 @@ fn the_engine_checks_again_every_call_read_from_a_mailbox() {
         role: None,
         mode: None,
         ticket: None,
+        model: None,
     };
     assert_eq!(checked(planted), Err(CALL_INVALID));
     let planted = Call::UpdateWork {
@@ -728,6 +731,7 @@ fn the_engine_checks_again_every_call_read_from_a_mailbox() {
         role: Some("Page".into()),
         mode: None,
         ticket: None,
+        model: None,
     };
     assert_eq!(checked(planted), Err(CALL_INVALID));
 }
@@ -1353,6 +1357,7 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
             role: None,
             mode: None,
             ticket: None,
+            model: None,
         })
     );
     for refused in [json!("teams"), json!(3), json!(["native"])] {
@@ -1364,6 +1369,7 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
         role: None,
         mode: Some(SubagentMode::Native),
         ticket: None,
+        model: None,
     };
     assert_eq!(checked(planted.clone()), Ok(planted));
     let line =
@@ -1828,4 +1834,80 @@ fn a_discard_call_needs_a_harness_name_and_a_one_line_reason() {
         json!({"agent": "@docs", "reason": "Not needed\u{200b}"})
     ));
     assert!(TEAM_TOOLS.contains(&DISCARD_TOOL) && !LEAD_TOOLS.contains(&DISCARD_TOOL));
+}
+
+#[test]
+fn a_spawn_names_a_model_only_with_a_short_plain_reason() {
+    let spawn = |arguments: Value| live_call(SPAWN_TOOL, Some(&arguments)).unwrap();
+    let pick = |model: &str, reason: &str| ModelPick {
+        model: model.into(),
+        reason: reason.into(),
+    };
+    assert_eq!(
+        spawn(json!({"task": "Write docs", "model": " gpt-a ", "reason": " cheap docs work "})),
+        Ok(Call::Spawn {
+            task: "Write docs".into(),
+            harness: None,
+            role: None,
+            mode: None,
+            ticket: None,
+            model: Some(pick("gpt-a", "cheap docs work")),
+        })
+    );
+    assert_eq!(
+        spawn(json!({"task": "Write docs", "model": "opus[1m]", "reason": "long file"})),
+        Ok(Call::Spawn {
+            task: "Write docs".into(),
+            harness: None,
+            role: None,
+            mode: None,
+            ticket: None,
+            model: Some(pick("opus[1m]", "long file")),
+        })
+    );
+    for blank in [
+        json!({"task": "Write docs"}),
+        json!({"task": "Write docs", "model": "  ", "reason": ""}),
+        json!({"task": "Write docs", "model": null, "reason": null}),
+    ] {
+        match spawn(blank.clone()) {
+            Ok(Call::Spawn { model, .. }) => assert_eq!(model, None, "{blank}"),
+            other => panic!("not a spawn: {other:?}"),
+        }
+    }
+    let long = "r".repeat(MODEL_REASON_BYTES_MAX + 1);
+    for refused in [
+        json!({"task": "Write docs", "model": "gpt-a"}),
+        json!({"task": "Write docs", "reason": "cheap"}),
+        json!({"task": "Write docs", "model": "bad id", "reason": "cheap"}),
+        json!({"task": "Write docs", "model": "-c", "reason": "cheap"}),
+        json!({"task": "Write docs", "model": "gpt-a\"\nx=1", "reason": "cheap"}),
+        json!({"task": "Write docs", "model": "gpt-a", "reason": "two\nlines"}),
+        json!({"task": "Write docs", "model": "gpt-a", "reason": long}),
+        json!({"task": "Write docs", "model": "gpt-a", "reason": "hidden\u{202e}text"}),
+        json!({"task": "Write docs", "model": 5, "reason": "cheap"}),
+        json!({"task": "Write docs", "model": "gpt-a", "reason": ["cheap"]}),
+    ] {
+        assert_eq!(spawn(refused.clone()), Err(MODEL_INVALID), "{refused}");
+    }
+    let planted = Call::Spawn {
+        task: "Write docs".into(),
+        harness: Some("codex".into()),
+        role: None,
+        mode: None,
+        ticket: None,
+        model: Some(pick("gpt-a", "cheap docs work")),
+    };
+    assert_eq!(checked(planted.clone()), Ok(planted.clone()));
+    let line = serde_json::to_vec(&planted).unwrap();
+    assert_eq!(read_call(&line), Some(planted));
+    let unpicked = br#"{"tool":"spawn","task":"Write docs","harness":null,"role":null}"#;
+    match read_call(unpicked) {
+        Some(Call::Spawn { model, .. }) => assert_eq!(model, None),
+        other => panic!("not a spawn: {other:?}"),
+    }
+    let properties = &spec(SPAWN_TOOL)["inputSchema"]["properties"];
+    assert_eq!(properties["model"]["type"], json!("string"));
+    assert_eq!(properties["reason"]["type"], json!("string"));
+    assert_eq!(spec(SPAWN_TOOL)["inputSchema"]["required"], json!(["task"]));
 }

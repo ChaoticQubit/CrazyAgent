@@ -1,4 +1,4 @@
-use super::{Busy, Grant, Order, Report, TeamRuntime, error, full_stop};
+use super::{Busy, Grant, Order, Placed, Report, TeamRuntime, error, full_stop};
 use crate::agents::Agents;
 use crate::config::ModelAccess;
 use crate::engine::EngineError;
@@ -286,10 +286,23 @@ impl TeamRuntime {
         if self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
         }
-        let account = match self.account_for(access, project, &run.harness, paused) {
-            Ok(Some(account)) => account,
-            Ok(None) => return Ok(()),
-            Err(reason) => {
+        let task = match busy {
+            Busy::Task(task) => Some(task),
+            Busy::Message(_) => None,
+        };
+        let placed = self.start_account(
+            access,
+            project,
+            &run.harness,
+            paused,
+            run.kind,
+            run.agent,
+            task,
+        )?;
+        let account = match placed {
+            Placed::Run(account, _) => account,
+            Placed::Wait(None) => return Ok(()),
+            Placed::Wait(Some(reason)) | Placed::Stop(reason) => {
                 return self.fail_for_now(
                     run,
                     RunState::Interrupted,

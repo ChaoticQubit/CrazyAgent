@@ -32,6 +32,7 @@ pub use transport::harness_settings::HARNESS_SETTINGS_CODES;
 pub use transport::ide::IDE_CODES;
 pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
+pub use transport::model_choice::{Added as ModelAdded, MODEL_CHOICE_PROTOCOL_CODES};
 pub use transport::overview::OVERVIEW_CODES;
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{

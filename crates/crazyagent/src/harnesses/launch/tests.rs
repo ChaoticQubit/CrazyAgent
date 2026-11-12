@@ -903,6 +903,49 @@ fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it()
     assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
 }
 
+/// A launch checks its model with the same rule the owner's model store saves by, so a
+/// Claude Code id such as `opus[1m]` the store accepts also starts, while Codex, whose
+/// model goes into a `-c model="..."` line, still refuses brackets (DEC-150 MS-2).
+#[cfg(unix)]
+#[test]
+fn a_launch_takes_the_model_ids_the_owner_s_store_accepts_for_its_harness() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::Builder::new()
+        .prefix("ca-launch-model-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = folder.path().canonicalize().unwrap();
+    let home = base.join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let request = |harness: &str, model: &str| {
+        let mut request = codex_request(crate::trust::Trust::Reviewed, base.clone());
+        request.harness = harness.into();
+        request.account = AccountBinding::Subscription { home: home.clone() };
+        request.model = Some(model.into());
+        request
+    };
+    for (harness, model, code) in [
+        ("claude-code", "opus[1m]", "launch_sandbox_required"),
+        ("claude-code", "claude-opus-5-5", "launch_sandbox_required"),
+        ("codex", "gpt-6.1-sol", "launch_sandbox_required"),
+        ("codex", "opus[1m]", "launch_model_invalid"),
+        ("claude-code", "-opus", "launch_model_invalid"),
+        ("claude-code", "opus 1m", "launch_model_invalid"),
+    ] {
+        assert_eq!(
+            crate::model_choice::model_valid(harness, model),
+            code != "launch_model_invalid",
+            "{harness} {model}"
+        );
+        assert_eq!(
+            super::validate(&request(harness, model)).unwrap_err().0,
+            code,
+            "{harness} {model}"
+        );
+    }
+}
+
 /// Starts `program` with `args` as the leader of a process group of its own. Inputs: the
 /// program and its arguments. Output: the child and its group as a pid.
 #[cfg(unix)]
@@ -1202,4 +1245,65 @@ fn an_unread_durable_output_log_past_its_bound_is_emptied_only_when_it_is_the_pr
     std::fs::rename(&moved, &path).unwrap();
     assert!(super::trim_unread_output(&path, &probe));
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+}
+
+/// A launched agent's model refusal is told apart from any other turn error by its
+/// harness code alone (DEC-150 F8): Claude Code's `model_not_found` assistant error, and a
+/// Codex app-server turn error whose `codexErrorInfo` is `modelNotFound`, each ahead of the
+/// plain turn error; other codes and wording that only names the model are not refusals.
+#[test]
+fn a_model_refusal_is_reported_from_the_harness_code_ahead_of_its_turn_error() {
+    let refusals = |events: &[LaunchEvent]| {
+        events
+            .iter()
+            .filter(|event| matches!(event, LaunchEvent::ModelRefused))
+            .count()
+    };
+    let mut driver = claude_driver();
+    let (events, _) = driver
+        .receive(&line(json!({
+            "type":"assistant", "uuid":"assistant-1", "session_id":"native-session",
+            "parent_tool_use_id":null, "error":"model_not_found",
+            "message":{"id":"message-1","type":"message","role":"assistant",
+                "model":"observed-model","content":[],"stop_reason":"end_turn",
+                "usage":{"input_tokens":1,"output_tokens":0}}
+        })))
+        .unwrap();
+    assert_eq!(refusals(&events), 1);
+    assert_eq!(turn_errors(&events), [false]);
+    let refused = events
+        .iter()
+        .position(|event| matches!(event, LaunchEvent::ModelRefused));
+    let failed = events
+        .iter()
+        .position(|event| matches!(event, LaunchEvent::TurnError { .. }));
+    assert!(refused < failed, "{events:?}");
+    let (events, _) = driver
+        .receive(&line(json!({
+            "type":"assistant", "uuid":"assistant-2", "session_id":"native-session",
+            "parent_tool_use_id":null, "error":"invalid_request",
+            "message":{"id":"message-2","type":"message","role":"assistant",
+                "model":"observed-model","content":[],"stop_reason":"end_turn",
+                "usage":{"input_tokens":1,"output_tokens":0}}
+        })))
+        .unwrap();
+    assert_eq!(refusals(&events), 0);
+
+    let mut driver = codex_driver_in_a_turn();
+    let (events, _) = driver
+        .receive(&line(json!({"method":"error","params":{
+            "threadId":"own-thread", "turnId":"own-turn", "willRetry":false,
+            "error":{"message":"The model gpt-x does not exist","codexErrorInfo":"modelNotFound"}
+        }})))
+        .unwrap();
+    assert_eq!(refusals(&events), 1, "{events:?}");
+    assert_eq!(turn_errors(&events), [false]);
+    let mut driver = codex_driver_in_a_turn();
+    let (events, _) = driver
+        .receive(&line(json!({"method":"error","params":{
+            "threadId":"own-thread", "turnId":"own-turn", "willRetry":false,
+            "error":{"message":"model not found","codexErrorInfo":"badRequest"}
+        }})))
+        .unwrap();
+    assert_eq!(refusals(&events), 0, "{events:?}");
 }

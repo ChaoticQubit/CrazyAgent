@@ -866,6 +866,7 @@ impl TerminalSession {
                 TranscriptEvent::TurnError { rate_limited } => {
                     LaunchEvent::TurnError { rate_limited }
                 }
+                TranscriptEvent::ModelRefused => LaunchEvent::ModelRefused,
                 TranscriptEvent::TurnFinished { success } => {
                     if !self.background.is_empty() && (success || self.over_hold) {
                         self.held = true;

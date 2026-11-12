@@ -1299,6 +1299,7 @@ fn answer(
             role,
             mode,
             ticket,
+            model,
         } => {
             return delegate(
                 connection,
@@ -1307,6 +1308,7 @@ fn answer(
                 (harness.as_deref(), role.as_deref()),
                 mode,
                 ticket.as_deref(),
+                model.as_ref(),
             );
         }
         Call::Ticket { op, arguments } => tool::tracker::answer(
@@ -1398,6 +1400,7 @@ pub(super) fn answer_sub(
             role,
             mode: None,
             ticket,
+            model,
         } => lead_delegate(
             connection,
             answering,
@@ -1405,6 +1408,7 @@ pub(super) fn answer_sub(
             &task,
             (harness.as_deref(), role.as_deref()),
             ticket.as_deref(),
+            model.as_ref(),
         )?,
         Call::Ticket { op, arguments } => tool::tracker::answer(
             connection,
@@ -1600,10 +1604,11 @@ fn is_worker(
 
 /// Starts a worker of a lead (N1) when Sub-agent depth and Max teammates per harness allow
 /// it (DEC-104 K8): admitted as the master's task would be, only for a harness kind with a
-/// signed-in account, cut from the lead's commit and reporting back to the lead, and linked
-/// to the ticket the call names (TI-3). Takes the database, what the answers need, the
-/// lead, the task, harness and role, and the ticket. Returns the sentence the lead reads
-/// and whether it is a refusal, which wrote nothing, or a SQLite failure.
+/// signed-in account, cut from the lead's commit and reporting back to the lead, linked to
+/// the ticket the call names (TI-3), on a model pick the owner's list allows (DEC-150).
+/// Takes the database, what the answers need, the lead, the task, harness and role, the
+/// ticket and the model pick. Returns the sentence the lead reads and whether it is a
+/// refusal, which wrote nothing, or a SQLite failure.
 fn lead_delegate(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -1611,6 +1616,7 @@ fn lead_delegate(
     task: &str,
     (harness, role): (Option<&str>, Option<&str>),
     ticket: Option<&str>,
+    model: Option<&tool::ModelPick>,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     let tx = connection
@@ -1666,6 +1672,10 @@ fn lead_delegate(
             row.get(0)
         })
         .map_err(state)?;
+    let on = match super::model_pick::pin(&tx, project, id, &chosen, model)? {
+        Ok(on) => on,
+        Err(refusal) => return Ok((format!("Not started: {refusal}"), true)),
+    };
     let ready = super::launch_harness(&chosen)
         .map(|launch| signed_in_account(&tx, answering.access, project, launch))
         .transpose()?
@@ -1692,7 +1702,7 @@ fn lead_delegate(
     tx.commit().map_err(state)?;
     Ok((
         format!(
-            "Task {id} is queued for a {chosen} worker of yours, in its own worktree on a branch <your task branch>--<its name>, cut from your current commit. The engine tells you when it ends; then merge it into your task branch."
+            "Task {id} is queued for a {chosen} worker of yours{on}, in its own worktree on a branch <your task branch>--<its name>, cut from your current commit. The engine tells you when it ends; then merge it into your task branch."
         ),
         false,
     ))
@@ -2277,11 +2287,12 @@ fn unlogged(problem: &EngineError) -> String {
     )
 }
 
-/// Admits the task a live master's `spawn` names at once, with its role and mode, and
-/// links it to the ticket the call names (TI-3), all in one transaction. Takes the
-/// database, what the answers need, the task, its harness and role, the mode and the
-/// ticket. Returns the sentence the master reads and whether it is a refusal, which wrote
-/// nothing, or a SQLite failure.
+/// Admits the task a live master's `spawn` names at once, with its role, mode and model
+/// pick checked against the owner's allowed list (DEC-150), and links it to the ticket the
+/// call names (TI-3), all in one transaction. Takes the database, what the answers need,
+/// the task, its harness and role, the mode, the ticket and the model pick. Returns the
+/// sentence the master reads and whether it is a refusal, which wrote nothing, or a
+/// SQLite failure.
 fn delegate(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -2289,6 +2300,7 @@ fn delegate(
     (harness, role): (Option<&str>, Option<&str>),
     mode: Option<crate::coord::settings::SubagentMode>,
     ticket: Option<&str>,
+    model: Option<&tool::ModelPick>,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     let tx = connection
@@ -2354,6 +2366,10 @@ fn delegate(
     {
         return Ok((format!("Not handed off: {reason}."), true));
     }
+    let on = match super::model_pick::pin(&tx, project, id, &chosen, model)? {
+        Ok(on) => on,
+        Err(refusal) => return Ok((format!("Not handed off: {refusal}"), true)),
+    };
     tx.commit().map_err(state)?;
     let waiting = if status == "needs_pool" {
         " It waits until the pool has a ready account for that harness."
@@ -2362,7 +2378,7 @@ fn delegate(
     };
     Ok((
         format!(
-            "Task {id} is queued for a {chosen} sub-agent.{waiting} The engine tells you when it ends."
+            "Task {id} is queued for a {chosen} sub-agent{on}.{waiting} The engine tells you when it ends."
         ),
         false,
     ))
