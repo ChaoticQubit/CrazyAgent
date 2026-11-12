@@ -1947,11 +1947,12 @@ fn stored() -> crate::project_setup::StoredSetup {
 
 /// Team settings name the saved master harness on the plan line and, after the On harness
 /// switch choice, when a saved change reaches the running master; at 80 columns too, where a
-/// setting of its own would fold the first settings row away.
+/// setting of its own would fold the first settings row away. At 80 by 24 the plan line gives
+/// way first, as `draw` orders it, and every setting, Left running included, still shows.
 #[test]
 fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_master() {
     let view = loaded();
-    for (width, height) in [(160, 36), (80, 24)] {
+    for (width, height) in [(160, 36), (80, 25)] {
         let rows = frame(&view, width, height);
         assert!(find(&rows, "leads.").contains("Codex leads."));
         assert!(
@@ -1961,6 +1962,13 @@ fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_m
             rows.join("\n")
         );
     }
+    let short = frame(&view, 80, 24);
+    assert!(
+        find(&short, "On harness switch")
+            .contains("On harness switch  Carry over, when the master is idle")
+    );
+    assert!(find(&short, "Max teammates").contains("Max teammates  No limit"));
+    assert!(find(&short, "Left running").contains("Left running  End them"));
     let mut later = team();
     later.apply_harness_switch = crate::team::SwitchApply::NextStart;
     let mut view = TeamView::new(project());

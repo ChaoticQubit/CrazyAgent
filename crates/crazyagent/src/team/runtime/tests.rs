@@ -3811,15 +3811,20 @@ fn a_live_claude_master_whose_terminal_ends_resumes_its_conversation_and_logs_ea
     set_master(&fixture, "claude-code");
     switch_session(&fixture.connection, "s-one");
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the Claude Code master runs and is kept", |f| {
-        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
+    fixture.until(&mut team, "the Claude Code master runs", |f| {
+        live_agent(&f.connection).is_some()
     });
     let master = masters(&fixture.connection)[0];
     host.input(&AgentId::team(master).unwrap(), b"hello\r")
         .unwrap();
-    fixture.until(&mut team, "the owner's turn ends", |f| {
-        live_turns(&f.connection) == (1, false)
-    });
+    fixture.until(
+        &mut team,
+        "the owner's turn ends and its conversation, recorded from that turn, is kept",
+        |f| {
+            live_turns(&f.connection) == (1, false)
+                && kept_conversation(&f.connection, "s-one").is_some()
+        },
+    );
     let (conversation, _) = kept_conversation(&fixture.connection, "s-one").unwrap();
 
     host.input(&AgentId::team(master).unwrap(), b"/exit\r")
@@ -28225,6 +28230,8 @@ fn a_native_lead_that_exits_on_its_own_has_its_stop_end_what_it_started() {
 /// as failed and the owner still sees what runs. The stop never reports the agent as only
 /// having left commands running, so nothing keeps it from failing (TEAM-8-L1). The lead runs
 /// on a server with no keeper, the one place a close can leave such a process (KEEPER (b)).
+/// Its project keeps what was left running (DEC-147.4 Keep), so the process outliving the
+/// close shows the close left it; under the End default the hold would end it at once.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_last() {
@@ -28233,6 +28240,14 @@ fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_la
         "defined(POSIX::setpgid(0, 0)) or die; $SIG{HUP} = 'IGNORE';",
     );
     assert_ne!(script, LEAVING_CLAUDE);
+    let kept_by = crate::harnesses::leftovers::HoldBy {
+        project: Some("team-close-keeps-left-running".to_owned()),
+        who: "a test agent".to_owned(),
+    };
+    crate::harnesses::leftovers::set_mode(
+        "team-close-keeps-left-running",
+        crate::harnesses::leftovers::LeftoverMode::Keep,
+    );
     let ((problem, left), running) = ended_native_lead(&script, true, |session, host, lead| {
         let AgentSession::Terminal(mut session) = session else {
             panic!("the native lead runs in a terminal");
@@ -28257,14 +28272,7 @@ fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_la
                 }
             });
             let problem = live_serve(
-                *session,
-                &receive,
-                &reports,
-                &cancel,
-                &leave,
-                false,
-                None,
-                &test_by(),
+                *session, &receive, &reports, &cancel, &leave, false, None, &kept_by,
             );
             let _ = ended.send(());
             let left = reported
