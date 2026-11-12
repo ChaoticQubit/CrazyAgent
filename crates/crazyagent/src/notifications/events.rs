@@ -14,10 +14,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub const NEAR_PERCENT: f64 = 90.0;
 /// The share of a limit window at which an account counts as at its limit.
 pub const AT_PERCENT: f64 = 100.0;
+/// How far apart two readings' reset times may be and still name one window: a reset time
+/// worked out from "resets in N seconds" moves a little with every reading.
+pub const RESET_SLACK_MS: i64 = 5 * 60 * 1000;
 const ENGINE_RUN: &str = "engine_run";
 const ENGINE_RESTARTED: &str = "The CrazyAgent engine stopped without closing and started again.";
 
 const _: () = assert!(NEAR_PERCENT < AT_PERCENT);
+const _: () = assert!(RESET_SLACK_MS > 0 && RESET_SLACK_MS * 12 <= 5 * 60 * 60 * 1000);
 const _: () = assert!(ENGINE_RESTARTED.len() <= super::TEXT_BYTES_MAX);
 
 fn logged(problem: &EngineError) {
@@ -177,13 +181,23 @@ pub(crate) fn limits(db: &Connection, account: &CredentialRef) -> Option<Limits>
     }
 }
 
+/// Whether two readings' reset times name one window: both unknown, or both known and at
+/// most `RESET_SLACK_MS` apart. Inputs: the two reset times. Output: true for one window.
+fn one_window(before: Option<i64>, after: Option<i64>) -> bool {
+    match (before, after) {
+        (None, None) => true,
+        (Some(before), Some(after)) => before.abs_diff(after) <= RESET_SLACK_MS.unsigned_abs(),
+        _ => false,
+    }
+}
+
 /// Which item a window's new reading makes: at the limit when it reaches `AT_PERCENT`, near
 /// it when it reaches `NEAR_PERCENT`, each only when the reading before in the same window
 /// was below. Inputs: the window before and after. Output: the kind, or none.
 fn crossed(before: Window, after: Window) -> Option<NoticeKind> {
     let (used, resets) = after?;
     let prior = before
-        .filter(|(_, prior_resets)| *prior_resets == resets)
+        .filter(|(_, prior_resets)| one_window(*prior_resets, resets))
         .map_or(0.0, |(prior, _)| prior);
     assert!((0.0..=100.0).contains(&used) && (0.0..=100.0).contains(&prior));
     if used >= AT_PERCENT && prior < AT_PERCENT {
