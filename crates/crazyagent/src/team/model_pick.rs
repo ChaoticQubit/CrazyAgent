@@ -11,6 +11,10 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_task_models (
     reason TEXT NOT NULL
 );";
 
+/// The reason an owner's own delegate pins with its model (DEC-150 addendum 7), shown on
+/// the task where a master's pick shows the reason it gave.
+pub(crate) const OWNER_PICK_REASON: &str = "Picked by the owner.";
+
 /// Checks the model a spawn picked for a new task against the owner's choices and pick
 /// rule for its harness (DEC-150) and pins an allowed pick with its reason to the task, in
 /// the caller's transaction, so a refusal rolls the task back. No pick, or one the rule
