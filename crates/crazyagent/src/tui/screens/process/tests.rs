@@ -600,6 +600,52 @@ fn a_stale_save_keeps_the_draft_and_never_adopts_the_newer_version() {
     );
 }
 
+/// A refused save over a four-line newer text keeps the editor and the "not saved" line in
+/// view at 80x24 under the wrapped hint bar (backlog 27, review F1): the blank separators
+/// give way, then the intro's Ctrl-G and Ctrl-D sentence, which the bar still names. At
+/// 120x40 nothing gives way.
+#[test]
+fn a_refused_save_over_a_four_line_text_keeps_the_problem_in_view_at_80_by_24() {
+    use crate::tui::screens::settings_accounts::tests::bar_rows;
+    let mut shell = opened(Scope::App, "Old rule.");
+    typed(&mut shell, "Mine. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Mine. Old rule.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    let stale = SavedText::Stale {
+        version: READ_VERSION,
+        current: ProcessText {
+            text: "One.\nTwo.\nThree.\nFour.".into(),
+            version: READ_VERSION + 1,
+        },
+        writer: crate::storage::versioned::LastWriter::Owner,
+    };
+    shell.arrive(answered(save, Ok(ProcessReply::Saved(stale))));
+    let rows = render(&mut shell, 80, 24);
+    let shown = rows.join("\n");
+    for text in [
+        "Four.",
+        "Keep mine",
+        "Instructions for agents",
+        "Mine. ",
+        "so yours were not saved.",
+    ] {
+        assert!(shown.contains(text), "{text}:\n{shown}");
+    }
+    assert!(!shown.contains("Ctrl-G imports"), "{shown}");
+    let bar = bar_rows(&rows).join("\n");
+    assert!(bar.contains("Ctrl-G Import from file"), "{shown}");
+    assert!(bar.contains("Ctrl-D Default process"), "{shown}");
+    let tall = render(&mut shell, 120, 40).join("\n");
+    assert!(tall.contains("Ctrl-G imports"), "{tall}");
+    assert!(tall.contains("so yours were not saved."), "{tall}");
+}
+
 #[test]
 fn stale_save_shows_the_conflict_choices() {
     let stale = |named: u64, text: &str| {
