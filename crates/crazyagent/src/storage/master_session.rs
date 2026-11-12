@@ -4494,7 +4494,11 @@ pub(super) fn runtime(
             if turn.phase != MasterTurnPhase::Running || !turn_tools(&tx, &session)? {
                 return Err(error("master_memory_turn_not_running"));
             }
-            assert_eq!(tx.total_changes(), written, "a memory turn check writes nothing");
+            assert_eq!(
+                tx.total_changes(),
+                written,
+                "a memory turn check writes nothing"
+            );
             tx.commit().map_err(error)?;
             crate::team::master::serve_memory_calls(db, &session.project_id, mailbox)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
