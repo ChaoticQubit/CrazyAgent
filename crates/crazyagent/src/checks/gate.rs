@@ -237,7 +237,7 @@ pub fn assess(
             }
         }
         if skips {
-            let added: BTreeSet<String> = integrity::skips(db, &project, change_set, &files)?
+            let added: BTreeSet<String> = integrity::skips(db, &project, change_set, &view.head, &files)?
                 .into_iter()
                 .map(|skip| skip.path)
                 .collect();
