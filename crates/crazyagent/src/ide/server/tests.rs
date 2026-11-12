@@ -2626,6 +2626,61 @@ fn only_a_full_access_launch_has_workspace_trust_on() {
     );
 }
 
+/// V3C-L1: below Full access an untrusted repository's IDE opens in VS Code Restricted Mode
+/// and its git shim never runs the project's hooks, even with the owner's hooks switch on,
+/// while the same policy on a reviewed repository gets workspace trust and its hooks.
+#[test]
+fn an_untrusted_repository_ide_opens_in_restricted_mode_with_its_hooks_off() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let shim = |folder: &Path, hooks: Option<&Path>| {
+        let text = fs::read_to_string(
+            settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM),
+        )
+        .unwrap();
+        let wanted = crate::ide::git::shim_text(
+            hooks,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX),
+            )),
+        )
+        .unwrap();
+        text == wanted
+    };
+    for (name, trust) in [
+        ("reviewed", crate::trust::Trust::Reviewed),
+        ("untrusted", crate::trust::Trust::Untrusted),
+    ] {
+        let id = project(name);
+        set_policy(data.path(), &id, AgentAccess::Sandboxed, true);
+        crate::trust::save(
+            &crate::landing::open(data.path()).unwrap(),
+            id.as_str(),
+            trust,
+            crate::trust::Origin::Owner,
+        )
+        .unwrap();
+        let trusted = trust == crate::trust::Trust::Reviewed;
+        let (built, folder) = built_server(&servers, &id, &root);
+        assert_eq!(
+            built
+                .get_args()
+                .any(|arg| arg == "--disable-workspace-trust"),
+            trusted,
+            "{name}"
+        );
+        assert!(
+            shim(&folder, trusted.then_some(root.as_path())),
+            "{name}: the git shim does not match the hooks rule"
+        );
+    }
+}
+
 /// Only a Full access server gets a lineage token, the one its command carries; a confined
 /// server's processes stay in its sandbox.
 #[test]
