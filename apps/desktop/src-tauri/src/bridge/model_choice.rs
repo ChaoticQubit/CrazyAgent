@@ -487,6 +487,8 @@ mod tests {
                     origin: Origin::Catalog,
                 })
                 .collect(),
+            qualified: true,
+            reason: None,
         };
         let all = || Slot::ALL.into_iter().map(row).collect::<Vec<_>>();
         let page = page_of(models(all(), "claude-code", 2), "claude-code", None).unwrap();
@@ -503,6 +505,11 @@ mod tests {
             models(swapped, "claude-code", 0),
             models(all(), "codex", 0),
             models(all(), "claude-code", CATALOG_MODELS_MAX + CUSTOM_MAX + 1),
+            Models {
+                qualified: false,
+                reason: Some("x".repeat(UNQUALIFIED_REASON_BYTES_MAX + 1)),
+                ..models(all(), "claude-code", 0)
+            },
         ] {
             assert_eq!(
                 page_of(broken, "claude-code", None).unwrap_err().code,

@@ -18,6 +18,8 @@ const page = (rows = {}, extra = {}) => ({
     harness: "claude-code",
     rows: ["master", "agent", "allowed"].map((slot) => row(slot, rows[slot])),
     candidates: candidates(extra.owned ?? []),
+    qualified: extra.qualified ?? true,
+    reason: extra.reason ?? null,
   },
   project_id: extra.project_id ?? null, qualified_versions: ["2.1.309"], sources: ["https://docs.anthropic.com/en/docs/claude-code/model-config"],
 });
@@ -126,6 +128,17 @@ test("the Models section shows each slot with its control, source and catalog li
   assert.doesNotMatch(markup, /aria-label="Save Master model"/, "no change, no Save");
   const changed = section(ok(page({ master: { here: "opus", effective: "opus", source: "app" } })), { drafts: { master: "sonnet" } });
   assert.match(changed, /aria-label="Save Master model"/);
+});
+
+test("a harness version the model list was not checked on shows the engine's reason, and the choices stay", () => {
+  const reason = "listed for Claude Code 2.1.309, 2.1.322; installed 2.1.330 not yet checked";
+  const unchecked = page({}, { qualified: false, reason });
+  assert.equal(client.uncheckedLine(unchecked.models), `Version not checked: ${reason}.`);
+  assert.equal(client.uncheckedLine(page().models), "");
+  const markup = section(ok(unchecked));
+  assert.match(markup, /Version not checked: listed for Claude Code 2\.1\.309, 2\.1\.322; installed 2\.1\.330 not yet checked\./);
+  assert.match(markup, /<select id="models-master"/, "the ids can still be chosen");
+  assert.doesNotMatch(section(ok(page())), /Version not checked/);
 });
 
 test("pending and failed owner ids show their state and stay unticked and disabled", () => {

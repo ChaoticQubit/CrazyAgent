@@ -57,6 +57,8 @@ fn models(rows: [Row; 3], owned: &[(&str, Origin)]) -> Models {
         harness: HARNESS.into(),
         rows: rows.into(),
         candidates,
+        qualified: true,
+        reason: None,
     }
 }
 
@@ -575,6 +577,8 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
             read_only(Slot::Allowed),
         ],
         candidates: vec![],
+        qualified: true,
+        reason: None,
     };
     let page = ModelsPage::new("opencode".into(), "OpenCode".into(), Scope::App);
     let mut shell = Shell::with(ctx(80, 24), Box::new(page));
@@ -596,6 +600,34 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
     shell.key(Key::Enter);
     assert_eq!(requests(&mut shell), vec![]);
     assert_eq!(lead(&shell), "Not supported by this harness.");
+}
+
+#[test]
+fn a_harness_version_the_model_list_was_not_checked_on_shows_the_reason_and_still_sends() {
+    let reason = "listed for Claude Code 2.1.309, 2.1.322; installed 2.1.330 not yet checked";
+    let mut shell = app_page(Models {
+        qualified: false,
+        reason: Some(reason.into()),
+        ..plain_models()
+    });
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("Version not checked: listed for Claude Code"),
+        "{text}"
+    );
+    assert!(text.contains("Add a model id"), "{text}");
+    press(&mut shell, &[Key::Enter, Key::Right, Key::Enter]);
+    assert_eq!(requests(&mut shell).len(), 1, "the ids still save");
+    let mut shell = app_page(Models {
+        qualified: false,
+        reason: Some("x".repeat(crate::model_choice::UNQUALIFIED_REASON_BYTES_MAX + 1)),
+        ..plain_models()
+    });
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("Could not read the Claude Code models."),
+        "{text}"
+    );
 }
 
 #[test]
