@@ -1655,15 +1655,18 @@ fn first_run_shows_the_harness_step_with_only_rcli_picked() {
         screen.contains("c Continue without")
     });
     pty.type_bytes(b"c");
-    pty.until("the Harnesses step lists RCLI picked and the others unpicked", |screen| {
-        screen.contains("Choose your harnesses")
-            && screen.contains("[x] RCLI")
-            && screen.contains("Comes with CrazyAgent.")
-            && screen.contains("[ ] Codex")
-            && screen.contains("[ ] Claude Code")
-            && screen.contains("Enter Continue")
-            && !screen.contains("Install picked harnesses")
-    });
+    pty.until(
+        "the Harnesses step lists RCLI picked and the others unpicked",
+        |screen| {
+            screen.contains("Choose your harnesses")
+                && screen.contains("[x] RCLI")
+                && screen.contains("Comes with CrazyAgent.")
+                && screen.contains("[ ] Codex")
+                && screen.contains("[ ] Claude Code")
+                && screen.contains("Enter Continue")
+                && !screen.contains("Install picked harnesses")
+        },
+    );
     pty.type_bytes(b"\r");
     pty.until("Continue goes on to the Accounts step", |screen| {
         screen.contains("Add an account") && !screen.contains("Choose your harnesses")

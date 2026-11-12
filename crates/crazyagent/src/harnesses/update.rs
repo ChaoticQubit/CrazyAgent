@@ -812,11 +812,30 @@ pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixe
     }
 }
 
+/// Tells whether the tool resolver finds no Node.js in the roots' Homebrew folders or the
+/// HOME folders the harness catalog uses, nvm's versions included. Input: the roots.
+/// Output: true when no usable node is there.
+fn node_missing(roots: &Roots) -> bool {
+    let mut folders: Vec<PathBuf> = roots
+        .brew_prefixes
+        .iter()
+        .map(|prefix| prefix.join("bin"))
+        .collect();
+    if roots.home.is_absolute() {
+        folders.extend(harnesses::home_places(&roots.home));
+    }
+    crate::tools::resolve(
+        "node",
+        &crate::tools::Places::new(folders, Some(roots.home.clone())),
+    )
+    .is_err()
+}
+
 /// Builds the one install command of a harness that is not installed: Homebrew first with
 /// the table's installable name (casks only where `roots.casks`), else npm with the table's
 /// package and the vendor's flags. A missing or untrusted tool is skipped; an npm harness on a
-/// Mac with no npm at all is refused as needing Node. Inputs: the harness id and the roots.
-/// Output: the command, or the refusal code.
+/// Mac with no npm and no Node the tool resolver finds is refused as needing Node.
+/// Inputs: the harness id and the roots. Output: the command, or the refusal code.
 pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
     let id = harnesses::canonical(id);
     if id == BUNDLED {
@@ -847,7 +866,7 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
             .iter()
             .all(|prefix| std::fs::symlink_metadata(prefix.join("bin").join("npm")).is_err())
     };
-    let refusal = if recipe.npm.is_some() && no_npm() {
+    let refusal = if recipe.npm.is_some() && no_npm() && node_missing(roots) {
         NEEDS_NODE
     } else {
         NO_INSTALLER
