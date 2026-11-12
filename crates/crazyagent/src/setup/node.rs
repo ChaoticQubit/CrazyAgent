@@ -148,11 +148,10 @@ pub fn runtime(engine_root: &Path) -> Option<NodeRuntime> {
     (own_file && inside && prefix_ready).then_some(NodeRuntime { node, npm, prefix })
 }
 
-/// The one test of whether this machine has Node, used by the setup row, the setup run and
-/// npm harness installs alike: the first folder on the places where the tool resolver
-/// accepts both `node` and `npm`, npm with the interpreter its first line names, so npm runs
-/// with the node of its own install and never pairs with a node from another. The engine's
-/// own Node is found the same way, through its links in `setup/bin`. Nothing is run.
+/// The one test of whether this machine has Node, for the setup row, the setup run and npm
+/// harness installs: the first folder on the places where the tool resolver accepts both
+/// `node` and `npm` (npm with its interpreter), so npm never pairs with another install's
+/// node; the engine's own is found through its `setup/bin` links. Nothing is run.
 /// Input: the places. Output: the Node, or none when no folder holds both.
 pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
     let found = places.folders().iter().find_map(|folder| {
