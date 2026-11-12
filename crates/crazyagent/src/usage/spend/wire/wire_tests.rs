@@ -64,13 +64,18 @@ fn a_codex_spend_posts_the_key_and_token_and_names_no_reset() {
 fn the_curl_command_holds_no_token_key_or_url() {
     let token = secret();
     let key = attempt_key().unwrap();
-    let url = url::Url::parse("http://127.0.0.1:9/backend-api/wham/rate-limit-reset-credits/consume")
-        .unwrap();
+    let url =
+        url::Url::parse("http://127.0.0.1:9/backend-api/wham/rate-limit-reset-credits/consume")
+            .unwrap();
     let (command, config) = codex_request(&url, &credential(&token), &key, true)
         .unwrap()
         .json_command("{}")
         .unwrap();
-    let shown = format!("{:?} {:?}", command.get_args().collect::<Vec<_>>(), command.get_envs().collect::<Vec<_>>());
+    let shown = format!(
+        "{:?} {:?}",
+        command.get_args().collect::<Vec<_>>(),
+        command.get_envs().collect::<Vec<_>>()
+    );
     assert!(!shown.contains(&token));
     assert!(!shown.contains(&key));
     assert!(!shown.contains("rate-limit-reset-credits"));
@@ -82,12 +87,30 @@ fn the_curl_command_holds_no_token_key_or_url() {
 #[test]
 fn codex_spend_replies_are_read_by_their_outcome_word_in_either_case() {
     let cases = [
-        (serde_json::json!({"outcome": "nothingToReset"}), Outcome::NothingToReset),
-        (serde_json::json!({"outcome": "nothing_to_reset"}), Outcome::NothingToReset),
-        (serde_json::json!({"outcome": "noCredit"}), Outcome::NoCredit),
-        (serde_json::json!({"result": "already-redeemed"}), Outcome::AlreadyRedeemed),
-        (serde_json::json!({"status": "RESET", "extra": 1}), Outcome::Reset),
-        (serde_json::json!({"outcome": "somethingNew"}), Outcome::Unknown),
+        (
+            serde_json::json!({"outcome": "nothingToReset"}),
+            Outcome::NothingToReset,
+        ),
+        (
+            serde_json::json!({"outcome": "nothing_to_reset"}),
+            Outcome::NothingToReset,
+        ),
+        (
+            serde_json::json!({"outcome": "noCredit"}),
+            Outcome::NoCredit,
+        ),
+        (
+            serde_json::json!({"result": "already-redeemed"}),
+            Outcome::AlreadyRedeemed,
+        ),
+        (
+            serde_json::json!({"status": "RESET", "extra": 1}),
+            Outcome::Reset,
+        ),
+        (
+            serde_json::json!({"outcome": "somethingNew"}),
+            Outcome::Unknown,
+        ),
         (serde_json::json!({"outcome": 3}), Outcome::Unknown),
         (serde_json::json!([]), Outcome::Unknown),
     ];
@@ -95,7 +118,8 @@ fn codex_spend_replies_are_read_by_their_outcome_word_in_either_case() {
         let answer = body.clone();
         let server = Server::start(move |_, _| Answer::json(200, answer.clone()));
         let key = attempt_key().unwrap();
-        let outcome = codex_consume(consume_at(&server), &credential(&secret()), &key, true).unwrap();
+        let outcome =
+            codex_consume(consume_at(&server), &credential(&secret()), &key, true).unwrap();
         assert_eq!(outcome, expected, "{body}");
     }
     let server = Server::start(|_, _| Answer::bytes(200, b"not json".to_vec()));
@@ -140,8 +164,13 @@ fn codex_spend_failures_become_plain_codes() {
 #[test]
 fn a_malformed_key_is_never_sent() {
     let server = Server::start(|_, _| Answer::json(200, serde_json::json!({"outcome": "reset"})));
-    let problem = codex_consume(consume_at(&server), &credential(&secret()), "not-a-key", true)
-        .unwrap_err();
+    let problem = codex_consume(
+        consume_at(&server),
+        &credential(&secret()),
+        "not-a-key",
+        true,
+    )
+    .unwrap_err();
     assert_eq!(problem.0, "usage_request_invalid");
     assert!(server.seen().is_empty());
 }
@@ -149,8 +178,9 @@ fn a_malformed_key_is_never_sent() {
 #[test]
 fn a_plain_http_consume_call_is_refused_unless_it_is_a_loopback_test() {
     let key = attempt_key().unwrap();
-    let url = url::Url::parse("http://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")
-        .unwrap();
+    let url =
+        url::Url::parse("http://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")
+            .unwrap();
     assert_eq!(
         codex_consume(url, &credential(&secret()), &key, false)
             .unwrap_err()

@@ -1,8 +1,9 @@
 use super::capture::{Attribution, Format, RunKind, run_attribution, scan_agent_home, scan_runs};
 use super::health::{UsageStep, clear, record_panic, record_recovered};
-use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
+use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, PollCredential, Provider, poll};
 use super::recount;
 use super::report::{mark_unreported, reports_usage};
+use super::spend;
 use super::{LimitSource, failure, record_failure, record_observation, storage};
 use crate::config::{ModelAccess, ModelConnection};
 use crate::engine::bootstrap::NativeProfileUsePurpose;
@@ -271,6 +272,7 @@ impl Usage {
             self.poll_all(&access, now_ms)?;
             self.completed(UsageStep::Poll, now_ms)?;
         }
+        self.spend_all(&access, now_ms)?;
         self.doing = UsageStep::Team;
         self.scan_team(&access, now_ms)?;
         self.completed(UsageStep::Team, now_ms)?;
@@ -524,6 +526,73 @@ impl Usage {
         connection: &ModelConnection,
         now_ms: i64,
     ) -> Result<Option<super::Observation>, EngineError> {
+        let Some((provider, credential)) = self.credential(connection, "poll")? else {
+            return Ok(None);
+        };
+        let (claude, codex, loopback) = &self.endpoints;
+        let url = match provider {
+            Provider::Claude => claude.clone(),
+            Provider::Codex => codex.clone(),
+        };
+        poll(provider, url, &credential, *loopback, now_ms).map(Some)
+    }
+
+    /// Runs the spend part of a step (DEC-154 slice 3): settles sent spends a newer poll has
+    /// read, tracks the limited pools (queuing an auto-spend when the owner chose it), then
+    /// sends each queued spend with its stored key, its token read under the same custody
+    /// lease as the poll. Inputs: the live access and the time. Output: done, or the
+    /// store's failure.
+    fn spend_all(&mut self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
+        spend::settle_sent(&self.db, now_ms)?;
+        spend::track_pools(&self.db, access, now_ms)?;
+        let spends = spend::read(&self.db)?.spends();
+        for attempt in spend::queued(&self.db)? {
+            let connection = access
+                .connections
+                .iter()
+                .find(|connection| connection.id == attempt.account);
+            let refused = match connection.map(MemberKind::of) {
+                _ if !spends => Some("usage_spend_off"),
+                None => Some("usage_spend_no_account"),
+                Some(MemberKind::Claude | MemberKind::Chatgpt) => None,
+                Some(_) => Some("usage_spend_not_in_app"),
+            };
+            if let Some(code) = refused {
+                spend::not_sent(&self.db, &attempt, Some(&failure(code)), now_ms)?;
+                continue;
+            }
+            let connection = connection.expect("a refused attempt was skipped");
+            match self.credential(connection, "spend") {
+                Ok(Some((provider, credential))) => {
+                    let (claude, codex, loopback) = &self.endpoints;
+                    spend::send_one(
+                        &self.db,
+                        &attempt,
+                        provider,
+                        &credential,
+                        claude,
+                        codex,
+                        *loopback,
+                        now_ms,
+                    )?;
+                }
+                Ok(None) => spend::not_sent(&self.db, &attempt, None, now_ms)?,
+                Err(problem) => spend::not_sent(&self.db, &attempt, Some(&problem), now_ms)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads one managed account's credential for one call: proves its sign-in as an agent
+    /// turn does, takes a shared lease on its profile only to read the access token, and
+    /// releases the lease before the call. Inputs: the connection and the call's name for
+    /// the lease. Output: the provider and credential, None for an account that is not a
+    /// Claude or Codex sign-in, not signed in or busy signing in, or the plain failure.
+    fn credential(
+        &mut self,
+        connection: &ModelConnection,
+        call: &str,
+    ) -> Result<Option<(Provider, PollCredential)>, EngineError> {
         let (provider, harness) = match MemberKind::of(connection) {
             MemberKind::Claude => (Provider::Claude, "claude-code"),
             MemberKind::Chatgpt => (Provider::Codex, "codex"),
@@ -557,7 +626,7 @@ impl Usage {
         }
         drop(tx);
         self.polls += 1;
-        let operation = RequestId::new(format!("usage-poll-{}", self.polls)).map_err(storage)?;
+        let operation = RequestId::new(format!("usage-{call}-{}", self.polls)).map_err(storage)?;
         let custody = self.custody.as_mut().map_err(|error| error.clone())?;
         let lease = match custody.acquire_use(
             &host,
@@ -572,13 +641,7 @@ impl Usage {
         };
         let credential = lease.usage_credential(&executable);
         drop(lease);
-        let credential = credential?;
-        let (claude, codex, loopback) = &self.endpoints;
-        let url = match provider {
-            Provider::Claude => claude.clone(),
-            Provider::Codex => codex.clone(),
-        };
-        poll(provider, url, &credential, *loopback, now_ms).map(Some)
+        Ok(Some((provider, credential?)))
     }
 }
 

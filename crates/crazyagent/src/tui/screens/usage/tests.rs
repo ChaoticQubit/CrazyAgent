@@ -105,6 +105,7 @@ fn report() -> UsageReport {
         counting_notice: None,
         activity: Vec::new(),
         models: Vec::new(),
+        spend: Default::default(),
     }
 }
 

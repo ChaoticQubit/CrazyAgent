@@ -411,6 +411,7 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(health::SCHEMA).map_err(storage)?;
     db.execute_batch(report::SCHEMA).map_err(storage)?;
     db.execute_batch(money::SCHEMA).map_err(storage)?;
+    db.execute_batch(spend::SCHEMA).map_err(storage)?;
     db.execute_batch(turns::SCHEMA).map_err(storage)?;
     db.execute_batch(recount::SCHEMA).map_err(storage)?;
     db.execute_batch(activity::SCHEMA).map_err(storage)?;

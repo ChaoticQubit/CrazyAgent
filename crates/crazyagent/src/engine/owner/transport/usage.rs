@@ -3,6 +3,7 @@ use crate::protocol::{CredentialRef, ProjectId, encode_frame};
 use crate::usage::metrics::Metrics;
 use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
+use crate::usage::spend::SpendSettings;
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,7 @@ pub const USAGE_CODES: &[&str] = &[
     "usage_reply_bounds",
     "usage_request_bounds",
     "usage_request_invalid",
+    "usage_spend_off",
     "usage_unavailable",
     "owner_authentication_failed",
     "owner_authority_unavailable",
@@ -56,6 +58,12 @@ enum Action {
     },
     DecideRecount {
         use_new: bool,
+    },
+    Spend {
+        account: CredentialRef,
+    },
+    SetSpend {
+        settings: SpendSettings,
     },
 }
 
@@ -174,6 +182,26 @@ impl OwnerClient {
         }
     }
 
+    /// Asks the engine to spend one free reset on an account (DEC-154 slice 3). The usage
+    /// thread sends it with a key the engine made and stored; its outcome appears in the
+    /// report's spend view. Input: the account. Output: done once queued, or
+    /// `usage_spend_off` when the owner turned spending off.
+    pub async fn usage_spend(&self, account: CredentialRef) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::Spend { account }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Stores the owner's spend settings: Spend confirmation and When every pool account is
+    /// limited. Input: the settings. Output: done.
+    pub async fn usage_set_spend(&self, settings: SpendSettings) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetSpend { settings }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn usage_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(USAGE_TIMEOUT), async {
             let read = read_kind(&action);
@@ -235,6 +263,8 @@ enum Change {
     SetReset(CredentialRef, WindowKind, Option<i64>),
     SetMoney(MoneySettings),
     DecideRecount(bool),
+    Spend(CredentialRef),
+    SetSpend(SpendSettings),
 }
 
 /// Serves one usage request. The report is built first; then, under the owner barrier, the
@@ -331,6 +361,8 @@ async fn prepare(
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
         Action::SetMoney { settings } => Prepared::Change(root, Change::SetMoney(settings)),
         Action::DecideRecount { use_new } => Prepared::Change(root, Change::DecideRecount(use_new)),
+        Action::Spend { account } => Prepared::Change(root, Change::Spend(account)),
+        Action::SetSpend { settings } => Prepared::Change(root, Change::SetSpend(settings)),
     })
 }
 
@@ -385,6 +417,8 @@ async fn finish(
             Change::DecideRecount(use_new) => {
                 usage::recount::decide(&db, use_new, crate::team::now_ms())
             }
+            Change::Spend(account) => usage::spend::request(&db, &account, crate::team::now_ms()),
+            Change::SetSpend(settings) => usage::spend::write(&db, settings),
         }
     })
     .await
