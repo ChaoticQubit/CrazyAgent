@@ -1,12 +1,12 @@
 use super::{BridgeError, ENGINE_VERSION_MISMATCH, NativeBridge, bounded, caused, failure};
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::finding::{self, Found};
-use crazyagent::harnesses::update::{HarnessVersions, UpdateSettings};
+use crazyagent::harnesses::update::{HarnessVersions, INSTALL_LIST_INVALID, UpdateSettings};
 
 const HARNESS_ID_BYTES_MAX: usize = 64;
 const UNKNOWN_HARNESS: &str = "harness_update_unknown_harness";
 const OUTCOME_UNKNOWN: &str = "harness_update_outcome_unknown";
-const HARNESS_CODES: [&str; 26] = [
+const HARNESS_CODES: [&str; 28] = [
     "harness_update_unknown_install",
     "harness_update_with_app",
     "harness_update_tool_missing",
@@ -33,6 +33,8 @@ const HARNESS_CODES: [&str; 26] = [
     "harness_install_already",
     "harness_install_not_found",
     "harness_install_failed",
+    "harness_install_needs_node",
+    INSTALL_LIST_INVALID,
 ];
 
 /// The refusals a Check again or a chosen harness file may carry to the window; any other
@@ -170,6 +172,37 @@ impl NativeBridge {
         }
         self.reader()?
             .harness_install(id)
+            .await
+            .map_err(|error| harness_failure(&error.0))
+    }
+
+    /// Queues the installs of several harnesses that are not on this machine; the engine runs
+    /// them one after another in the background. Input: the catalog ids, at most one per
+    /// catalog harness. Output: Ok once queued, or a harness code.
+    pub async fn harness_install_many(&self, ids: &[String]) -> Result<(), BridgeError> {
+        if ids.is_empty() || ids.len() > crazyagent::harnesses::specs().len() {
+            return Err(failure(INSTALL_LIST_INVALID));
+        }
+        for id in ids {
+            harness_id(id)?;
+        }
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.reader()?
+            .harness_install_many(ids)
+            .await
+            .map_err(|error| harness_failure(&error.0))
+    }
+
+    /// Reads the harness ids still waiting in the engine's install queue, in the order they
+    /// will run. Output: the ids, or a harness code.
+    pub async fn harness_queued(&self) -> Result<Vec<String>, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.reader()?
+            .harness_queued()
             .await
             .map_err(|error| harness_failure(&error.0))
     }

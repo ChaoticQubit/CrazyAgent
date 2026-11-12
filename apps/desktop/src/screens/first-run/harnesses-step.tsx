@@ -86,8 +86,9 @@ function assert(condition: boolean, message: string): asserts condition {
 }
 
 /** The Harnesses step: reads the offered harnesses, installs the picked ones in the engine one
- * after another, reads again every few seconds while any waits or installs, and lets the owner
- * continue at any time while the engine keeps installing. Input: what to do on Continue. */
+ * after another, reads again a few seconds after each read lands while any waits or installs,
+ * and lets the owner continue at any time while the engine keeps installing.
+ * Input: what to do on Continue. */
 export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
   const [rows, setRows] = useState<Rows>({});
   const [picks, setPicks] = useState<string[]>([]);
@@ -95,23 +96,30 @@ export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
   const [reads, setReads] = useState(0);
+  const [reading, setReading] = useState(false);
+  const [polls, setPolls] = useState(0);
   const pending = Object.values(rows).some((row) => row.kind === "waiting" || row.kind === "installing") || (started && progress(installable(picks), rows).running);
 
   useEffect(() => {
     let live = true;
+    setReading(true);
     void readRows().then((read) => {
       if (!live) return;
       setRows(read.rows);
       if (read.problem) setProblem(read.problem);
+      setReading(false);
     });
     return () => { live = false; };
   }, [reads]);
 
   useEffect(() => {
-    if (!pending || reads >= UPDATE_POLLS_MAX) return;
-    const timer = window.setTimeout(() => setReads((count) => count + 1), UPDATE_POLL_MS);
+    if (!pending || reading || polls >= UPDATE_POLLS_MAX) return;
+    const timer = window.setTimeout(() => {
+      setPolls((count) => count + 1);
+      setReads((count) => count + 1);
+    }, UPDATE_POLL_MS);
     return () => window.clearTimeout(timer);
-  }, [pending, reads, rows]);
+  }, [pending, reading, polls]);
 
   const send = async (ids: string[]) => {
     if (busy || ids.length === 0) return;
@@ -122,6 +130,7 @@ export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
     if (result.kind !== "ok") { setProblem(result.kind === "error" && result.code.startsWith("harness_") ? updateCopy(result.code) : failure(result)); return; }
     setStarted(true);
     setPicks((old) => [...old, ...ids.filter((id) => !old.includes(id))]);
+    setPolls(0);
     setReads((count) => count + 1);
   };
 
