@@ -1,10 +1,12 @@
 pub mod account_choice;
 pub mod checks;
 pub(in crate::tui) mod harness_page;
+pub(in crate::tui) mod models_page;
 pub(in crate::tui) mod notices;
 pub mod pool_editor;
 pub mod pools;
 pub mod profile;
+pub mod replay;
 pub mod spend;
 pub mod tickets;
 

@@ -1655,6 +1655,132 @@ fn first_run_with_the_guide_ticked_skips_accounts_and_keeps_the_guide_on_home() 
     engine.stop();
 }
 
+/// Ends a fresh engine's TUI first run with the guide unticked and Skip for now, then waits
+/// for Home without the guide and for the engine to hold the guide as skipped. Inputs: the
+/// runtime, the engine and the home folder the TUI runs with. Output: the TUI on Home.
+fn first_run_skipping_the_guide(
+    runtime: &tokio::runtime::Runtime,
+    engine: &Engine,
+    home: &Path,
+) -> ScriptPty {
+    let mut pty = reach_accounts_step(engine, home);
+    pty.type_bytes(b" ");
+    pty.until("Space unticks the guide", |screen| {
+        screen.contains("[ ] Show the guide on Home")
+    });
+    pty.type_bytes(RIGHT_KEY);
+    pty.until("Right focuses Skip for now", |screen| {
+        screen.contains("[ Add account ]   [> Skip for now ]")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Home opens with Get set up and no guide", |screen| {
+        screen.contains("New project")
+            && screen.contains("Get set up")
+            && !screen.contains("Learn CrazyAgent")
+    });
+    let start = Instant::now();
+    while !guide_skipped(runtime, engine) {
+        assert!(
+            start.elapsed() < SCREEN_TIME,
+            "the engine never held the guide as skipped"
+        );
+        std::thread::sleep(POLL_TIME);
+    }
+    pty
+}
+
+/// Opens Settings, Profile from Home and waits for its Learn CrazyAgent entries.
+/// Input: the TUI on Home. Output: none; the TUI is on Settings, Profile.
+fn open_profile_replay(pty: &mut ScriptPty) {
+    pty.type_bytes(b"s");
+    pty.until("Settings opens on Accounts", |screen| {
+        screen.contains("Settings  /  Accounts")
+    });
+    pty.type_bytes(b"[");
+    pty.until("Profile shows the Learn CrazyAgent entries", |screen| {
+        screen.contains("Settings  /  Profile")
+            && screen.contains("g  Show the learning guide again")
+            && screen.contains("f  Run first-run setup again")
+    });
+}
+
+/// DEC-153 slice 4: after first run skipped the guide, Settings, Profile's Show the learning
+/// guide again clears the skip in the engine and Home shows the guide again.
+#[test]
+fn show_the_learning_guide_again_on_profile_clears_the_skip_and_home_shows_the_guide() {
+    let mut engine = Engine::start("ca-e2e-learn-");
+    let home = scratch("ca-e2e-learn-home-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut pty = first_run_skipping_the_guide(&runtime, &engine, home.path());
+    open_profile_replay(&mut pty);
+    pty.type_bytes(b"g");
+    pty.until("Home shows the Learn CrazyAgent guide again", |screen| {
+        screen.contains("New project")
+            && screen.contains("Learn CrazyAgent")
+            && !screen.contains("Settings  /  Profile")
+    });
+    assert!(
+        !guide_skipped(&runtime, &engine),
+        "the replay clears the skip in the engine"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-153 slice 4: after first run skipped the guide, Settings, Profile's Run first-run
+/// setup again clears the skip in the engine, starts first run with the saved profile, and
+/// Skip for now with the guide ticked ends on Home with the guide.
+#[test]
+fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_the_guide() {
+    let mut engine = Engine::start("ca-e2e-learn-");
+    let home = scratch("ca-e2e-learn-home-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut pty = first_run_skipping_the_guide(&runtime, &engine, home.path());
+    open_profile_replay(&mut pty);
+    pty.type_bytes(b"f");
+    pty.until("first run opens with the saved profile", |screen| {
+        screen.contains("Welcome to CrazyAgent") && screen.contains("Mira Okafor")
+    });
+    assert!(
+        !guide_skipped(&runtime, &engine),
+        "the replay clears the skip before first run"
+    );
+    pty.type_bytes(b"\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty.type_bytes(b"c");
+    pty.until("the Accounts step opens with the ticked guide", |screen| {
+        screen.contains("[x] Show the guide on Home")
+    });
+    pty.type_bytes(RIGHT_KEY);
+    pty.until("Right focuses Skip for now", |screen| {
+        screen.contains("[ Add account ]   [> Skip for now ]")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Home shows the Learn CrazyAgent guide", |screen| {
+        screen.contains("New project")
+            && screen.contains("Learn CrazyAgent")
+            && !screen.contains("Show the guide on Home")
+    });
+    assert!(
+        !guide_skipped(&runtime, &engine),
+        "a ticked guide writes no skip"
+    );
+    drop(pty);
+    engine.stop();
+}
+
 /// DEC-153: unticking the guide and picking Add account ends first run on Add account over
 /// Home, the engine holds the guide as skipped, and Home shows no guide.
 #[test]
@@ -2007,4 +2133,609 @@ fn the_tui_saves_the_days_done_items_stay() {
             ..NoticeSettings::default()
         }
     );
+}
+
+/// The Models page rows (DEC-150): each model choice option the TUI offers, on a real engine
+/// whose PATH starts with stand-in `claude` and `opencode` files and whose HOME is scratch,
+/// checked on screen and in the engine.
+mod models {
+    use super::*;
+    use crazyagent::client_controller::OwnerController;
+    use crazyagent::harness_settings::{Access, Source};
+    use crazyagent::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
+    use crazyagent::model_choice::{Models, NOT_SUPPORTED, Origin, Row, Slot, Written};
+    use serde_json::{Value, json};
+    use std::os::unix::fs::PermissionsExt;
+
+    const ID: &str = "e2e-models";
+    const PROJECT: &str = "Models e2e";
+    const HARNESS: &str = "claude-code";
+    const CLAUDE_CODE: &str = "Claude Code";
+    const OPENCODE: &str = "OpenCode";
+
+    /// A TUI on Home with the engine it talks to, the runtime the owner reads run on and the
+    /// scratch folders that hold the stand-ins, HOME and the projects home.
+    struct Tui {
+        engine: Engine,
+        pty: Pty,
+        runtime: tokio::runtime::Runtime,
+        _disk: tempfile::TempDir,
+    }
+
+    /// The Claude Code versions the shipped model catalog lists; the stand-in answers the
+    /// first, so it reads as checked whichever versions the catalog qualifies.
+    fn qualified_versions() -> Vec<String> {
+        crazyagent::model_choice::shipped(HARNESS)
+            .expect("Claude Code ships a model catalog")
+            .qualified_versions
+    }
+
+    fn project_id() -> ProjectId {
+        ProjectId::new(ID).unwrap()
+    }
+
+    fn crumbs(screen: &str) -> &str {
+        screen.lines().next().unwrap_or_default().trim_end()
+    }
+
+    fn stand_in(path: &Path, version: &str) {
+        std::fs::write(path, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn row(models: &Models, slot: Slot) -> Row {
+        models
+            .rows
+            .iter()
+            .find(|row| row.slot == slot)
+            .cloned()
+            .expect("the engine lists every slot")
+    }
+
+    fn own(models: &Models) -> Vec<(String, Origin)> {
+        models
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.origin != Origin::Catalog)
+            .map(|candidate| (candidate.id.clone(), candidate.origin))
+            .collect()
+    }
+
+    impl Tui {
+        /// Starts the engine with the stand-ins first on its PATH, saves a profile, a
+        /// projects home and one project, and opens the TUI on a settled Home. Input: a
+        /// scratch prefix. Output: the TUI.
+        fn start(prefix: &str) -> Self {
+            let disk = scratch("ca-e2e-models-");
+            let bin = disk.path().join("bin");
+            let home = disk.path().join("home");
+            let projects = disk.path().join("Projects");
+            for folder in [&bin, &home, &projects] {
+                std::fs::create_dir(folder).unwrap();
+            }
+            stand_in(
+                &bin.join("claude"),
+                &format!("{} (Claude Code)", qualified_versions()[0]),
+            );
+            stand_in(&bin.join("opencode"), "1.0.0");
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            let mut engine = Engine::new(prefix);
+            engine.home = Some(home);
+            engine.env_path = Some(
+                std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+                    .unwrap(),
+            );
+            engine.launch();
+            let tmux = installed(engine.path()).expect(TMUX);
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let mut owner = Owner::attach(&engine).await;
+                assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+                assert_eq!(owner.set_home(&projects).await, OwnerResult::Applied);
+                assert_eq!(
+                    owner.create_project(ID, PROJECT).await,
+                    OwnerResult::Applied
+                );
+                owner.controller.detach();
+            });
+            let pty = Pty::launch(tmux, &engine.socket());
+            reach_home(&pty, |screen| at_home(screen, PROJECT));
+            setup_checked(&pty);
+            Self {
+                engine,
+                pty,
+                runtime,
+                _disk: disk,
+            }
+        }
+
+        /// Runs one owner request through the real owner socket. Input: the request on a
+        /// fresh owner connection. Output: its answer.
+        fn owner<T>(
+            &self,
+            request: impl for<'a> FnOnce(
+                &'a OwnerController,
+            ) -> std::pin::Pin<Box<dyn Future<Output = T> + 'a>>,
+        ) -> T {
+            self.runtime.block_on(async {
+                let mut owner = Owner::attach(&self.engine).await;
+                let answer = request(&owner.controller).await;
+                owner.controller.detach();
+                answer
+            })
+        }
+
+        fn models(&self, harness: &'static str, project: bool) -> Models {
+            self.owner(move |controller| {
+                Box::pin(async move {
+                    controller
+                        .model_choice_values(harness, project.then(project_id))
+                        .await
+                        .unwrap()
+                })
+            })
+        }
+
+        fn rules(&self) -> Rules {
+            self.owner(|controller| {
+                Box::pin(async move { controller.model_choice_rules().await.unwrap() })
+            })
+        }
+
+        /// Seeds one Claude Code slot through the owner protocol, naming the version held.
+        /// Inputs: whether it is the project's, the slot and the value.
+        fn set(&self, project: bool, slot: Slot, value: Value) {
+            let version = row(&self.models(HARNESS, project), slot).version;
+            let written = self.owner(move |controller| {
+                Box::pin(async move {
+                    controller
+                        .model_choice_set(HARNESS, project.then(project_id), slot, value, version)
+                        .await
+                        .unwrap()
+                })
+            });
+            assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+        }
+
+        fn add(&self, model: &'static str) {
+            self.owner(move |controller| {
+                Box::pin(async move { controller.model_choice_add(HARNESS, model).await.unwrap() })
+            });
+        }
+
+        fn set_rule(&self, rule: Rule) {
+            let rules = self.rules();
+            let version = match rule {
+                Rule::Pick(_) => rules.pick_version,
+                Rule::Fallback(_) => rules.fallback_version,
+            };
+            let written = self.owner(move |controller| {
+                Box::pin(async move {
+                    controller
+                        .model_choice_set_rule(rule, version)
+                        .await
+                        .unwrap()
+                })
+            });
+            assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+        }
+
+        /// Opens Settings > Harnesses, then one harness's page and its Models page with m.
+        /// Inputs: the harness name and the Models page title.
+        fn app_page(&self, name: &str, title: &str) {
+            let pty = &self.pty;
+            pty.keys(&["s"]);
+            pty.until("s on Home opens Settings", |screen| {
+                crumbs(screen).contains("Settings")
+            });
+            for step in 0..=STEPS_MAX {
+                let screen = pty.screen();
+                if crumbs(&screen).ends_with("Settings  /  Harnesses") {
+                    break;
+                }
+                assert!(
+                    step < STEPS_MAX,
+                    "no Settings section is Harnesses:\n{screen}"
+                );
+                pty.bytes(&SHIFT_RIGHT);
+                pty.until("the next Settings section shows", |now| {
+                    crumbs(now) != crumbs(&screen)
+                });
+            }
+            self.harness_models(name, title);
+        }
+
+        /// Opens the project's Settings tab, its harness list with h, Claude Code's page and
+        /// its Models page with m.
+        fn project_page(&self) {
+            let pty = &self.pty;
+            tab_until_enter(pty, "Open");
+            pick_card(pty, PROJECT);
+            pty.keys(&["Enter"]);
+            pty.until("the project screen opens with its tabs", |screen| {
+                screen.contains("Tabs")
+            });
+            to_tab(pty, PROJECT, "Settings", &SHIFT_RIGHT);
+            pty.keys(&["h"]);
+            pty.until(
+                "h on the Settings tab opens the project's harness list",
+                |screen| crumbs(screen).ends_with(&format!("{PROJECT}  /  Harnesses")),
+            );
+            self.harness_models(CLAUDE_CODE, &format!("{CLAUDE_CODE} models for {PROJECT}"));
+        }
+
+        fn harness_models(&self, name: &str, title: &str) {
+            let pty = &self.pty;
+            let picked = format!("> {name} ");
+            for step in 0..=STEPS_MAX {
+                let screen = pty.until("the harness list shows its rows", |screen| {
+                    screen.contains(name)
+                });
+                if screen
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(&picked))
+                {
+                    break;
+                }
+                assert!(step < STEPS_MAX, "no harness row is {name}:\n{screen}");
+                pty.keys(&["Down"]);
+                pty.until("the pick moves", |now| now != screen);
+            }
+            pty.keys(&["Enter"]);
+            pty.until("Enter opens the harness page", |screen| {
+                crumbs(screen).ends_with(&format!("Harnesses  /  {name}"))
+            });
+            pty.keys(&["m"]);
+            pty.until("m on the harness page opens its Models page", |screen| {
+                screen.contains(title) && screen.contains("Master model")
+            });
+        }
+
+        fn says(&self, words: &str) -> String {
+            self.pty.until(&format!("the TUI says {words}"), |screen| {
+                screen.contains(words)
+            })
+        }
+
+        fn finish(self) {
+            let Self {
+                mut engine, pty, ..
+            } = self;
+            drop(pty);
+            engine.stop();
+        }
+    }
+
+    #[test]
+    fn the_tui_models_page_saves_a_master_model_app_wide() {
+        let tui = Tui::start("ca-e2e-m01-");
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        let screen = tui.says(&format!(
+            "Checked against {}",
+            qualified_versions().join(", ")
+        ));
+        assert!(screen.contains("Account's own model"), "{screen}");
+        tui.pty.keys(&["Enter", "Right", "Enter"]);
+        tui.says("Saved.");
+        let master = row(&tui.models(HARNESS, false), Slot::Master);
+        assert_eq!(
+            (master.here, master.effective, master.source),
+            (Some(json!("opus")), json!("opus"), Source::App)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn x_on_the_master_model_clears_it_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m02-");
+        tui.set(false, Slot::Master, json!("opus"));
+        let before = row(&tui.models(HARNESS, false), Slot::Master).version;
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty.keys(&["x"]);
+        tui.says("Saved.");
+        let master = row(&tui.models(HARNESS, false), Slot::Master);
+        assert_eq!((master.here, master.effective), (None, Value::Null));
+        assert!(master.version > before, "the reset is a new version");
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_saves_an_agent_default_model() {
+        let tui = Tui::start("ca-e2e-m03-");
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty.keys(&["Down", "Enter", "Right", "Right", "Enter"]);
+        tui.says("Saved.");
+        let agent = row(&tui.models(HARNESS, false), Slot::Agent);
+        assert_eq!(
+            (agent.here, agent.source),
+            (Some(json!("sonnet")), Source::App)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn choosing_the_account_s_own_model_clears_the_agent_default_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m04-");
+        tui.set(false, Slot::Agent, json!("sonnet"));
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty.keys(&["Down", "Enter", "Left", "Left", "Enter"]);
+        tui.says("Saved.");
+        let agent = row(&tui.models(HARNESS, false), Slot::Agent);
+        assert_eq!(
+            (agent.here, agent.effective, agent.source),
+            (None, Value::Null, Source::Default)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn ticking_allowed_models_saves_the_list_in_page_order_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m05-");
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty.keys(&["Down", "Down", "Enter"]);
+        tui.says("[ ] opus");
+        tui.pty.keys(&["Down", "Space", "Up", "Space", "Enter"]);
+        tui.says("Saved.");
+        let allowed = row(&tui.models(HARNESS, false), Slot::Allowed);
+        assert_eq!(allowed.here, Some(json!(["opus", "sonnet"])));
+        tui.finish();
+    }
+
+    #[test]
+    fn unticking_an_allowed_model_saves_the_shorter_list_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m06-");
+        tui.set(false, Slot::Allowed, json!(["opus", "sonnet"]));
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty.keys(&["Down", "Down", "Enter"]);
+        tui.says("[x] opus");
+        tui.pty.keys(&["Space", "Enter"]);
+        tui.says("Saved.");
+        let allowed = row(&tui.models(HARNESS, false), Slot::Allowed);
+        assert_eq!(allowed.here, Some(json!(["sonnet"])));
+        tui.finish();
+    }
+
+    #[test]
+    fn x_on_the_allowed_list_clears_it_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m07-");
+        tui.set(false, Slot::Allowed, json!(["opus"]));
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty.keys(&["Down", "Down", "x"]);
+        tui.says("Saved.");
+        let allowed = row(&tui.models(HARNESS, false), Slot::Allowed);
+        assert_eq!((allowed.here, allowed.effective), (None, json!([])));
+        tui.finish();
+    }
+
+    #[test]
+    fn typing_an_own_model_id_adds_it_waiting_for_its_test_launch_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m08-");
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty
+            .keys(&["Down", "Down", "Down", "Down", "Down", "Enter"]);
+        tui.says("Model id");
+        tui.pty.text("my-model-1");
+        tui.pty.keys(&["Enter"]);
+        let screen = tui.says("Added my-model-1.");
+        assert!(screen.contains("Waiting for its test launch"), "{screen}");
+        assert_eq!(
+            own(&tui.models(HARNESS, false)),
+            vec![("my-model-1".to_owned(), Origin::Pending)]
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn adding_an_id_the_model_list_has_adds_nothing_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m09-");
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty
+            .keys(&["Down", "Down", "Down", "Down", "Down", "Enter"]);
+        tui.says("Model id");
+        tui.pty.text("opus");
+        tui.pty.keys(&["Enter"]);
+        tui.says("opus is already on the Claude Code model list.");
+        assert_eq!(own(&tui.models(HARNESS, false)), vec![]);
+        tui.finish();
+    }
+
+    #[test]
+    fn an_id_with_characters_a_model_id_cannot_have_never_leaves_the_tui() {
+        let tui = Tui::start("ca-e2e-m10-");
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty
+            .keys(&["Down", "Down", "Down", "Down", "Down", "Enter"]);
+        tui.says("Model id");
+        tui.pty.text("bad id!");
+        tui.pty.keys(&["Enter"]);
+        tui.says("Use letters, digits and - _ . : / @ +");
+        assert_eq!(own(&tui.models(HARNESS, false)), vec![]);
+        tui.finish();
+    }
+
+    #[test]
+    fn x_on_an_own_model_id_removes_it_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m11-");
+        tui.add("my-model-1");
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        tui.pty
+            .keys(&["Down", "Down", "Down", "Down", "Down", "Down", "x"]);
+        tui.says("Removed my-model-1.");
+        assert_eq!(own(&tui.models(HARNESS, false)), vec![]);
+        tui.finish();
+    }
+
+    /// Picks one rule option from the app Models page and checks the engine holds it as a
+    /// new version. Inputs: the TUI, the rule row's place, the keys and the rule expected.
+    fn rule_row(tui: &Tui, downs: usize, keys: &[&str], expected: Rule) {
+        let before = tui.rules();
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        for _ in 0..downs {
+            tui.pty.keys(&["Down"]);
+        }
+        tui.pty.keys(&["Enter"]);
+        tui.pty.keys(keys);
+        tui.pty.keys(&["Enter"]);
+        tui.says("Saved.");
+        let after = tui.rules();
+        match expected {
+            Rule::Pick(pick) => {
+                assert_eq!(after.pick, pick);
+                assert!(after.pick_version > before.pick_version);
+            }
+            Rule::Fallback(fallback) => {
+                assert_eq!(after.fallback, fallback);
+                assert!(after.fallback_version > before.fallback_version);
+            }
+        }
+    }
+
+    #[test]
+    fn the_tui_pick_rule_any_offered_model_saves_hint() {
+        let tui = Tui::start("ca-e2e-m12-");
+        rule_row(&tui, 3, &["Right"], Rule::Pick(PickRule::Hint));
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_pick_rule_always_the_default_saves_default() {
+        let tui = Tui::start("ca-e2e-m13-");
+        rule_row(&tui, 3, &["Right", "Right"], Rule::Pick(PickRule::Default));
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_pick_rule_only_the_allowed_list_saves_strict() {
+        let tui = Tui::start("ca-e2e-m14-");
+        tui.set_rule(Rule::Pick(PickRule::Hint));
+        rule_row(&tui, 3, &["Left"], Rule::Pick(PickRule::Strict));
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_fallback_rule_stop_and_say_why_saves_stop() {
+        let tui = Tui::start("ca-e2e-m15-");
+        rule_row(&tui, 4, &["Right"], Rule::Fallback(FallbackRule::Stop));
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_fallback_rule_quietly_saves_silent() {
+        let tui = Tui::start("ca-e2e-m16-");
+        rule_row(
+            &tui,
+            4,
+            &["Right", "Right"],
+            Rule::Fallback(FallbackRule::Silent),
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_fallback_rule_tell_me_saves_notice() {
+        let tui = Tui::start("ca-e2e-m17-");
+        tui.set_rule(Rule::Fallback(FallbackRule::Stop));
+        rule_row(&tui, 4, &["Left"], Rule::Fallback(FallbackRule::Notice));
+        tui.finish();
+    }
+
+    #[test]
+    fn a_harness_whose_model_crazyagent_does_not_choose_shows_the_reason_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m18-");
+        let before = tui.models("opencode", false);
+        for slot in Slot::ALL {
+            assert_eq!(
+                row(&before, slot).access,
+                Access::ReadOnly {
+                    reason: NOT_SUPPORTED.into()
+                }
+            );
+        }
+        tui.app_page(OPENCODE, "OpenCode models");
+        let screen = tui.says("No model list");
+        assert!(
+            screen.matches(NOT_SUPPORTED).count() >= 3,
+            "each slot gives the reason:\n{screen}"
+        );
+        tui.pty.keys(&["Enter"]);
+        tui.says("CrazyAgent does not choose this model here.");
+        assert_eq!(tui.models("opencode", false), before);
+        tui.finish();
+    }
+
+    #[test]
+    fn a_project_with_nothing_set_uses_the_app_value_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m19-");
+        tui.set(false, Slot::Master, json!("opus"));
+        tui.project_page();
+        let screen = tui.says("Claude Code models for Models e2e");
+        assert!(
+            !screen.contains("Pick rule") && !screen.contains("Add a model id"),
+            "the rules and own ids are app-wide:\n{screen}"
+        );
+        tui.pty.keys(&["Enter"]);
+        tui.says("Use the app value");
+        tui.pty.keys(&["Escape"]);
+        let master = row(&tui.models(HARNESS, true), Slot::Master);
+        assert_eq!(
+            (master.here, master.effective, master.source),
+            (None, json!("opus"), Source::App)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn choosing_a_model_for_the_project_overrides_the_app_value_there_only_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m20-");
+        tui.set(false, Slot::Master, json!("opus"));
+        tui.project_page();
+        tui.pty.keys(&["Enter", "Right", "Right", "Enter"]);
+        tui.says("Saved.");
+        let master = row(&tui.models(HARNESS, true), Slot::Master);
+        assert_eq!(
+            (master.here, master.source),
+            (Some(json!("sonnet")), Source::Project)
+        );
+        let app = row(&tui.models(HARNESS, false), Slot::Master);
+        assert_eq!(app.here, Some(json!("opus")), "the app value stays");
+        tui.finish();
+    }
+
+    #[test]
+    fn unticking_every_allowed_model_saves_an_own_empty_project_list_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m21-");
+        tui.set(false, Slot::Allowed, json!(["opus"]));
+        tui.project_page();
+        tui.pty.keys(&["Down", "Down", "Enter"]);
+        tui.says("[x] opus");
+        tui.pty.keys(&["Space", "Enter"]);
+        tui.says("Saved.");
+        let allowed = row(&tui.models(HARNESS, true), Slot::Allowed);
+        assert_eq!(
+            (allowed.here, allowed.effective, allowed.source),
+            (Some(json!([])), json!([]), Source::Project)
+        );
+        let app = row(&tui.models(HARNESS, false), Slot::Allowed);
+        assert_eq!(app.here, Some(json!(["opus"])), "the app list stays");
+        tui.finish();
+    }
+
+    #[test]
+    fn x_on_a_project_value_goes_back_to_the_app_value_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m22-");
+        tui.set(false, Slot::Master, json!("opus"));
+        tui.set(true, Slot::Master, json!("sonnet"));
+        tui.project_page();
+        tui.pty.keys(&["x"]);
+        tui.says("Saved.");
+        let master = row(&tui.models(HARNESS, true), Slot::Master);
+        assert_eq!(
+            (master.here, master.effective, master.source),
+            (None, json!("opus"), Source::App)
+        );
+        tui.finish();
+    }
 }

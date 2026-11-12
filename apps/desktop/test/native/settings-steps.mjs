@@ -238,3 +238,17 @@ export async function observeModelAccess() {
     pools: pages[2].items.map((item) => item.pool),
   };
 }
+
+/** Reads one harness's Models section and the model rules from the engine through the desktop
+ * owner fixture, independently of the window. Inputs: the harness id and the project id, none
+ * for the app. Output: each slot's row by slot name, the owner's own ids and both rules. */
+export async function observeModelChoice(harness, project) {
+  const result = await execute(process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE, ["observe-model-choice", harness, ...(project ? [project] : [])],
+    { timeout: 10000, killSignal: "SIGKILL", maxBuffer: OBSERVATION_BYTES_MAX * 2 });
+  assert.equal(result.stderr, "", "the model choice observation ran without diagnostics");
+  assert(Buffer.byteLength(result.stdout) <= OBSERVATION_BYTES_MAX, "the model choice observation stays bounded");
+  const { rows, own, rules } = JSON.parse(result.stdout);
+  assert.deepEqual(rows.map((row) => row.slot), ["master", "agent", "allowed"], "the engine read every slot in page order");
+  assert(Array.isArray(own), "the engine listed the owner's ids");
+  return { rows: Object.fromEntries(rows.map((row) => [row.slot, row])), own, rules };
+}

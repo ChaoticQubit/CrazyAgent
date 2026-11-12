@@ -1,0 +1,5 @@
+.models-allowed { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: var(--space-1) var(--space-3); margin: 0; padding: 0; border: 0; }
+.models-ctl { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.models-ctl .row { gap: var(--space-2); flex-wrap: wrap; }
+.models-add { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
+.models-add .input { width: 260px; max-width: 100%; }

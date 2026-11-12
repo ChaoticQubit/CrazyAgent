@@ -9,7 +9,7 @@ import { createConnection, createServer } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
-import { createRunDirectories } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, runProjects } from "./run-layout.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workRoot = resolve(appRoot, "../../.local-state/desktop-execution");
@@ -23,7 +23,8 @@ const began = performance.now();
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
 const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
-assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "pools-spend", "first-run-guide", "first-run-skip-guide"].includes(suite),
+assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "pools-spend", "first-run-guide", "first-run-skip-guide",
+  "models-app", "models-project", "learning-replay-guide", "learning-replay-first-run"].includes(suite),
   "closed native suite required");
 const WEBDRIVER_SECONDS = suite === "pools-screen" || suite === "pools-spend" ? 900 : 300;
 let interrupted = false;
@@ -50,11 +51,35 @@ function binary(path) {
     sha256: createHash("sha256").update(readFileSync(path)).digest("hex") };
 }
 
+/** The first Claude Code version the shipped model catalog lists, so the stand-in reads as
+ * checked whichever versions the catalog qualifies. Output: the exact version. */
+function catalogVersion() {
+  const path = new URL("../../../../crates/crazyagent/assets/model-catalogs/claude-code.json", import.meta.url);
+  const version = JSON.parse(readFileSync(path, "utf8")).qualified_versions?.[0];
+  assert(typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version), "the model catalog names an exact version");
+  return version;
+}
+
+/** Puts a stand-in Claude Code on PATH for the project Models suite, whose project page lists
+ * installed harnesses only: it answers the catalog's first version and does nothing else.
+ * Output: the folder to put first on PATH, or none for every other suite. */
+function standIns() {
+  if (suite !== "models-project") return null;
+  const folder = join(evidence, "bin");
+  mkdirSync(folder, { mode: 0o700 });
+  writeFileSync(join(folder, "claude"), `#!/bin/sh\nprintf '${catalogVersion()} (Claude Code)\\n'\n`, { mode: 0o700 });
+  return folder;
+}
+
 function environment() {
   createRunDirectories(evidence);
-  return {
-    PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
-    HOME: join(evidence, "home"),
+  const stand = standIns();
+  const { home, prepared } = chooseHome(join(evidence, "home"));
+  clearWebStore(home);
+  return { projects: runProjects(home), env: {
+    PATH: `${stand ? `${stand}:` : ""}${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+    HOME: home,
+    ...(prepared ? { CFFIXED_USER_HOME: home } : {}),
     TMPDIR: join(evidence, "tmp"),
     LANG: "en_US.UTF-8",
     NO_COLOR: "1",
@@ -63,7 +88,7 @@ function environment() {
     CRAZYAGENT_DESKTOP_TEST_FIXTURE: fixture,
     CRAZYAGENT_DESKTOP_TEST_EVIDENCE: evidence,
     CRAZYAGENT_DESKTOP_TEST_SUITE: suite,
-  };
+  } };
 }
 
 function signalGroup(entry, signal) {
@@ -201,10 +226,8 @@ function captured(entry) {
 
 async function execute() {
   const binaries = [binary(app), binary(fixture)];
-  const env = environment();
+  const { env, projects } = environment();
   const port = await unusedPort();
-  const projects = join(env.HOME, "Projects");
-  mkdirSync(projects, { mode: 0o700 });
   const engine = launch("engine", fixture,
     [suite === "model-access-read-only" ? "serve" : "serve-model-access",
       engineRoot, projects], env, WEBDRIVER_SECONDS + 30);

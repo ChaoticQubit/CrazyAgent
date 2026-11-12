@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { shownView } from "./agents-cards.mjs";
-import { TURN_S } from "./master-switch.wdio.conf.mjs";
+import { TURN_S, home } from "./master-switch.wdio.conf.mjs";
 import { click, shown, toasts, unfold } from "./settings-steps.mjs";
 import { go, paste, pick, reopen, run, segment, tab, terminalTyping, until, waitFor } from "./trial-kit.mjs";
 import { KEYS, TERMINAL, masterRows, sendToMaster, startIfPaused, teamNodes, terminalLive } from "./trial4/n-d8-master-reply.mjs";
@@ -25,7 +25,7 @@ const WAITS = "[data-testid=master-switch-waits]";
 const DIVIDER = "[data-testid=harness-switch]";
 const STOP = "//dialog[@open]//button[normalize-space(.)=\"Stop all\"]";
 const INPUT_KEY = "crazyagent.terminal-input";
-const STORE = join(root, "home", "Library", "WebKit", basename(process.env.WD_APP));
+const STORE = join(home, "Library", "WebKit", basename(process.env.WD_APP));
 const kit = { go, tab, pick, paste, reopen, until, waitFor, project: () => run.project };
 let generation = 0;
 

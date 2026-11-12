@@ -11,6 +11,7 @@ import { Button, Dialog, Icon, LoadError, NotReady, ProviderMark, Segmented, Set
 import { SettingRow } from "../../ui/setting";
 import { displayText } from "../conversation";
 import { HarnessPage } from "./harness-page";
+import { ModelsSection } from "./models-section";
 import "../project/projects.css";
 
 const KIND_LABEL: Record<HarnessAccountKind, string> = {
@@ -428,6 +429,7 @@ export function HarnessScreenView({ catalog, id }: { catalog: Loaded<HarnessEntr
         <SettingLine label="Model">{entry.model_selection ? "You can choose the model" : "Chosen inside the harness"}</SettingLine>
       </SettingSection>
     </div>
+    <ModelsSection harness={entry.id} name={entry.name} projectId={null} />
     <HarnessPage harness={entry.id} projectId={null} />
   </div>;
 }

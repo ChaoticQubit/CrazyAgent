@@ -917,10 +917,20 @@ fn a_linked_repo_file_is_listed_and_read_from_the_project_folder() {
             ("repo/docs/plan-2026.md", ContextKind::Plan, 15, true),
         ]
     );
+    let unlinked: Vec<(String, ContextKind, bool)> = list_context_with_links(&case.stored, &[])
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| (item.path, item.kind, item.linked))
+        .collect();
     assert_eq!(
-        list_context_with_links(&case.stored, &[]).unwrap(),
-        list_context(&case.stored).unwrap(),
-        "with no links the list is the context alone"
+        unlinked,
+        [
+            ("context/brief.md".into(), ContextKind::Brief, false),
+            ("repo/docs/market.md".into(), ContextKind::Document, true),
+            ("repo/docs/plan-2026.md".into(), ContextKind::Document, true),
+        ],
+        "with no links the project's own docs are listed as documents (DEC-152)"
     );
 
     let chunk =
@@ -971,6 +981,244 @@ fn a_linked_path_through_a_symlink_is_refused_and_left_out_of_the_list() {
     let context = list_context_with_links(&case.stored, &linked).unwrap();
     assert!(context.items.iter().all(|item| !item.linked));
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside");
+}
+
+fn write_below(folder: &Path, path: &str, text: &str) {
+    let file = folder.join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, text).unwrap();
+}
+
+fn linked_paths(case: &ContextCase) -> Vec<String> {
+    list_context_with_links(&case.stored, &[])
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|item| item.linked)
+        .map(|item| item.path)
+        .collect()
+}
+
+#[test]
+fn a_docs_only_projects_nested_docs_are_listed_and_read_without_links() {
+    let case = context_case();
+    for (path, text) in [
+        ("docs/architecture/overview.md", "# Overview\n"),
+        ("docs/architecture/adr/0001-store.md", "# ADR 1\n"),
+        ("docs/roadmap/README.md", "# Roadmap\n"),
+        ("docs/notes.txt", "notes"),
+        ("docs/.drafts/secret.md", "draft"),
+        ("README.md", "# Root\n"),
+        ("src/lib.md", "source"),
+    ] {
+        write_below(&case.folder, path, text);
+    }
+    let context = list_context_with_links(&case.stored, &[]).unwrap();
+    let listed: Vec<(&str, ContextKind, u64, bool)> = context
+        .items
+        .iter()
+        .map(|item| (item.path.as_str(), item.kind, item.bytes, item.linked))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (
+                "repo/docs/architecture/adr/0001-store.md",
+                ContextKind::Document,
+                8,
+                true
+            ),
+            (
+                "repo/docs/architecture/overview.md",
+                ContextKind::Document,
+                11,
+                true
+            ),
+            (
+                "repo/docs/roadmap/README.md",
+                ContextKind::Document,
+                10,
+                true
+            ),
+        ]
+    );
+    let chunk = read_context_with_links(
+        &case.stored,
+        &[],
+        "repo/docs/architecture/adr/0001-store.md",
+        0,
+    )
+    .unwrap();
+    assert_eq!(chunk.text.as_deref(), Some("# ADR 1\n"));
+    for path in [
+        "repo/docs/notes.txt",
+        "repo/docs/.drafts/secret.md",
+        "repo/README.md",
+        "repo/src/lib.md",
+        "repo/docs/../README.md",
+        "repo/docs/./roadmap/README.md",
+        "repo/docs",
+    ] {
+        let refused = read_context_with_links(&case.stored, &[], path, 0);
+        assert_eq!(refused.unwrap_err().0, "context_path_invalid", "{path}");
+    }
+}
+
+#[test]
+fn a_doc_that_is_a_link_a_hard_link_oversize_or_too_deep_is_left_out_and_refused() {
+    let case = context_case();
+    let other = tempfile::tempdir().unwrap();
+    write_below(other.path(), "outside.md", "outside");
+    write_below(other.path(), "more/inner.md", "inner");
+    write_below(&case.folder, "docs/plain.md", "# Plain\n");
+    write_below(&case.folder, "docs/shared.md", "# Shared\n");
+    std::fs::hard_link(
+        case.folder.join("docs/shared.md"),
+        other.path().join("shared.md"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        other.path().join("outside.md"),
+        case.folder.join("docs/linked.md"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(other.path().join("more"), case.folder.join("docs/more")).unwrap();
+    write_below(
+        &case.folder,
+        "docs/big.md",
+        &"a".repeat(links::LINK_BYTES_MAX as usize + 1),
+    );
+    write_below(&case.folder, "docs/a/b/c/d/e/f/g/deep.md", "# Deep\n");
+    assert_eq!(linked_paths(&case), ["repo/docs/plain.md"]);
+    for path in [
+        "repo/docs/linked.md",
+        "repo/docs/more/inner.md",
+        "repo/docs/shared.md",
+        "repo/docs/big.md",
+    ] {
+        let refused = read_context_with_links(&case.stored, &[], path, 0);
+        assert_eq!(refused.unwrap_err().0, "context_item_missing", "{path}");
+    }
+    let deep = read_context_with_links(&case.stored, &[], "repo/docs/a/b/c/d/e/f/g/deep.md", 0);
+    assert_eq!(deep.unwrap_err().0, "context_path_invalid");
+    assert_eq!(
+        std::fs::read_to_string(other.path().join("outside.md")).unwrap(),
+        "outside"
+    );
+}
+
+const OWNER_DOCS_MAX: usize = 256;
+
+#[test]
+fn a_docs_folder_past_its_own_bound_lists_its_first_docs_by_path_and_counts_the_rest() {
+    let case = context_case();
+    write_below(&case.folder, ".crazyagent/context/brief.md", "# Brief\n");
+    for index in 0..OWNER_DOCS_MAX + 6 {
+        write_below(&case.folder, &format!("docs/adr/{index:03}.md"), "# ADR\n");
+    }
+    let context = list_context_with_links(&case.stored, &[]).unwrap();
+    let listed: Vec<&str> = context
+        .items
+        .iter()
+        .filter(|item| item.linked)
+        .map(|item| item.path.as_str())
+        .collect();
+    assert_eq!(
+        listed.len(),
+        OWNER_DOCS_MAX,
+        "docs have their own bound beside the context's"
+    );
+    assert_eq!(listed[0], "repo/docs/adr/000.md");
+    assert_eq!(
+        listed[OWNER_DOCS_MAX - 1],
+        format!("repo/docs/adr/{:03}.md", OWNER_DOCS_MAX - 1)
+    );
+    assert!(
+        context
+            .items
+            .iter()
+            .any(|item| item.kind == ContextKind::Brief)
+    );
+    let wire = serde_json::to_value(&context).unwrap();
+    assert_eq!(
+        wire["unlisted_docs"], 6,
+        "a cut list says how many docs it left out"
+    );
+    assert_eq!(wire.get("docs_folder_cut"), None);
+    assert_eq!(
+        list_context(&case.stored).unwrap().items.len(),
+        1,
+        "the agents' index stays the context alone"
+    );
+}
+
+#[test]
+fn a_docs_folder_too_large_to_read_whole_says_so_instead_of_dropping_docs_silently() {
+    let case = context_case();
+    write_below(&case.folder, "docs/a.md", "# A\n");
+    for index in 0..4100 {
+        write_below(&case.folder, &format!("docs/img/{index:04}.png"), "");
+    }
+    let context = list_context_with_links(&case.stored, &[]).unwrap();
+    let wire = serde_json::to_value(&context).unwrap();
+    assert_eq!(wire["docs_folder_cut"], true);
+    let small = context_case();
+    write_below(&small.folder, "docs/a.md", "# A\n");
+    let wire = serde_json::to_value(list_context_with_links(&small.stored, &[]).unwrap()).unwrap();
+    assert_eq!(
+        wire.get("unlisted_docs"),
+        None,
+        "nothing cut, nothing on the wire"
+    );
+    assert_eq!(wire.get("docs_folder_cut"), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn names_that_are_not_text_count_toward_the_docs_scan_bound() {
+    use std::os::unix::ffi::OsStrExt;
+    let case = context_case();
+    write_below(&case.folder, "docs/a.md", "# A\n");
+    let folder = case.folder.join("docs/raw");
+    std::fs::create_dir_all(&folder).unwrap();
+    for index in 0..4100u32 {
+        let mut name = vec![0xff];
+        name.extend_from_slice(index.to_string().as_bytes());
+        std::fs::write(folder.join(std::ffi::OsStr::from_bytes(&name)), "").unwrap();
+    }
+    let context = list_context_with_links(&case.stored, &[]).unwrap();
+    assert!(
+        context.docs_folder_cut,
+        "a name that is not text is still an entry read"
+    );
+}
+
+#[test]
+fn docs_that_would_overflow_the_owner_reply_are_counted_not_sent() {
+    let case = context_case();
+    let name = "n".repeat(180);
+    for index in 0..OWNER_DOCS_MAX {
+        write_below(
+            &case.folder,
+            &format!("docs/{index:03}-{name}.md"),
+            "# Doc\n",
+        );
+    }
+    let context = list_context_with_links(&case.stored, &[]).unwrap();
+    let wire = serde_json::to_vec(&context).unwrap();
+    assert!(
+        wire.len() + 4096 <= crate::protocol::FRAME_BYTES_MAX,
+        "{}",
+        wire.len()
+    );
+    let listed = context.items.iter().filter(|item| item.linked).count();
+    assert!(listed > 0 && listed < OWNER_DOCS_MAX, "{listed}");
+    assert_eq!(listed + context.unlisted_docs, OWNER_DOCS_MAX);
+    assert_eq!(
+        context.items.last().unwrap().path,
+        format!("repo/docs/{:03}-{name}.md", listed - 1),
+        "the docs kept are the first by path"
+    );
 }
 
 #[test]

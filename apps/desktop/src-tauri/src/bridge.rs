@@ -36,6 +36,7 @@ pub mod intake;
 pub mod master;
 pub mod memory;
 mod model_access;
+pub mod model_choice;
 mod native_auth;
 mod notifications;
 pub mod notify;

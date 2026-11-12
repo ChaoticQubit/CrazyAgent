@@ -34,6 +34,7 @@ pub(super) mod harness_settings;
 pub(super) mod ide;
 pub(super) mod intake;
 pub(super) mod learning;
+pub(super) mod model_choice;
 pub(super) mod notifications;
 pub(super) mod process;
 mod project_setup;

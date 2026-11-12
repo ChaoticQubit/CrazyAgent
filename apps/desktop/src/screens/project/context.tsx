@@ -73,6 +73,37 @@ export function shownPath(item: ContextItem): string {
   return item.linked === true && item.path.startsWith(LINKED_PREFIX) ? item.path.slice(LINKED_PREFIX.length) : item.path;
 }
 
+/** Groups the files linked from the repository by the folder they sit in, so nested docs read
+ * folder by folder: files at the repository root first, then each folder before the folders
+ * inside it. Input: the linked items. Output: pairs of folder path, "" for the root, and its
+ * items in the order listed. */
+export function repoFolders(items: ContextItem[]): [string, ContextItem[]][] {
+  const folders = new Map<string, ContextItem[]>();
+  for (const item of items) {
+    const path = shownPath(item);
+    const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+    folders.set(folder, [...(folders.get(folder) ?? []), item]);
+  }
+  const names = (folder: string) => (folder === "" ? [] : folder.split("/"));
+  return [...folders.entries()].sort(([left], [right]) => {
+    const [a, b] = [names(left), names(right)];
+    for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+      if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+    }
+    return a.length - b.length;
+  });
+}
+
+/** The line the tree shows when the engine left docs out of its listing, so a cut list is
+ * never read as whole (DEC-152). Inputs: how many docs it left out and whether it stopped
+ * before reading the whole docs folder. Output: the line, or null when nothing was left out. */
+export function unlistedLine(unlisted: number, cut: boolean): string | null {
+  const counted = unlisted > 0 ? `${unlisted} more ${unlisted === 1 ? "doc" : "docs"} not listed` : null;
+  const folder = "the docs folder has more files than CrazyAgent reads";
+  if (counted === null) return cut ? `More docs not listed: ${folder}` : null;
+  return cut ? `${counted}, and ${folder}` : counted;
+}
+
 const TEXT_TYPES = ["md", "txt", "csv"];
 const MEMORY = "@memory";
 const extension = (path: string) => path.slice(path.lastIndexOf(".") + 1).toLowerCase();
@@ -101,7 +132,8 @@ export function followContext(project: string, path: string, writing: boolean, a
   };
 }
 
-/** Context tab: the project folder's brief, documents and research reports, with a reader.
+/** Context tab: Project memory, the project folder's brief, documents and research reports,
+ * and the repository's linked files and nested docs folder by folder, with a reader.
  * Input: the project data. Output: the tree and the reader; reports render as safe Markdown. */
 export function ContextTab({ data }: { data: ProjectData }) {
   const context = valueOf(data.context);
@@ -109,6 +141,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const listed = context?.items ?? [];
   const items = listed.filter((entry) => entry.linked !== true);
   const linked = listed.filter((entry) => entry.linked === true);
+  const unlisted = unlistedLine(context?.unlisted_docs ?? 0, context?.docs_folder_cut === true);
   const [selected, setSelected] = useState<string | null>(() => hashParam("file"));
   const [file, setFile] = useState<Result<{ text: string | null; truncated: boolean }>>();
   const [saving, setSaving] = useState<{ heading: string | null } | null>(null);
@@ -245,9 +278,12 @@ export function ContextTab({ data }: { data: ProjectData }) {
             <Group title="research/" items={items.filter((entry) => entry.kind === "research")} selected={chosen} onSelect={select} running={running} />
             {items.filter((entry) => entry.kind === "plan").map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}><Icon name="list-checks" size={14} />{displayText(entry.path.slice(entry.path.lastIndexOf("/") + 1))}</button></li>)}
           </ul></li>
-          {linked.length > 0 && <li><span className="pj-folder"><Icon name="folder" size={13} />From your repo</span><ul>
-            {linked.map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}>
-              <Icon name={fileIcon(entry.path)} size={14} />{displayText(shownPath(entry))}</button></li>)}
+          {(linked.length > 0 || unlisted !== null) && <li><span className="pj-folder"><Icon name="folder" size={13} />From your repo</span><ul>
+            {repoFolders(linked).map(([folder, entries]) => folder === ""
+              ? entries.map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}>
+                <Icon name={fileIcon(entry.path)} size={14} />{displayText(shownPath(entry))}</button></li>)
+              : <Group key={folder} title={displayText(`${folder}/`)} items={entries} selected={chosen} onSelect={select} running={running} />)}
+            {unlisted !== null && <li><span className="pj-folder pj-muted">{unlisted}</span></li>}
           </ul></li>}
         </ul>
       </>}

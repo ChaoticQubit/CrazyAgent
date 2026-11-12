@@ -25,6 +25,7 @@ import { PlanningLine } from "./planning";
 import { SessionContext, useHeld, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { HarnessPage } from "../settings/harness-page";
+import { ModelsSection } from "../settings/models-section";
 import { ProjectChecks } from "../settings/checks";
 import { PluginsAndSkills } from "../settings/plugins";
 import { TicketSettingsPanel } from "../settings/tickets";
@@ -193,6 +194,7 @@ function HarnessesSection({ data }: { data: ProjectData }) {
     {data.harnesses?.kind === "ok" && entries.length === 0 && <p className="pj-muted">No harness is installed on this Mac. Install one, then choose Check again in Settings, Harnesses.</p>}
     {current && <>
       <Select id="ps-harness" label="Harness" value={current.id} options={entries.map((entry) => ({ value: entry.id, label: entry.name }))} onValue={setChosen} />
+      <ModelsSection key={current.id} harness={current.id} name={current.name} projectId={data.id} />
       <HarnessPage key={current.id} harness={current.id} projectId={data.id} />
     </>}
   </div>;

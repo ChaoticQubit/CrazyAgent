@@ -63,6 +63,8 @@ fn context(paths: &[&str]) -> ProjectContext {
                 linked: false,
             })
             .collect(),
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     }
 }
 

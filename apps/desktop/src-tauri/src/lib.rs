@@ -11,6 +11,7 @@ use bridge::checks::TestsReply;
 use bridge::harness_settings::HarnessSettingsPage;
 use bridge::intake::FolderSize;
 use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
+use bridge::model_choice::ModelsPage;
 use bridge::notify::Notices;
 use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
@@ -32,7 +33,7 @@ use crazyagent::coord::tool_switches::Switch;
 use crazyagent::demo::DemoView;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
-    ChecksReply, ModelAccessCollection, NativeAuthMethod, TrackedProject,
+    ChecksReply, ModelAccessCollection, ModelAdded, NativeAuthMethod, TrackedProject,
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
@@ -46,6 +47,7 @@ use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
+use crazyagent::model_choice::rules::Rules;
 use crazyagent::notifications::{NoticeAction, NoticePage, NoticeQuery, NoticeSettings};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::owner_profile::OwnerProfile;
@@ -4340,6 +4342,98 @@ async fn desktop_reset_harness_setting(
 }
 
 #[tauri::command]
+async fn desktop_model_choice(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    harness: String,
+    project_id: Option<String>,
+) -> Result<ModelsPage, BridgeError> {
+    main_window(&webview)?;
+    let call = read(&state).await?.model_choice(harness, project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_set_model_choice(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    harness: String,
+    project_id: Option<String>,
+    slot: String,
+    value: serde_json::Value,
+    version: u64,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .set_model_choice(harness, project_id, slot, value, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_reset_model_choice(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    harness: String,
+    project_id: Option<String>,
+    slot: String,
+    version: u64,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .reset_model_choice(harness, project_id, slot, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_add_model(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    harness: String,
+    model: String,
+) -> Result<ModelAdded, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.add_model(harness, model)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_remove_model(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    harness: String,
+    model: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.remove_model(harness, model)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_model_rules(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Rules, BridgeError> {
+    main_window(&webview)?;
+    let call = read(&state).await?.model_rules()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_set_model_rule(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    rule: String,
+    value: String,
+    version: u64,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.set_model_rule(rule, value, version)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_questions(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5062,6 +5156,13 @@ native_commands! {
     desktop_harness_settings,
     desktop_set_harness_setting,
     desktop_reset_harness_setting,
+    desktop_model_choice,
+    desktop_set_model_choice,
+    desktop_reset_model_choice,
+    desktop_add_model,
+    desktop_remove_model,
+    desktop_model_rules,
+    desktop_set_model_rule,
     desktop_harness_versions,
     desktop_harness_update,
     desktop_harness_install,

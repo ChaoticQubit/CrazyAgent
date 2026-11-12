@@ -141,10 +141,12 @@ pub fn scratch(prefix: &str) -> tempfile::TempDir {
 
 /// The real `crazyagent engine` process on a private root, started as the desktop app
 /// and the TUI start it. Inputs: a scratch prefix. Output: a running engine whose
-/// stderr is kept for failure messages; dropping it kills the process.
+/// stderr is kept for failure messages; dropping it kills the process. A set `home` or
+/// `env_path` replaces HOME or PATH for the process alone.
 pub struct Engine {
     pub root: tempfile::TempDir,
     pub home: Option<PathBuf>,
+    pub env_path: Option<std::ffi::OsString>,
     pub harness: Option<(&'static str, PathBuf)>,
     child: Option<Child>,
     stderr: Option<std::thread::JoinHandle<String>>,
@@ -161,6 +163,7 @@ impl Engine {
         Self {
             root,
             home: None,
+            env_path: None,
             harness: None,
             child: None,
             stderr: None,
@@ -204,6 +207,9 @@ impl Engine {
             .stderr(Stdio::piped());
         if let Some(home) = &self.home {
             command.env("HOME", home);
+        }
+        if let Some(path) = &self.env_path {
+            command.env("PATH", path);
         }
         if let Some((flag, executable)) = &self.harness {
             assert!(matches!(
