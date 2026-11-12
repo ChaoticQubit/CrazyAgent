@@ -561,6 +561,7 @@ fallback_allowed = false
             steps: prepared.steps,
             time: prepared.time,
             frames: prepared.frames,
+            model: prepared.model.clone(),
         }
     }
 

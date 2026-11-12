@@ -1813,9 +1813,135 @@ async fn an_rcli_master_turn_is_prepared_with_the_saved_time_limit() {
             prepared.time.run_time().is_none(),
             limit == TimeLimit::NoLimit
         );
+        assert_eq!(
+            prepared.model, None,
+            "no master model runs the account's own"
+        );
         drop(prepared);
         case.finish().await;
     }
+}
+
+/// Saves the owner's RCLI master model at app scope the way the Models section does, and
+/// for an id the catalog does not list first records it as an owner id that passed its
+/// test launch. Inputs: the fixture and the id. Output: none; the save is checked.
+fn store_rcli_master_model(case: &Fixture, model: &str) {
+    use crate::model_choice::{Slot, Written, store};
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let catalog = crate::model_choice::catalog("rcli");
+    if !catalog.iter().any(|id| id == model) {
+        store::custom_begin(&writer, "rcli", &catalog, model).unwrap();
+        store::custom_checked(&writer, "rcli", model, true).unwrap();
+    }
+    let scope = crate::harness_settings::Scope::App;
+    let models = store::values(&writer, "rcli", &catalog, &scope, None).unwrap();
+    let version = models
+        .rows
+        .iter()
+        .find(|row| row.slot == Slot::Master)
+        .unwrap()
+        .version;
+    let written = store::set(
+        &writer,
+        "rcli",
+        &catalog,
+        &scope,
+        Slot::Master,
+        &serde_json::json!(model),
+        version,
+    )
+    .unwrap();
+    assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+}
+
+/// DEC-150 M-5 (leader 17:09): with an RCLI master model no pool account serves, the turn
+/// waits blocked with a plain line naming the model, each account says why, and nothing
+/// launches on the account's own model.
+#[tokio::test]
+async fn an_rcli_master_model_no_pool_account_serves_blocks_the_turn_naming_the_model() {
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    case.register().await;
+    store_rcli_master_model(&case, "claude-opus-5-5");
+    let returned = case
+        .drive()
+        .await
+        .expect("a master model no account serves blocks the turn");
+    assert_eq!(returned.phase, MasterTurnPhase::Blocked);
+    let stopped = case.persisted_turn().await;
+    assert_eq!(stopped.phase, MasterTurnPhase::Blocked);
+    assert_eq!(
+        serde_json::to_value(stopped.reason).unwrap(),
+        serde_json::json!("model_unserved")
+    );
+    assert_eq!(stopped.cause.as_deref(), Some("master_model_unserved"));
+    assert_eq!(
+        stopped.detail.as_deref(),
+        Some(
+            "No account in this master's pool can run claude-opus-5-5. Add an account whose provider serves it to the pool, or change the master model in Settings, Harnesses, RCLI, Models."
+        )
+    );
+    assert!(stopped.attempt.is_none());
+    assert_eq!(stopped.accounts.len(), 1);
+    assert_eq!(
+        stopped.accounts[0].connection,
+        reference("local-connection")
+    );
+    assert_eq!(
+        serde_json::to_value(stopped.accounts[0].reason).unwrap(),
+        serde_json::json!("model_unserved")
+    );
+    let session = Fixture::read_session(&case.owner, &case.session.project_id).await;
+    assert_eq!(session.current_turn, None);
+    case.finish().await;
+}
+
+/// DEC-150 M-5: an RCLI master model the pool account's provider serves prepares the turn
+/// on it and carries the model to the launch, read once with the preparation.
+#[tokio::test]
+async fn an_rcli_master_model_its_account_serves_is_prepared_and_carried_to_the_launch() {
+    let catalog = CATALOG.replace(
+        r#"protocol = "openai-chat""#,
+        r#"protocol = "anthropic-messages""#,
+    );
+    assert_ne!(catalog, CATALOG);
+    let case = Fixture::open(&catalog, selection(MasterBackend::Rcli), true).await;
+    let config = String::from_utf8(LOCAL_CONFIG.to_vec())
+        .unwrap()
+        .replace(r#""openai-chat""#, r#""anthropic-messages""#);
+    private_file(&case.home.join(".backboard/config.json"), config.as_bytes());
+    case.register().await;
+    store_rcli_master_model(&case, "claude-opus-5-5");
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(
+        prepared.attempt.connection.id,
+        reference("local-connection")
+    );
+    assert_eq!(prepared.model.as_deref(), Some("claude-opus-5-5"));
+    let persisted = case.persisted_turn().await;
+    assert_eq!(persisted.phase, MasterTurnPhase::Prepared);
+    assert!(persisted.accounts.is_empty());
+    drop(prepared);
+    case.finish().await;
+}
+
+/// DEC-150 M-5: a URL or Ollama account runs a master model only when it is the account's
+/// own model.
+#[tokio::test]
+async fn a_local_account_runs_a_master_model_only_when_it_is_its_own() {
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    case.register().await;
+    store_rcli_master_model(&case, "local-model");
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(
+        prepared.attempt.connection.id,
+        reference("local-connection")
+    );
+    assert_eq!(prepared.model.as_deref(), Some("local-model"));
+    drop(prepared);
+    case.finish().await;
 }
 
 #[tokio::test]
