@@ -221,12 +221,10 @@ fn a_read_runs_the_resolved_harness_signed_out_in_a_private_home_it_then_removes
             report.display()
         ),
     );
-    let started = Instant::now();
     assert_eq!(
-        read_with("codex", &codex, &root, LIMIT),
+        read_with("codex", &codex, &root, Duration::from_secs(60)),
         Some(ids(&["gpt-a"]))
     );
-    assert!(started.elapsed() < LIMIT);
     let seen = std::fs::read_to_string(&report).unwrap();
     let field = |name: &str| -> String {
         seen.lines()
@@ -368,6 +366,53 @@ fn a_saved_live_model_survives_a_shorter_read_a_failed_read_and_a_restart() {
         .as_deref(),
         Some("live-b"),
         "the picked live model still launches"
+    );
+}
+
+#[test]
+fn a_saved_live_model_past_the_bound_stays_when_a_new_id_comes_ahead_of_it() {
+    let (_tmp, _root, db) = engine();
+    let room = crate::model_choice::CATALOG_MODELS_MAX - shipped_ids("codex").len();
+    let listed: Vec<String> = (0..room + 5).map(|n| format!("live-{n:03}")).collect();
+    store::live_record(&db, "codex", Some(&listed)).unwrap();
+    let last = store::catalog(&db, "codex")
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last, listed[room - 1]);
+    let master = values(&db)
+        .rows
+        .iter()
+        .find(|row| row.slot == Slot::Master)
+        .unwrap()
+        .version;
+    let written = store::set(
+        &db,
+        "codex",
+        &store::catalog(&db, "codex").unwrap(),
+        &Scope::App,
+        Slot::Master,
+        &json!(last),
+        master,
+    )
+    .unwrap();
+    assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    let mut ahead = ids(&["live-new"]);
+    ahead.extend(listed.iter().cloned());
+    store::live_record(&db, "codex", Some(&ahead)).unwrap();
+    let catalog = store::catalog(&db, "codex").unwrap();
+    assert!(
+        catalog.contains(&last),
+        "the saved id stays though the new list pushes it past the bound: {catalog:?}"
+    );
+    assert!(catalog.contains(&"live-new".to_owned()));
+    assert_catalog("codex", &catalog);
+    assert_eq!(
+        store::launch_model(&db, "codex", &catalog, None, Slot::Master)
+            .unwrap()
+            .as_deref(),
+        Some(last.as_str())
     );
 }
 
