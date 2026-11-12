@@ -2052,6 +2052,7 @@ mod tests {
                 MasterReason::ProtocolFault,
             ),
             ("codex_host_input_limit", MasterReason::FrameLimit),
+            ("claude_host_input_limit", MasterReason::FrameLimit),
             (
                 "master_session_scope_conflict",
                 MasterReason::ConnectionChanged,

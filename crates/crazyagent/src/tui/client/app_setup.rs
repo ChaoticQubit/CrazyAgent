@@ -2,6 +2,7 @@ use super::settings::{applied, problem};
 use super::*;
 use crate::cleanup_settings::CleanupSettings;
 use crate::github::GitHubStatus;
+use crate::master_frame_limit::MasterFrameSettings;
 use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
 use crate::projects_home::ProjectsHome;
@@ -538,6 +539,31 @@ mod tests {
             let read_time = AppSetupJob::MasterTime;
             let AppSetupEvent::MasterTime(Ok(read)) = ask(&mut native, read_time).await else {
                 panic!("master time limit required")
+            };
+            assert_eq!(read, settings, "{limit:?} is stored as picked");
+        }
+
+        let read_frames = AppSetupJob::MasterFrames;
+        let AppSetupEvent::MasterFrames(Ok(frames)) = ask(&mut native, read_frames).await else {
+            panic!("master frame size limit required")
+        };
+        assert_eq!(frames, MasterFrameSettings::default());
+        assert_eq!(frames.limit, crate::master_frame_limit::FrameSize::Kib64);
+        let limits = crate::master_frame_limit::FrameSize::ALL;
+        for (generation, limit) in (17..).zip(limits.into_iter().rev()) {
+            let settings = MasterFrameSettings { limit };
+            let set = ask(
+                &mut native,
+                AppSetupJob::SetMasterFrames {
+                    settings,
+                    generation,
+                },
+            )
+            .await;
+            assert!(matches!(set, AppSetupEvent::MasterFramesSet(Ok(()))));
+            let read_frames = AppSetupJob::MasterFrames;
+            let AppSetupEvent::MasterFrames(Ok(read)) = ask(&mut native, read_frames).await else {
+                panic!("master frame size limit required")
             };
             assert_eq!(read, settings, "{limit:?} is stored as picked");
         }
