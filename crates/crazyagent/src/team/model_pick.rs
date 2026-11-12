@@ -330,10 +330,11 @@ pub(crate) enum Fallen {
 }
 
 /// Tells the owner and the master once that no pool account could run a model chosen for
-/// a harness's agents or master, so a start runs on the default (DEC-150): one owner
-/// Pool failover notification (DEC-136a) and one engine message to the master, then nothing more for that project,
-/// harness and model until it runs again (`ran`). Takes the transaction, the project, the
-/// harness, the model, who falls back and the time. Returns whether this call told them.
+/// a harness's agents or master, so a start runs on the default (DEC-150): one owner Pool
+/// failover notification (DEC-136a) and one engine message to the master, then nothing
+/// more for that project, harness and model until it runs again (`ran`). Takes the
+/// transaction, the project, the harness, the model, who falls back and the time. Returns
+/// whether this call told them.
 pub(crate) fn fell_back(
     tx: &Transaction<'_>,
     project: &ProjectId,
