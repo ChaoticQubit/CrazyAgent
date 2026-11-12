@@ -1,4 +1,6 @@
+use crate::engine::owner::AccountExtras;
 use crate::usage::extras::{LimitExtras, ResetKind, Resets, Spend};
+use std::collections::HashMap;
 
 /// The separator between the parts of an account's limits line, the same as the desktop's.
 pub const PART_GAP: &str = " \u{b7} ";
@@ -89,6 +91,89 @@ pub fn extras_line(extras: &LimitExtras, now_ms: i64, offset: i64) -> String {
 pub fn new_reset_line(name: &str, count: u32) -> String {
     assert!(count >= 1, "a new free reset leaves at least one");
     format!("{name} has a new free reset. {} now.", counted(count))
+}
+
+/// How often the shell reads the stored extras for the new free reset notice, in ms.
+pub const RESET_WATCH_MS: i64 = 60_000;
+
+/// How long before the first look a gain still counts as new, the same as the desktop's: one
+/// usage poll and some slack, so a reset that arrived while the TUI was closed is not told.
+pub const FRESH_GAIN_MS: i64 = 15 * 60_000;
+
+/// The most new free resets one look tells, so a burst never floods the message line.
+pub const NOTICES_PER_LOOK_MAX: usize = 3;
+
+/// The shell's watch for new free resets: when it last asked for the stored extras, and each
+/// account's last gain stamp seen, none before the first look.
+#[derive(Debug, Default)]
+pub struct ResetWatch {
+    asked_ms: Option<i64>,
+    known: Option<HashMap<String, i64>>,
+}
+
+impl ResetWatch {
+    /// Tells whether the shell asks for the stored extras now: never asked, `RESET_WATCH_MS`
+    /// since the last ask, or a clock that went back; a yes marks the ask. Input: now.
+    /// Output: the answer.
+    pub fn due(&mut self, now_ms: i64) -> bool {
+        let due = self
+            .asked_ms
+            .is_none_or(|at| at > now_ms || now_ms - at >= RESET_WATCH_MS);
+        if due {
+            self.asked_ms = Some(now_ms);
+        }
+        due
+    }
+
+    /// Picks the new free resets to tell from one read, the same as the desktop's: each
+    /// account whose gain stamp changed since the last look, and for an account not seen
+    /// before only a gain from the last `FRESH_GAIN_MS`; a count not reported now is never
+    /// told. Inputs: the read and now. Output: the accounts and counts to tell, at most
+    /// `NOTICES_PER_LOOK_MAX`.
+    pub fn look(&mut self, rows: &[AccountExtras], now_ms: i64) -> Vec<(String, u32)> {
+        let mut seen = HashMap::new();
+        let mut send = Vec::new();
+        for row in rows {
+            let Some(gained) = row.extras.resets_gained_ms else {
+                continue;
+            };
+            let account = row.account.as_str();
+            seen.insert(account.to_owned(), gained);
+            let Some(resets) = live(&row.extras, now_ms).filter(|resets| resets.count >= 1) else {
+                continue;
+            };
+            let fresh = match self.known.as_ref().and_then(|known| known.get(account)) {
+                None => gained > now_ms - FRESH_GAIN_MS,
+                Some(before) => *before != gained,
+            };
+            if fresh && send.len() < NOTICES_PER_LOOK_MAX {
+                send.push((account.to_owned(), resets.count));
+            }
+        }
+        self.known = Some(seen);
+        assert!(send.len() <= NOTICES_PER_LOOK_MAX);
+        send
+    }
+}
+
+/// The one message for a look's new free resets: each account by its label, joined, never by
+/// its id. Inputs: the accounts and counts to tell and the labels by account id. Output: the
+/// message, or none when none arrived.
+pub fn reset_notice(send: &[(String, u32)], labels: &HashMap<String, String>) -> Option<String> {
+    assert!(send.len() <= NOTICES_PER_LOOK_MAX);
+    if send.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = send
+        .iter()
+        .map(|(account, count)| {
+            new_reset_line(
+                labels.get(account).map_or("An account", String::as_str),
+                *count,
+            )
+        })
+        .collect();
+    Some(lines.join(" "))
 }
 
 #[cfg(test)]
