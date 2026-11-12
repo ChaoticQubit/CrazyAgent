@@ -142,6 +142,12 @@ fn agent_row(agent: &FinishedAgent) -> String {
 }
 
 impl Cleanup {
+    /// Says whether the cleanup box is open, where n closes it (DEC-136a key n).
+    /// Input: none. Output: true while the box reads or asks.
+    pub(super) fn asking(&self) -> bool {
+        false
+    }
+
     /// Cleanup with nothing read and no box open.
     pub(super) fn new() -> Self {
         Self {

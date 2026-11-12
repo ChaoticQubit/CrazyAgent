@@ -605,6 +605,13 @@ async fn a_move_of_a_repo_with_a_linked_worktree_asks_first_and_move_anyway_move
     );
     assert!(pump(&mut shell, &mut connection).await.is_empty());
     assert!(source.join(".git").is_dir());
+    shell.key(Key::Char('n'));
+    assert_eq!(
+        shell.place(),
+        Some(Place::AddFolder),
+        "an open question keeps n from the notifications list (DEC-136a key n)"
+    );
+    assert!(shows(&render(&mut shell, 80, 40), "Move shop anyway?"));
 
     shell.key(Key::Right);
     shell.key(Key::Enter);

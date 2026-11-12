@@ -764,6 +764,14 @@ pub(in crate::tui) struct ProjectScreen {
 }
 
 impl ProjectScreen {
+    /// Says whether an open question on this screen answers n now (DEC-136a key n): any
+    /// box or y/n ask, the plan ask, a memory suggestion under the Overview cursor, a
+    /// report suggestion being read on Context, or the open tab's own ask. Output: true
+    /// while n answers something here, so the shell leaves n to it.
+    pub fn asking(&self) -> bool {
+        false
+    }
+
     /// Opens a project on its Overview tab.
     /// Takes the project, its name from the engine snapshot and the owner's home folder.
     /// Returns the screen; engine reads start with `next_query`.

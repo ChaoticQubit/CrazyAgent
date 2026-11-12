@@ -1524,10 +1524,10 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
         shown.contains("Session  started")
     })
     .await;
-    assert!(shown.contains("n New session"), "{shown}");
+    assert!(shown.contains("+ New session"), "{shown}");
     assert!(!shown.contains("earlier"), "{shown}");
 
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     let shown = until(&mut shell, &mut connection, |shown| {
         shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
     })
@@ -1635,7 +1635,7 @@ async fn n_after_a_settings_change_on_another_client_starts_a_new_session() {
         shown.contains("Session  started")
     })
     .await;
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     let shown = until(&mut shell, &mut connection, |shown| {
         shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
     })
@@ -1663,7 +1663,7 @@ async fn n_whose_settings_read_fails_says_the_new_session_was_not_started() {
         shown.contains("Session  started")
     })
     .await;
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     let mut read = None;
     for _ in 0..shell.ctx.queued() {
         match shell.ctx.next_request().unwrap() {
@@ -1671,7 +1671,7 @@ async fn n_whose_settings_read_fails_says_the_new_session_was_not_started() {
             other => shell.ctx.request(other),
         }
     }
-    let read = read.expect("n reads the current settings first");
+    let read = read.expect("+ reads the current settings first");
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut asked = false;
     let event = loop {
@@ -1704,7 +1704,7 @@ async fn n_whose_settings_read_fails_says_the_new_session_was_not_started() {
     assert_eq!(
         message.rest,
         "The current settings could not be read (master_owner_identity_changed). \
-         Press n to try again."
+         Press + to try again."
     );
     pump(&mut shell, &mut connection).await;
     let (latest, _) = latest_master(&mut engine, &notes).await;
@@ -1729,13 +1729,13 @@ async fn a_second_n_while_the_first_new_session_starts_says_it_is_already_starti
         shown.contains("Session  started")
     })
     .await;
-    shell.key(Key::Char('n'));
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
+    shell.key(Key::Char('+'));
     let message = shell
         .ctx
         .message()
         .cloned()
-        .expect("the second n is answered on the page");
+        .expect("the second + is answered on the page");
     assert_eq!(message.tone, Tone::Error);
     assert_eq!(message.lead, "The session did not switch.");
     assert_eq!(message.rest, "A new session is already starting.");
@@ -1784,7 +1784,7 @@ async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_alre
         shown.contains("Session  started")
     })
     .await;
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     let mut read = None;
     for _ in 0..shell.ctx.queued() {
         match shell.ctx.next_request().unwrap() {
@@ -1793,7 +1793,7 @@ async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_alre
         }
     }
     connection
-        .master(*read.expect("n reads the current settings first"))
+        .master(*read.expect("+ reads the current settings first"))
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -1812,12 +1812,12 @@ async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_alre
             None => tokio::time::sleep(Duration::from_millis(20)).await,
         }
     }
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     let message = shell
         .ctx
         .message()
         .cloned()
-        .expect("the second n is answered on the page");
+        .expect("the second + is answered on the page");
     assert_eq!(message.lead, "The session did not switch.");
     assert_eq!(message.rest, "A new session is already starting.");
     let other = Message::error("The master's turn did not stop.", "It had already ended.");
@@ -1858,7 +1858,7 @@ async fn n_while_a_sent_message_is_under_way_says_so_in_plain_words() {
     }
     shell.key(Key::Enter);
     shell.key(Key::Esc);
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     let message = shell
         .ctx
         .message()
@@ -1868,7 +1868,7 @@ async fn n_while_a_sent_message_is_under_way_says_so_in_plain_words() {
     assert_eq!(message.lead, "The session did not switch.");
     assert_eq!(
         message.rest,
-        "Your last request is still being handled. Press n again when it is done."
+        "Your last request is still being handled. Press + again when it is done."
     );
     let shown = render(&mut shell, 100, 40);
     for internal in ["intent", "exact identity", "Ctrl-R recovers"] {
@@ -1892,7 +1892,7 @@ async fn a_new_session_on_a_live_master_turns_the_switch_on() {
     })
     .await;
 
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     let mut sent = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     while !sent.contains(&"team change") {
@@ -1960,7 +1960,7 @@ async fn a_new_session_with_no_session_in_view_turns_the_live_switch_on() {
     assert_ne!(before.live_master, Some(true), "the switch starts off");
 
     shell.key(Key::Esc);
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     let mut sent = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     while !sent.contains(&"team change") {
@@ -2980,7 +2980,7 @@ async fn a_paste_on_the_team_settings_goes_into_the_task_draft_and_quit_warns_it
     pump(&mut shell, &mut connection).await;
     team_settings(&mut shell, &mut connection).await;
 
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     let shown = render(&mut shell, 200, 40);
     assert!(shown.contains("New task from you"), "{shown}");
     shell.key(Key::Paste("Fix the flaky sync test".into()));
@@ -4452,7 +4452,7 @@ async fn a_session_switch_from_the_master_view_opens_the_master_view_again() {
         shown.contains("Session  started")
     })
     .await;
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     until(&mut shell, &mut connection, |shown| {
         shown.contains("No messages yet.")
     })
@@ -4484,7 +4484,7 @@ async fn a_session_switch_from_the_master_view_opens_the_master_view_again() {
     assert_eq!(resumed.unwrap().session_id, first.session_id);
 
     shell.key(LEADER);
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('+'));
     until_place(&mut shell, &mut connection, &master).await;
     let (fresh, _) = latest_master(&mut engine, &notes).await;
     let fresh = fresh.unwrap();

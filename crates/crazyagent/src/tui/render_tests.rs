@@ -526,7 +526,7 @@ fn home_cards_show_team_work_and_suggested_memories_and_m_opens_memory() {
     assert!(!shown.contains("Updated 4 min ago"), "{shown}");
     assert_eq!(
         shown.lines().last(),
-        Some(" n New project  a Add project  Enter Open  m Review memories             ? Help "),
+        Some(" p New project  a Add project  Enter Open  m Review memories             ? Help "),
         "s Settings no longer fits at 80 columns once m shows: {shown}"
     );
     shell.key(Key::Char('m'));
@@ -625,7 +625,7 @@ fn home_lists_a_kept_new_project_draft_first_and_enter_continues_it() {
     ctx.store.pools = Load::Ready(pools());
     let mut shell = shell_at(ctx, Place::Home);
     shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('p'));
     keys(&mut shell, "Saltmarsh");
     shell.key(Key::Esc);
     shell.key(Key::Esc);
@@ -664,7 +664,7 @@ fn home_shows_a_kept_draft_instead_of_the_empty_state() {
     ctx.store.pools = Load::Ready(pools());
     let mut shell = shell_at(ctx, Place::Home);
     shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
-    shell.key(Key::Char('n'));
+    shell.key(Key::Char('p'));
     keys(&mut shell, "Saltmarsh");
     shell.key(Key::Esc);
     shell.key(Key::Esc);

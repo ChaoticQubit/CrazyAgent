@@ -1800,3 +1800,79 @@ fn the_tui_header_counts_unread_and_pending_notifications_as_they_change() {
     drop(pty);
     engine.stop();
 }
+
+/// DEC-136a key n: n on Home opens the notifications list over every project, Esc goes
+/// back, and Enter on the newest item, an open question, opens that project's Questions
+/// tab and marks the item read, so the header drops one unread and keeps it pending.
+#[test]
+fn the_tui_n_key_lists_notifications_and_enter_opens_the_question_and_marks_it_read() {
+    let mut engine = Engine::start("ca-e2e-notice-n-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-notice-n-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+        assert_eq!(
+            owner.create_project(NOTICE_PROJECT, PROJECT).await,
+            OwnerResult::Applied
+        );
+        owner.controller.detach();
+    });
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    pty.until("the research waiting for a pool is counted", |screen| {
+        header_row(screen).contains("1 unread, 1 pending")
+    });
+    let db = questions::open(engine.path()).unwrap();
+    questions::raise(
+        &db,
+        &ProjectId::new(NOTICE_PROJECT).unwrap(),
+        &EngineSource::Planning,
+        &Ask {
+            question: "Which page ships first?".into(),
+            kind: QuestionKind::Single,
+            options: vec!["Shop".into(), "Blog".into()],
+            recommended: Some("Shop".into()),
+            context: None,
+        },
+    )
+    .unwrap();
+    drop(db);
+    pty.until("the open question is counted", |screen| {
+        header_row(screen).contains("2 unread, 2 pending")
+    });
+
+    pty.keys(&["n"]);
+    pty.until("n opens the notifications list", |screen| {
+        header_row(screen).contains("Notifications")
+            && screen.contains("Which page ships first?")
+            && screen.contains("Waiting for a pool")
+    });
+    pty.keys(&["Escape"]);
+    pty.until("Esc goes back to Home", |screen| at_home(screen, PROJECT));
+
+    pty.keys(&["n"]);
+    pty.until("the list opens again on the newest item", |screen| {
+        header_row(screen).contains("Notifications") && screen.contains("Which page ships first?")
+    });
+    pty.keys(&["Enter"]);
+    pty.until(
+        "Enter opens the question's project on Questions, read but still pending",
+        |screen| {
+            let header = header_row(screen);
+            header.contains(&format!("/  {PROJECT}  /  Questions"))
+                && header.contains("1 unread, 2 pending")
+                && screen.contains("Which page ships first?")
+        },
+    );
+    drop(pty);
+    engine.stop();
+}

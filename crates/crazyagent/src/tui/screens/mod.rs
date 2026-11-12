@@ -338,6 +338,12 @@ pub trait Screen {
     fn raw(&self) -> bool {
         false
     }
+    /// True while an open question on the screen answers n: a y/n ask, a review decision,
+    /// a retry or recount offer. The shell then leaves n to the screen instead of opening
+    /// the notifications list (DEC-136a key n), so n is never lost as No. False by default.
+    fn asking(&self) -> bool {
+        false
+    }
 
     /// Handles one key the shell did not take as a global key.
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow;

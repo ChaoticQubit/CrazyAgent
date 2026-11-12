@@ -1059,6 +1059,20 @@ fn accept_and_discard_name_the_set_they_ask_about() {
 }
 
 #[test]
+fn the_discard_and_accept_questions_report_asking_so_n_answers_them() {
+    let mut view = listed(vec![named('1', ChangeState::Pending)]);
+    assert!(!view.asking());
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    assert!(view.asking());
+    assert!(view.key(key(KeyCode::Char('n')), NOW));
+    assert!(!view.asking());
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert!(view.asking());
+    assert!(view.key(key(KeyCode::Esc), NOW));
+    assert!(!view.asking());
+}
+
+#[test]
 fn marks_on_file_pages_past_the_text_limit_still_load_and_show() {
     let mut view = listed(vec![set('1', ChangeState::Pending)]);
     assert!(view.key(key(KeyCode::Enter), NOW));

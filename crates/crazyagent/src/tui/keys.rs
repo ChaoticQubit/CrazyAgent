@@ -65,6 +65,7 @@ pub enum Global {
     Help,
     PreviousSection,
     NextSection,
+    Notifications,
 }
 
 /// What Shift-←→ do while the master's terminal has the keys, a choice kept on this
@@ -165,7 +166,7 @@ impl Key {
 
 /// Resolves the keys every screen shares.
 /// Inputs: the key and whether a text field has focus. Output: the global
-/// action; `?`, `[` and `]` type into a focused field instead.
+/// action; `?`, `[`, `]` and `n` type into a focused field instead.
 pub fn global(key: &Key, typing: bool) -> Option<Global> {
     match key {
         Key::Ctrl('q' | 'c') => Some(Global::Quit),
@@ -369,7 +370,9 @@ mod tests {
         );
         assert_eq!(global(&Key::Char(']'), true), None);
         assert_eq!(global(&Key::ShiftRight, true), Some(Global::NextSection));
-        assert_eq!(global(&Key::Char('n'), false), None);
+        assert_eq!(global(&Key::Char('n'), false), Some(Global::Notifications));
+        assert_eq!(global(&Key::Char('n'), true), None);
+        assert_eq!(global(&Key::Char('N'), false), None);
         assert_eq!(global(&Key::Esc, false), None);
     }
 

@@ -1103,7 +1103,13 @@ async fn a_real_engine_refuses_a_team_setting_saved_from_an_older_read() {
 fn a_new_task_goes_to_the_chosen_sub_agent() {
     let mut view = loaded();
     assert!(!view.typing());
-    assert_eq!(view.key(press(KeyCode::Char('n'))), TeamReply::Handled);
+    assert_eq!(
+        view.key(press(KeyCode::Char('n'))),
+        TeamReply::Ignored,
+        "n opens the notifications list, + writes a task (DEC-136a key n)"
+    );
+    assert!(!view.typing());
+    assert_eq!(view.key(press(KeyCode::Char('+'))), TeamReply::Handled);
     assert!(view.typing());
     let wide = frame(&view, 120, 36);
     assert!(find(&wide, "New task from you").contains("For  < Any sub-agent >"));
@@ -1209,7 +1215,7 @@ fn a_new_task_goes_to_the_chosen_sub_agent() {
 #[test]
 fn an_empty_task_is_not_sent_and_esc_closes_the_composer() {
     let mut view = loaded();
-    view.key(press(KeyCode::Char('n')));
+    view.key(press(KeyCode::Char('+')));
     assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
     assert_eq!(
         view.notice,
@@ -1228,13 +1234,13 @@ fn an_empty_task_is_not_sent_and_esc_closes_the_composer() {
     assert!(!view.paste("ignored"), "no composer takes no paste");
     let rows = frame(&view, 120, 36);
     assert!(rows.iter().all(|row| !row.contains("New task from you")));
-    assert!(rows.last().unwrap().contains("n New task"));
+    assert!(rows.last().unwrap().contains("+ New task"));
 }
 
 #[test]
 fn a_refused_task_keeps_its_text_and_shows_why() {
     let mut view = loaded();
-    view.key(press(KeyCode::Char('n')));
+    view.key(press(KeyCode::Char('+')));
     assert!(view.paste("Write the alerts page"));
     let TeamReply::Change(action) = view.key(press(KeyCode::Enter)) else {
         panic!("a delegate change expected");
@@ -1290,7 +1296,7 @@ fn a_refused_task_keeps_its_text_and_shows_why() {
 #[test]
 fn a_team_without_a_runnable_sub_agent_opens_no_composer() {
     let mut view = TeamView::new(project());
-    view.key(press(KeyCode::Char('n')));
+    view.key(press(KeyCode::Char('+')));
     assert!(!view.typing());
     assert_eq!(
         view.notice,
@@ -1300,7 +1306,7 @@ fn a_team_without_a_runnable_sub_agent_opens_no_composer() {
     status.harnesses[1].runnable = false;
     let query = view.next_query(NOW).unwrap();
     view.apply(&query, Ok(SetupView::Team(Box::new(status))));
-    view.key(press(KeyCode::Char('n')));
+    view.key(press(KeyCode::Char('+')));
     assert!(!view.typing());
     assert_eq!(
         view.notice,
@@ -1373,7 +1379,7 @@ async fn a_real_engine_takes_a_task_from_the_owner() {
             .iter()
             .any(|row| row.contains("Codex leads. Claude Code x1."))
     );
-    view.key(press(KeyCode::Char('n')));
+    view.key(press(KeyCode::Char('+')));
     assert!(view.typing(), "{:?}", view.notice);
     assert!(view.paste("Write the readings API"));
     view.key(press(KeyCode::Tab));
@@ -5140,4 +5146,20 @@ fn team_settings_at_80_by_24_keep_the_plan_line_and_every_setting() {
         },
     )))));
     every_setting_once_beside_the_plan_line(&render(&mut shell, 80, 24));
+}
+
+#[test]
+fn a_stop_or_cancel_question_reports_asking_so_n_answers_it() {
+    let mut view = loaded();
+    assert!(!view.asking());
+    view.ask = Some(Ask::StopAll);
+    assert!(view.asking(), "the stop question keeps n as Keep running");
+    view.ask = None;
+    view.confirm = Some(11);
+    assert!(view.asking(), "the cancel question keeps n as Keep");
+    view.alerts = true;
+    assert!(
+        !view.asking(),
+        "the open alerts list takes the key first and leaves n alone"
+    );
 }

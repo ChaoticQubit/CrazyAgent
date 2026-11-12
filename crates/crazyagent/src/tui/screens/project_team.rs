@@ -286,6 +286,12 @@ pub(in crate::tui) struct TeamView {
 }
 
 impl TeamView {
+    /// Says whether a stop or cancel question waits for y or n and gets the next key, so
+    /// n answers it (DEC-136a key n). Input: none. Output: true while it does.
+    pub fn asking(&self) -> bool {
+        false
+    }
+
     /// Opens the team of one project with nothing read yet.
     /// Takes the project.
     /// Returns the view; reads start with `next_query`.

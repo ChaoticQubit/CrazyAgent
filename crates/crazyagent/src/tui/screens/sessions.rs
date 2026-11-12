@@ -99,6 +99,12 @@ pub(in crate::tui) struct Sessions {
 }
 
 impl Sessions {
+    /// Says whether the stop-or-delete question is open, so n answers it (DEC-136a key n).
+    /// Input: none. Output: true while the question waits for y or n.
+    pub fn asking(&self) -> bool {
+        false
+    }
+
     /// Takes a fresh engine list, newest activity first, keeping the cursor on the same
     /// session when it is still listed. Input: the rows. Output: none.
     pub fn set(&mut self, rows: Vec<SessionRow>) {

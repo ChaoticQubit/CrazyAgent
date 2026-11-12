@@ -450,6 +450,11 @@ impl Shell {
                 self.overlay = Some(Overlay::Help);
                 return;
             }
+            Some(Global::Notifications)
+                if !modal && self.go_to_allowed() && !self.top().asking() =>
+            {
+                return self.apply(Flow::Open(Place::Notifications));
+            }
             Some(Global::PreviousSection | Global::NextSection) if !modal => {
                 let forward = global(&key, typing) == Some(Global::NextSection);
                 let ctx = &mut self.ctx;
@@ -760,6 +765,7 @@ impl Shell {
         let left = vec![
             styled("Everywhere", Role::Heading, theme),
             key("Ctrl-K", "Go to anything", 13),
+            key("n", "Notifications", 13),
             key("Esc", "Back or cancel", 13),
             key("Tab", "Next field or panel", 13),
             key("Shift-Tab", "Previous", 13),
@@ -1297,6 +1303,131 @@ mod tests {
         assert_eq!(shell.depth(), 2);
         assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Pools)));
         assert_eq!(shell.stack[0].place(), Some(Place::Home));
+    }
+
+    struct Asking {
+        open: bool,
+        took: std::rc::Rc<std::cell::RefCell<Vec<char>>>,
+    }
+
+    impl Screen for Asking {
+        fn crumbs(&self) -> Vec<String> {
+            vec!["Ask".into()]
+        }
+
+        fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
+            Vec::new()
+        }
+
+        fn asking(&self) -> bool {
+            self.open
+        }
+
+        fn key(&mut self, key: &Key, _ctx: &mut Ctx) -> Flow {
+            match key {
+                Key::Char(letter) => {
+                    self.took.borrow_mut().push(*letter);
+                    Flow::Handled
+                }
+                _ => Flow::Ignored,
+            }
+        }
+
+        fn draw(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &Ctx) -> Option<Position> {
+            None
+        }
+
+        fn place(&self) -> Option<Place> {
+            Some(Place::Usage)
+        }
+    }
+
+    #[test]
+    fn an_open_inline_ask_takes_n_before_the_global_key() {
+        let took = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let screen = Asking {
+            open: true,
+            took: took.clone(),
+        };
+        let mut shell = Shell::with(ctx(), Box::new(screen));
+        shell.key(Key::Char('n'));
+        assert_eq!(*took.borrow(), vec!['n'], "the open ask gets n as its No");
+        assert_eq!(shell.depth(), 1);
+        assert_eq!(shell.place(), Some(Place::Usage));
+
+        let screen = Asking {
+            open: false,
+            took: took.clone(),
+        };
+        took.borrow_mut().clear();
+        let mut shell = Shell::with(ctx(), Box::new(screen));
+        shell.key(Key::Char('n'));
+        assert!(took.borrow().is_empty(), "with no ask open n is global");
+        assert_eq!(shell.place(), Some(Place::Notifications));
+    }
+
+    #[test]
+    fn n_opens_the_notifications_list_over_any_view_once_and_esc_returns() {
+        for place in [Place::Home, Place::Usage] {
+            let mut shell = at(place.clone(), ctx());
+            let depth = shell.depth();
+            shell.key(Key::Char('n'));
+            assert_eq!(shell.place(), Some(Place::Notifications), "{place:?}");
+            assert_eq!(shell.depth(), depth + 1, "{place:?}");
+            shell.key(Key::Char('n'));
+            assert_eq!(
+                shell.depth(),
+                depth + 1,
+                "n on the list opens no second list"
+            );
+            shell.key(Key::Esc);
+            assert_eq!(shell.place(), Some(place.clone()), "Esc returns");
+        }
+    }
+
+    #[test]
+    fn n_types_into_a_focused_field_and_waits_for_an_open_overlay() {
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('/'));
+        shell.key(Key::Char('n'));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Home),
+            "n types into Home's filter"
+        );
+
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Ctrl('k'));
+        shell.key(Key::Char('n'));
+        assert!(matches!(shell.overlay, Some(Overlay::GoTo(_))));
+        assert_eq!(shell.place(), Some(Place::Home), "n types into Go to");
+
+        let mut shell = at(Place::Welcome, ctx());
+        shell.key(Key::Char('n'));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Welcome),
+            "no list before first run ends"
+        );
+    }
+
+    #[test]
+    fn p_on_home_opens_new_project_now_that_n_opens_notifications() {
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('p'));
+        assert_eq!(shell.place(), Some(Place::NewProject));
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('n'));
+        assert_ne!(shell.place(), Some(Place::NewProject));
+    }
+
+    #[test]
+    fn the_keys_overlay_lists_n_for_notifications_everywhere() {
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('?'));
+        let shown = crate::tui::render_tests::render(&mut shell, 120, 40).join("\n");
+        assert!(shown.contains("Notifications"), "{shown}");
+        assert!(!shown.contains("n         New project"), "{shown}");
     }
 
     #[test]

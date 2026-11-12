@@ -441,6 +441,10 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     screen.width = 80;
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
     assert!(screen.reading);
+    assert!(
+        !screen.asking(),
+        "a report with no suggested memory leaves n to the shell"
+    );
     let drawn = project_screen(&mut screen, 80, 24, &look);
     assert_eq!(
         drawn.crumbs.last().map(String::as_str),
@@ -502,6 +506,10 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     screen.open(Tab::Overview);
     settle(&mut screen, &mut controller, start + 9_000).await;
     assert_eq!(screen.suggested().len(), 1);
+    assert!(
+        screen.asking(),
+        "n dismisses the suggestion under the Overview cursor"
+    );
     assert_eq!(
         memory_source(screen.suggested()[0]),
         Some(ResearchKind::CompetitorResearch)
@@ -553,6 +561,10 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     screen.width = 80;
     screen.read(&research);
     assert!(screen.report_suggestion().is_some());
+    assert!(
+        screen.asking(),
+        "n dismisses the suggestion of the report being read"
+    );
     screen.preview.as_mut().unwrap().scroll = usize::MAX / 2;
     let drawn = project_screen(&mut screen, 80, 24, &look);
     let shown = text(&drawn.rows);
@@ -715,6 +727,50 @@ fn tabs_input_and_escape_follow_the_design_keys() {
     assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
     assert_eq!(screen.confirm_delete, None);
     assert_eq!(screen.key(key(KeyCode::Char('q'))), ProjectReply::Ignored);
+}
+
+#[test]
+fn every_open_question_on_the_project_screen_reports_asking_so_n_answers_it() {
+    let project = ProjectId::new("asks").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Asks".into(), None);
+    assert!(!screen.asking(), "a new Overview asks nothing");
+
+    screen.confirm_delete = Some("context/documents/scope.csv".into());
+    assert!(screen.asking());
+    assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
+    assert_eq!(screen.confirm_delete, None, "n answered No");
+    assert!(!screen.asking());
+
+    screen.confirm_stop = Some(7);
+    assert!(screen.asking());
+    screen.confirm_stop = None;
+    screen.confirm_remove = true;
+    assert!(screen.asking());
+    screen.confirm_remove = false;
+    screen.confirm_move = true;
+    assert!(screen.asking());
+    screen.confirm_move = false;
+    screen.confirm_plan = Some(SetupAction::CancelResearch {
+        project_id: project.clone(),
+        job: 7,
+    });
+    assert!(screen.asking());
+    screen.confirm_plan = None;
+    assert!(!screen.asking());
+
+    screen.plugins.confirm = Some("plugin-1".into());
+    assert!(!screen.asking(), "the plugin ask shows only on Settings");
+    screen.tab = Tab::Settings;
+    assert!(screen.asking());
+    screen.plugins.confirm = None;
+    screen.plugins.removing = Some("plugin-1".into());
+    assert!(screen.asking());
+    screen.plugins.removing = None;
+    assert!(!screen.asking());
+
+    screen.tab = Tab::Conversation;
+    screen.typing = true;
+    assert!(!screen.asking(), "the master input types n");
 }
 
 #[test]
