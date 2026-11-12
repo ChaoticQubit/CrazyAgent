@@ -779,6 +779,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         harnesses.codex.as_deref(),
                         harnesses.claude.as_deref(),
                         agent_terminal(&service),
+                        terminal_probe(&service),
                         agents,
                         service
                             .owner_runtime()
