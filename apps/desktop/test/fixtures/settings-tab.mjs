@@ -6,6 +6,7 @@ import frame from "../../src/screens/settings/settings.css?inline";
 import { SessionContext } from "../../src/state.ts";
 
 export { contrast } from "./contrast.mjs";
+export { dialogFrame } from "./user-dialog.mjs";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const PAGE = '<div class="shell"><nav class="sidebar"></nav><main class="main" id="main" tabindex="-1"><div class="page" id="mount"></div></main></div>';

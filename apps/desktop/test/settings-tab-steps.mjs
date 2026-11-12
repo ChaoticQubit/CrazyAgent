@@ -36,10 +36,11 @@ export async function doublePress(page, selector, wanted = null) {
   await page.evaluate("Fixture.settle(80)");
 }
 
-/** Walks focus with real Tab keys from the last Settings list link. Inputs: the page and the
- * number of keys and whether to read the name or the id. Output: each focused control's. */
+/** Walks focus with real Tab keys from the last Settings list link, or in a user menu dialog
+ * from its Close button. Inputs: the page and the number of keys and whether to read the name
+ * or the id. Output: each focused control's. */
 export async function tabWalk(page, keys, part = "name") {
-  await page.evaluate("[...document.querySelectorAll('.settings-nav a')].at(-1).focus()");
+  await page.evaluate("(document.querySelector('dialog[open] .dialog-head button:last-child') ?? [...document.querySelectorAll('.settings-nav a')].at(-1)).focus()");
   const seen = [];
   for (let at = 0; at < keys; at += 1) {
     for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });

@@ -25,10 +25,10 @@ export async function press(page, selector, wanted = null) {
   await page.evaluate("Fixture.settle(120)");
 }
 
-/** Walks the tab with real Tab keys from the last Settings link. Inputs: the page and how many
- * stops. Output: each stop's name. */
+/** Walks the tab with real Tab keys from the last Settings link, or in a user menu dialog
+ * from its Close button. Inputs: the page and how many stops. Output: each stop's name. */
 export async function walk(page, stops) {
-  await page.evaluate("[...document.querySelectorAll('.settings-nav a')].at(-1).focus()");
+  await page.evaluate("(document.querySelector('dialog[open] .dialog-head button:last-child') ?? [...document.querySelectorAll('.settings-nav a')].at(-1)).focus()");
   const seen = [];
   for (let at = 0; at < stops; at += 1) {
     for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });

@@ -1151,3 +1151,39 @@ fn delete_everything_removes_the_projects_roadmap_status_runs_and_no_other_proje
         assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
     }
 }
+
+#[test]
+fn a_check_that_got_an_account_drops_the_no_account_problem_and_keeps_any_other() {
+    let case = status_case(Refresh::AfterLanding);
+    let mut runs = FakeRuns::default();
+    refresh(&case.db, &case.project).unwrap();
+    assert_eq!(tick(&case.db, &mut runs, case.now).unwrap(), 1);
+    let due = case.now + RETRY_MS;
+    assert!(wait_for_account(&case.db, &case.project, runs.last(), NO_ACCOUNT, due).unwrap());
+    let waiting = case.read(case.now + 1);
+    assert_eq!(waiting.problem.as_deref(), Some(NO_ACCOUNT));
+    assert!(waiting.stale && !waiting.running);
+
+    assert_eq!(tick(&case.db, &mut runs, due).unwrap(), 1);
+    assert!(account_found(&case.db, &case.project, runs.last()).unwrap());
+    let found = case.read(due + 1);
+    assert!(found.running && found.problem.is_none());
+    assert!(
+        finish(
+            &case.db,
+            &case.project,
+            runs.last(),
+            Err(UNFINISHED),
+            due + 2
+        )
+        .unwrap()
+    );
+
+    refresh(&case.db, &case.project).unwrap();
+    assert_eq!(tick(&case.db, &mut runs, due + 3).unwrap(), 1);
+    assert!(
+        !account_found(&case.db, &case.project, runs.last()).unwrap(),
+        "another problem stays until the check ends"
+    );
+    assert_eq!(case.read(due + 4).problem.as_deref(), Some(UNFINISHED));
+}

@@ -459,6 +459,27 @@ pub fn wait_for_account(
     Ok(changed == 1)
 }
 
+/// Drops the no-account line of the run holding `claim` once that run got an account, so
+/// the line never stands beside the run that answers it; any other line stays until the
+/// run ends. Inputs: the connection, the project and the claim. Output: whether a line
+/// went, or `overview_unavailable`.
+pub fn account_found(
+    db: &Connection,
+    project: &ProjectId,
+    claim: Claim,
+) -> Result<bool, EngineError> {
+    assert!(claim.ms() >= 0);
+    let cleared = db
+        .execute(
+            "UPDATE project_overview SET failure=NULL
+             WHERE project=?1 AND running_ms=?2 AND failure=?3",
+            params![project.as_str(), claim.ms(), line(NO_ACCOUNT)],
+        )
+        .map_err(unavailable)?;
+    assert!(cleared <= 1);
+    Ok(cleared == 1)
+}
+
 /// Makes the Overview tables and closes every run an engine that stopped left open: a run
 /// lives on a thread of its engine, so at engine start none can still report, and each is
 /// closed with [`UNFINISHED`] without a new try. Input: the connection. Output: how many

@@ -1959,15 +1959,15 @@ fn stored() -> crate::project_setup::StoredSetup {
 /// switch choice, when a saved change reaches the running master; at 80 columns too, where a
 /// setting of its own would fold the first settings row away. In a short window the focused
 /// agent's Tools and Working copy rows give way first, then the plan line, as `draw` orders
-/// them: at 80 by 25 the plan line shows, at 80 by 24 it gives way, and every setting, Left
-/// running included, shows at both (v2.3.2 gate rows 26 and 27).
+/// them. At 80 by 25 and 80 by 24 the plan line shows, the settings packed by first fit
+/// (BL-TUI-8024-PLANLINE), and every setting, Left running included, shows at both.
 #[test]
 fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_master() {
     let view = loaded();
     let tall = frame(&view, 160, 36);
     assert!(find(&tall, "Working copy").contains("agent-1"));
     assert!(find(&tall, "Tools").contains("On, inside the project folder"));
-    for (width, height) in [(160, 36), (80, 25)] {
+    for (width, height) in [(160, 36), (80, 25), (80, 24)] {
         let rows = frame(&view, width, height);
         assert!(find(&rows, "leads.").contains("Codex leads."));
         assert!(
@@ -5054,4 +5054,90 @@ fn x_ends_and_k_keeps_the_oldest_hold_and_each_hold_has_a_row() {
             key: 3,
         })
     );
+}
+
+/// Checks a frame of the `team()` fixture: the plan line shows once and every setting shows
+/// once and whole, label and value on one row. Takes the rendered rows. Returns nothing;
+/// panics with the frame on a miss.
+fn every_setting_once_beside_the_plan_line(rows: &[String]) {
+    let shown = rows.join("\n");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("Codex leads."))
+            .count(),
+        1,
+        "{shown}"
+    );
+    for setting in [
+        "Keep warm  Off",
+        "Task  Off",
+        "Session  Off",
+        "Idle stop  Off",
+        "On harness switch  Carry over, when the master is idle",
+        "Sub-agent depth  2",
+        "Worker lands  When the lead accepts",
+        "Agent branches  Named branch",
+        "Max harnesses  No limit",
+        "Live terminal  On",
+        "Max teammates  No limit",
+        "Sub-agent rounds  Until the goal is done",
+        "Master run time  7 days",
+        "Spread accounts  Off",
+        "Token budget  Off",
+        "Master's branch  Repository default",
+        "Land on  Master's branch",
+        "Master accepts change sets  Itself",
+        "Re-ask empty reply  On",
+        "End a turn after done  10 min",
+        "New folder limit  1000 files",
+        "Master idle stop  15 min",
+        "Terminals per window  6",
+        "Background commands  Wait",
+        "Left running  End them",
+    ] {
+        assert_eq!(
+            rows.iter().filter(|row| row.contains(setting)).count(),
+            1,
+            "{setting:?} shows once, whole:\n{shown}"
+        );
+    }
+    assert!(rows.iter().all(|row| row.chars().count() <= 80), "{shown}");
+}
+
+/// At 80 by 24 the team view keeps its plan line beside every setting (backlog
+/// BL-TUI-8024-PLANLINE): Left running after a stop took the plan line's row there, so the
+/// settings pack tighter and "Codex leads." shows with all of them.
+#[test]
+fn the_team_view_at_80_by_24_keeps_the_plan_line_and_every_setting() {
+    every_setting_once_beside_the_plan_line(&frame(&loaded(), 80, 24));
+}
+
+/// Team settings drawn by the shell at 80 by 24 keep the plan line beside every setting
+/// (backlog BL-TUI-8024-PLANLINE): the screen wraps its hint bar to three rows there, so its
+/// body has the same 18 rows as the Agents tab and the settings must pack as tight.
+#[test]
+fn team_settings_at_80_by_24_keep_the_plan_line_and_every_setting() {
+    use crate::tui::client::{OwnerEvent, SetupEvent};
+    use crate::tui::screens::settings_accounts::tests::{ctx, render};
+    use crate::tui::screens::team_settings::TeamSettings;
+    use crate::tui::seam::{Arrival, Request};
+    use crate::tui::shell::Shell;
+    let mut shell = Shell::with(
+        ctx(80, 24),
+        Box::new(TeamSettings::new(project(), "Tidepool".into())),
+    );
+    let mut queries = Vec::new();
+    while let Some(request) = shell.ctx.next_request() {
+        if let Request::Setup(query) = request {
+            queries.push(query);
+        }
+    }
+    assert_eq!(queries.len(), 1, "{queries:?}");
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: queries.remove(0),
+            result: Ok(SetupView::Team(Box::new(team()))),
+        },
+    )))));
+    every_setting_once_beside_the_plan_line(&render(&mut shell, 80, 24));
 }

@@ -11,6 +11,9 @@
 .settings-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .settings-top h2 { margin: 0; font-size: 18px; line-height: 24px; font-weight: 600; }
 .settings-top p { margin: 2px 0 0; color: var(--text-2); font-size: 13px; max-width: 560px; }
+.user-dialog { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.user-dialog .settings-top h2 { display: none; }
+.user-dialog .settings-top p { margin: 0; }
 .settings-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
 @media (max-width: 980px) { .settings-two { grid-template-columns: minmax(0, 1fr); } }
 .set-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--border); }

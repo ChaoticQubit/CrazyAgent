@@ -2,11 +2,11 @@ import type { ReactNode } from "react";
 import { BrandMark } from "./brand";
 import { Icon } from "./icon";
 import { formatRoute, type Route } from "./router";
-import { SidebarFoot, type EngineRestartControl, type EngineState } from "./sidebar-foot";
+import { SidebarFoot, type EngineRestartControl, type EngineState, type UserMenuControl } from "./sidebar-foot";
 
 export { BrandMark };
 
-export type { EngineRestartControl, EngineState };
+export type { EngineRestartControl, EngineState, UserMenuControl };
 
 /** Says how many agents are working. Input: the count, above zero. Output: the words. */
 export function agentsWorking(count: number): string {
@@ -36,16 +36,17 @@ function WorkingCount({ count }: { count: number }) {
 /** The fixed 220 px sidebar as the approved design draws it: the brand, the project list alone
  * on top and scrolling by itself, a dividing line, then Home, New project, Settings and the
  * app-wide Metrics page, and a footer with the profile's initial, its name, the engine
- * state and, on hover or keyboard focus, the Restart engine menu. Inputs: current route,
- * projects, profile name, engine state, a retry action and the restart control, without which
- * the footer has no menu. */
-export function Sidebar({ route, projects, profileName, engine, onRetry, restart }: {
+ * state and, on hover, keyboard focus or a click on the name, the user menu. Inputs: current
+ * route, projects, profile name, engine state, a retry action, the restart control and the
+ * user menu's dialogs; without both the footer has no menu. */
+export function Sidebar({ route, projects, profileName, engine, onRetry, restart, menu }: {
   route: Route;
   projects: SidebarProject[] | undefined;
   profileName: string | undefined;
   engine: EngineState;
   onRetry: () => void;
   restart?: EngineRestartControl;
+  menu?: UserMenuControl;
 }) {
   const current = (match: boolean) => match ? "page" as const : undefined;
   return <aside className="sidebar" aria-label="CrazyAgent">
@@ -74,7 +75,7 @@ export function Sidebar({ route, projects, profileName, engine, onRetry, restart
         <Icon name="trending-up" /><span className="name">Metrics</span>
       </a>
     </nav>
-    <SidebarFoot name={profileName || "Profile"} engine={engine} onRetry={onRetry} restart={restart} />
+    <SidebarFoot name={profileName || "Profile"} engine={engine} onRetry={onRetry} restart={restart} menu={menu} />
   </aside>;
 }
 

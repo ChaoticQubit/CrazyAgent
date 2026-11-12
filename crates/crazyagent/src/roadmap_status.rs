@@ -1014,6 +1014,31 @@ pub fn wait_for_account(
     Ok(changed == 1)
 }
 
+/// Drops the no-account problem of the check holding `claim` once that check got an
+/// account, so the line never stands beside the check that answers it; any other problem
+/// stays until the check ends. Inputs: the connection, the project and the claim. Output:
+/// whether a line went, or `roadmap_status_unavailable`.
+pub fn account_found(
+    db: &Connection,
+    project: &ProjectId,
+    claim: Claim,
+) -> Result<bool, EngineError> {
+    assert!(claim.ms() >= 0);
+    let cleared = db
+        .execute(
+            "UPDATE roadmap_status SET problem=NULL
+             WHERE project=?1 AND running_ms=?2 AND problem=?3",
+            params![
+                project.as_str(),
+                claim.ms(),
+                line(NO_ACCOUNT, NOTE_BYTES_MAX)
+            ],
+        )
+        .map_err(unavailable)?;
+    assert!(cleared <= 1);
+    Ok(cleared == 1)
+}
+
 /// Whether a run still holds its claim: no longer once `tick` closed it, the owner switched
 /// the status off or the project was removed, and then the run stops and stores nothing. A
 /// store that cannot be read counts as held, so a busy database stops no run. Inputs: the

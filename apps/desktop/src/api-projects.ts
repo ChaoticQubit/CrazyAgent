@@ -1,4 +1,4 @@
-import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, plainError, type Result } from "./api";
+import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, oneSelection, plainError, type Result } from "./api";
 import {
   allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterMessages, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
@@ -795,15 +795,17 @@ export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddO
 
 export const PAGES_MAX = 50;
 
-async function allRecords(collection: "pools" | "connections"): Promise<ModelAccessRecord[]> {
-  const records: ModelAccessRecord[] = [];
-  let page = await modelAccessPage(collection, false);
-  records.push(...page.items);
-  for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
-    page = await modelAccessPage(collection, true);
+function allRecords(collection: "pools" | "connections"): Promise<ModelAccessRecord[]> {
+  return oneSelection(async () => {
+    const records: ModelAccessRecord[] = [];
+    let page = await modelAccessPage(collection, false);
     records.push(...page.items);
-  }
-  return records;
+    for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
+      page = await modelAccessPage(collection, true);
+      records.push(...page.items);
+    }
+    return records;
+  });
 }
 
 /** Reads every pool with its member connections.
@@ -841,9 +843,11 @@ export async function setProjectPool(projectId: string, poolId: string | null, g
   return wrap(async () => {
     const opened = await openProject(projectId);
     if (!opened.fresh || opened.project_id !== projectId) throw { code: "invalid_project" };
-    const page = await modelAccessPage("pools", false);
-    if (!page.writable) throw { code: "settings_read_only" };
-    const state = receiptState(await editModelAccess(page.ticket, { kind: "assign_project_pool", project: projectId, pool: poolId }, generation));
+    const state = await oneSelection(async (): Promise<ReceiptState> => {
+      const page = await modelAccessPage("pools", false);
+      if (!page.writable) throw { code: "settings_read_only" };
+      return receiptState(await editModelAccess(page.ticket, { kind: "assign_project_pool", project: projectId, pool: poolId }, generation));
+    });
     if (state.kind !== "applied") return state;
     const saved = (await allRecords("pools")).flatMap((record) => record.kind === "pool" ? [record.pool] : []);
     return projectPoolIs(saved, projectId, poolId) ? state : { kind: "unconfirmed" } as ReceiptState;

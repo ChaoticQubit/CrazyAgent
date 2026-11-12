@@ -164,10 +164,24 @@ export function hash() {
   return browser.execute(() => location.hash);
 }
 
-/** Opens a route by its hash and waits until the window shows it. Input: the hash. */
+/** The dialog each user menu route opens over the page instead of a Settings page (DEC-151). */
+export const USER_DIALOGS = { "#/settings/profile": "Profile", "#/settings/updates": "Updates", "#/settings/github": "GitHub", "#/settings/home": "Projects folder" };
+
+/** The Close button of an open user menu dialog. */
+const USER_DIALOG_CLOSE = "dialog[open]:has(> .dialog-body > .user-dialog) .dialog-head button:last-child";
+
+/** Opens a route by its hash and waits until the window shows it: the page, or for Profile,
+ * Updates, GitHub and Projects folder their dialog over the page. An open user menu dialog is
+ * closed first, as the owner closes it before going elsewhere. Input: the hash. */
 export async function go(route) {
+  await browser.execute((close) => { document.querySelector(close)?.click(); }, USER_DIALOG_CLOSE);
   await browser.execute((next) => { location.hash = next; }, route);
-  await until(async () => (await hash()) === route, UI_MS, `${route} did not open`);
+  const title = USER_DIALOGS[route];
+  if (title === undefined) {
+    await until(async () => (await hash()) === route, UI_MS, `${route} did not open`);
+    return;
+  }
+  await until(() => browser.execute((wanted) => [...document.querySelectorAll("dialog[open] .dialog-head h2")].some((head) => head.textContent === wanted), title), UI_MS, `${route} did not open the ${title} dialog`);
 }
 
 /** The trial project's id, read by the add-project step. Output: the id; throws when no

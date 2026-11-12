@@ -121,7 +121,7 @@ export type FirstRunStep = "profile" | "home" | "tools" | "accounts";
 
 export const FIRST_RUN_STEPS: { id: FirstRunStep; label: string; title: string; intro: string }[] = [
   { id: "profile", label: "Profile", title: "Tell CrazyAgent about you",
-    intro: "Agents read this before they work for you. You can change it later in Settings, Profile." },
+    intro: "Agents read this before they work for you. You can change it later from Profile in the menu under your name." },
   { id: "home", label: "Projects folder", title: "Choose your projects folder",
     intro: "Every project lives in its own folder here. CrazyAgent keeps its own data in a private folder, not in this one." },
   { id: "tools", label: "Tools", title: "Set up tools",

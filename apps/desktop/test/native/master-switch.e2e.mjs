@@ -146,16 +146,16 @@ async function masterFollowsSavedInput() {
   return seen;
 }
 
-/** Saves a Terminal input option on Settings, Profile, as the owner does, and reads it back after
- * leaving the page and opening it again. Input: the option's label. */
+/** Saves a Terminal input option in the Profile dialog, as the owner does, and reads it back
+ * after leaving it and opening it again. Input: the option's label. */
 async function saveInput(option) {
   const choice = segment("Terminal input", option);
   await go("#/settings/profile");
-  await until(() => shown(choice), UI_MS, "Settings, Profile never showed Terminal input");
+  await until(() => shown(choice), UI_MS, "the Profile dialog never showed Terminal input");
   await click(choice);
   await go("#/settings/process");
   await go("#/settings/profile");
-  await until(async () => (await shown(choice)) && (await $(choice).getAttribute("aria-checked")) === "true", UI_MS, `Terminal input did not read ${option} after opening Settings again`);
+  await until(async () => (await shown(choice)) && (await $(choice).getAttribute("aria-checked")) === "true", UI_MS, `Terminal input did not read ${option} after opening Profile again`);
 }
 
 /** Starts one sub-agent through the app's own command, opens its terminal from its card and
