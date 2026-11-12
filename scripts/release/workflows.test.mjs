@@ -198,6 +198,14 @@ test("a release builds the bundled tmux from its pinned script before staging si
   assert(!/TMUX_(VERSION|SHA256)/.test(ci), "lint-only CI builds no tmux, so it pins none (DEC-143)");
 });
 
+test("no release step pipes a tool into grep -q, since under pipefail an early grep exit fails a good check or passes a bad one (DEC-157)", async () => {
+  const release = await workflow("release.yml");
+  assert.deepEqual(release.split("\n").filter((line) => /\|\s*grep\b[^|]*\s-[A-Za-z]*q/.test(line)), [], "each check captures its tool's output, then greps it");
+  const build = steps(release, "build");
+  const stage = build.find((step) => /^\s*(- )?name: Stage desktop sidecars$/m.test(step));
+  assert.match(stage, /\$\{tmux\[@\]\+"\$\{tmux\[@\]\}"\}/, "an empty tmux list expands to nothing under set -u on any bash");
+});
+
 test("every badal job refuses to run under Rosetta before anything else", async () => {
   const [ci] = steps(await workflow("ci.yml"), "macos");
   assert.match(ci, new RegExp(`^ {6}- name: ${ROSETTA}\n {8}run: \\|`));
