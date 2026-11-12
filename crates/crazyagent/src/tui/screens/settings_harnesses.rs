@@ -2,6 +2,7 @@ use super::project_markdown::sanitize;
 use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
+use crate::harnesses::finding::{self, Found};
 use crate::harnesses::update::{HarnessVersions, Latest, Method, UpdateMode, UpdateSettings};
 use crate::harnesses::{AccountKind, HarnessEntry, HarnessStatus, ToolControl};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
@@ -13,6 +14,7 @@ use crate::tui::text::{
     cells, cut, join, list_row, pad, restyle, row, status, styled, thumb, width, with_bar, wrap,
 };
 use crate::tui::theme::Role;
+use crate::tui::widgets::TextField;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
@@ -28,6 +30,53 @@ const UNKNOWN_INSTALL: &str = "harness_update_unknown_install";
 const LOOKUP_FAILED: &str = "harness_update_lookup_failed";
 const OUTCOME_UNKNOWN: &str = "The update ended in a way CrazyAgent doesn't know.";
 const NOT_FOUND: &str = "harness_install_not_found";
+const LOOKED_SHOWN_MAX: usize = 20;
+const SHIMS: &str = "Volta, asdf and mise folders hold shims that start another program, so CrazyAgent doesn't use them.";
+const PATH_COPY: [(&str, &str); 13] = [
+    (
+        finding::UNKNOWN_HARNESS,
+        "You can only choose the file for Codex and Claude Code.",
+    ),
+    (finding::PATH_INVALID, "That isn't a full path to one file."),
+    (finding::PATH_NOT_FOUND, "There's no file there."),
+    (
+        finding::PATH_NOT_EXECUTABLE,
+        "That file isn't a program this Mac can run.",
+    ),
+    (
+        finding::PATH_AGENT_SPACE,
+        "That file is in CrazyAgent's own folders, where agents work, so CrazyAgent won't run it.",
+    ),
+    (
+        finding::PATH_SHIM,
+        "That file is a Volta, asdf or mise shim, which starts another program. Choose the real file instead.",
+    ),
+    (
+        finding::PATH_CHANGEABLE,
+        "Another user on this Mac can change that file or a folder above it, so CrazyAgent won't run it.",
+    ),
+    (
+        finding::PATH_UNREADABLE,
+        "CrazyAgent couldn't read or save the chosen file. Try again.",
+    ),
+    (
+        "native_auth_host_executable_unsafe",
+        "Another user on this Mac can change that file, or it isn't a plain program file, so CrazyAgent won't run it.",
+    ),
+    (
+        "native_auth_host_executable_changed",
+        "That file changed while CrazyAgent checked it. Try again.",
+    ),
+    (
+        "native_auth_host_unavailable",
+        "The engine can't add a harness right now. Restart the engine, then try again.",
+    ),
+    (
+        "native_auth_host_registration_frozen",
+        "The engine is stopping, so it can't add a harness now. Try again once it has restarted.",
+    ),
+    ("owner_runtime_stale", "The engine restarted. Try again."),
+];
 const COPY: [(&str, &str); 26] = [
     (
         UNKNOWN_INSTALL,
@@ -135,6 +184,46 @@ struct Confirm {
     id: String,
     job: Job,
     line: String,
+}
+
+/// The sentence for a refused harness file, the same as the app's. Input: the engine's code.
+/// Output: the sentence, or the plain words for a code that is not about the file.
+pub fn path_copy(code: &str) -> &'static str {
+    PATH_COPY
+        .iter()
+        .find(|(known, _)| *known == code)
+        .map_or_else(|| plain(code), |(_, copy)| *copy)
+}
+
+/// The file the owner looks for when choosing a harness's file. Input: the catalog id.
+/// Output: `claude` for Claude Code, else the id.
+fn file_name(id: &str) -> &str {
+    if id == "claude-code" { "claude" } else { id }
+}
+
+/// What a look for Codex or Claude Code found, as the owner reads it under the harness.
+/// Inputs: the harness name, its file name and the answer. Output: the sentence.
+fn found_line(name: &str, file: &str, found: &Found) -> String {
+    let shown = |path: &std::path::Path| sanitize(&path.display().to_string());
+    match found {
+        Found::Registered { path } | Found::Ready { path } => {
+            format!("{name} is ready at {}.", shown(path.as_path()))
+        }
+        Found::Missing { looked } if looked.is_empty() => {
+            format!("CrazyAgent didn't find {file}. Press f to choose the {file} file.")
+        }
+        Found::Missing { looked } => format!(
+            "CrazyAgent looked for {file} in {} folders and didn't find it. Press w to see them.",
+            looked.len()
+        ),
+        Found::Refused { path, code } => {
+            format!(
+                "CrazyAgent won't use {}. {}",
+                shown(path.as_path()),
+                path_copy(code)
+            )
+        }
+    }
 }
 
 /// The line a job would run for a harness. Inputs: the versions and the job. Output: the
@@ -356,6 +445,10 @@ pub struct Harnesses {
     confirm: Option<Confirm>,
     wants: Option<(String, Job)>,
     running: Option<(String, usize)>,
+    found: BTreeMap<String, Found>,
+    finding: BTreeSet<String>,
+    choosing: Option<(String, TextField)>,
+    looked: Option<String>,
 }
 
 impl Default for Harnesses {
@@ -381,6 +474,10 @@ impl Harnesses {
             confirm: None,
             wants: None,
             running: None,
+            found: BTreeMap::new(),
+            finding: BTreeSet::new(),
+            choosing: None,
+            looked: None,
         }
     }
 
@@ -464,6 +561,115 @@ impl Harnesses {
             return;
         }
         self.ask_versions(&id, true, ctx);
+    }
+
+    /// The selected harness when it is Codex or Claude Code and not installed, the two whose
+    /// file the owner may choose. Output: its catalog id, or none.
+    fn choosable(&self) -> Option<String> {
+        self.entries
+            .get(self.selected)
+            .filter(|entry| {
+                entry.executable.is_none() && finding::CHOOSABLE.contains(&entry.id.as_str())
+            })
+            .map(|entry| entry.id.clone())
+    }
+
+    /// Asks the engine to look for the selected Codex or Claude Code again; the reply lists
+    /// where it looked or names the refused file. Input: the context. Output: none.
+    fn find(&mut self, ctx: &mut Ctx) {
+        let Some(id) = self.choosable() else {
+            return;
+        };
+        if self.finding.insert(id.clone()) {
+            assert!(self.finding.len() <= finding::CHOOSABLE.len());
+            send(ctx, SettingsJob::HarnessFind { id });
+        }
+    }
+
+    /// Opens the path field for the selected Codex or Claude Code. Input: none. Output: none.
+    fn open_choose(&mut self) {
+        let Some(id) = self.choosable() else {
+            return;
+        };
+        let file = file_name(&id).to_owned();
+        let field = TextField::new(&format!("The {file} file"), finding::PATH_BYTES_MAX)
+            .placeholder(&format!("/opt/homebrew/bin/{file}"));
+        self.choosing = Some((id, field));
+    }
+
+    /// Edits the path field: Enter sends the path for the engine to check and pin, Esc
+    /// closes it. Inputs: the key and the context. Output: none.
+    fn chose(&mut self, key: &Key, ctx: &mut Ctx) {
+        let Some((id, field)) = self.choosing.as_mut() else {
+            return;
+        };
+        match key {
+            Key::Esc => self.choosing = None,
+            Key::Enter => {
+                let path = field.value().trim().to_owned();
+                if path.is_empty() {
+                    return;
+                }
+                let id = id.clone();
+                self.choosing = None;
+                send(
+                    ctx,
+                    SettingsJob::HarnessChoosePath {
+                        id,
+                        path: Some(path),
+                    },
+                );
+            }
+            other => {
+                field.key(other);
+            }
+        }
+    }
+
+    /// Clears the file chosen for the selected harness after the engine refused it.
+    /// Input: the context. Output: none; the reply shows what the engine finds now.
+    fn forget(&mut self, ctx: &mut Ctx) {
+        let Some(id) = self.choosable() else {
+            return;
+        };
+        if matches!(self.found.get(&id), Some(Found::Refused { .. })) {
+            send(ctx, SettingsJob::HarnessChoosePath { id, path: None });
+        }
+    }
+
+    /// Takes the engine's answer to a look or a chosen file: keeps it for the detail, opens
+    /// the "where we looked" list after w, reloads the list once the harness is pinned, and
+    /// says why a chosen file was refused. Inputs: the id, the path sent (none for a look,
+    /// `Some(None)` to forget), the answer and the context. Output: none.
+    fn arrive_found(
+        &mut self,
+        id: &str,
+        sent: Option<&Option<String>>,
+        result: &Result<Found, String>,
+        ctx: &mut Ctx,
+    ) {
+        self.finding.remove(id);
+        let found = match result {
+            Ok(found) => found,
+            Err(code) => {
+                let lead = match sent {
+                    Some(Some(path)) => format!("CrazyAgent won't use {}.", sanitize(path)),
+                    Some(None) => "Couldn't forget the chosen file.".to_owned(),
+                    None => format!("Couldn't look for {} again.", self.name_of(id)),
+                };
+                ctx.say(Message::error(&lead, path_copy(code)));
+                return;
+            }
+        };
+        if sent.is_none() && matches!(found, Found::Missing { .. }) {
+            self.looked = Some(id.to_owned());
+        }
+        let pinned = matches!(found, Found::Registered { .. } | Found::Ready { .. });
+        self.found.insert(id.to_owned(), found.clone());
+        assert!(self.found.len() <= finding::CHOOSABLE.len());
+        if pinned {
+            self.reload(ctx);
+        }
     }
 
     fn name_of(&self, id: &str) -> String {
@@ -703,6 +909,7 @@ impl Harnesses {
     fn detail(
         entry: &HarnessEntry,
         versions: Option<&HarnessVersions>,
+        found: Option<&Found>,
         limit: usize,
         ctx: &Ctx,
     ) -> Vec<Line<'static>> {
@@ -725,6 +932,10 @@ impl Harnesses {
             ])
         };
         let mut lines = vec![head];
+        if let Some(found) = found.filter(|_| entry.executable.is_none()) {
+            let line = found_line(&entry.name, file_name(&entry.id), found);
+            lines.extend(wrap(&line, limit.max(8)).into_iter().map(Line::raw));
+        }
         let sentence = control_sentence(entry);
         match &entry.executable {
             Some(path) => {
@@ -894,6 +1105,7 @@ impl Harnesses {
             lines.extend(Self::detail(
                 entry,
                 self.versions.get(&entry.id),
+                self.found.get(&entry.id),
                 limit,
                 ctx,
             ));
@@ -901,6 +1113,66 @@ impl Harnesses {
         self.selected = selected;
         self.offset = offset;
         lines
+    }
+
+    /// The path field for choosing a harness's file. Inputs: the id, the field and the
+    /// context. Output: the modal and its hints.
+    fn choose_modal(&self, id: &str, field: &TextField, ctx: &Ctx) -> (Modal, Vec<Hint>) {
+        let file = file_name(id);
+        let room = usize::from(MODAL_WIDTH) - 4;
+        let intro = format!(
+            "Type or paste the full path of the {file} file. CrazyAgent checks it before it uses it."
+        );
+        let mut body: Vec<Line<'static>> = wrap(&intro, room).into_iter().map(Line::raw).collect();
+        body.push(Line::default());
+        body.extend(field.lines(room, true, &ctx.theme, ctx.glyphs).0);
+        let modal = Modal {
+            width: MODAL_WIDTH,
+            title: format!("Choose the {file} file"),
+            body,
+            top: None,
+        };
+        (modal, vec![hint("Enter", "Choose"), hint("Esc", "Cancel")])
+    }
+
+    /// The folders the engine looked in for a harness, at most [`LOOKED_SHOWN_MAX`] of them
+    /// with a count of the rest. Inputs: the id and the context. Output: the modal and hints.
+    fn looked_modal(&self, id: &str, ctx: &Ctx) -> (Modal, Vec<Hint>) {
+        let file = file_name(id);
+        let room = usize::from(MODAL_WIDTH) - 4;
+        let looked: &[String] = match self.found.get(id) {
+            Some(Found::Missing { looked }) => looked,
+            _ => &[],
+        };
+        let mut body: Vec<Line<'static>> = wrap(
+            &format!("CrazyAgent looked for {file} in these folders and didn't find it:"),
+            room,
+        )
+        .into_iter()
+        .map(Line::raw)
+        .collect();
+        for folder in looked.iter().take(LOOKED_SHOWN_MAX) {
+            body.push(styled(
+                cut(&sanitize(folder), room, ctx.glyphs.ellipsis),
+                Role::Accent,
+                &ctx.theme,
+            ));
+        }
+        if looked.len() > LOOKED_SHOWN_MAX {
+            body.push(Line::raw(format!(
+                "and {} more.",
+                looked.len() - LOOKED_SHOWN_MAX
+            )));
+        }
+        body.push(Line::default());
+        body.extend(wrap(SHIMS, room).into_iter().map(Line::raw));
+        let modal = Modal {
+            width: MODAL_WIDTH,
+            title: format!("Where CrazyAgent looked for {file}"),
+            body,
+            top: None,
+        };
+        (modal, vec![hint("Any key", "Close")])
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -936,6 +1208,13 @@ impl Screen for Harnesses {
                 hints.push(hint("i", "Install"));
             }
         }
+        if let Some(id) = self.choosable() {
+            hints.push(hint("f", "Choose file"));
+            hints.push(hint("w", "Where it looked"));
+            if matches!(self.found.get(&id), Some(Found::Refused { .. })) {
+                hints.push(hint("x", "Forget the chosen file"));
+            }
+        }
         if self.chosen().is_some() && mode != UpdateMode::Off {
             hints.push(hint("c", "Check for updates"));
             if mode == UpdateMode::CheckAndUpdate {
@@ -951,12 +1230,26 @@ impl Screen for Harnesses {
             self.confirmed(key, ctx);
             return Flow::Handled;
         }
+        if self.choosing.is_some() {
+            self.chose(key, ctx);
+            return Flow::Handled;
+        }
+        if self.looked.take().is_some() {
+            return Flow::Handled;
+        }
         let page = self.window(ctx).saturating_sub(1).max(1) as isize;
+        let choosable = self.choosable().is_some();
         match key {
-            Key::Char('r') => self.reload(ctx),
+            Key::Char('r') => {
+                self.found.clear();
+                self.reload(ctx);
+            }
             Key::Char('c') => self.check(ctx),
             Key::Char('u') => self.update(ctx),
             Key::Char('i') => self.install(ctx),
+            Key::Char('f') if choosable => self.open_choose(),
+            Key::Char('w') if choosable => self.find(ctx),
+            Key::Char('x') if choosable => self.forget(ctx),
             Key::Up => self.move_by(-1),
             Key::Down => self.move_by(1),
             Key::PageUp => self.move_by(-page),
@@ -985,6 +1278,14 @@ impl Screen for Harnesses {
             }
             Some(SettingsEvent::HarnessInstalled(id, result)) => {
                 self.arrive_started(id, Job::Install, result, ctx);
+                return Flow::Handled;
+            }
+            Some(SettingsEvent::HarnessFound(id, result)) => {
+                self.arrive_found(id, None, result, ctx);
+                return Flow::Handled;
+            }
+            Some(SettingsEvent::HarnessChosen(id, path, result)) => {
+                self.arrive_found(id, Some(path), result, ctx);
                 return Flow::Handled;
             }
             Some(SettingsEvent::HarnessUpdateSettings(result)) => {
@@ -1040,6 +1341,12 @@ impl Screen for Harnesses {
     }
 
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        if let Some((id, field)) = &self.choosing {
+            return Some(self.choose_modal(id, field, ctx));
+        }
+        if let Some(id) = &self.looked {
+            return Some(self.looked_modal(id, ctx));
+        }
         let Confirm { id, job, line } = self.confirm.as_ref()?;
         let name = self.name_of(id);
         let how = self.versions.get(id).map_or_else(String::new, |versions| {
@@ -1100,7 +1407,10 @@ impl Screen for Harnesses {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.waiting || !self.asking.is_empty() || self.running.is_some()
+        self.waiting
+            || !self.asking.is_empty()
+            || self.running.is_some()
+            || !self.finding.is_empty()
     }
 
     fn place(&self) -> Option<Place> {

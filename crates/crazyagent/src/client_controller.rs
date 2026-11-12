@@ -80,6 +80,27 @@ impl OwnerController {
         self.harness_client()?.harness_install(id).await
     }
 
+    /// Has the engine look for Codex or Claude Code again and pin it when it can. Input: the
+    /// catalog id. Output: what was found, the engine's refusal code, or
+    /// `controller_disconnected` without a connection.
+    pub async fn harness_find(
+        &self,
+        id: &str,
+    ) -> Result<crate::harnesses::finding::Found, EngineError> {
+        self.harness_client()?.harness_find(id).await
+    }
+
+    /// Saves, or with none clears, the file the owner chose for Codex or Claude Code, then
+    /// looks again with it. Inputs: the catalog id and the absolute path. Output: what was
+    /// found, the engine's refusal code, or `controller_disconnected` without a connection.
+    pub async fn harness_choose_path(
+        &self,
+        id: &str,
+        path: Option<&Path>,
+    ) -> Result<crate::harnesses::finding::Found, EngineError> {
+        self.harness_client()?.harness_choose_path(id, path).await
+    }
+
     /// Reads the owner's harness update settings. Output: the settings, the engine's
     /// refusal code, or `controller_disconnected` without a connection.
     pub async fn harness_update_settings(

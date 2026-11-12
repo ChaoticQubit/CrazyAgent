@@ -10,6 +10,7 @@ use crate::engine::owner::{
     NativeAuthMethod, NativeAuthPhase, NativeAuthStart, OwnerResult,
 };
 use crate::harnesses::HarnessEntry;
+use crate::harnesses::finding::Found;
 use crate::harnesses::update::{HarnessVersions, UpdateSettings};
 use crate::memory::library::{
     AgentWrites, LIBRARY_ITEMS_MAX, LibraryAction, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX,
@@ -47,6 +48,13 @@ pub(in crate::tui) enum SettingsJob {
     },
     HarnessInstall {
         id: String,
+    },
+    HarnessFind {
+        id: String,
+    },
+    HarnessChoosePath {
+        id: String,
+        path: Option<String>,
     },
     HarnessUpdateSettings,
     Usage {
@@ -211,6 +219,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::HarnessVersions { .. } => "HarnessVersions",
             Self::HarnessUpdate { .. } => "HarnessUpdate",
             Self::HarnessInstall { .. } => "HarnessInstall",
+            Self::HarnessFind { .. } => "HarnessFind",
+            Self::HarnessChoosePath { .. } => "HarnessChoosePath",
             Self::HarnessUpdateSettings => "HarnessUpdateSettings",
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
@@ -333,6 +343,8 @@ pub(in crate::tui) enum SettingsEvent {
     HarnessVersions(String, Result<HarnessVersions, String>),
     HarnessUpdated(String, Result<(), String>),
     HarnessInstalled(String, Result<(), String>),
+    HarnessFound(String, Result<Found, String>),
+    HarnessChosen(String, Option<String>, Result<Found, String>),
     HarnessUpdateSettings(Result<UpdateSettings, String>),
     Usage(Result<Box<UsageReport>, String>),
     UsageRefreshed(Result<(), String>),
@@ -390,6 +402,10 @@ impl SettingsEvent {
             }
             SettingsJob::HarnessUpdate { id } => Self::HarnessUpdated(id.clone(), Err(problem)),
             SettingsJob::HarnessInstall { id } => Self::HarnessInstalled(id.clone(), Err(problem)),
+            SettingsJob::HarnessFind { id } => Self::HarnessFound(id.clone(), Err(problem)),
+            SettingsJob::HarnessChoosePath { id, path } => {
+                Self::HarnessChosen(id.clone(), path.clone(), Err(problem))
+            }
             SettingsJob::HarnessUpdateSettings => Self::HarnessUpdateSettings(Err(problem)),
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
@@ -576,6 +592,26 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 };
                 SettingsEvent::HarnessInstalled(id, result)
+            }
+            SettingsJob::HarnessFind { id } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_find(&id)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessFound(id, result)
+            }
+            SettingsJob::HarnessChoosePath { id, path } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_choose_path(&id, path.as_deref().map(std::path::Path::new))
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessChosen(id, path, result)
             }
             SettingsJob::HarnessUpdateSettings => {
                 SettingsEvent::HarnessUpdateSettings(match self.settings_controller() {
