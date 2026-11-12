@@ -1334,6 +1334,13 @@ fn answer(
             version,
             owner_turn,
         } => record_answer(connection, project, question, version, owner_turn)?,
+        Call::RequestAccess { grant, reason } => tool::questions::request_reply(
+            connection,
+            project,
+            &crate::questions::Asker::Master(master),
+            &grant,
+            &reason,
+        ),
         call => return answer_work(connection, answering, master, true, call),
     })
 }
@@ -1367,7 +1374,7 @@ pub(super) fn answer_sub(
         )?,
         Call::Stop { agent: name } => work::stop(connection, answering, agent, false, &name)?,
         Call::Merge { agent: name } => work::lead_merge(connection, answering, agent, &name)?,
-        call @ (Call::Ask { .. } | Call::RecordAnswer { .. }) => {
+        call @ (Call::Ask { .. } | Call::RecordAnswer { .. } | Call::RequestAccess { .. }) => {
             tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }
         Call::Sessions { .. }

@@ -73,10 +73,12 @@ pub const MEMORY_TOOLS: [&str; 2] = [REMEMBER_TOOL, RECALL_TOOL];
 pub const LEAD_TOOLS: [&str; 3] = [SPAWN_TOOL, STOP_TOOL, MERGE_TOOL];
 pub const ASK_TOOL: &str = "ask";
 pub const RECORD_TOOL: &str = "record_answer";
+pub const REQUEST_ACCESS_TOOL: &str = "request_access";
 /// The owner's questions tools (DEC-099 A) a server lists after `TEAM_TOOLS`: `ask` logs a
-/// question for the owner and `record_answer` records the owner's chat message that
-/// answered one of the master's own. A sub-agent's server leaves `record_answer` out.
-pub const QUESTION_TOOLS: [&str; 2] = [ASK_TOOL, RECORD_TOOL];
+/// question for the owner, `record_answer` records the owner's chat message that answered
+/// one of the master's own and `request_access` asks the owner for one narrow extra the
+/// sandbox blocks (F08). A sub-agent's server leaves `record_answer` out.
+pub const QUESTION_TOOLS: [&str; 3] = [ASK_TOOL, RECORD_TOOL, REQUEST_ACCESS_TOOL];
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -124,6 +126,9 @@ const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters. For kind single or multi give 2 to 6 distinct one-line options of up to 200 bytes and one of them as recommended; for kind text give no options. Context may be up to 4096 bytes.";
 const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and the number of the owner's chat message that answers it.";
 const ASK_KEYS: [&str; 5] = ["question", "kind", "options", "recommended", "context"];
+const REQUEST_INVALID: &str = "Not requested: give kind socket with the socket's full path, kind port with one port from 1 to 49151, or kind temp_folder, and a reason in plain words of up to 2048 bytes.";
+const REQUEST_KEYS: [&str; 4] = ["kind", "path", "port", "reason"];
+const REQUEST_REASON_BYTES_MAX: usize = 2048;
 const RECORD_KEYS: [&str; 3] = ["question", "version", "owner_turn"];
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
@@ -253,6 +258,10 @@ pub enum Call {
         version: u64,
         owner_turn: i64,
     },
+    RequestAccess {
+        grant: crate::sandbox::policy::AccessGrant,
+        reason: String,
+    },
 }
 
 impl Call {
@@ -275,6 +284,7 @@ impl Call {
             Self::LogActivity { .. } => ACTIVITY_TOOL,
             Self::Ask { .. } => ASK_TOOL,
             Self::RecordAnswer { .. } => RECORD_TOOL,
+            Self::RequestAccess { .. } => REQUEST_ACCESS_TOOL,
         };
         assert!(TEAM_TOOLS.contains(&name) || QUESTION_TOOLS.contains(&name));
         name
@@ -490,7 +500,11 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                     "additionalProperties": false,
                 },
             })];
-            tools.extend([questions::ask_listing(), questions::record_listing()]);
+            tools.extend([
+                questions::ask_listing(),
+                questions::record_listing(),
+                questions::request_listing(),
+            ]);
             if mailbox.is_some() {
                 tools.extend(
                     MEMORY_TOOLS
@@ -499,7 +513,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                         .map(|name| spec(name)),
                 );
             }
-            assert!(tools.len() <= 3 + MEMORY_TOOLS.len());
+            assert!(tools.len() <= 4 + MEMORY_TOOLS.len());
             json!({ "tools": tools })
         }
         Some("tools/call") => match (mailbox, name) {
@@ -554,6 +568,9 @@ fn team_tools(off: &[String]) -> Value {
     }
     if on(RECORD_TOOL) {
         tools.push(record_tool());
+    }
+    if on(REQUEST_ACCESS_TOOL) {
+        tools.push(request_access_tool());
     }
     assert!(tools.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len());
     json!({ "tools": tools })
@@ -669,6 +686,27 @@ pub fn record_tool() -> Value {
                 "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
             },
             "required": ["question", "version", "owner_turn"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// The MCP entry of the `request_access` tool (F08), the same for every master and agent
+/// that is given it: one socket, one port on this computer or the owner's temp folder, with
+/// the reason the owner reads. Output: the tool's name, description and input schema.
+pub fn request_access_tool() -> Value {
+    json!({
+        "name": REQUEST_ACCESS_TOOL,
+        "description": "Ask the owner to allow one narrow extra your sandbox blocks: connecting to one unix socket, connecting to one TCP port on this computer, or using the owner's own temp folder as yours. The engine checks it and raises a question the owner answers in the Questions view; if allowed it joins the project's Agent access and agents restart at their next pause to get it. Use it instead of working around the sandbox. Container, VM, key and password agent sockets are never allowed, nor ports from 49152 up.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["socket", "port", "temp_folder"], "description": "socket: one unix socket by its full path. port: one TCP port on this computer. temp_folder: the owner's own temp folder."},
+                "path": {"type": "string", "description": "For kind socket only: the socket's full path."},
+                "port": {"type": "integer", "minimum": 1, "maximum": 49_151, "description": "For kind port only: the port."},
+                "reason": {"type": "string", "description": "Why you need it, in one or two plain sentences the owner reads."},
+            },
+            "required": ["kind", "reason"],
             "additionalProperties": false,
         },
     })
@@ -986,6 +1024,7 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
         }
         ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
         RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
+        REQUEST_ACCESS_TOOL => request_call(arguments).ok_or(REQUEST_INVALID),
         _ => return None,
     })
 }
@@ -1035,6 +1074,43 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
         options: ask.options,
         recommended: ask.recommended,
         context: ask.context,
+    })
+}
+
+/// Reads one `request_access` call: a kind with only the field it needs, a plain grant and
+/// a reason of up to `REQUEST_REASON_BYTES_MAX` bytes; the engine checks the grant itself
+/// and plains the reason when it raises the question. Takes the arguments. Returns the
+/// call, or none when a part is missing, extra or outside its bounds.
+fn request_call(arguments: Option<&Value>) -> Option<Call> {
+    use crate::sandbox::policy::AccessGrant;
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !REQUEST_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let reason = arguments.get("reason")?.as_str()?;
+    if reason.trim().is_empty() || reason.len() > REQUEST_REASON_BYTES_MAX {
+        return None;
+    }
+    let has = |key: &str| arguments.contains_key(key);
+    let grant = match arguments.get("kind")?.as_str()? {
+        "socket" if !has("port") => AccessGrant::Socket {
+            path: std::path::PathBuf::from(arguments.get("path")?.as_str()?),
+        },
+        "port" if !has("path") => AccessGrant::Port {
+            port: u16::try_from(arguments.get("port")?.as_u64()?).ok()?,
+        },
+        "temp_folder" if !has("path") && !has("port") => AccessGrant::TempFolder,
+        _ => return None,
+    };
+    if !grant.plain() {
+        return None;
+    }
+    Some(Call::RequestAccess {
+        grant,
+        reason: reason.to_owned(),
     })
 }
 
@@ -1121,6 +1197,11 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             version,
             owner_turn,
         } => json!({"question": question, "version": version, "owner_turn": owner_turn}),
+        Call::RequestAccess { grant, reason } => {
+            let mut arguments = serde_json::to_value(grant).map_err(|_| CALL_INVALID)?;
+            arguments["reason"] = json!(reason);
+            arguments
+        }
     };
     let again = live_call(call.name(), Some(&arguments)).expect("every call names a team tool")?;
     if again != call {

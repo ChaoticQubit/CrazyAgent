@@ -1,7 +1,9 @@
-use super::{ASK_TOOL, CALLS_PER_TICK_MAX, Call, RECORD_TOOL};
+use super::{ASK_TOOL, CALLS_PER_TICK_MAX, Call, RECORD_TOOL, REQUEST_ACCESS_TOOL};
 use crate::engine::EngineError;
 use crate::protocol::{ProjectId, SessionId};
 use crate::questions::{Asker, Settlement};
+use crate::sandbox::grants::{self, Requested};
+use crate::sandbox::policy::AccessGrant;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::io::{Read, Write};
@@ -12,7 +14,10 @@ pub const ASKS_PER_REPLY_MAX: usize = 8;
 pub const ASK_DROP_BYTES_MAX: u64 = ASKS_PER_REPLY_MAX as u64 * super::CALL_BYTES_MAX;
 const ASK_LOGGED: &str = "Recorded. When your reply ends, the engine logs this question in the project's questions and notifies the owner, unless 8 of your questions are still open. Their answer or dismissal comes back to you once on a later turn, so do not ask it again.";
 const RECORD_TAKEN: &str = "Noted. When your reply ends, the engine records the owner's message as the answer, taking the words from that message and never from yours, if the question is still open and the message is the owner's.";
-const ASK_ONLY: &str = "Not sent: this tool only takes a question or a recorded answer.";
+const REQUEST_TAKEN: &str = "Recorded. When your reply ends, the engine checks the request and raises it as a question in the owner's Questions view. If the owner allows it, it joins the project's Agent access and you get it at your next start; do not ask again.";
+const REQUEST_HELD: &str = "The project already allows that, so nothing was asked. If your sandbox still blocks it, you get it at your next start.";
+const ASK_ONLY: &str =
+    "Not sent: this tool only takes a question, a recorded answer or an access request.";
 const ASKS_FULL: &str = "Not sent: the engine takes at most 8 question calls from one reply. Make the next one in a later reply.";
 const ASK_UNWRITABLE: &str = "Not sent: the engine's question record could not be written.";
 const AGENT_ASKS_ONLY: &str = "Not recorded: the owner answers a sub-agent's questions in the Questions view, so only the master records an answer from chat.";
@@ -55,6 +60,14 @@ pub fn note_lines(notes: &[crate::questions::Note]) -> (String, Vec<u64>) {
     (lines, carried)
 }
 
+/// The `request_access` tool's listing, as the live master's list shows it. Output: the
+/// tool's JSON entry, named `REQUEST_ACCESS_TOOL`.
+pub(super) fn request_listing() -> Value {
+    let listed = super::request_access_tool();
+    assert_eq!(listed["name"], REQUEST_ACCESS_TOOL);
+    listed
+}
+
 /// The `record_answer` tool's listing, as the live master's list shows it. Output: the
 /// tool's JSON entry, named `RECORD_TOOL`.
 pub(super) fn record_listing() -> Value {
@@ -77,14 +90,17 @@ pub fn ask_file(drop: &Path) -> PathBuf {
 pub(super) fn drop_call(params: Option<&Value>, drop: &Path) -> Option<(String, bool)> {
     let params = params?;
     let name = params.get("name")?.as_str()?;
-    if name != ASK_TOOL && name != RECORD_TOOL {
+    if ![ASK_TOOL, RECORD_TOOL, REQUEST_ACCESS_TOOL].contains(&name) {
         return None;
     }
     Some(match super::live_call(name, params.get("arguments"))? {
         Err(refused) => (refused.to_owned(), true),
-        Ok(call @ (Call::Ask { .. } | Call::RecordAnswer { .. })) => {
+        Ok(call @ (Call::Ask { .. } | Call::RecordAnswer { .. } | Call::RequestAccess { .. })) => {
             match record_ask(drop, &call) {
                 Ok(true) if matches!(call, Call::Ask { .. }) => (ASK_LOGGED.to_owned(), false),
+                Ok(true) if matches!(call, Call::RequestAccess { .. }) => {
+                    (REQUEST_TAKEN.to_owned(), false)
+                }
                 Ok(true) => (RECORD_TAKEN.to_owned(), false),
                 Ok(false) => (ASKS_FULL.to_owned(), true),
                 Err(_) => (ASK_UNWRITABLE.to_owned(), true),
@@ -95,7 +111,7 @@ pub(super) fn drop_call(params: Option<&Value>, drop: &Path) -> Option<(String, 
 }
 
 fn record_ask(drop: &Path, call: &Call) -> std::io::Result<bool> {
-    assert!(matches!(call, Call::Ask { .. } | Call::RecordAnswer { .. }));
+    assert!(question_call(call));
     let mut file = super::open_drop(&ask_file(drop))?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -143,11 +159,18 @@ pub fn take_asks(drop: &Path) -> Vec<Call> {
         .split(|byte| *byte == b'\n')
         .filter_map(|line| serde_json::from_slice::<Call>(line).ok())
         .filter_map(|call| super::checked(call).ok())
-        .filter(|call| matches!(call, Call::Ask { .. } | Call::RecordAnswer { .. }))
+        .filter(question_call)
         .take(ASKS_PER_REPLY_MAX)
         .collect();
     assert!(found.len() <= ASKS_PER_REPLY_MAX);
     found
+}
+
+fn question_call(call: &Call) -> bool {
+    matches!(
+        call,
+        Call::Ask { .. } | Call::RecordAnswer { .. } | Call::RequestAccess { .. }
+    )
 }
 
 /// Writes the engine line that reminds a drop-file or conversation master of its questions
@@ -198,6 +221,7 @@ pub fn apply_master_calls(
     let asker = Asker::Master(master);
     applied(take_asks(drop), |call| match call {
         Call::Ask { .. } => logged_ask(db, project, &asker, call),
+        Call::RequestAccess { grant, reason } => not_raised(db, project, &asker, &grant, &reason),
         Call::RecordAnswer {
             question,
             version,
@@ -232,6 +256,7 @@ pub fn apply_session_calls(
     let mut used = false;
     applied(calls, |call| match call {
         Call::Ask { .. } => logged_ask(db, project, &asker, call),
+        Call::RequestAccess { grant, reason } => not_raised(db, project, &asker, &grant, &reason),
         Call::RecordAnswer {
             question,
             version,
@@ -255,6 +280,58 @@ pub fn apply_session_calls(
         },
         _ => unreachable!("take_asks returns only question calls"),
     })
+}
+
+/// Raises a drop-file or conversation master's access request when its reply ends, as
+/// [`request_reply`] does. Inputs: the engine connection, the project, the master as
+/// asker, the grant and its reason. Output: none once asked, else the sentence for its
+/// next turn.
+fn not_raised(
+    db: &Connection,
+    project: &ProjectId,
+    asker: &Asker,
+    grant: &AccessGrant,
+    reason: &str,
+) -> Option<String> {
+    match grants::request(db, project, asker, grant, reason) {
+        Ok(Requested::Asked(_)) => None,
+        Ok(Requested::AlreadyAllowed) => Some(format!(
+            "Your access request for {}: {REQUEST_HELD}",
+            grant.label()
+        )),
+        Err(code) => Some(format!(
+            "Your access request for {} was not raised: {}",
+            grant.label(),
+            grants::refusal_text(&code)
+        )),
+    }
+}
+
+/// Raises one access request (F08) for the owner and says how it went: the grant is
+/// checked as a save checks it, a grant the project already allows asks nothing, and the
+/// reason is plained and quoted in the owner's question. Inputs: the engine connection, the
+/// project, who asked, the grant and the reason. Output: the sentence the caller reads and
+/// whether it is an error.
+pub(in crate::team) fn request_reply(
+    db: &Connection,
+    project: &ProjectId,
+    asker: &Asker,
+    grant: &AccessGrant,
+    reason: &str,
+) -> (String, bool) {
+    match grants::request(db, project, asker, grant, reason) {
+        Ok(Requested::Asked(question)) => (
+            format!(
+                "Access request raised as question {question} in the owner's Questions view. If the owner allows it, it joins this project's Agent access and you restart at your next pause with it; you are not told otherwise, so do not ask again."
+            ),
+            false,
+        ),
+        Ok(Requested::AlreadyAllowed) => (REQUEST_HELD.to_owned(), false),
+        Err(code) => (
+            format!("Not requested: {}", grants::refusal_text(&code)),
+            true,
+        ),
+    }
 }
 
 fn applied(calls: Vec<Call>, apply: impl FnMut(Call) -> Option<String>) -> Vec<String> {
@@ -338,15 +415,20 @@ pub fn clear_asks(drop: &Path) {
 
 /// Logs the question a sub-agent asked through the `ask` tool of its team server, with the
 /// sub-agent as the asker; a sub-agent's `record_answer` is refused. Inputs: the engine
-/// connection, the project, the sub-agent's team id and its checked call, `ask` or
-/// `record_answer`. Output: the sentence the sub-agent reads and whether it is an error.
+/// connection, the project, the sub-agent's team id and its checked call, `ask`,
+/// `record_answer` or `request_access`, which raises its access request as
+/// [`request_reply`] does. Output: the sentence the sub-agent reads and whether it is an
+/// error.
 pub(in crate::team) fn agent_ask(
     db: &Connection,
     project: &ProjectId,
     agent: i64,
     call: Call,
 ) -> (String, bool) {
-    assert!(matches!(call, Call::Ask { .. } | Call::RecordAnswer { .. }));
+    assert!(question_call(&call));
+    if let Call::RequestAccess { grant, reason } = &call {
+        return request_reply(db, project, &Asker::Agent(agent), grant, reason);
+    }
     let Call::Ask {
         question,
         kind,
