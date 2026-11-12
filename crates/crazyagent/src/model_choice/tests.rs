@@ -721,3 +721,25 @@ fn a_hint_rule_runs_any_usable_pick_and_a_default_rule_overrules_every_pick() {
         Pick::Unsupported
     );
 }
+
+#[test]
+fn a_claude_code_id_holds_brackets_only_as_the_catalog_s_1m_suffix() {
+    for model in ["opus[1m]", "sonnet[1m]", "claude-opus-4-6[1m]"] {
+        assert!(model_valid("claude-code", model), "{model}");
+        assert!(!model_valid("codex", model), "{model}");
+    }
+    for model in [
+        "opus[2m]",
+        "op[1m]us",
+        "opus[1m][1m]",
+        "opus]",
+        "opus[",
+        "[1m]",
+        "opus[]",
+    ] {
+        assert!(!model_valid("claude-code", model), "{model}");
+    }
+    for model in catalog("claude-code") {
+        assert!(model_valid("claude-code", &model), "{model}");
+    }
+}
