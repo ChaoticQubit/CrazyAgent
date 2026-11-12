@@ -5,7 +5,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api.ts");
-const { MemorySuggestion, OwnNoteRow, SavedMemoryRow } = await import("../src/screens/project/memory.tsx");
+const { MemorySuggestion, OwnNoteRow, OwnNotes, ProjectMemoryHead, SavedMemoryRow, mergeNotes, waitingLine } = await import("../src/screens/project/memory.tsx");
+const { readFileSync, readdirSync } = await import("node:fs");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const item = (patch = {}) => ({ id: "entry-7", version: 2, text: "Competitors charge per seat.", status: "Provisional", human_reviewed: false, ...patch });
@@ -71,7 +72,14 @@ test("an edited project memory is refused before the engine when the text breaks
 
 const note = (patch = {}) => ({ id: "memory-3", text: "Use cargo nextest.", scope: "project", project_id: "project-harbor", origin: "agent",
   from_project_id: null, source_path: null, agent: "Master", ...patch });
-const noteRow = (memory) => visible(renderToStaticMarkup(createElement(OwnNoteRow, { memory, busy: false, onDelete: forbidden })));
+const noteMarkup = (memory, busy = false) => renderToStaticMarkup(createElement(OwnNoteRow, { memory, busy, onApprove: forbidden, onDelete: forbidden }));
+const noteRow = (memory) => visible(noteMarkup(memory));
+const labelled = (node, label) => {
+  if (Array.isArray(node)) return node.map((child) => labelled(child, label)).find(Boolean) ?? null;
+  if (!node || typeof node !== "object") return null;
+  if (node.props?.children === label) return node;
+  return labelled(node.props?.children, label);
+};
 
 test("a note in Your notes reads Saved once agents use it, and one an agent asked for says it needs approval (OP-22)", () => {
   assert.match(noteRow(note()), /Saved/);
@@ -79,8 +87,76 @@ test("a note in Your notes reads Saved once agents use it, and one an agent aske
   assert.match(waiting, /Use cargo nextest\./);
   assert.doesNotMatch(waiting, /Saved/);
   assert.match(waiting, /Needs approval/);
-  assert.match(waiting, /Approve it in Settings, Memory\./);
+  assert.doesNotMatch(waiting, /Settings, Memory/);
   assert.match(waiting, /Delete/);
+});
+
+test("a note an agent asked for has Approve right in its project row, and a saved note has none", () => {
+  const waiting = noteMarkup(note({ origin: "requested" }));
+  assert.match(waiting, /<button[^>]*class="btn primary small"[^>]*>.*Approve<\/button>/u);
+  assert.doesNotMatch(noteMarkup(note()), />Approve</);
+  assert.doesNotMatch(noteMarkup(note({ origin: "written", agent: null })), />Approve</);
+  assert.match(noteMarkup(note({ origin: "requested" }), true), /Approving\.\.\./);
+});
+
+test("Approve in a project note calls the approve action for that note only", () => {
+  const asked = [];
+  const row = OwnNoteRow({ memory: note({ origin: "requested" }), busy: false, onApprove: () => asked.push("approve"), onDelete: forbidden });
+  labelled(row, "Approve").props.onClick();
+  assert.deepEqual(asked, ["approve"]);
+});
+
+test("an approved note, now kept for the agent, reads Saved with no Approve", () => {
+  const approved = noteRow(note({ origin: "agent" }));
+  assert.match(approved, /Saved/);
+  assert.doesNotMatch(approved, /Needs approval|Approve/);
+});
+
+test("the waiting line counts the notes that wait, one or many, and says older notes may hold more", () => {
+  assert.equal(waitingLine([note()], false), "");
+  assert.equal(waitingLine([], true), "");
+  assert.equal(waitingLine([note({ origin: "requested" }), note({ id: "memory-4" })], false), "1 memory waits for your approval.");
+  assert.equal(waitingLine([note({ origin: "requested" }), note({ id: "memory-4", origin: "requested" })], false), "2 memories wait for your approval.");
+  assert.equal(waitingLine([note({ origin: "requested" })], true), "1 memory waits for your approval. Older notes may hold more.");
+});
+
+test("the head of Project memory shows the waiting line, and Memory settings opens app Settings on Memory", () => {
+  const opened = [];
+  const head = ProjectMemoryHead({ waiting: "2 memories wait for your approval.", navigate: (path) => opened.push(path) });
+  labelled(head, "Memory settings").props.onClick();
+  assert.deepEqual(opened, ["/settings/memory"]);
+  const markup = renderToStaticMarkup(head);
+  assert.match(markup, /<h2>Project memory<\/h2>/);
+  assert.match(markup, /role="status">2 memories wait for your approval\.</);
+  assert.doesNotMatch(renderToStaticMarkup(ProjectMemoryHead({ waiting: "", navigate: forbidden })), /role="status"/);
+});
+
+test("Your notes shows Show older only while older notes remain, and asks for them in place", () => {
+  const props = { items: [note(), note({ id: "memory-4", origin: "requested", text: "Ship on Fridays." })], busy: null, paging: false,
+    onApprove: forbidden, onDelete: forbidden, onMore: forbidden };
+  const shown = renderToStaticMarkup(createElement(OwnNotes, { ...props, more: true }));
+  assert.match(shown, />Show older</);
+  assert.match(shown, /Use cargo nextest\..*Ship on Fridays\./su);
+  assert.match(shown, />Approve</);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(OwnNotes, { ...props, more: false })), /Show older/);
+  assert.match(renderToStaticMarkup(createElement(OwnNotes, { ...props, more: true, paging: true })), /Loading\.\.\./);
+  const asked = [];
+  labelled(OwnNotes({ ...props, more: true, onMore: () => asked.push("older") }), "Show older").props.onClick();
+  assert.deepEqual(asked, ["older"]);
+});
+
+test("older notes join the newest page once each, even after a reload moved one onto it", () => {
+  const first = [note({ id: "a" }), note({ id: "b" })];
+  const older = [note({ id: "b" }), note({ id: "c" })];
+  assert.deepEqual(mergeNotes(first, older).map((memory) => memory.id), ["a", "b", "c"]);
+  assert.deepEqual(mergeNotes(first, []).map((memory) => memory.id), ["a", "b"]);
+});
+
+test("no project screen sends the owner to Settings, Memory to approve or list their notes", () => {
+  const folder = new URL("../src/screens/project/", import.meta.url);
+  const named = readdirSync(folder).filter((file) => /\.tsx?$/u.test(file))
+    .filter((file) => /Settings, Memory/u.test(readFileSync(new URL(file, folder), "utf8")));
+  assert.deepEqual(named, []);
 });
 
 test("a note an agent wrote names that agent in Your notes, and the owner's own note names none (OP-22)", () => {
