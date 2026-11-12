@@ -42,6 +42,8 @@ pub(crate) use native_auth::CUSTODIAN_CODES;
 pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
+#[cfg(unix)]
+pub(crate) use native_auth::account_check_running;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::sign_in_rechecking;

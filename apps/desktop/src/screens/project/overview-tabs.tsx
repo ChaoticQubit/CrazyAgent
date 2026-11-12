@@ -637,10 +637,11 @@ function Proposal({ data, label, state, review, onReview, actions }: {
 }
 
 /** One generated tab: the move line for a project outside the CrazyAgent folder, why its file
- * can't be shown, or its body with Edit and, when a refresh proposal waits, its banner or
- * review. An open editor takes the body's place; once the tab changed under it, the changed
- * tab shows above the editor so the owner can compare, and a Save is made only against the
- * version the owner was told about: each later change holds the Save and says so again.
+ * can't be shown, or its body and, when a refresh proposal waits, its banner or review; its
+ * Edit sits in the Overview's row. An open editor takes the body's place; once the tab changed
+ * under it, the changed tab shows above the editor so the owner can compare, and a Save is
+ * made only against the version the owner was told about: each later change holds the Save
+ * and says so again.
  * Inputs: the project data, the overview, the tab, its open editor and review or null with
  * their handlers, the actions, the Run mode, the tab pick handler and how Quick info renders
  * a text. Output: the panel body. */
@@ -673,7 +674,6 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview,
   const label = STRIP.find((item) => item.id === tab)?.label ?? "";
   if (draft === null) return <>
     {state.proposal !== null && <Proposal data={data} label={label} state={state} review={review} onReview={onReview} actions={actions} />}
-    <div className="ov-edit-row"><button type="button" className="btn" id={EDIT_OPEN} onClick={() => onDraft({ version: state.version, text: state.text ?? "", busy: false, note: "", changed: false, told: false })}>Edit</button></div>
     {body}
   </>;
   const save = async () => {
@@ -691,7 +691,8 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview,
 }
 
 /** The Overview's tab strip and the picked tab: Quick info, Features, Competitors, Install &
- * use, README and Activity, with when the tabs were checked and the Refresh button. README and
+ * use, README and Activity. The strip sits alone; one row under it holds when the tabs were
+ * checked, Edit for a shown generated tab with no open editor, and Refresh. README and
  * Activity show even when the tabs could not be read. Open editors are kept for the session,
  * so typed text survives leaving the Overview until it is saved or cancelled.
  * Inputs: the project data, the overview or null, why it is null, now, the picked tab, the
@@ -724,6 +725,9 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
     storeDrafts(data.id, next, store);
   };
   const status = overview === null ? null : checked(overview, now);
+  const editable = selected === "readme" || selected === "activity" || overview === null || overview.needs_home || (drafts[selected] ?? null) !== null
+    ? undefined
+    : overview.tabs.find((item) => item.tab === selected && !item.blocked);
   const off = overview === null || overview.running || overview.refresh === "off" || overview.needs_home;
   const refresh = async () => {
     assert(!off, "Refresh was chosen while it is disabled");
@@ -736,19 +740,20 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
   };
   const missing = overview === null && selected !== "activity" ? <p className={problem ? "pj-error" : "pj-muted"} role={problem ? "alert" : "status"}>{problem ?? LOADING}</p> : null;
   return <section className="pj-stack-s ov-tabs" aria-label="Overview tabs">
-    <div className="ov-strip">
-      <div className="tabs ov-tablist" role="tablist" aria-label="Overview" onKeyDown={(event) => {
-        const next = stripMove(selected, event.key);
-        if (next === null) return;
-        event.preventDefault();
-        onSelect(next);
-        requestAnimationFrame(() => document.getElementById(`ov-tab-${next}`)?.focus());
-      }}>
-        {STRIP.map((item) => <button key={item.id} type="button" id={`ov-tab-${item.id}`} role="tab" className="tab" aria-controls="ov-panel"
-          aria-selected={item.id === selected} tabIndex={item.id === selected ? 0 : -1} onClick={() => onSelect(item.id)}>{item.label}</button>)}
-      </div>
-      <div className="pj-row ov-meta">
-        {status && <span className="pj-small pj-muted" role="status">{status}</span>}
+    <div className="tabs ov-tablist" role="tablist" aria-label="Overview" onKeyDown={(event) => {
+      const next = stripMove(selected, event.key);
+      if (next === null) return;
+      event.preventDefault();
+      onSelect(next);
+      requestAnimationFrame(() => document.getElementById(`ov-tab-${next}`)?.focus());
+    }}>
+      {STRIP.map((item) => <button key={item.id} type="button" id={`ov-tab-${item.id}`} role="tab" className="tab" aria-controls="ov-panel"
+        aria-selected={item.id === selected} tabIndex={item.id === selected ? 0 : -1} onClick={() => onSelect(item.id)}>{item.label}</button>)}
+    </div>
+    <div className="ov-bar">
+      {status && <span className="pj-small pj-muted" role="status">{status}</span>}
+      <div className="pj-row ov-actions">
+        {editable && <button type="button" className="btn" id={EDIT_OPEN} onClick={() => keepDraft(editable.tab, { version: editable.version, text: editable.text ?? "", busy: false, note: "", changed: false, told: false })}>Edit</button>}
         <button type="button" className="btn" disabled={off || asking} onClick={() => void refresh()}>Refresh</button>
       </div>
     </div>
