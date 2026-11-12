@@ -187,6 +187,7 @@ test("a release builds the bundled tmux from its pinned script before staging si
   assert.match(build[tmux], /^ {8}if: matrix\.os != 'windows'$/m);
   assert.match(build[tmux], /scripts\/release\/build-tmux\.sh --target "\$TARGET" --work "\$work\/build" --out "\$work\/crazyagent-tmux"/);
   assert.match(build[tmux], /TMUX_SIDECAR=\$work\/crazyagent-tmux" >> "\$GITHUB_ENV"/);
+  assert(!/continue-on-error/.test(build[tmux]), "a failed tmux check, such as a weak import, fails the release");
   assert.match(build[stage], /--tmux "\$TMUX_SIDECAR"/);
   assert.match(build[index("Install Linux build packages")], /--no-install-recommends [^\n]*\bbison\b[^\n]*\bmusl-tools\b/);
   assert.match(build[verify], /^ {8}if: matrix\.os == 'macos'$/m);

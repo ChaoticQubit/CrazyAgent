@@ -74,6 +74,8 @@ test("on macOS no libc function newer than the app's minimum is linked weak: pip
   assert.equal(text.match(/^MACOS_WEAK_ALLOWED="([^"]*)"$/m)?.[1], "_malloc_default_purgeable_zone ___darwin_check_fd_set_overflow", "only the two weak imports whose callers check for NULL");
   assert.match(text, /^check_weak_imports\(\) \{\n[^]*?nm -m "\$binary"[^]*?\(undefined\\\) weak external[^]*?build_tmux_weak_import[^]*?\n\}$/m);
   assert.match(text, /^check_macos\(\) \{\n[^]*?check_weak_imports "\$binary" "\$minimum"[^]*?\n\}$/m);
+  const macos = text.slice(text.indexOf('if [ "$os" = macos ]; then\n  export CC=clang'), text.indexOf("build_jemalloc \"$tree\""));
+  assert.match(macos, /^ {2}export MACOSX_DEPLOYMENT_TARGET="\$minimum"$/m, "every dependency is built for the app's minimum macOS, not the SDK's");
 });
 
 test("every check reads its tool's whole output before it matches, so pipefail never fails a good build or passes a bad one when grep -q stops reading early", () => {
