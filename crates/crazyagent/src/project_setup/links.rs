@@ -296,10 +296,8 @@ pub fn docs(folder: &Path, most: usize) -> Docs {
             let Ok(entry) = entry else {
                 break;
             };
-            let Ok(name) = entry.file_name().to_str() else {
-                continue;
-            };
-            if name == "." || name == ".." {
+            let raw = entry.file_name().to_bytes();
+            if raw == b"." || raw == b".." {
                 continue;
             }
             if scanned == DOCS_ENTRIES_SCANNED {
@@ -307,6 +305,9 @@ pub fn docs(folder: &Path, most: usize) -> Docs {
                 break;
             }
             scanned += 1;
+            let Ok(name) = entry.file_name().to_str() else {
+                continue;
+            };
             if name.starts_with('.') {
                 continue;
             }

@@ -4354,10 +4354,7 @@ fn the_context_tab_names_the_docs_the_engine_left_out_as_the_desktop_does_never_
     let listed = |unlisted_docs: usize, docs_folder_cut: bool| ProjectContext {
         project_id: project.clone(),
         folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
-        items: vec![
-            doc("docs/adr/0001-store.md"),
-            doc("docs/roadmap/README.md"),
-        ],
+        items: vec![doc("docs/adr/0001-store.md"), doc("docs/roadmap/README.md")],
         unlisted_docs,
         docs_folder_cut,
     };
@@ -4389,9 +4386,8 @@ fn the_context_tab_names_the_docs_the_engine_left_out_as_the_desktop_does_never_
     assert!(!one.contains("1 more docs"), "{one}");
     let folder = words(listed(0, true), 80);
     assert!(
-        folder.contains(
-            "More docs not listed: the docs folder has more files than CrazyAgent reads"
-        ),
+        folder
+            .contains("More docs not listed: the docs folder has more files than CrazyAgent reads"),
         "{folder}"
     );
     let both = words(listed(6, true), 80);
