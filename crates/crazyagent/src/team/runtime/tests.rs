@@ -29752,6 +29752,102 @@ fn a_task_for_a_model_no_idle_agent_runs_frees_a_full_slot_of_one_on_another_mod
     assert_eq!(status, "queued");
 }
 
+/// Under the Stop fallback rule a task whose model only a resting account can run stops
+/// no idle agent on another model while it waits (DEC-150 r2 P1): a stopped agent would
+/// leave a slot keep warm refills on the agent default, and dispatch would stop it again,
+/// launching a harness every cycle for the whole rest.
+#[test]
+fn a_task_waiting_on_a_resting_account_stops_no_idle_agent_so_keep_warm_launches_none() {
+    use crate::model_choice::Slot;
+    use crate::model_choice::rules::{FallbackRule, PickRule, Rule};
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.min_agents = 2;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    let mut team = fixture.runtime();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
+    reuse_idle_on(&fixture);
+    let mut access = fixture.access.clone();
+    let mut other = access.connections[0].clone();
+    other.id = reference("local-b");
+    other.model.id = "other-model".into();
+    access.connections.push(other);
+    access.pools[0].members.push(reference("local-b"));
+    model_rule(&fixture, Rule::Pick(PickRule::Hint));
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    codex_model(&fixture, "qwen2.5:0.5b", Slot::Agent);
+    codex_model(&fixture, "other-model", Slot::Agent);
+    let idle = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&fixture.setup.project_id, AgentRole::Sub, false, false);
+    worker.connection = reference("local-b");
+    worker.model = Some("other-model".to_owned());
+    team.workers.insert(idle, worker);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    let pinned = super::super::model_pick::pin(
+        &tx,
+        &fixture.setup.project_id,
+        task,
+        "codex",
+        Some(&crate::team::tool::ModelPick {
+            model: "qwen2.5:0.5b".into(),
+            reason: "the small model fits".into(),
+        }),
+    )
+    .unwrap();
+    assert!(pinned.is_ok(), "{pinned:?}");
+    tx.commit().unwrap();
+    let resting = BTreeSet::from([reference(ENDPOINT)]);
+    for _ in 0..3 {
+        team.dispatch(&fixture.setup, &access, &resting).unwrap();
+        assert!(
+            !team.workers[&idle].stopping,
+            "no idle agent stops while the task's account rests"
+        );
+        team.keep_warm(&fixture.setup, &access, &resting).unwrap();
+        assert_eq!(team.workers.len(), 1, "keep warm launches none");
+    }
+    let agents: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agents, 1);
+    let (status, wait): (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,wait FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "queued");
+    assert!(wait.is_some(), "the task says why it waits");
+}
+
 /// Keep warm starts its agents on the owner's agent default, so a task for that model
 /// takes one (DEC-150 F3), and starts none while an agent of the project still stops, so
 /// an agent dispatch stopped to free its slot is not replaced before the task starts.
