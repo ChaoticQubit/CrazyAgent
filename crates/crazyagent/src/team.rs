@@ -2770,7 +2770,11 @@ fn perform(
             if !settings_write(tx, project, *version)? {
                 return Ok(rejected(STALE_CODE));
             }
+            let retry = *on && master::switch(tx, project)?.0 == Some(true);
             master::set_live(tx, project, *on)?;
+            if retry {
+                master::ask_retry(tx, project)?;
+            }
             Ok(Outcome::Applied)
         }
         TeamAction::Pause { .. } => {

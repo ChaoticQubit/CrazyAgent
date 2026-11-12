@@ -4165,7 +4165,9 @@ impl TeamRuntime {
     /// harness that has no live terminal, such as RCLI, it turns the live master off with one
     /// note, so the one-turn master answers (F06). Each time the owner switches it on, as
     /// Start or Try again, the tool probes look again at once, so a tool the owner just
-    /// installed is found. Takes the setup, live access and paused accounts.
+    /// installed is found; a Try again with the switch already on also stops a master that
+    /// has not read keys [`MASTER_OVERDUE`] after its start, to start again as a counted
+    /// start. Takes the setup, live access and paused accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -4174,9 +4176,10 @@ impl TeamRuntime {
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let on = super::master::live(&self.connection, project)?;
+        let retry = super::master::take_retry(&self.connection, project)? && on;
         if !on {
             self.live_switched_on.remove(project);
-        } else if self.live_switched_on.insert(project.clone()) {
+        } else if self.live_switched_on.insert(project.clone()) || retry {
             (self.tools_refresh)();
         }
         if self.workers.values().any(|w| {
@@ -4191,6 +4194,16 @@ impl TeamRuntime {
                 && super::master::switch(&self.connection, project)?.0 == Some(true);
             let held = chosen_off && !self.live_master_idles(id, project, true);
             let worker = self.workers.get_mut(&id).expect("master worker exists");
+            if retry
+                && worker.live
+                && !worker.input_ready
+                && worker.busy.is_none()
+                && worker.spawned.elapsed() >= MASTER_OVERDUE
+            {
+                worker.stop_for("engine_stop:owner_retry");
+                let _ = worker.orders.send(Order::Stop);
+                return Ok(());
+            }
             let moved = on && worker.live && worker.session != session;
             if worker.live != on || moved {
                 if worker.busy.is_none() && !held {
@@ -12551,6 +12564,9 @@ fn excerpt(text: &str, max: usize) -> String {
 }
 const RESUME_REFUSED: &str = "launch_resume_unavailable";
 const LIVE_STARTS_MAX: usize = 3;
+/// How long a live master may run without reading keys before the owner's Try again starts
+/// it again: the minute after which both clients show its terminal as overdue.
+const MASTER_OVERDUE: Duration = Duration::from_secs(60);
 const GIT_POINTER_BYTES_MAX: u64 = 4096;
 const LIVE_STARTS_WINDOW: Duration = Duration::from_secs(10 * 60);
 const LIVE_STOPPED: &str = super::master::LIVE_STOPPED;

@@ -98,8 +98,8 @@ fn state(problem: impl std::fmt::Display) -> EngineError {
 }
 
 /// Creates the live master tables: the per-project live switch with its turn and owner
-/// typing state, the turns a live master ended and the harness conversation each master
-/// session continues. `names` keeps the role a delegation asked for.
+/// typing state, the owner's pending Try again, the turns a live master ended and the
+/// harness conversation each master session continues. `names` keeps the role a delegation asked for.
 /// Takes the engine database. Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
@@ -121,6 +121,9 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             );
             CREATE TABLE IF NOT EXISTS team_master_input_holds (
                 agent INTEGER PRIMARY KEY
+            );
+            CREATE TABLE IF NOT EXISTS team_master_retries (
+                project TEXT PRIMARY KEY
             );
             CREATE TABLE IF NOT EXISTS team_master_turns (
                 agent INTEGER NOT NULL,
@@ -283,6 +286,35 @@ pub fn set_live(connection: &Connection, project: &ProjectId, on: bool) -> Resul
         )
         .map_err(state)?;
     Ok(())
+}
+
+/// Keeps the owner's Try again while a project's live master switch is already on, as on an
+/// overdue terminal, for the runtime to take ([`take_retry`]). Takes the owner transaction
+/// and the project. Returns any SQLite failure.
+pub(crate) fn ask_retry(connection: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO team_master_retries(project) VALUES (?1)",
+            [project.as_str()],
+        )
+        .map_err(state)?;
+    Ok(())
+}
+
+/// Takes and forgets the owner's pending Try again for a project, so each one is acted on
+/// once. Takes the engine database and the project. Returns whether one was pending.
+pub(crate) fn take_retry(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<bool, EngineError> {
+    let taken = connection
+        .execute(
+            "DELETE FROM team_master_retries WHERE project=?1",
+            [project.as_str()],
+        )
+        .map_err(state)?;
+    assert!(taken <= 1);
+    Ok(taken == 1)
 }
 
 /// Reads whether a project's master runs live: its run flag is on and the owner's "Live
