@@ -4000,8 +4000,14 @@ fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets
     let granted = owner_tmp.join("g.sock");
     let other = owner_tmp.join("o.sock");
     let listener = crazyagent::spawn_gate::bind_unix_std(&granted).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let _served = std::thread::spawn(move || {
-        let _ = crazyagent::spawn_gate::accept_unix_std(&listener);
+        for _ in 0..600 {
+            if crazyagent::spawn_gate::accept_unix_std(&listener).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     });
     let _other = crazyagent::spawn_gate::bind_unix_std(&other).unwrap();
     let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
@@ -4081,8 +4087,14 @@ fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
     }
     let granted = owner_tmp.join("g.sock");
     let listener = crazyagent::spawn_gate::bind_unix_std(&granted).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let _served = std::thread::spawn(move || {
-        let _ = crazyagent::spawn_gate::accept_unix_std(&listener);
+        for _ in 0..600 {
+            if crazyagent::spawn_gate::accept_unix_std(&listener).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     });
     let cache = tool_cache(&case, false);
     let homes = ToolHomes::owner().unwrap();
