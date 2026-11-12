@@ -1331,6 +1331,40 @@ async fn a_turn_whose_write_waits_on_another_engine_connection_still_ends_with_i
     case.finish().await;
 }
 
+/// A preparation that meets another engine connection's write lock held for a fifth of the
+/// 250 ms storage wait, as the research loop's stale-job update or a team runtime commit
+/// holds it, waits the lock out and prepares the turn (BL-DBLOCK). Preparation reads before
+/// it writes, and SQLite refuses a read transaction's first write at once, with no wait,
+/// while another connection holds the lock.
+#[tokio::test]
+async fn a_preparation_that_meets_a_short_write_lock_waits_it_out_and_prepares_the_turn() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let holder = case.hold_write_lock(Duration::from_millis(50));
+    let prepared = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+        .await;
+    holder.join().unwrap();
+    let prepared = match prepared {
+        Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+        Ok(_) => panic!("the preparation returned no prepared turn"),
+        Err(error) => panic!("the turn was not prepared: {}", error.0),
+    };
+    assert_eq!(prepared.session.session_id, case.session.session_id);
+    assert_eq!(
+        case.persisted_turn().await.phase,
+        MasterTurnPhase::Prepared,
+        "the prepared turn is stored"
+    );
+    drop(prepared);
+    case.finish().await;
+}
+
 #[tokio::test]
 async fn an_unregistered_rcli_profile_stops_the_turn_with_its_own_cause() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
