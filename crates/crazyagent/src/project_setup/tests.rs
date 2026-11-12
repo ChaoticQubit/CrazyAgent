@@ -1174,6 +1174,34 @@ fn a_docs_folder_too_large_to_read_whole_says_so_instead_of_dropping_docs_silent
 }
 
 #[test]
+fn docs_that_would_overflow_the_owner_reply_are_counted_not_sent() {
+    let case = context_case();
+    let name = "n".repeat(180);
+    for index in 0..OWNER_DOCS_MAX {
+        write_below(
+            &case.folder,
+            &format!("docs/{index:03}-{name}.md"),
+            "# Doc\n",
+        );
+    }
+    let context = list_context_with_links(&case.stored, &[]).unwrap();
+    let wire = serde_json::to_vec(&context).unwrap();
+    assert!(
+        wire.len() + 4096 <= crate::protocol::FRAME_BYTES_MAX,
+        "{}",
+        wire.len()
+    );
+    let listed = context.items.iter().filter(|item| item.linked).count();
+    assert!(listed > 0 && listed < OWNER_DOCS_MAX, "{listed}");
+    assert_eq!(listed + context.unlisted_docs, OWNER_DOCS_MAX);
+    assert_eq!(
+        context.items.last().unwrap().path,
+        format!("repo/docs/{:03}-{name}.md", listed - 1),
+        "the docs kept are the first by path"
+    );
+}
+
+#[test]
 fn a_long_linked_file_is_read_in_chunks_that_end_on_whole_characters() {
     let case = context_case();
     let text = format!("a{}", "\u{e9}".repeat(6000));

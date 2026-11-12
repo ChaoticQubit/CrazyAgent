@@ -2876,6 +2876,8 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
         project_id: project.clone(),
         folder: "/Users/owner/hidden".into(),
         items: vec![],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
@@ -3111,6 +3113,8 @@ fn console_screen() -> ProjectScreen {
             bytes: 10,
             linked: false,
         }],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     screen.open(Tab::Conversation);
     assert!(screen.typing);
@@ -3629,6 +3633,8 @@ fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder
                 linked: false,
             },
         ],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     let spec = OpenRequest::Context {
         folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
@@ -3687,6 +3693,8 @@ fn shift_o_on_the_context_tab_is_in_the_key_help_and_says_why_when_the_ide_canno
             bytes: 20,
             linked: false,
         }],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     };
     screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
     let look = Look::plain();
@@ -4347,6 +4355,8 @@ fn a_file_linked_from_the_repo_says_so_opens_from_the_project_folder_and_is_not_
             bytes: 15,
             linked: true,
         }],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     let look = Look::plain();
     let drawn = project_screen(&mut screen, 80, 24, &look);
@@ -4612,6 +4622,8 @@ fn p_on_the_context_tab_opens_project_memory_and_both_layouts_say_so() {
             bytes: 20,
             linked: false,
         }],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     let look = Look::plain();
     for (width, height) in [(80, 24), (120, 36)] {
