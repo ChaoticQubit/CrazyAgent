@@ -745,29 +745,49 @@ WantedBy=default.target\n",
 }
 
 /// The first entry on a path that someone other than this user or root can change: an
-/// entry another user owns, a world-writable entry such as `/tmp`, or a folder its group
-/// can write unless that group is trusted ([`trusted_group`]). It reads the path as written
-/// and with its links resolved; a link's own mode bits and missing entries are not counted,
-/// an unreadable entry is. Input: the absolute path. Output: the entry, or none.
+/// entry another user owns, a world-writable entry such as `/tmp`, or a folder an untrusted
+/// group can write ([`trusted_group`]), except a sticky store such as /nix/store above an
+/// entry's own folder ([`first_changeable`]). It reads the path as written and with its links
+/// resolved; an unreadable entry counts. Input: the absolute path. Output: the entry, or none.
 #[cfg(unix)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
     let me = current_uid();
     let resolved = canonical(path);
     [path, resolved.as_path()]
         .into_iter()
-        .flat_map(Path::ancestors)
-        .find(|entry| match std::fs::symlink_metadata(entry) {
+        .find_map(|path| first_changeable(path, me))
+}
+
+/// The first entry of one path, the entry itself first, that someone other than this user
+/// or root can change ([`changeable_by_others`]). A sticky folder this user or root owns
+/// counts for its group only as the entry, the entry's own folder or above a missing one,
+/// since the group cannot replace an entry another owns. Inputs: the path and this user's
+/// id. Output: the entry, or none.
+#[cfg(unix)]
+fn first_changeable(path: &Path, me: u32) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let mut below_exists = false;
+    for (depth, entry) in path.ancestors().enumerate() {
+        let read = std::fs::symlink_metadata(entry);
+        let changeable = match &read {
             Ok(metadata) => {
-                (metadata.uid() != me && metadata.uid() != 0)
+                let owned = metadata.uid() == me || metadata.uid() == 0;
+                let store = depth >= 2 && below_exists && owned && metadata.mode() & 0o1000 != 0;
+                !owned
                     || (!metadata.file_type().is_symlink() && metadata.mode() & 0o002 != 0)
                     || (metadata.is_dir()
                         && metadata.mode() & 0o020 != 0
-                        && !trusted_group(metadata.gid()))
+                        && !trusted_group(metadata.gid())
+                        && !store)
             }
             Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-        })
-        .map(Path::to_path_buf)
+        };
+        if changeable {
+            return Some(entry.to_path_buf());
+        }
+        below_exists = read.is_ok();
+    }
+    None
 }
 
 /// Reports no changeable entry where Unix owners and modes do not exist; the Windows task
