@@ -1630,8 +1630,8 @@ fn a_round_stops_at_its_bound_and_the_next_rounds_go_on() {
         .map(|at| claude("user", &format!("okapi message {at}")))
         .collect();
     record(&home.join("projects").join("p").join("many.jsonl"), &lines);
-    assert!(!fixture.index_within(2, 1 << 20));
-    let caught: Vec<bool> = (0..3).map(|_| fixture.index_within(2, 1 << 20)).collect();
+    assert!(!fixture.index_within(2, 4 << 20));
+    let caught: Vec<bool> = (0..3).map(|_| fixture.index_within(2, 4 << 20)).collect();
     assert_eq!(caught.last(), Some(&true));
     let ordinals: Vec<i64> = fixture
         .chunks(&format!("agent-{id}/many"))
@@ -1740,7 +1740,7 @@ fn the_scan_answers_while_the_index_is_not_caught_up() {
         .map(|at| claude("user", &format!("okapi message {at}")))
         .collect();
     record(&home.join("projects").join("p").join("slow.jsonl"), &lines);
-    assert!(!fixture.index_within(2, 1 << 20));
+    assert!(!fixture.index_within(2, 4 << 20));
     let found = fixture.sessions("okapi");
     assert!(found.contains("newest conversations first"), "{found}");
     assert_eq!(
@@ -1819,4 +1819,125 @@ fn a_foreign_chunk_is_never_shown_and_an_excerpt_is_masked_again() {
         hits.iter().all(|hit| !hit.contains("hunter2okapi")),
         "{hits:?}"
     );
+}
+
+/// Leader 14:34 (rv-v3code J1 note): a round stores what it read only inside one write
+/// transaction that still finds its project, so a project removed while the round read its
+/// messages keeps no chunk, watermark or pass mark.
+#[test]
+fn a_round_whose_project_is_removed_while_it_reads_stores_nothing() {
+    let mut fixture = Fixture::new();
+    fixture.team_message("engine", "okapi note", 1_000);
+    let round = crate::search_index::indexer::read_round(
+        &fixture.db,
+        &fixture.agents,
+        &project(),
+        INDEXED_AT,
+        256,
+        4 << 20,
+    )
+    .unwrap();
+    let tx = fixture.db.transaction().unwrap();
+    tx.execute("DELETE FROM projects WHERE id=?1", [PROJECT])
+        .unwrap();
+    crate::search_index::forget_project(&tx, &project()).unwrap();
+    tx.commit().unwrap();
+    crate::search_index::indexer::store_round(&mut fixture.db, round, INDEXED_AT).unwrap();
+    for table in ["search_chunks", "search_sources", "search_projects"] {
+        let left: i64 = fixture
+            .db
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE project=?1"),
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "{table}");
+    }
+}
+
+/// Same note: the turns a round read from a master session deleted before the round stores
+/// them are dropped with their watermark.
+#[test]
+fn a_round_drops_the_turns_of_a_session_deleted_while_it_reads() {
+    let mut fixture = Fixture::new();
+    fixture.turn("s3", 1, "okapi ask", "okapi answer", 1_000);
+    let round = crate::search_index::indexer::read_round(
+        &fixture.db,
+        &fixture.agents,
+        &project(),
+        INDEXED_AT,
+        256,
+        4 << 20,
+    )
+    .unwrap();
+    fixture
+        .db
+        .execute_batch("DELETE FROM master_turns WHERE session='s3'; DELETE FROM master_sessions WHERE id='s3';")
+        .unwrap();
+    crate::search_index::forget_session(&fixture.db, "s3").unwrap();
+    crate::search_index::indexer::store_round(&mut fixture.db, round, INDEXED_AT).unwrap();
+    assert!(fixture.chunks("session/s3").is_empty());
+    let watermark: i64 = fixture
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM search_sources WHERE key='session/s3'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(watermark, 0);
+}
+
+/// DEC-105 D8: a record line longer than the line bound and than a round's bytes is skipped
+/// over the next rounds as session() skips it, and the message after it is indexed under
+/// the number session() prints.
+#[test]
+fn a_line_longer_than_a_rounds_bytes_is_skipped_and_the_next_message_indexed() {
+    let mut fixture = Fixture::new();
+    let (id, home) = fixture.agent("claude-code");
+    record(
+        &home.join("projects").join("p").join("long.jsonl"),
+        &[
+            claude("user", "before the long okapi line"),
+            claude("user", &"okapi ".repeat(1_000_000)),
+            claude("assistant", "after the long okapi line"),
+        ],
+    );
+    let bound = 2 * LINE_BYTES_MAX as u64 + 2;
+    let caught = (0..8).any(|_| fixture.index_within(256, bound));
+    assert!(caught, "the long line never stalls the record");
+    let key = format!("agent-{id}/long");
+    assert_eq!(
+        fixture.chunks(&key),
+        [
+            (0, "before the long okapi line".to_owned()),
+            (1, "after the long okapi line".to_owned())
+        ]
+    );
+    fixture.assert_numbers_match_session(&key);
+}
+
+/// DEC-105 D1: one engine tick indexes every project's conversations, each under its own
+/// project, and reports nothing left behind.
+#[test]
+fn one_engine_tick_indexes_every_project() {
+    let mut fixture = Fixture::new();
+    fixture.team_message("engine", "okapi here", 1_000);
+    fixture.team_message_of(OTHER, "engine", "okapi there", 1_000);
+    let root = fixture.agents.parent().unwrap().to_path_buf();
+    let behind =
+        crate::search_index::indexer::tick(&mut fixture.db, &root, &fixture.agents, INDEXED_AT)
+            .unwrap();
+    assert!(!behind);
+    assert_eq!(fixture.chunks("team"), [(0, "okapi here".to_owned())]);
+    let there: String = fixture
+        .db
+        .query_row(
+            "SELECT text FROM search_chunks WHERE project=?1",
+            [OTHER],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(there, "okapi there");
 }

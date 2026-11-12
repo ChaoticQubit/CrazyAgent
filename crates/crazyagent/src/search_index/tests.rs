@@ -3,6 +3,22 @@ use rusqlite::Connection;
 
 const NOW: i64 = 1_762_950_000_000;
 
+/// Stores chunks the way the indexer does, inside one write transaction. Inputs and output
+/// as `super::append`.
+fn append(
+    db: &Connection,
+    project: Option<&ProjectId>,
+    source: Source,
+    key: &str,
+    chunks: &[(i64, &str)],
+    at_ms: i64,
+) -> Result<usize, EngineError> {
+    let tx = db.unchecked_transaction().unwrap();
+    let stored = super::append(&tx, project, source, key, chunks, at_ms)?;
+    tx.commit().unwrap();
+    Ok(stored)
+}
+
 fn project(id: &str) -> ProjectId {
     ProjectId::new(id).unwrap()
 }
@@ -533,7 +549,9 @@ fn memory_chunks(db: &Connection) -> Vec<(String, Option<String>)> {
         .unwrap()
 }
 
+#[cfg(unix)]
 const WRITTEN: &str = r#"{"kind":"written"}"#;
+#[cfg(unix)]
 const WAITING: &str = r#"{"kind":"requested","agent":"Ada"}"#;
 
 /// DEC-105 D6: only memories an agent may read are indexed (none waiting for the owner,

@@ -1979,3 +1979,59 @@ async fn deleting_a_session_keeps_the_learning_tick_its_owner_messages_gave() {
     assert!(master_done(&case), "the tick outlives the messages");
     case.close().await;
 }
+
+/// DEC-105 D7 (rv-v3code J2): deleting a master session runs the search index forget inside
+/// its delete transaction, so the session's chunks and watermark go, nothing of it stays in
+/// the full-text table, and another session's chunks stay.
+#[tokio::test]
+async fn deleting_a_session_forgets_its_search_index_rows() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-first").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    assert_eq!(
+        case.submit("first-line", &first.session_id, "Write the okapi guide")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.renew("renew-first", true).await, OwnerResult::Applied);
+    let gone = format!("session/{}", first.session_id.as_str());
+    {
+        let db = case.db();
+        for (key, text) in [
+            (gone.as_str(), "okapi deleted"),
+            ("session/kept", "okapi kept"),
+        ] {
+            db.execute(
+                "INSERT INTO search_chunks(project,source,key,ordinal,text,at_ms) VALUES (?1,'session',?2,0,?3,1)",
+                rusqlite::params![case.project.as_str(), key, text],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO search_sources(project,key,checked_ms) VALUES (?1,?2,1)",
+                rusqlite::params![case.project.as_str(), key],
+            )
+            .unwrap();
+        }
+    }
+    assert_eq!(
+        case.delete("delete-first", &first.session_id).await,
+        OwnerResult::Applied
+    );
+    let count = |sql: &str, key: &str| -> i64 {
+        case.db().query_row(sql, [key], |row| row.get(0)).unwrap()
+    };
+    let chunks = "SELECT COUNT(*) FROM search_chunks WHERE key=?1";
+    let marks = "SELECT COUNT(*) FROM search_sources WHERE key=?1";
+    assert_eq!(count(chunks, &gone), 0);
+    assert_eq!(count(marks, &gone), 0);
+    assert_eq!(count(chunks, "session/kept"), 1);
+    assert_eq!(count(marks, "session/kept"), 1);
+    assert_eq!(
+        count(
+            "SELECT COUNT(*) FROM search_chunks_fts WHERE search_chunks_fts MATCH ?1",
+            "deleted"
+        ),
+        0
+    );
+    case.close().await;
+}
