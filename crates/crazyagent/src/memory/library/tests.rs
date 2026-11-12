@@ -2154,7 +2154,7 @@ fn an_app_wide_agent_memory_stays_in_its_project_unless_the_owner_lets_agents_ch
     assert_eq!(page_scope(&mut db), AgentScope::Project);
 
     assert_eq!(
-        agent_remember(&mut db, &alpha, "Master", true, "Gotcha in the parser.").unwrap(),
+        agent_remember(&mut db, &alpha, (None, "Master"), true, "Gotcha in the parser.").unwrap(),
         Ok(AgentSaved {
             waiting: false,
             narrowed: true
@@ -2171,7 +2171,7 @@ fn an_app_wide_agent_memory_stays_in_its_project_unless_the_owner_lets_agents_ch
         "another project never reads it"
     );
     assert_eq!(
-        agent_remember(&mut db, &alpha, "Master", false, "Project fact.").unwrap(),
+        agent_remember(&mut db, &alpha, (None, "Master"), false, "Project fact.").unwrap(),
         Ok(AgentSaved {
             waiting: false,
             narrowed: false
@@ -2191,7 +2191,7 @@ fn an_app_wide_agent_memory_stays_in_its_project_unless_the_owner_lets_agents_ch
     );
     assert_eq!(page_scope(&mut db), AgentScope::Agent);
     assert_eq!(
-        agent_remember(&mut db, &alpha, "Master", true, "Plain commits.").unwrap(),
+        agent_remember(&mut db, &alpha, (None, "Master"), true, "Plain commits.").unwrap(),
         Ok(AgentSaved {
             waiting: false,
             narrowed: false
@@ -2304,7 +2304,7 @@ fn the_owner_moves_an_app_wide_agent_memory_into_one_project() {
         (&alpha, true, "Twice."),
         (&beta, false, "Twice."),
     ] {
-        agent_remember(&mut db, project, "Master", app, text)
+        agent_remember(&mut db, project, (None, "Master"), app, text)
             .unwrap()
             .unwrap();
     }

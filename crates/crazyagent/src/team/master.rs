@@ -1241,7 +1241,7 @@ pub fn serve_memory_calls(
             Some(Ok(call)) if switched_off(connection, project, &call).unwrap_or(true) => {
                 (SWITCHED_OFF.to_owned(), true)
             }
-            Some(Ok(call)) => memory_answer(connection, project, MASTER_LABEL, call)
+            Some(Ok(call)) => memory_answer(connection, project, (None, MASTER_LABEL), call)
                 .expect("a memory call has an answer")?,
         };
         let _ = tool::answer_call(mailbox, id, &text, error);
@@ -1325,7 +1325,7 @@ fn answer(
                 .expect("a past-conversation call has an answer")
         }
         call @ (Call::Remember { .. } | Call::Recall { .. }) => {
-            return memory_answer(connection, project, (master, MASTER_LABEL), call)
+            return memory_answer(connection, project, (Some(master), MASTER_LABEL), call)
                 .expect("a memory call has an answer");
         }
         Call::Ask {
@@ -1943,13 +1943,13 @@ fn land_on_lead(
 
 /// Answers one saved-memory call of a project's agent: `remember` saves under the owner's
 /// Agent memory writes and Where agents save memories settings and `recall` searches what
-/// agents may read. Takes the engine database, the project, the agent's team id and label
-/// and the call. Returns the text and whether it is an error, or a SQLite failure; none for
-/// any other call.
+/// agents may read. Takes the engine database, the project, the agent's team id (None for a
+/// master answering from its mailbox, which runs no task) and label and the call. Returns the
+/// text and whether it is an error, or a SQLite failure; none for any other call.
 pub(super) fn memory_answer(
     connection: &mut Connection,
     project: &ProjectId,
-    agent: (i64, &str),
+    agent: (Option<i64>, &str),
     call: Call,
 ) -> Option<Result<(String, bool), EngineError>> {
     match call {
@@ -1962,13 +1962,12 @@ pub(super) fn memory_answer(
 fn remember(
     connection: &mut Connection,
     project: &ProjectId,
-    (id, agent): (i64, &str),
+    agent: (Option<i64>, &str),
     scope: tool::MemoryReach,
     text: &str,
 ) -> Result<(String, bool), EngineError> {
     let app = scope == tool::MemoryReach::App;
-    let saved =
-        crate::memory::library::agent_remember(connection, project, (Some(id), agent), app, text)?;
+    let saved = crate::memory::library::agent_remember(connection, project, agent, app, text)?;
     Ok(
         match saved {
             Ok(saved) => (

@@ -185,7 +185,7 @@ pub fn serve_agent_calls(
                 Some(Ok(call @ (Call::Remember { .. } | Call::Recall { .. }))),
                 Some((caller, label)),
                 Ok(false),
-            ) => match super::master::memory_answer(connection, project, (caller, &label), call) {
+            ) => match super::master::memory_answer(connection, project, (Some(caller), &label), call) {
                 Some(Ok(answered)) => answered,
                 Some(Err(_)) | None => (MEMORY_UNREAD.to_owned(), true),
             },

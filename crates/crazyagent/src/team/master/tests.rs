@@ -6529,7 +6529,7 @@ fn recall_of_notes_full_of_line_feeds_fits_the_reply_without_a_panic() {
         let saved = memory_answer(
             &mut fixture.connection,
             &project,
-            "Dummy agent",
+            (None, "Dummy agent"),
             Call::Remember {
                 text: format!("{n}{}z", "\n".repeat(1990)),
                 scope: tool::MemoryReach::Project,
@@ -6540,7 +6540,7 @@ fn recall_of_notes_full_of_line_feeds_fits_the_reply_without_a_panic() {
     let (text, failed) = memory_answer(
         &mut fixture.connection,
         &project,
-        "Dummy agent",
+        (None, "Dummy agent"),
         Call::Recall {
             query: String::new(),
         },
@@ -6582,7 +6582,7 @@ fn recall_keeps_a_note_that_fits_exactly_and_says_so_when_one_byte_more_is_left_
             let saved = memory_answer(
                 &mut fixture.connection,
                 &project,
-                "Dummy agent",
+                (None, "Dummy agent"),
                 Call::Remember {
                     text: note,
                     scope: tool::MemoryReach::Project,
@@ -6593,7 +6593,7 @@ fn recall_keeps_a_note_that_fits_exactly_and_says_so_when_one_byte_more_is_left_
         let (text, failed) = memory_answer(
             &mut fixture.connection,
             &project,
-            "Dummy agent",
+            (None, "Dummy agent"),
             Call::Recall {
                 query: String::new(),
             },
