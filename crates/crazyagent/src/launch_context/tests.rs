@@ -1239,6 +1239,58 @@ fn a_skills_entry_swapped_for_an_owner_s_file_during_its_release_keeps_the_owner
     );
 }
 
+/// V231-ACL (DEC-141 PA-19): a Codex `skills` folder whose removal beside the home needs a
+/// release, because a folder in it has no write, leaves an owner's file that folder holds a
+/// hard link to and a file its link names with their ACL entry and mode: the release changes
+/// nothing with a second link and follows no link. The launch starts and nothing stays parked.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_released_skills_folder_leaves_an_owner_s_linked_file_and_a_link_s_target_as_they_were() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let skills = home.join("skills");
+    let kept = skills.join("kept");
+    fs::create_dir_all(&kept).unwrap();
+    let (owner, target) = (root.join("owner.txt"), root.join("target.txt"));
+    for file in [&owner, &target] {
+        fs::write(file, "owner\n").unwrap();
+        assert!(
+            chmod(&["+a", "everyone deny write"], file),
+            "the owner adds an ACL entry"
+        );
+        assert!(chmod(&["0400"], file), "the owner makes the file read only");
+    }
+    fs::hard_link(&owner, kept.join("linked")).unwrap();
+    std::os::unix::fs::symlink(&target, kept.join("link")).unwrap();
+    assert!(
+        chmod(&["0500"], &kept),
+        "the agent takes write off a folder"
+    );
+
+    let held = lock_only(&home, "codex");
+
+    assert_eq!(held.as_ref().err().map(|problem| problem.0.as_str()), None);
+    assert!(fs::read_dir(&skills).is_ok_and(|mut entries| entries.next().is_none()));
+    for (file, name) in [(&owner, "linked file"), (&target, "link's target")] {
+        assert!(
+            listed(&[file]).contains("deny write"),
+            "the release cleared the ACL of the {name}"
+        );
+        let mode = fs::symlink_metadata(file).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o400, "the release changed the mode of the {name}");
+    }
+    let parked = fs::read_dir(&root)
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        .filter(|name| name.starts_with(&format!(".{STATE}-parked-")))
+        .collect::<Vec<_>>();
+    assert!(parked.is_empty(), "the launch parks {parked:?}");
+    drop(held);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_home() {
