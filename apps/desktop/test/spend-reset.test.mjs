@@ -105,3 +105,8 @@ test("every spend outcome the engine stores reads as its own sentence", () => {
   assert.equal(client.spendOutcome(attempt({ outcome: "usage_new_thing" })), "Something went wrong. Try again. (usage_new_thing)");
   assert.equal(client.usageRefusal({ code: "usage_spend_off" }), "Spending free resets is off. Turn it on in Settings, Pools.");
 });
+
+test("the window may call both spend commands", () => {
+  const allowed = JSON.parse(readFileSync(new URL("../src-tauri/capabilities/main-window.json", import.meta.url), "utf8")).permissions;
+  for (const permission of ["allow-desktop-usage-spend", "allow-desktop-usage-set-spend"]) assert.ok(allowed.includes(permission), permission);
+});
