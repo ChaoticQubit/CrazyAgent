@@ -203,6 +203,7 @@ const steps2 = () => {
     deps: (patch = {}) => ({
       create: async (pool, gen) => { calls.push(`create ${pool} ${gen}`); return ok(receipt()); },
       reconcile: async () => { calls.push("reconcile"); return ok(receipt()); },
+      read: async () => { calls.push("read"); return ok(demo()); },
       assign: async (project, pool, gen) => { calls.push(`assign ${project} ${pool} ${gen}`); return ok({ kind: "applied" }); },
       generation: () => { generation += 1; return generation; },
       ...patch,
@@ -228,8 +229,37 @@ test("a refused or unconfirmed Create the demo gives no pool and says why", asyn
   const unsure = steps2();
   const pending = receipt({ pending: true, outcome: "unknown" });
   const left = await model.makeDemo("pool-a", unsure.deps({ create: async () => ok(pending), reconcile: async () => { unsure.calls.push("reconcile"); return ok(pending); } }));
-  assert.equal(left.kind, "refused");
-  assert.deepEqual(unsure.calls, ["reconcile"]);
+  assert.deepEqual(left, { kind: "refused", message: words.DEMO_UNCONFIRMED });
+  assert.deepEqual(unsure.calls, ["reconcile", "read"]);
+});
+
+test("an unconfirmed Create the demo reads the demo again and gives the pool once the demo is there, as the TUI does", async () => {
+  const pending = receipt({ pending: true, outcome: "unknown" });
+  const unsure = (run, patch = {}) => run.deps({
+    create: async (pool, gen) => { run.calls.push(`create ${pool} ${gen}`); return ok(pending); },
+    reconcile: async () => { run.calls.push("reconcile"); return ok(pending); },
+    read: async () => { run.calls.push("read"); return ok(demo({ project_id: "crazyagent-demo", created_ms: 1, steps: steps({ created: true }) })); },
+    ...patch,
+  });
+  const run = steps2();
+  assert.deepEqual(await model.makeDemo("pool-a", unsure(run)), { kind: "made", project: "crazyagent-demo", note: null });
+  assert.deepEqual(run.calls, ["create pool-a 1", "reconcile", "read", "assign crazyagent-demo pool-a 2"]);
+  const refused = steps2();
+  const unassigned = await model.makeDemo("pool-a", unsure(refused, { assign: async () => ok({ kind: "rejected", code: "settings_read_only" }) }));
+  assert.deepEqual(unassigned, { kind: "made", project: "crazyagent-demo", note: words.DEMO_POOL_UNASSIGNED });
+  const unread = steps2();
+  const blind = await model.makeDemo("pool-a", unsure(unread, { read: async () => { unread.calls.push("read"); return { kind: "error", code: "owner_read_failed", message: "x" }; } }));
+  assert.deepEqual(blind, { kind: "refused", message: words.DEMO_UNCONFIRMED });
+  assert.ok(!unread.calls.some((call) => call.startsWith("assign")), "an unread demo gets no pool");
+  const nameless = steps2();
+  const applied = await model.makeDemo("pool-a", unsure(nameless, { create: async () => ok(receipt({ project_id: null })) }));
+  assert.deepEqual(applied, { kind: "made", project: "crazyagent-demo", note: null });
+  assert.deepEqual(nameless.calls, ["read", "assign crazyagent-demo pool-a 2"]);
+});
+
+test("the demo page reads the demo again for an unconfirmed Create the demo", () => {
+  const source = readFileSync(new URL("../src/screens/demo/offer.tsx", import.meta.url), "utf8");
+  assert.match(source, /read: loadDemo,/);
 });
 
 test("a demo made whose pool could not be given still opens, with a line saying to choose the pool again", async () => {
