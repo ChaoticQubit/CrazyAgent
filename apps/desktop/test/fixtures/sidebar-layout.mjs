@@ -65,7 +65,7 @@ export function foot() {
   const name = document.querySelector(".sidebar-foot .me");
   const engine = document.querySelector(".sidebar-foot .engine-state");
   const footer = document.querySelector(".sidebar-foot").getBoundingClientRect();
-  const retry = document.querySelector(".sidebar-foot button")?.getBoundingClientRect() ?? null;
+  const retry = document.querySelector(".sidebar-foot .foot-retry")?.getBoundingClientRect() ?? null;
   return {
     initial: avatar?.textContent ?? null, hidden: avatar?.getAttribute("aria-hidden") ?? null, name: name.textContent, engine: engine.textContent,
     initialRight: avatar?.getBoundingClientRect().right ?? null, nameLeft: name.getBoundingClientRect().left,
