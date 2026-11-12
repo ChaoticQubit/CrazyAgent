@@ -1407,7 +1407,11 @@ fn an_agent_item_with_a_token_is_stored_and_served_without_it() {
         texts(&page),
         vec!["Sub-agent 2 finished: pushed with [hidden] to main"]
     );
-    assert!(stored_texts(&connection).iter().all(|text| !text.contains(&secret)));
+    assert!(
+        stored_texts(&connection)
+            .iter()
+            .all(|text| !text.contains(&secret))
+    );
 }
 
 #[test]
@@ -1425,7 +1429,10 @@ fn a_question_with_a_credential_line_never_reaches_the_store_or_a_client() {
         NOW_MS,
     );
     let page = listed(&connection, &query(NoticeFilter::All));
-    assert_eq!(texts(&page), vec!["[hidden: this line may contain a secret]"]);
+    assert_eq!(
+        texts(&page),
+        vec!["[hidden: this line may contain a secret]"]
+    );
     let stored = stored_texts(&connection);
     assert_eq!(stored.len(), 1);
     assert!(!stored[0].contains(&secret));
@@ -1451,7 +1458,10 @@ fn a_row_stored_with_a_token_before_redaction_is_served_without_it() {
     assert_eq!(texts(&page), vec!["Sub-agent 3 used [hidden]"]);
     let mut folded = query(NoticeFilter::All);
     folded.fold = true;
-    assert_eq!(texts(&listed(&connection, &folded)), vec!["Sub-agent 3 used [hidden]"]);
+    assert_eq!(
+        texts(&listed(&connection, &folded)),
+        vec!["Sub-agent 3 used [hidden]"]
+    );
 }
 
 #[test]
