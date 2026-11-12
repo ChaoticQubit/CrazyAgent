@@ -498,6 +498,7 @@ fn a_question_asked_on_the_task_links_once() {
     let ask = |asker: &Asker, question: &str| {
         let asked = Ask {
             question: question.into(),
+            kind: crate::questions::QuestionKind::Single,
             options: vec!["Markdown".into(), "Plain text".into()],
             recommended: None,
             context: None,

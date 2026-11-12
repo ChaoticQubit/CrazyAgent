@@ -225,6 +225,7 @@ fn ask(db: &Connection, project: &ProjectId, left: &[Left]) -> Result<usize, Eng
     for part in left.iter().take(LEFT_ASKED_MAX) {
         let ask = Ask {
             question: part.question.clone(),
+            kind: questions::QuestionKind::Text,
             options: Vec::new(),
             recommended: None,
             context: Some(part.context.clone()),

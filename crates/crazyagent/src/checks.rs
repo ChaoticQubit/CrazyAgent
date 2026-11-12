@@ -550,6 +550,7 @@ fn ask_owner(
             &id.as_str()[..12],
             actor.spoken()
         ),
+        kind: crate::questions::QuestionKind::Text,
         options: Vec::new(),
         recommended: None,
         context: Some(bound_text(&context, crate::questions::CONTEXT_BYTES_MAX)),

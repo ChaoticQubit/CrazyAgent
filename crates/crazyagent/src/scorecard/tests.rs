@@ -266,6 +266,7 @@ fn dispatch(tx: &Transaction<'_>, op: &str, args: Value) -> Value {
 fn ask(text: &str) -> Ask {
     Ask {
         question: text.into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Yes".into(), "No".into()],
         recommended: None,
         context: None,
