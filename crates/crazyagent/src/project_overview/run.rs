@@ -386,6 +386,31 @@ pub fn requeue(
     Ok(changed == 1)
 }
 
+/// Puts the run holding `claim` back to wait for an account, with `words` as its line: no
+/// longer running, stale again and due at `due_ms`, so the line stays while no account of
+/// the project's pool can run it and the first run that gets one replaces it. A run that
+/// was closed or replaced changes nothing. Inputs: the connection, the project, the claim,
+/// the words and when to try again. Output: whether this run was the one in flight, or
+/// `overview_unavailable`.
+pub fn wait_for_account(
+    db: &Connection,
+    project: &ProjectId,
+    claim: Claim,
+    words: &str,
+    due_ms: i64,
+) -> Result<bool, EngineError> {
+    assert!(due_ms >= 0 && claim.ms() >= 0);
+    let changed = db
+        .execute(
+            "UPDATE project_overview SET running_ms=NULL, stale=1, due_ms=?3, failure=?4
+             WHERE project=?1 AND running_ms=?2",
+            params![project.as_str(), claim.ms(), due_ms, line(words)],
+        )
+        .map_err(unavailable)?;
+    assert!(changed <= 1);
+    Ok(changed == 1)
+}
+
 /// Makes the Overview tables and closes every run an engine that stopped left open: a run
 /// lives on a thread of its engine, so at engine start none can still report, and each is
 /// closed with [`UNFINISHED`] without a new try. Input: the connection. Output: how many

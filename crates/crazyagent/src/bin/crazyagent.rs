@@ -779,6 +779,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         service
                             .owner_runtime()
                             .map(|handle| handle.harness_lookup()),
+                        service.owner_runtime().map(|handle| handle.reproving()),
                     )
                     .map(Some)
                 })
