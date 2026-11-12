@@ -571,13 +571,15 @@ pub(crate) fn execute(
     let access = Some(AgentAccess::NEW_PROJECT)
         .filter(|level| level.unavailable().is_none())
         .unwrap_or_default();
+    let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
     let policy = AgentPolicy {
         access,
-        toolchains: Vec::new(),
+        toolchains: crate::sandbox::policy::recorded_toolchains(&repo, homes.as_ref()),
         network: crate::sandbox::policy::AgentNetwork::default(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
     };
     crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
     let stored = crate::project_setup::load_setup(tx, &project_id)?

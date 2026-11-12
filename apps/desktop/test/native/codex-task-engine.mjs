@@ -110,6 +110,16 @@ fi
   return [first, answer + rest.join("\n")].join("\n");
 }
 
+/** The Codex stand-in that first runs a shell block in every run it serves, then answers as
+ * the counting stand-in does. Input: the block, which must end with a newline. Output: the
+ * script. */
+export function startingWith(block) {
+  assert.ok(typeof block === "string" && block.endsWith("\n") && !block.includes("\0"), "a stand-in start is some shell ending with a newline");
+  const [first, ...rest] = COUNTING_CODEX.split("\n");
+  assert.equal(first, "#!/bin/sh", "the stand-in starts with its interpreter line");
+  return [first, block + rest.join("\n")].join("\n");
+}
+
 /** Writes the stand-in Codex the engine is started with. Inputs: the test root and the
  * script. Output: its absolute path. */
 function standInHarness(root, script) {

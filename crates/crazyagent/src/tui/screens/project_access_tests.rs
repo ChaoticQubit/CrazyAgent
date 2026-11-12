@@ -3,10 +3,14 @@ use super::project_access::FULL_ACCESS_WARNING;
 use super::project_access::{
     AGENT_FILES_IGNORED_UNDER_FULL, AccessEdit, AccessKey, IDE_AGENT_FILES, IDE_GIT_HOOKS,
     IDE_GIT_HOOKS_LINE, LOWERING_STOPS_AGENTS, NETWORK_IGNORED_UNDER_FULL, POLICY_RESTARTS_IDE,
-    TOOLCHAIN_OFF_STOPS_AGENTS, agent_files_help, network_help, summary,
+    SHARED_FOLDERS, SHARED_FOLDERS_IGNORED_UNDER_FULL, SHARED_FOLDERS_NEXT_START,
+    SHARED_SECRETS_LINE, TOOLCHAIN_OFF_STOPS_AGENTS, agent_files_help, network_help, summary,
 };
 use crate::sandbox::policy::{
     AgentAccess, AgentNetwork, IdeAgentFiles, LevelView, NetworkView, PolicyView, ToolchainView,
+};
+use crate::sandbox::shared_folders::{
+    CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
 };
 use crate::sandbox::toolchains::Toolchain;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -54,6 +58,8 @@ fn view() -> PolicyView {
         tool_cache: Default::default(),
         tool_caches: Vec::new(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
+        local_folders: Vec::new(),
         version: 0,
     }
 }
@@ -259,13 +265,14 @@ fn the_access_box_keeps_the_tool_cache_choice_when_it_saves() {
     assert_eq!(edit.policy().tool_cache, scope);
 }
 
-/// DEC-124: the agent folders choice is the box's last row, cycles through its three choices
-/// with each one's help, says it does not apply at Full access and is what Save sends.
+/// DEC-124: the agent folders choice has its own row after the IDE hooks switch, cycles
+/// through its three choices with each one's help, says it does not apply at Full access and
+/// is what Save sends.
 #[test]
-fn the_access_box_saves_the_agent_folders_choice_on_its_last_row_with_its_help() {
+fn the_access_box_saves_the_agent_folders_choice_on_its_row_with_its_help() {
     let mut edit = AccessEdit::of(&view());
     assert_eq!(edit.ide_agent_files, IdeAgentFiles::AllowAll);
-    for _ in 0..8 {
+    for _ in 0..5 {
         assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
     }
     assert_eq!(edit.cursor, 5);
@@ -380,4 +387,202 @@ fn the_full_access_box_says_what_full_access_means_for_the_ide() {
 fn the_ide_hooks_line_says_full_access_runs_the_owners_git() {
     assert!(IDE_GIT_HOOKS_LINE.contains("No effect at Full access: git runs as yours."));
     assert!(IDE_GIT_HOOKS_LINE.ends_with("Applies when the IDE next starts."));
+}
+
+fn shared_view(shared: SharedFolders, local: &[&str]) -> PolicyView {
+    PolicyView {
+        shared_folders: shared,
+        local_folders: local.iter().map(|name| (*name).to_owned()).collect(),
+        ..view()
+    }
+}
+
+fn shown_words(edit: &AccessEdit) -> String {
+    let look = super::new_project_view::Look::plain();
+    edit.rows(&look, usize::MAX)
+        .iter()
+        .map(|row| row.text())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shown_rows(edit: &AccessEdit) -> Vec<String> {
+    let look = super::new_project_view::Look::plain();
+    edit.rows(&look, usize::MAX)
+        .iter()
+        .map(|row| row.text())
+        .collect()
+}
+
+/// DEC-147.9: every shared folders choice and both access choices are reached with the
+/// keys from the shared folders rows after the agent folders row, each with its help, and
+/// Save sends exactly the pair picked.
+#[test]
+fn the_access_box_saves_every_shared_folders_choice_and_access_with_its_help() {
+    for (step, scope) in SharedScope::ALL.into_iter().enumerate() {
+        for access in SharedAccess::ALL {
+            let mut edit = AccessEdit::of(&shared_view(
+                SharedFolders::default(),
+                &["build", "program"],
+            ));
+            for _ in 0..6 {
+                assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
+            }
+            assert_eq!(
+                edit.cursor, 6,
+                "the shared folders row follows the agent folders row"
+            );
+            for _ in 0..step {
+                assert_eq!(edit.key(key(KeyCode::Right)), AccessKey::Handled);
+            }
+            assert_eq!(edit.shared.scope, scope);
+            let rows = shown_rows(&edit);
+            let row = rows
+                .iter()
+                .position(|row| row.contains(&format!("< {} >", scope.label())))
+                .expect("the shared folders row");
+            assert!(rows[row].starts_with("> "), "{}", rows[row]);
+            assert!(shown_words(&edit).contains(scope.help()), "{rows:?}");
+            for _ in 0..12 {
+                assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
+            }
+            if access == SharedAccess::ReadWrite {
+                assert_eq!(edit.key(key(KeyCode::Right)), AccessKey::Handled);
+            }
+            assert_eq!(edit.shared.access, access);
+            let rows = shown_rows(&edit);
+            let row = rows
+                .iter()
+                .position(|row| row.contains(&format!("< {} >", access.label())))
+                .expect("the shared access row");
+            assert!(rows[row].starts_with("> "), "{}", rows[row]);
+            assert!(shown_words(&edit).contains(access.help()), "{rows:?}");
+            let AccessKey::Save(policy) = edit.key(key(KeyCode::Enter)) else {
+                panic!("Enter saves");
+            };
+            assert_eq!(policy.shared_folders.scope, scope);
+            assert_eq!(policy.shared_folders.access, access);
+            assert!(policy.shared_folders.chosen.is_empty());
+            assert!(policy.validate().is_ok());
+        }
+    }
+}
+
+/// Chosen folders lists the project folder's top-level folders under its row, one switch
+/// each; Save sends the picked ones, and a pick past the engine's bound is refused with why.
+#[test]
+fn chosen_folders_picks_top_level_folders_on_their_rows_within_the_bound() {
+    let chosen = SharedFolders {
+        scope: SharedScope::Chosen,
+        ..SharedFolders::default()
+    };
+    let mut edit = AccessEdit::of(&shared_view(chosen.clone(), &["build", "program"]));
+    for _ in 0..6 {
+        edit.key(key(KeyCode::Down));
+    }
+    let rows = shown_rows(&edit);
+    assert!(rows.iter().any(|row| row.contains("[ ] build")), "{rows:?}");
+    assert!(
+        rows.iter().any(|row| row.contains("[ ] program")),
+        "{rows:?}"
+    );
+    edit.key(key(KeyCode::Down));
+    edit.key(key(KeyCode::Down));
+    assert_eq!(edit.key(key(KeyCode::Char(' '))), AccessKey::Handled);
+    assert!(
+        shown_rows(&edit)
+            .iter()
+            .any(|row| row.starts_with("> ") && row.contains("[x] program"))
+    );
+    let AccessKey::Save(policy) = edit.key(key(KeyCode::Enter)) else {
+        panic!("Enter saves");
+    };
+    assert_eq!(policy.shared_folders.chosen, vec!["program".to_owned()]);
+    assert_eq!(policy.shared_folders.scope, SharedScope::Chosen);
+
+    let local: Vec<String> = (0..=CHOSEN_MAX)
+        .map(|index| format!("f{index:02}"))
+        .collect();
+    let full = SharedFolders {
+        scope: SharedScope::Chosen,
+        chosen: local[..CHOSEN_MAX].to_vec(),
+        ..SharedFolders::default()
+    };
+    let names: Vec<&str> = local.iter().map(String::as_str).collect();
+    let mut edit = AccessEdit::of(&shared_view(full, &names));
+    for _ in 0..(7 + CHOSEN_MAX) {
+        edit.key(key(KeyCode::Down));
+    }
+    assert!(shown_rows(&edit).iter().any(|row| row.starts_with("> ") && row.contains(&format!("[ ] {}", local[CHOSEN_MAX]))));
+    edit.key(key(KeyCode::Char(' ')));
+    assert_eq!(
+        edit.shared.chosen.len(),
+        CHOSEN_MAX,
+        "no pick past the bound"
+    );
+    assert_eq!(
+        edit.error.as_deref(),
+        Some(format!("Pick at most {CHOSEN_MAX} folders.").as_str())
+    );
+    edit.key(key(KeyCode::Up));
+    edit.key(key(KeyCode::Char(' ')));
+    assert_eq!(
+        edit.shared.chosen.len(),
+        CHOSEN_MAX - 1,
+        "an unpick always works"
+    );
+    assert_eq!(edit.error, None);
+}
+
+/// A save keeps the secrets the owner shared back in the desktop app and a picked folder that
+/// is gone, which still shows so it can be unpicked; the box says what stays closed, when a
+/// change applies, the Linux and Windows gap and that Full access makes the choice moot.
+#[test]
+fn the_access_box_keeps_shared_back_secrets_and_says_what_stays_closed() {
+    let saved = SharedFolders {
+        scope: SharedScope::Chosen,
+        access: SharedAccess::ReadWrite,
+        chosen: vec!["old".into()],
+        secrets: vec![".env".into()],
+    };
+    let edit = AccessEdit::of(&shared_view(saved.clone(), &["program"]));
+    assert_eq!(edit.folders, vec!["old".to_owned(), "program".to_owned()]);
+    assert_eq!(
+        edit.policy().shared_folders,
+        saved,
+        "a save keeps every part of the choice"
+    );
+    let words = shown_words(&edit);
+    assert!(words.contains(SHARED_FOLDERS));
+    assert!(words.contains(SHARED_SECRETS_LINE), "{words}");
+    assert!(words.contains("Shared back for reading: .env."), "{words}");
+    assert!(
+        words.contains(&format!("{UNREACHABLE_SECRETS_LINE} .env.")),
+        "Chosen folders without a picked folder around it keeps .env closed: {words}"
+    );
+    assert!(words.contains(SHARED_FOLDERS_NEXT_START), "{words}");
+    assert!(words.contains(OFF_MACOS_LINE), "{words}");
+    assert!(!words.contains(SHARED_FOLDERS_IGNORED_UNDER_FULL));
+    let full = AccessEdit::of(&PolicyView {
+        access: AgentAccess::Full,
+        ..shared_view(saved, &["program"])
+    });
+    assert!(shown_words(&full).contains(SHARED_FOLDERS_IGNORED_UNDER_FULL));
+    let before = AccessEdit::of(&view());
+    assert_eq!(
+        before.policy().shared_folders,
+        SharedFolders::default(),
+        "All with Read-only by default"
+    );
+    let all = AccessEdit::of(&shared_view(
+        SharedFolders {
+            secrets: vec![".env".into()],
+            ..SharedFolders::default()
+        },
+        &["program"],
+    ));
+    assert!(!shown_words(&all).contains(UNREACHABLE_SECRETS_LINE));
 }

@@ -22,6 +22,7 @@ const SETUP = {
 };
 const POLICY = {
   access: "full", network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all", version: 3, networks: [],
+  tool_cache: "shared", tool_caches: [], shared_folders: { scope: "all", access: "read_only", chosen: [], secrets: [] }, local_folders: [],
   levels: [{ access: "sandboxed", label: "Sandboxed", unavailable: null }, { access: "own_branch", label: "Own branch", unavailable: null }, { access: "full", label: "Full access", unavailable: null }],
 };
 const server = (name) => ({ id: name, name, scope: { kind: "global" }, scope_label: "", spec: { kind: "stdio", command: name, args: [] }, runs: "", enabled: true,

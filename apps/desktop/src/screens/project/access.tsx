@@ -1,4 +1,4 @@
-import type { AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ToolCacheScope } from "../../api-projects";
+import type { AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, SharedAccess, SharedFolders, SharedScope, ToolCacheScope } from "../../api-projects";
 import { Switch } from "../../ui";
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -81,14 +81,87 @@ export const TOOL_CACHE_CLEAN = "uv cache clean fails inside an agent's sandbox.
 /** Why the tool cache choice has no effect under Full access. */
 export const TOOL_CACHE_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so their tools use their own caches.";
 
+/** The most top-level folders Chosen folders may pick and the most secret paths the owner may
+ * share back, the engine's CHOSEN_MAX and SECRETS_MAX. */
+export const SHARED_CHOSEN_MAX = 16;
+export const SHARED_SECRETS_MAX = 16;
+
+/** The shared folders choice of a policy saved before the setting existed. */
+export const DEFAULT_SHARED_FOLDERS: SharedFolders = { scope: "all", access: "read_only", chosen: [], secrets: [] };
+
+/** The shared folders setting's name, the same in the TUI. */
+export const SHARED_FOLDERS = "Shared project folders";
+
+/** Every shared folders choice, the default first, with the engine's labels and what each
+ * gives agents (DEC-147.9), the same in the TUI. */
+export const SHARED_SCOPE_CHOICES: { scope: SharedScope; label: string; help: string }[] = [
+  { scope: "all", label: "All local folders", help: "Agents see every folder in the project folder, the ones git ignores included, such as data and programs." },
+  { scope: "chosen", label: "Chosen folders", help: "Agents see only the top-level folders you pick." },
+  { scope: "none", label: "None", help: "Agents see only their own worktree." },
+];
+
+/** Every shared folders access choice, the default first, with the engine's labels and what
+ * each lets agents do, the same in the TUI. */
+export const SHARED_ACCESS_CHOICES: { access: SharedAccess; label: string; help: string }[] = [
+  { access: "read_only", label: "Read-only", help: "Agents read shared folders and never change them." },
+  { access: "read_write", label: "Read-write", help: "Agents may also change files in shared top-level folders git does not track, but not in hidden folders such as .venv or .vscode. Folders such as node_modules, target and venv stay writable, and your own tools run what is in them outside the sandbox. Folders inside stay in place: agents can't move or delete them. Tracked files change only in their worktree." },
+];
+
+/** What stays closed in shared folders, the same in the TUI. */
+export const SHARED_SECRETS_LINE = "Secret files stay closed to agents wherever they sit: .env files, keys, certificates and credential files. Their names stay listed.";
+
+/** How the owner shares a secret back for reading. */
+export const SHARED_SECRETS_HOW = "To let agents read one, add its path inside the project folder, one per line.";
+
+/** The line before the shared-back secrets the choice cannot reach, the engine's UNREACHABLE_SECRETS_LINE. */
+export const SHARED_SECRETS_UNREACHABLE = "Still closed unless git tracks them, since this choice does not share their folder:";
+
+/** What the Linux and Windows sandboxes can and can't do with this setting, the engine's OFF_MACOS_LINE. */
+export const SHARED_FOLDERS_OFF_MACOS = "On Linux and Windows agents read the whole project folder, secret files included, and only All with Read-only can start them.";
+
+/** When a changed shared folders choice reaches agents, the same in the TUI. */
+export const SHARED_FOLDERS_NEXT_START = "A change reaches each agent, research job and master turn when it next starts.";
+
+/** Why the shared folders choice has no effect under Full access, the same in the TUI. */
+export const SHARED_FOLDERS_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so they see the whole project folder, secret files included.";
+
+/** The secret paths the owner typed, one per line, trimmed, blank lines and repeats dropped.
+ * Input: the text. Output: the paths, in the order typed. */
+export function sharedSecretsOf(text: string): string[] {
+  const paths = text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+  return paths.filter((path, index) => paths.indexOf(path) === index);
+}
+
+/** The shared-back secrets a choice cannot reach, as the engine's unreachable_secrets: under
+ * None each one, under Chosen folders each one whose top-level folder is not picked. Inputs:
+ * the scope, the picked folders and the secret paths. Output: the paths, in the order given. */
+export function unreachableSecrets(scope: SharedScope, chosen: string[], secrets: string[]): string[] {
+  if (scope === "all") return [];
+  return secrets.filter((path) => scope === "none" || !chosen.includes(path.split("/")[0]));
+}
+
+/** The top-level folders the owner may pick: the ones the engine found and any picked before
+ * that is gone now, so it can still be unpicked. Inputs: the engine's folders and the picked
+ * ones. Output: the names, sorted. */
+export function pickableFolders(local: string[], chosen: string[]): string[] {
+  return [...new Set([...local, ...chosen])].sort();
+}
+
+/** Whether two shared folders choices save the same. Inputs: both choices. Output: the answer. */
+export function sameShared(left: SharedFolders, right: SharedFolders): boolean {
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((item, index) => item === b[index]);
+  return left.scope === right.scope && left.access === right.access && same(left.chosen, right.chosen) && same(left.secrets, right.secrets);
+}
+
 /** The policy Save sends: the level, the network choice, a choice only for each toolchain
  * whose switch differs from the project's own use, so the others keep following the project,
- * the IDE hooks switch, the agent folders choice and the tool cache choice. Inputs: the
- * engine's view, the chosen level and network, one switch per view toolchain, the IDE hooks
- * switch, the agent folders choice and the tool cache choice, the saved one when left out.
- * Output: the policy. */
-export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean, ideAgentFiles: IdeAgentFiles, toolCache: ToolCacheScope = view.tool_cache): AgentPolicy {
+ * the IDE hooks switch, the agent folders choice, the tool cache choice and the shared
+ * folders choice. Inputs: the engine's view, the chosen level and network, one switch per
+ * view toolchain, the IDE hooks switch, the agent folders choice, and the tool cache and
+ * shared folders choices, the saved ones when left out. Output: the policy. */
+export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean, ideAgentFiles: IdeAgentFiles, toolCache: ToolCacheScope = view.tool_cache, sharedFolders: SharedFolders = view.shared_folders ?? DEFAULT_SHARED_FOLDERS): AgentPolicy {
   assert(allowed.length === view.toolchains.length, "one switch per toolchain");
+  assert(sharedFolders.chosen.length <= SHARED_CHOSEN_MAX && sharedFolders.secrets.length <= SHARED_SECRETS_MAX, "shared folders within the engine's bounds");
   return {
     access,
     network,
@@ -96,6 +169,7 @@ export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNe
     ide_git_hooks: ideGitHooks,
     tool_cache: toolCache,
     ide_agent_files: ideAgentFiles,
+    shared_folders: sharedFolders,
   };
 }
 
@@ -206,6 +280,60 @@ export function IdeAgentFilesChoices({ name, value, access, onChange }: {
       </label>)}
     </div>
     {access === "full" && <p className="pj-note" role="note">{AGENT_FILES_IGNORED_UNDER_FULL}</p>}
+  </fieldset>;
+}
+
+/** The shared folders choice: which local folders agents see as radio cards, the top-level
+ * folders to pick for Chosen folders, Read-only or Read-write, and the secret paths shared
+ * back, with what stays closed and the shared-back ones the choice cannot reach, the Linux
+ * and Windows gap, when a change applies and a note when Full access makes it moot.
+ * Inputs: the id prefix, the choice, the secret paths text, the engine's top-level folders,
+ * the chosen access level and the change handlers. Output: the fieldset. */
+export function SharedFoldersChoices({ prefix, value, secretsText, local, access, onChange, onSecretsText }: {
+  prefix: string; value: SharedFolders; secretsText: string; local: string[]; access: AgentAccess;
+  onChange: (value: SharedFolders) => void; onSecretsText: (text: string) => void;
+}) {
+  const folders = pickableFolders(local, value.chosen);
+  const full = value.chosen.length >= SHARED_CHOSEN_MAX;
+  const unreachable = unreachableSecrets(value.scope, value.chosen, sharedSecretsOf(secretsText));
+  return <fieldset className="pj-field">
+    <legend>{SHARED_FOLDERS}</legend>
+    <div className="pj-radio-cards" role="radiogroup" aria-label={SHARED_FOLDERS}>
+      {SHARED_SCOPE_CHOICES.map((choice) => <label className={`pj-radio-card ${value.scope === choice.scope ? "selected" : ""}`} key={choice.scope}>
+        <input type="radio" name={`${prefix}-shared-scope`} value={choice.scope} checked={value.scope === choice.scope} onChange={() => onChange({ ...value, scope: choice.scope })} />
+        <span className="pj-radio-body">
+          <strong>{choice.label}</strong>
+          <span className="pj-secondary">{choice.help}</span>
+        </span>
+      </label>)}
+    </div>
+    {value.scope === "chosen" && <div className="pj-field">
+      <span className="pj-small pj-muted">Top-level folders to share, at most {SHARED_CHOSEN_MAX}</span>
+      {folders.length === 0 && <p className="pj-muted">This project folder has no top-level folders to pick.</p>}
+      <div className="pj-chips">{folders.map((name) => {
+        const on = value.chosen.includes(name);
+        return <label className={`pj-chip-toggle ${on ? "on" : ""}`} key={name}>
+          <input type="checkbox" className="pj-sr" checked={on} disabled={!on && full}
+            onChange={() => onChange({ ...value, chosen: on ? value.chosen.filter((item) => item !== name) : [...value.chosen, name] })} />{name}</label>;
+      })}</div>
+    </div>}
+    <div className="pj-radio-cards" role="radiogroup" aria-label="Shared folders access">
+      {SHARED_ACCESS_CHOICES.map((choice) => <label className={`pj-radio-card ${value.access === choice.access ? "selected" : ""}`} key={choice.access}>
+        <input type="radio" name={`${prefix}-shared-access`} value={choice.access} checked={value.access === choice.access} onChange={() => onChange({ ...value, access: choice.access })} />
+        <span className="pj-radio-body">
+          <strong>{choice.label}</strong>
+          <span className="pj-secondary">{choice.help}</span>
+        </span>
+      </label>)}
+    </div>
+    <label htmlFor={`${prefix}-shared-secrets`}>Secret files agents may read</label>
+    <p className="pj-help" id={`${prefix}-shared-secrets-help`}>{SHARED_SECRETS_LINE} {SHARED_SECRETS_HOW}</p>
+    <textarea id={`${prefix}-shared-secrets`} className="pj-input" rows={3} value={secretsText} spellCheck={false} aria-describedby={`${prefix}-shared-secrets-help`}
+      onChange={(event) => onSecretsText(event.target.value)} />
+    {sharedSecretsOf(secretsText).length > SHARED_SECRETS_MAX && <p className="pj-error" role="alert">At most {SHARED_SECRETS_MAX} secret paths.</p>}
+    {unreachable.length > 0 && <p className="pj-note" role="note">{SHARED_SECRETS_UNREACHABLE} {unreachable.join(", ")}.</p>}
+    <p className="pj-help">{SHARED_FOLDERS_NEXT_START} {SHARED_FOLDERS_OFF_MACOS}</p>
+    {access === "full" && <p className="pj-note" role="note">{SHARED_FOLDERS_IGNORED_UNDER_FULL}</p>}
   </fieldset>;
 }
 

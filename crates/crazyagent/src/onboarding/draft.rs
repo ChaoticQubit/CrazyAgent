@@ -17,7 +17,7 @@ use std::path::Path;
 #[cfg(unix)]
 pub(crate) mod documents;
 #[cfg(unix)]
-pub(crate) use documents::{kept_out, outside_git};
+pub(crate) use documents::{kept_out, outside_git, untracked};
 pub(crate) mod names;
 
 const README_NAMES: [&str; 4] = ["README.md", "README", "README.txt", "readme.md"];
