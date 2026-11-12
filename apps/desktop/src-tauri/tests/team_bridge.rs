@@ -579,8 +579,8 @@ fn tool_switch_and_coordination_commands_are_registered_where_the_web_view_calls
 
 async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
     use crazyagent::coord::settings::{
-        CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo, RoleSkills,
-        SubagentMode, TaskStart, TerminalDisplay,
+        CoordSettings, Delivery, HarnessKind, HeavyLane, Nudges, Overlaps, QuestionsTo, RoleSkills,
+        SharedResource, SubagentMode, TaskStart, TerminalDisplay,
     };
     use crazyagent::coord::tool_switches::Switch;
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
@@ -662,6 +662,11 @@ async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
         },
         terminal_display: TerminalDisplay::Fullscreen,
         task_start: TaskStart::Off,
+        heavy_lane: HeavyLane::Two,
+        shared_resources: vec![SharedResource {
+            name: "ollama".into(),
+            slots: 1,
+        }],
     };
     for receipt in [
         bridge.team_coordination(&id, chosen.clone(), 2).await?,
@@ -687,6 +692,7 @@ async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
     );
     let saved = bridge.team_status(&id).await?.coordination.unwrap();
     assert_eq!(saved.settings, chosen);
+    assert!(saved.lane.running.is_empty() && saved.lane.waiting.is_empty());
     let row = |harness: HarnessKind| {
         let row = saved
             .harnesses
