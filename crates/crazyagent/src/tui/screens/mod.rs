@@ -12,6 +12,7 @@ pub(in crate::tui) mod new_project;
 mod new_project_input;
 pub(in crate::tui) mod new_project_page;
 pub(in crate::tui) mod new_project_view;
+pub(in crate::tui) mod notifications;
 pub mod onboarding;
 pub(in crate::tui) mod planning_line;
 pub(in crate::tui) mod process;
@@ -238,6 +239,7 @@ pub enum Place {
     AddFolder,
     CloneRepo,
     Usage,
+    Notifications,
     Onboarding {
         path: String,
         name: String,
@@ -415,7 +417,8 @@ pub trait Screen {
             | Place::AddProject
             | Place::AddFolder
             | Place::CloneRepo
-            | Place::Usage => None,
+            | Place::Usage
+            | Place::Notifications => None,
         }
     }
 }
@@ -475,6 +478,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
         Place::Usage => Box::new(usage::UsagePage::new()),
+        Place::Notifications => Box::new(notifications::Notifications::new()),
         Place::CheckSettings { project } => {
             Box::new(settings::checks::CheckSettingsPage::new(match project {
                 None => process::Scope::App,
