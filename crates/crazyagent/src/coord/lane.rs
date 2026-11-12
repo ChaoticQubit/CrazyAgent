@@ -554,11 +554,14 @@ struct Found {
 
 /// Moves a project's heavy lane one step, each team tick (F28): reads every live agent's
 /// lane folder without following a link, frees the ticket of a lane command that ended
-/// (its lock is gone), refuses a ticket naming a shared resource the project lacks, keeps
-/// each new ticket's turn, lets the next ones run by `grant` and tells each waiting one its
-/// place. The store changes in one transaction; files are written after it commits. A
-/// folder that cannot be opened is skipped this tick. Takes the database, the project, the
-/// agents' folders, the project's settings and the time. Returns Ok or the SQLite failure.
+/// (its lock is gone) or whose agent the engine no longer reads, refuses a waiting ticket
+/// naming a shared resource the project lacks, keeps each new ticket's turn, lets the next
+/// ones run by `grant`, offers each running one its go again and tells each waiting one its
+/// place. A ticket whose folder or lock cannot be read this tick keeps its row and its slot,
+/// and only a ticket read this tick starts, so a passing read failure never lets more
+/// commands run than the lane allows. The store changes in one transaction; files are
+/// written after it commits. Takes the database, the project, the agents' folders, the
+/// project's settings and the time. Returns Ok or the SQLite failure.
 #[cfg(unix)]
 pub fn tick(
     db: &Connection,
@@ -569,45 +572,62 @@ pub fn tick(
 ) -> Result<(), EngineError> {
     use crate::team::tool::Mailbox;
     assert!(now_ms > 0);
+    let running_before: BTreeSet<(AgentId, String)> = stored(db, project)?
+        .into_iter()
+        .filter(|row| row.granted_ms.is_some())
+        .map(|row| (row.agent, row.ticket))
+        .collect();
+    let holding: BTreeSet<AgentId> = holders
+        .iter()
+        .take(HOLDERS_MAX)
+        .map(|holder| holder.agent)
+        .collect();
     let mut folders: Vec<(AgentId, Mailbox)> = Vec::new();
     let mut live: Vec<Found> = Vec::new();
+    let mut unread: BTreeSet<(AgentId, String)> = BTreeSet::new();
     for holder in holders.iter().take(HOLDERS_MAX) {
         let Ok(folder) = Mailbox::open_for_engine(&holder.folder) else {
             continue;
         };
-        for (_, id) in folder
-            .entries(TICKET)
-            .into_iter()
-            .take(TICKETS_PER_AGENT_MAX)
-        {
-            if live.len() >= TICKETS_PER_PROJECT_MAX {
-                break;
+        for (at, (_, id)) in folder.entries(TICKET).into_iter().enumerate() {
+            if at >= TICKETS_PER_AGENT_MAX || live.len() >= TICKETS_PER_PROJECT_MAX {
+                unread.insert((holder.agent, id));
+                continue;
             }
             match probe(&folder, &id) {
                 Probe::Gone => clear(&folder, &id),
-                Probe::Unread => {}
+                Probe::Unread => {
+                    unread.insert((holder.agent, id));
+                }
                 Probe::Held(None) => answer(&folder, &format!("{id}{NO}"), UNREADABLE.as_bytes()),
-                Probe::Held(Some(ticket)) => match refusal(&ticket, settings) {
-                    Some(reason) => answer(&folder, &format!("{id}{NO}"), reason.as_bytes()),
-                    None => live.push(Found {
-                        agent: holder.agent,
-                        id,
-                        ticket,
-                    }),
-                },
+                Probe::Held(Some(ticket)) => {
+                    let runs = running_before.contains(&(holder.agent, id.clone()));
+                    match refusal(&ticket, settings).filter(|_| !runs) {
+                        Some(reason) => answer(&folder, &format!("{id}{NO}"), reason.as_bytes()),
+                        None => live.push(Found {
+                            agent: holder.agent,
+                            id,
+                            ticket,
+                        }),
+                    }
+                }
             }
         }
         folders.push((holder.agent, folder));
     }
     assert!(live.len() <= TICKETS_PER_PROJECT_MAX);
+    let read = |agent: AgentId, ticket: &str| {
+        live.iter()
+            .any(|found| found.agent == agent && found.id == ticket)
+    };
+    let opened = |agent: AgentId| folders.iter().any(|(holder, _)| *holder == agent);
     let change = Change::begin(db)?;
     let tx = change.db();
     let before = stored(tx, project)?;
     for row in &before {
-        if !live
-            .iter()
-            .any(|found| found.agent == row.agent && found.id == row.ticket)
-        {
+        let unseen = unread.contains(&(row.agent, row.ticket.clone()))
+            || (holding.contains(&row.agent) && !opened(row.agent));
+        if !read(row.agent, &row.ticket) && !unseen {
             tx.execute(
                 "DELETE FROM coord_lane WHERE agent=?1 AND ticket=?2",
                 params![row.agent, row.ticket],
@@ -658,22 +678,38 @@ pub fn tick(
         settings.heavy_lane,
         &settings.shared_resources,
     );
+    let starts = |row: &Stored, runs: bool| {
+        runs && (row.granted_ms.is_some() || read(row.agent, &row.ticket))
+    };
+    let running = queue
+        .iter()
+        .zip(&runs)
+        .filter(|(row, runs)| starts(row, **runs))
+        .count();
     let mut granted = Vec::new();
     let mut waiting = Vec::new();
-    let running = runs.iter().filter(|runs| **runs).count();
+    let mut ahead = 0;
     for (row, runs) in queue.iter().zip(&runs) {
-        if *runs && row.granted_ms.is_none() {
-            tx.execute(
-                "UPDATE coord_lane SET granted_ms=?3 WHERE agent=?1 AND ticket=?2",
-                params![row.agent, row.ticket, now_ms],
-            )
-            .map_err(state)?;
-            granted.push((row.agent, row.ticket.clone()));
-        } else if !*runs {
-            let line = waiting_line(settings.heavy_lane, running, waiting.len(), &row.uses);
-            waiting.push((row.agent, row.ticket.clone(), line));
+        if starts(row, *runs) {
+            if row.granted_ms.is_none() {
+                tx.execute(
+                    "UPDATE coord_lane SET granted_ms=?3 WHERE agent=?1 AND ticket=?2",
+                    params![row.agent, row.ticket, now_ms],
+                )
+                .map_err(state)?;
+            }
+            if read(row.agent, &row.ticket) {
+                granted.push((row.agent, row.ticket.clone()));
+            }
+        } else {
+            if read(row.agent, &row.ticket) {
+                let line = waiting_line(settings.heavy_lane, running, ahead, &row.uses);
+                waiting.push((row.agent, row.ticket.clone(), line));
+            }
+            ahead += 1;
         }
     }
+    assert!(granted.len() + waiting.len() <= live.len());
     change.commit()?;
     let folder = |agent: AgentId| {
         folders

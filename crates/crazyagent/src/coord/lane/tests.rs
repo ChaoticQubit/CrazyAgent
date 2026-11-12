@@ -658,3 +658,101 @@ fn the_heavy_commands_section_names_the_engine_the_folder_and_the_resources() {
             .unwrap();
     assert!(section.len() <= crate::launch_context::HEAVY_LANE_BYTES_MAX);
 }
+
+/// F28: a running command keeps its slot while its agent's lane folder cannot be opened for
+/// a tick, so another agent's command still waits, and it hands the slot on once it ends.
+#[test]
+fn tick_keeps_a_running_commands_slot_while_its_folder_cannot_be_read() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = db();
+    let settings = CoordSettings::default();
+    let a = holder(root.path(), 1);
+    let b = holder(root.path(), 2);
+    let first = Entry::enter(&a.folder, &ticket(&[], "make")).unwrap();
+    tick(
+        &connection,
+        &project(),
+        &[a.clone(), b.clone()],
+        &settings,
+        1_000,
+    )
+    .unwrap();
+    assert!(has(&a, &first, GO));
+    let second = Entry::enter(&b.folder, &ticket(&[], "cargo")).unwrap();
+    let unreadable = Holder {
+        agent: 1,
+        folder: root.path().join("agent-1").join("tmp").join("missing"),
+    };
+    tick(
+        &connection,
+        &project(),
+        &[unreadable, b.clone()],
+        &settings,
+        2_000,
+    )
+    .unwrap();
+    assert!(!has(&b, &second, GO), "the lane is still full");
+    let shown = view(&connection, &project()).unwrap();
+    assert_eq!(
+        (shown.running.len(), shown.waiting.len()),
+        (1, 1),
+        "{shown:?}"
+    );
+    assert_eq!(shown.running[0].agent, 1);
+    tick(
+        &connection,
+        &project(),
+        &[a.clone(), b.clone()],
+        &settings,
+        3_000,
+    )
+    .unwrap();
+    assert!(!has(&b, &second, GO));
+    first.leave();
+    tick(&connection, &project(), &[a, b.clone()], &settings, 4_000).unwrap();
+    assert!(has(&b, &second, GO));
+    second.leave();
+}
+
+/// F28: a command that already runs keeps running when the owner removes the shared
+/// resource it uses, while a waiting one that names it is refused.
+#[test]
+fn removing_a_shared_resource_refuses_only_the_commands_that_wait_for_it() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = db();
+    let with = CoordSettings {
+        heavy_lane: HeavyLane::NoLimit,
+        shared_resources: vec![resource("ollama", 1)],
+        ..CoordSettings::default()
+    };
+    let a = holder(root.path(), 1);
+    let b = holder(root.path(), 2);
+    let first = Entry::enter(&a.folder, &ticket(&["ollama"], "eval")).unwrap();
+    let second = Entry::enter(&b.folder, &ticket(&["ollama"], "eval")).unwrap();
+    let holders = [a.clone(), b.clone()];
+    tick(&connection, &project(), &holders, &with, 1_000).unwrap();
+    let without = CoordSettings {
+        shared_resources: vec![],
+        ..with.clone()
+    };
+    tick(&connection, &project(), &holders, &without, 2_000).unwrap();
+    let (runner, runner_holder, waiter, waiter_holder) = if has(&a, &first, GO) {
+        (&first, &a, &second, &b)
+    } else {
+        (&second, &b, &first, &a)
+    };
+    assert!(has(runner_holder, runner, GO));
+    assert!(
+        !has(runner_holder, runner, NO),
+        "a running command is never refused"
+    );
+    assert!(read(waiter_holder, waiter, NO).contains("ollama"));
+    let shown = view(&connection, &project()).unwrap();
+    assert_eq!(
+        (shown.running.len(), shown.waiting.len()),
+        (1, 0),
+        "{shown:?}"
+    );
+    first.leave();
+    second.leave();
+}
