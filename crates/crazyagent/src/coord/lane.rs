@@ -558,18 +558,12 @@ struct Found {
     ticket: Ticket,
 }
 
-/// Moves a project's heavy lane one step, each team tick (F28): reads every live agent's
-/// lane folder without following a link, frees the ticket of a lane command that ended
-/// (its lock is gone) or whose agent the engine no longer reads, refuses a waiting ticket
-/// naming a shared resource the project lacks, keeps each new ticket's turn, lets the next
-/// ones run by `grant`, offers each running one its go again and tells each waiting one its
-/// place. A ticket whose folder or lock cannot be read this tick keeps its row and its slot
-/// for at most `SILENCE_MAX` after it was last read (its seen time is refreshed each
-/// `HEARTBEAT`), and only a ticket read this tick starts, so a passing read failure never
-/// lets more commands run than the lane allows and a folder that is gone never holds the
-/// lane for longer than an absent engine holds a command. The store changes in one
-/// transaction; files are written after it commits. Takes the database, the project, the
-/// agents' folders, the project's settings and the time. Returns Ok or the SQLite failure.
+/// Moves a project's heavy lane one step each team tick (F28): reads each live agent's lane
+/// folder without following a link, drops a ticket whose lock is gone or that went unread
+/// past `SILENCE_MAX`, stores at most `TICKETS_PER_AGENT_MAX` per agent and
+/// `TICKETS_PER_PROJECT_MAX` per project, refuses unknown resources, grants by `grant` and
+/// answers each ticket read. Inputs: database, project, folders, settings, time. Output: Ok
+/// or the SQLite failure.
 #[cfg(unix)]
 pub fn tick(
     db: &Connection,
@@ -580,10 +574,11 @@ pub fn tick(
 ) -> Result<(), EngineError> {
     use crate::team::tool::Mailbox;
     assert!(now_ms > 0);
-    let running_before: BTreeSet<(AgentId, String)> = stored(db, project)?
-        .into_iter()
+    let had = stored(db, project)?;
+    let running_before: BTreeSet<(AgentId, String)> = had
+        .iter()
         .filter(|row| row.granted_ms.is_some())
-        .map(|row| (row.agent, row.ticket))
+        .map(|row| (row.agent, row.ticket.clone()))
         .collect();
     let holding: BTreeSet<AgentId> = holders
         .iter()
@@ -624,6 +619,9 @@ pub fn tick(
         folders.push((holder.agent, folder));
     }
     assert!(live.len() <= TICKETS_PER_PROJECT_MAX);
+    if had.is_empty() && live.is_empty() {
+        return Ok(());
+    }
     let read = |agent: AgentId, ticket: &str| {
         live.iter()
             .any(|found| found.agent == agent && found.id == ticket)
@@ -632,8 +630,10 @@ pub fn tick(
     let change = Change::begin(db)?;
     let tx = change.db();
     let before = stored(tx, project)?;
+    let mut held: BTreeMap<AgentId, usize> = BTreeMap::new();
     for row in &before {
         if read(row.agent, &row.ticket) {
+            *held.entry(row.agent).or_default() += 1;
             if now_ms - row.seen_ms >= HEARTBEAT_MS {
                 tx.execute(
                     "UPDATE coord_lane SET seen_ms=?3 WHERE agent=?1 AND ticket=?2",
@@ -651,8 +651,12 @@ pub fn tick(
                 params![row.agent, row.ticket],
             )
             .map_err(state)?;
+        } else {
+            *held.entry(row.agent).or_default() += 1;
         }
     }
+    let mut total: usize = held.values().sum();
+    let mut added = 0;
     let mut next: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(seq),0)+1 FROM coord_lane WHERE project=?1",
@@ -667,9 +671,13 @@ pub fn tick(
         {
             continue;
         }
+        let mine = held.get(&found.agent).copied().unwrap_or(0);
+        if mine >= TICKETS_PER_AGENT_MAX || total >= TICKETS_PER_PROJECT_MAX {
+            continue;
+        }
         let uses = serde_json::to_string(&found.ticket.uses).map_err(state)?;
-        tx.execute(
-            "INSERT INTO coord_lane(project,agent,ticket,uses,label,seq,created_ms,seen_ms,granted_ms)
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO coord_lane(project,agent,ticket,uses,label,seq,created_ms,seen_ms,granted_ms)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?7,NULL)",
             params![
                 project.as_str(),
@@ -682,8 +690,15 @@ pub fn tick(
             ],
         )
         .map_err(state)?;
-        next += 1;
+        if inserted == 1 {
+            *held.entry(found.agent).or_default() += 1;
+            total += 1;
+            added += 1;
+            next += 1;
+        }
     }
+    assert!(added == 0 || total <= TICKETS_PER_PROJECT_MAX);
+    assert!(held.values().all(|count| *count <= TICKETS_PER_AGENT_MAX) || added == 0);
     let queue = stored(tx, project)?;
     let runs = grant(
         &queue
@@ -909,6 +924,7 @@ fn command(request: &Request, out: &mut dyn Write) -> i32 {
             let mut waiter = tokio::task::spawn_blocking(move || child.wait());
             loop {
                 let passed = tokio::select! {
+                    biased;
                     done = &mut waiter => {
                         return Ok(done.unwrap_or_else(|problem| Err(std::io::Error::other(problem))));
                     }

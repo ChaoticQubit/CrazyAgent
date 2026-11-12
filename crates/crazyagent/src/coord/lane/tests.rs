@@ -839,3 +839,147 @@ fn a_long_running_command_that_is_read_keeps_its_slot_past_silence_max() {
     first.leave();
     second.leave();
 }
+
+/// Sets a ticket's modified time, the order the engine reads an agent's tickets in. Takes
+/// the holder, the entry and the seconds after the epoch.
+fn touch(holder: &Holder, entry: &Entry, seconds: u64) {
+    std::fs::File::options()
+        .write(true)
+        .open(holder.folder.join(format!("{}{TICKET}", entry.id)))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+        .unwrap();
+}
+
+/// The tickets the lane stores for one agent, in ticket order. Takes the database and the
+/// agent. Returns the ticket ids.
+fn stored_tickets(connection: &Connection, agent: AgentId) -> BTreeSet<String> {
+    let mut statement = connection
+        .prepare("SELECT ticket FROM coord_lane WHERE agent=?1")
+        .unwrap();
+    statement
+        .query_map([agent], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// F28 L5-L1: an agent that keeps more tickets than the engine reads, and shuffles their
+/// modified times so other ones are read, never stores more than `TICKETS_PER_AGENT_MAX`
+/// rows and never makes the tick fail; tickets left unread go after `SILENCE_MAX` and the
+/// ones it reads take their place.
+#[test]
+fn an_agent_past_its_ticket_cap_never_grows_the_lane_or_fails_the_tick() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = db();
+    let settings = CoordSettings::default();
+    let a = holder(root.path(), 1);
+    let holders = [a.clone()];
+    let old: Vec<Entry> = (0..TICKETS_PER_AGENT_MAX)
+        .map(|_| Entry::enter(&a.folder, &ticket(&[], "make")).unwrap())
+        .collect();
+    for (at, entry) in old.iter().enumerate() {
+        touch(&a, entry, 1_000 + at as u64);
+    }
+    tick(&connection, &project(), &holders, &settings, 1_000).unwrap();
+    assert_eq!(rows(&connection), TICKETS_PER_AGENT_MAX as i64);
+    let new: Vec<Entry> = (0..TICKETS_PER_AGENT_MAX)
+        .map(|_| Entry::enter(&a.folder, &ticket(&[], "cargo")).unwrap())
+        .collect();
+    for (at, entry) in new.iter().enumerate() {
+        touch(&a, entry, 2_000 + at as u64);
+    }
+    tick(&connection, &project(), &holders, &settings, 2_000).unwrap();
+    assert_eq!(rows(&connection), TICKETS_PER_AGENT_MAX as i64);
+    for (at, entry) in old.iter().enumerate() {
+        touch(&a, entry, 3_000 + at as u64);
+    }
+    let silence = i64::try_from(SILENCE_MAX.as_millis()).unwrap();
+    let old_ids: BTreeSet<String> = old.iter().map(|entry| entry.id.clone()).collect();
+    let new_ids: BTreeSet<String> = new.iter().map(|entry| entry.id.clone()).collect();
+    for now in (3_000..=1_000 + silence).step_by(5_000) {
+        tick(&connection, &project(), &holders, &settings, now).unwrap();
+        assert_eq!(stored_tickets(&connection, 1), old_ids, "at {now}");
+    }
+    tick(
+        &connection,
+        &project(),
+        &holders,
+        &settings,
+        1_001 + silence,
+    )
+    .unwrap();
+    assert_eq!(stored_tickets(&connection, 1), new_ids);
+    for entry in old.into_iter().chain(new) {
+        entry.leave();
+    }
+}
+
+/// F28 L5-L1: a stored row the lane's bounded read does not return is never inserted
+/// again, so the tick never fails on the ticket's key, and the row is read once the rows
+/// before it are gone.
+#[test]
+fn a_row_hidden_from_the_lane_read_never_fails_the_tick() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = db();
+    let settings = CoordSettings::default();
+    let a = holder(root.path(), 1);
+    let entry = Entry::enter(&a.folder, &ticket(&[], "make")).unwrap();
+    let insert = |agent: AgentId, ticket: &str, seq: i64| {
+        connection
+            .execute(
+                "INSERT INTO coord_lane(project,agent,ticket,uses,label,seq,created_ms,seen_ms) VALUES (?1,?2,?3,'[]','old',?4,1,1)",
+                params![PROJECT, agent, ticket, seq],
+            )
+            .unwrap();
+    };
+    for seq in 1..=STORED_MAX as i64 {
+        insert(99, &format!("{seq:032x}"), seq);
+    }
+    insert(1, &entry.id, STORED_MAX as i64 + 10);
+    tick(&connection, &project(), &[a.clone()], &settings, 2_000).unwrap();
+    tick(&connection, &project(), &[a.clone()], &settings, 3_000).unwrap();
+    assert_eq!(rows(&connection), 1);
+    assert!(has(&a, &entry, GO));
+    entry.leave();
+}
+
+/// F28 L5-L1: a lane folder made unreadable while its command runs holds the slot no
+/// longer than `SILENCE_MAX`, then the next command gets its go.
+#[test]
+fn an_unreadable_lane_folder_holds_its_slot_no_longer_than_silence_max() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let connection = db();
+    let settings = CoordSettings::default();
+    let a = holder(root.path(), 1);
+    let b = holder(root.path(), 2);
+    let holders = [a.clone(), b.clone()];
+    let first = Entry::enter(&a.folder, &ticket(&[], "make")).unwrap();
+    tick(&connection, &project(), &holders, &settings, 1_000).unwrap();
+    assert!(has(&a, &first, GO));
+    let second = Entry::enter(&b.folder, &ticket(&[], "cargo")).unwrap();
+    std::fs::set_permissions(&a.folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let silence = i64::try_from(SILENCE_MAX.as_millis()).unwrap();
+    tick(
+        &connection,
+        &project(),
+        &holders,
+        &settings,
+        1_000 + silence,
+    )
+    .unwrap();
+    assert!(!has(&b, &second, GO));
+    tick(
+        &connection,
+        &project(),
+        &holders,
+        &settings,
+        1_001 + silence,
+    )
+    .unwrap();
+    assert!(has(&b, &second, GO));
+    std::fs::set_permissions(&a.folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    first.leave();
+    second.leave();
+}
