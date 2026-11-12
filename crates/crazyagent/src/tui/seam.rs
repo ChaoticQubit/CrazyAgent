@@ -229,6 +229,7 @@ impl std::fmt::Debug for Request {
             Self::Process(_) => "Process",
             Self::Recovery(_) => "Recovery",
             Self::Roadmap(_) => "Roadmap",
+            Self::Demo(_) => "Demo",
             Self::Questions(_) => "Questions",
             Self::Cleanup(_) => "Cleanup",
             Self::Reveal(_) => "Reveal",
