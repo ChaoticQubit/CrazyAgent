@@ -959,5 +959,7 @@ impl Screen for UsagePage {
     }
 }
 
+pub(in crate::tui) mod extras;
+
 #[cfg(all(test, unix))]
 mod tests;
