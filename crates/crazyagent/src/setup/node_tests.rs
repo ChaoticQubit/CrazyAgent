@@ -236,6 +236,29 @@ fn an_unpacked_tree_is_kept_only_with_plain_files_folders_and_links_that_stay_in
     assert_eq!(check_tree(&deep, limits), unsafe_tree);
 }
 
+#[test]
+fn a_link_that_climbs_out_through_another_link_is_refused_though_its_words_stay_inside() {
+    let work = tempfile::tempdir().unwrap();
+    let limits = Limits {
+        entries: 64,
+        bytes: 1024 * 1024,
+        depth: 8,
+    };
+    let top = tree(&work.path().join("chain"), TOP, "v26.13.1");
+    std::fs::create_dir_all(top.join("a/b")).unwrap();
+    std::os::unix::fs::symlink("../..", top.join("a/b/s")).unwrap();
+    assert_eq!(
+        check_tree(&top, limits),
+        Ok(()),
+        "a link to the top itself stays inside"
+    );
+    std::os::unix::fs::symlink("s/../..", top.join("a/b/t")).unwrap();
+    assert_eq!(
+        check_tree(&top, limits),
+        Err(InstallError("setup_archive_unsafe"))
+    );
+}
+
 fn places(folders: Vec<PathBuf>) -> crate::tools::Places {
     crate::tools::Places::new(folders, None)
 }
