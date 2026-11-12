@@ -16,6 +16,7 @@ pub mod conversation;
 pub mod coord;
 pub mod coordination;
 pub mod credentials;
+pub mod demo;
 pub mod engine;
 pub mod file_identity;
 #[cfg(unix)]

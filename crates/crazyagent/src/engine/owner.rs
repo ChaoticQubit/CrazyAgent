@@ -273,6 +273,10 @@ pub enum OwnerMutation {
     SetMasterTimeSettings {
         settings: crate::master_time_limit::MasterTimeSettings,
     },
+    CreateDemo {
+        project_id: ProjectId,
+        pool: CredentialRef,
+    },
     SetMasterFrameSettings {
         settings: crate::master_frame_limit::MasterFrameSettings,
     },
@@ -601,6 +605,9 @@ impl OwnerMutation {
                 step: *step,
                 on: *on,
             },
+            Self::CreateDemo { project_id, pool } => Command::ProjectSetup {
+                action: crate::demo::create_action(project_id, pool)?,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -803,6 +810,7 @@ pub enum OwnerRead {
     MasterTimeSettings,
     MasterFrameSettings,
     ProjectsHome,
+    ProjectDemo,
     SetupStatus,
     LearningProgress,
     FoundProjects,
@@ -907,6 +915,7 @@ impl OwnerRead {
             | Self::MasterTimeSettings
             | Self::MasterFrameSettings
             | Self::ProjectsHome
+            | Self::ProjectDemo
             | Self::SetupStatus
             | Self::LearningProgress
             | Self::FoundProjects
@@ -1360,6 +1369,9 @@ pub enum OwnerData {
     },
     MasterFrameSettings {
         settings: crate::master_frame_limit::MasterFrameSettings,
+    },
+    ProjectDemo {
+        demo: crate::demo::DemoView,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,

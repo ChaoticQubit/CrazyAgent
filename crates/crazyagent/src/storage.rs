@@ -1094,6 +1094,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::coordination::initialize(connection)?;
     crate::memory::initialize(connection)?;
     crate::project_setup::initialize(connection)?;
+    crate::demo::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
     crate::sandbox_settings::initialize(connection)?;
@@ -2388,7 +2389,16 @@ fn setup_plan(
     if owner_revision(&tx)? != request.expected_revision.value() {
         return Ok(Err("stale_revision".into()));
     }
-    crate::project_setup::plan_new(&tx, config, path, &action)
+    let OwnerMutation::CreateDemo { pool, .. } = mutation else {
+        return crate::project_setup::plan_new(&tx, config, path, &action);
+    };
+    if crate::demo::exists(&tx)? {
+        return Ok(Err("demo_exists".into()));
+    }
+    if let Some(code) = crate::demo::pool_unavailable(&tx, config, pool)? {
+        return Ok(Err(code.into()));
+    }
+    Ok(crate::project_setup::plan_new(&tx, config, path, &action)?.map_err(crate::demo::refusal))
 }
 
 /// Applies one owner mutation, optionally with a disk effect already done.
@@ -2437,7 +2447,18 @@ fn owner_apply_with(
             projects_home::record(&tx, path, &request.request_id, &command, effect)?
         }
         (Some(Effect::NewProject(staged)), Command::ProjectSetup { action }) => {
-            crate::project_setup::record_new(&tx, config, action, staged)?
+            let outcome = crate::project_setup::record_new(&tx, config, action, staged)?;
+            if let (
+                Outcome::Applied,
+                OwnerOperation::Apply {
+                    mutation: OwnerMutation::CreateDemo { project_id, .. },
+                },
+            ) = (&outcome, &request.operation)
+            {
+                crate::demo::assert_confined(&tx, project_id)?;
+                crate::demo::record(&tx, project_id, crate::team::now_ms())?;
+            }
+            outcome
         }
         (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
         (Some(Effect::Delete(outcome)), Command::ProjectSetup { action }) => {
@@ -2505,6 +2526,14 @@ fn owner_apply_with(
     )?;
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
+    if changed
+        && let OwnerOperation::Apply {
+            mutation: OwnerMutation::CreateDemo { .. },
+        } = &request.operation
+        && let Err(e) = crate::demo::plant_question(db)
+    {
+        eprintln!("demo_question_not_planted cause={}", e.0);
+    }
     Ok(OwnerApplied {
         result,
         provenance,
@@ -2825,6 +2854,9 @@ fn owner_read(
         OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
         OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,
         OwnerRead::MasterFrameSettings => crate::master_frame_limit::read(&tx)?,
+        OwnerRead::ProjectDemo => OwnerData::ProjectDemo {
+            demo: crate::demo::view(&tx, config)?,
+        },
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },
