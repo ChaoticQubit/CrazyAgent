@@ -218,3 +218,137 @@ fn a_line_logged_once_is_kept_once() {
     assert_eq!(kept.iter().filter(|kept| **kept == line).count(), 1);
     assert!(kept.len() <= LOGGED_ONCE_MAX);
 }
+
+/// F21: an owner change to a file the change set does not touch no longer blocks its Accept;
+/// the set lands and the owner's change stays in the checkout, uncommitted, and nothing is
+/// listed as in the way.
+#[test]
+fn an_owner_change_to_a_file_the_set_does_not_touch_lands_and_stays_uncommitted() {
+    let case = Case::new();
+    case.owner_commit("notes.txt", "base\n", "Notes");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    write(&case.repo.join("notes.txt"), "owner edit\n");
+    write(&case.repo.join("scratch.txt"), "mine\n");
+    assert!(owner_dirty(&case.db, &id, None).unwrap().is_empty());
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.tip(), commit);
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("notes.txt")).unwrap(),
+        "owner edit\n"
+    );
+    assert_eq!(
+        case.owner(&["status", "--porcelain"]),
+        " M notes.txt\n?? scratch.txt\n"
+    );
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+}
+
+/// F21: an owner change to a file the change set changes is listed, committed first with the
+/// owner's message and nothing else, and the next Accept lands on top of it.
+#[test]
+fn an_owner_change_to_a_file_the_set_changes_is_listed_and_committed_first() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    write(&case.repo.join("README"), "zero\none\ntwo\nthree\n");
+    write(&case.repo.join("scratch.txt"), "mine\n");
+    let before = case.tip();
+    assert_eq!(refused(case.accept(&id)), "changes_owner_dirty");
+    assert_eq!(owner_dirty(&case.db, &id, None).unwrap(), ["README"]);
+
+    let (commit, branch) = commit_owner_files(
+        &case.db,
+        &case.home,
+        &id,
+        &["README".to_owned()],
+        "Add the top line",
+        None,
+    )
+    .unwrap();
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%s", &commit]).trim(),
+        format!("{before}|Add the top line")
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &commit]),
+        "README\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "?? scratch.txt\n");
+    assert!(owner_dirty(&case.db, &id, None).unwrap().is_empty());
+
+    let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &landed]).trim(),
+        commit
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "zero\none\ntwo\nthree\nfour\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "?? scratch.txt\n");
+}
+
+/// F21: anything staged in the owner's index still blocks an Accept, because the move back
+/// after a failed checkout step needs a clean index; the staged file is listed and can be
+/// committed first like any other.
+#[test]
+fn a_staged_owner_file_blocks_the_accept_until_it_is_committed_first() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    write(&case.repo.join("staged.txt"), "staged\n");
+    case.owner(&["add", "staged.txt"]);
+    assert_eq!(refused(case.accept(&id)), "changes_owner_dirty");
+    assert_eq!(owner_dirty(&case.db, &id, None).unwrap(), ["staged.txt"]);
+    commit_owner_files(
+        &case.db,
+        &case.home,
+        &id,
+        &["staged.txt".to_owned()],
+        "Add the staged file",
+        None,
+    )
+    .unwrap();
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+    let AcceptOutcome::Landed { .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+}
+
+/// F21: a commit first names only files the engine itself finds in the way, with a usable
+/// message; anything else is refused and commits nothing.
+#[test]
+fn a_commit_first_of_a_file_not_in_the_way_or_without_a_message_commits_nothing() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    write(&case.repo.join("README"), "zero\none\ntwo\nthree\n");
+    write(&case.repo.join("scratch.txt"), "mine\n");
+    let before = case.tip();
+    let commit = |files: &[&str], message: &str| {
+        let files: Vec<String> = files.iter().map(|file| (*file).to_owned()).collect();
+        refused(commit_owner_files(
+            &case.db, &case.home, &id, &files, message, None,
+        ))
+    };
+    assert_eq!(commit(&["scratch.txt"], "Add"), "changes_stale");
+    assert_eq!(commit(&["README", "scratch.txt"], "Add"), "changes_stale");
+    assert_eq!(commit(&["README"], "  \n"), "changes_message_invalid");
+    assert_eq!(commit(&[], "Add"), "changes_request_invalid");
+    assert_eq!(case.tip(), before);
+    assert_eq!(
+        case.owner(&["status", "--porcelain"]),
+        " M README\n?? scratch.txt\n"
+    );
+}

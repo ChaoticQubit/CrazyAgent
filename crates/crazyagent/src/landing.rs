@@ -413,6 +413,10 @@ pub struct LeadGit<'a> {
 
 /// The most local branches a target listing carries.
 pub const BRANCHES_MAX: usize = 256;
+/// The most files the owner's blocking-file listing and a commit-first name (F21).
+pub const DIRTY_FILES_MAX: usize = 64;
+/// The most bytes one file name in a commit-first request may hold (F21).
+pub const DIRTY_PATH_BYTES_MAX: usize = 512;
 
 /// The longest branch name an Accept target may have, in bytes.
 pub const BRANCH_BYTES_MAX: usize = 255;
@@ -1621,6 +1625,48 @@ pub fn owner_git_identity(
     #[cfg(not(unix))]
     {
         let _ = (repository, owner_home);
+        Err(unavailable())
+    }
+}
+
+/// Lists the files in the owner's checkout that keep a change set's Accept from landing
+/// (F21): files staged anywhere, unstaged edits to files the squash changes, and untracked
+/// files where it adds one; an unstaged edit to a file it leaves alone does not block.
+/// Inputs: the store, the change set and the target branch, None for the Land on branch.
+/// Output: the files, empty when none blocks, or `changes_too_large` past
+/// `DIRTY_FILES_MAX`.
+pub fn owner_dirty(
+    db: &Connection,
+    id: &ChangeSetId,
+    target: Option<&str>,
+) -> Result<Vec<String>, EngineError> {
+    #[cfg(unix)]
+    return owner::owner_dirty(db, id, target);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id, target);
+        Err(unavailable())
+    }
+}
+
+/// Commits the owner's files that keep a change set's Accept from landing, and nothing
+/// else, as one commit with the owner's message and identity on the branch the Accept lands
+/// on, so the owner can accept again (F21). Only files the engine finds blocking now may be
+/// named. Inputs: the store, the owner's home, the change set, the files, the message and
+/// the target branch, None for the Land on branch. Output: the commit and its branch.
+pub fn commit_owner_files(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+    files: &[String],
+    message: &str,
+    target: Option<&str>,
+) -> Result<(String, String), EngineError> {
+    #[cfg(unix)]
+    return owner::commit_owner_files(db, owner_home, id, files, message, target);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, owner_home, id, files, message, target);
         Err(unavailable())
     }
 }

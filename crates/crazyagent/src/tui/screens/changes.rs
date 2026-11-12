@@ -1524,7 +1524,7 @@ fn done(view: &ChangesView) -> Notice {
 pub(in crate::tui) fn refusal(code: &str) -> String {
     match code {
         "changes_owner_dirty" => {
-            "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again."
+            "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again."
         }
         "changes_detached_head" => {
             "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again."

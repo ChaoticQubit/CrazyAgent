@@ -98,6 +98,42 @@ impl NativeBridge {
         }))
     }
 
+    /// Lists the files in the project folder that keep a change set's Accept from landing,
+    /// run without the bridge lock. Inputs: the change set id and the target branch, None
+    /// for the Land on branch. Output: the files, empty when none does.
+    pub fn change_owner_dirty(
+        &self,
+        id: String,
+        target: Option<String>,
+    ) -> Result<Unlocked<Vec<String>>, BridgeError> {
+        let id = change_set(id)?;
+        let client = self.changes_client()?;
+        Ok(Box::pin(async move {
+            client.owner_dirty(id, target).await.map_err(changes_error)
+        }))
+    }
+
+    /// Commits only the listed project folder files that keep an Accept from landing, with
+    /// the owner's message, run without the bridge lock. Inputs: the change set id, the
+    /// files, the message and the target branch, None for the Land on branch. Output: the
+    /// commit and its branch.
+    pub fn commit_owner_files(
+        &self,
+        id: String,
+        files: Vec<String>,
+        message: String,
+        target: Option<String>,
+    ) -> Result<Unlocked<(String, String)>, BridgeError> {
+        let id = change_set(id)?;
+        let client = self.changes_client()?;
+        Ok(Box::pin(async move {
+            client
+                .commit_owner_files(id, files, message, target)
+                .await
+                .map_err(changes_error)
+        }))
+    }
+
     /// Discards a change set, restorable for seven days, run without the bridge lock.
     /// Inputs: the change set id and the head the owner reviewed. Output: the time it
     /// stays restorable until, in milliseconds.

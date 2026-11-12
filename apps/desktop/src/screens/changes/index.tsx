@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
+import { acceptChange, changesRefusal, commitOwnerFiles, discardChange, loadChangeDiff, loadOwnerDirty, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
 import type { ChangeDiff, ChangeSet, TargetBranches } from "../../api-changes";
 import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, landingNote, lastPageSeen, movedNote, movedOn, outcomeNote, regeneratedNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, committedFirstNote, conflictNote, diffText, fileLine, fileMarks, landingNote, lastPageSeen, movedNote, movedOn, outcomeNote, regeneratedNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
 import { useChangeList } from "./poll";
 import "./changes.css";
 
-type Asking = { kind: "accept" | "discard"; set: ChangeSet } | null;
+type CommitFirst = { kind: "commit"; set: ChangeSet; files: string[]; message: string; target: string | null };
+type Asking = { kind: "accept" | "discard"; set: ChangeSet } | CommitFirst | null;
 
 /** Shows diff text as plain text in a preformatted block: markup stays text and control
  * characters show as escapes. On the last page it calls `onEnd` once the end of the text
@@ -74,6 +75,29 @@ export function AcceptDialog({ set, pending, onCancel, onAccept }: {
     {shown !== set.message && <p role="alert">The proposed message held characters you cannot see. They are shown as escapes: check it before you accept.</p>}
     <TextArea id={id} label="Commit message" value={text} onValue={setText} rows={6}
       error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to accept." : undefined} />
+  </Dialog>;
+}
+
+/** The "commit these files first" dialog (F21): lists the files in the project folder whose
+ * uncommitted changes keep the Accept from landing and asks for a message to commit only
+ * those files with; the Accept then runs again. Inputs: the files, whether it runs, and the
+ * handlers; Commit gets the message. Output: the dialog. */
+export function CommitFirstDialog({ files, pending, onCancel, onCommit }: {
+  files: string[];
+  pending: boolean;
+  onCancel: () => void;
+  onCommit: (message: string) => void;
+}) {
+  const [text, setText] = useState("Save my changes before accepting");
+  const id = useId();
+  const message = commitMessage(text);
+  return <Dialog open title="Commit your files first?" onClose={onCancel} busy={pending}
+    footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
+      <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onCommit(message); }}>Commit these files first</Button></>}>
+    <p>These files in your project folder have changes that are not committed, and they are in the way of these changes. Commit only these files, then the changes are accepted. Nothing else in your folder is committed.</p>
+    <ul className="pj-rows" aria-label="Files in the way">{files.map((file) => <li key={file}>{displayText(file)}</li>)}</ul>
+    <TextArea id={id} label="Commit message for your files" value={text} onValue={setText} rows={3}
+      error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to commit." : undefined} />
   </Dialog>;
 }
 
@@ -201,7 +225,28 @@ export function ChangesTab({ data }: { data: ProjectData }) {
 
   async function accept(set: ChangeSet, message: string, target: string | null) {
     setBusy(true);
-    await settle(set, await acceptChange(set.id, set.head, message, target), acceptNote);
+    const result = await acceptChange(set.id, set.head, message, target);
+    if (result.kind === "error" && result.code === "changes_owner_dirty") {
+      const dirty = await loadOwnerDirty(set.id, target);
+      if (dirty.kind === "ok" && dirty.value.length > 0) {
+        setBusy(false);
+        setNote(null);
+        setAsking({ kind: "commit", set, files: dirty.value, message, target });
+        return;
+      }
+    }
+    await settle(set, result, acceptNote);
+  }
+
+  async function commitFirst(asked: CommitFirst, commit: string) {
+    setBusy(true);
+    const made = await commitOwnerFiles(asked.set.id, asked.files, commit, asked.target);
+    if (made.kind !== "ok") {
+      await settle(asked.set, made, () => null);
+      return;
+    }
+    data.notify(committedFirstNote(made.value[0], made.value[1]));
+    await accept(asked.set, asked.message, asked.target);
   }
 
   async function discard(set: ChangeSet) {
@@ -235,6 +280,8 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     </div>}
     {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
       onCancel={() => setAsking(null)} onAccept={(message, target) => void accept(asking.set, message, target)} />}
+    {asking?.kind === "commit" && <CommitFirstDialog key={`${asking.set.id}:${asking.set.head}`} files={asking.files} pending={busy}
+      onCancel={() => setAsking(null)} onCommit={(commit) => void commitFirst(asking, commit)} />}
     <ConfirmDialog open={asking?.kind === "discard"} pending={busy} title="Discard these changes?" confirmLabel="Discard" cancelLabel="Keep reviewing"
       onCancel={() => setAsking(null)} onConfirm={() => { if (asking) void discard(asking.set); }}>
       The agent's working copy goes back to your branch. You can restore these changes for 7 days.

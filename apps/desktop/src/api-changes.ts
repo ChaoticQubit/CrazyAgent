@@ -58,7 +58,7 @@ export interface ChangesRefusal {
 const CONFLICT_SHOWN = 5;
 
 const REFUSALS: Record<string, string> = {
-  changes_owner_dirty: "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again.",
+  changes_owner_dirty: "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again.",
   changes_detached_head: "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again.",
   changes_git_busy: "Git is in the middle of a merge, rebase, cherry-pick or bisect in your project folder. Finish or stop it, then accept again.",
   changes_conflict: "These changes conflict with your branch. Ask the agent to update, or discard.",
@@ -152,6 +152,20 @@ export function acceptChange(id: string, expectedHead: string, message: string, 
  * branches, the checked-out one and the Land on branch. */
 export function loadTargetBranches(id: string): Promise<Result<TargetBranches>> {
   return call<TargetBranches>("desktop_change_branches", { id });
+}
+
+/** Lists the files in the project folder that keep a change set's Accept from landing, for
+ * the "commit these files first" box. Inputs: the id and the target branch, null for the
+ * Land on branch. Output: the files, empty when none does. */
+export function loadOwnerDirty(id: string, target: string | null = null): Promise<Result<string[]>> {
+  return call<string[]>("desktop_change_owner_dirty", { id, target });
+}
+
+/** Commits only those project folder files, with the owner's message, so the next Accept can
+ * land. Inputs: the id, the files, the message and the target branch, null for the Land on
+ * branch. Output: the new commit and its branch. */
+export function commitOwnerFiles(id: string, files: string[], message: string, target: string | null = null): Promise<Result<[string, string]>> {
+  return call<[string, string]>("desktop_commit_owner_files", { id, files, message, target });
 }
 
 /** Discards a change set; it stays restorable for 7 days. Inputs: the id and the head the

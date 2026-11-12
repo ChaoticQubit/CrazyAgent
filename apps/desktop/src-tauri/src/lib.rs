@@ -3699,6 +3699,34 @@ async fn desktop_change_branches(
 }
 
 #[tauri::command]
+async fn desktop_change_owner_dirty(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    target: Option<String>,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.change_owner_dirty(id, target)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_commit_owner_files(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    files: Vec<String>,
+    message: String,
+    target: Option<String>,
+) -> Result<(String, String), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .commit_owner_files(id, files, message, target)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_discard_change(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4725,6 +4753,8 @@ native_commands! {
     desktop_change_diff,
     desktop_accept_change,
     desktop_change_branches,
+    desktop_change_owner_dirty,
+    desktop_commit_owner_files,
     desktop_discard_change,
     desktop_restore_change,
     desktop_undo_change,

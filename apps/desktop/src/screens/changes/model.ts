@@ -250,6 +250,12 @@ export function acceptNote(outcome: AcceptOutcome): string | null {
   return outcome.kind === "landed" ? `Accepted as ${outcome.commit.slice(0, 7)} on ${displayText(outcome.branch)}.` : null;
 }
 
+/** The note after the owner's own files were committed first and the Accept runs again
+ * (F21). Inputs: the commit and its branch. Output: the sentence. */
+export function committedFirstNote(commit: string, branch: string): string {
+  return `Committed your files as ${commit.slice(0, 7)} on ${displayText(branch)}. Accepting the changes now.`;
+}
+
 /** One line for a changed file: how it changed and its path. Input: the file. */
 export function fileLine(file: ChangedFile): string {
   const path = displayText(file.path);

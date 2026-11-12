@@ -8056,7 +8056,7 @@ fn an_import_commit_that_loses_the_branch_race_leaves_only_the_staged_deletion_a
 }
 
 #[test]
-fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move_is_committed() {
+fn a_checkout_dirty_only_by_the_instruction_import_lands_and_keeps_the_move_uncommitted() {
     let case = Case::new();
     case.edit("README", "one\ntwo\nthree\nfour\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -8071,34 +8071,6 @@ fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move
     );
     let head = case.view(&id).head;
     let before = case.tip();
-    assert_eq!(
-        refused(accept_into(
-            &case.db,
-            &case.home,
-            &id,
-            &head,
-            None,
-            "main",
-            crate::activity::AcceptPlace::Changes
-        )),
-        "changes_owner_dirty"
-    );
-    assert_eq!(case.tip(), before, "a refused accept moves no branch");
-    assert_eq!(
-        crate::instruction_files::uncommitted(&case.repo).unwrap(),
-        ["CLAUDE.md"]
-    );
-    let made = crate::instruction_files::commit(&case.repo, &case.home).unwrap();
-    assert_eq!(made.files, ["CLAUDE.md"]);
-    assert_eq!(
-        (made.branch.as_str(), case.tip()),
-        ("main", made.commit.clone())
-    );
-    assert!(
-        crate::instruction_files::uncommitted(&case.repo)
-            .unwrap()
-            .is_empty()
-    );
     let AcceptOutcome::Landed { commit, branch } = accept_into(
         &case.db,
         &case.home,
@@ -8114,16 +8086,31 @@ fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move
     assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
     assert_eq!(
         case.owner(&["log", "-1", "--format=%P", &commit]).trim(),
-        made.commit
+        before
     );
     assert_eq!(
         case.owner(&["ls-tree", "-r", "--name-only", &commit]),
-        "README\n"
+        "CLAUDE.md\nREADME\n"
     );
-    assert_eq!(case.owner(&["status", "--porcelain"]), "");
     assert_eq!(
-        std::fs::read_to_string(case.repo.join(".crazyagent/imported/CLAUDE.md")).unwrap(),
-        "RULE\n"
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+    assert_eq!(
+        crate::instruction_files::uncommitted(&case.repo).unwrap(),
+        ["CLAUDE.md"]
+    );
+    let made = crate::instruction_files::commit(&case.repo, &case.home).unwrap();
+    assert_eq!(made.files, ["CLAUDE.md"]);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &made.commit])
+            .trim(),
+        commit
+    );
+    assert!(
+        crate::instruction_files::uncommitted(&case.repo)
+            .unwrap()
+            .is_empty()
     );
 }
 

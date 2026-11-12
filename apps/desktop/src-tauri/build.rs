@@ -231,6 +231,8 @@ fn main() {
         "desktop_change_diff",
         "desktop_accept_change",
         "desktop_change_branches",
+        "desktop_change_owner_dirty",
+        "desktop_commit_owner_files",
         "desktop_discard_change",
         "desktop_restore_change",
         "desktop_undo_change",
