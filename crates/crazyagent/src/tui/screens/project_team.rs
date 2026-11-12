@@ -1223,6 +1223,7 @@ impl TeamView {
             project_id: self.project.clone(),
             harness,
             prompt,
+            model: None,
         })
     }
 

@@ -406,6 +406,7 @@ fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() 
             project_id: project.clone(),
             harness: None,
             prompt: "Write a long essay of at least three thousand words about rivers.".into(),
+            model: None,
         }),
         Outcome::Applied
     );

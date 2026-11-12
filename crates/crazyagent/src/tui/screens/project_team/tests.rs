@@ -1217,6 +1217,7 @@ fn a_new_task_goes_to_the_chosen_sub_agent() {
             project_id: project(),
             harness: Some("claude-code".into()),
             prompt: "Fix the chart legend\nKeep the colours the same.".into(),
+            model: None,
         }
     );
     assert!(view.busy());
@@ -1287,6 +1288,7 @@ fn a_refused_task_keeps_its_text_and_shows_why() {
             project_id: project(),
             harness: None,
             prompt: "Write the alerts page".into(),
+            model: None,
         }
     );
     view.apply(

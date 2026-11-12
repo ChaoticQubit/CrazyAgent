@@ -660,6 +660,8 @@ pub enum TeamAction {
         project_id: ProjectId,
         harness: Option<String>,
         prompt: String,
+        #[serde(default)]
+        model: Option<String>,
     },
     Cancel {
         project_id: ProjectId,
@@ -940,13 +942,24 @@ impl TeamAction {
                 .then_some(())
                 .ok_or_else(|| failure("team_message_invalid")),
             Self::Delegate {
-                harness, prompt, ..
+                harness,
+                prompt,
+                model,
+                ..
             } => {
                 if harness
                     .as_ref()
                     .is_some_and(|h| h.is_empty() || h.len() > 64 || !harness_name(h))
                 {
                     return Err(failure("team_harness_invalid"));
+                }
+                if let Some(model) = model {
+                    let rule = harness.as_deref().map_or("claude-code", |harness| {
+                        crate::model_choice::harness_id(harness).unwrap_or(harness)
+                    });
+                    if !crate::model_choice::model_valid(rule, model) {
+                        return Err(failure("team_model_invalid"));
+                    }
                 }
                 text_valid(prompt, TASK_PROMPT_BYTES_MAX)
                     .then_some(())
@@ -2250,6 +2263,66 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
+/// Admits one task the owner delegates and pins the model the owner named under the pick
+/// rule a master's spawn meets (DEC-150 addendum 7), inside a savepoint so a refused
+/// admission or pick writes nothing. Takes the transaction, the engine configuration, the
+/// project's setup, the harness, the prompt, the model and the time. Returns Applied or
+/// the rejection, or a SQLite failure.
+#[allow(clippy::too_many_arguments)]
+fn owner_delegate(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    stored: &StoredSetup,
+    harness: Option<&str>,
+    prompt: &str,
+    model: Option<&str>,
+    now: i64,
+) -> Result<Outcome, EngineError> {
+    tx.execute_batch("SAVEPOINT owner_delegate")
+        .map_err(error)?;
+    let admitted = admit(
+        tx,
+        access,
+        stored,
+        harness,
+        prompt,
+        TaskSource::Owner,
+        None,
+        now,
+    )?;
+    let outcome = match (admitted, model) {
+        (Err(code), _) => rejected(code),
+        (Ok(_), None) => Outcome::Applied,
+        (Ok(task), Some(model)) => {
+            let chosen: String = tx
+                .query_row(
+                    "SELECT harness FROM team_tasks WHERE id=?1",
+                    [task],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            let pick = tool::ModelPick {
+                model: model.to_owned(),
+                reason: model_pick::OWNER_PICK_REASON.to_owned(),
+            };
+            match model_pick::pin_or_refuse(tx, &stored.project_id, task, &chosen, Some(&pick))? {
+                Ok(_) => Outcome::Applied,
+                Err(refused) => rejected(match refused.code {
+                    "model_not_allowed" => "team_model_not_allowed",
+                    "model_not_supported" => "team_model_not_supported",
+                    code => unreachable!("a pick refusal names a known code, not {code}"),
+                }),
+            }
+        }
+    };
+    if outcome != Outcome::Applied {
+        tx.execute_batch("ROLLBACK TO owner_delegate")
+            .map_err(error)?;
+    }
+    tx.execute_batch("RELEASE owner_delegate").map_err(error)?;
+    Ok(outcome)
+}
+
 /// Deletes a project's oldest history rows so that one more row fits within `max`.
 /// Takes the transaction, the table, the SQL condition that marks history, the project and the bound.
 /// Returns any SQLite failure; live rows are never deleted, so live rows filling the bound is a broken invariant.
@@ -2466,21 +2539,18 @@ fn perform(
             },
         ),
         TeamAction::Delegate {
-            harness, prompt, ..
-        } => Ok(
-            match admit(
-                tx,
-                access,
-                &stored,
-                harness.as_deref(),
-                prompt,
-                TaskSource::Owner,
-                None,
-                now,
-            )? {
-                Ok(_) => Outcome::Applied,
-                Err(code) => rejected(code),
-            },
+            harness,
+            prompt,
+            model,
+            ..
+        } => owner_delegate(
+            tx,
+            access,
+            &stored,
+            harness.as_deref(),
+            prompt,
+            model.as_deref(),
+            now,
         ),
         TeamAction::Cancel { task, .. } => {
             let matched: i64 = tx

@@ -157,6 +157,7 @@ impl NativeBridge {
             project_id,
             harness,
             prompt,
+            model: None,
         };
         self.team_action(action, generation).await
     }
