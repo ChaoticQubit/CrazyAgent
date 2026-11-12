@@ -31,5 +31,7 @@ reports/
 apps/desktop/src-tauri/binaries/
 !crates/crazyagent/assets/pack/**/*.md
 !crates/trackwright-core/docs/
+!crates/crazyagent/docs/
+!crates/crazyagent/docs/*.md
 !crates/crazyagent/src/demo/seed/*.md
 scripts/qualification/__pycache__/
