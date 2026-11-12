@@ -60,10 +60,9 @@ struct Engine {
 /// while the socket lives and no other process can take the port. Output: the socket, which
 /// the test engine holds, and its address.
 fn refusing_port() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
-    let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket
-        .bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .unwrap();
+    let socket =
+        crate::spawn_gate::bind_tcp_unlistened(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap();
     let address = socket.local_addr().unwrap();
     assert!(
         address.ip().is_loopback() && address.port() != 0,
