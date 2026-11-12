@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { saveProfile, type OwnerProfile } from "../../api";
-import { BrandMark, Button, ChipInput, Notice, Segmented, SettingLine, TextArea, TextField, navigate, type Route } from "../../ui";
+import { BrandMark, Button, Checkbox, ChipInput, Notice, Segmented, SettingLine, TextArea, TextField, navigate, type Route } from "../../ui";
 import { HomeFolderPicker } from "../intake/home-folder";
 import { ToolsSetup } from "../intake/setup-step";
 import "../intake/intake.css";
@@ -130,6 +130,14 @@ export const FIRST_RUN_STEPS: { id: FirstRunStep; label: string; title: string; 
     intro: "Agents need a model account to work. Sign in with ChatGPT or Claude, or add an API key or a local model." },
 ];
 
+/** The Learn CrazyAgent offer on the last first-run page, in the same words as the TUI
+ * Accounts step: heading, two sentences and the label of its ticked box. */
+export const LEARN_OFFER = {
+  title: "Learn CrazyAgent",
+  text: "A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets. Its first step is an optional demo project.",
+  tick: "Show the guide on Home",
+};
+
 /** The first-run flow with no sidebar, in the order profile, projects folder, tools, accounts:
  * the brand, the step list and a short intro on the left, the step on the right. Finishing goes
  * to Home or to Add account. Inputs: the saved handler, an optional skip handler used when the
@@ -145,6 +153,7 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
   const [errors, setErrors] = useState<ProfileErrors>({});
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<{ message: string; notReady: boolean }>();
+  const [guide, setGuide] = useState(true);
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (saving) return;
@@ -194,6 +203,11 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
         <Button variant="primary" size="large" icon="key-round" onClick={() => finish({ name: "settings", tab: "accounts", action: "add" })}>Add account</Button>
         <Button variant="quiet" onClick={() => finish({ name: "home" })}>Skip for now</Button>
       </div>
+      <section className="stack-small" aria-labelledby="learn-offer-title">
+        <h2 id="learn-offer-title">{LEARN_OFFER.title}</h2>
+        <p>{LEARN_OFFER.text}</p>
+        <Checkbox label={LEARN_OFFER.tick} checked={guide} onChecked={setGuide} />
+      </section>
     </section>}
   </main>;
 }
