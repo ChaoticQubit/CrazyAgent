@@ -3375,7 +3375,7 @@ impl TeamRuntime {
         wanted: Option<String>,
         task: i64,
     ) -> Result<Option<(TeamAccount, Option<String>)>, EngineError> {
-        match self.account_with_model(access, project, harness, paused, wanted, task)? {
+        match self.account_with_model(access, project, harness, paused, wanted, Some(task))? {
             Placed::Run(account, run) => Ok(Some((account, run))),
             Placed::Wait(None) => {
                 self.wait(task, WAIT_SIGN_IN_CHECK)?;
@@ -3596,13 +3596,11 @@ impl TeamRuntime {
         Err("Every account in this project's pool is resting after a rate limit".into())
     }
 
-    /// Picks the account a task's agent starts on and the model it runs (DEC-150): an account
-    /// that can run the model wanted; when none can, the owner's fallback rule decides: any
-    /// account on its own model, telling the owner and the master once
-    /// (`model_pick::fell_back`) or no one, or no start, with the reason. A pick that finds
-    /// an account for the model clears a told fallback. Takes the live access, the project,
-    /// the harness, the paused accounts, the model wanted, none for any account's own, and
-    /// the task. Returns where the agent starts, or a store or SQLite failure.
+    /// Picks the account an agent starts on and the model it runs (DEC-150): one that can
+    /// run the model wanted, else what the owner's fallback rule allows (`fallback_allowed`).
+    /// Takes the live access, the project, the harness, the paused accounts, the model wanted,
+    /// none for any account's own, and the task, none for a start with none. Returns where
+    /// the agent starts, or a store or SQLite failure.
     fn account_with_model(
         &mut self,
         access: &ModelAccess,
@@ -3610,7 +3608,7 @@ impl TeamRuntime {
         harness: &str,
         paused: &BTreeSet<CredentialRef>,
         wanted: Option<String>,
-        task: i64,
+        task: Option<i64>,
     ) -> Result<Placed, EngineError> {
         let Some(wanted) = wanted else {
             let account = self.account_for(access, project, harness, paused, None);
@@ -3634,7 +3632,7 @@ impl TeamRuntime {
                     Err(reason) => return Ok(Placed::Wait(Some(reason))),
                 };
                 let shown = bound_text(harness, 64);
-                if !self.fallback_allowed(project, harness, &wanted, Some(task))? {
+                if !self.fallback_allowed(project, harness, &wanted, task)? {
                     return Ok(Placed::Stop(format!(
                         "No account in this project's pool can run {wanted} for {shown} agents, and the owner's fallback setting stops the task instead of running another model. Pick another model or leave model out."
                     )));
