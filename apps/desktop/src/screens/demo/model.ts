@@ -12,6 +12,21 @@ const DEMO_POOLS_MAX = 64;
 /** How often the demo's page and guide read the demo again while a step is still open. */
 export const DEMO_POLL_MS = 5000;
 
+/** The demo read the entry, the page and the guide show: the newest good read, or the last
+ * good one while a later read failed or reloads, so one busy or timed-out read neither hides
+ * the guide nor stops its poll. Inputs: the newest read and the last good view, if any.
+ * Output: the read to show; a failure shows only before any good read. */
+export function keptDemo(latest: Loaded<DemoView>, last: DemoView | null): Loaded<DemoView> {
+  if (last === null || latest.kind === "ok" || latest.kind === "not_ready") return latest;
+  return { kind: "ok", value: last };
+}
+
+/** Whether the demo is read again: while the demo exists and its change set is not accepted.
+ * Input: the read shown. Output: the answer. */
+export function demoPolls(view: Loaded<DemoView>): boolean {
+  return view.kind === "ok" && view.value.project_id !== null && !view.value.steps.change_set_accepted;
+}
+
 /** One pool on the demo page: its id, its name, the names of its accounts that are ready for
  * agents, and why the demo cannot run on it, or null when it can. */
 export interface DemoPoolChoice {

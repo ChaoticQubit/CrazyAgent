@@ -1,24 +1,28 @@
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { checkUnconfirmed, listAccounts, nextGeneration, poolSummaries, receiptResult, type AccountView, type PoolSummary } from "../../api";
 import { createDemo, loadDemo, type DemoView } from "../../api-demo";
 import { setProjectPool } from "../../api-projects";
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { Button, Icon, LoadError, NotReady, Notice, PageHeader, Panel, RadioCard, Skeleton, formatRoute } from "../../ui";
-import { DEMO_POLL_MS, demoEntry, demoPoolChoices, makeDemo, pickable, type DemoEntry, type DemoPoolChoice } from "./model";
+import { DEMO_POLL_MS, demoEntry, demoPolls, demoPoolChoices, keptDemo, makeDemo, pickable, type DemoEntry, type DemoPoolChoice } from "./model";
 import { flash, go } from "../project/flash";
 import { DEMO_ABOUT, DEMO_COST_NOTE, DEMO_CREATE, DEMO_ENTRY, DEMO_EXISTS, DEMO_NO_POOL, DEMO_NO_POOL_ACTION, DEMO_PICK } from "./words";
 import "./demo.css";
 
 /** Reads the demo, and reads it again every few seconds while some step is still open, so the
- * entry, the page and the guide follow the engine. Output: the latest read and a reload. */
+ * entry, the page and the guide follow the engine. A failed read keeps the last good one and
+ * the poll goes on. Output: the read to show and a reload. */
 export function useDemo(): [Loaded<DemoView>, () => void] {
-  const [view, reload] = useLoad(loadDemo, [], "project-demo");
-  const open = view.kind === "ok" && view.value.project_id !== null && !view.value.steps.change_set_accepted;
+  const [latest, reload] = useLoad(loadDemo, [], "project-demo");
+  const last = useRef<DemoView | null>(null);
+  if (latest.kind === "ok") last.current = latest.value;
+  const view = keptDemo(latest, last.current);
+  const polls = demoPolls(view);
   useEffect(() => {
-    if (!open) return;
+    if (!polls) return;
     const timer = window.setTimeout(reload, DEMO_POLL_MS);
     return () => window.clearTimeout(timer);
-  }, [open, view]);
+  }, [polls, latest]);
   return [view, reload];
 }
 

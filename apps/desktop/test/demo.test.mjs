@@ -276,3 +276,31 @@ test("a lost Create the demo reply is reconciled once and a settled answer is ke
   assert.deepEqual(made, { kind: "made", project: "crazyagent-demo", note: null });
   assert.deepEqual(run.calls, ["create pool-a 1", "reconcile", "assign crazyagent-demo pool-a 2"]);
 });
+
+test("one failed demo read keeps the last good read, so the guide stays and its poll goes on", () => {
+  const open = demo({ project_id: "crazyagent-demo", created_ms: 1, steps: steps({ created: true, goal_sent: true }) });
+  const failed = { kind: "error", code: "owner_busy", message: "x" };
+  assert.deepEqual(model.keptDemo(ok(open), null), ok(open));
+  assert.deepEqual(model.keptDemo(failed, open), ok(open));
+  assert.deepEqual(model.keptDemo({ kind: "loading" }, open), ok(open));
+  assert.deepEqual(model.keptDemo(failed, null), failed, "with no good read the failure shows");
+  assert.deepEqual(model.keptDemo({ kind: "not_ready" }, open), { kind: "not_ready" }, "an engine with no demo is not hidden");
+  const fresh = demo({ project_id: "crazyagent-demo", created_ms: 1, steps: steps({ created: true, goal_sent: true, agent_started: true }) });
+  assert.deepEqual(model.keptDemo(ok(fresh), open), ok(fresh));
+  assert.equal(model.demoPolls(model.keptDemo(failed, open)), true);
+  assert.equal(model.demoPolls(ok(demo())), false, "no demo, nothing to follow");
+  assert.equal(model.demoPolls(ok(demo({ project_id: "crazyagent-demo", steps: steps({ change_set_accepted: true }) }))), false);
+  assert.equal(model.demoPolls(failed), false);
+  const guide = renderToStaticMarkup(createElement(DemoGuideView, {
+    guide: model.guideSteps(model.keptDemo(failed, open).value, "crazyagent-demo"), goal: open.goal, copied: false, onCopy: idle,
+  }));
+  assert.match(guide, /Step 2 of 5/);
+});
+
+test("useDemo shows the kept read and re-arms its poll on every read, failed ones too", () => {
+  const source = readFileSync(new URL("../src/screens/demo/offer.tsx", import.meta.url), "utf8");
+  const hook = source.slice(source.indexOf("export function useDemo"), source.indexOf("export function DemoEntryView"));
+  assert.match(hook, /keptDemo\(latest, /);
+  assert.match(hook, /demoPolls\(view\)/);
+  assert.match(hook, /\[polls, latest\]/);
+});
