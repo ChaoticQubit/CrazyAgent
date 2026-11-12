@@ -5,7 +5,7 @@ import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Icon, Skeleton, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { NotReady } from "../project/shared";
-import { SETUP_READS, approvalLine, dependencyView, entryIcon, entryName, foldSetupRead, installed, packGroups, packStateView, packTicks, rowInstall, setupBusy, setupPollMs, setupProgress, toolsChecking } from "./intake";
+import { SETUP_READS, approvalLine, dependencyView, entryIcon, entryName, foldSetupRead, installed, packGroups, packStateView, packTicks, retryTicks, rowInstall, setupBusy, setupPollMs, setupProgress, toolsChecking } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -25,10 +25,11 @@ function PackRow({ entry, ticked, onTick, locked }: { entry: PackEntry; ticked: 
 
 /** The desktop setup screen as a view of its state: tmux, uv and graphify with their state and
  * version, the default pack as ticks grouped like the manifest, the sentence naming the ticked MCP
- * servers that continuing approves, and progress while setup installs. Inputs: the setup read, the
- * ticked ids and their handler, flags, the last problem, the failed refresh line (empty when the
- * last read worked), the Run and Continue handlers and, when given, the one-tool Install handler. */
-export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, stale = "", onRun, onContinue, onInstall }: {
+ * servers that continuing approves, progress while setup installs, and Try again once a run ended
+ * with failures. Inputs: the setup read, the ticked ids and their handler, flags, the last problem,
+ * the failed refresh line (empty when the last read worked), the Run, Try again and Continue
+ * handlers and, when given, the one-tool Install handler. */
+export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, stale = "", onRun, onRetry = () => undefined, onContinue, onInstall }: {
   status: Loaded<SetupStatus>;
   ticks: string[];
   onTick: (id: string, on: boolean) => void;
@@ -37,6 +38,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
   problem: string;
   stale?: string;
   onRun: () => void;
+  onRetry?: () => void;
   onContinue: () => void;
   onInstall?: (dependency: Dependency) => void;
 }) {
@@ -87,6 +89,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
     <span className="pj-row">
       {started || running ? <Button variant="primary" icon="arrow-right" onClick={onContinue}>Continue</Button>
         : <Button variant="primary" icon="wrench" pending={busy} pendingLabel="Starting..." onClick={onRun}>Set up tools</Button>}
+      {started && !running && progress.failed > 0 && <Button icon="refresh-cw" pending={busy} pendingLabel="Starting..." onClick={onRetry}>Try again</Button>}
       {!started && !running && <Button variant="quiet" disabled={busy} onClick={onContinue}>Skip for now</Button>}
     </span>
   </div>;
@@ -121,11 +124,11 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
     return () => window.clearTimeout(timer);
   }, [running, checking, known]);
 
-  const run = async () => {
-    if (busy || ticks === null) return;
+  const run = async (picked: string[] | null = ticks) => {
+    if (busy || picked === null) return;
     setBusy(true);
     setProblem("");
-    const result = await runSetup(ticks);
+    const result = await runSetup(picked);
     setBusy(false);
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Installing tools isn't in this build." : intakeCopy(result)); return; }
     setKnown((old) => ({ ...old, latest: result.value, failures: 0, line: "" }));
@@ -147,6 +150,7 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
     return on ? (list.includes(id) ? list : [...list, id]) : list.filter((item) => item !== id);
   });
 
-  return <ToolsSetupView status={status} ticks={ticks ?? []} onTick={tick} busy={busy} started={started} problem={problem} stale={known.line} onRun={() => void run()} onContinue={onContinue}
+  return <ToolsSetupView status={status} ticks={ticks ?? []} onTick={tick} busy={busy} started={started} problem={problem} stale={known.line} onRun={() => void run()}
+    onRetry={() => void run(value === null || ticks === null ? null : retryTicks(value, ticks))} onContinue={onContinue}
     onInstall={(dependency) => void install(dependency)} />;
 }

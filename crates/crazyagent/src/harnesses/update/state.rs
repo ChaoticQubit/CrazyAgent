@@ -143,13 +143,26 @@ impl Roots {
     }
 }
 
-/// Finds the npm an npm harness installs with for one engine: the Node setup finds and the
-/// engine prefix, named by its real path when it exists so an install found inside it
-/// matches. Input: the engine root. Output: the npm, or none with no usable Node.
+/// Finds the npm an npm harness installs with for one engine on the engine's own resolver
+/// places. Input: the engine root. Output: the npm, or none with no usable Node.
 #[cfg(unix)]
 fn engine_npm(engine_root: &Path) -> Option<super::NpmInstall> {
-    let places = crate::tools::Places::from_environment(Some(engine_root));
-    let found = crate::setup::node::usable(&places)?;
+    engine_npm_at(
+        engine_root,
+        &crate::tools::Places::from_environment(Some(engine_root)),
+    )
+}
+
+/// Finds the npm an npm harness installs with: the Node setup's one test finds on the places
+/// and the engine prefix, named by its real path when it exists so an install found inside
+/// it matches. Inputs: the engine root and the places. Output: the npm, or none with no
+/// usable Node.
+#[cfg(unix)]
+pub(crate) fn engine_npm_at(
+    engine_root: &Path,
+    places: &crate::tools::Places,
+) -> Option<super::NpmInstall> {
+    let found = crate::setup::node::usable(places)?;
     let named = crate::setup::node::prefix(engine_root);
     let prefix = named.canonicalize().unwrap_or(named);
     let node_bin = found.node.parent()?.to_path_buf();

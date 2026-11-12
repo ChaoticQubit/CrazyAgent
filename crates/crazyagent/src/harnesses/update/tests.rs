@@ -1838,6 +1838,58 @@ fn an_unrecognized_install_of_a_harness_crazyagent_cannot_start_is_never_run() {
     assert!(system.machine.root.path().join("ran").exists());
 }
 
+/// The roots of a machine whose npm is the one setup's Node test finds on the resolver's
+/// folders under that machine's HOME only, so this Mac's own Node never counts.
+fn home_node_roots(machine: &Machine) -> Roots {
+    let home = machine.roots().home;
+    let folders: Vec<PathBuf> = crate::tools::Places::engine(None, None, Some(home.clone()), None)
+        .folders()
+        .iter()
+        .filter(|folder| folder.starts_with(&home))
+        .cloned()
+        .collect();
+    let places = crate::tools::Places::new(folders, Some(home));
+    Roots {
+        npm: super::state::engine_npm_at(machine.root.path(), &places),
+        ..machine.roots()
+    }
+}
+
+#[test]
+fn node_the_tool_resolver_finds_outside_homebrew_is_not_called_missing() {
+    for (bin, why) in [
+        ("home/.nvm/versions/node/v22.11.0/bin", "an nvm Node"),
+        (
+            "home/.volta/tools/image/node/22.11.0/bin",
+            "a volta Node, found through its real install, not its shim",
+        ),
+    ] {
+        let machine = Machine::new();
+        machine.program(&format!("{bin}/node"), 0o755);
+        assert_eq!(
+            install_command("codex", &home_node_roots(&machine)).unwrap_err(),
+            NEEDS_NODE,
+            "{why} without npm is not a usable Node"
+        );
+        let npm = machine.program(&format!("{bin}/npm"), 0o755);
+        let fixed = install_command("codex", &home_node_roots(&machine)).unwrap();
+        assert_eq!(fixed.program, npm, "{why}");
+        assert_eq!(
+            fixed.prefix.as_deref(),
+            Some(machine.root.path().join("harnesses").as_path()),
+            "{why} installs into the engine prefix"
+        );
+    }
+    let other = Machine::new();
+    other.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o777);
+    other.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
+    assert_eq!(
+        install_command("codex", &home_node_roots(&other)).unwrap_err(),
+        NEEDS_NODE,
+        "a node anyone can change is not one the resolver uses"
+    );
+}
+
 #[test]
 fn an_npm_harness_on_a_mac_with_no_npm_needs_node_and_a_harness_with_no_package_has_no_installer() {
     let machine = Machine::new();
@@ -1949,7 +2001,16 @@ fn a_queued_list_installs_in_order_one_at_a_time_and_a_failure_does_not_stop_the
         !case.updates.idle()
     });
     assert!(running);
-    assert_eq!(case.updates.queued(), listed(&["goose", "codex"]));
+    let rest = listed(&["goose", "codex"]);
+    let waiting = (0..WAIT_STEPS).any(|_| {
+        let now = case.updates.queued();
+        assert!(now.ends_with(&rest), "{now:?}");
+        now == rest || {
+            std::thread::sleep(WAIT_STEP);
+            false
+        }
+    });
+    assert!(waiting, "aider leaves the queue once its install started");
     case.finish();
     drain.join().unwrap();
     assert_eq!(

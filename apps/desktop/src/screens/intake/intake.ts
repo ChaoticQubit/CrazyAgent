@@ -627,6 +627,13 @@ export function packStateView(state: PackState, hooksRefused: string | null = nu
   }
 }
 
+/** The pack ids Try again sends after a run with failures: every ticked entry that is not
+ * installed, so a failed one runs again and an installed one is left alone; the tools are
+ * checked again on every run. Inputs: the setup read and the ticks. Output: the ids. */
+export function retryTicks(status: SetupStatus, ticks: readonly string[]): string[] {
+  return status.pack.filter((item) => ticks.includes(item.id) && !installed(item)).map((item) => item.id);
+}
+
 /** Tells whether a pack entry is installed, so Settings can switch or remove it.
  * Input: the entry. Output: true when it is on or off. */
 export function installed(entry: PackEntry): boolean {

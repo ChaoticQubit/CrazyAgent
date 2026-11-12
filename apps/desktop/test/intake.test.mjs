@@ -931,6 +931,23 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
 });
 
+test("after a run with failures the tools step offers Try again, which runs the tools and only the ticked entries not installed", () => {
+  const listed = [entry("superpowers", "skill", "workflow", true, { state: "on" }), entry("caveman", "skill", "workflow", true, { state: "failed", reason: "The source could not be downloaded." }),
+    entry("serena", "mcp_server", "optional", false, { state: "available" })];
+  const value = { dependencies: [dep("tmux", { state: "failed", reason: "Homebrew is not installed." })], pack: listed, running: false };
+  assert.deepEqual(intake.retryTicks(value, ["superpowers", "caveman"]), ["caveman"]);
+  assert.deepEqual(intake.retryTicks({ ...value, pack: listed.slice(0, 1) }, ["superpowers"]), []);
+  const base = { status: ok(value), ticks: ["superpowers", "caveman"], onTick: noop, busy: false, started: true, problem: "", onRun: noop, onRetry: noop, onContinue: noop };
+  const finished = html(ToolsSetupView, base);
+  assert.match(finished, /Setup finished: 3 of 3 done, 2 failed\. Each failure shows its reason above\./);
+  assert.match(finished, />Try again<\/button>/);
+  assert.match(finished, />Continue<\/button>/);
+  assert.doesNotMatch(html(ToolsSetupView, { ...base, status: ok({ ...value, running: true }) }), />Try again</);
+  const clean = { ...value, dependencies: [dep("tmux", { state: "found", version: "3.5a" })], pack: listed.slice(0, 1) };
+  assert.doesNotMatch(html(ToolsSetupView, { ...base, status: ok(clean), ticks: ["superpowers"] }), />Try again</);
+  assert.doesNotMatch(html(ToolsSetupView, { ...base, started: false }), />Try again</);
+});
+
 test("the tools step says why an installed entry's hooks were not added, on that entry only", () => {
   const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
   const listed = pack.map((item) => item.id === "headroom" ? { ...item, hooks_refused: refused } : item);
