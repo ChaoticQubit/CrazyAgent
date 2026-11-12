@@ -51,7 +51,17 @@ fn put(row: &str, column: usize, text: &str, room: usize) -> String {
     cells.into_iter().collect()
 }
 
-fn engine_table(rows: &mut [String], first: usize, control: usize, works: usize, room: usize) {
+/// Writes the engine's Works with words and Limited control marks over a design frame's
+/// harness rows. Takes the rows, the first harness row, the two columns, the Works with
+/// width and how many harness rows show. Returns nothing.
+fn engine_table(
+    rows: &mut [String],
+    first: usize,
+    control: usize,
+    works: usize,
+    room: usize,
+    shown: usize,
+) {
     let words = [
         "Any account",
         "Subscription, API key",
@@ -63,7 +73,8 @@ fn engine_table(rows: &mut [String], first: usize, control: usize, works: usize,
         "Subscription, API key, Local model",
         "Any account",
     ];
-    for (index, word) in words.iter().enumerate() {
+    assert!(shown <= words.len());
+    for (index, word) in words.iter().enumerate().take(shown) {
         let row = &mut rows[first + index];
         *row = put(row, works, &cut(word, room, "…"), room);
         if index == 5 || index == 7 {
@@ -80,15 +91,15 @@ fn harness_list_frames_match_the_design() {
 
     let mut shell = Shell::with(harness_ctx(80, 24), Box::new(Harnesses::with(nine.clone())));
     let mut expected = fixture("harnesses-80", &[]);
-    engine_table(&mut expected, 6, 35, 54, 24);
-    expected[17] = put(&expected[17], 15, &path, 63);
+    engine_table(&mut expected, 6, 35, 54, 23, 8);
+    expected[16] = put(&expected[16], 15, &path, 63);
+    expected[19] = " ".repeat(80);
     expected[20] = " ".repeat(80);
-    expected[21] = " ".repeat(80);
     assert_eq!(render(&mut shell, 80, 24), expected);
 
     let mut shell = Shell::with(harness_ctx(120, 36), Box::new(Harnesses::with(nine)));
     let mut expected = fixture("harnesses-120", &[]);
-    engine_table(&mut expected, 9, 37, 56, 62);
+    engine_table(&mut expected, 9, 37, 56, 62, 9);
     expected[20] = put(&expected[20], 15, &path, 103);
     expected[21] = expected[22].clone();
     for row in expected.iter_mut().skip(22).take(3) {
@@ -106,7 +117,7 @@ fn a_harness_that_is_not_installed_says_how_to_add_it() {
         shell.key(Key::Down);
     }
     let mut expected = fixture("harness-limited-80", &[]);
-    engine_table(&mut expected, 6, 35, 54, 24);
+    engine_table(&mut expected, 6, 35, 54, 24, 9);
     expected[17] = format!(
         "{:<80}",
         "  Limited control: tools are allowed or denied only through Cursor's"
@@ -366,7 +377,7 @@ fn frame(shell: &mut Shell) -> String {
 }
 
 fn footer(shell: &mut Shell) -> String {
-    render(shell, 120, 36).pop().unwrap()
+    crate::tui::screens::settings_accounts::tests::bar_rows(&render(shell, 120, 36)).join("\n")
 }
 
 #[test]

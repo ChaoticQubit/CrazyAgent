@@ -895,7 +895,7 @@ impl Harnesses {
             2
         };
         (ctx.height as usize)
-            .saturating_sub(CHROME_ROWS + head + 1 + DETAIL_ROWS + 1)
+            .saturating_sub(CHROME_ROWS + head + 1 + DETAIL_ROWS + 1 + ctx.extra_hint_rows())
             .max(1)
             .min(self.entries.len().max(1))
     }
@@ -1187,6 +1187,10 @@ impl Harnesses {
 }
 
 impl Screen for Harnesses {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Harnesses".into()]
     }

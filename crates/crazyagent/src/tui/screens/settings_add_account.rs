@@ -1783,6 +1783,10 @@ pub(super) fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInVie
 }
 
 impl Screen for AddAccount {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         let mut crumbs = vec![
             "Settings".to_owned(),

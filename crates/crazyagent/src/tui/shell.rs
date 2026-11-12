@@ -6,8 +6,8 @@ use super::client::settings::SettingsEvent;
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
-    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, footer, header, hint,
-    strip_bidi, too_small,
+    HINT_ROWS_MAX, Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, hint,
+    strip_bidi, too_small, wrapped_footer,
 };
 use super::keys::{Global, Key, global};
 use super::screens::intake::not_ready;
@@ -21,7 +21,7 @@ use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
 use ratatui::Frame;
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 use std::time::{Duration, Instant};
@@ -676,6 +676,14 @@ impl Shell {
         }
     }
 
+    /// The hints the help bar shows now: an overlay's, else the top screen's modal's, else
+    /// the top screen's own. Input: none. Output: the hints in order.
+    fn bar_hints(&self) -> Vec<Hint> {
+        self.overlay_hints()
+            .or_else(|| self.top().modal(&self.ctx).map(|(_, hints)| hints))
+            .unwrap_or_else(|| self.top().hints(&self.ctx))
+    }
+
     fn overlay_hints(&self) -> Option<Vec<Hint>> {
         let arrows = format!("{}{}", self.ctx.glyphs.left, self.ctx.glyphs.right);
         let vertical = format!("{}{}", self.ctx.glyphs.up, self.ctx.glyphs.down);
@@ -858,10 +866,19 @@ impl Shell {
             too_small(frame.buffer_mut(), area, &self.ctx.theme);
             return;
         }
-        let [head, rule, body, message, help] = bands(area);
         let width = area.width as usize;
         let theme = self.ctx.theme.clone();
         let glyphs = self.ctx.glyphs;
+        let pending = self.ctx.store.pending();
+        let rows_max = if self.top().wraps_hints() {
+            HINT_ROWS_MAX
+        } else {
+            1
+        };
+        let bar_rows =
+            wrapped_footer(width, &self.bar_hints(), pending, &theme, glyphs, rows_max).len();
+        self.ctx.hint_rows = u16::try_from(bar_rows).expect("the bar has at most three rows");
+        let [head, rule, body, message, help] = bands(area, self.ctx.hint_rows);
         let top = self.stack.last().expect("the stack is never empty");
         let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
         let status = with_waiting(waiting, top.status(&self.ctx), &theme);
@@ -885,21 +902,10 @@ impl Shell {
             draw_lines(frame.buffer_mut(), message, &[note.line(&theme, glyphs)]);
         }
         let screen_modal = self.top().modal(&self.ctx);
-        let hints = self
-            .overlay_hints()
-            .or_else(|| screen_modal.as_ref().map(|(_, hints)| hints.clone()))
-            .unwrap_or_else(|| self.top().hints(&self.ctx));
-        draw_lines(
-            frame.buffer_mut(),
-            help,
-            &[footer(
-                width,
-                &hints,
-                self.ctx.store.pending(),
-                &theme,
-                glyphs,
-            )],
-        );
+        let bar = wrapped_footer(width, &self.bar_hints(), pending, &theme, glyphs, bar_rows);
+        let shown = u16::try_from(bar.len()).expect("the bar has at most three rows");
+        let help = Rect::new(help.x, help.y + help.height - shown, help.width, shown);
+        draw_lines(frame.buffer_mut(), help, &bar);
         let mut cursor = if screen_modal.is_some() || self.overlay.is_some() {
             None
         } else {

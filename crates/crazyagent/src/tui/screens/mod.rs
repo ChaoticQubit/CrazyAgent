@@ -283,6 +283,12 @@ pub trait Screen {
     /// Keys for the help line, in priority order.
     fn hints(&self, ctx: &Ctx) -> Vec<Hint>;
 
+    /// True when the help line wraps to more rows instead of dropping hints, as every
+    /// settings screen's does, so each key stays in view from 80 columns up.
+    fn wraps_hints(&self) -> bool {
+        false
+    }
+
     /// Keys for "This screen" in the Keys overlay; the help line by default.
     fn keys(&self, ctx: &Ctx) -> Vec<Hint> {
         self.hints(ctx)

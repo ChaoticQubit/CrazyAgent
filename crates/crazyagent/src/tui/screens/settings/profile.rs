@@ -42,6 +42,10 @@ impl ProfilePage {
 }
 
 impl Screen for ProfilePage {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Profile".into()]
     }

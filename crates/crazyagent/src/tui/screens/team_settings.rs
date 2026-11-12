@@ -66,6 +66,10 @@ impl TeamSettings {
 }
 
 impl Screen for TeamSettings {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec![self.name.clone(), "Team settings".into()]
     }

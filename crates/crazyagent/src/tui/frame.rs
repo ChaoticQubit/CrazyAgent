@@ -169,7 +169,98 @@ pub fn footer(
     theme: &Theme,
     glyphs: &Glyphs,
 ) -> Line<'static> {
-    let separator = if limit >= 100 { "   " } else { "  " };
+    let separator = hint_separator(limit);
+    let right = help_right(pending, separator, theme);
+    let mut used = 1;
+    let mut spans = vec![Span::raw(" ")];
+    for (index, item) in hints.iter().enumerate() {
+        let cost = hint_cost(index, item, separator);
+        if used + cost + right.width() + 2 > limit {
+            break;
+        }
+        push_hint(&mut spans, index, item, separator, theme);
+        used += cost;
+    }
+    row(limit, Line::from(spans), right, glyphs)
+}
+
+/// The most rows a wrapping help bar takes from the body.
+pub const HINT_ROWS_MAX: usize = 3;
+
+/// The help bar of a settings screen, which wraps instead of dropping hints: hints fill
+/// each row left to right and go on to the next row; the last row is `footer`, with the
+/// badge and `? Help` and at least one hint. Inputs: width, hints, pending count, theme,
+/// glyphs and the most rows. Output: one to `rows_max` lines, one line when all fit.
+pub fn wrapped_footer(
+    limit: usize,
+    hints: &[Hint],
+    pending: u64,
+    theme: &Theme,
+    glyphs: &Glyphs,
+    rows_max: usize,
+) -> Vec<Line<'static>> {
+    assert!((1..=HINT_ROWS_MAX).contains(&rows_max));
+    let separator = hint_separator(limit);
+    let right_width = help_right(pending, separator, theme).width();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while lines.len() + 1 < rows_max && start + 1 < hints.len() {
+        let rest = &hints[start..];
+        let all: usize = rest
+            .iter()
+            .enumerate()
+            .map(|(index, item)| hint_cost(index, item, separator))
+            .sum();
+        if 1 + all + right_width + 2 <= limit {
+            break;
+        }
+        let mut used = 1;
+        let mut taken = 0;
+        for (index, item) in rest.iter().enumerate() {
+            let cost = hint_cost(index, item, separator);
+            if taken > 0 && used + cost + 1 > limit {
+                break;
+            }
+            used += cost;
+            taken += 1;
+        }
+        let taken = taken.min(rest.len() - 1);
+        assert!(taken >= 1);
+        let mut spans = vec![Span::raw(" ")];
+        for (index, item) in rest[..taken].iter().enumerate() {
+            push_hint(&mut spans, index, item, separator, theme);
+        }
+        lines.push(row(limit, Line::from(spans), Line::default(), glyphs));
+        start += taken;
+    }
+    lines.push(footer(limit, &hints[start..], pending, theme, glyphs));
+    assert!(!lines.is_empty() && lines.len() <= rows_max);
+    lines
+}
+
+fn hint_separator(limit: usize) -> &'static str {
+    if limit >= 100 { "   " } else { "  " }
+}
+
+fn hint_cost(index: usize, item: &Hint, separator: &str) -> usize {
+    usize::from(index > 0) * separator.len() + width(&item.key) + 1 + width(&item.label)
+}
+
+fn push_hint(
+    spans: &mut Vec<Span<'static>>,
+    index: usize,
+    item: &Hint,
+    separator: &'static str,
+    theme: &Theme,
+) {
+    if index > 0 {
+        spans.push(Span::raw(separator));
+    }
+    spans.push(Span::styled(item.key.clone(), theme.heading));
+    spans.push(Span::raw(format!(" {}", item.label)));
+}
+
+fn help_right(pending: u64, separator: &'static str, theme: &Theme) -> Line<'static> {
     let mut right = Vec::new();
     if pending > 0 {
         let noun = if pending == 1 {
@@ -182,23 +273,7 @@ pub fn footer(
     }
     right.push(Span::styled("?", theme.heading));
     right.push(Span::raw(" Help "));
-    let right = Line::from(right);
-    let mut used = 1;
-    let mut spans = vec![Span::raw(" ")];
-    for (index, item) in hints.iter().enumerate() {
-        let cost =
-            usize::from(index > 0) * separator.len() + width(&item.key) + 1 + width(&item.label);
-        if used + cost + right.width() + 2 > limit {
-            break;
-        }
-        if index > 0 {
-            spans.push(Span::raw(separator));
-        }
-        spans.push(Span::styled(item.key.clone(), theme.heading));
-        spans.push(Span::raw(format!(" {}", item.label)));
-        used += cost;
-    }
-    row(limit, Line::from(spans), right, glyphs)
+    Line::from(right)
 }
 
 /// One tab or section in a tab strip.
@@ -323,17 +398,23 @@ pub fn draw_lines(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>]) {
 }
 
 /// The five bands of every screen.
-/// Input: the full frame area. Output: header, rule, body, message and help
-/// areas.
-pub fn bands(area: Rect) -> [Rect; 5] {
-    assert!(area.height >= 4);
+/// Inputs: the full frame area and the help bar's rows, 1 to `HINT_ROWS_MAX`. Output:
+/// header, rule, body, message and help areas; the help area holds the bar's rows.
+pub fn bands(area: Rect, help_rows: u16) -> [Rect; 5] {
+    assert!((1..=HINT_ROWS_MAX as u16).contains(&help_rows));
+    assert!(area.height >= 3 + help_rows);
     let line = |y: u16| Rect::new(area.x, y, area.width, 1);
     [
         line(area.y),
         line(area.y + 1),
-        Rect::new(area.x, area.y + 2, area.width, area.height - 4),
-        line(area.y + area.height - 2),
-        line(area.y + area.height - 1),
+        Rect::new(area.x, area.y + 2, area.width, area.height - 3 - help_rows),
+        line(area.y + area.height - 1 - help_rows),
+        Rect::new(
+            area.x,
+            area.y + area.height - help_rows,
+            area.width,
+            help_rows,
+        ),
     ]
 }
 
@@ -544,6 +625,42 @@ mod tests {
             )
         );
         assert!(plain(&footer(20, &hints, 0, &theme(), &UNICODE)).ends_with("? Help "));
+    }
+
+    /// A wrapped help line is the one-row line while every hint fits, and with one row
+    /// allowed. Past the width, the first row takes the hints that fit and the last row
+    /// keeps `? Help` with at least one hint (backlog 27).
+    #[test]
+    fn a_wrapped_help_line_keeps_every_hint_and_stays_one_row_when_all_fit() {
+        let hints = [
+            hint("n", "New project"),
+            hint("Enter", "Open"),
+            hint("s", "Settings"),
+            hint("/", "Filter"),
+            hint("Ctrl-K", "Go to"),
+            hint("Ctrl-Q", "Quit"),
+        ];
+        let theme = theme();
+        let wrapped = |limit: usize, rows_max: usize| -> Vec<String> {
+            wrapped_footer(limit, &hints, 0, &theme, &UNICODE, rows_max)
+                .iter()
+                .map(plain)
+                .collect()
+        };
+        let one = |limit: usize| plain(&footer(limit, &hints, 0, &theme, &UNICODE));
+        assert_eq!(wrapped(120, HINT_ROWS_MAX), [one(120)]);
+        assert_eq!(wrapped(80, 1), [one(80)]);
+        assert_eq!(
+            wrapped(80, HINT_ROWS_MAX),
+            [
+                format!(
+                    " n New project  Enter Open  s Settings  / Filter  Ctrl-K Go to{}",
+                    " ".repeat(18)
+                ),
+                format!(" Ctrl-Q Quit{}? Help ", " ".repeat(61)),
+            ]
+        );
+        assert_eq!(wrapped(80, HINT_ROWS_MAX).len(), 2);
     }
 
     #[test]

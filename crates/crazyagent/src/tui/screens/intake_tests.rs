@@ -1167,7 +1167,7 @@ async fn first_run_setup_continues_without_installing_and_home_lists_what_is_mis
     let mut connection = engine.connect();
     assert_eq!(pump(&mut shell, &mut connection).await, ["settings"]);
     let rows = render(&mut shell, 80, 24);
-    let help = rows.last().unwrap();
+    let help = crate::tui::screens::settings_accounts::tests::bar_rows(&rows).join("\n");
     assert!(help.contains("Enter Install and continue"), "{rows:#?}");
     assert!(help.contains("c Continue without installing"), "{rows:#?}");
 

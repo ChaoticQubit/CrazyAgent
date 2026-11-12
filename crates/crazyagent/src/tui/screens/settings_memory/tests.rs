@@ -182,7 +182,11 @@ fn memory_frames_match_the_design() {
     with_writes(
         &mut expected,
         80,
-        " Enter View  d Delete  a Add  w Agent memory writes  i Import  / Filter  ? Help ",
+        " Shift-←→ Sections  Esc Home  p Where agents save                        ? Help ",
+    );
+    expected[22] = format!(
+        "{:<80}",
+        " Enter View  d Delete  a Add  w Agent memory writes  i Import  / Filter"
     );
     assert_eq!(render(&mut shell, 80, 24), expected);
 
@@ -194,7 +198,11 @@ fn memory_frames_match_the_design() {
     with_writes(
         &mut expected,
         120,
-        " Enter View   d Delete   a Add   w Agent memory writes   i Import   / Filter   Shift-←→ Sections   Esc Home      ? Help ",
+        &format!("{:<113}? Help ", " p Where agents save"),
+    );
+    expected[34] = format!(
+        "{:<120}",
+        " Enter View   d Delete   a Add   w Agent memory writes   i Import   / Filter   Shift-←→ Sections   Esc Home"
     );
     assert_eq!(render(&mut shell, 120, 36), expected);
 }
@@ -203,8 +211,12 @@ fn memory_frames_match_the_design() {
 fn no_memories_shows_how_they_arrive() {
     let mut shell = Shell::with(memory_ctx(80, 24), Box::new(Memory::with(Vec::new())));
     let mut expected = fixture("memory-empty-80", &[]);
+    expected[22] = format!(
+        "{:<80}",
+        " a Add  w Agent memory writes  i Import  Shift-←→ Sections  Esc Home"
+    );
     expected[23] =
-        " a Add  w Agent memory writes  i Import  Shift-←→ Sections  Esc Home     ? Help ".into();
+        " p Where agents save                                                     ? Help ".into();
     assert_eq!(render(&mut shell, 80, 24), expected);
 }
 
