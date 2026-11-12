@@ -426,6 +426,35 @@ fn an_owner_node_and_the_app_node_both_present_picks_the_owners() {
 }
 
 #[test]
+fn an_owner_node_or_npm_alone_never_pairs_with_the_app_install_and_the_app_pair_is_used_whole() {
+    use crate::setup::{Dependency, Installer, Version};
+    let root = root();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("source");
+    tree(&source, TOP, "v26.13.1");
+    let (archive, sha256) = pack(work.path(), &source);
+    install_pin(root.path(), &pin_for(&archive, &sha256)).unwrap();
+    let owner = work.path().join("owner");
+    let setup_bin = root.path().join("setup/bin");
+    let both = places(vec![owner.clone(), setup_bin.clone()]);
+    let engine_pair = Some(Usable {
+        node: setup_bin.join("node"),
+        real_node: folder(root.path()).join("bin/node").canonicalize().unwrap(),
+        npm: setup_bin.join("npm"),
+    });
+    script(&owner.join("node"), "v22.11.0");
+    assert_eq!(usable(&both), engine_pair, "an owner node without npm");
+    let installer = PinnedInstaller::with_paths(root.path(), Vec::new()).with_places(both.clone());
+    assert_eq!(
+        installer.find(Dependency::Node),
+        Ok(Some(Version::parse(NODE_VERSION).unwrap()))
+    );
+    std::fs::remove_file(owner.join("node")).unwrap();
+    npm_launcher(&owner);
+    assert_eq!(usable(&both), engine_pair, "an owner npm without node");
+}
+
+#[test]
 fn the_engine_npm_prefix_sits_in_the_setup_folder_the_resolver_and_harness_finding_accept() {
     let root = Path::new("/engine");
     assert_eq!(
