@@ -559,6 +559,74 @@ fn columns(scope: &Scope) -> (&'static str, &str) {
     }
 }
 
+/// The most harnesses one removed project may hold model choices for; more means a
+/// broken store.
+const FORGOTTEN_HARNESSES_MAX: usize = 64;
+
+/// Clears a removed project's model choices (DEC-150 F6): its project-scope values go and
+/// every slot item of each harness it ever saved moves on a version, so a project added
+/// again under the same id inherits nothing and a screen read before cannot save onto it.
+/// Takes the removal's immediate transaction and the project. Returns
+/// `model_choice_unavailable` when the store cannot be read or written.
+pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    if exists(tx)? {
+        tx.execute(
+            "DELETE FROM model_choices WHERE scope = 'project' AND project = ?1",
+            [project.as_str()],
+        )
+        .map_err(unavailable)?;
+    }
+    let versions: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+             AND name = 'versioned_items')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !versions {
+        return Ok(());
+    }
+    let marker = format!(":project:{}:", project.as_str());
+    let items: Vec<String> = tx
+        .prepare(
+            "SELECT item FROM versioned_items
+             WHERE substr(item, 1, length(?1)) = ?1 AND instr(item, ?2) > 0",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![format!("{}:", super::ITEM_PREFIX), marker], |row| {
+                    row.get(0)
+                })?
+                .collect()
+        })
+        .map_err(unavailable)?;
+    let scope = Scope::Project(project.clone());
+    let mut harnesses = std::collections::BTreeSet::new();
+    for item in &items {
+        let Some((harness, tail)) = item
+            .strip_prefix(super::ITEM_PREFIX)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .and_then(|rest| rest.split_once(':'))
+        else {
+            continue;
+        };
+        if Slot::ALL
+            .iter()
+            .any(|slot| tail == format!("project:{}:{}", project.as_str(), slot.as_str()))
+        {
+            harnesses.insert(harness.to_owned());
+        }
+    }
+    assert!(harnesses.len() <= FORGOTTEN_HARNESSES_MAX);
+    for harness in &harnesses {
+        for slot in Slot::ALL {
+            versioned::retire(tx, &item(harness, &scope, slot)?)?;
+        }
+    }
+    Ok(())
+}
+
 fn exists(db: &Connection) -> Result<bool, EngineError> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'

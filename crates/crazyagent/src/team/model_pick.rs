@@ -420,6 +420,28 @@ pub(crate) fn refused(
     .map_err(super::error)
 }
 
+/// Drops a removed project's model records (DEC-150 F6): its tasks' pinned picks, its
+/// agents' started models, its told fallbacks and its accounts' model refusals, so a
+/// project added again under the same id starts from none. Takes the removal's
+/// transaction and the project. Returns a SQLite failure.
+pub(crate) fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    for name in [
+        "team_task_models",
+        "team_agent_models",
+        "team_model_fallbacks",
+        "team_model_refusals",
+    ] {
+        if table(tx, name)? {
+            tx.execute(
+                &format!("DELETE FROM {name} WHERE project=?1"),
+                [project.as_str()],
+            )
+            .map_err(super::error)?;
+        }
+    }
+    Ok(())
+}
+
 fn table(db: &Connection, name: &str) -> Result<bool, EngineError> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
