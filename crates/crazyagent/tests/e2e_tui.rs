@@ -1925,6 +1925,9 @@ fn the_tui_overview_needs_you_lists_the_projects_pending_items_and_enter_opens_o
 
     let pty = Pty::launch(tmux, &engine.socket());
     reach_home(&pty, |screen| at_home(screen, PROJECT));
+    pty.until("the research waiting for a pool is counted", |screen| {
+        header_row(screen).contains("1 unread, 1 pending")
+    });
     let db = questions::open(engine.path()).unwrap();
     questions::raise(
         &db,
