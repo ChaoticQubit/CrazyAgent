@@ -326,17 +326,19 @@ fn harness_words(program: &Path) -> Result<Vec<String>, RunError> {
     Ok(words)
 }
 
-/// Lets a research harness run in `sandbox`: its real file, the Node folders of an npm
-/// install ([`ProjectSandbox::allow_node_for`]) and the interpreters the tool resolver finds
-/// for it ([`ProjectSandbox::allow_interpreters`]), the same grants a team agent gets.
-/// Inputs: the sandbox and the harness's real file. Output: the sandbox, or its refusal.
+/// Lets a research harness run in `sandbox`, only once the tool resolver lets it launch
+/// ([`crate::harnesses::interactive::launch_tool`]): the real file that starts, the Node
+/// folders of an npm install ([`ProjectSandbox::allow_node_for`]) and its interpreters
+/// ([`ProjectSandbox::allow_interpreters`]), the same grants a team agent gets. Inputs: the
+/// sandbox and the harness's real file. Output: the sandbox, or the resolver's owner line.
 fn allow_harness(sandbox: ProjectSandbox, program: &Path) -> Result<ProjectSandbox, RunError> {
-    let mut sandbox = sandbox.allow_exec(program)?.allow_node_for(program)?;
     let places = crate::tools::Places::from_environment(None);
-    if let Ok(resolved) = crate::tools::resolve_entry(program, &places) {
-        sandbox = sandbox.allow_interpreters(&resolved)?;
-    }
-    Ok(sandbox)
+    let launched = crate::harnesses::interactive::launch_tool(program, &places)
+        .map_err(|problem| RunError::Invalid(problem.0))?;
+    let sandbox = sandbox
+        .allow_exec(&launched.program)?
+        .allow_node_for(&launched.program)?;
+    Ok(sandbox.allow_interpreters(&launched)?)
 }
 
 /// Ends every research pane an earlier engine left in `host`, with every process its harness

@@ -550,20 +550,33 @@ pub(crate) fn launch_words(executable: &Path) -> Result<Vec<String>, LaunchError
     Ok(words)
 }
 
-/// The harness the engine starts for a pinned file, as the tool resolver reads it
-/// ([`crate::tools::resolve_entry`]). A file the resolver cannot read stays as given.
-/// Inputs: the harness file and the places. Output: the tool, or the resolver's owner line
-/// when its interpreter is missing.
+/// The harness the engine starts for a pinned file, only after the tool resolver's entry
+/// checks ([`crate::tools::resolve_entry`]). A version-manager shim starts the real install
+/// its name resolves to, else the shim itself while agents and other users cannot change
+/// it. Inputs: the harness file and the places. Output: the tool, or the resolver's owner
+/// line for why it cannot run.
 pub(crate) fn launch_tool(
     executable: &Path,
     places: &crate::tools::Places,
 ) -> Result<crate::tools::Resolved, LaunchError> {
-    match crate::tools::resolve_entry(executable, places) {
-        Ok(resolved) => Ok(resolved),
-        Err(missing) if missing.reason == crate::tools::Reason::NeedsInterpreter => {
-            Err(LaunchError(missing.line(), None))
+    let refused = |missing: crate::tools::Missing| LaunchError(missing.line(), None);
+    if !super::is_shim(places.home(), executable) {
+        return crate::tools::resolve_entry(executable, places).map_err(refused);
+    }
+    let name = executable
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default();
+    match crate::tools::resolve(name, places) {
+        Ok(found) => Ok(found),
+        Err(_)
+            if executable.is_absolute()
+                && !places.agent_writable(executable)
+                && crate::service::changeable_by_others(executable).is_none() =>
+        {
+            Ok(as_given(executable))
         }
-        Err(_) => Ok(as_given(executable)),
+        Err(missing) => Err(refused(missing)),
     }
 }
 

@@ -212,7 +212,7 @@ impl Places {
     /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]) or inside
     /// the engine's data folder outside its `setup` folder. Input: the path. Output: the
     /// answer.
-    fn agent_writable(&self, path: &Path) -> bool {
+    pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
         std::iter::once(path).chain(real.as_deref()).any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
