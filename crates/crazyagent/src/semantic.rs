@@ -25,7 +25,9 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// What agents' search ranks with: full text only, or full text fused with the vectors of
@@ -90,6 +92,17 @@ pub const SENDS: [&str; 4] = [
     "Memories",
     "Search queries",
 ];
+
+/// How far the chosen plugin has embedded the indexed sessions and memories, for the
+/// Search settings page. Inputs: the connection and the engine root. Output: the counts;
+/// this stub reports none until the L3 vectors (feat/v3-hybrid) land.
+pub fn progress(connection: &Connection, root: &Path) -> Progress {
+    let _ = (connection, root);
+    Progress {
+        embedded: 0,
+        total: 0,
+    }
+}
 
 /// The search order after fusing full text with vectors: chunk ids best first, and a note
 /// the answer carries when the vector part could not be used.
