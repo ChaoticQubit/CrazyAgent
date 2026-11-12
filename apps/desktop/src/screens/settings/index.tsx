@@ -2,6 +2,7 @@ import { useLayoutEffect, type ReactNode } from "react";
 import { PageHeader, formatRoute } from "../../ui";
 import { SETTINGS_TABS, isUserMenuTab, type ListedSettingsTab, type SettingsAction } from "../../ui/router";
 import { Accounts } from "./accounts";
+import { AppPluginsSettings } from "./app-plugins";
 import { ChecksSettings } from "./checks";
 import { FinishedAgentsSettings } from "./finished-agents";
 import { Harnesses } from "./harnesses";
@@ -13,6 +14,7 @@ import { Pools } from "./pools";
 import { QuittingSettings } from "./quitting";
 import { ProcessSettings } from "../process";
 import { SandboxSettingsTab } from "./sandbox";
+import { SearchSettings } from "./search";
 import { TeamAlertsSettings } from "./team-alerts";
 import { TicketSettings } from "./tickets";
 import "../project/projects.css";
@@ -36,6 +38,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   ] },
   { title: "App", items: [
     { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" },
+    { id: "app-plugins", label: "App plugins" }, { id: "search", label: "Search" },
   ] },
 ];
 
@@ -94,6 +97,8 @@ export function Settings({ tab, action, account, skill, harness }: { tab: Listed
       : tab === "finished" ? <FinishedAgentsSettings />
       : tab === "quit" ? <QuittingSettings />
       : tab === "master" ? <MasterSettings />
+      : tab === "app-plugins" ? <AppPluginsSettings />
+      : tab === "search" ? <SearchSettings />
       : <TeamAlertsSettings />}
   </SettingsFrame>;
 }
