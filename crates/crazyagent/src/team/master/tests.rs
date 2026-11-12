@@ -3068,13 +3068,21 @@ fn a_reply_to_a_finished_worker_wakes_it_and_a_refused_wake_stores_no_reply() {
 }
 
 /// A message to the handle the master gave a task that has not started names that task
-/// instead of "no agent is called" (F16, DM "@classifier-storage not recognized"), and the
-/// master reads the project's retired handles in inspect_work (F10).
+/// instead of "no agent is called" (F16, DM "@classifier-storage not recognized"), even
+/// when an earlier agent held that handle and moved on to another job: the master gave the
+/// name to the task, so the registry does not redirect it to the earlier holder.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_waiting_task_s_handle_is_named_as_waiting_and_retired_handles_are_listed() {
+fn a_waiting_task_s_handle_is_named_as_waiting_even_after_an_earlier_holder_moved_on() {
     let mut fixture = Fixture::new();
     master_row(&fixture);
+    let earlier = named_sub(&fixture, "classifier-storage", "working");
+    let project = ProjectId::new(PROJECT).unwrap();
+    assert!(
+        super::super::names::assign_role(&fixture.connection, &project, earlier, "storage-api")
+            .unwrap()
+            .is_ok()
+    );
     fixture
         .connection
         .execute(
@@ -3107,16 +3115,7 @@ fn a_waiting_task_s_handle_is_named_as_waiting_and_retired_handles_are_listed() 
         .connection
         .query_row("SELECT COUNT(*) FROM coord_messages", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(count, 0);
-    let gone = named_sub(&fixture, "core-policy", "stopped");
-    no_worktree(&fixture, gone);
-    let label = super::super::events::label(&fixture.connection, gone).unwrap();
-    let (said, refused) = as_master(&mut fixture, tool::INSPECT_WORK_TOOL, json!({}));
-    assert!(!refused, "{said}");
-    assert!(
-        said.contains(&format!("Retired handles: these agents finished and their worktrees were cleaned up after their work landed, so a message or wake to one is refused:\n- {label}")),
-        "{said}"
-    );
+    assert_eq!(count, 0, "nothing reaches the earlier holder");
 }
 
 /// Runs git in `dir` with an isolated home and no system config, as the owner or an agent

@@ -781,16 +781,23 @@ fn a_woken_agent_reclaims_its_names_and_never_shares_a_live_handle() {
 fn an_earlier_handle_reaches_its_agent_after_a_new_job_or_a_rename_until_another_takes_it() {
     let (_directory, connection) = engine();
     let alpha = project("alpha");
+    let started = |task: i64| {
+        connection
+            .execute("UPDATE team_tasks SET status='running' WHERE id=?1", [task])
+            .unwrap();
+    };
     let sub = agent(&connection, "alpha", "sub", "working");
     let first = task(&connection, "alpha");
     give_role(&connection, &alpha, first, "classifier-storage", 0).unwrap();
     assign_task_role(&connection, &alpha, sub, first).unwrap();
+    started(first);
     let second = task(&connection, "alpha");
     give_role(&connection, &alpha, second, "storage-api", 0).unwrap();
     assert_eq!(
         assign_task_role(&connection, &alpha, sub, second).unwrap(),
         Some("storage-api".into())
     );
+    started(second);
     assert_eq!(
         resolve(&connection, &alpha, "@classifier-storage").unwrap(),
         Some(sub),
@@ -873,6 +880,23 @@ fn a_waiting_task_s_role_names_that_task_until_it_starts() {
         waiting_task(&connection, &project("beta"), "@classifier-storage").unwrap(),
         None
     );
+    let earlier = agent(&connection, "alpha", "sub", "working");
+    assign_role(&connection, &alpha, earlier, "classifier-storage")
+        .unwrap()
+        .unwrap();
+    assign_role(&connection, &alpha, earlier, "storage-api")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolve(&connection, &alpha, "@classifier-storage").unwrap(),
+        None,
+        "the waiting task the master gave the handle outranks its earlier holder"
+    );
+    stop(&connection, earlier);
+    assert_eq!(
+        resolve_finished(&connection, &alpha, "@classifier-storage").unwrap(),
+        None
+    );
     connection
         .execute(
             "UPDATE team_tasks SET status='running' WHERE id=?1",
@@ -883,50 +907,11 @@ fn a_waiting_task_s_role_names_that_task_until_it_starts() {
         waiting_task(&connection, &alpha, "@classifier-storage").unwrap(),
         None
     );
-}
-
-/// A retired handle is one of a finished sub-agent whose worktree is gone and that no live
-/// agent holds; the listing is bounded (F10, F16).
-#[test]
-fn retired_handles_are_finished_agents_without_a_worktree_that_no_live_agent_holds() {
-    let (_directory, connection) = engine();
-    let alpha = project("alpha");
-    let worktree = |agent: i64| {
-        connection
-            .execute(
-                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,'alpha','.','.','.git')",
-                [agent],
-            )
-            .unwrap();
-    };
-    let gone = agent(&connection, "alpha", "sub", "working");
-    assign_role(&connection, &alpha, gone, "core-policy")
-        .unwrap()
-        .unwrap();
-    stop(&connection, gone);
-    let kept = agent(&connection, "alpha", "sub", "working");
-    assign_role(&connection, &alpha, kept, "docs")
-        .unwrap()
-        .unwrap();
-    worktree(kept);
-    stop(&connection, kept);
-    let running = agent(&connection, "alpha", "sub", "working");
-    assign_role(&connection, &alpha, running, "web")
-        .unwrap()
-        .unwrap();
     assert_eq!(
-        retired(&connection, &alpha).unwrap(),
-        vec![("core-policy".to_owned(), gone)]
+        resolve_finished(&connection, &alpha, "@classifier-storage").unwrap(),
+        Some(earlier),
+        "once the task started, the registry reaches the earlier holder again"
     );
-    let retaken = agent(&connection, "alpha", "sub", "working");
-    assign_role(&connection, &alpha, retaken, "core-policy")
-        .unwrap()
-        .unwrap();
-    assert!(
-        retired(&connection, &alpha).unwrap().is_empty(),
-        "a handle a live agent holds again is not retired"
-    );
-    assert!(retired(&connection, &project("beta")).unwrap().is_empty());
 }
 
 /// The registry keeps at most `HANDLES_KEPT_MAX` handles per project, the newest, and none

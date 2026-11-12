@@ -40,8 +40,6 @@ const LIVE: &str = "a.status IN ('starting','idle','working')";
 const FINISHED: &str = "a.status IN ('stopped','failed')";
 /// The most handles the registry keeps per project, the newest ones (F16).
 pub const HANDLES_KEPT_MAX: usize = 512;
-/// The most retired handles one listing returns.
-pub const RETIRED_LISTED_MAX: usize = 32;
 const WAITING_TASKS_READ_MAX: i64 = 64;
 const WAKING: &str = "EXISTS(SELECT 1 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
      WHERE p.agent=a.id AND t.status IN ('queued','needs_pool'))";
@@ -49,8 +47,7 @@ const SUFFIXES_MAX: usize = PANES_PER_PROJECT_MAX + 2;
 
 const _: () = assert!(PERSONAS.len() > PANES_PER_PROJECT_MAX);
 const _: () = assert!(HANDLE_CHARS_MAX >= 8 && HANDLE_CHARS_MAX < NAME_CHARS_MAX);
-const _: () =
-    assert!(HANDLES_KEPT_MAX >= PANES_PER_PROJECT_MAX && RETIRED_LISTED_MAX <= HANDLES_KEPT_MAX);
+const _: () = assert!(HANDLES_KEPT_MAX >= PANES_PER_PROJECT_MAX);
 
 /// A team sub-agent's stable persona and the role handle of its current job, without the `@`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,10 +443,9 @@ fn remember(
     Ok(())
 }
 
-/// Follows the handle registry for a handle no agent in the wanted state carries now
-/// (F16): the agent that last held it, while it is a sub-agent of the project in that
-/// state, so whatever was sent to a renamed agent or one reused for a later job reaches
-/// it. The registry maps a handle straight to its agent, so there is no chain to follow.
+/// Follows the handle registry for a handle no agent in the wanted state carries (F16): its
+/// last holder, a renamed or reused sub-agent in that state, one hop with no chain. A task
+/// waiting under that handle outranks the earlier holder, since the master gave it the name.
 /// Takes the connection, project, the handle without its `@` and `LIVE` or `FINISHED`.
 /// Returns the agent, or None.
 fn redirected(
@@ -459,6 +455,9 @@ fn redirected(
     state: &str,
 ) -> Result<Option<i64>, EngineError> {
     assert!(state == LIVE || state == FINISHED);
+    if waiting_task(connection, project, handle)?.is_some() {
+        return Ok(None);
+    }
     connection
         .query_row(
             &format!(
@@ -509,38 +508,6 @@ pub fn waiting_task(
         .into_iter()
         .find(|(_, role)| handle(role).as_deref() == Some(wanted.as_str()))
         .map(|(task, _)| task))
-}
-
-/// Lists the project's retired handles (F10, F16): those of sub-agents that finished and
-/// whose worktree is gone, so they cannot wake there, and that no live agent holds now.
-/// Newest first, at most `RETIRED_LISTED_MAX`. Takes the connection and project. Returns
-/// each handle with its agent id.
-pub fn retired(
-    connection: &Connection,
-    project: &ProjectId,
-) -> Result<Vec<(String, i64)>, EngineError> {
-    let mut statement = connection
-        .prepare(&format!(
-            "SELECT n.handle,a.id FROM team_names n JOIN team_agents a ON a.id=n.agent
-             WHERE n.project=?1 AND a.project=?1 AND a.role='sub' AND {FINISHED}
-               AND n.handle IS NOT NULL
-               AND NOT EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id)
-               AND NOT EXISTS(SELECT 1 FROM team_names m JOIN team_agents b ON b.id=m.agent
-                              WHERE m.project=?1 AND b.project=?1 AND m.handle=n.handle
-                                AND b.status IN ('starting','idle','working'))
-             ORDER BY COALESCE(a.stopped_ms,a.heartbeat_ms) DESC, a.id DESC LIMIT ?2"
-        ))
-        .map_err(error)?;
-    let found = statement
-        .query_map(
-            params![project.as_str(), RETIRED_LISTED_MAX as i64],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .map_err(error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(error)?;
-    assert!(found.len() <= RETIRED_LISTED_MAX);
-    Ok(found)
 }
 
 /// Gives a sub-agent that starts again its names back (DEC-102): its persona while no other

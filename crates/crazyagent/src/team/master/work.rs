@@ -314,22 +314,6 @@ pub(super) fn inspect_work(
         }
         sections.push(format!("Overlapping claims:\n{}", lines.join("\n")));
     }
-    if master || !led.is_empty() {
-        let retired = crate::team::names::retired(connection, project)?;
-        if !retired.is_empty() {
-            let mut lines = Vec::with_capacity(retired.len());
-            for (_, id) in &retired {
-                lines.push(format!(
-                    "- {}",
-                    crate::team::events::label(connection, *id)?
-                ));
-            }
-            sections.push(format!(
-                "Retired handles: these agents finished and their worktrees were cleaned up after their work landed, so a message or wake to one is refused:\n{}",
-                lines.join("\n")
-            ));
-        }
-    }
     if master {
         sections.push(match crate::team::events::status(connection, project) {
             Ok(status) => format!("The team:\n{}", status.text()),
