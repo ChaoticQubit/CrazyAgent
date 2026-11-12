@@ -5621,6 +5621,7 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
+            crate::landing::tell_main_moved(&self.connection, project, agent);
             let (waiting, carried) = match self.workers[&agent].fresh {
                 Some(started) if prompt == super::master::WAKE_TASK => {
                     crate::coord::delivery::next_turn_unread(&self.connection, agent, started)?

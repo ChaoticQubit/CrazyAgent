@@ -113,6 +113,7 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_stale" }), "These changes moved on since you opened them. Review them again, then accept.");
   assert.equal(client.changesRefusal({ code: "changes_branch_moved" }), "Your branch moved while these changes were landing, so nothing changed. Review and accept again.");
   assert.equal(client.changesRefusal({ code: "changes_git_unsupported" }), "The Git on this computer can't land changes. Update Git, then try again.");
+  assert.equal(client.changesRefusal({ code: "changes_merge_unsafe" }), "These changes can't land as a merge commit: too many agent commits, or one has hidden characters. Switch Landing to Squash, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_restore_expired" }), "These changes can no longer be restored. Discarded changes are kept for 7 days.");
   assert.equal(client.changesRefusal({ code: "changes_agent_has_pending" }), "This agent has newer changes waiting. Accept or discard those first.");
   assert.equal(client.changesRefusal({ code: "changes_agent_busy" }), "The agent is working right now. Try again when it finishes.");

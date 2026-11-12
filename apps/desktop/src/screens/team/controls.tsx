@@ -1,8 +1,8 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandingMode, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
+import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, LandingMode, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { IconName, SelectOption } from "../../ui";
 import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
@@ -509,6 +509,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits", Object.is, status);
   const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on", Object.is, status);
   const [reuseIdle, holdReuseIdle] = useHeld<"off" | "on">(status.reuse_idle === "on" ? "on" : "off", Object.is, status);
+  const [landing, holdLanding] = useHeld<LandingMode>(status.landing_mode === "merge" ? "merge" : "squash", Object.is, status);
   const [newFolder, holdNewFolder] = useHeld(status.new_folder_files_max ?? NEW_FOLDER_DEFAULT, Object.is, status);
   const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses), Object.is, status);
   const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates), Object.is, status);
@@ -573,6 +574,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const chooseAskMerge = (choice: "off" | "on") => change(() => setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting", () => holdAskMerge(choice));
   const chooseCatchUp = (choice: "off" | "on") => change(() => setCatchUpMain(projectId, choice), "the catch up with main setting", () => holdCatchUp(choice));
   const chooseReuseIdle = (choice: "off" | "on") => change(() => setReuseIdle(projectId, choice), "the reuse idle agents setting", () => holdReuseIdle(choice));
+  const chooseLanding = (choice: LandingMode) => change(() => setLandingMode(projectId, choice), "the landing setting", () => holdLanding(choice));
   const chooseNewFolder = (files: number) => change(() => setNewFolderLimit(projectId, files), "the new folder limit", () => holdNewFolder(files));
 
   async function saveBackground(choice: BackgroundAtEnd) {
@@ -709,6 +711,12 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             <Segmented label="Catch up with main" value={catchUp} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
               options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
             <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off makes the git the app writes for an agent refuse that command, except a master at Full access, whose git runs everything. Off is a guide, not a lock: nothing checks it later, so landed work can still come in another way.</span>
+          </SettingRow>
+          <SettingRow label="Landing">
+            <span className="set-label" aria-hidden="true">Landing</span>
+            <Segmented label="Landing" value={landing} onValue={(choice) => { if (!busy) void chooseLanding(choice); }}
+              options={[{ value: "squash", label: "Squash" }, { value: "merge", label: "Merge commit" }]} />
+            <span className="tg-terminal-note">Squash lands each accepted change set as one commit. Merge commit keeps every agent commit in your history, so an agent's own git merge crazyagent/main stops conflicting. After each accept, an agent with no unlanded work moves onto the landed main, or is told to when it works in its own copy.</span>
           </SettingRow>
           <SettingRow label="Finished agents">
             <span className="set-label" aria-hidden="true">Finished agents</span>

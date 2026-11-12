@@ -1260,6 +1260,21 @@ async fn desktop_team_reuse_idle(
 }
 
 #[tauri::command]
+async fn desktop_team_landing_mode(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_landing_mode(&id, &mode, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_new_folder_limit(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4552,6 +4567,7 @@ native_commands! {
     desktop_team_master_idle_stop,
     desktop_team_master_live_terminal,
     desktop_team_reuse_idle,
+    desktop_team_landing_mode,
     desktop_team_new_folder_limit,
     desktop_team_coordination,
     desktop_team_harness_mode,

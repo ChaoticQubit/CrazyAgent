@@ -65,6 +65,7 @@ const REFUSALS: Record<string, string> = {
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
   changes_branch_not_above_base: "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
+  changes_merge_unsafe: "These changes can't land as a merge commit: too many agent commits, or one has hidden characters. Switch Landing to Squash, then accept again.",
   changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
   changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
   changes_restore_expired: "These changes can no longer be restored. Discarded changes are kept for 7 days.",

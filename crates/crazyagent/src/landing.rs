@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
+mod ancestry;
+#[cfg(unix)]
 mod clone;
 #[cfg(unix)]
 mod diff;
@@ -1654,6 +1656,45 @@ pub(crate) fn conflicts_with_main(
 /// settings files the regeneration was given.
 pub(crate) type AfterRegeneration =
     fn(&Connection, &ChangeSetId, bool, Option<&(PathBuf, PathBuf)>);
+
+/// Moves a sub-agent whose turn just ended and left nothing pending onto the tip of its
+/// Land on branch when its linked worktree carries only landed work (DEC-147.6); a step
+/// that cannot run is logged by its plain code and the agent stays where it is. Inputs:
+/// the store and the turn's workspace. Output: whether it moved.
+pub fn move_after_turn(db: &Connection, workspace: &Workspace) -> bool {
+    #[cfg(unix)]
+    return ancestry::move_after_turn(db, workspace).unwrap_or_else(|error| {
+        eprintln!(
+            "landing_agent_not_moved code={}",
+            crate::protocol::plain_code(&error.0)
+        );
+        false
+    });
+    #[cfg(not(unix))]
+    {
+        let _ = (db, workspace);
+        false
+    }
+}
+
+/// Tells a sub-agent in its own clone, as its next task is handed over, that main moved on
+/// and how to start from it, once per tip (DEC-147.6); a step that cannot run is logged by
+/// its plain code. Inputs: the store, the project and the agent. Output: whether it was told.
+pub fn tell_main_moved(db: &Connection, project: &ProjectId, agent: i64) -> bool {
+    #[cfg(unix)]
+    return ancestry::tell_main_moved(db, project, agent).unwrap_or_else(|error| {
+        eprintln!(
+            "landing_main_moved_not_told code={}",
+            crate::protocol::plain_code(&error.0)
+        );
+        false
+    });
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project, agent);
+        false
+    }
+}
 
 /// Removes what lockfile regenerations a stopped engine left behind (OS-8): their
 /// temporary worktrees with their admin folders and the engine's scratch folders. Input:

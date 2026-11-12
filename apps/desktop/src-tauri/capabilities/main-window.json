@@ -60,6 +60,7 @@
     "allow-desktop-team-master-idle-stop",
     "allow-desktop-team-master-live-terminal",
     "allow-desktop-team-reuse-idle",
+    "allow-desktop-team-landing-mode",
     "allow-desktop-team-new-folder-limit",
     "allow-desktop-team-coordination",
     "allow-desktop-team-harness-mode",

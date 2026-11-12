@@ -840,6 +840,8 @@ export type MasterLands = "merges" | "waits";
 export type CatchUpMain = "on" | "off";
 /** Whether an idle agent of the same lead may take a project's next task, or each new task starts a new agent. */
 export type ReuseIdle = "on" | "off";
+/** How an accepted change set lands on the owner's branch: one squash commit, or a merge commit keeping every agent commit. */
+export type LandingMode = "squash" | "merge";
 
 /** A harness kind the coordination settings are kept for, by its catalog id. */
 export type CoordHarness = "claude-code" | "codex" | "rcli";
@@ -944,6 +946,7 @@ export interface TeamStatus {
   master_live_terminal?: boolean;
   catch_up_main?: CatchUpMain;
   reuse_idle?: ReuseIdle;
+  landing_mode?: LandingMode;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
   message_settings?: MessageSettings;

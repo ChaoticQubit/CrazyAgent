@@ -1557,6 +1557,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_git_unsupported" => {
             "The Git on this computer can't land changes. Update Git, then try again."
         }
+        "changes_merge_unsafe" => {
+            "These changes can't land as a merge commit: too many agent commits, or one has hidden characters. Switch Landing to Squash, then accept again."
+        }
         "changes_restore_expired" => {
             "These changes can no longer be restored. Discarded changes are kept for 7 days."
         }

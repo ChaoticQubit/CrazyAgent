@@ -20,9 +20,9 @@ use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, R
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
-    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle, SwitchApply,
-    SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
-    TeamStatus, TeamTask,
+    CoordinationView, DelegationPath, LandingMode, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle,
+    SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent,
+    TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::{AccountRow, account_label};
@@ -182,9 +182,10 @@ pub(in crate::tui) enum CoordRow {
     Counted,
     Skills(SkillRole),
     ReuseIdle,
+    LandingMode,
 }
 
-const COORD_ROWS: [CoordRow; 17] = [
+const COORD_ROWS: [CoordRow; 18] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::Mode(HarnessKind::Codex),
@@ -202,6 +203,7 @@ const COORD_ROWS: [CoordRow; 17] = [
     CoordRow::Skills(SkillRole::Lead),
     CoordRow::Skills(SkillRole::Worker),
     CoordRow::ReuseIdle,
+    CoordRow::LandingMode,
 ];
 const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
 const OVERLAPS: [Overlaps; 4] = [
@@ -2529,6 +2531,24 @@ impl TeamView {
                 };
                 (TeamAction::ReuseIdle { project_id, mode }, done.to_owned())
             }
+            CoordRow::LandingMode => {
+                let mode = match self.status.as_ref().map(|status| status.landing_mode) {
+                    Some(LandingMode::Merge) => LandingMode::Squash,
+                    Some(LandingMode::Squash) | None => LandingMode::Merge,
+                };
+                let done = match mode {
+                    LandingMode::Merge => {
+                        "Landing is Merge commit: accepted changes land as a merge commit that keeps every agent commit in your history."
+                    }
+                    LandingMode::Squash => {
+                        "Landing is Squash: each accepted change set lands as one commit."
+                    }
+                };
+                (
+                    TeamAction::LandingMode { project_id, mode },
+                    done.to_owned(),
+                )
+            }
             CoordRow::Nudges => {
                 settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
                 let done = format!(
@@ -2788,6 +2808,15 @@ impl TeamView {
                     match self.status.as_ref().map(|status| status.reuse_idle) {
                         Some(ReuseIdle::On) => "On",
                         Some(ReuseIdle::Off) | None => "Off",
+                    }
+                    .to_owned(),
+                    "",
+                ),
+                CoordRow::LandingMode => (
+                    "Landing".to_owned(),
+                    match self.status.as_ref().map(|status| status.landing_mode) {
+                        Some(LandingMode::Merge) => "Merge commit",
+                        Some(LandingMode::Squash) | None => "Squash",
                     }
                     .to_owned(),
                     "",

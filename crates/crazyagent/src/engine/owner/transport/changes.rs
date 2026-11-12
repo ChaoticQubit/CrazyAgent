@@ -32,6 +32,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_master_closed",
     "changes_master_not_started",
     "changes_master_tools_off",
+    "changes_merge_unsafe",
     "changes_message_invalid",
     "changes_not_found",
     "changes_outcome_unknown",
