@@ -2051,3 +2051,32 @@ fn a_queued_list_installs_in_order_one_at_a_time_and_a_failure_does_not_stop_the
     );
     assert_eq!(goose.last.unwrap().code.as_deref(), Some(NO_INSTALLER));
 }
+
+#[test]
+fn a_second_npm_install_keeps_the_prefix_node_on_the_real_node_when_the_resolver_finds_the_link_first()
+ {
+    let machine = Machine::new();
+    let root = machine.root.path();
+    let prefix = crate::setup::harness_prefix(root);
+    let node = machine.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o755);
+    machine.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
+    let places = crate::tools::Places::new(
+        vec![prefix.join("bin"), node.parent().unwrap().to_path_buf()],
+        None,
+    );
+    for round in ["first install", "second install"] {
+        let npm = super::state::engine_npm_at(root, &places).unwrap();
+        crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
+        assert_eq!(
+            std::fs::read_link(prefix.join("bin/node")).unwrap(),
+            node,
+            "{round} links the real node"
+        );
+    }
+    let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();
+    let script = machine.program(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix));
+}
