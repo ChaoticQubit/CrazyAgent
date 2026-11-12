@@ -2079,15 +2079,64 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
+/// Owner 11-11, no output cap: a turn's reply text past its bound is trimmed on a character
+/// boundary and marked once, its start kept, and later parts are left out, never an end of
+/// the turn; text within the bound is kept whole.
+#[test]
+fn a_reply_text_past_its_bound_is_trimmed_with_one_mark_never_ended() {
+    let max = TRIMMED.len() + 10;
+    let mut text = String::new();
+    push_trimmed(&mut text, "abcde", max);
+    assert_eq!(text, "abcde");
+    push_trimmed(&mut text, "\u{e9}\u{e9}\u{e9}\u{e9}", max);
+    assert_eq!(text, format!("abcde\u{e9}\u{e9}{TRIMMED}"));
+    assert!(text.len() <= max);
+    push_trimmed(&mut text, "more", max);
+    assert_eq!(text, format!("abcde\u{e9}\u{e9}{TRIMMED}"));
+    assert_eq!(text.matches(TRIMMED).count(), 1);
+    let mut long = String::new();
+    for _ in 0..1000 {
+        push_trimmed(&mut long, &"x".repeat(1024), LIVE_REPLY_BYTES_MAX);
+    }
+    assert!(long.len() <= LIVE_REPLY_BYTES_MAX && long.ends_with(TRIMMED));
+    let mut turn = String::new();
+    push_trimmed(
+        &mut turn,
+        &"y".repeat(TURN_TEXT_BYTES_MAX * 2),
+        TURN_TEXT_BYTES_MAX,
+    );
+    assert_eq!(turn.len(), TURN_TEXT_BYTES_MAX);
+}
+
+/// L1C r1 F1: a sub-agent turn the engine ended at its run time or on an unreadable record
+/// leaves the closed process with that code on its agent, and the turn-ended stop that
+/// follows still names the end `engine_limit:<code>`; the owner's task limit leaves no
+/// problem, and a turn that closed its agent keeps its code as before.
+#[test]
+fn a_turn_ended_at_an_engine_bound_leaves_its_code_on_the_agent() {
+    for code in ["launch_deadline", "launch_transcript_unavailable"] {
+        let (end, cause) = launch_end(LaunchError(code.into(), None));
+        let problem = turn_problem(end, cause.as_deref());
+        assert_eq!(problem, Some(format!("The agent process closed. ({code})")));
+        assert_eq!(
+            continuity::cause(Some(continuity::TURN_ENDED), true, problem.as_deref()),
+            format!("engine_limit:{code}")
+        );
+    }
+    assert_eq!(turn_problem(TurnEnd::TimedOut, Some(TURN_LIMIT)), None);
+    assert_eq!(
+        turn_problem(TurnEnd::Closed, Some("launch_protocol_failed")).as_deref(),
+        Some("The agent process closed. (launch_protocol_failed)")
+    );
+    assert_eq!(turn_problem(TurnEnd::Success, None), None);
+    assert_eq!(turn_problem(TurnEnd::Interrupted, None), None);
+}
+
 #[test]
 fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its_task() {
     assert_eq!(
         launch_end(LaunchError("launch_deadline".into(), None)),
         (TurnEnd::TimedOut, Some("launch_deadline".to_owned()))
-    );
-    assert_eq!(
-        launch_end(LaunchError("launch_event_limit".into(), None)),
-        (TurnEnd::TooLong, None)
     );
     let (end, cause) = launch_end(LaunchError("launch_protocol_failed".into(), None));
     assert_eq!(end, TurnEnd::Closed);
@@ -3668,21 +3717,30 @@ fn idle_ticks(team: &mut TeamRuntime) {
     }
 }
 
-/// A live master that ends on its own, as when the owner types /exit, turns its switch off
-/// with one note instead of starting again every tick; turned on again, it starts under the
-/// same agent row in the same worktree and home it left.
+/// A live master whose terminal ends on its own, as when the owner types /exit, starts
+/// again at once under the same agent row, in the same worktree and home, resuming its own
+/// Codex conversation: live stays on, one team note says so and one end row names the cause
+/// (F02, DEC-147.4).
 #[cfg(target_os = "macos")]
 #[test]
-fn a_live_master_that_ends_by_itself_turns_off_and_starts_again_in_its_own_worktree() {
+fn a_live_master_whose_terminal_ends_starts_again_in_its_own_conversation_and_worktree() {
+    let script = RESUMING_CODEX.replacen(
+        "  esac\n",
+        "  esac\n  [ \"$line\" = \"/exit\" ] && exit 0\n",
+        1,
+    );
+    assert_ne!(script, RESUMING_CODEX);
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
+    let mut team = live_runtime(&fixture, &host, &script);
     let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the live master's pane runs", |f| {
-        live_agent(&f.connection).is_some()
+    fixture.until(&mut team, "the live master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
     });
     let master = masters(&fixture.connection)[0];
+    let (conversation, record) = kept_conversation(&fixture.connection, "s-one").unwrap();
     let worktree = |f: &Fixture| -> Vec<String> {
         f.connection
             .prepare("SELECT worktree FROM team_worktrees WHERE project=?1")
@@ -3694,40 +3752,189 @@ fn a_live_master_that_ends_by_itself_turns_off_and_starts_again_in_its_own_workt
     };
     let first = worktree(&fixture);
     assert_eq!(first.len(), 1);
+    host.input(&AgentId::team(master).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(&mut team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
 
     host.input(&AgentId::team(master).unwrap(), b"/exit\r")
         .unwrap();
-    fixture.until(&mut team, "the ended master turns its switch off", |f| {
-        turned_off(f, "its terminal ended")
-    });
-    idle_ticks(&mut team);
-    assert_eq!(
-        masters(&fixture.connection),
-        [master],
-        "no master starts while off"
+    fixture.until(
+        &mut team,
+        "the ended master starts again in its own conversation",
+        |f| launches(f, master).len() == 2 && live_agent(&f.connection) == Some(master),
     );
-
-    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the master starts again", |f| {
-        live_agent(&f.connection) == Some(master)
-    });
-    assert_eq!(live_turns(&fixture.connection), (0, false), "nothing typed");
+    let launched = launches(&fixture, master);
+    assert!(
+        launched[1].contains(&format!("resume {conversation}")),
+        "{launched:?}"
+    );
+    assert!(
+        super::super::master::live(&fixture.connection, &project).unwrap(),
+        "live stays on"
+    );
     assert_eq!(
         masters(&fixture.connection),
         [master],
-        "the same master row starts again"
+        "the same master row"
     );
     assert_eq!(worktree(&fixture), first, "in the same worktree");
+    assert_eq!(
+        kept_conversation(&fixture.connection, "s-one"),
+        Some((conversation, record))
+    );
+    assert_eq!(terminal_ended_notes(&fixture), 1);
+    assert_eq!(end_causes(&fixture, master), ["ended_by_itself"]);
     assert_eq!(host.alive().unwrap(), names(&[master]));
-    assert_eq!(fixture.agent_status(master).0, AgentStatus::Idle);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     assert!(host.alive().unwrap().is_empty());
 }
 
-/// A live master that cannot start, first because its sandbox profile cannot be written and
-/// then because its harness exits at once, turns its switch off after one try each time and
-/// adds no agent rows while it is off.
+/// A live Claude Code master whose terminal ends on its own starts again with `--resume` on
+/// its own conversation, live stays on, and the owner's later stop writes a second end row
+/// with its own cause (F02, DEC-147.4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_claude_master_whose_terminal_ends_resumes_its_conversation_and_logs_each_end() {
+    let script = RESUMING_CLAUDE.replacen(
+        "  esac\n",
+        "  esac\n  [ \"$line\" = \"/exit\" ] && exit 0\n",
+        1,
+    );
+    assert_ne!(script, RESUMING_CLAUDE);
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = claude_runtime(&fixture, &host, &script);
+    let project = fixture.setup.project_id.clone();
+    set_master(&fixture, "claude-code");
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Claude Code master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    host.input(&AgentId::team(master).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(&mut team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let (conversation, _) = kept_conversation(&fixture.connection, "s-one").unwrap();
+
+    host.input(&AgentId::team(master).unwrap(), b"/exit\r")
+        .unwrap();
+    fixture.until(&mut team, "the ended master resumes", |f| {
+        launches(f, master).len() == 2 && live_agent(&f.connection) == Some(master)
+    });
+    let launched = launches(&fixture, master);
+    assert!(
+        launched[1].contains(&format!("--resume {conversation}")),
+        "{launched:?}"
+    );
+    assert!(super::super::master::live(&fixture.connection, &project).unwrap());
+    assert_eq!(masters(&fixture.connection), [master]);
+    assert_eq!(terminal_ended_notes(&fixture), 1);
+
+    stop_live(&fixture, &mut team);
+    assert_eq!(
+        end_causes(&fixture, master),
+        ["ended_by_itself", "owner_stop"]
+    );
+    assert_eq!(
+        terminal_ended_notes(&fixture),
+        1,
+        "an owner stop adds no restart note"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// A resumed live master whose terminal ends before its app reads keys has its conversation
+/// refused, so the start after it is fresh rather than the same dead resume (DEC-147.4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_resumed_master_that_ends_before_reading_keys_starts_fresh_next_time() {
+    let script = RESUMING_CODEX
+        .replacen(
+            "  esac\n",
+            "  esac\n  [ \"$line\" = \"/exit\" ] && exit 0\n",
+            1,
+        )
+        .replacen(
+            "if [ -n \"$id\" ]; then\n",
+            "if [ -n \"$id\" ]; then\n  exit 5\n",
+            1,
+        );
+    assert_eq!(script.matches("exit 5").count(), 1);
+    assert!(script.contains("= \"/exit\" ] && exit 0"));
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &script);
+    let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let (first, _) = kept_conversation(&fixture.connection, "s-one").unwrap();
+
+    host.input(&AgentId::team(master).unwrap(), b"/exit\r")
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the resume that ends at once is followed by a fresh start",
+        |f| launches(f, master).len() == 3 && live_agent(&f.connection) == Some(master),
+    );
+    let launched = launches(&fixture, master);
+    assert!(
+        launched[1].contains(&format!("resume {first}")),
+        "{launched:?}"
+    );
+    assert!(!launched[2].contains("resume"), "{launched:?}");
+    fixture.until(&mut team, "the fresh conversation is kept", |f| {
+        kept_conversation(&f.connection, "s-one").is_some_and(|(kept, _)| {
+            kept != first && crate::harnesses::interactive::resumable(&kept)
+        })
+    });
+    assert!(super::super::master::live(&fixture.connection, &project).unwrap());
+    assert_eq!(end_causes(&fixture, master).len(), 2);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Counts the team notes that say a live master's terminal ended and it starts again.
+/// Input: the fixture. Output: the count.
+#[cfg(target_os = "macos")]
+fn terminal_ended_notes(fixture: &Fixture) -> usize {
+    fixture
+        .status()
+        .messages
+        .iter()
+        .filter(|message| {
+            message.state == MessageState::Note
+                && message.text.starts_with(super::continuity::TERMINAL_ENDED)
+        })
+        .count()
+}
+
+/// Reads one agent's end rows, oldest first. Inputs: the fixture and the agent. Output: each
+/// row's cause.
+fn end_causes(fixture: &Fixture, agent: i64) -> Vec<String> {
+    fixture
+        .connection
+        .prepare("SELECT cause FROM team_agent_ends WHERE agent=?1 ORDER BY id")
+        .unwrap()
+        .query_map([agent], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A live master that cannot start turns its switch off: after one try when its sandbox
+/// profile cannot be written, and when its harness exits at once, after it started again up
+/// to `LIVE_STARTS_MAX` times, each end with its row; no agent starts while it is off.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_live_master_that_cannot_start_turns_off_after_one_try() {
@@ -3758,15 +3965,19 @@ fn a_live_master_that_cannot_start_turns_off_after_one_try() {
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
     fixture.until(
         &mut team,
-        "a harness that exits at once turns the switch off",
-        |f| turned_off(f, "its terminal ended"),
+        "a harness that exits at once turns the switch off once it started too often",
+        |f| turned_off(f, &format!("it had to start {LIVE_STARTS_MAX} times")),
+    );
+    let tried = masters(&fixture.connection);
+    let ends: usize = tried.iter().map(|id| end_causes(&fixture, *id).len()).sum();
+    assert_eq!(ends, LIVE_STARTS_MAX, "one end row for each start");
+    assert_eq!(
+        terminal_ended_notes(&fixture),
+        LIVE_STARTS_MAX - 1,
+        "a restart note for each end but the last"
     );
     idle_ticks(&mut team);
-    assert_eq!(
-        masters(&fixture.connection).len(),
-        2,
-        "one more try, then none while off"
-    );
+    assert_eq!(masters(&fixture.connection), tried, "none while off");
     let notes = fixture
         .status()
         .messages
@@ -5372,7 +5583,8 @@ done
 
 /// A live master whose pane ends in the middle of a turn still lands that turn: the
 /// files it changed show as a pending change set under the turn's key, and the turn is
-/// counted as closed, as a turn that ends normally is.
+/// counted as closed, as a turn that ends normally is. Live stays on, the restart note says
+/// the turn was cut, and the end row marks a turn open.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_live_master_turn_cut_short_by_its_pane_ending_still_lands() {
@@ -5414,7 +5626,22 @@ fn a_live_master_turn_cut_short_by_its_pane_ending_still_lands() {
         )
         .unwrap();
     assert_eq!(outcome, "closed");
-    assert!(turned_off(&fixture, "its terminal ended"));
+    assert!(super::super::master::live(&fixture.connection, &project).unwrap());
+    let cut = fixture.status().messages.iter().any(|message| {
+        message.state == MessageState::Note
+            && message.text.starts_with(super::continuity::TERMINAL_ENDED)
+            && message.text.contains("Its last turn was cut")
+    });
+    assert!(cut, "the restart note says the turn was cut");
+    let turn_open: bool = fixture
+        .connection
+        .query_row(
+            "SELECT turn_open FROM team_agent_ends WHERE agent=?1",
+            [master],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(turn_open);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
@@ -15607,6 +15834,7 @@ fn between_turns(
         busy: None,
         idle_since: Instant::now(),
         stopping: false,
+        stop_why: "",
         held: false,
         restarting: false,
         warm: false,
@@ -15626,6 +15854,7 @@ fn between_turns(
         background_held: false,
         kept_session,
         fresh: None,
+        resumed: false,
         own_turn: None,
         own_rules: None,
         counted_none: false,
@@ -17339,7 +17568,13 @@ fn a_stop_that_leaves_a_command_running_says_so_and_the_agent_reads_stopped() {
     leader.kill().unwrap();
     leader.wait().unwrap();
     let (reports, reported) = channel();
-    let ended = settle_end(lineage.settle().map(|()| None), None, None, &reports);
+    let ended = settle_end(
+        lineage.settle().map(|()| None),
+        None,
+        None,
+        &reports,
+        &test_by(),
+    );
     if let Some(pid) = rustix::process::Pid::from_raw(child) {
         let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
     }
@@ -22245,6 +22480,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
+            &test_by(),
         );
         assert_eq!(problem, Some(expected));
         assert!(!host.alive().unwrap().contains(&agent));
@@ -22307,6 +22543,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(leave),
+            &test_by(),
         );
         drop(reports);
         let reports: Vec<Report> = reported.iter().collect();
@@ -22542,6 +22779,7 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
+            &test_by(),
         );
         drop(reports);
         assert_eq!(
@@ -22570,6 +22808,7 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
+            &test_by(),
         ),
         None
     );
@@ -27701,17 +27940,15 @@ fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
     fixture.until(
         &mut team,
         "the Claude Code master ends before it reports a conversation",
-        |f| masters(&f.connection).len() == 2 && turned_off(f, "its terminal ended"),
+        |f| masters(&f.connection).len() == 2 && terminal_ended_notes(f) == 1,
     );
     let second = masters(&fixture.connection)[1];
-    assert_eq!(launches(&fixture, second).len(), 1);
     assert_eq!(
         kept_conversation(&fixture.connection, "s-one"),
         codex_kept,
         "the session still keeps the Codex conversation"
     );
-
-    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    assert!(super::super::master::live(&fixture.connection, &project).unwrap());
     fixture.until(&mut team, "the Claude Code master starts again", |f| {
         launches(f, second).len() == 2
     });

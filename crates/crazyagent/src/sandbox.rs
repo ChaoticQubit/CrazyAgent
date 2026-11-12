@@ -3237,7 +3237,12 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// Codex launch, and no move or removal of the `skills` folder, so no folder built elsewhere
 /// is moved in, nor a flag on `skills` or anywhere in `.system` that would keep the engine
 /// from removing it (CTX-M1 r1), each name in any letter case. Its own run cannot change the
-/// text it runs with until the next launch rewrites it. They must follow every write allow.
+/// text it runs with until the next launch rewrites it. They also keep the agent's own
+/// keychain and keychain settings, which the engine sets up with `security` calls before a
+/// launch, out of its reach (DEC-146): no write under `Library/Keychains` nor to
+/// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link
+/// in place of `Library` or `Library/Preferences`, so no link an agent plants leads one of
+/// those calls to another keychain or settings file. They must follow every write allow.
 /// Input: the home. Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
@@ -3252,6 +3257,7 @@ fn launch_denies(home: &Path) -> String {
         "output-styles",
         "rules",
         ".agents",
+        "Library/Keychains",
     ];
     let files = [
         Harness::Claude.instruction_file(),
@@ -3259,6 +3265,7 @@ fn launch_denies(home: &Path) -> String {
         "AGENTS.override.md",
         "config.toml",
         "settings.json",
+        "Library/Preferences/com.apple.security.plist",
     ];
     let mut text = String::from("(deny file-write*\n");
     for folder in folders {
@@ -3275,7 +3282,12 @@ fn launch_denies(home: &Path) -> String {
         other_than(crate::launch_context::CODEX_SYSTEM_SKILLS),
         any_case(crate::launch_context::CODEX_SYSTEM_SKILLS)
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 15);
+    let library = format!("{home}/{}", any_case("Library"));
+    let preferences = format!("{library}/{}", any_case("Preferences"));
+    text.push_str(&format!(
+        "(deny {PINNED_WRITES}\n  (regex #\"^{library}$\")\n  (regex #\"^{preferences}$\"))\n(deny file-write-create\n  (require-all\n    (require-any\n      (regex #\"^{library}$\")\n      (regex #\"^{preferences}$\"))\n    (vnode-type SYMLINK)))\n"
+    ));
+    assert_eq!(text.matches("(regex #\"^/").count(), 21);
     text
 }
 

@@ -839,6 +839,7 @@ impl OwnerRuntimeHandle {
                     launch.home,
                     action,
                     account_ref,
+                    prepared.session.project_id.clone(),
                     prepared.time.run_time(),
                     resources,
                 )
@@ -852,6 +853,7 @@ impl OwnerRuntimeHandle {
                 launch.home,
                 action,
                 account_ref,
+                prepared.session.project_id.clone(),
                 prepared.time.run_time(),
                 resources,
                 &prepared.instructions,

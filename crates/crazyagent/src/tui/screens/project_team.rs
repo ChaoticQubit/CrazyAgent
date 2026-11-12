@@ -12,6 +12,7 @@ use crate::coord::settings::{
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
+use crate::harnesses::leftovers::HoldState;
 use crate::project_setup::{
     ProjectSetup, SetupAction, SetupQuery, SetupView, StoredSetup, TeamPlan,
 };
@@ -20,9 +21,9 @@ use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, R
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
-    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle, SwitchApply,
-    SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
-    TeamStatus, TeamTask,
+    CoordinationView, DelegationPath, LeftoverMode, MASTER_BRANCH_BYTES_MAX, MasterLands,
+    ReuseIdle, SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction,
+    TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::{AccountRow, account_label};
@@ -753,6 +754,9 @@ impl TeamView {
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('W') => self.terminals_per_window(),
             KeyCode::Char('B') => self.background_at_end(),
+            KeyCode::Char('O') => self.leftovers_setting(),
+            KeyCode::Char('X') => self.settle_hold(true),
+            KeyCode::Char('K') => self.settle_hold(false),
             KeyCode::Char('G') => self.grace_time(),
             KeyCode::Char('c') => {
                 self.open_coord();
@@ -2273,6 +2277,77 @@ impl TeamView {
         self.change(&done, action)
     }
 
+    /// Moves "Left running after a stop", what the engine does with processes an agent leaves
+    /// running after its stop (DEC-147.4), from End them to Keep running to Ask me and back.
+    /// Output: the change to send, or Handled with a notice while loading or saving.
+    fn leftovers_setting(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let (mode, done) = match status.leftovers {
+            LeftoverMode::End => (
+                LeftoverMode::Keep,
+                "Processes an agent leaves running after its stop now keep running, and its account is let go at once.",
+            ),
+            LeftoverMode::Keep => (
+                LeftoverMode::Ask,
+                "Processes an agent leaves running after its stop now keep its account until you press X to end them or K to keep them.",
+            ),
+            LeftoverMode::Ask => (
+                LeftoverMode::End,
+                "Processes an agent leaves running after its stop are now ended after 10 seconds, then its account is let go.",
+            ),
+        };
+        let action = TeamAction::LeftoversAtEnd {
+            project_id: self.project.clone(),
+            mode,
+        };
+        self.change(done, action)
+    }
+
+    /// Ends (X) or keeps (K) the processes of the oldest hold the owner's key still changes:
+    /// End skips a hold already ending, Keep one already kept. Input: whether to end them.
+    /// Output: the change to send, or Handled with a notice when none is listed.
+    fn settle_hold(&mut self, end: bool) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let skip = if end {
+            HoldState::Ending
+        } else {
+            HoldState::Kept
+        };
+        let Some(hold) = status.leftover_holds.iter().find(|hold| hold.state != skip) else {
+            self.notice = Some(Notice::plain(
+                "Nothing an agent left running waits for you.",
+            ));
+            return TeamReply::Handled;
+        };
+        let (done, action) = if end {
+            (
+                format!("Ending what {} left running.", hold.who),
+                TeamAction::EndLeftovers {
+                    project_id: self.project.clone(),
+                    key: hold.key,
+                },
+            )
+        } else {
+            (
+                format!(
+                    "Keeping what {} left running; its account is let go.",
+                    hold.who
+                ),
+                TeamAction::KeepLeftovers {
+                    project_id: self.project.clone(),
+                    key: hold.key,
+                },
+            )
+        };
+        self.change(&done, action)
+    }
+
     /// Opens the coordination editor on its first row. Output: none; a notice while the team
     /// is loading or when the engine sends no coordination settings.
     fn open_coord(&mut self) {
@@ -3275,6 +3350,7 @@ impl TeamView {
                 "Background commands",
                 background_words(status.background_at_end),
             ),
+            setting("Left running", leftover_words(status.leftovers).to_owned()),
         ];
         let mut rows = Vec::new();
         let mut right = Row::default();
@@ -3302,6 +3378,14 @@ impl TeamView {
             };
         }
         rows.push(spread(content, left, right));
+        for hold in status.leftover_holds.iter().take(LEFTOVER_ROWS_MAX) {
+            rows.push(
+                Row::of("Left running  ", look.warning)
+                    .push(format!("{}: {}", hold.who, hold.names), look.fg)
+                    .push(format!("  {}", hold_words(hold.state)), look.muted)
+                    .pad(content),
+            );
+        }
         rows
     }
 
@@ -3634,6 +3718,7 @@ impl TeamView {
             ("F", "New folder limit"),
             ("W", "Terminals per window"),
             ("B", "Background commands"),
+            ("O", "Left running after a stop"),
             ("G", "Grace time"),
             ("c", "Coordination"),
             ("e", "Wake rules"),
@@ -3956,6 +4041,29 @@ fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
 /// report their background commands (PA-10), a turn-end stop for agents run per turn, and
 /// none for rcli, which has no tools (rv-code BHT-M1).
 const BACKGROUND_SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
+
+/// The most holds the Team rows list; the rest stay in the team view.
+const LEFTOVER_ROWS_MAX: usize = 5;
+
+/// The summary words for Left running after a stop (DEC-147.4). Input: the setting. Output:
+/// the words.
+fn leftover_words(mode: LeftoverMode) -> &'static str {
+    match mode {
+        LeftoverMode::End => "End them",
+        LeftoverMode::Keep => "Keep running",
+        LeftoverMode::Ask => "Ask me",
+    }
+}
+
+/// Where one hold stands, as its row says it, with the keys that still change it. Input: the
+/// state. Output: the words.
+fn hold_words(state: HoldState) -> &'static str {
+    match state {
+        HoldState::Held => "waiting for you: X ends, K keeps",
+        HoldState::Ending => "ending: K keeps",
+        HoldState::Kept => "kept running: X ends",
+    }
+}
 
 /// The summary words for Background commands at task end (DEC-111 Q13). Input: the
 /// choice. Output: the words.

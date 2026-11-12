@@ -1,8 +1,8 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setLeftovers, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
+import type { BackgroundAtEnd, LeftoverMode, BranchMode, ChildLanding, IntentReceipt, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { IconName, SelectOption } from "../../ui";
 import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
@@ -112,6 +112,13 @@ export const BACKGROUND_OPTIONS: SelectOption[] = [
   { value: "wait", label: "Wait for them" },
   { value: "grace", label: "Stop them after a grace time" },
   { value: "stop", label: "Stop them when the turn ends" },
+];
+
+/** The choices of Left running after a stop. End them is the default (DEC-147.4). */
+export const LEFTOVER_OPTIONS: SelectOption[] = [
+  { value: "end", label: "End them" },
+  { value: "keep", label: "Keep running and release the account" },
+  { value: "ask", label: "Ask me" },
 ];
 
 /** The default grace time, also offered when the owner first picks one, and its bounds,
@@ -262,7 +269,7 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
     rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", ...PER_HARNESS_ROWS] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
-    rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"] },
+    rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Left running after a stop", "Token budget"] },
 ];
 
 function findWords(query: string): string {
@@ -505,6 +512,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const [lands, holdLands] = useHeld<ChildLanding>(status.child_landing ?? "lead", Object.is, status);
   const [branchMode, holdBranchMode] = useHeld<BranchMode>(status.agent_branches ?? "named", Object.is, status);
   const [spread, holdSpread] = useHeld<"off" | "on">(status.spread_accounts === true ? "on" : "off", Object.is, status);
+  const [leftoversShown, holdLeftovers] = useHeld<LeftoverMode>(status.leftovers ?? "end", Object.is, status);
   const [askMerge, holdAskMerge] = useHeld<"off" | "on">(status.ask_before_merge === true ? "on" : "off", Object.is, status);
   const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits", Object.is, status);
   const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on", Object.is, status);
@@ -570,6 +578,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   }
 
   const chooseMasterLands = (choice: MasterLands) => change(() => setMasterLands(projectId, choice), "what the master does with its conflict fixes", () => holdMasterLands(choice));
+  const chooseLeftovers = (choice: LeftoverMode) => change(() => setLeftovers(projectId, choice), "the Left running after a stop setting", () => holdLeftovers(choice));
   const chooseAskMerge = (choice: "off" | "on") => change(() => setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting", () => holdAskMerge(choice));
   const chooseCatchUp = (choice: "off" | "on") => change(() => setCatchUpMain(projectId, choice), "the catch up with main setting", () => holdCatchUp(choice));
   const chooseReuseIdle = (choice: "off" | "on") => change(() => setReuseIdle(projectId, choice), "the reuse idle agents setting", () => holdReuseIdle(choice));
@@ -745,6 +754,11 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               <Button type="submit" size="small" disabled={busy || graceText === null} pending={busy && graceText !== null} pendingLabel="Saving...">Save</Button>
               <span className="tg-terminal-note" id={`tg-grace-help-${projectId}`}>From 10 to 3600 seconds.</span>
             </form>}
+          </SettingRow>
+          <SettingRow label="Left running after a stop">
+            <Select id={`tg-leftovers-${projectId}`} label="Left running after a stop" value={leftoversShown} options={LEFTOVER_OPTIONS}
+              onValue={(value) => { if (!busy && (value === "end" || value === "keep" || value === "ask")) void chooseLeftovers(value); }}
+              helper="What happens to processes an agent started that still run after it stopped, such as a dev server. End them asks them to stop, ends any still running after 10 seconds, then lets the account go. Keep running lets the account go at once and lists them until they end. Ask me keeps the account until you pick End or Keep under Left running in this view." />
           </SettingRow>
           <SettingRow label="Token budget">
             <Select id={`tg-token-budget-${projectId}`} label="Token budget" value={tokenBudget} options={budgetOptions()}

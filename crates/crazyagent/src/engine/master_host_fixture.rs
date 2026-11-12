@@ -2,7 +2,7 @@ use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelRe
 use crate::engine::EngineError;
 use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
-use crate::protocol::{ConfigId, CredentialRef, Cursor, RequestId};
+use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
 use rustix::process::Pid;
 use std::fs;
@@ -71,6 +71,7 @@ echo $$ > run/leader.pid
 pub(in crate::engine) struct MasterFixture {
     pub(in crate::engine) root: tempfile::TempDir,
     pub(in crate::engine) project: PathBuf,
+    pub(in crate::engine) project_id: ProjectId,
     pub(in crate::engine) connection: ModelConnection,
     custody: NativeProfileCustody,
     host: HostStamp,
@@ -126,9 +127,12 @@ impl MasterFixture {
             connection: connection.clone(),
             custody_id,
         };
+        let project_id =
+            ProjectId::new(root.path().file_name().unwrap().to_str().unwrap()).unwrap();
         Self {
             root,
             project,
+            project_id,
             connection,
             custody,
             host,

@@ -2954,6 +2954,10 @@ fn bundle(
         crate::sandbox::policy::load(tx, session.project_id.as_str()).map_err(error)?;
     let hidden_paths =
         crate::sandbox::hidden_paths::load(tx, session.project_id.as_str()).map_err(error)?;
+    crate::harnesses::leftovers::set_mode(
+        session.project_id.as_str(),
+        crate::team::leftover_mode(tx, session.project_id.as_str())?,
+    );
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         message: running_message(tx, &session, turn)?,

@@ -159,6 +159,8 @@ fn team() -> TeamStatus {
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftover_holds: Vec::new(),
+        leftovers: crate::team::LeftoverMode::End,
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,
@@ -4614,4 +4616,90 @@ fn every_harness_kind_says_what_its_delivery_choices_do() {
         };
         assert!(said.contains(native), "{kind:?}: {said}");
     }
+}
+
+/// O moves Left running after a stop from End them to Keep running to Ask me and back, each
+/// with its notice, and the Team rows show the choice (DEC-147.4).
+#[test]
+fn o_cycles_the_leftover_setting_and_the_team_rows_show_it() {
+    let mut view = loaded();
+    assert!(view.help().contains(&("O", "Left running after a stop")));
+    assert!(shows(&view, "Left running  End them"));
+    let mut stored = team();
+    let mut at = NOW;
+    for (mode, shown) in [
+        (
+            crate::team::LeftoverMode::Keep,
+            "Left running  Keep running",
+        ),
+        (crate::team::LeftoverMode::Ask, "Left running  Ask me"),
+        (crate::team::LeftoverMode::End, "Left running  End them"),
+    ] {
+        let reply = view.key(press(KeyCode::Char('O')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::LeftoversAtEnd {
+                project_id: project(),
+                mode,
+            }),
+            "{mode:?}"
+        );
+        applied(&mut view, reply);
+        stored.leftovers = mode;
+        at += 60_000;
+        reread(&mut view, stored.clone(), at);
+        assert!(shows(&view, shown), "{shown}");
+    }
+}
+
+/// X ends and K keeps what the oldest listed hold left running, skipping a hold already in
+/// that state; with nothing listed both only say so. Each hold has its own row (DEC-147.4).
+#[test]
+fn x_ends_and_k_keeps_the_oldest_hold_and_each_hold_has_a_row() {
+    use crate::harnesses::leftovers::{HeldView, HoldState};
+    let mut view = loaded();
+    for key in ['X', 'K'] {
+        assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
+        assert_eq!(
+            view.notice,
+            Some(Notice::plain(
+                "Nothing an agent left running waits for you."
+            ))
+        );
+    }
+    let hold = |key: u64, who: &str, state: HoldState| HeldView {
+        key,
+        who: who.to_owned(),
+        names: format!("{key} node"),
+        state,
+        since_ms: NOW,
+        holds_account: state != HoldState::Kept,
+    };
+    let mut stored = team();
+    stored.leftover_holds = vec![
+        hold(3, "team agent 156", HoldState::Ending),
+        hold(4, "the master", HoldState::Held),
+    ];
+    reread(&mut view, stored, NOW + 60_000);
+    assert!(shows(&view, "Left running  team agent 156: 3 node"));
+    assert!(shows(&view, "Left running  the master: 4 node"));
+    assert_eq!(
+        view.key(press(KeyCode::Char('X'))),
+        TeamReply::Change(TeamAction::EndLeftovers {
+            project_id: project(),
+            key: 4,
+        }),
+        "X skips the hold already ending"
+    );
+    let mut view = loaded();
+    let mut stored = team();
+    stored.leftover_holds = vec![hold(3, "team agent 156", HoldState::Ending)];
+    reread(&mut view, stored, NOW + 60_000);
+    assert_eq!(
+        view.key(press(KeyCode::Char('K'))),
+        TeamReply::Change(TeamAction::KeepLeftovers {
+            project_id: project(),
+            key: 3,
+        })
+    );
 }

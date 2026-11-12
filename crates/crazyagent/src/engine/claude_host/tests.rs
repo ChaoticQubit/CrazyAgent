@@ -514,6 +514,7 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
             worktree_lease: RequestId::new("claude-master-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        crate::protocol::ProjectId::new("claude-master-project").unwrap(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
@@ -597,6 +598,7 @@ async fn stand_in_master_under(
             worktree_lease: RequestId::new("claude-group-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         clock,
         ResourceBudget::unit(),
     )
@@ -848,6 +850,59 @@ async fn cancelling_a_full_access_claude_master_names_what_left_its_session_and_
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// L1 r1 security L1: a Claude host turn's leftovers follow its project's setting and show
+/// in that project's owner view. Under Ask the hold waits with the account kept and nothing
+/// signalled; the owner's Keep lets the account go at once while the orphan still runs.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_claude_host_hold_follows_its_projects_ask_then_keep_and_is_listed_for_the_owner() {
+    use crate::engine::master_host_fixture::{MasterFixture, ORPHANING_HARNESS, Orphan};
+    use crate::harnesses::leftovers::{self, HoldState, LeftoverMode};
+
+    let mut fixture = MasterFixture::new("claude");
+    let project = fixture.project_id.as_str().to_owned();
+    leftovers::set_mode(&project, LeftoverMode::Ask);
+    let body = format!("{ORPHANING_HARNESS}exec /bin/sleep 30\n");
+    let mut claude = stand_in_master_at(&mut fixture, &body, true).await;
+    let orphan = Orphan::wait(&fixture.project);
+    let cancelled = claude.cancel().await;
+    assert_eq!(
+        cancelled.map_err(|error| error.0),
+        Err(leftovers::LEFT.to_owned())
+    );
+    let listed = leftovers::held_in(&project);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].who, "a Claude host turn");
+    assert_eq!(listed[0].state, HoldState::Held);
+    assert!(listed[0].holds_account);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        rustix::process::test_kill_process(orphan.0),
+        Ok(()),
+        "Ask signalled the orphan"
+    );
+    assert_eq!(
+        fixture
+            .sign_in("claude-ask-busy", 2)
+            .err()
+            .map(|error| error.0)
+            .as_deref(),
+        Some("native_profile_in_use"),
+        "Ask let the account go before the owner chose"
+    );
+    assert!(leftovers::keep_held(listed[0].key, &project));
+    assert!(
+        fixture.sign_in("claude-kept-next", 3).is_ok(),
+        "Keep held the account"
+    );
+    let kept = leftovers::held_in(&project);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].state, HoldState::Kept);
+    assert!(!kept[0].holds_account);
+    assert_eq!(rustix::process::test_kill_process(orphan.0), Ok(()));
+    drop(orphan);
 }
 
 #[cfg(target_os = "macos")]
@@ -1239,6 +1294,7 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
             worktree_lease: RequestId::new("claude-tools-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
@@ -1330,6 +1386,7 @@ async fn held_turn(
             worktree_lease: RequestId::new("claude-steps-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
@@ -1661,6 +1718,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             worktree_lease: RequestId::new("claude-late-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
@@ -1890,6 +1948,7 @@ async fn a_claude_master_turn_reads_a_tool_result_past_a_mebibyte_within_its_all
             worktree_lease: RequestId::new("claude-large-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget {
             output_bytes: 64 * 1024 * 1024,

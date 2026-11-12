@@ -83,11 +83,10 @@ const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 pub(crate) const RUN_NAME_USED: &str = "run name already used";
 const CONTEXT_BUSY: &str = "launch_home_busy";
 const PANE_PREFIX: &str = "research-";
-const PANE_EVENTS_MAX: usize = 200_000;
 /// Gives a tools-off Claude Code run one model turn, as it has no tools to take a second.
 /// It does not stop Claude Code 2.1.309 from continuing an answer cut at the output limit:
 /// it sends up to three more requests for that answer outside the turn count, so the
-/// output cap and the caller's wall time bound such a run.
+/// output token cap and the caller's wall time bound such a run.
 const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
 /// The variable that caps the output tokens of each Claude Code request.
 const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
@@ -106,7 +105,9 @@ const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
 /// and a reader of a stored report reads up to this many.
 pub const REPORT_BYTES_MAX: u64 = 512 * 1024;
 
-/// Bounds every research run obeys.
+/// Bounds every research run obeys. `output_bytes_max` is the most bytes kept in each agent
+/// log and read back from it; output past it is counted, never a reason to end the run
+/// (owner 11-11).
 #[derive(Debug, Clone)]
 pub struct ResearchLimits {
     pub wall_time: Duration,
@@ -117,7 +118,7 @@ pub struct ResearchLimits {
 }
 
 impl Default for ResearchLimits {
-    /// Twenty minutes, 4 MiB of agent output, a report of [`REPORT_BYTES_MAX`], three
+    /// Twenty minutes, 4 MiB kept of each agent log, a report of [`REPORT_BYTES_MAX`], three
     /// agents per project at once and two attempts per job.
     fn default() -> Self {
         Self {
@@ -322,7 +323,6 @@ struct JobPlace {
 enum Ending {
     Exited(bool),
     TimedOut,
-    Overflowed,
     Cancelled,
     Interrupted,
     RateLimited,
@@ -712,7 +712,6 @@ impl ResearchRunner {
                 }
                 let reason = match ending {
                     Ending::TimedOut => "Agent ran out of time",
-                    Ending::Overflowed => "Agent output exceeded the limit",
                     Ending::RateLimited => "The account hit its rate limit",
                     _ => "Agent stopped with an error",
                 };
@@ -907,7 +906,10 @@ impl ResearchRunner {
                     .hand_to_agent(&home, self.limits.wall_time, executable)
                     .map_err(|problem| RunError::Account(problem.0))?,
             ),
-            None => None,
+            None => {
+                endpoint_keychain(&self.state, harness, &home)?;
+                None
+            }
         };
         let policy = jobs
             .agent_policy(&project)
@@ -1007,10 +1009,6 @@ impl ResearchRunner {
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
-                    output_bytes: usize::try_from(self.limits.output_bytes_max)
-                        .unwrap_or(usize::MAX)
-                        .min(64 * 1024 * 1024),
-                    events: PANE_EVENTS_MAX,
                     ..LaunchLimits::default()
                 },
             };
@@ -1043,12 +1041,14 @@ impl ResearchRunner {
                 }
                 Err(Unstopped::Left(left)) => {
                     let code = left.code();
-                    let mut credential = credential;
-                    if let Some(credential) = credential.as_mut() {
-                        credential.stop_renewing();
-                    }
+                    drop(credential);
                     let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
-                    left.hold(account, (credential, lease));
+                    let by = leftovers::HoldBy {
+                        project: Some(job.project.clone()),
+                        who: format!("research job {}", job.id),
+                    };
+                    let mode = jobs.leftover_mode(&job.project);
+                    left.hold(account, lease, by, mode);
                     return Err(RunError::Uncertain(code));
                 }
             }
@@ -1255,9 +1255,6 @@ impl ResearchRunner {
             if self.is_stopping() {
                 break Ending::Interrupted;
             }
-            if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
-                break Ending::Overflowed;
-            }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
                 match jobs.heartbeat(job, counted.load(Ordering::Relaxed)) {
@@ -1301,9 +1298,6 @@ impl ResearchRunner {
             if self.is_stopping() {
                 break Ending::Interrupted;
             }
-            if counted > self.limits.output_bytes_max {
-                break Ending::Overflowed;
-            }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
                 match jobs.heartbeat(job, counted) {
@@ -1329,7 +1323,6 @@ impl ResearchRunner {
                 Err(problem) => {
                     break match problem.0.as_str() {
                         "launch_deadline" => Ending::TimedOut,
-                        "launch_output_limit" | "launch_event_limit" => Ending::Overflowed,
                         _ => Ending::Exited(false),
                     };
                 }
@@ -1599,7 +1592,10 @@ impl ResearchRunner {
                     .hand_to_agent(&home, run.wall_time, executable)
                     .map_err(|problem| RunError::Account(problem.0))?,
             ),
-            None => None,
+            None => {
+                endpoint_keychain(&self.state, harness, &home)?;
+                None
+            }
         };
         let work = agent.join("work");
         private_directory(&work)?;
@@ -1698,9 +1694,6 @@ impl ResearchRunner {
             }
             if stop() || self.is_stopping() {
                 break Some(ReadOnlyEnding::Stopped);
-            }
-            if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
-                break Some(ReadOnlyEnding::Failed("Agent wrote too much output".into()));
             }
             std::thread::sleep(POLL);
         };
@@ -3174,6 +3167,22 @@ fn codex_retry_limited(line: &str) -> bool {
             .is_some_and(|(_, cause)| rate_limited(cause))
 }
 
+/// Gives a Claude Code research agent that reaches its model by key or address, with no
+/// signed-in account handed to it, its own keychain in its home as a handoff gives a
+/// signed-in one, so a harness that stores anything there never makes macOS ask the owner
+/// to create a keychain (DEC-146 KCA-M2). Codex keeps nothing in a keychain. Inputs: the
+/// research state folder, the harness and the agent home. Output: done, or the refusal.
+fn endpoint_keychain(state: &Path, harness: ResearchHarness, home: &Path) -> Result<(), RunError> {
+    #[cfg(target_os = "macos")]
+    if matches!(harness, ResearchHarness::ClaudeCode) {
+        crate::engine::keychain::fresh_profile_keychain(state, home, &[])
+            .map_err(|_| RunError::Account("agent_keychain_unavailable".into()))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (state, harness, home);
+    Ok(())
+}
+
 /// Tells whether a research agent that exited failing was refused for a rate or usage
 /// limit: Codex's own failure message in its stdout log, or the first line of Claude
 /// Code's printed reply. Takes the harness, the agent state folder, the report path and
@@ -3530,6 +3539,50 @@ mod tests {
     use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    /// A Claude Code research agent with no signed-in account handed to it gets one agent
+    /// keychain of its own as its home's default and search list, and a Codex one gets no
+    /// keychain folder at all (DEC-146 r1 KCA-M2).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_claude_research_agent_without_a_lease_gets_its_own_default_keychain() {
+        use crate::credentials::test_keychain::TestKeychain;
+        let dir = tempfile::Builder::new()
+            .prefix("ca-research-keychain-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let state = dir.path().canonicalize().unwrap().join("research");
+        let homes = [state.join("claude/home"), state.join("codex/home")];
+        for home in &homes {
+            std::fs::create_dir_all(home).unwrap();
+            std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        endpoint_keychain(&state, ResearchHarness::Codex, &homes[1]).unwrap();
+        assert!(!homes[1].join("Library").exists());
+        endpoint_keychain(&state, ResearchHarness::ClaudeCode, &homes[0]).unwrap();
+        let found: Vec<PathBuf> = fs::read_dir(homes[0].join("Library/Keychains"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_str().unwrap().ends_with(".keychain-db"))
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("agent-")
+        );
+        let keychain = TestKeychain::adopt(&homes[0], found[0].clone());
+        let text = found[0].to_str().unwrap();
+        assert!(keychain.setting("default-keychain").contains(text));
+        assert!(keychain.setting("list-keychains").contains(text));
+        assert!(
+            endpoint_keychain(&state, ResearchHarness::ClaudeCode, dir.path()).is_err(),
+            "a home outside the research state got a keychain"
+        );
+    }
 
     #[test]
     fn a_research_job_network_follows_the_project_choice_only_with_tools() {
