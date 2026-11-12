@@ -164,7 +164,7 @@ impl SearchPage {
                 ));
                 return;
             }
-            if let RunsView::Http { url, .. } = &option.runs {
+            if let Some(RunsView::Http { url, .. }) = &option.runs {
                 match host_of(url) {
                     Some(host) => {
                         self.failure = None;
@@ -339,7 +339,7 @@ impl SearchPage {
                 theme,
                 ctx.glyphs,
             ));
-            let mut under = vec![runs_line(&option.runs)];
+            let mut under: Vec<String> = option.runs.iter().map(runs_line).collect();
             if !option.usable
                 && let Some(reason) = &option.reason
             {

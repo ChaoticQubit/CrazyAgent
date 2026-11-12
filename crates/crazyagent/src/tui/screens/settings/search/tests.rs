@@ -23,7 +23,7 @@ fn option(
             RunsView::Http { .. } => vec!["Session text".into(), "Memories".into()],
             RunsView::Local { .. } => Vec::new(),
         },
-        runs,
+        runs: Some(runs),
         usable,
         reason: reason.map(Into::into),
     }
@@ -74,6 +74,7 @@ fn view() -> SearchView {
                 Some("Set its key in App plugins first."),
             ),
         ],
+        note: None,
         model: ModelState::Ready { size_bytes: SIZE },
         progress: Progress {
             embedded: 120,
@@ -422,4 +423,50 @@ fn search_opens_from_go_to_and_a_refused_read_offers_r() {
         Some("localhost".into())
     );
     assert_eq!(host_of("not an address"), None);
+}
+
+#[test]
+fn a_removed_plugin_note_shows_above_the_choices() {
+    let note = "Your chosen plugin was removed, so search uses full text.";
+    let mut read = view();
+    read.choice = SearchChoice::FullText;
+    read.note = Some(note.into());
+    let mut shell = page(read);
+    let rows = render(&mut shell, 100, 40);
+    let at = |text: &str| rows.iter().position(|row| row.contains(text));
+    assert!(at(note).is_some(), "the engine's note is shown");
+    assert!(at(note) < at("Full text only"), "above the choices");
+    let mut plain = page(view());
+    assert!(!shows(&mut plain, note));
+}
+
+#[test]
+fn a_gone_or_refused_chosen_plugin_stays_listed_with_its_reason_and_no_runs_line() {
+    let mut read = view();
+    read.options.push(SearchOption {
+        name: "harbor".into(),
+        title: "Harbor embeddings".into(),
+        runs: None,
+        usable: false,
+        reason: Some("This plugin is gone from your plugins folder.".into()),
+        sends: Vec::new(),
+    });
+    read.choice = SearchChoice::Plugin {
+        name: "harbor".into(),
+    };
+    let mut shell = page(read);
+    assert!(shows(&mut shell, "(*) Harbor embeddings"));
+    assert!(shows(
+        &mut shell,
+        "This plugin is gone from your plugins folder."
+    ));
+    for _ in 0..4 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    assert!(
+        requests(&mut shell).is_empty(),
+        "the chosen plugin is not saved again"
+    );
+    assert!(!shows(&mut shell, "Send search text to"));
 }
