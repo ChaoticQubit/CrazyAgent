@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { getMasterStepSettings, getMasterTimeSettings, saveMasterStepSettings, saveMasterTimeSettings, type MasterStepSettings, type MasterTimeSettings, type Result, type StepLimit, type TimeLimit } from "../../api";
+import { getMasterFrameSettings, getMasterStepSettings, getMasterTimeSettings, saveMasterFrameSettings, saveMasterStepSettings, saveMasterTimeSettings, type FrameSize, type MasterFrameSettings, type MasterStepSettings, type MasterTimeSettings, type Result, type StepLimit, type TimeLimit } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, NotReady, Notice, RadioCard, SettingLine, SettingSection, Skeleton } from "../../ui";
 import "../project/projects.css";
@@ -34,6 +34,21 @@ export const TIME_LIMIT_CHOICES: { choice: TimeLimit; title: string; help: strin
 /** What a turn stopped by the time limit says and which masters the limit covers, the same
  * words in the TUI. */
 export const TIME_LIMIT_NOTE = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and rcli.";
+
+/** The setting an owner has until they pick another: the engine's `MasterFrameSettings` default. */
+export const FRAME_LIMIT_DEFAULT: MasterFrameSettings = { limit: "kib64" };
+
+/** The frame size options in the order Settings lists them, smallest first, each with its
+ * title and what it is for, the same words in the TUI. */
+export const FRAME_LIMIT_CHOICES: { choice: FrameSize; title: string; help: string }[] = [
+  { choice: "kib64", title: "64 KiB", help: "The engine's own message size; enough for most turns." },
+  { choice: "kib256", title: "256 KiB", help: "Room for long instructions and large pasted text." },
+  { choice: "mib1", title: "1 MiB", help: "The largest; for a turn that still stops at 256 KiB." },
+];
+
+/** What a turn stopped by the frame size limit says and which masters the limit covers, the
+ * same words in the TUI. */
+export const FRAME_LIMIT_NOTE = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, then send again. The limit covers Claude and Codex masters; rcli keeps 64 KiB.";
 
 const MASTER_TOP = <div className="settings-top"><div>
   <h2>Master</h2>
@@ -124,6 +139,19 @@ export function MasterTimeView({ settings, picked, saving, problem, onPick, onSa
     onPick={onPick} onSave={onSave} />;
 }
 
+/** The master frame size limit of Settings, Master as a view of its state: the three frame
+ * size options, marked when away from the default, and its own Save changes, enabled only
+ * after a change. Inputs: the setting read, the picked option, a saving flag, the last
+ * problem and the handlers. Output: the frame size form, or what its read is waiting on. */
+export function MasterFrameView({ settings, picked, saving, problem, onPick, onSave, onRetry }: LimitState<FrameSize>) {
+  if (settings.kind === "loading") return <Skeleton shape="line" count={3} />;
+  if (settings.kind === "not_ready") return <NotReady what="The master frame size limit" />;
+  if (settings.kind === "error") return <LoadError message={`Couldn't load the master frame size limit. ${settings.message}`} onRetry={onRetry} />;
+  return <LimitForm form="Master frame size limit" title="Master frame size limit" line="Largest one message to the master" name="frame-limit" choices={FRAME_LIMIT_CHOICES}
+    fallback={FRAME_LIMIT_DEFAULT.limit} note={FRAME_LIMIT_NOTE} stored={settings.value.limit} picked={picked} saving={saving} problem={problem}
+    onPick={onPick} onSave={onSave} />;
+}
+
 /** Reads one master limit and saves the picked option in the engine. Inputs: the engine read
  * and save of the setting and the note shown once it is saved. Output: the limit's state for
  * its view. */
@@ -148,13 +176,15 @@ function useLimit<T extends string>(read: () => Promise<Result<{ limit: T }>>, w
   return { settings, picked, saving, problem, onPick: (choice) => { setPicked(choice); setProblem(""); }, onSave: () => void save(), onRetry: reload };
 }
 
-/** Settings, Master: reads the owner's master step limit and master time limit and saves the
+/** Settings, Master: reads the owner's master step, time and frame size limits and saves the
  * picked option of each in the engine, each with its own Save changes. */
 export function MasterSettings() {
   const steps = useLimit<StepLimit>(getMasterStepSettings, saveMasterStepSettings, "Master step limit saved.");
   const time = useLimit<TimeLimit>(getMasterTimeSettings, saveMasterTimeSettings, "Master time limit saved.");
+  const frames = useLimit<FrameSize>(getMasterFrameSettings, saveMasterFrameSettings, "Master frame size limit saved.");
   return <div className="stack">
     <MasterSettingsView {...steps} />
     <MasterTimeView {...time} />
+    <MasterFrameView {...frames} />
   </div>;
 }

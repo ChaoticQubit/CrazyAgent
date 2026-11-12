@@ -3,6 +3,7 @@ use super::settings_plugins::tilde;
 use super::{Flow, Place, Screen, open};
 use crate::cleanup_settings::{CleanupMode, CleanupSettings, DAYS_MAX, DAYS_MIN};
 use crate::github::{GitHubMethod, GitHubStatus};
+use crate::master_frame_limit::{FrameSize, MasterFrameSettings};
 use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
@@ -72,6 +73,9 @@ const STEPS_TEXT: &str = "Master step limit: the most steps a project's master t
 const STEPS_NOTE: &str = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers Claude and Codex masters with tools on. A master with tools off, and an rcli master, which has no tools, answers each turn in one step, so the limit never stops it.";
 const TIME_TEXT: &str = "Master time limit: the longest a project's master works on one turn.";
 const TIME_NOTE: &str = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and rcli.";
+const FRAMES_TEXT: &str =
+    "Master frame size limit: the largest one message the engine sends a project's master.";
+const FRAMES_NOTE: &str = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, then send again. The limit covers Claude and Codex masters; rcli keeps 64 KiB.";
 const HOURS_DIGITS_MAX: usize = 3;
 
 /// The title of one finished agents option, the same words as the desktop Settings.
@@ -164,6 +168,25 @@ pub(in crate::tui) fn time_limit_words(limit: TimeLimit) -> (&'static str, &'sta
     }
 }
 
+/// The title of one master frame size limit option and what it is for, the same words as
+/// the desktop Settings. Input: the option. Output: the title and the sentence.
+pub(in crate::tui) fn frame_size_words(limit: FrameSize) -> (&'static str, &'static str) {
+    match limit {
+        FrameSize::Kib64 => (
+            "64 KiB",
+            "The engine's own message size; enough for most turns.",
+        ),
+        FrameSize::Kib256 => (
+            "256 KiB",
+            "Room for long instructions and large pasted text.",
+        ),
+        FrameSize::Mib1 => (
+            "1 MiB",
+            "The largest; for a turn that still stops at 256 KiB.",
+        ),
+    }
+}
+
 /// The plain title and explanation of one Linux sockets option, as Settings shows it.
 /// Input: the option. Output: the title and the sentence naming what it allows and risks.
 pub(in crate::tui) fn sockets_words(sockets: LinuxSockets) -> (&'static str, &'static str) {
@@ -203,6 +226,9 @@ pub fn setup_plain(code: &str) -> String {
         }
         "master_time_settings_invalid" => {
             "The stored master time limit is not one this version knows."
+        }
+        "master_frame_settings_invalid" => {
+            "The stored master frame size limit is not one this version knows."
         }
         crate::storage::versioned::STALE_CODE => {
             "The pack changed in another window, so this was not saved. The list shows it now."
@@ -334,6 +360,9 @@ enum Ask {
     Time {
         choice: usize,
     },
+    Frames {
+        choice: usize,
+    },
 }
 
 enum Sent {
@@ -347,7 +376,7 @@ enum Sent {
 /// ticked MCP servers approves them. Settings shows it with on and off,
 /// remove, the projects home folder, the GitHub account, the Linux sockets
 /// setting, when finished agents' worktrees go, what quitting does to team agents and
-/// the master step limit.
+/// the master step, time and frame size limits.
 pub struct AppSetup {
     first_run: bool,
     setup: Load<SetupStatus>,
@@ -358,10 +387,11 @@ pub struct AppSetup {
     quit: Load<QuitSettings>,
     steps: Load<MasterStepSettings>,
     time: Load<MasterTimeSettings>,
+    frames: Load<MasterFrameSettings>,
     chosen: BTreeMap<String, bool>,
     selected: usize,
     offset: usize,
-    reading: [bool; 8],
+    reading: [bool; 9],
     sent: Option<Sent>,
     started: bool,
     finished_with_problems: bool,
@@ -373,7 +403,7 @@ impl AppSetup {
     /// Input: true during first run. Output: the screen; `shown` asks the
     /// engine for the setup status, and in Settings also for the projects
     /// home, the GitHub account, the sandbox settings, the finished agents
-    /// setting, the quitting setting and the master step and time limits.
+    /// setting, the quitting setting and the master step, time and frame size limits.
     pub fn new(first_run: bool) -> Self {
         Self {
             first_run,
@@ -385,10 +415,11 @@ impl AppSetup {
             quit: Load::Idle,
             steps: Load::Idle,
             time: Load::Idle,
+            frames: Load::Idle,
             chosen: BTreeMap::new(),
             selected: 0,
             offset: 0,
-            reading: [false; 8],
+            reading: [false; 9],
             sent: None,
             started: false,
             finished_with_problems: false,
@@ -480,6 +511,10 @@ impl AppSetup {
             self.time = Load::Loading;
         }
         self.read(7, AppSetupJob::MasterTime, ctx);
+        if matches!(self.frames, Load::Idle) {
+            self.frames = Load::Loading;
+        }
+        self.read(8, AppSetupJob::MasterFrames, ctx);
     }
 
     fn change(&mut self, job: AppSetupJob, sent: Sent, ctx: &mut Ctx) {
@@ -1116,6 +1151,84 @@ impl AppSetup {
         lines
     }
 
+    fn ask_frames(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.frames else {
+            ctx.say(Message::warning(
+                "The master frame size limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = FrameSize::ALL
+            .iter()
+            .position(|limit| *limit == settings.limit)
+            .expect("every option is listed");
+        assert!(choice < FrameSize::ALL.len());
+        self.ask = Some(Ask::Frames { choice });
+    }
+
+    fn set_frames(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < FrameSize::ALL.len());
+        let settings = MasterFrameSettings {
+            limit: FrameSize::ALL[choice],
+        };
+        let Load::Ready(current) = &self.frames else {
+            ctx.say(Message::warning(
+                "The master frame size limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        if *current == settings {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!(
+            "Master frame size limit: {}.",
+            frame_size_words(settings.limit).0
+        );
+        let job = AppSetupJob::SetMasterFrames {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn frames_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.frames {
+            Load::Ready(settings) => Line::raw(frame_size_words(settings.limit).0),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn frames_rows(&self, choice: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        assert!(choice < FrameSize::ALL.len());
+        let theme = &ctx.theme;
+        let muted = |text: &str, inset: usize| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(inset).max(1))
+                .into_iter()
+                .map(|part| styled(format!("{}{part}", " ".repeat(inset)), Role::Muted, theme))
+                .collect()
+        };
+        let mut lines = muted(FRAMES_TEXT, 0);
+        for (index, option) in FrameSize::ALL.iter().enumerate() {
+            let (title, detail) = frame_size_words(*option);
+            let mark = if index == choice { "> " } else { "  " };
+            let title = styled(title, Role::Heading, theme);
+            lines.push(join([Line::raw(mark), title]));
+            lines.extend(muted(detail, 4));
+        }
+        lines.extend(muted(FRAMES_NOTE, 0));
+        assert!(lines.len() > 2 * FrameSize::ALL.len());
+        lines
+    }
+
     fn ask_sign_out(&mut self, ctx: &mut Ctx) {
         match &self.github {
             Load::Ready(github) if github.signed_in => self.ask = Some(Ask::SignOut),
@@ -1272,6 +1385,21 @@ impl AppSetup {
                 Key::Enter => self.set_time(choice, ctx),
                 Key::Esc => {}
                 _ => self.ask = Some(Ask::Time { choice }),
+            },
+            Ask::Frames { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Frames {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Frames {
+                        choice: (choice + 1).min(FrameSize::ALL.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_frames(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Frames { choice }),
             },
             Ask::CleanupDays(mut field) => match key {
                 Key::Esc => {}
@@ -1623,6 +1751,10 @@ impl AppSetup {
         if matches!(self.time, Load::Ready(_)) {
             lines.extend(note(TIME_NOTE));
         }
+        lines.push(label("Master frame", self.frames_value(ctx)));
+        if matches!(self.frames, Load::Ready(_)) {
+            lines.extend(note(FRAMES_NOTE));
+        }
         lines
     }
 
@@ -1675,6 +1807,7 @@ impl AppSetup {
             Some(Ask::Cleanup { choice }) => lines.extend(self.cleanup_rows(*choice, limit, ctx)),
             Some(Ask::Steps { choice }) => lines.extend(self.steps_rows(*choice, limit, ctx)),
             Some(Ask::Time { choice }) => lines.extend(self.time_rows(*choice, limit, ctx)),
+            Some(Ask::Frames { choice }) => lines.extend(self.frames_rows(*choice, limit, ctx)),
             Some(Ask::CleanupDays(field)) => {
                 let (field_lines, at) =
                     field.lines(limit.min(FIELD_WIDTH), true, theme, ctx.glyphs);
@@ -1860,7 +1993,8 @@ impl Screen for AppSetup {
                 | Ask::QuitChoice { .. }
                 | Ask::QuitLimit { .. }
                 | Ask::Steps { .. }
-                | Ask::Time { .. }),
+                | Ask::Time { .. }
+                | Ask::Frames { .. }),
             ) => {
                 let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
                 let enter = if matches!(ask, Ask::QuitChoice { .. }) {
@@ -1914,6 +2048,7 @@ impl Screen for AppSetup {
             hints.push(hint("q", "Quitting"));
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
+            hints.push(hint("z", "Master frame size"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -1989,13 +2124,17 @@ impl Screen for AppSetup {
                 self.ask_time(ctx);
                 Flow::Handled
             }
+            Key::Char('z') if !self.first_run => {
+                self.ask_frames(ctx);
+                Flow::Handled
+            }
             _ => Flow::Ignored,
         }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if matches!(arrival, Arrival::Disconnected(_)) {
-            self.reading = [false; 8];
+            self.reading = [false; 9];
             self.sent = None;
             return Flow::Handled;
         }
@@ -2011,7 +2150,8 @@ impl Screen for AppSetup {
             | AppSetupEvent::CleanupSet(result)
             | AppSetupEvent::QuitSet(result)
             | AppSetupEvent::MasterStepsSet(result)
-            | AppSetupEvent::MasterTimeSet(result) => self.changed(result, ctx),
+            | AppSetupEvent::MasterTimeSet(result)
+            | AppSetupEvent::MasterFramesSet(result) => self.changed(result, ctx),
             AppSetupEvent::Sandbox(result) => {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
@@ -2031,6 +2171,10 @@ impl Screen for AppSetup {
             AppSetupEvent::MasterTime(result) => {
                 self.reading[7] = false;
                 self.time = loaded(result);
+            }
+            AppSetupEvent::MasterFrames(result) => {
+                self.reading[8] = false;
+                self.frames = loaded(result);
             }
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
@@ -2083,6 +2227,7 @@ impl Screen for AppSetup {
             || matches!(self.quit, Load::Loading)
             || matches!(self.steps, Load::Loading)
             || matches!(self.time, Load::Loading)
+            || matches!(self.frames, Load::Loading)
             || matches!(self.ask, Some(Ask::HomeChoice { size: None, .. }))
     }
 

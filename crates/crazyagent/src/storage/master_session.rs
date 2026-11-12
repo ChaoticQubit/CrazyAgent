@@ -181,6 +181,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) tools_off: Vec<String>,
     pub(crate) steps: crate::master_step_limit::StepLimit,
     pub(crate) time: crate::master_time_limit::TimeLimit,
+    pub(crate) frames: crate::master_frame_limit::FrameSize,
 }
 
 impl PreparedMasterTurn {
@@ -2973,6 +2974,7 @@ fn bundle(
         tools_off,
         steps: crate::master_step_limit::load(tx)?.limit,
         time: crate::master_time_limit::load(tx)?.limit,
+        frames: crate::master_frame_limit::load(tx)?.limit,
     };
     assert_eq!(
         prepared.attempt.request.task_id,

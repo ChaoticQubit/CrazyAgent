@@ -12,7 +12,8 @@ use crate::setup::SetupStatus;
 
 /// One request from the setup page: setup status and runs, default-pack changes,
 /// the projects home folder, the GitHub account, the sandbox settings, when finished
-/// agents' worktrees go, what quitting does to team agents and the master step limit.
+/// agents' worktrees go, what quitting does to team agents and the master step, time and
+/// frame size limits.
 /// Input: built by the setup page. Output: run on the owner worker; the reply
 /// arrives as `SettingsEvent::AppSetup`.
 pub(in crate::tui) enum AppSetupJob {
@@ -61,6 +62,11 @@ pub(in crate::tui) enum AppSetupJob {
         settings: MasterTimeSettings,
         generation: u64,
     },
+    MasterFrames,
+    SetMasterFrames {
+        settings: MasterFrameSettings,
+        generation: u64,
+    },
 }
 
 /// One change to an installed default-pack entry at the pack version the page showed.
@@ -91,6 +97,8 @@ pub(in crate::tui) enum AppSetupEvent {
     MasterStepsSet(Result<(), String>),
     MasterTime(Result<MasterTimeSettings, String>),
     MasterTimeSet(Result<(), String>),
+    MasterFrames(Result<MasterFrameSettings, String>),
+    MasterFramesSet(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -116,6 +124,8 @@ impl AppSetupJob {
             Self::SetMasterSteps { .. } => "SetMasterSteps",
             Self::MasterTime => "MasterTime",
             Self::SetMasterTime { .. } => "SetMasterTime",
+            Self::MasterFrames => "MasterFrames",
+            Self::SetMasterFrames { .. } => "SetMasterFrames",
         }
     }
 }
@@ -143,6 +153,8 @@ impl AppSetupEvent {
             AppSetupJob::SetMasterSteps { .. } => Self::MasterStepsSet(Err(problem)),
             AppSetupJob::MasterTime => Self::MasterTime(Err(problem)),
             AppSetupJob::SetMasterTime { .. } => Self::MasterTimeSet(Err(problem)),
+            AppSetupJob::MasterFrames => Self::MasterFrames(Err(problem)),
+            AppSetupJob::SetMasterFrames { .. } => Self::MasterFramesSet(Err(problem)),
         }
     }
 }
@@ -288,6 +300,22 @@ impl NativeOwner {
                     .set_master_time_settings(settings, generation)
                     .await,
                 "master_time_settings_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::MasterFrames => AppSetupEvent::MasterFrames(
+                controller
+                    .master_frame_settings()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetMasterFrames {
+                settings,
+                generation,
+            } => AppSetupEvent::MasterFramesSet(applied(
+                controller
+                    .set_master_frame_settings(settings, generation)
+                    .await,
+                "master_frame_settings_outcome_unknown",
                 lost,
             )),
         }

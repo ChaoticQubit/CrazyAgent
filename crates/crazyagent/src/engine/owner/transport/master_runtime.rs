@@ -841,6 +841,7 @@ impl OwnerRuntimeHandle {
                     account_ref,
                     prepared.time.run_time(),
                     resources,
+                    prepared.frames,
                 )
                 .await?,
             ))
@@ -855,6 +856,7 @@ impl OwnerRuntimeHandle {
                 prepared.time.run_time(),
                 resources,
                 &prepared.instructions,
+                prepared.frames,
             )
             .await?;
             if prepared.tools {
