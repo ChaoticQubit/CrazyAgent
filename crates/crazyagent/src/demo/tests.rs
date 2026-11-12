@@ -475,12 +475,14 @@ fn the_planted_question_is_the_engines_own_once_and_its_answer_ticks_the_step() 
     let mut db = database(temp.path());
     db.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
         .unwrap();
-    let first = plant_question(&db).unwrap();
+    let tx = db.transaction().unwrap();
+    let first = plant_question(&tx).unwrap();
     assert_eq!(
-        plant_question(&db).unwrap(),
+        plant_question(&tx).unwrap(),
         first,
         "asked once while it waits"
     );
+    tx.commit().unwrap();
     let (asker, source, question, status): (String, String, String, String) = db
         .query_row(
             "SELECT asker,source,question,status FROM questions_log WHERE id=?1",

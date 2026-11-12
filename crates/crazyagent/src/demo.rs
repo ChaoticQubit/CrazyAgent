@@ -213,8 +213,9 @@ pub(crate) fn refusal(code: String) -> String {
 }
 
 /// Marks the project the demo created as the demo, in the transaction that records it, with
-/// the newest master turn cursor so steps count only this demo's rows; a mark a deleted
-/// demo left is replaced. Inputs: the transaction, the project and when. Output: done.
+/// the newest master turn cursor so steps count only this demo's rows, and plants its
+/// question there, so the two commit together; a mark a deleted demo left is replaced.
+/// Inputs: the transaction, the project and when. Output: done.
 pub(crate) fn record(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -237,7 +238,31 @@ pub(crate) fn record(
         params![PROJECT_ID, now_ms, turn_floor],
     )
     .map_err(error)?;
+    plant(tx);
     Ok(())
+}
+
+/// Plants the demo's question in the recording transaction under its own savepoint: a
+/// failure rolls back only the question, logs `demo_question_not_planted` and lets the demo
+/// be recorded, since New Project already moved its folder into place. Input: the
+/// transaction. Output: none.
+fn plant(tx: &Transaction<'_>) {
+    if tx.execute_batch("SAVEPOINT demo_question").is_err() {
+        eprintln!("demo_question_not_planted cause=savepoint");
+        return;
+    }
+    let planted = plant_question(tx);
+    let closed = if planted.is_ok() {
+        tx.execute_batch("RELEASE demo_question")
+    } else {
+        tx.execute_batch("ROLLBACK TO demo_question; RELEASE demo_question")
+    };
+    if let Err(e) = planted {
+        eprintln!("demo_question_not_planted cause={}", e.0);
+    }
+    if closed.is_err() {
+        eprintln!("demo_question_not_planted cause=release");
+    }
 }
 
 /// Asserts the demo's agents start confined right after New Project recorded it (DEC-153,
@@ -259,11 +284,11 @@ pub(crate) fn assert_confined(db: &Connection, project_id: &ProjectId) -> Result
     Ok(())
 }
 
-/// Plants the demo's question once the demo is recorded, so the guide's question step has
-/// one whatever the model does; the owner's answer reaches the master as an engine message.
-/// Asking again while it waits returns the same question. Input: the engine connection.
-/// Output: the question id.
-pub(crate) fn plant_question(db: &Connection) -> Result<u64, EngineError> {
+/// Plants the demo's question in the transaction that records the demo, so the guide's
+/// question step has one whatever the model does; the owner's answer reaches the master as an
+/// engine message. Asking again while it waits returns the same question. Input: the
+/// transaction. Output: the question id.
+pub(crate) fn plant_question(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     let ask = crate::questions::Ask {
         question: QUESTION.into(),
         kind: crate::questions::QuestionKind::Single,
@@ -271,7 +296,7 @@ pub(crate) fn plant_question(db: &Connection) -> Result<u64, EngineError> {
         recommended: Some(QUESTION_OPTIONS[0].into()),
         context: Some(QUESTION_CONTEXT.into()),
     };
-    crate::questions::raise(db, &demo_id()?, &crate::questions::EngineSource::Demo, &ask)
+    crate::questions::raise_in(tx, &demo_id()?, &crate::questions::EngineSource::Demo, &ask)
 }
 
 fn any(tx: &Transaction<'_>, query: &str) -> Result<bool, EngineError> {

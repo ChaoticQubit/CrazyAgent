@@ -567,14 +567,27 @@ pub fn raise(
     source: &EngineSource,
     ask: &Ask,
 ) -> Result<u64, EngineError> {
-    let asker = source
-        .name()
-        .ok_or_else(|| failure("questions_ask_invalid"))?;
     let tx = immediate(db)?;
-    let id = insert(&tx, project, &asker, "engine", ask, true, None)?;
+    let id = raise_in(&tx, project, source, ask)?;
     tx.commit().map_err(unavailable)?;
     page::refresh(db, project);
     Ok(id)
+}
+
+/// Logs a question an engine step raises inside the caller's transaction, as `raise` does,
+/// so it commits or rolls back with the caller's other rows; the caller rewrites the
+/// project's questions page with `refresh_page` after its commit. Inputs: the transaction,
+/// the project, the step and the ask. Output: as `raise`.
+pub(crate) fn raise_in(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    source: &EngineSource,
+    ask: &Ask,
+) -> Result<u64, EngineError> {
+    let asker = source
+        .name()
+        .ok_or_else(|| failure("questions_ask_invalid"))?;
+    insert(tx, project, &asker, "engine", ask, true, None)
 }
 
 /// Records the owner's answer from a Questions view, naming the version the owner read. A
