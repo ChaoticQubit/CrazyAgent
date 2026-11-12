@@ -61,6 +61,11 @@ const MASTER_STOPPED: &str = "The live master is stopped.";
 const MASTER_RESTART: &str =
     "It starts again when you open this view again or press n for a new session.";
 const MASTER_START_AGAIN: &str = "s starts it again, on the same conversation.";
+const MASTER_TRY_AGAIN: &str = "s tries again.";
+const MASTER_OVERDUE: &str = "The master's terminal hasn't opened after a minute.";
+/// How long the master view waits for the master's terminal before it stops waiting and
+/// offers s to try again, in milliseconds, the desktop's `OPEN_LIMIT_MS` (DEC-141).
+const OPEN_LIMIT_MS: i64 = 60_000;
 const MASTER_HEAD_ROWS: u16 = 1;
 const MASTER_PAUSED: &str = "The team is stopped (Stop all). Start the team to run the master.";
 const MASTER_PAUSED_START: &str =
@@ -297,10 +302,10 @@ impl Team {
         }
     }
 
-    /// Whether the master view is still waiting for a terminal that is coming: none yet or
-    /// one the engine has not attached, the team not stopped, no refused start and the
-    /// switch not off. Input: none. Output: true while typed keys wait for the terminal.
-    fn starting(&self) -> bool {
+    /// Whether the master view waits for a terminal that is coming: none yet or one the
+    /// engine has not attached, the team not stopped, no refused start and the switch not
+    /// off. Input: none. Output: true from the start until the terminal opens or it ends.
+    fn waiting(&self) -> bool {
         self.master
             && self
                 .attached
@@ -311,19 +316,72 @@ impl Team {
             && self.live_on() != Some(false)
     }
 
+    /// Whether that wait has lasted `OPEN_LIMIT_MS` since it began, so the view stops
+    /// waiting in silence, keeps the keys and offers s to try again (owner 11-12).
+    /// Input: none. Output: the answer at this moment.
+    fn overdue(&self) -> bool {
+        self.waiting()
+            && self
+                .waiting_since
+                .is_some_and(|since| now_ms().saturating_sub(since) >= OPEN_LIMIT_MS)
+    }
+
+    /// Whether the master view still waits for its terminal within the limit.
+    /// Input: none. Output: true while typed keys wait for the terminal.
+    fn starting(&self) -> bool {
+        self.waiting() && !self.overdue()
+    }
+
+    /// Starts the wait's clock when a wait begins and clears it once the terminal opened or
+    /// the start ended, so each wait for a terminal gets its own minute.
+    /// Input: none. Output: none.
+    fn time_wait(&mut self) {
+        if !self.waiting() {
+            self.waiting_since = None;
+        } else if self.waiting_since.is_none() {
+            self.waiting_since = Some(now_ms());
+        }
+    }
+
+    /// The engine's line for a live master it stopped, shown as is, and what s does then:
+    /// after an idle stop it starts the master again, after any other stop it tries again.
+    /// None while the master runs, under Stop all, or for a stop with no line.
+    /// Input: none. Output: the line and the words for s.
+    fn stop_line(&self) -> Option<(&str, &'static str)> {
+        if !self.master || self.paused || self.live_on() != Some(false) {
+            return None;
+        }
+        let switch = self.switch.as_ref()?;
+        let line = switch.problem.as_deref()?;
+        let rest = if switch.idle {
+            MASTER_START_AGAIN
+        } else {
+            MASTER_TRY_AGAIN
+        };
+        Some((line, rest))
+    }
+
+    /// Whether s tries the live master's start again: its terminal is overdue, or the engine
+    /// stopped it with a line for any reason but idle, as the desktop's Try again (DEC-141).
+    /// Input: none. Output: the answer.
+    fn try_again(&self) -> bool {
+        self.overdue() || (self.stop_line().is_some() && !self.idle_stopped())
+    }
+
     /// Whether keys go to a terminal: the terminal has focus and, in the master view, one is
-    /// attached or coming; a stopped, refused or switched-off master keeps the view keys.
+    /// attached or coming within the limit; a stopped, refused, switched-off or overdue
+    /// master keeps the view keys.
     /// Input: none. Output: true while every key but Ctrl-] goes to the terminal.
     fn terminal_keys(&self) -> bool {
         self.focus == Focus::Terminal
-            && (!self.master || self.attached.is_some() || self.starting())
+            && (!self.master || (self.attached.is_some() && !self.overdue()) || self.starting())
     }
 
     /// Keeps one key typed while the master's terminal starts, up to `HELD_KEYS_MAX` keys
     /// (not bytes) in all; a paste is not kept, since its bracketing needs the open
     /// terminal's mode. Inputs: the key and the context. Output: none; a dropped key says why.
     fn hold(&mut self, key: &Key, ctx: &mut Ctx) {
-        assert!(self.starting());
+        assert!(self.waiting());
         if matches!(key, Key::Paste(_)) {
             ctx.say(Message::warning(MASTER_PASTE_WAIT, MASTER_HELD_FULL));
             return;
@@ -354,8 +412,8 @@ impl Team {
             .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
     }
 
-    /// Whether an idle stop ended the live master and no Stop all holds the team, the one
-    /// stop that offers s to start it again from this view. Input: none. Output: the answer.
+    /// Whether an idle stop ended the live master and no Stop all holds the team, the stop
+    /// whose s starts it again on the same conversation. Input: none. Output: the answer.
     fn idle_stopped(&self) -> bool {
         self.master
             && !self.paused
@@ -367,6 +425,7 @@ impl Team {
         self.asked = true;
         self.want = Some(true);
         self.refused = None;
+        self.waiting_since = Some(now_ms());
         if let Some(switch) = self.switch.as_mut() {
             switch.problem = None;
         }
@@ -627,7 +686,7 @@ impl Team {
         match key {
             Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
             Key::Char('S') if self.paused => self.start_team(ctx),
-            Key::Char('s') if self.idle_stopped() => self.start_live(ctx),
+            Key::Char('s') if self.idle_stopped() || self.try_again() => self.start_live(ctx),
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
@@ -1007,10 +1066,10 @@ impl Team {
 
     /// Takes a key while the terminal has the keys: Ctrl-] gives them back to the team or
     /// master view, any other key goes to the open terminal. While the master's terminal
-    /// starts, keys wait for it and Esc goes back; a master view with no terminal coming
-    /// gives the keys to the view. A terminal that closed keeps the keys and drops them
-    /// until Ctrl-], so keys typed as it closed never act on the view, but for s after an
-    /// idle stop, which starts the master again.
+    /// starts, keys wait for it and Esc goes back; past the limit, or with no terminal
+    /// coming, the master view has the keys, so s tries again. A terminal that closed keeps
+    /// the keys and drops them until Ctrl-], so keys typed as it closed never act on the
+    /// view, but for s after a stop with a line, which starts the master again.
     /// Inputs: the key and the context. Output: the flow.
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if *key == LEADER {
@@ -1032,6 +1091,9 @@ impl Team {
             self.hold(key, ctx);
             return Flow::Handled;
         }
+        if self.overdue() {
+            return self.master_key(key, ctx);
+        }
         let Some(attached) = self.attached.as_mut() else {
             self.focus = Focus::Tree;
             if self.master {
@@ -1040,7 +1102,7 @@ impl Team {
             return Flow::Handled;
         };
         if attached.closed.is_some() {
-            if *key == Key::Char('s') && self.idle_stopped() {
+            if *key == Key::Char('s') && (self.idle_stopped() || self.try_again()) {
                 self.start_live(ctx);
             }
             return Flow::Handled;
@@ -1312,37 +1374,41 @@ impl Team {
             return None;
         }
         if self.master && self.live_on() == Some(false) && self.attached.is_none() {
-            let problem = self
-                .switch
-                .as_ref()
-                .and_then(|switch| switch.problem.as_deref());
-            let mut lines: Vec<Line<'static>> = wrap(problem.unwrap_or(MASTER_STOPPED), limit)
-                .into_iter()
-                .map(Line::raw)
-                .collect();
+            let (lead, rest) = match self.stop_line() {
+                Some(stop) => stop,
+                None if self.idle_stopped() => (MASTER_STOPPED, MASTER_START_AGAIN),
+                None => (MASTER_STOPPED, MASTER_RESTART),
+            };
+            let mut lines: Vec<Line<'static>> =
+                wrap(lead, limit).into_iter().map(Line::raw).collect();
             lines.extend(
-                wrap(
-                    if self.idle_stopped() {
-                        MASTER_START_AGAIN
-                    } else {
-                        MASTER_RESTART
-                    },
-                    limit,
-                )
-                .into_iter()
-                .map(|text| styled(text, Role::Muted, theme)),
+                wrap(rest, limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
             );
             boxed(frame, area, "Master", false, lines, ctx);
             return None;
         }
-        let idle_line = self
-            .idle_stopped()
-            .then(|| {
-                self.switch
-                    .as_ref()
-                    .and_then(|switch| switch.problem.clone())
-            })
-            .flatten();
+        if self.overdue() {
+            let line = self
+                .switch
+                .as_ref()
+                .and_then(|switch| switch.problem.as_deref())
+                .map_or_else(
+                    || MASTER_OVERDUE.to_owned(),
+                    |line| format!("{MASTER_OVERDUE} {line}"),
+                );
+            let mut lines: Vec<Line<'static>> =
+                wrap(&line, limit).into_iter().map(Line::raw).collect();
+            lines.extend(
+                wrap(MASTER_TRY_AGAIN, limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            boxed(frame, area, "Master", false, lines, ctx);
+            return None;
+        }
+        let stop = self.stop_line().map(|(line, rest)| (line.to_owned(), rest));
         let Some(attached) = self.attached.as_mut() else {
             let waiting = if self.master {
                 self.switch
@@ -1364,7 +1430,7 @@ impl Team {
             .switch
             .as_ref()
             .and_then(|switch| switch.problem.as_deref())
-            .filter(|_| self.master && !self.paused && !attached.started)
+            .filter(|_| self.master && !self.paused && !attached.started && stop.is_none())
         {
             let lines = wrap(waiting, limit)
                 .into_iter()
@@ -1374,9 +1440,9 @@ impl Team {
             return None;
         }
         if let Some(code) = &attached.closed {
-            let (lead, rest) = idle_line
-                .as_deref()
-                .map_or(closed_words(code), |line| (line, MASTER_START_AGAIN));
+            let (lead, rest) = stop
+                .as_ref()
+                .map_or(closed_words(code), |(line, rest)| (line.as_str(), *rest));
             let mut lines: Vec<Line<'static>> =
                 wrap(lead, limit).into_iter().map(Line::raw).collect();
             lines.extend(
@@ -1422,6 +1488,8 @@ impl Screen for Team {
             let mut hints = vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
             if self.idle_stopped() {
                 hints.insert(0, hint("s", "Start again"));
+            } else if self.try_again() {
+                hints.insert(0, hint("s", "Try again"));
             }
             if self.starting() {
                 hints.push(hint("Esc", "Back"));
@@ -1444,6 +1512,8 @@ impl Screen for Team {
             }
             if self.idle_stopped() {
                 hints.push(hint("s", "Start again"));
+            } else if self.try_again() {
+                hints.push(hint("s", "Try again"));
             }
             if self
                 .attached
@@ -1680,6 +1750,7 @@ impl Screen for Team {
             _ => {}
         }
         self.ask_messages(ctx);
+        self.time_wait();
         if !self.starting() {
             self.drop_held(ctx);
         }
@@ -1697,6 +1768,7 @@ impl Screen for Team {
             project: self.project.clone(),
         });
         self.reattach(ctx);
+        self.time_wait();
         self.sync(ctx);
     }
 
