@@ -458,6 +458,10 @@ const PLAIN: &[(&str, &str)] = &[
         "choosing a plugin that sends your text to a host needs a confirm naming that host.",
     ),
     (
+        "search_choice_removed",
+        "the chosen plugin was removed, so search uses full text.",
+    ),
+    (
         "search_choice_unavailable",
         "that plugin is off, not ready or not an embedding plugin.",
     ),

@@ -38,15 +38,16 @@ pub enum SearchChoice {
     Plugin { name: String },
 }
 
-/// One embedding plugin the Search settings can choose: its name and title, how it runs,
-/// whether it can be used now with the plain reason when not, and, for an HTTP plugin,
-/// what leaves this computer for its host once chosen (empty for the local runtime).
+/// One embedding plugin the Search settings can choose: its name and title, how it runs
+/// (none for a chosen plugin that is gone or refused), whether it can be used now with the
+/// plain reason when not, and, for an HTTP plugin, what leaves this computer for its host
+/// once chosen (empty for the local runtime).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchOption {
     pub name: String,
     pub title: String,
-    pub runs: RunsView,
+    pub runs: Option<RunsView>,
     pub usable: bool,
     pub reason: Option<String>,
     pub sends: Vec<String>,
@@ -71,14 +72,16 @@ pub struct Progress {
     pub total: u64,
 }
 
-/// The Search settings page: the saved choice at its version, every choosable plugin, the
-/// local model's download state and the embedding progress of the choice.
+/// The Search settings page: the saved choice at its version, every choosable plugin, a
+/// plain note when the choice fell back to full text, the local model's download state and
+/// the embedding progress of the choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchView {
     pub version: u64,
     pub choice: SearchChoice,
     pub options: Vec<SearchOption>,
+    pub note: Option<String>,
     pub model: ModelState,
     pub progress: Progress,
 }

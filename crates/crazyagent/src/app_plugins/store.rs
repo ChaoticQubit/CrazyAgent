@@ -333,6 +333,42 @@ fn view(db: &Connection, root: &Path, found: Found) -> Result<PluginView, Engine
     })
 }
 
+fn loopback_port(manifest: &Manifest) -> Option<u16> {
+    let Runs::Http(http) = &manifest.runs else {
+        return None;
+    };
+    let loopback = match http.url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+    loopback.then(|| http.url.port_or_known_default()).flatten()
+}
+
+/// The loopback ports every readable plugin would send to, trusted or not, on or off, for a
+/// tools-on sandbox to keep free of agent listeners (rv-code V3-PLUGINS-1 F1). Input: the
+/// engine root. Output: the ports sorted once each, or the folder's refusal, or
+/// `app_plugin_folder_unavailable` when there are more files than are read, so a launch
+/// fails closed instead of missing a port.
+pub fn loopback_ports(root: &Path) -> Result<Vec<u16>, EngineError> {
+    let (files, more) = folder::entries(root)?;
+    if more {
+        return Err(error("app_plugin_folder_unavailable"));
+    }
+    let mut ports: Vec<u16> = BUNDLED
+        .iter()
+        .map(|(name, text)| bundled_found(name, text))
+        .chain(files.into_iter().map(|(stem, read)| user_found(stem, read)))
+        .filter_map(|found| found.parsed.ok())
+        .filter_map(|manifest| loopback_port(&manifest))
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    assert!(ports.len() <= BUNDLED.len() + USER_PLUGINS_MAX);
+    Ok(ports)
+}
+
 /// Lists every plugin for the owner's screen: the bundled ones first, then the user's
 /// plugins folder by name, at most `USER_PLUGINS_MAX`. Inputs: the engine database and
 /// root. Output: the listing with each plugin's status and secret bindings, or the
@@ -505,9 +541,10 @@ fn drop_binding(
     Ok(())
 }
 
-/// Removes a user plugin: its file, trust record, state, bindings and the keys entered for
-/// it. Account keys stay. Inputs: database, engine root and name. Output: Ok, or
-/// `app_plugin_bundled`, `app_plugin_not_found`, or the folder's refusal.
+/// Removes a user plugin: first a Search choice naming it (back to full text with a note),
+/// then its file, trust record, state, bindings and the keys entered for it. Account keys
+/// stay. Inputs: database, engine root and name. Output: Ok, or `app_plugin_bundled`,
+/// `app_plugin_not_found`, or the folder's refusal.
 pub fn remove(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
     tables(db)?;
     if is_bundled(name) {
@@ -516,6 +553,7 @@ pub fn remove(db: &Connection, root: &Path, name: &str) -> Result<(), EngineErro
     if !manifest::valid_name(name) {
         return Err(error("app_plugin_not_found"));
     }
+    crate::semantic::settings::forget(db, name)?;
     let removed = folder::remove(root, name)?;
     let known: bool = db
         .query_row(

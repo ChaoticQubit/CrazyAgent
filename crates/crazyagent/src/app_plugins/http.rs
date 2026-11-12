@@ -65,10 +65,11 @@ pub fn embed(
     let body = serde_json::to_vec(&spec.body(inputs, purpose)).map_err(|_| failed())?;
     let scratch = Scratch::new(root)?;
     let path = scratch.write(&body)?;
-    let mut config = config(spec, &secrets, &path)?;
+    let mut buffer = Config::with_capacity(CONFIG_BYTES);
+    config(spec, &secrets, &path, &mut buffer)?;
     drop(secrets);
-    let reply = run(spec, &config);
-    config.fill(0);
+    let reply = run(spec, &buffer.0);
+    drop(buffer);
     drop(scratch);
     vectors(&reply?, spec, inputs.len())
 }
@@ -85,67 +86,120 @@ pub fn embed(
     Err(failed())
 }
 
+/// The curl config bytes, held in one buffer that never grows, so no copy of a key is left
+/// in freed memory by a resize, and zeroed when dropped, so a key in it is wiped on every
+/// exit: a send, an early error or an unwind (rv-v3sec PLUGINS-2).
 #[cfg(unix)]
-fn push_quoted(config: &mut String, text: &str) -> Result<(), EngineError> {
+struct Config(Vec<u8>);
+
+#[cfg(unix)]
+impl Config {
+    fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    fn push(&mut self, text: &str) {
+        assert!(
+            self.0.len() + text.len() <= self.0.capacity(),
+            "the config buffer never grows"
+        );
+        self.0.extend_from_slice(text.as_bytes());
+    }
+
+    fn wipe(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Config {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+#[cfg(unix)]
+fn push_quoted(config: &mut Config, text: &str) -> Result<(), EngineError> {
     if text.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
-        || config.len() + 2 * text.len() + CONFIG_MARGIN > config.capacity()
+        || config.0.len() + 2 * text.len() + CONFIG_MARGIN > config.0.capacity()
     {
         return Err(failed());
     }
-    for character in text.chars() {
-        if matches!(character, '\\' | '"') {
-            config.push('\\');
+    for byte in text.bytes() {
+        if matches!(byte, b'\\' | b'"') {
+            config.0.push(b'\\');
         }
-        config.push(character);
+        config.0.push(byte);
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn push_line(config: &mut String, key: &str, value: &str) -> Result<(), EngineError> {
-    config.push_str(key);
-    config.push_str(" = \"");
+fn push_line(config: &mut Config, key: &str, value: &str) -> Result<(), EngineError> {
+    config.push(key);
+    config.push(" = \"");
     push_quoted(config, value)?;
-    config.push_str("\"\n");
+    config.push("\"\n");
     Ok(())
 }
 
-/// Builds the curl config, which goes only to curl's stdin: the URL, a loopback pin for
-/// `localhost`, the manifest's headers with secrets filled in, and the body file. Built in
-/// one buffer that never grows, so no copy of a key is left in freed memory by a resize.
-/// Inputs: the plugin's HTTP spec, the secret values in declaration order and the body
-/// file. Output: the config bytes, or `app_plugin_call_failed`.
 #[cfg(unix)]
-fn config(spec: &HttpSpec, secrets: &[SecretString], body: &Path) -> Result<Vec<u8>, EngineError> {
-    let mut config = String::with_capacity(CONFIG_BYTES);
-    let capacity = config.capacity();
-    push_line(&mut config, "url", spec.url.as_str())?;
-    config.push_str("request = \"POST\"\nheader = \"Expect:\"\n");
-    config.push_str("header = \"Content-Type: application/json\"\n");
+fn lines(
+    config: &mut Config,
+    spec: &HttpSpec,
+    secrets: &[SecretString],
+    body: &Path,
+) -> Result<(), EngineError> {
+    push_line(config, "url", spec.url.as_str())?;
+    config.push("request = \"POST\"\nheader = \"Expect:\"\n");
+    config.push("header = \"Content-Type: application/json\"\n");
     if spec.url.host_str() == Some("localhost") {
         let port = spec.url.port_or_known_default().ok_or_else(failed)?;
-        push_line(
-            &mut config,
-            "resolve",
-            &format!("localhost:{port}:127.0.0.1"),
-        )?;
+        push_line(config, "resolve", &format!("localhost:{port}:127.0.0.1"))?;
     }
     for header in &spec.headers {
-        config.push_str("header = \"");
-        push_quoted(&mut config, &header.name)?;
-        config.push_str(": ");
+        config.push("header = \"");
+        push_quoted(config, &header.name)?;
+        config.push(": ");
         for piece in &header.value {
             match piece {
-                Piece::Text(text) => push_quoted(&mut config, text)?,
-                Piece::Secret(index) => push_quoted(&mut config, secrets[*index].expose())?,
+                Piece::Text(text) => push_quoted(config, text)?,
+                Piece::Secret(index) => push_quoted(config, secrets[*index].expose())?,
             }
         }
-        config.push_str("\"\n");
+        config.push("\"\n");
     }
     let body = body.to_str().ok_or_else(failed)?;
-    push_line(&mut config, "data-binary", &format!("@{body}"))?;
-    assert_eq!(config.capacity(), capacity, "the config buffer never grows");
-    Ok(config.into_bytes())
+    push_line(config, "data-binary", &format!("@{body}"))
+}
+
+/// Writes the curl config, which goes only to curl's stdin: the URL, a loopback pin for
+/// `localhost`, the manifest's headers with secrets filled in, and the body file, quotes and
+/// backslashes escaped. A write that fails part way zeroes what it wrote before returning.
+/// Inputs: the plugin's HTTP spec, the secret values in declaration order, the body file and
+/// an empty buffer. Output: Ok with the config in the buffer, or `app_plugin_call_failed`.
+#[cfg(unix)]
+fn config(
+    spec: &HttpSpec,
+    secrets: &[SecretString],
+    body: &Path,
+    config: &mut Config,
+) -> Result<(), EngineError> {
+    assert!(
+        config.0.is_empty(),
+        "a config is written into an empty buffer"
+    );
+    let capacity = config.0.capacity();
+    let written = lines(config, spec, secrets, body);
+    if written.is_err() {
+        config.wipe();
+    }
+    assert_eq!(
+        config.0.capacity(),
+        capacity,
+        "the config buffer never grows"
+    );
+    written
 }
 
 /// Builds the curl command without running it: no `.curlrc`, only the plugin's scheme,
