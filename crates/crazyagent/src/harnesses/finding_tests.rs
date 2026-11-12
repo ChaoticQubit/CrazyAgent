@@ -344,6 +344,19 @@ fn a_chosen_or_found_codex_where_agents_write_is_refused_as_agent_space() {
         );
     }
     assert_eq!(case.check("codex", &good), Ok(good.clone()));
+    let harbor = case.root.join("projects/harbor");
+    let kept = db.unchecked_transaction().unwrap();
+    for agent in 2..=(finding::AGENT_ROWS_MAX as i64 + 64) {
+        let worktree = harbor.join(format!(".crazyagent/worktrees/agent-{agent}"));
+        kept.execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES(?1,'harbor',?2,?3,'git')",
+            rusqlite::params![agent, text(&harbor), text(&worktree)],
+        )
+        .unwrap();
+    }
+    kept.commit().unwrap();
+    assert_eq!(case.check("codex", &good), Ok(good.clone()));
+    assert_eq!(case.check("codex", &legacy), Err(PATH_AGENT_SPACE.into()));
     finding::initialize(&db).unwrap();
     finding::set_chosen(&db, "codex", Some(&good)).unwrap();
     assert_eq!(

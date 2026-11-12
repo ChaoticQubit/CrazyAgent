@@ -1095,7 +1095,11 @@ fn a_node_script_harness_runs_with_the_node_beside_it_inside_the_sandbox() {
             .next(),
         Some(bin)
     );
-    let output = wrapped.output().unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -1161,7 +1165,12 @@ fn a_node_harness_reads_its_node_and_package_but_no_npm_credential_or_other_pack
     assert!(!stdout.contains("FIXTURE-NODE-SECRET"), "{stdout}");
     let mut harness = std::process::Command::new(&script);
     harness.current_dir(&case.project);
-    let output = sandbox.wrap(&profile, &harness).unwrap().output().unwrap();
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
     assert!(
         output.status.success(),
         "{}",
