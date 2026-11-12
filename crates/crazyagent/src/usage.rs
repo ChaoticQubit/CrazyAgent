@@ -7,6 +7,7 @@ use std::time::Duration;
 
 pub mod activity;
 pub mod capture;
+pub mod extras;
 pub mod health;
 pub mod metrics;
 pub mod money;
