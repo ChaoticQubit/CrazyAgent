@@ -431,6 +431,21 @@ impl NativeBridge {
             .await
     }
 
+    /// Saves a project's "End a turn after done" choice (F15): how long a sub-agent's task
+    /// turn may stay quiet after its agent reported done before the engine ends it, in
+    /// seconds, none for Off. Takes the project id, the choice and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn team_done_quiet(
+        &mut self,
+        id: &str,
+        secs: Option<u32>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::DoneQuiet { project_id, secs }, generation)
+            .await
+    }
+
     /// Saves how many terminals each of a project's terminal wall windows holds: 4, 6 or 9.
     /// Takes the project id, the choice and the client generation. Returns the actual commit
     /// receipt.

@@ -1405,6 +1405,14 @@ export function setMasterLands(id: string, mode: MasterLands): Promise<Result<In
   return call<IntentReceipt>("desktop_team_master_lands", { id, mode, generation: nextGeneration() });
 }
 
+/** Saves the project's "End a turn after done" choice: how long a sub-agent's task turn may
+ * stay quiet after its agent reported done before the engine ends it, in seconds, null for
+ * Off. Inputs: the project id and the choice, 120, 600 or 3600 or null. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function setDoneQuiet(id: string, secs: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_done_quiet", { id, secs, generation: nextGeneration() });
+}
+
 /** Turns the project's "Re-ask a sub-agent's empty reply" setting on or off; on, a
  * sub-agent whose task ends with no reply text is asked once more for its reply. Inputs:
  * the project id and the switch. Output: the engine receipt, not ready, or a plain error. */

@@ -56,6 +56,7 @@
     "allow-desktop-team-ask-before-merge",
     "allow-desktop-team-master-lands",
     "allow-desktop-team-reask-empty-reply",
+    "allow-desktop-team-done-quiet",
     "allow-desktop-team-catch-up-main",
     "allow-desktop-team-master-idle-stop",
     "allow-desktop-team-master-live-terminal",
