@@ -85,22 +85,24 @@ fn an_npm_codex_with_an_env_node_line_starts_with_no_search_path() {
         vec![script.clone(), node, PathBuf::from("/bin/sh")]
     );
 
-    let by_name = Command::new(prefix.join("bin/codex"))
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .unwrap();
+    let by_name = crate::spawn_gate::output(
+        Command::new(prefix.join("bin/codex"))
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin"),
+    )
+    .unwrap();
     assert!(
         !by_name.status.success(),
         "env finds no node on /usr/bin:/bin"
     );
     let words = codex.argv();
-    let run = Command::new(&words[0])
-        .args(&words[1..])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .unwrap();
+    let run = crate::spawn_gate::output(
+        Command::new(&words[0])
+            .args(&words[1..])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin"),
+    )
+    .unwrap();
     assert!(run.status.success());
     assert_eq!(
         String::from_utf8_lossy(&run.stdout).trim(),
