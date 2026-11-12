@@ -23,7 +23,8 @@ const began = performance.now();
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
 const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
-assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "first-run-guide", "first-run-skip-guide"].includes(suite),
+assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "first-run-guide", "first-run-skip-guide",
+  "models-app", "models-project"].includes(suite),
   "closed native suite required");
 const WEBDRIVER_SECONDS = suite === "pools-screen" ? 900 : 300;
 let interrupted = false;
@@ -50,10 +51,22 @@ function binary(path) {
     sha256: createHash("sha256").update(readFileSync(path)).digest("hex") };
 }
 
+/** Puts a stand-in Claude Code on PATH for the project Models suite, whose project page lists
+ * installed harnesses only: it answers its version and does nothing else. Output: the folder
+ * to put first on PATH, or none for every other suite. */
+function standIns() {
+  if (suite !== "models-project") return null;
+  const folder = join(evidence, "bin");
+  mkdirSync(folder, { mode: 0o700 });
+  writeFileSync(join(folder, "claude"), "#!/bin/sh\nprintf '2.1.309 (Claude Code)\\n'\n", { mode: 0o700 });
+  return folder;
+}
+
 function environment() {
   createRunDirectories(evidence);
+  const stand = standIns();
   return {
-    PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+    PATH: `${stand ? `${stand}:` : ""}${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
     HOME: join(evidence, "home"),
     TMPDIR: join(evidence, "tmp"),
     LANG: "en_US.UTF-8",

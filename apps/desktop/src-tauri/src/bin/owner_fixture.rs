@@ -7,6 +7,7 @@ use crazyagent::engine::owner::{
     OwnerClient, OwnerClientKind, OwnerData, OwnerOperation, OwnerRead, OwnerRequest,
     OwnerResponse, OwnerResult,
 };
+use crazyagent::model_choice::Origin;
 use crazyagent::protocol::*;
 use serde_json::json;
 use std::error::Error;
@@ -260,6 +261,36 @@ async fn observe_learning() -> FixtureResult<()> {
     emit(json!({ "skipped": progress.skipped }))
 }
 
+/// Reads one harness's Models section and the model rules through the engine's own owner
+/// reads, independently of the window. Inputs: the harness and the project id, none for
+/// the app. Output: one JSON line with each slot's stored value, value in force, source and
+/// version, the owner's own ids with their state, and both rules with their versions.
+async fn observe_model_choice(harness: &str, project: Option<&str>) -> FixtureResult<()> {
+    let socket =
+        std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").ok_or("native fixture socket is required")?;
+    let client = Client::new(socket.into(), Duration::from_secs(3))?;
+    let (_, owner) = OwnerController::attach_configured(client, OwnerClientKind::Tui).await?;
+    let project = project
+        .map(|id| ProjectId::new(id.to_owned()))
+        .transpose()?;
+    let models = owner.model_choice_values(harness, project).await?;
+    let rules = owner.model_choice_rules().await?;
+    let rows: Vec<_> = models
+        .rows
+        .iter()
+        .map(|row| {
+            json!({ "slot": row.slot, "here": row.here, "effective": row.effective,
+                "source": row.source, "version": row.version })
+        })
+        .collect();
+    let own: Vec<_> = models
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.origin != Origin::Catalog)
+        .collect();
+    emit(json!({ "rows": rows, "own": own, "rules": rules }))
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).take(4).collect();
@@ -272,6 +303,18 @@ async fn main() -> std::process::ExitCode {
         }
         [mode] if mode == "observe-model-access" => observe_model_access().await,
         [mode] if mode == "observe-learning" => observe_learning().await,
+        [mode, harness] if mode == "observe-model-choice" => match harness.to_str() {
+            Some(harness) => observe_model_choice(harness, None).await,
+            None => Err("invalid harness id".into()),
+        },
+        [mode, harness, project] if mode == "observe-model-choice" => {
+            match (harness.to_str(), project.to_str()) {
+                (Some(harness), Some(project)) => {
+                    observe_model_choice(harness, Some(project)).await
+                }
+                _ => Err("invalid harness or project id".into()),
+            }
+        }
         [mode, id] if mode == "observe-native-auth" => match id.to_str() {
             Some(id) => observe_native_auth(id, None).await,
             None => Err("invalid connection id".into()),
