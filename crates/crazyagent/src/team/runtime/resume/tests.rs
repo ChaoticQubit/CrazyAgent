@@ -1306,6 +1306,7 @@ mod live {
                 &reports,
                 &cancel,
                 &interrupt,
+                &AtomicBool::new(false),
                 &crate::team::runtime::test_by(),
             )
         });

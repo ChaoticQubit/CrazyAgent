@@ -882,6 +882,7 @@ impl ManagedAgent {
             &reports,
             &cancel,
             &interrupt,
+            &AtomicBool::new(false),
             &super::test_by(),
         );
         drop(reports);
@@ -936,6 +937,7 @@ impl ManagedAgent {
             &reports,
             &cancel,
             &interrupt,
+            &AtomicBool::new(false),
             &super::test_by(),
         );
         drop(reports);
@@ -1049,6 +1051,7 @@ impl ManagedAgent {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(leave),
+            &AtomicBool::new(false),
             &super::test_by(),
         );
         drop(reports);
@@ -1098,6 +1101,7 @@ impl ManagedAgent {
             adoption,
             &ordered,
             &reports,
+            &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
