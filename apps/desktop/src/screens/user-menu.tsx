@@ -1,6 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { Dialog } from "../ui";
-import { formatRoute, navigate, type Route, type UserMenuTab } from "../ui/router";
+import { formatRoute, type Route, type UserMenuTab } from "../ui/router";
 import { USER_MENU_ITEMS } from "../ui/sidebar-foot";
 import { GitHubSettings } from "./settings/github";
 import { ProfileSettings } from "./settings/profile";
@@ -56,17 +56,18 @@ export function UserMenuDialog({ tab, onClose }: { tab: UserMenuTab; onClose: ()
 }
 
 /** The open user menu dialog over the shell. A deep link to one of the four settings routes
- * opens its dialog and puts the page the owner was on back in the address, so Back and every
- * hash reader see that page; a move to another page closes the dialog. Inputs: the tab a deep
- * link asks for, if any, and the page under it. */
-export function UserDialogLayer({ asked, under }: { asked: UserMenuTab | null; under: Route }) {
+ * opens its dialog and puts the address the owner was on back, a project section included, so
+ * Back and every hash reader see that page; a move to another page closes the dialog. Inputs:
+ * the tab a deep link asks for, if any, the page under it and that page's address. */
+export function UserDialogLayer({ asked, under, back = formatRoute(under) }: { asked: UserMenuTab | null; under: Route; back?: string }) {
   const open = useUserDialog();
   const page = formatRoute(under);
   const shown = useRef(page);
   useEffect(() => {
     if (asked === null) return;
     openUserDialog(asked);
-    navigate(under, true);
+    window.history.replaceState(null, "", back);
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
   }, [asked]);
   useEffect(() => {
     if (shown.current === page) return;

@@ -159,8 +159,9 @@ function ShellSidebar({ route, projects, profileName, session }: { route: Route;
  * routed screen. Updates, by route or as the open dialog, opens on its own in place of all but
  * the shell, so an install that restarts the engine keeps it in view. In the shell a route to
  * Profile, Updates, GitHub or Projects folder opens that dialog over the page under it.
- * Inputs: the session, the current route and the last shell page that was none of those four. */
-export function AppView({ session, route, alerts, working, under }: { session: Session; route: Route; alerts?: Map<string, number>; working?: ReadonlyMap<string, number>; under?: Route }) {
+ * Inputs: the session, the current route, and the last shell page that was none of those four
+ * with its address. */
+export function AppView({ session, route, alerts, working, under, back }: { session: Session; route: Route; alerts?: Map<string, number>; working?: ReadonlyMap<string, number>; under?: Route; back?: string }) {
   const open = useUserDialog();
   const updates = route.name === "settings" && route.tab === "updates" || open === "updates";
   if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
@@ -201,7 +202,7 @@ export function AppView({ session, route, alerts, working, under }: { session: S
         {STUCK_SIGN_IN_LINE}
       </Banner>}
       <Screen route={page} session={session} alerts={alerts} />
-      <UserDialogLayer asked={asked} under={page} />
+      <UserDialogLayer asked={asked} under={page} back={back} />
       <GoToLayer projects={projects ?? []} />
     </AppShell>
   </SessionContext.Provider>;
@@ -322,11 +323,11 @@ function useIdeFocus(running: boolean) {
 export function App() {
   const session = useSession();
   const route = useRoute();
-  const under = useRef<Route>({ name: "home" });
-  if (route.name !== "welcome" && !(route.name === "settings" && isUserMenuTab(route.tab))) under.current = route;
+  const under = useRef<{ route: Route; hash?: string }>({ route: { name: "home" } });
+  if (route.name !== "welcome" && !(route.name === "settings" && isUserMenuTab(route.tab))) under.current = { route, hash: window.location.hash || undefined };
   useShortcuts();
   useUpdateWatch(session.showToast);
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
-  return <AppView session={session} route={route} alerts={alerts} working={working} under={under.current} />;
+  return <AppView session={session} route={route} alerts={alerts} working={working} under={under.current.route} back={under.current.hash} />;
 }
