@@ -5373,4 +5373,45 @@ mod tests {
         }
         assert_eq!(reached.lock().unwrap().len(), NATIVE_COMMANDS.len() * 2);
     }
+
+    #[test]
+    fn every_native_command_is_granted_in_some_capability_file() {
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+        let mut granted = std::collections::BTreeSet::new();
+        let mut files = 0;
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            files += 1;
+            let capability: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let permissions = capability["permissions"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} lists no permissions", path.display()));
+            for permission in permissions {
+                if let Some(name) = permission
+                    .as_str()
+                    .and_then(|name| name.strip_prefix("allow-"))
+                {
+                    granted.insert(name.replace('-', "_"));
+                }
+            }
+        }
+        assert!(
+            files >= 2,
+            "main-window.json and terminal-wall.json are read"
+        );
+        let missing: Vec<&str> = NATIVE_COMMANDS
+            .iter()
+            .copied()
+            .filter(|command| !granted.contains(*command))
+            .collect();
+        assert_eq!(
+            missing,
+            Vec::<&str>::new(),
+            "a native command no capability file allows is refused by the real app",
+        );
+    }
 }
