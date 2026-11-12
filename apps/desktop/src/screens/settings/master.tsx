@@ -48,7 +48,7 @@ export const FRAME_LIMIT_CHOICES: { choice: FrameSize; title: string; help: stri
 
 /** What a turn stopped by the frame size limit says and which masters the limit covers, the
  * same words in the TUI. */
-export const FRAME_LIMIT_NOTE = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, then send again. The limit covers Claude and Codex masters; rcli keeps 64 KiB.";
+export const FRAME_LIMIT_NOTE = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, or at 1 MiB shorten the message or the instructions, then send again. The limit covers Claude and Codex masters; rcli keeps 64 KiB.";
 
 const MASTER_TOP = <div className="settings-top"><div>
   <h2>Master</h2>

@@ -405,7 +405,7 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
             "it sent a message out of order. Send again to start a fresh turn."
         }
         Some(MasterReason::FrameLimit) => {
-            "one message was larger than the master frame size limit. Raise it in Settings, then send again."
+            "one message was larger than the master frame size limit. Raise it in Settings, or at 1 MiB shorten the message or the instructions, then send again."
         }
         Some(MasterReason::WorktreeUncertain) => {
             "its copy of the project could not be checked. Close the master and open it again, then send again."

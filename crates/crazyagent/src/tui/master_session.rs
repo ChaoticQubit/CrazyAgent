@@ -3289,7 +3289,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
             "The harness sent a message out of order: send again to start a fresh turn"
         }
         MasterReason::FrameLimit => {
-            "One message was larger than the master frame size limit: raise it in Settings, then send again"
+            "One message was larger than the master frame size limit: raise it in Settings, or at 1 MiB shorten the message or the instructions, then send again"
         }
         MasterReason::WorktreeUncertain => {
             "Its copy of the project could not be checked: close it (F4), open it again (F2, Enter), then send again"

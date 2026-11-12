@@ -75,7 +75,7 @@ const TIME_TEXT: &str = "Master time limit: the longest a project's master works
 const TIME_NOTE: &str = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and rcli.";
 const FRAMES_TEXT: &str =
     "Master frame size limit: the largest one message the engine sends a project's master.";
-const FRAMES_NOTE: &str = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, then send again. The limit covers Claude and Codex masters; rcli keeps 64 KiB.";
+const FRAMES_NOTE: &str = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, or at 1 MiB shorten the message or the instructions, then send again. The limit covers Claude and Codex masters; rcli keeps 64 KiB.";
 const HOURS_DIGITS_MAX: usize = 3;
 
 /// The title of one finished agents option, the same words as the desktop Settings.
