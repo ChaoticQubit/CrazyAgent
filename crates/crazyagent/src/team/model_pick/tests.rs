@@ -2,6 +2,7 @@ use super::*;
 use crate::model_choice::store::{Begun, custom_begin, custom_checked, set};
 use crate::model_choice::{Slot, Written};
 use crate::protocol::CredentialRef;
+use crate::team::TeamReach;
 use serde_json::json;
 
 const PROJECT: &str = "models";

@@ -603,14 +603,14 @@ fn each_launch_harness_ships_a_checked_model_catalog() {
         assert!(!shipped.qualified_versions.is_empty());
         assert!(!shipped.sources.is_empty());
         assert!(!shipped.models.is_empty());
-        assert_eq!(catalog(harness), shipped.models);
+        assert_eq!(super::catalog(harness), shipped.models);
     }
-    assert!(catalog("codex").contains(&"gpt-6.1-sol".to_owned()));
-    assert!(catalog("claude-code").contains(&"opus[1m]".to_owned()));
-    assert_eq!(catalog("claude"), catalog("claude-code"));
+    assert!(super::catalog("codex").contains(&"gpt-6.1-sol".to_owned()));
+    assert!(super::catalog("claude-code").contains(&"opus[1m]".to_owned()));
+    assert_eq!(super::catalog("claude"), super::catalog("claude-code"));
     assert!(shipped("rcli").is_none());
-    assert!(catalog("rcli").is_empty());
-    assert!(catalog("no-such-harness").is_empty());
+    assert!(super::catalog("rcli").is_empty());
+    assert!(super::catalog("no-such-harness").is_empty());
 }
 
 #[test]
@@ -753,7 +753,7 @@ fn a_claude_code_id_holds_brackets_only_as_the_catalog_s_1m_suffix() {
     ] {
         assert!(!model_valid("claude-code", model), "{model}");
     }
-    for model in catalog("claude-code") {
+    for model in super::catalog("claude-code") {
         assert!(model_valid("claude-code", &model), "{model}");
     }
 }
