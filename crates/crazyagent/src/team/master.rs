@@ -1711,6 +1711,7 @@ fn lead_status(
     }
     let mut status = super::events::status(connection, project)?;
     status.agents.retain(|line| workers.contains(&line.agent));
+    status.queued.retain(|queued| queued.parent == Some(lead));
     status.events.retain(|event| workers.contains(&event.agent));
     status.finished = super::events::finished_agents(connection, project, now_ms())?
         .into_iter()

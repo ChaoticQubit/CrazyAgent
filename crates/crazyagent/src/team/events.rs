@@ -1,7 +1,7 @@
 pub use super::agent_messages::Said;
 use super::{
-    AgentRole, AgentStatus, MessageAuthor, MessageState, append_message, bound_text, error,
-    make_room,
+    AgentRole, AgentStatus, MessageAuthor, MessageState, TaskStatus, append_message, bound_text,
+    error, make_room,
 };
 use crate::activity::ActivityKind;
 use crate::engine::EngineError;
@@ -320,12 +320,26 @@ pub struct AgentLine {
     pub waiting: Option<String>,
 }
 
-/// What the master's status tool shows: the project's live sub-agents, the finished ones it
-/// can wake, the newest events and whether auto-wake is paused at its cap.
+/// One task still waiting to start as the master's status reads it (F11): its number, the
+/// lead that handed it out, if any, and its line with why it waits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedLine {
+    pub task: i64,
+    pub parent: Option<i64>,
+    pub line: String,
+}
+
+/// What the master's status tool shows: the project's live sub-agents, the tasks still
+/// waiting with why each waits, the agent limits the owner set, read only (F11), the
+/// finished ones it can wake, the newest events and whether auto-wake is paused at its cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventsStatus {
     pub project_id: ProjectId,
     pub agents: Vec<AgentLine>,
+    #[serde(default)]
+    pub queued: Vec<QueuedLine>,
+    #[serde(default)]
+    pub limits: Option<String>,
     #[serde(default)]
     pub finished: Vec<String>,
     pub events: Vec<TeamEvent>,
@@ -353,6 +367,17 @@ impl EventsStatus {
             if let Some(question) = &agent.waiting {
                 text.push_str(&format!(", waiting on: {}", agent_line(question)));
             }
+            text.push('\n');
+        }
+        if !self.queued.is_empty() {
+            text.push_str("Tasks waiting to start, oldest first:\n");
+            for queued in &self.queued {
+                text.push_str(&queued.line);
+                text.push('\n');
+            }
+        }
+        if let Some(limits) = &self.limits {
+            text.push_str(limits);
             text.push('\n');
         }
         if !self.finished.is_empty() {
@@ -1832,6 +1857,8 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
     Ok(EventsStatus {
         project_id: project.clone(),
         agents,
+        queued: queued_lines(connection, project)?,
+        limits: limits_line(connection, project)?,
         finished: finished_agents(connection, project, super::now_ms())?
             .into_iter()
             .map(|(_, line)| line)
@@ -1839,6 +1866,92 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
         events: events(connection, project, STATUS_EVENTS_MAX)?,
         paused,
     })
+}
+
+/// The most waiting tasks the master's status lists (F11).
+pub const QUEUED_SHOWN_MAX: i64 = 16;
+/// How much of a waiting task's prompt its status line quotes.
+const QUEUED_PROMPT_BYTES_MAX: usize = 80;
+/// The wait line of a task no dispatch pass has looked at yet.
+pub const WAIT_UNSEEN: &str = "Waits for its turn in the queue";
+/// The wait line of a task that waits for this project to have an account pool.
+pub const WAIT_NEEDS_POOL: &str = "Waits for an account pool for this project";
+
+/// Reads the project's tasks still waiting to start for the master's status (F11), oldest
+/// first and at most `QUEUED_SHOWN_MAX`, each with the reason the engine stored for it.
+/// Takes the connection and the project. Returns the lines, or a SQLite failure.
+fn queued_lines(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Vec<QueuedLine>, EngineError> {
+    type Row = (i64, Option<i64>, String, String, Option<String>);
+    let rows: Vec<Row> = connection
+        .prepare(
+            "SELECT id,parent,prompt,status,wait FROM team_tasks
+             WHERE project=?1 AND status IN ('queued','needs_pool') ORDER BY id LIMIT ?2",
+        )
+        .map_err(error)?
+        .query_map(params![project.as_str(), QUEUED_SHOWN_MAX], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= QUEUED_SHOWN_MAX as usize);
+    Ok(rows
+        .into_iter()
+        .map(|(task, parent, prompt, status, wait)| {
+            let why = TaskStatus::parse(&status)
+                .and_then(|status| super::wait_line(status, wait.as_deref()))
+                .unwrap_or_else(|| WAIT_UNSEEN.to_owned());
+            QueuedLine {
+                task,
+                parent,
+                line: format!(
+                    "- task {task} \"{}\": {why}",
+                    one_line(&prompt, QUEUED_PROMPT_BYTES_MAX)
+                ),
+            }
+        })
+        .collect())
+}
+
+/// Writes the agent limits the owner set for a project as one read-only line for the
+/// master (F11): the team plan's sub-agents at once and per harness, Max harnesses per
+/// project and Max teammates per harness. Takes the connection and the project. Returns
+/// the line, None without a setup, or a SQLite failure.
+pub fn limits_line(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<String>, EngineError> {
+    let Some(stored) = crate::project_setup::load_setup(connection, project)? else {
+        return Ok(None);
+    };
+    let caps = super::caps::read(connection, project)?;
+    let plan = &stored.team;
+    let per_harness = if plan.sub_harnesses.is_empty() {
+        "any harness that can run".to_owned()
+    } else {
+        plan.sub_harnesses
+            .iter()
+            .take(super::TEAMMATES_SHOWN_MAX)
+            .map(|slot| format!("{} {}", one_line(&slot.harness, 64), slot.agents))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let cap = |value: Option<u8>| value.map_or_else(|| "No limit".to_owned(), |v| v.to_string());
+    Ok(Some(format!(
+        "Limits the owner sets (read only; ask the owner to change them): team plan {} sub-agents at once, per harness: {per_harness}; Max harnesses per project: {}; Max teammates per harness: {}.",
+        plan.max_agents.saturating_sub(1),
+        cap(caps.harnesses),
+        cap(caps.teammates)
+    )))
 }
 
 /// Writes one event as the master reads it: the agent's text goes through `agent_line`, so

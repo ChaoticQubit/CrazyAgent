@@ -1241,6 +1241,21 @@ async fn desktop_team_reask_empty_reply(
 }
 
 #[tauri::command]
+async fn desktop_team_done_quiet(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    secs: Option<u32>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_done_quiet(&id, secs, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_catch_up_main(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4651,6 +4666,7 @@ native_commands! {
     desktop_team_ask_before_merge,
     desktop_team_master_lands,
     desktop_team_reask_empty_reply,
+    desktop_team_done_quiet,
     desktop_team_catch_up_main,
     desktop_team_master_idle_stop,
     desktop_team_master_live_terminal,

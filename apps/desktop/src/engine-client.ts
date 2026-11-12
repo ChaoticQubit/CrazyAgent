@@ -805,6 +805,7 @@ export interface TeamTask {
   started_ms: number | null;
   finished_ms: number | null;
   parent?: number | null;
+  wait?: string | null;
 }
 
 export interface TeamMessage {
@@ -943,6 +944,7 @@ export interface TeamStatus {
   master_lands?: MasterLands | null;
   access_unreadable?: boolean;
   reask_empty_reply?: boolean;
+  done_quiet_secs?: number | null;
   master_idle_stop?: MasterIdleStop;
   master_live_terminal?: boolean;
   catch_up_main?: CatchUpMain;

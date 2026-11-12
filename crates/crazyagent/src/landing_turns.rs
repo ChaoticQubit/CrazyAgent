@@ -50,6 +50,32 @@ pub fn record(
     Ok(Landed::Added(id))
 }
 
+/// Records what an agent committed while its turn is still open through
+/// `landing::record_commits` and tells whether that is news, as `record_news` does, but
+/// sends nothing back to the agent mid-turn: a clash with main waits for the turn end
+/// (F15). Inputs: the change set store, the workspace and the turn so far. Output: the
+/// landing and whether it is news, or the refusal.
+pub fn record_commits(
+    db: &Connection,
+    workspace: &Workspace,
+    end: &TurnEnd,
+) -> Result<(Landed, bool), EngineError> {
+    let open = landing::open_change_set(db, &workspace.worktree)?;
+    let before = open.as_ref().map(|set| (set.head.clone(), set.state));
+    let was = open.map(|set| (set.id, set.state));
+    let Some(id) = landing::record_commits(db, workspace, end)? else {
+        return Ok((Landed::Nothing, false));
+    };
+    let after = landing::change_set(db, &id)?.map(|(_, set)| (set.head, set.state));
+    let landed = if after.is_some() && after == before {
+        Landed::Waiting(id)
+    } else {
+        Landed::Added(id)
+    };
+    let news = is_news(was, &landed);
+    Ok((landed, news))
+}
+
 /// Records one ended turn as [`record`] does and tells whether the owner and the master
 /// hear of it (F31): a set this turn opened, or one that waited on its agent and is pending
 /// again, is news; edits a turn adds to a set already pending for the owner are not, so a
@@ -63,12 +89,20 @@ pub fn record_news(
 ) -> Result<(Landed, bool), EngineError> {
     let before = landing::open_change_set(db, &workspace.worktree)?.map(|set| (set.id, set.state));
     let landed = record(db, workspace, end, settings)?;
-    let news = match &landed {
+    let news = is_news(before, &landed);
+    Ok((landed, news))
+}
+
+/// Whether a landing is news to the owner and the master (F31): edits added to a set that
+/// was not already pending for the owner. Inputs: the worktree's open set and its state
+/// before, and the landing. Output: the answer, never true unless it is `Landed::Added`.
+fn is_news(before: Option<(ChangeSetId, ChangeState)>, landed: &Landed) -> bool {
+    let news = match landed {
         Landed::Added(id) => before != Some((id.clone(), ChangeState::Pending)),
         Landed::Nothing | Landed::Waiting(_) => false,
     };
     assert!(!news || matches!(landed, Landed::Added(_)));
-    Ok((landed, news))
+    news
 }
 
 /// Sends a team agent's change set that conflicts with main back to its agent at its turn

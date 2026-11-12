@@ -54,6 +54,7 @@ fn main() {
         "desktop_team_ask_before_merge",
         "desktop_team_master_lands",
         "desktop_team_reask_empty_reply",
+        "desktop_team_done_quiet",
         "desktop_team_catch_up_main",
         "desktop_team_master_idle_stop",
         "desktop_team_master_live_terminal",
