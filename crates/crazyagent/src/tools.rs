@@ -167,9 +167,10 @@ impl Places {
     }
 
     /// Builds the engine's places from this process's HOME and PATH and the folder of the
-    /// running executable. With no engine root given, this process's data folder is still
-    /// refused, though its setup folder is not looked in. Input: the engine root. Output:
-    /// the places ([`Places::engine`]).
+    /// running executable. With no engine root given, a launch takes the one this process's
+    /// engine recorded ([`record_engine_root`]), so it looks where setup does; with none,
+    /// the data folder is still refused, though its setup folder is not looked in. Input:
+    /// the engine root. Output: the places ([`Places::engine`]).
     pub fn from_environment(engine_root: Option<&Path>) -> Self {
         Self::at_roots(engine_root, ENGINE_ROOT.get().map(PathBuf::as_path))
     }
@@ -178,7 +179,7 @@ impl Places {
     /// root this process recorded given explicitly so rows never record the global. Inputs:
     /// the engine root given, if any, and the recorded one. Output: the places.
     fn at_roots(engine_root: Option<&Path>, recorded: Option<&Path>) -> Self {
-        let _ = recorded;
+        let engine_root = engine_root.or(recorded);
         let app = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.canonicalize().ok())
