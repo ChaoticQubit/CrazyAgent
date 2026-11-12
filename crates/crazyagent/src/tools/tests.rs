@@ -535,3 +535,44 @@ fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
     let places = Places::new(vec![own.clone()], None);
     assert_eq!(resolve("tool", &places).unwrap().program, tool);
 }
+
+/// RC-M1 on Linux: the engine looks in Linuxbrew and the NixOS system and default profiles,
+/// in that order and before the system folders. A tool in a Linuxbrew prefix and one a
+/// profile links into its store are found; a profile link into a project is refused.
+#[cfg(target_os = "linux")]
+#[test]
+fn linuxbrew_and_nixos_profile_tools_are_found_and_a_link_into_a_project_is_refused() {
+    let (_folder, home) = scratch();
+    let engine = Places::engine(None, None, Some(home.clone()), Some(OsStr::new("")));
+    let at = |folder: &str| {
+        engine
+            .folders()
+            .iter()
+            .position(|f| f == Path::new(folder))
+            .unwrap_or_else(|| panic!("{folder} is looked in"))
+    };
+    let linux = LINUX_FOLDERS.map(at);
+    assert!(linux.windows(2).all(|pair| pair[0] < pair[1]), "{linux:?}");
+    assert!(linux[2] < at(SYSTEM_FOLDERS[0]));
+
+    let brew = home.join("home/linuxbrew/.linuxbrew/bin");
+    let brewed = program(&brew.join("tmux"), NODE);
+    let stored = program(&home.join("nix/store/0-uv/bin/uv"), NODE);
+    let profile = home.join("nix/var/nix/profiles/default/bin");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::os::unix::fs::symlink(&stored, profile.join("uv")).unwrap();
+    let places = Places::new(vec![brew, profile.clone()], Some(home.clone()));
+    assert_eq!(resolve("tmux", &places).unwrap().program, brewed);
+    let uv = resolve("uv", &places).unwrap();
+    assert_eq!((uv.entry, uv.program), (profile.join("uv"), stored));
+
+    let planted = program(&project(&home.join("work/app")).join("uv"), NODE);
+    let twin = home.join("run/current-system/sw/bin");
+    std::fs::create_dir_all(&twin).unwrap();
+    std::os::unix::fs::symlink(&planted, twin.join("uv")).unwrap();
+    let refused = Places::new(vec![twin], Some(home));
+    assert_eq!(
+        resolve("uv", &refused).unwrap_err().reason,
+        Reason::NotFound
+    );
+}
