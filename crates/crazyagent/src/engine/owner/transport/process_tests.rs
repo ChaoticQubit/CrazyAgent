@@ -8,8 +8,8 @@ use std::sync::Barrier;
 /// Makes a temporary engine folder whose `engine.db` is in WAL and written in it, as an engine
 /// leaves it. The macOS system SQLite refuses a writer at once in a rollback journal while a
 /// read-only connection holds a read, and refuses read-only connections on a WAL file never
-/// written in WAL. No engine on a disk that takes WAL meets either; the engine does not check
-/// that WAL took. Output: the folder's guard and its canonical path.
+/// written in WAL. No engine meets either: it refuses a store that does not take WAL
+/// (`database_wal_refused`). Output: the folder's guard and its canonical path.
 fn root() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();

@@ -32749,3 +32749,24 @@ fn a_restarted_engine_gives_the_adopted_live_master_a_fresh_run_time() {
     );
     again.shutdown().unwrap();
 }
+
+/// SQLITE-WAL-UNCHECKED: the team runtime refuses a store that answers its WAL request by keeping
+/// a rollback journal, here an anonymous temporary database, with one plain code instead of
+/// running the team on it.
+#[test]
+fn the_team_runtime_refuses_a_store_that_keeps_a_rollback_journal() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let state = root.path().canonicalize().unwrap().join("team");
+    let opened = TeamRuntime::open(
+        Path::new(""),
+        &state,
+        BTreeMap::new(),
+        Box::new(|| None::<ModelAccess>),
+        TeamLimits::default(),
+    );
+    match opened {
+        Err(EngineError(code)) => assert_eq!(code, "database_wal_refused: delete"),
+        Ok(_) => panic!("the team runtime opened a store that keeps a rollback journal"),
+    }
+}

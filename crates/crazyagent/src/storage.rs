@@ -1368,10 +1368,24 @@ fn unlock_database(file: &std::fs::File) -> Result<(), EngineError> {
         .map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
+/// Asks SQLite for write-ahead logging and reads the mode back, since a store that cannot take
+/// WAL answers with the journal it kept, not an error. An anonymous in-memory store, which no
+/// other connection can open, may keep `memory` (DEC-147 addendum). Takes the connection.
+/// Returns the kept mode when the store is not in WAL, none when it is, or the SQLite failure.
+pub fn wal_refused(connection: &Connection) -> rusqlite::Result<Option<String>> {
+    let mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    let anonymous = connection.path().is_none_or(str::is_empty);
+    let kept = mode != "wal" && !(anonymous && mode == "memory");
+    Ok(kept.then_some(mode))
+}
+
 #[cfg(unix)]
 fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
-    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+    if let Some(mode) = wal_refused(connection).map_err(error)? {
+        return Err(error(format!("database_wal_refused: {mode}")));
+    }
+    connection.execute_batch("PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
             INSERT OR IGNORE INTO state VALUES (1,0);
             CREATE TABLE IF NOT EXISTS operations (client TEXT NOT NULL, id TEXT NOT NULL,
@@ -4180,6 +4194,44 @@ mod database_lock_tests {
 
         drop(next_owner);
         release_database_lock(lock_database(&path).unwrap()).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod journal_mode_tests {
+    use super::*;
+
+    fn journal_mode(connection: &Connection) -> String {
+        connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// SQLITE-WAL-UNCHECKED: a store that answers the WAL request by keeping a rollback journal,
+    /// here an anonymous temporary database, fails the engine schema with one plain code instead
+    /// of opening in rollback mode, where a read-only reader beside the writer gets IOERR_LOCK.
+    #[test]
+    fn the_engine_schema_refuses_a_store_that_keeps_a_rollback_journal() {
+        let temporary = Connection::open("").unwrap();
+        let refused = initialize_schema(&temporary);
+        assert_eq!(
+            refused.map_err(|error| error.0),
+            Err("database_wal_refused: delete".to_owned())
+        );
+        assert_eq!(journal_mode(&temporary), "delete");
+    }
+
+    /// A store with a file name runs in write-ahead logging, and an anonymous in-memory store,
+    /// which no other connection can open, keeps its memory journal (DEC-147 addendum).
+    #[test]
+    fn a_file_store_runs_in_wal_and_an_anonymous_memory_store_keeps_its_memory_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let file = Connection::open(root.path().join("engine.db")).unwrap();
+        initialize_schema(&file).unwrap();
+        assert_eq!(journal_mode(&file), "wal");
+        let memory = Connection::open_in_memory().unwrap();
+        initialize_schema(&memory).unwrap();
+        assert_eq!(journal_mode(&memory), "memory");
     }
 }
 
