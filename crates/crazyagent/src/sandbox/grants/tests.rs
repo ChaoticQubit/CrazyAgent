@@ -105,7 +105,7 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
         .unwrap();
     let typed = tmp.path().join("discord-ipc-0");
     assert!(typed.starts_with("/tmp"));
-    let _listener = std::os::unix::net::UnixListener::bind(&typed).unwrap();
+    let _listener = crate::spawn_gate::bind_unix_std(&typed).unwrap();
     let kept = checked(
         &AccessGrant::Socket {
             path: typed.clone(),
@@ -138,7 +138,7 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
     );
     let launchd = tempfile::Builder::new()
         .prefix("com.apple.launchd.")
-        .tempdir_in("/private/tmp")
+        .tempdir_in("/tmp")
         .unwrap();
     let agent = AccessGrant::Socket {
         path: launchd.path().join("Listeners"),
@@ -446,7 +446,7 @@ fn host_escape_and_key_agent_sockets_are_refused_by_class() {
     for (relative, code) in rows {
         let path = base.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let _listener = crate::spawn_gate::bind_unix_std(&path).unwrap();
         assert_eq!(
             checked(&AccessGrant::Socket { path }, data),
             Err(code),
@@ -618,7 +618,7 @@ fn editor_and_terminal_control_sockets_are_refused_by_class() {
     for relative in rows {
         let path = base.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let _listener = crate::spawn_gate::bind_unix_std(&path).unwrap();
         assert_eq!(
             checked(&AccessGrant::Socket { path }, data),
             Err("grant_socket_agent"),
@@ -647,13 +647,13 @@ fn a_socket_with_a_second_name_is_refused_at_both_names() {
     let base = tmp.path().canonicalize().unwrap();
     let data = Path::new("/nonexistent");
     let lone = base.join("lone.sock");
-    let _lone = std::os::unix::net::UnixListener::bind(&lone).unwrap();
+    let _lone = crate::spawn_gate::bind_unix_std(&lone).unwrap();
     assert_eq!(
         checked(&AccessGrant::Socket { path: lone.clone() }, data),
         Ok(AccessGrant::Socket { path: lone })
     );
     let first = base.join("first.sock");
-    let _first = std::os::unix::net::UnixListener::bind(&first).unwrap();
+    let _first = crate::spawn_gate::bind_unix_std(&first).unwrap();
     let second = base.join("second.sock");
     std::fs::hard_link(&first, &second).unwrap();
     for path in [first, second] {
@@ -768,7 +768,7 @@ fn the_floor_also_refuses_kakoune_dtach_abduco_and_ssh_mux_sockets() {
     for relative in rows {
         let path = base.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let _listener = crate::spawn_gate::bind_unix_std(&path).unwrap();
         assert_eq!(
             checked(&AccessGrant::Socket { path }, data),
             Err("grant_socket_agent"),

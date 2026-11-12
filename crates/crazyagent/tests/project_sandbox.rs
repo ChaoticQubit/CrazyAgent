@@ -3994,14 +3994,13 @@ fn a_confined_shell_lists_its_own_running_child() {
 #[test]
 fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets() {
     use crazyagent::sandbox::policy::AccessGrant;
-    use std::os::unix::net::UnixListener;
     let case = case();
     let owner_tmp = case.root.join("otmp");
     fs::create_dir_all(&owner_tmp).unwrap();
     let granted = owner_tmp.join("g.sock");
     let other = owner_tmp.join("o.sock");
-    let _granted = UnixListener::bind(&granted).unwrap();
-    let _other = UnixListener::bind(&other).unwrap();
+    let _granted = crazyagent::spawn_gate::bind_unix_std(&granted).unwrap();
+    let _other = crazyagent::spawn_gate::bind_unix_std(&other).unwrap();
     let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
         .grant_access(
             &[
