@@ -1316,6 +1316,7 @@ mod live {
             native: plan.native,
             tmux: plan.tmux.clone(),
             native_threads: plan.native_threads,
+            native_model: plan.native_model,
             hookless: plan.hookless,
             scratch_pin: plan.scratch_pin,
             proxy: plan.proxy.clone(),

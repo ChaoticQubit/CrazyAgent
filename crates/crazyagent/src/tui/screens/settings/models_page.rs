@@ -204,6 +204,7 @@ fn slot_label(slot: Slot) -> &'static str {
         Slot::Master => "Master model",
         Slot::Agent => "Agent default model",
         Slot::Allowed => "Allowed models",
+        Slot::Native => "Native sub-agent model",
     }
 }
 
@@ -212,6 +213,7 @@ fn slot_help(slot: Slot) -> &'static str {
         Slot::Master => "The model the master runs on with this harness.",
         Slot::Agent => "The model an agent runs on when the master picks none.",
         Slot::Allowed => "The models the master may pick for an agent, with a short reason.",
+        Slot::Native => "What the sub-agents a native lead starts itself run on.",
     }
 }
 

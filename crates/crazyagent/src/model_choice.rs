@@ -63,24 +63,34 @@ const _: () = assert!(
     ITEM_PREFIX.len() + HARNESS_BYTES_MAX + ":project:".len() + PROJECT_BYTES_MAX + 1 + 8
         <= ITEM_BYTES_MAX
 );
+/// The longest Native sub-agent model value as JSON: the longer option name, quoted.
+const NATIVE_VALUE_JSON_MAX: usize = 16;
+const NATIVE_ROW_JSON_MAX: usize = 2 * NATIVE_VALUE_JSON_MAX + 512;
+
+const _: () = assert!(Slot::ALL.len() == 4);
 const _: () = assert!(
-    (CATALOG_MODELS_MAX + CUSTOM_MAX) * CANDIDATE_JSON_MAX + 3 * ROW_JSON_MAX + 1024
+    (CATALOG_MODELS_MAX + CUSTOM_MAX) * CANDIDATE_JSON_MAX
+        + 3 * ROW_JSON_MAX
+        + NATIVE_ROW_JSON_MAX
+        + 1024
         <= crate::protocol::FRAME_BYTES_MAX
 );
 
 /// One model choice of a harness at one scope: the model the master runs on, the default
-/// model of the agents it starts, and the models the master may pick from for an agent.
+/// model of the agents it starts, the models the master may pick from for an agent, and
+/// what a native lead's own sub-agents run on (DEC-150 M-11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Slot {
     Master,
     Agent,
     Allowed,
+    Native,
 }
 
 impl Slot {
     /// Every slot in page order.
-    pub const ALL: [Slot; 3] = [Slot::Master, Slot::Agent, Slot::Allowed];
+    pub const ALL: [Slot; 4] = [Slot::Master, Slot::Agent, Slot::Allowed, Slot::Native];
 
     /// Names the slot as the store and the owner protocol write it.
     pub fn as_str(self) -> &'static str {
@@ -88,6 +98,7 @@ impl Slot {
             Slot::Master => "master",
             Slot::Agent => "agent",
             Slot::Allowed => "allowed",
+            Slot::Native => "native",
         }
     }
 }
@@ -100,6 +111,16 @@ impl Slot {
 pub enum NativeModel {
     Follow,
     Harness,
+}
+
+impl NativeModel {
+    /// Names the option as the store and the owner protocol write it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NativeModel::Follow => "follow",
+            NativeModel::Harness => "harness",
+        }
+    }
 }
 
 /// Where one candidate model id comes from: the harness's model catalog, or an id the
@@ -295,6 +316,7 @@ pub fn supported(harness: &str, slot: Slot) -> bool {
     match slot {
         Slot::Master => matches!(harness, "claude-code" | "codex"),
         Slot::Agent | Slot::Allowed => crate::team::launch_harness(harness).is_some(),
+        Slot::Native => false,
     }
 }
 
@@ -312,6 +334,7 @@ pub(crate) fn value_ok(harness: &str, slot: Slot, value: &Value, usable: &[Strin
                     .iter()
                     .all(|id| id.as_str().is_some_and(|id| known(id) && seen.insert(id)))
         }),
+        Slot::Native => false,
     }
 }
 
@@ -321,6 +344,7 @@ pub(crate) fn fallback(slot: Slot) -> Value {
     match slot {
         Slot::Master | Slot::Agent => Value::Null,
         Slot::Allowed => Value::Array(Vec::new()),
+        Slot::Native => Value::String(NativeModel::Follow.as_str().to_owned()),
     }
 }
 
@@ -337,7 +361,7 @@ pub(crate) fn layered(
 ) -> (Value, Source) {
     let kept = |value: &Value| -> Option<Value> {
         match slot {
-            Slot::Master | Slot::Agent => {
+            Slot::Master | Slot::Agent | Slot::Native => {
                 value_ok(harness, slot, value, usable).then(|| value.clone())
             }
             Slot::Allowed => {

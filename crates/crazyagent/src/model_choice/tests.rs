@@ -99,7 +99,7 @@ fn with_nothing_set_every_slot_leaves_the_model_to_the_account() {
     for scope in [Scope::App, alpha()] {
         let models = store::values(&db, "codex", &catalog(&["a", "b"]), &scope, None).unwrap();
         assert_eq!(models.harness, "codex");
-        assert_eq!(models.rows.len(), 3);
+        assert_eq!(models.rows.len(), 4);
         for slot in [Slot::Master, Slot::Agent] {
             let row = row(&models, slot);
             assert_eq!(row.here, None);
@@ -909,5 +909,182 @@ fn the_models_section_says_whether_the_installed_version_was_checked_and_still_s
     assert_eq!(
         store::launch_model(&db, "codex", &ids, None, Slot::Agent).unwrap(),
         Some(ids[0].clone())
+    );
+}
+
+/// M-11 (DEC-150), Follow the agent's model, the default: with nothing set, Claude Code
+/// and Codex show an editable Native sub-agent model row on Follow, at the app and in a
+/// project, and every start reads Follow.
+#[test]
+fn with_nothing_set_native_sub_agents_follow_the_agent_s_model() {
+    let (_tmp, db) = engine();
+    let project = ProjectId::new(PROJECT).unwrap();
+    for harness in ["claude-code", "codex"] {
+        for scope in [Scope::App, alpha()] {
+            let models = store::values(&db, harness, &catalog(&["a"]), &scope, None).unwrap();
+            let native = row(&models, Slot::Native);
+            assert_eq!(native.here, None, "{harness}");
+            assert_eq!(native.effective, json!("follow"), "{harness}");
+            assert_eq!(native.source, Source::Default, "{harness}");
+            assert_eq!(native.version, 0, "{harness}");
+            assert_eq!(native.access, Access::Editable, "{harness}");
+        }
+        assert_eq!(
+            store::native_model(&db, harness, Some(&project)).unwrap(),
+            NativeModel::Follow
+        );
+        assert_eq!(
+            store::native_model(&db, harness, None).unwrap(),
+            NativeModel::Follow
+        );
+    }
+}
+
+/// M-11 (DEC-150), Let the harness choose: saved at the app, every project's start reads
+/// it; a project's own Follow beats it there, and a reset falls back to the app value.
+#[test]
+fn let_the_harness_choose_saved_at_the_app_reaches_every_project_until_one_overrides_it() {
+    let (_tmp, db) = engine();
+    let project = ProjectId::new(PROJECT).unwrap();
+    for harness in ["claude-code", "codex"] {
+        let app = saved(
+            set(
+                &db,
+                harness,
+                &["a"],
+                &Scope::App,
+                Slot::Native,
+                json!("harness"),
+            )
+            .unwrap(),
+        );
+        assert_eq!(app.here, Some(json!("harness")), "{harness}");
+        assert_eq!(app.effective, json!("harness"), "{harness}");
+        assert_eq!(app.source, Source::App, "{harness}");
+        assert_eq!(
+            store::native_model(&db, harness, Some(&project)).unwrap(),
+            NativeModel::Harness
+        );
+        assert_eq!(
+            store::native_model(&db, harness, None).unwrap(),
+            NativeModel::Harness
+        );
+
+        let here = saved(
+            set(
+                &db,
+                harness,
+                &["a"],
+                &alpha(),
+                Slot::Native,
+                json!("follow"),
+            )
+            .unwrap(),
+        );
+        assert_eq!(here.effective, json!("follow"), "{harness}");
+        assert_eq!(here.source, Source::Project, "{harness}");
+        assert_eq!(
+            store::native_model(&db, harness, Some(&project)).unwrap(),
+            NativeModel::Follow
+        );
+        assert_eq!(
+            store::native_model(&db, harness, None).unwrap(),
+            NativeModel::Harness
+        );
+
+        let reset =
+            saved(store::reset(&db, harness, &catalog(&["a"]), &alpha(), Slot::Native, 1).unwrap());
+        assert_eq!(reset.effective, json!("harness"), "{harness}");
+        assert_eq!(reset.source, Source::App, "{harness}");
+        assert_eq!(
+            store::native_model(&db, harness, Some(&project)).unwrap(),
+            NativeModel::Harness
+        );
+    }
+}
+
+/// M-11 (DEC-150): the Native sub-agent model row takes only its two option names; a model
+/// id, another case, a list or a flag is refused before anything is saved.
+#[test]
+fn a_native_sub_agent_model_outside_its_two_options_is_refused() {
+    let (_tmp, db) = engine();
+    for bad in [
+        json!("a"),
+        json!("Follow"),
+        json!("inherit"),
+        json!(["follow"]),
+        json!(true),
+        json!(null),
+    ] {
+        let refused =
+            set(&db, "codex", &["a"], &Scope::App, Slot::Native, bad.clone()).unwrap_err();
+        assert_eq!(refused.0, "model_choice_value_invalid", "{bad}");
+    }
+    let models = store::values(&db, "codex", &catalog(&["a"]), &Scope::App, None).unwrap();
+    assert_eq!(row(&models, Slot::Native).here, None);
+    assert_eq!(row(&models, Slot::Native).version, 0);
+}
+
+/// M-11 (DEC-150): RCLI runs no native sub-agents, so its Native sub-agent model row is
+/// read-only with "Not supported by this harness", a set is refused and a start follows.
+#[test]
+fn rcli_shows_native_sub_agent_model_not_supported_and_refuses_a_set() {
+    let (_tmp, db) = engine();
+    let models = store::values(&db, "rcli", &catalog(&["local"]), &Scope::App, None).unwrap();
+    assert_eq!(
+        row(&models, Slot::Native).access,
+        Access::ReadOnly {
+            reason: NOT_SUPPORTED.into()
+        }
+    );
+    match set(
+        &db,
+        "rcli",
+        &["local"],
+        &Scope::App,
+        Slot::Native,
+        json!("harness"),
+    )
+    .unwrap()
+    {
+        Written::Refused { code, row } => {
+            assert_eq!(code, "model_choice_not_supported");
+            assert_eq!(row.here, None);
+        }
+        other => panic!("not refused: {other:?}"),
+    }
+    assert_eq!(
+        store::native_model(&db, "rcli", None).unwrap(),
+        NativeModel::Follow
+    );
+}
+
+/// M-11 (DEC-150): a stored Native value outside the two options, as an older or damaged
+/// row could hold, is passed over, so a start follows the agent's model.
+#[test]
+fn a_damaged_native_sub_agent_model_value_is_passed_over_for_follow() {
+    let (_tmp, db) = engine();
+    saved(
+        set(
+            &db,
+            "codex",
+            &["a"],
+            &Scope::App,
+            Slot::Native,
+            json!("harness"),
+        )
+        .unwrap(),
+    );
+    db.execute(
+        "UPDATE model_choices SET value_json = '\"sideways\"' WHERE slot = 'native'",
+        [],
+    )
+    .unwrap();
+    let models = store::values(&db, "codex", &catalog(&["a"]), &Scope::App, None).unwrap();
+    assert_eq!(row(&models, Slot::Native).effective, json!("follow"));
+    assert_eq!(row(&models, Slot::Native).source, Source::Default);
+    assert_eq!(
+        store::native_model(&db, "codex", None).unwrap(),
+        NativeModel::Follow
     );
 }

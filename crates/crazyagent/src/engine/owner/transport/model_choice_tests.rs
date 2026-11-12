@@ -296,10 +296,18 @@ fn the_largest_models_section_fits_one_owner_frame() {
     let full: Value = json!((0..ALLOWED_MAX).map(id).collect::<Vec<_>>());
     let rows = Slot::ALL
         .iter()
-        .map(|slot| Row {
+        .map(|slot| {
+            let value = if *slot == Slot::Native {
+                json!("harness")
+            } else {
+                full.clone()
+            };
+            (slot, value)
+        })
+        .map(|(slot, value)| Row {
             slot: *slot,
-            here: Some(full.clone()),
-            effective: full.clone(),
+            here: Some(value.clone()),
+            effective: value,
             source: Source::Project,
             version: u64::MAX,
             access: Access::ReadOnly {
