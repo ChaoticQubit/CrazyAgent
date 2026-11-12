@@ -415,6 +415,7 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(turns::SCHEMA).map_err(storage)?;
     db.execute_batch(recount::SCHEMA).map_err(storage)?;
     db.execute_batch(activity::SCHEMA).map_err(storage)?;
+    db.execute_batch(extras::SCHEMA).map_err(storage)?;
     capture::count_rows(db)
 }
 
@@ -583,23 +584,31 @@ pub fn record_failure(
     Ok(())
 }
 
-/// Forgets one removed account's stored limits, so no limits card stays for it.
-/// Inputs: the engine store or a transaction on it, and the account. Output: done, nothing
-/// to do in a store that never kept limits, or `usage_unavailable`.
+/// Forgets one removed account's stored limits and limits extras, so no limits card stays
+/// for it. Inputs: the engine store or a transaction on it, and the account. Output: done,
+/// nothing to do in a store that never kept them, or `usage_unavailable`.
 pub(crate) fn forget_limits(db: &Connection, account: &CredentialRef) -> Result<(), EngineError> {
-    let kept: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_limits')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if kept {
-        db.execute(
+    for (table, forget) in [
+        (
+            "account_limits",
             "DELETE FROM account_limits WHERE account=?1",
-            params![account.as_str()],
-        )
-        .map_err(storage)?;
+        ),
+        (
+            "account_limit_extras",
+            "DELETE FROM account_limit_extras WHERE account=?1",
+        ),
+    ] {
+        let kept: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                params![table],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if kept {
+            db.execute(forget, params![account.as_str()])
+                .map_err(storage)?;
+        }
     }
     Ok(())
 }
