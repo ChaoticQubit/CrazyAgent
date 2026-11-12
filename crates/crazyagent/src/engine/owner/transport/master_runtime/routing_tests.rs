@@ -720,6 +720,57 @@ impl Fixture {
         assert_eq!(changed, 1);
     }
 
+    /// Settles a connection's newest operation as an engine restart or its own bound settles
+    /// a check that got no answer: Failed with `code`, or UnauthenticatedObserved for none.
+    /// Inputs: the connection and the code. Output: none; the stored fact and phase change.
+    fn end_newest_check(&self, connection: &str, code: Option<&str>) {
+        let db = Connection::open_with_flags(
+            self.root.path().join("engine.db"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.busy_timeout(Duration::from_secs(1)).unwrap();
+        let mut statement = db
+            .prepare("SELECT fact FROM native_auth_operations ORDER BY generation DESC")
+            .unwrap();
+        let mut fact = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|bytes| crate::engine::owner::native_auth::decode_fact(&bytes.unwrap()).unwrap())
+            .find(|fact| fact.binding.connection.id == reference(connection))
+            .unwrap();
+        drop(statement);
+        assert_eq!(
+            fact.action,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::ClaudeExisting
+            }
+        );
+        let stored = match code {
+            Some(_) => {
+                fact.phase = NativeAuthPhase::Failed;
+                "unavailable"
+            }
+            None => {
+                fact.phase = NativeAuthPhase::UnauthenticatedObserved;
+                "unauthenticated_observed"
+            }
+        };
+        fact.code = code.map(str::to_owned);
+        let changed = db
+            .execute(
+                "UPDATE native_auth_operations SET fact=?1,phase=?2 WHERE id=?3 AND generation=?4",
+                params![
+                    crate::engine::owner::native_auth::encode_fact(&fact).unwrap(),
+                    stored,
+                    fact.operation_id.as_str(),
+                    i64::try_from(fact.generation).unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
     /// Asks the engine to check a connection's existing sign-in. With no account-check host
     /// registered the check cannot run, as when the host is busy at an engine restart.
     /// Input: the connection. Output: none; the check ends unavailable.
@@ -2336,6 +2387,40 @@ async fn a_sign_in_check_the_host_could_not_run_leaves_the_earlier_sign_in_to_be
     case.move_to_earlier_run("claude-a");
     case.check("claude-a").await;
     assert_eq!(case.stale().await, vec![reference("claude-a")]);
+    case.finish().await;
+}
+
+/// v2.4.0 owner update bug: four engine starts in five minutes cut every re-proof check, an
+/// engine stop settled them `native_auth_interrupted`, a lost custody session
+/// `native_auth_recovery_required` and a slow status `native_auth_claude_deadline`, and no
+/// later start re-proved the accounts. Each such check of an earlier run is looked past; one
+/// cut in the running engine stays, so it is not re-run before every turn, and a provider's
+/// signed-out answer still ends the re-proof.
+#[tokio::test]
+async fn a_sign_in_check_cut_before_the_provider_answered_leaves_the_earlier_sign_in_to_be_re_proved()
+ {
+    for code in [
+        "native_auth_interrupted",
+        "native_auth_recovery_required",
+        "native_auth_claude_deadline",
+    ] {
+        let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+        case.sign_in("claude-a", true).await;
+        case.move_to_earlier_run("claude-a");
+        case.check("claude-a").await;
+        case.end_newest_check("claude-a", Some(code));
+        assert!(case.stale().await.is_empty(), "{code} in this run");
+        case.move_to_earlier_run("claude-a");
+        assert_eq!(case.stale().await, vec![reference("claude-a")], "{code}");
+        case.finish().await;
+    }
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.move_to_earlier_run("claude-a");
+    case.check("claude-a").await;
+    case.end_newest_check("claude-a", None);
+    case.move_to_earlier_run("claude-a");
+    assert!(case.stale().await.is_empty());
     case.finish().await;
 }
 

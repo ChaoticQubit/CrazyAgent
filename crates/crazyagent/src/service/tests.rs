@@ -900,6 +900,150 @@ fn current_holds_only_for_the_definition_install_would_write_now() {
     }
 }
 
+/// v2.4.0 owner update bug: the update's `service start` started the definition an install
+/// script wrote for an older engine. A definition running another program is told apart from
+/// one that only has another PATH, which still starts as it is.
+#[test]
+fn a_definition_that_runs_another_program_is_told_apart_from_one_with_another_path() {
+    let temp = tempfile::tempdir().unwrap();
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = temp.path().join("CrazyAgent.app").join("crazyagent");
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        assert!(!own.runs_another_program());
+        let mut script = own.clone();
+        script.executable = temp.path().join("bin").join("engine-start");
+        write_definition(
+            &own.definition,
+            &script.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(own.runs_another_program());
+        let mut elsewhere = own.clone();
+        elsewhere.path = OsString::from("/usr/bin:/bin");
+        write_definition(
+            &own.definition,
+            &elsewhere.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(!own.current());
+        assert!(!own.runs_another_program());
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert!(!own.runs_another_program());
+    }
+}
+
+/// rv-code F1: the definition writes the executable escaped (XML in a plist, quoted for
+/// systemd), so an app kept in a folder named with `&` or `$` is still found in its own
+/// definition and still told apart from an install script's.
+#[test]
+fn an_executable_path_with_escaped_characters_is_still_found_in_its_definition() {
+    let temp = tempfile::tempdir().unwrap();
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = temp
+            .path()
+            .join("Tools & $Apps")
+            .join("CrazyAgent.app")
+            .join("crazyagent");
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert!(!own.runs_another_program());
+        let mut script = own.clone();
+        script.executable = temp.path().join("bin").join("engine-start");
+        write_definition(
+            &own.definition,
+            &script.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(own.runs_another_program());
+    }
+}
+
+/// rv-secreview UE-L1: `service start` replaces a definition that runs another program only
+/// with an installed app's engine outside any cargo target folder, and never under a newer
+/// engine: the last one that ran at the data root or the app bundle the installed plist runs.
+#[cfg(unix)]
+#[test]
+fn only_an_installed_app_engine_that_is_not_older_may_replace_another_program() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = temp
+        .path()
+        .join("Applications")
+        .join("CrazyAgent.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("crazyagent");
+    std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    std::fs::write(&bundled, b"engine").unwrap();
+    let mut own = service(Platform::MacOs);
+    own.root = temp.path().join("engine");
+    std::fs::create_dir_all(&own.root).unwrap();
+    own.executable = bundled.clone();
+    own.definition = temp.path().join("dev.crazyagent.engine.plist");
+    assert!(own.may_replace());
+    let mut plain = own.clone();
+    plain.executable = temp.path().join("bin").join("crazyagent");
+    assert!(!plain.may_replace());
+    let target = temp.path().join("worktree").join("target");
+    let built = target
+        .join("release")
+        .join("bundle")
+        .join("macos")
+        .join("CrazyAgent.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("crazyagent");
+    std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+    std::fs::write(&built, b"engine").unwrap();
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    let mut dev = own.clone();
+    dev.executable = built;
+    assert!(!dev.may_replace());
+    let old = temp.path().join("Old.app");
+    std::fs::create_dir_all(old.join("Contents").join("MacOS")).unwrap();
+    let mut installed = own.clone();
+    installed.executable = old.join("Contents").join("MacOS").join("crazyagent");
+    write_definition(
+        &own.definition,
+        &installed.definition_text().unwrap(),
+        Platform::MacOs,
+    )
+    .unwrap();
+    let info = |version: &str| {
+        std::fs::write(
+            old.join("Contents").join("Info.plist"),
+            format!("<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleShortVersionString</key>\n\t<string>{version}</string>\n</dict>\n</plist>\n"),
+        )
+        .unwrap();
+    };
+    info("99.0.0");
+    assert!(!own.may_replace());
+    info("0.0.1");
+    assert!(own.may_replace());
+    std::fs::write(
+        own.root.join("owner-current"),
+        br#"{"engine_version":"99.0.0"}"#,
+    )
+    .unwrap();
+    assert!(!own.may_replace());
+    std::fs::write(
+        own.root.join("owner-current"),
+        br#"{"engine_version":"0.0.1"}"#,
+    )
+    .unwrap();
+    assert!(own.may_replace());
+}
+
 #[test]
 fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
     let temp = tempfile::tempdir().unwrap();

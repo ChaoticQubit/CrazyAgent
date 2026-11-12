@@ -306,7 +306,7 @@ impl Service {
 </dict>\n\
 </plist>\n",
                 label = xml(&self.name),
-                executable = xml(&executable),
+                executable = self.written_executable(),
                 root = xml(&root),
                 path = xml(&self.path.to_string_lossy()),
                 log = xml(&log),
@@ -326,7 +326,7 @@ StandardError=append:{log}\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n",
-                executable = systemd_quoted(&executable),
+                executable = self.written_executable(),
                 root = systemd_quoted(&root),
                 path = systemd_quoted(&format!("PATH={}", self.path.to_string_lossy())),
                 log = systemd_specifiers(&log),
@@ -555,6 +555,79 @@ WantedBy=default.target\n",
     /// that differs never stops or restarts a running engine. Input: the bundled engine.
     pub fn stale(&self, bundled: &Path) -> bool {
         self.executable != bundled && !self.current()
+    }
+
+    /// The executable as [`Self::definition_text`] writes it on this platform: XML-escaped in
+    /// a plist, quoted for systemd, quoted for cmd and then XML-escaped in a Windows task.
+    /// Output: the text that names the executable in the definition.
+    fn written_executable(&self) -> String {
+        let executable = self.executable.to_string_lossy();
+        match self.platform {
+            Platform::MacOs => xml(&executable),
+            Platform::Linux => systemd_quoted(&executable),
+            Platform::Windows => xml(&windows_quoted(&executable)),
+        }
+    }
+
+    /// Whether the installed definition runs another program than this service's engine, as
+    /// an install script's layout or an older app location does: the line of
+    /// [`Self::definition_text`] naming the executable, as written there, is not in the file.
+    /// A different PATH or setting does not count. Output: false when nothing readable is
+    /// installed.
+    pub fn runs_another_program(&self) -> bool {
+        let Ok(text) = self.definition_text() else {
+            return false;
+        };
+        let written = self.written_executable();
+        let own = text.lines().find(|line| line.contains(written.as_str()));
+        assert!(own.is_some(), "a definition names its executable");
+        std::fs::read_to_string(&self.definition)
+            .is_ok_and(|installed| !installed.lines().any(|line| Some(line) == own))
+    }
+
+    /// Whether `service start` may replace an installed definition that runs another program
+    /// with this service's engine: the engine is an installed desktop app's (an app bundle, a
+    /// mounted AppImage or a Windows install folder) outside any cargo target folder, and no
+    /// engine known at this data root is newer, neither the last one that ran here nor the app
+    /// bundle the installed plist runs. Output: the answer; false for a dev or worktree build.
+    pub fn may_replace(&self) -> bool {
+        let own = canonical(&self.executable);
+        let built = own
+            .ancestors()
+            .any(|folder| folder.join("CACHEDIR.TAG").is_file());
+        if built || !crate::update::inside_app_bundle(&own) {
+            return false;
+        }
+        [
+            crate::engine::bootstrap::reported_engine_version(&self.root),
+            self.installed_bundle_version(),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|known| {
+            crate::update::is_newer(&known, crate::version::VERSION).is_ok_and(|newer| !newer)
+        })
+    }
+
+    /// The version of the app bundle the installed plist runs, from that bundle's Info.plist
+    /// read as text. Output: none when either file is not plain text, is larger than its cap,
+    /// or the plist names no app bundle.
+    fn installed_bundle_version(&self) -> Option<String> {
+        let installed = bounded_text(&self.definition)?;
+        let program = installed
+            .lines()
+            .skip_while(|line| !line.contains("<key>ProgramArguments</key>"))
+            .find_map(plist_string)?;
+        let bundle = Path::new(&program).ancestors().find(|folder| {
+            folder
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        })?;
+        let info = bounded_text(&bundle.join("Contents").join("Info.plist"))?;
+        info.lines()
+            .skip_while(|line| !line.contains("<key>CFBundleShortVersionString</key>"))
+            .nth(1)
+            .and_then(plist_string)
     }
 
     fn loaded(&self) -> Result<bool, ServiceError> {
@@ -822,6 +895,39 @@ fn xml(text: &str) -> String {
 
 fn systemd_specifiers(text: &str) -> String {
     text.replace('%', "%%")
+}
+
+/// The largest definition or Info.plist read when telling installed versions apart.
+const PLIST_BYTES_MAX: u64 = 64 << 10;
+
+/// Reads a small file as UTF-8 text. Input: the path. Output: the text, or none when it is
+/// missing, not UTF-8 or larger than [`PLIST_BYTES_MAX`].
+fn bounded_text(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(PLIST_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= PLIST_BYTES_MAX).then_some(text)
+}
+
+/// The text of a one-line plist `<string>` element, with XML's five escapes undone. Input:
+/// the line. Output: the text, or none for a line that holds no such element.
+fn plist_string(line: &str) -> Option<String> {
+    let inner = line
+        .trim()
+        .strip_prefix("<string>")?
+        .strip_suffix("</string>")?;
+    Some(
+        inner
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
 }
 
 fn systemd_quoted(text: &str) -> String {
