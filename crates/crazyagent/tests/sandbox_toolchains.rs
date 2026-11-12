@@ -1397,6 +1397,59 @@ fn tmux_at(tmux: &Path, socket: &Path, args: &[&str]) -> Output {
     crazyagent::spawn_gate::output(&mut command).unwrap()
 }
 
+/// The app ships tmux as `CrazyAgent.app/Contents/MacOS/crazyagent-tmux`, beside the engine
+/// and its other helpers, where no agent may start a program (DEC-157). A lead's tmux grant
+/// names that one file for reading and starting, never the folder, so the engine, rcli and
+/// runner beside it stay out of the profile.
+#[test]
+fn a_lead_may_read_and_start_only_the_bundled_tmux_file_never_its_app_folder() {
+    let case = case();
+    let macos = case
+        .project
+        .parent()
+        .unwrap()
+        .join("Applications/CrazyAgent.app/Contents/MacOS");
+    for name in ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux"] {
+        write(&macos.join(name), "#!/bin/sh\n");
+        fs::set_permissions(macos.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let tmux = macos.join("crazyagent-tmux");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap()
+    .allow_tmux_server(&tmp.join("tmux.sock"), &tmux)
+    .unwrap();
+    let text = sandbox.profile();
+    toolchains::remove_tmp(&case.home).unwrap();
+    let file = format!("(literal \"{}\")", tmux.display());
+    assert!(
+        text.contains(&format!("(allow process-exec\n  {file}")),
+        "the bundled tmux may be started past the app bundle exec deny: {text}"
+    );
+    assert!(
+        text.matches(&file).count() >= 2,
+        "the bundled tmux is readable as one file: {text}"
+    );
+    let macos = macos.display().to_string();
+    assert!(
+        !text.contains(&format!("(subpath \"{macos}\")")),
+        "the app folder is never granted: {text}"
+    );
+    for sibling in ["crazyagent\"", "crazyagent-rcli", "crazyagent-runner"] {
+        assert!(
+            !text.contains(&format!("{macos}/{sibling}")),
+            "{sibling} stays out of the profile: {text}"
+        );
+    }
+}
+
 #[test]
 fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
     let case = case();
