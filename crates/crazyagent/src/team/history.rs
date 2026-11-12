@@ -1052,7 +1052,7 @@ fn turns(
     from: i64,
     limit: usize,
 ) -> rusqlite::Result<Vec<Turn>> {
-    let mut statement = connection.prepare_cached(&format!(
+    let mut statement = connection.prepare(&format!(
         "SELECT CASE WHEN length(CAST(c.text AS BLOB))<={ROW_TEXT_BYTES_MAX} THEN c.text END,
                 CASE WHEN length(CAST(t.body AS BLOB))<=16384 THEN json_extract(t.body,'$.engine_request.line') END,
                 CASE WHEN length(CAST(t.body AS BLOB))<=16384 THEN json_extract(t.body,'$.reply.text') END,
@@ -1106,7 +1106,7 @@ fn team_rows(
     from: i64,
     limit: usize,
 ) -> rusqlite::Result<Vec<(String, String)>> {
-    let mut statement = connection.prepare_cached(&format!(
+    let mut statement = connection.prepare(&format!(
         "SELECT author, text FROM team_messages
          WHERE project=?1 AND text IS NOT NULL AND length(CAST(text AS BLOB))<={ROW_TEXT_BYTES_MAX}
          ORDER BY created_ms, id LIMIT ?2 OFFSET ?3"
