@@ -17,6 +17,7 @@ pub mod recount;
 pub mod report;
 mod rules;
 pub mod service;
+pub mod spend;
 pub mod turns;
 
 pub use recount::RecountStatus;
