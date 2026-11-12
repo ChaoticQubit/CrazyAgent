@@ -166,6 +166,7 @@ export interface TeamTaskRow {
   word: string;
   prompt: string;
   summary: string;
+  pick: string;
   result: string | null;
   elapsed: string;
   stop: { task: number; label: "Stop" | "Cancel" } | null;
@@ -235,11 +236,19 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
     word: teamTaskWord(item.status),
     prompt: firstLine(item.prompt),
     summary: item.problem ?? (WAITING.includes(item.status) ? waitLine(item) : item.result !== null ? resultSummary(item.result) : ""),
+    pick: "",
     result: item.result,
     elapsed: item.started_ms !== null ? elapsed((item.finished_ms ?? now) - item.started_ms) : "",
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
   return { agents, tasks };
+}
+
+/** Says which model a task's spawn picked and why (DEC-150 M-7), the engine's team::pick_line
+ * words. Input: the pick. Output: one line. */
+export function pickLine(pick: { model: string; reason: string }): string {
+  void pick;
+  return "";
 }
 
 /** Says why a waiting task waits (F11): the reason the engine stored, such as which cap, account

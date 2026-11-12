@@ -3100,6 +3100,13 @@ pub fn wait_line(status: TaskStatus, wait: Option<&str>) -> Option<String> {
     }
 }
 
+/// Says which model a task's spawn picked and why (DEC-150 M-7), the same words on desktop
+/// and TUI. Takes the pick. Returns one bounded line.
+pub fn pick_line(pick: &tool::ModelPick) -> String {
+    let _ = pick;
+    String::new()
+}
+
 /// The longest task title an owner action line quotes.
 const AUDIT_TITLE_BYTES_MAX: usize = 80;
 
@@ -3466,6 +3473,11 @@ pub struct TeamTask {
     /// it waits for. None when it runs, ended, or no reason was stored yet.
     #[serde(default)]
     pub wait: Option<String>,
+    /// The model the spawn pinned to this task and the reason given for it (DEC-150 M-7),
+    /// so task views say which model was picked and why. None when the spawn left the
+    /// model to the default.
+    #[serde(default)]
+    pub pick: Option<tool::ModelPick>,
 }
 
 /// One entry of the team conversation between owner, master and engine.
@@ -3717,6 +3729,7 @@ pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
         finished_ms: row.get(14)?,
         parent: row.get(15)?,
         wait: row.get(16)?,
+        pick: None,
     })
 }
 

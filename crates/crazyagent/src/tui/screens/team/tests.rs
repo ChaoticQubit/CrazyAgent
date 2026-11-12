@@ -1192,6 +1192,7 @@ fn finished_team() -> crate::team::TeamStatus {
             finished_ms: Some(2),
             parent: None,
             wait: None,
+            pick: None,
         }],
         messages: Vec::new(),
         plan: Vec::new(),
@@ -1939,6 +1940,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 finished_ms: Some(2),
                 parent: None,
                 wait: None,
+                pick: None,
             })
             .collect(),
         messages: Vec::new(),

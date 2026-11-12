@@ -445,3 +445,80 @@ fn the_master_is_told_each_harness_s_models_as_the_pick_rule_offers_them() {
     );
     assert_eq!(master_lines(&db, &project(), &["rcli"]).unwrap(), "");
 }
+
+/// The project's stored setup for a status read: Codex master, no sub-agent slots.
+fn setup() -> crate::project_setup::StoredSetup {
+    crate::project_setup::StoredSetup {
+        project_id: project(),
+        name: "Models".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 4,
+        },
+        documents: vec![],
+        folder: "/private/tmp/unused".into(),
+        created_ms: 1,
+        revision: 1,
+    }
+}
+
+#[test]
+fn the_team_status_shows_each_task_s_picked_model_and_reason_and_none_for_the_default() {
+    let (_tmp, mut db) = engine();
+    crate::project_setup::initialize(&db).unwrap();
+    crate::coord::ensure(&db).unwrap();
+    let setup = setup();
+    db.execute(
+        "INSERT INTO project_setups VALUES (?1,?2)",
+        params![PROJECT, serde_json::to_string(&setup).unwrap()],
+    )
+    .unwrap();
+    owner_models(&db, &["gpt-a"], &["gpt-a"], None);
+    let plain = task(&db, "Plain");
+    let picked = task(&db, "Picked");
+    let tx = db.transaction().unwrap();
+    assert_eq!(
+        pin(&tx, &project(), picked, "codex", Some(&pick("gpt-a"))).unwrap(),
+        Ok(" on gpt-a".to_owned())
+    );
+    tx.commit().unwrap();
+
+    let read = crate::team::status(&db, &setup).unwrap();
+
+    let picks = read
+        .tasks
+        .iter()
+        .map(|task| (task.id, task.pick.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(picks, vec![(plain, None), (picked, Some(pick("gpt-a")))]);
+    assert_eq!(
+        crate::team::pick_line(&pick("gpt-a")),
+        "Picked model gpt-a: gpt-a fits"
+    );
+    assert_eq!(
+        crate::team::pick_line(&ModelPick {
+            model: "gpt-a".into(),
+            reason: String::new(),
+        }),
+        "Picked model gpt-a"
+    );
+    let long = ModelPick {
+        model: "gpt-a".into(),
+        reason: format!("{}\nsecond line", "r".repeat(400)),
+    };
+    let line = crate::team::pick_line(&long);
+    assert!(!line.contains('\n'), "{line}");
+    assert!(
+        line.len() <= "Picked model gpt-a: ".len() + crate::team::tool::MODEL_REASON_BYTES_MAX + 3,
+        "{}",
+        line.len()
+    );
+}

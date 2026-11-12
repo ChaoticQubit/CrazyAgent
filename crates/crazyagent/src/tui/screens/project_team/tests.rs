@@ -109,6 +109,7 @@ fn task(id: i64, source: TaskSource, prompt: &str, status: TaskStatus) -> TeamTa
         finished_ms: None,
         parent: None,
         wait: None,
+        pick: None,
     }
 }
 
@@ -531,6 +532,41 @@ fn the_panel_follows_the_focused_task() {
     assert!(find(&rows, "Result").contains("Created the Next.js app"));
     view.key(press(KeyCode::Down));
     assert_eq!(view.task_cursor, 2, "the cursor stops at the last task");
+}
+
+#[test]
+fn the_task_panel_says_which_model_the_master_picked_and_why() {
+    let mut status = team();
+    let pick = crate::team::tool::ModelPick {
+        model: "claude-opus-4-5".into(),
+        reason: "the charts need careful layout work".into(),
+    };
+    let charts = status.tasks.iter_mut().find(|task| task.id == 11).unwrap();
+    charts.pick = Some(pick.clone());
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    view.key(press(KeyCode::Tab));
+    assert_eq!(view.focus, TeamFocus::Tasks);
+    let rows = frame(&view, 120, 36);
+    let line = crate::team::pick_line(&pick);
+    assert_eq!(
+        line,
+        "Picked model claude-opus-4-5: the charts need careful layout work"
+    );
+    assert!(find(&rows, "Task from the master").contains("running 6 min"));
+    assert!(
+        rows.iter().any(|row| row.contains(&line)),
+        "{}",
+        rows.join("\n")
+    );
+    view.key(press(KeyCode::Down));
+    let rows = frame(&view, 120, 36);
+    assert!(
+        !rows.iter().any(|row| row.contains("Picked model")),
+        "a task with no pick runs the default and says nothing: {}",
+        rows.join("\n")
+    );
 }
 
 #[test]
