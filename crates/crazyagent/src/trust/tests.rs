@@ -205,6 +205,7 @@ fn given_in(trust: Trust, checkout: PathBuf, data: PathBuf) -> crate::agent_home
         id: ProjectId::new("hostile").unwrap(),
         folder: Some(checkout),
         mode: crate::instruction_files::Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
         trust,
     })
     .unwrap()
@@ -582,7 +583,7 @@ async fn an_untrusted_project_refuses_own_branch_when_chosen_and_names_the_trust
             .unwrap()
             .ide_git_hooks
     );
-    assert!(crate::ide::workspace::project_hooks(engine.root.path(), &project).unwrap());
+    assert!(crate::ide::workspace::ide_policy(engine.root.path(), &project).unwrap().hooks);
 
     let lowered = owner
         .set_project_trust(project.clone(), 0, Trust::Untrusted, false, 4)
@@ -621,7 +622,7 @@ async fn an_untrusted_project_refuses_own_branch_when_chosen_and_names_the_trust
         !view.ide_git_hooks,
         "an untrusted project's IDE never runs its hooks"
     );
-    assert!(!crate::ide::workspace::project_hooks(engine.root.path(), &project).unwrap());
+    assert!(!crate::ide::workspace::ide_policy(engine.root.path(), &project).unwrap().hooks);
     assert_eq!(
         crate::ide::workspace::project_trust(engine.root.path(), &project).unwrap(),
         Trust::Untrusted
@@ -668,7 +669,7 @@ async fn an_untrusted_project_ide_opens_in_restricted_mode_with_git_hooks_off() 
         Enforcement::for_level(crate::ide::workspace::project_trust(root, &project).unwrap())
             .ide_workspace_trust
     );
-    assert!(crate::ide::workspace::project_hooks(root, &project).unwrap());
+    assert!(crate::ide::workspace::ide_policy(root, &project).unwrap().hooks);
     let lowered = owner
         .set_project_trust(project.clone(), 0, Trust::Untrusted, false, 4)
         .await
@@ -678,7 +679,7 @@ async fn an_untrusted_project_ide_opens_in_restricted_mode_with_git_hooks_off() 
         !Enforcement::for_level(crate::ide::workspace::project_trust(root, &project).unwrap())
             .ide_workspace_trust
     );
-    assert!(!crate::ide::workspace::project_hooks(root, &project).unwrap());
+    assert!(!crate::ide::workspace::ide_policy(root, &project).unwrap().hooks);
     let kept = crate::sandbox::policy::load(
         &Connection::open(root.join("engine.db")).unwrap(),
         project.as_str(),
@@ -711,8 +712,11 @@ async fn a_memory_suggestion_from_an_untrusted_project_is_project_scoped() {
             .unwrap();
     assert_eq!(
         written,
-        Ok(false),
-        "saved at once under the default setting"
+        Ok(crate::memory::library::AgentSaved {
+            waiting: false,
+            narrowed: true,
+        }),
+        "saved at once under the default setting, kept to the untrusted project"
     );
     let scopes: Vec<Option<String>> = db
         .prepare("SELECT project FROM memory_library WHERE text=?1")
