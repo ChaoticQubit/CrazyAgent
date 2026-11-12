@@ -485,7 +485,7 @@ test("Codex installed after the engine started: the Not installed row lists wher
     assert.equal(catalog.find((entry) => entry.id === "codex")?.executable, late, "the catalog and sign-in name the same Codex");
   }, { codexAtStart: false }));
 
-test("Choose the codex file: a file that isn't a program is refused with the reason, and a chosen program is pinned and shown with no engine restart", { timeout: 600000 }, (t) => {
+test("Choose the codex file: a file that isn't a program is refused with the reason, a chosen program is pinned and shown with no engine restart, and Forget clears it once it is gone", { timeout: 600000 }, (t) => {
   const picks = [];
   return onEngine(t, "harness-choose-", async ({ bridge, me, open, rowShows, fakes }) => {
     const folder = join(fakes.root, "tools");
@@ -504,6 +504,14 @@ test("Choose the codex file: a file that isn't a program is refused with the rea
     await me.click("Choose the codex file", "button");
     await rowShows("codex", "the version of the chosen Codex", "Version 0.0.1.");
     assert.deepEqual(await value(bridge, "desktop_harness_find", { id: "codex" }), { kind: "ready", path: program }, "sign-in uses the chosen Codex");
+    rmSync(program);
+    await me.click("Check again", "button");
+    await me.waitFor("the chosen file that is gone, with Forget", (text) => text.includes(`CrazyAgent won't use ${program}. There's no file there.`) && text.includes("Forget the chosen file"));
+    assert.deepEqual(await value(bridge, "desktop_harness_find", { id: "codex" }), { kind: "refused", path: program, code: "harness_path_not_found" }, "a gone chosen file is refused, never pinned");
+    await me.capture("codex-chosen-gone");
+    await me.click("Forget the chosen file", "button");
+    await me.waitFor("where CrazyAgent looked once the choice is forgotten", (text) => text.includes("CrazyAgent looked for codex in these folders and didn't find it:") && !text.includes("Forget the chosen file"));
+    assert.equal((await value(bridge, "desktop_harness_find", { id: "codex" })).kind, "missing", "Forget leaves nothing chosen or pinned");
     assert.deepEqual(picks, [], "the page opened the chooser once for each pick");
   }, { codexAtStart: false, local: { desktop_pick_harness_file: () => ({ value: picks.shift() ?? null }) } });
 });

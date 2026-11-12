@@ -162,7 +162,7 @@ export function HarnessFileView({ id, name, found, pending, problem, onLook, onC
       </>}
       <p className="small secondary">{`If ${name} is installed somewhere else, choose its ${file} file. Volta, asdf and mise folders hold shims that start another program, so CrazyAgent doesn't use them.`}</p>
     </>}
-    {found?.kind === "refused" && <p role="alert">{`CrazyAgent found ${homePath(found.path)} but won't use it. ${pathCopy(found.code)}`}</p>}
+    {found?.kind === "refused" && <p role="alert">{`CrazyAgent won't use ${homePath(found.path)}. ${pathCopy(found.code)}`}</p>}
     {inUse !== null && <p role="status">{`${name} is ready at ${homePath(inUse)}.`}</p>}
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <div className="row">

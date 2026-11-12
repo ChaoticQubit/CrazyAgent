@@ -34,9 +34,10 @@ test("only Codex and Claude Code have a file to choose, named as the owner finds
 });
 
 test("a harness found nowhere lists where CrazyAgent looked, says shims are skipped, and offers Check again and Choose the file", () => {
-  const html = block({ found: { kind: "missing", looked: ["/opt/homebrew/bin", "~/.local/bin", "~/.nvm/versions/node/v22.11.0/bin", "~/.volta/bin"] } });
+  const looked = ["/opt/homebrew/bin", "~/.local/bin", "~/.nvm/versions/node/v22.11.0/bin", "~/.volta/bin (shim, skipped)"];
+  const html = block({ found: { kind: "missing", looked } });
   assert.match(html, /CrazyAgent looked for codex in these folders and didn't find it:/);
-  for (const folder of ["/opt/homebrew/bin", "~/.local/bin", "~/.nvm/versions/node/v22.11.0/bin", "~/.volta/bin"]) assert.match(html, new RegExp(`<li>${folder.replace(/[.]/g, "\\.")}</li>`));
+  for (const folder of looked) assert.ok(html.includes(`<li>${folder}</li>`), folder);
   assert.match(html, /Volta, asdf and mise folders hold shims that start another program/);
   assert.match(html, /aria-label="Check again for Codex"/);
   assert.match(html, />Choose the codex file<\/button>/);
@@ -58,7 +59,8 @@ test("the looked list never shows more than the engine's bound", () => {
 
 test("a refused file names the file with home as ~ and the reason, and offers to forget a chosen file", () => {
   const html = block({ found: { kind: "refused", path: "/Users/someone/tools/codex", code: "harness_path_not_executable" } });
-  assert.match(html, /CrazyAgent found ~\/tools\/codex but won't use it\. That file isn't a program this Mac can run\./);
+  assert.match(html, /CrazyAgent won't use ~\/tools\/codex\. That file isn't a program this Mac can run\./);
+  assert.doesNotMatch(html, /but won't use it/);
   assert.match(html, />Forget the chosen file<\/button>/);
   assert.match(html, />Choose the codex file<\/button>/);
 });
