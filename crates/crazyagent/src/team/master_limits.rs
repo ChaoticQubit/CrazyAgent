@@ -260,13 +260,11 @@ pub(crate) fn set_run_time(
     Ok(())
 }
 
-/// Counts the sub-agent rounds of the owner's current goal. The goal starts at the owner's
-/// last team message that is not keep going, or at the owner's last key in the live
-/// master's terminal when that is later; a round is one master turn that handed work over
-/// after that start, read as the distinct turn keys of the master's top-level tasks: a
-/// reply's key is its message id, ordered against the goal message, and a live turn's is
-/// below zero and timed. Takes a connection and the project. Returns the rounds with the
-/// owner's limit, or any SQLite failure.
+/// Counts the sub-agent rounds of the owner's current goal, from `goal_start`: one round per
+/// master turn that handed work over since, as distinct turn keys of the master's top-level
+/// tasks; a reply's key, its message id, is ordered against the goal message and a live
+/// turn's negative key is timed. Takes a connection and the project. Returns the rounds
+/// with the owner's limit, or any SQLite failure.
 pub fn rounds(connection: &Connection, project: &ProjectId) -> Result<Rounds, EngineError> {
     let max = read(connection, project)?.rounds;
     let (goal, typed, start) = goal_start(connection, project)?;

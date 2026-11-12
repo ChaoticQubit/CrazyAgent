@@ -100,7 +100,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         const shown = (text) => text.includes(ROUNDS_SETTING) && text.includes(RUN_SETTING);
         await me.waitFor("the master limits in Agent settings", shown);
         const reload = async () => {
+          await page.evaluate("window.__e2eOldPage = true");
           await page.send("Page.reload", { ignoreCache: true });
+          for (const deadline = Date.now() + STEP_MS; !(await page.evaluate("window.__e2eOldPage !== true").catch(() => false)); await pause(POLL_MS)) {
+            assert.ok(Date.now() < deadline, "the reloaded page never replaced the old one");
+          }
           await me.waitFor("the master limits in Agent settings after a reload", shown);
         };
         await steps({ project, side: { me, page }, status, reload });
@@ -160,13 +164,16 @@ async function pick(side, id, choice, status, field) {
 
 /** Runs one row per choice of a master limit select: from another choice the owner picks it,
  * the engine keeps it, and the window shows it again after a reload, which reads the team
- * status afresh. Inputs: the test context, the steps' arguments, the select's id, its
- * options, the status field and the evidence name. Output: none. */
+ * status afresh. A reload before each pick saves from a fresh read, never a stale one.
+ * Inputs: the test context, the steps' arguments, the select's id, its options, the status
+ * field and the evidence name. Output: none. */
 async function everyChoice(t, { side, status, reload }, id, options, field, name) {
   for (const option of options) {
     await t.test(`${name}: ${option.label} is saved and read back`, async () => {
       const other = options.find((each) => each.value !== option.value);
+      await reload();
       await pick(side, id, other.value, status, field);
+      await reload();
       await pick(side, id, option.value, status, field);
       await reload();
       await until(side.page, `document.getElementById(${JSON.stringify(id)})?.value === ${JSON.stringify(option.value)}`, `the reloaded window shows ${option.label}`);

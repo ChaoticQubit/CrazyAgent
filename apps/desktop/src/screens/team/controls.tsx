@@ -798,7 +798,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           <SettingRow label="Master run time">
             <Select id={`tg-master-run-${projectId}`} label="Master run time" value={masterRun} options={runOptions()}
               onValue={chooseRun}
-              helper="How long the live master works on without a message or a key from you. It never stops while it waits for you. Each message from you starts the time again. 7 days is the default." />
+              helper="How long the live master works on without a message, an answer, a key or another action from you. It never stops while it waits for you. Each of them starts the time again. 7 days is the default." />
           </SettingRow>
           <SettingRow label="Sub-agent rounds per message">
             <Select id={`tg-master-rounds-${projectId}`} label="Sub-agent rounds per message" value={masterRounds} options={roundOptions()}

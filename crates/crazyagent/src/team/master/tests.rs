@@ -6244,7 +6244,7 @@ fn a_masters_spawn_past_the_round_limit_waits_for_the_owners_keep_going() {
     crate::team::master_limits::set_rounds(&fixture.connection, &project, Some(1)).unwrap();
     super::set_live(&fixture.connection, &project, true).unwrap();
     typed_turn(&fixture.connection, "Build the page");
-    let spawn = |id: u32, task: &str| {
+    let spawn = |id: u64, task: &str| {
         tool_call(
             id,
             tool::SPAWN_TOOL,
