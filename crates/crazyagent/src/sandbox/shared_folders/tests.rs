@@ -494,7 +494,8 @@ fn the_secret_names_hold_every_kind_the_owner_asked_for() {
         "secrets?",
         "pem",
         "p12",
-        "id_(rsa",
+        "id_(rsa|dsa|ecdsa|ed25519).*",
+        r".*\.tfvars(\..*)?",
         "credentials",
         "crt",
     ] {

@@ -32,6 +32,10 @@ const SECRETS: &[&str] = &[
     ".docker/config.json",
     ".kube/config",
     "keys/backup.age",
+    "keys/id_ed25519_github",
+    "keys/id_rsa_work.pub",
+    "infra/terraform.tfvars.json",
+    "infra/prod.auto.tfvars.json",
     "secrets.yaml",
     "program/credentials.json",
 ];

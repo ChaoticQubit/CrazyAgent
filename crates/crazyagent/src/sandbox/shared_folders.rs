@@ -62,12 +62,13 @@ pub const SECRET_NAMES: &[&str] = &[
     r"\.kube",
     r"\.docker/config\.json",
     r"\.config/gcloud",
-    r"id_(rsa|dsa|ecdsa|ed25519)(\..*)?",
+    r"id_(rsa|dsa|ecdsa|ed25519).*",
     r"credentials(\..*)?",
     r"secrets?(\..*)?",
     r".*service(-|_)?account.*\.json",
-    r".*\.(pem|key|p12|pfx|jks|keystore|ppk|kdbx|keychain|keychain-db|tfstate|tfvars|age|crt|cer)",
+    r".*\.(pem|key|p12|pfx|jks|keystore|ppk|kdbx|keychain|keychain-db|tfstate|age|crt|cer)",
     r".*\.tfstate\..*",
+    r".*\.tfvars(\..*)?",
 ];
 
 /// Env templates the secret deny gives back for reading, in any letter case, since they name
