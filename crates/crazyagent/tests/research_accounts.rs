@@ -57,6 +57,25 @@ fn connection(access: &ModelAccess, id: &str) -> ModelConnection {
         .unwrap()
 }
 
+/// The pick of mixed-pool's keyed OpenAI account, which Codex reaches through the engine
+/// key relay since DEC-141 PA-4 and which mixed-pool lists ahead of its Codex sign-in.
+fn keyed() -> AccountPick {
+    AccountPick::Account {
+        connection: CredentialRef::new("key-connection").unwrap(),
+        account: Box::new(ResearchAccount::Endpoint {
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-5".into(),
+            key: Some(CredentialRef::new("openai-key").unwrap()),
+        }),
+    }
+}
+
+/// Pauses only the keyed account, so a pick goes on to the members after it.
+/// Input: a connection. Output: the end of its pause.
+fn key_paused(id: &CredentialRef) -> Option<i64> {
+    (id.as_str() == "key-connection").then_some(3_000)
+}
+
 #[test]
 fn a_project_without_an_assigned_pool_needs_one() {
     let access = access();
@@ -70,11 +89,17 @@ fn a_project_without_an_assigned_pool_needs_one() {
     );
 }
 
+/// Codex takes mixed-pool's members in pool order: the keyed account listed first, then,
+/// while that one is paused, its own signed-in account, never Claude Code's sign-in.
 #[test]
-fn a_mixed_pool_gives_codex_its_first_signed_in_managed_account() {
+fn a_mixed_pool_gives_codex_its_keyed_account_then_its_first_signed_in_managed_account() {
     let access = access();
     assert_eq!(
         pick_account(&access, "project-a", "codex", signed_in),
+        keyed()
+    );
+    assert_eq!(
+        pick_unpaused(&access, "project-a", "codex", signed_in, key_paused),
         AccountPick::Account {
             connection: CredentialRef::new("codex-connection").unwrap(),
             account: Box::new(ResearchAccount::ManagedCodex {
@@ -85,11 +110,17 @@ fn a_mixed_pool_gives_codex_its_first_signed_in_managed_account() {
     );
 }
 
+/// A signed-out Codex account is passed over for the keyless endpoint after it. The keyed
+/// account ahead of both needs no sign-in, so it is paused here to reach them.
 #[test]
 fn a_signed_out_managed_account_falls_through_to_a_keyless_endpoint() {
     let access = access();
     assert_eq!(
         pick_account(&access, "project-a", "codex", signed_out),
+        keyed()
+    );
+    assert_eq!(
+        pick_unpaused(&access, "project-a", "codex", signed_out, key_paused),
         AccountPick::Account {
             connection: CredentialRef::new("local-connection").unwrap(),
             account: Box::new(ResearchAccount::Endpoint {
@@ -225,9 +256,19 @@ fn claude_code_gets_a_managed_claude_account_or_an_anthropic_endpoint_only() {
     );
 }
 
+/// Codex's mixed-pool members are the keyed account, its sign-in and the local endpoint, in
+/// that order: each pause hands research to the next one, and with all three paused it waits
+/// for the earliest pause to end.
 #[test]
 fn a_paused_pool_account_hands_research_to_the_next_member_or_waits_until_the_first_pause_ends() {
     let access = access();
+    let codex = AccountPick::Account {
+        connection: CredentialRef::new("codex-connection").unwrap(),
+        account: Box::new(ResearchAccount::ManagedCodex {
+            connection: connection(&access, "codex-connection"),
+            model: None,
+        }),
+    };
     let local = AccountPick::Account {
         connection: CredentialRef::new("local-connection").unwrap(),
         account: Box::new(ResearchAccount::Endpoint {
@@ -236,24 +277,39 @@ fn a_paused_pool_account_hands_research_to_the_next_member_or_waits_until_the_fi
             key: None,
         }),
     };
-    let codex_paused = |id: &CredentialRef| (id.as_str() == "codex-connection").then_some(2_000);
     assert_eq!(
-        pick_unpaused(&access, "project-a", "codex", signed_in, codex_paused),
+        pick_unpaused(&access, "project-a", "codex", signed_in, key_paused),
+        codex
+    );
+    let key_and_codex_paused = |id: &CredentialRef| match id.as_str() {
+        "key-connection" => Some(3_000),
+        "codex-connection" => Some(2_000),
+        _ => None,
+    };
+    assert_eq!(
+        pick_unpaused(
+            &access,
+            "project-a",
+            "codex",
+            signed_in,
+            key_and_codex_paused
+        ),
         local
     );
-    let both_paused = |id: &CredentialRef| match id.as_str() {
+    let all_paused = |id: &CredentialRef| match id.as_str() {
+        "key-connection" => Some(3_000),
         "codex-connection" => Some(2_000),
         "local-connection" => Some(1_000),
         _ => None,
     };
-    let pick = pick_unpaused(&access, "project-a", "codex", signed_in, both_paused);
+    let pick = pick_unpaused(&access, "project-a", "codex", signed_in, all_paused);
     assert_eq!(pick, AccountPick::Paused { until_ms: 1_000 });
     assert_eq!(
         pick.label(),
         "Every account in this project's pool that can run this research hit its rate limit"
     );
     assert_eq!(
-        pick_unpaused(&access, "project-a", "codex", signed_out, both_paused),
+        pick_unpaused(&access, "project-a", "codex", signed_out, all_paused),
         AccountPick::Paused { until_ms: 1_000 }
     );
     let claude_paused = |id: &CredentialRef| (id.as_str() == "claude-connection").then_some(5_000);
@@ -287,7 +343,7 @@ fn a_paused_pool_account_hands_research_to_the_next_member_or_waits_until_the_fi
             "project-unassigned",
             "codex",
             signed_in,
-            both_paused
+            all_paused
         ),
         AccountPick::NeedsPool
     );
@@ -658,6 +714,10 @@ fn the_onboarding_pool_pick_skips_paused_accounts_and_waits_while_every_one_is_p
     );
 }
 
+/// Research follows the owner's schedule over mixed-pool's Codex members. With no schedule
+/// it keeps pool order, so the keyed account comes first; under Use it or lose it the
+/// accounts with a known weekly reset come before the keyed account, which has no reading;
+/// with every account left out or held it waits for the held one's reset.
 #[test]
 fn research_follows_the_schedule_and_waits_for_a_held_account_to_reset() {
     let access = access();
@@ -717,7 +777,7 @@ fn research_follows_the_schedule_and_waits_for_a_held_account_to_reset() {
     };
     assert_eq!(
         picked(&Choice::default()),
-        "codex-connection",
+        "key-connection",
         "without a schedule research keeps pool order"
     );
     assert_eq!(picked(&choice(&db)), "local-connection");
@@ -747,10 +807,23 @@ fn research_follows_the_schedule_and_waits_for_a_held_account_to_reset() {
             ..AccountPlan::default()
         },
     );
-    assert_eq!(picked(&choice(&db)), "local-connection");
+    assert_eq!(
+        picked(&choice(&db)),
+        "key-connection",
+        "Use last puts local after the keyed account once codex is held"
+    );
     plan(
         &mut db,
         "local-connection",
+        AccountPlan {
+            pin: Some(Pin::NeverUse),
+            ..AccountPlan::default()
+        },
+    );
+    assert_eq!(picked(&choice(&db)), "key-connection");
+    plan(
+        &mut db,
+        "key-connection",
         AccountPlan {
             pin: Some(Pin::NeverUse),
             ..AccountPlan::default()

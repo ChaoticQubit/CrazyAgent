@@ -2487,6 +2487,8 @@ const REMOVED_WITH_PROJECT: [&str; 49] = [
     "team_master_branch",
     "team_land_on",
     "team_background",
+    "team_leftovers",
+    "team_agent_ends",
     "team_merge_ask",
     "team_master_lands",
     "team_reask_empty",

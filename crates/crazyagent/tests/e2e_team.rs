@@ -67,6 +67,11 @@ async fn closed(output: &mut TerminalOutput) -> String {
     .unwrap_or_else(|_| "no close within ten seconds".into())
 }
 
+/// The owner types into a shell in the engine's terminal server and sees it run, a resize
+/// reach it and its screen come back on a second attach, and the team graph shows the
+/// master. The shell's pane is a stand-in under a name no engine part owns: the team runtime
+/// starts on every writable engine and ends a `team-<id>` pane it has no record of, as
+/// `an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on` proves.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_master() {
     let mut engine = Engine::new("ca-e2e-team-");
@@ -76,7 +81,7 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let agent = AgentId::team(1).unwrap();
+    let agent = AgentId::new("stand-in-1").unwrap();
     let command = InteractiveCommand {
         argv: vec!["/bin/sh".into()],
         cwd: engine.path().to_path_buf(),

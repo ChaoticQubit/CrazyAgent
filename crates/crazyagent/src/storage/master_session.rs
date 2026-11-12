@@ -2955,6 +2955,10 @@ fn bundle(
         crate::sandbox::policy::load(tx, session.project_id.as_str()).map_err(error)?;
     let hidden_paths =
         crate::sandbox::hidden_paths::load(tx, session.project_id.as_str()).map_err(error)?;
+    crate::harnesses::leftovers::set_mode(
+        session.project_id.as_str(),
+        crate::team::leftover_mode(tx, session.project_id.as_str())?,
+    );
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         message: running_message(tx, &session, turn)?,
@@ -6515,6 +6519,36 @@ auth = { method = "none" }"#;
         let tx = db.transaction().unwrap();
         assert!(preparation(&tx, &session, settled).is_ok());
         assert!(preparation(&tx, &session, live).is_ok());
+        let refused = |turn: &MasterTurnView| {
+            preparation(&tx, &session, turn)
+                .err()
+                .map(|failure| failure.0)
+        };
+        let mut stale = settled.clone();
+        for phase in [
+            MasterTurnPhase::Prepared,
+            MasterTurnPhase::Delivering,
+            MasterTurnPhase::Running,
+        ] {
+            stale.phase = phase;
+            assert_eq!(
+                refused(&stale).as_deref(),
+                Some("master_preparation_record"),
+                "a live turn on the Open binding is refused ({phase:?})"
+            );
+        }
+        assert_ne!(now.0, open.0, "the outside edit moved the config id");
+        let mut foreign = settled.clone();
+        foreign
+            .attempt
+            .as_mut()
+            .expect("the settled turn keeps its attempt")
+            .config_id = now.0.clone();
+        assert_eq!(
+            refused(&foreign).as_deref(),
+            Some("master_preparation_record"),
+            "a proof whose config is not its own attempt's is refused"
+        );
         let mut unbound = session.clone();
         unbound.rebound.clear();
         assert_eq!(

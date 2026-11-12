@@ -220,6 +220,9 @@ enum Sent {
     Update(String),
     Install(String),
     Settings,
+    Find(String),
+    Choose(String, Option<String>),
+    Catalog,
     Other,
 }
 
@@ -232,6 +235,9 @@ fn sent(ctx: &mut Ctx) -> Vec<Sent> {
                 SettingsJob::HarnessUpdate { id } => Sent::Update(id),
                 SettingsJob::HarnessInstall { id } => Sent::Install(id),
                 SettingsJob::HarnessUpdateSettings => Sent::Settings,
+                SettingsJob::HarnessFind { id } => Sent::Find(id),
+                SettingsJob::HarnessChoosePath { id, path } => Sent::Choose(id, path),
+                SettingsJob::Harnesses => Sent::Catalog,
                 _ => Sent::Other,
             });
         }
@@ -600,7 +606,7 @@ fn a_job_started_somewhere_else_is_read_until_it_ends_and_holds_a_second_one() {
     deliver(&mut shell, ended(Some("2.1.309"), Some("2.1.322")));
     assert_eq!(
         sent(&mut shell.ctx),
-        vec![Sent::Other],
+        vec![Sent::Catalog],
         "the catalog is read again"
     );
     assert!(!frame(&mut shell).contains("Updating..."));
@@ -878,7 +884,7 @@ fn a_running_update_is_read_again_on_each_refresh_until_it_ends() {
     deliver(&mut shell, done);
     assert_eq!(
         sent(&mut shell.ctx),
-        vec![Sent::Other],
+        vec![Sent::Catalog],
         "the catalog is read again"
     );
     assert!(
@@ -1033,7 +1039,7 @@ fn a_finished_install_names_its_version_and_reads_the_catalog_again() {
     );
     assert_eq!(
         sent(&mut shell.ctx),
-        vec![Sent::Other],
+        vec![Sent::Catalog],
         "the catalog is read again"
     );
     assert!(
@@ -1082,4 +1088,172 @@ fn a_refused_install_says_the_engine_reason() {
             "Install from the app is off in settings."
         )
     );
+}
+
+/// A catalog with Claude Code found and Codex not installed, the case the file choice is for.
+/// Output: the entries with their folder kept.
+fn codex_missing() -> Found {
+    let root = tempfile::tempdir().unwrap();
+    let claude = root.path().join("claude");
+    std::fs::write(&claude, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let entries = catalog(&Search::new(
+        vec![root.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    let codex = root.path().join("codex");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.id == "codex" && entry.executable.is_none())
+    );
+    Found {
+        _root: root,
+        entries,
+        codex,
+    }
+}
+
+#[test]
+fn w_lists_where_the_engine_looked_for_a_missing_codex_and_f_chooses_its_file_by_path() {
+    use crate::harnesses::finding::Found as Look;
+    let missing = codex_missing();
+    let mut shell = on(&missing, "codex");
+    let hints = footer(&mut shell);
+    assert!(
+        hints.contains("f Choose file") && hints.contains("w Where it looked"),
+        "{hints}"
+    );
+    assert!(!hints.contains("Forget"), "{hints}");
+    shell.key(Key::Char('w'));
+    shell.key(Key::Char('w'));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Find("codex".into())]);
+    let looked = vec![
+        "/opt/homebrew/bin".to_owned(),
+        "~/.volta/bin (shim, skipped)".to_owned(),
+    ];
+    shell.arrive(arrival(SettingsEvent::HarnessFound(
+        "codex".into(),
+        Ok(Look::Missing { looked }),
+    )));
+    let shown = frame(&mut shell);
+    assert!(
+        shown.contains("Where CrazyAgent looked for codex"),
+        "{shown}"
+    );
+    assert!(shown.contains("~/.volta/bin (shim, skipped)"), "{shown}");
+    shell.key(Key::Char('q'));
+    let shown = frame(&mut shell);
+    assert!(
+        !shown.contains("Where CrazyAgent looked for codex"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("CrazyAgent looked for codex in 2 folders and didn't find it."),
+        "{shown}"
+    );
+    let chosen = "/Users/someone/tools/codex";
+    shell.key(Key::Char('f'));
+    assert!(frame(&mut shell).contains("Choose the codex file"));
+    shell.key(Key::Enter);
+    assert_eq!(sent(&mut shell.ctx), Vec::<Sent>::new());
+    shell.key(Key::Paste(chosen.into()));
+    shell.key(Key::Enter);
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Choose("codex".into(), Some(chosen.into()))]
+    );
+    assert!(!frame(&mut shell).contains("Choose the codex file"));
+    shell.arrive(arrival(SettingsEvent::HarnessChosen(
+        "codex".into(),
+        Some(chosen.into()),
+        Err("harness_path_shim".into()),
+    )));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(
+        (message.lead.as_str(), message.rest.as_str()),
+        (
+            "CrazyAgent won't use /Users/someone/tools/codex.",
+            path_copy("harness_path_shim")
+        )
+    );
+    shell.arrive(arrival(SettingsEvent::HarnessChosen(
+        "codex".into(),
+        Some(chosen.into()),
+        Ok(Look::Registered {
+            path: PathBuf::from(chosen),
+        }),
+    )));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Catalog]);
+}
+
+#[test]
+fn a_refused_codex_file_shows_its_reason_and_x_forgets_the_chosen_file() {
+    use crate::harnesses::finding::Found as Look;
+    let missing = codex_missing();
+    let mut shell = on(&missing, "codex");
+    shell.key(Key::Char('x'));
+    assert_eq!(sent(&mut shell.ctx), Vec::<Sent>::new());
+    shell.key(Key::Char('w'));
+    sent(&mut shell.ctx);
+    shell.arrive(arrival(SettingsEvent::HarnessFound(
+        "codex".into(),
+        Ok(Look::Refused {
+            path: PathBuf::from("/Users/someone/gone/codex"),
+            code: "harness_path_not_found".into(),
+        }),
+    )));
+    let shown = frame(&mut shell);
+    assert!(
+        !shown.contains("Where CrazyAgent looked for codex"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("CrazyAgent won't use /Users/someone/gone/codex. There's no file there."),
+        "{shown}"
+    );
+    assert!(footer(&mut shell).contains("x Forget the chosen file"));
+    shell.key(Key::Char('x'));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Choose("codex".into(), None)]
+    );
+    shell.arrive(arrival(SettingsEvent::HarnessChosen(
+        "codex".into(),
+        None,
+        Ok(Look::Missing { looked: Vec::new() }),
+    )));
+    let shown = frame(&mut shell);
+    assert!(
+        shown.contains("CrazyAgent didn't find codex. Press f to choose the codex file."),
+        "{shown}"
+    );
+    assert!(shell.ctx.message().is_none());
+    assert!(!footer(&mut shell).contains("Forget"));
+}
+
+#[test]
+fn the_file_choice_is_offered_only_for_a_missing_codex_or_claude_code() {
+    let found = found();
+    let mut shell = on(&found, "codex");
+    let hints = footer(&mut shell);
+    assert!(!hints.contains("Choose file"), "{hints}");
+    shell.key(Key::Char('f'));
+    shell.key(Key::Char('w'));
+    assert_eq!(sent(&mut shell.ctx), Vec::<Sent>::new());
+    assert!(!frame(&mut shell).contains("Choose the codex file"));
+    for (code, copy) in PATH_COPY {
+        assert_eq!(path_copy(code), copy);
+    }
+    assert_eq!(
+        PATH_COPY
+            .iter()
+            .map(|(_, copy)| copy)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        PATH_COPY.len()
+    );
+    assert_eq!(file_name("claude-code"), "claude");
+    assert_eq!(file_name("codex"), "codex");
 }

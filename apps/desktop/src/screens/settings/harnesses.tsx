@@ -5,6 +5,7 @@ import {
   harnessVersions, installedWith, installHarness, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
   UPDATE_SETTINGS_DEFAULT, type CheckWhen, type HarnessJob, type HarnessVersions, type InstallFromApp, type OnlineLookup, type UpdateMode, type UpdateSettings,
 } from "../../api-harness-updates";
+import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode, pathCopy, pickHarnessFile, LOOKED_MAX, type ChoosableHarness, type Found } from "../../api-harness-path";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
 import { SettingRow } from "../../ui/setting";
@@ -143,6 +144,83 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
   </>;
 }
 
+/** What looking for a harness's file found, with Check again and Choose the file: the folders
+ * looked in, the found file and why it was refused, or the file now in use. Inputs: the id,
+ * the name, the last look (null before one), whether a look runs, a failure, the actions, and
+ * a primary action with its label shown once the harness is in use. Output: the block. */
+export function HarnessFileView({ id, name, found, pending, problem, onLook, onChoose, onForget, onReady, readyLabel }: {
+  id: ChoosableHarness; name: string; found: Found | null; pending: boolean; problem?: string;
+  onLook: () => void; onChoose: () => void; onForget: () => void; onReady?: () => void; readyLabel?: string;
+}) {
+  const file = harnessFileName(id);
+  const inUse = found !== null && (found.kind === "registered" || found.kind === "ready") ? found.path : null;
+  return <div className="stack-small" data-harness-file={id}>
+    {found?.kind === "missing" && <>
+      {found.looked.length > 0 && <>
+        <p>{`CrazyAgent looked for ${file} in these folders and didn't find it:`}</p>
+        <ul className="mono small">{found.looked.slice(0, LOOKED_MAX).map((folder) => <li key={folder}>{folder}</li>)}</ul>
+      </>}
+      <p className="small secondary">{`If ${name} is installed somewhere else, choose its ${file} file. Volta, asdf and mise folders hold shims that start another program, so CrazyAgent doesn't use them.`}</p>
+    </>}
+    {found?.kind === "refused" && <p role="alert">{`CrazyAgent won't use ${homePath(found.path)}. ${pathCopy(found.code)}`}</p>}
+    {inUse !== null && <p role="status">{`${name} is ready at ${homePath(inUse)}.`}</p>}
+    {problem && <p className="pj-error" role="alert">{problem}</p>}
+    <div className="row">
+      {inUse !== null && onReady && readyLabel ? <Button variant="primary" onClick={onReady}>{readyLabel}</Button> : inUse === null && <>
+        <Button aria-label={`Check again for ${name}`} icon="refresh-cw" pending={pending} onClick={onLook}>Check again</Button>
+        <Button aria-label={`Choose the ${file} file`} disabled={pending} onClick={onChoose}>{`Choose the ${file} file`}</Button>
+      </>}
+      {found?.kind === "refused" && <Button variant="quiet" disabled={pending} onClick={onForget}>Forget the chosen file</Button>}
+    </div>
+  </div>;
+}
+
+/** Looks for a harness once when shown and again on Check again, and stores the file the owner
+ * chooses. The look on showing calls onFound only for a harness pinned by it, so a reload never
+ * loops. Inputs: the id, the name, what to do once the harness is in use, and a label that turns
+ * that into a button instead of running it at once. Output: the block. */
+export function HarnessFile({ id, name, onFound, readyLabel }: { id: ChoosableHarness; name: string; onFound: () => void; readyLabel?: string }) {
+  const [found, setFound] = useState<Found | null>(null);
+  const [pending, setPending] = useState(false);
+  const [problem, setProblem] = useState<string>();
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const take = (result: Result<Found>, asked: boolean, picked?: string) => {
+    if (!alive.current) return;
+    setPending(false);
+    if (result.kind === "not_ready") { setProblem(undefined); return; }
+    if (result.kind === "error") {
+      const line = isPathCode(result.code) ? pathCopy(result.code) : result.message;
+      setProblem(picked === undefined ? line : `CrazyAgent won't use ${homePath(picked)}. ${line}`);
+      return;
+    }
+    setProblem(undefined);
+    setFound(result.value);
+    if ((result.value.kind === "registered" || (asked && result.value.kind === "ready")) && readyLabel === undefined) onFound();
+  };
+  const look = async (asked: boolean) => {
+    setPending(true);
+    take(await findHarness(id), asked);
+  };
+  const choose = async () => {
+    const picked = await pickHarnessFile();
+    if (picked.kind !== "ok") { take(picked, true); return; }
+    if (picked.value === null || !alive.current) return;
+    setPending(true);
+    take(await chooseHarnessPath(id, picked.value), true, picked.value);
+  };
+  const forget = async () => {
+    setPending(true);
+    take(await chooseHarnessPath(id, null), true);
+  };
+  useEffect(() => { void look(false); }, [id]);
+  return <HarnessFileView id={id} name={name} found={found} pending={pending} problem={problem}
+    onLook={() => void look(true)} onChoose={() => void choose()} onForget={() => void forget()} onReady={readyLabel ? onFound : undefined} readyLabel={readyLabel} />;
+}
+
 /** Asks before an update: the exact line CrazyAgent runs, how the harness was installed and what
  * running agents do. Inputs: the versions with the command, the harness name, open, pending and
  * the two actions. Output: the dialog, focus starting on Cancel. */
@@ -214,6 +292,7 @@ function HarnessRow({ entry, settings, onCatalog }: { entry: HarnessEntry; setti
   const look = settings?.when === "on_open";
   const known = settings !== null;
   const installed = entry.status.kind !== "not_installed";
+  const chooser = !installed && choosable(entry.id) ? entry.id : null;
   useEffect(() => {
     alive.current = true;
     return () => { alive.current = false; };
@@ -264,6 +343,7 @@ function HarnessRow({ entry, settings, onCatalog }: { entry: HarnessEntry; setti
   return <>
     <HarnessRowView entry={entry} versions={versions} mode={mode} problem={problem} checking={checking}
       onCheck={() => void check()} onUpdate={() => void ask("update")} onInstall={() => void ask("install")} onGuide={(url) => void openLink(url)} />
+    {chooser !== null && <div className="set-body"><HarnessFile id={chooser} name={entry.name} onFound={onCatalog} /></div>}
     {versions?.command && <UpdateConfirm versions={versions} name={entry.name} open={asking} pending={pending}
       onConfirm={() => void start("update")} onCancel={() => setAsking(false)} />}
     {versions?.install && <InstallConfirm versions={versions} name={entry.name} open={adding} pending={pending}

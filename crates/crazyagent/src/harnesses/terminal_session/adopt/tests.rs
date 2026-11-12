@@ -572,26 +572,39 @@ fn an_adopted_pane_keeps_only_the_run_time_left_since_its_launch() {
     );
 }
 
+/// Owner 11-11, no output cap: an adopted pane whose record already holds more turns than
+/// the old 10,000-event budget and more than the old 8 MiB of bytes is taken over idle,
+/// not refused, and its polls go on without an error.
 #[cfg(target_os = "macos")]
 #[test]
-fn an_adopted_pane_counts_the_events_it_already_had_against_its_budget() {
+fn an_adopted_pane_past_the_old_event_and_byte_caps_is_taken_over_and_reads_on() {
     let fixture = Fixture::new();
     let host = fixture.host();
     let agent = AgentId::team(5).unwrap();
-    let file = fixture.transcript(&[TURN_OPEN, TURN_DONE, TURN_OPEN, TURN_DONE]);
-    let record = fixture.spawn(&host, &agent, "exec cat", &file);
-    let limits = LaunchLimits {
-        events: 1,
-        ..LaunchLimits::default()
-    };
-
-    let refused = TerminalSession::adopt(host.clone(), agent.clone(), &record, limits);
-    assert_eq!(
-        refused.err().map(|refused| refused.0).as_deref(),
-        Some("launch_event_limit")
+    let filler = format!(
+        r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+        "x".repeat(4096)
     );
-    let session =
-        TerminalSession::adopt(host.clone(), agent, &record, LaunchLimits::default()).unwrap();
+    let mut lines = Vec::new();
+    for _ in 0..7_000 {
+        lines.extend([TURN_OPEN, filler.as_str(), TURN_DONE]);
+    }
+    let file = fixture.transcript(&lines);
+    assert!(std::fs::metadata(&file).unwrap().len() > 3 * 8 * 1024 * 1024);
+    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+
+    let mut session = TerminalSession::adopt(
+        host.clone(),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .unwrap();
+    assert!(session.ready && !session.turn);
+    assert_eq!(
+        session.next_event(Duration::from_millis(300)).unwrap(),
+        None
+    );
     drop(session);
     assert!(host.alive().unwrap().is_empty());
 }

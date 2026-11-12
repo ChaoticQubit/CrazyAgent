@@ -906,12 +906,34 @@ fallback_allowed = false
             .expect("real master paging setup or readback failed");
     }
 
+    /// The most times the paging case sends one owner action again after a stale refusal.
+    const STALE_RESENDS_MAX: usize = 8;
+
+    /// Tells whether the engine refused an owner action only because the revision moved
+    /// between the bridge's read and its send, as a master turn that ends by itself moves it;
+    /// the case then sends the action again, and the bridge reads the revision anew. Counts
+    /// the resends. Inputs: the receipt and the resends so far. Output: true to send again.
+    fn stale_again(receipt: &IntentReceipt, resends: &mut usize) -> bool {
+        if receipt.rejection.as_deref() != Some("stale_revision") {
+            return false;
+        }
+        assert_eq!(receipt.outcome, ActionOutcome::Rejected);
+        *resends += 1;
+        assert!(
+            *resends <= STALE_RESENDS_MAX,
+            "the revision moved under {resends} sends in a row"
+        );
+        true
+    }
+
     /// Sends one more owner message than a page holds, stopping each turn before the next,
     /// then reads the turns back in two pages and checks a cursor from before a later turn is
     /// refused. In this fixture every turn also ends by itself, blocked for a missing
     /// profile, and a blocked turn can no longer be cancelled: a cancel that loses that race
-    /// is refused, and the turn then reads Blocked, not Cancelled. Input: the engine's owner
-    /// root. Output: Ok, or the setup or readback step that failed.
+    /// is refused, and the turn then reads Blocked, not Cancelled. A turn that ends between
+    /// the bridge's revision read and its send makes the engine refuse the action as stale;
+    /// the case then sends it again with a fresh generation. Input: the engine's owner root.
+    /// Output: Ok, or the setup or readback step that failed.
     async fn real_turn_pages_flow(root: &Path) -> Result<(), String> {
         let mut observer =
             OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
@@ -967,26 +989,35 @@ fallback_allowed = false
         let count = u64::from(PAGE_SIZE) + 1;
         let mut ids = Vec::new();
         let mut ended_alone = Vec::new();
+        let mut generation = 1;
         for round in 0..count {
-            let sent = bridge
-                .submit_master(
-                    &ticket,
-                    session_id,
-                    &format!("Owner message {round}."),
-                    2 + 2 * round,
-                )
-                .await
-                .map_err(|error| error.code)?;
+            let mut resends = 0;
+            let sent = loop {
+                generation += 1;
+                let sent = bridge
+                    .submit_master(
+                        &ticket,
+                        session_id,
+                        &format!("Owner message {round}."),
+                        generation,
+                    )
+                    .await
+                    .map_err(|error| error.code)?;
+                if !stale_again(&sent, &mut resends) {
+                    break sent;
+                }
+            };
             assert_eq!(sent.outcome, ActionOutcome::Applied);
-            let stopped = bridge
-                .cancel_master_turn(
-                    &ticket,
-                    session_id,
-                    &sent.intent.operation_id,
-                    3 + 2 * round,
-                )
-                .await
-                .map_err(|error| error.code)?;
+            let stopped = loop {
+                generation += 1;
+                let stopped = bridge
+                    .cancel_master_turn(&ticket, session_id, &sent.intent.operation_id, generation)
+                    .await
+                    .map_err(|error| error.code)?;
+                if !stale_again(&stopped, &mut resends) {
+                    break stopped;
+                }
+            };
             let alone = match stopped.outcome {
                 ActionOutcome::Applied => false,
                 ActionOutcome::Rejected => {
@@ -1060,15 +1091,17 @@ fallback_allowed = false
                 );
             }
         }
-        let later = bridge
-            .submit_master(
-                &ticket,
-                session_id,
-                "One more owner message.",
-                2 + 2 * count,
-            )
-            .await
-            .map_err(|error| error.code)?;
+        let mut resends = 0;
+        let later = loop {
+            generation += 1;
+            let later = bridge
+                .submit_master(&ticket, session_id, "One more owner message.", generation)
+                .await
+                .map_err(|error| error.code)?;
+            if !stale_again(&later, &mut resends) {
+                break later;
+            }
+        };
         assert_eq!(later.outcome, ActionOutcome::Applied);
         let stale = bridge
             .master_turns(&ticket, session_id, Some(next))

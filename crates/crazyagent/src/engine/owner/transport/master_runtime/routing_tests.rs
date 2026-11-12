@@ -21,6 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::watch;
 
@@ -1331,17 +1332,31 @@ async fn a_turn_whose_write_waits_on_another_engine_connection_still_ends_with_i
     case.finish().await;
 }
 
-/// How long the preparation row keeps another connection's write lock after storage starts
-/// the preparation: past the first write of a preparation that reads first, under the
-/// 250 ms storage busy wait.
-const SHORT_LOCK: Duration = Duration::from_millis(150);
+/// How many times the storage connection's busy handler waited in the preparation row, so
+/// the row sees the preparation waiting on the other connection's write lock.
+static PREPARATION_WAITS: AtomicUsize = AtomicUsize::new(0);
+
+/// The most 1 ms busy waits the preparation row's handler allows for one lock: the 250 ms
+/// the storage connection's own busy wait allows.
+const PREPARATION_WAITS_MAX: i32 = 250;
+
+/// The preparation row's busy handler: counts the wait, waits 1 ms and tries the lock again
+/// up to `PREPARATION_WAITS_MAX` times, as the storage busy timeout does. Input: the earlier
+/// waits for this lock. Output: whether SQLite tries the lock again.
+fn counted_wait(count: i32) -> bool {
+    assert!(count >= 0);
+    PREPARATION_WAITS.fetch_add(1, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(1));
+    count < PREPARATION_WAITS_MAX
+}
 
 /// A preparation that meets another engine connection's write lock, as the research loop's
 /// stale-job update or a team runtime commit holds it, waits the lock out and prepares the
 /// turn (BL-DBLOCK). Preparation reads before it writes, and SQLite refuses a read
-/// transaction's first write at once, with no wait, while another connection holds the
-/// lock. Storage is held until the preparation is queued behind the taken lock, so the lock
-/// spans the start of the preparation on a cold run or a slow machine too.
+/// transaction's first write at once, with no busy wait, while another connection holds the
+/// lock. The lock is kept until the preparation either waits on it in the storage
+/// connection's busy handler or has returned, so it spans the preparation's first write
+/// however slow the machine is, with no time window to outlast.
 #[tokio::test]
 async fn a_preparation_that_meets_a_short_write_lock_waits_it_out_and_prepares_the_turn() {
     let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
@@ -1358,13 +1373,19 @@ async fn a_preparation_that_meets_a_short_write_lock_waits_it_out_and_prepares_t
         matches!(routed, Ok(MasterRuntimeResult::Turn(_))),
         "a route reads the turn first, so the preparation's reads run warm"
     );
+    let storage = case.runtime().engine.storage.sender.clone();
+    let (set, handler) = tokio::sync::oneshot::channel();
+    storage
+        .send(crate::storage::Job::BusyHandler(counted_wait, set))
+        .await
+        .unwrap();
+    handler.await.unwrap().unwrap();
     let lock = Connection::open_with_flags(
         case.root.path().join("engine.db"),
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let storage = case.runtime().engine.storage.sender.clone();
     let (release, held) = tokio::sync::oneshot::channel();
     storage.try_send(crate::storage::Job::Hold(held)).unwrap();
     let deadline = Instant::now() + TEST_BOUND;
@@ -1372,6 +1393,8 @@ async fn a_preparation_that_meets_a_short_write_lock_waits_it_out_and_prepares_t
         assert!(Instant::now() < deadline, "storage never took the hold");
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
+    PREPARATION_WAITS.store(0, Ordering::SeqCst);
+    let returned = AtomicBool::new(false);
     let preparing = async {
         let prepared = case
             .command(MasterRuntimeCommand::Prepare {
@@ -1381,7 +1404,8 @@ async fn a_preparation_that_meets_a_short_write_lock_waits_it_out_and_prepares_t
                 turn_id: turn,
             })
             .await;
-        (prepared, Instant::now())
+        returned.store(true, Ordering::SeqCst);
+        prepared
     };
     let releasing = async {
         while storage.capacity() == storage.max_capacity() {
@@ -1392,20 +1416,24 @@ async fn a_preparation_that_meets_a_short_write_lock_waits_it_out_and_prepares_t
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         release.send(()).unwrap();
-        let released = Instant::now();
-        tokio::time::sleep(SHORT_LOCK).await;
+        while PREPARATION_WAITS.load(Ordering::SeqCst) == 0 && !returned.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the preparation neither waited on the lock nor returned"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         lock.execute_batch("COMMIT").unwrap();
-        released
     };
-    let ((prepared, ended), released) = tokio::join!(preparing, releasing);
+    let (prepared, ()) = tokio::join!(preparing, releasing);
     let prepared = match prepared {
         Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
         Ok(_) => panic!("the preparation returned no prepared turn"),
         Err(error) => panic!("the turn was not prepared: {}", error.0),
     };
     assert!(
-        ended.duration_since(released) >= SHORT_LOCK,
-        "the preparation started while the other connection held the lock and waited it out"
+        PREPARATION_WAITS.load(Ordering::SeqCst) > 0,
+        "the preparation met the other connection's lock and waited it out"
     );
     assert_eq!(prepared.session.session_id, case.session.session_id);
     assert_eq!(
@@ -2633,6 +2661,7 @@ async fn console_claude_master(
             worktree_lease: prepared.worktree_lease.clone(),
         },
         account_ref.clone(),
+        prepared.session.project_id.clone(),
         clock,
         ResourceBudget::unit(),
         crate::master_frame_limit::FrameSize::default(),

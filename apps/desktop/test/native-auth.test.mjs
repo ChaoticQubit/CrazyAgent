@@ -278,7 +278,7 @@ test("the sign-in panel offers no read or cancel without an operation, and the r
     phase: "unavailable", code: "native_auth_host_unavailable", challenge: null,
   }));
   assert.equal(unavailable.presentation.phase, "unavailable");
-  assert.match(markup(unavailable), /Codex isn&#x27;t installed on this Mac, so ChatGPT sign-in isn&#x27;t available\./);
+  assert.match(markup(unavailable), /CrazyAgent didn&#x27;t find a Codex it can run on this Mac, so ChatGPT sign-in isn&#x27;t available\. Install Codex, then choose Check again, or choose its file\./);
   assert.doesNotMatch(markup(unavailable), /native_auth_host_unavailable/);
   assert.doesNotMatch(markup(unavailable), /SYNTHETIC_STATE|SYNTHETIC_EMAIL/);
 });

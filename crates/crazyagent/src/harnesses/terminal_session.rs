@@ -57,7 +57,6 @@ pub struct TerminalSession {
     limits: LaunchLimits,
     deadline: Option<Instant>,
     checked: Instant,
-    events: usize,
     ready: bool,
     first: Option<FirstScreen>,
     folder: Option<FolderStep>,
@@ -347,7 +346,6 @@ impl TerminalSession {
             limits: request.limits,
             deadline: Some(Instant::now() + request.limits.run_time),
             checked: Instant::now(),
-            events: 0,
             ready: false,
             first: None,
             folder,
@@ -502,16 +500,12 @@ impl TerminalSession {
 
     /// Waits up to `wait` for the next event of the turn the engine started. Text, tool
     /// use and turn ends from turns the owner typed into the pane are not reported.
-    /// Output: Some(event), None on timeout, or an error past a limit or once the pane ended.
+    /// No count of events or record bytes ends the pane (owner 11-11). Output: Some(event),
+    /// None on timeout, or an error past the run time or once the pane ended.
     pub fn next_event(&mut self, wait: Duration) -> Result<Option<LaunchEvent>, LaunchError> {
         let until = Instant::now() + wait;
         loop {
             if let Some(event) = self.queue.pop_front() {
-                self.events += 1;
-                if self.events > self.limits.events {
-                    self.halt();
-                    return Err(failure("launch_event_limit"));
-                }
                 return Ok(Some(event));
             }
             if self.exited {
@@ -803,10 +797,6 @@ impl TerminalSession {
                 return Err(problem);
             }
         };
-        if self.reader.bytes() > self.limits.output_bytes as u64 {
-            self.halt();
-            return Err(failure("launch_output_limit"));
-        }
         if self.reader.bytes() != self.grown.0 {
             self.grown = (self.reader.bytes(), Instant::now());
         }

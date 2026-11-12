@@ -9,6 +9,12 @@ pub(in crate::engine) mod claude_auth {
     pub(crate) use super::claude_auth_types as types;
 }
 
+/// The pin's file rule on a platform with no pin: every file is refused as `capture`
+/// refuses it. Input: the metadata, unused. Output: `native_auth_host_unavailable`.
+pub(crate) fn pinnable(_metadata: &std::fs::Metadata) -> Result<(), EngineError> {
+    Err(EngineError("native_auth_host_unavailable".into()))
+}
+
 /// A registered native sign-in host executable, which cannot exist without the Unix
 /// owner, mode and inode checks that pin it. `capture` reports `native_auth_host_unavailable`,
 /// so every method below is unreachable by construction.
@@ -32,6 +38,10 @@ impl RegisteredNativeAuthHost {
     }
 
     pub(crate) fn entry(&self) -> Option<&Path> {
+        match *self {}
+    }
+
+    pub(crate) fn vanished(&self) -> bool {
         match *self {}
     }
 

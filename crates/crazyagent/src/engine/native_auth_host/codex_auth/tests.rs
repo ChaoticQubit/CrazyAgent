@@ -250,6 +250,37 @@ fn native_auth_codex_launch_uses_official_stdio_and_only_explicit_environment() 
 }
 
 #[test]
+fn native_auth_sign_in_child_finds_node_beside_an_npm_installed_codex_script() {
+    let temp = tempfile::tempdir().unwrap();
+    let prefix = std::fs::canonicalize(temp.path())
+        .unwrap()
+        .join("nvm/versions/node/v22.11.0");
+    let script = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+    let case = Case::new();
+    let path_of = |executable: &std::path::Path| {
+        super::command(executable, &case.home)
+            .unwrap()
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("PATH"))
+            .and_then(|(_, value)| value.map(|value| value.to_owned()))
+            .unwrap()
+    };
+    assert_eq!(path_of(&script), "/usr/bin:/bin");
+    std::fs::create_dir_all(prefix.join("bin")).unwrap();
+    std::fs::write(prefix.join("bin/node"), "node").unwrap();
+    let expected = format!("{}:/usr/bin:/bin", prefix.join("bin").display());
+    assert_eq!(path_of(&script), std::ffi::OsString::from(expected));
+    assert_eq!(
+        path_of(std::path::Path::new(
+            "/opt/homebrew/Caskroom/codex/1.0.0/codex-aarch64-apple-darwin"
+        )),
+        "/usr/bin:/bin"
+    );
+}
+
+#[test]
 fn native_auth_codex_launch_rejects_relative_executable_or_profile() {
     assert!(super::command(std::path::Path::new("codex"), std::path::Path::new("/home")).is_err());
     assert!(super::command(std::path::Path::new("/codex"), std::path::Path::new("home")).is_err());

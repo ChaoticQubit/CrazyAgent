@@ -26,6 +26,8 @@ const DOCUMENTS_TITLE: &str = "Choose documents to add";
 #[cfg(target_os = "linux")]
 const INSTRUCTIONS_TITLE: &str =
     "Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.";
+#[cfg(target_os = "linux")]
+const HARNESS_FILE_TITLE: &str = "Choose the harness program file, such as codex or claude.";
 const REPLY_BYTES_MAX: usize = 64 * 1024;
 const PATHS_MAX: usize = 64;
 const CANCELED: &str = "(-128)";
@@ -60,6 +62,13 @@ return reply";
 /// The macOS file chooser for one instructions file whose text goes into the app-wide
 /// instructions editor, such as a CLAUDE.md or AGENTS.md. Fixed text.
 pub const INSTRUCTIONS_SCRIPT: &str = "POSIX path of (choose file with prompt \"Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.\")";
+
+/// The macOS file chooser for the program file of a harness CrazyAgent did not find, hidden
+/// folders such as `~/.nvm` shown. Fixed text.
+pub const HARNESS_FILE_SCRIPT: &str = "POSIX path of (choose file with prompt \"Choose the harness program file, such as codex or claude.\" with invisibles)";
+
+/// The Windows file chooser for a harness program file. Fixed text.
+pub const WINDOWS_HARNESS_FILE_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose the harness program file, such as codex or claude.'; $d.Multiselect = $false; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName + [char]10) }";
 
 /// The Windows folder chooser, a fixed PowerShell script that prints the chosen folder.
 /// Nothing the owner or the web view sends is ever placed into it.
@@ -172,7 +181,12 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
     let purpose = FolderPurpose::ALL
         .into_iter()
         .find(|purpose| purpose.script() == script);
-    assert!(purpose.is_some() || script == DOCUMENTS_SCRIPT || script == INSTRUCTIONS_SCRIPT);
+    assert!(
+        purpose.is_some()
+            || script == DOCUMENTS_SCRIPT
+            || script == INSTRUCTIONS_SCRIPT
+            || script == HARNESS_FILE_SCRIPT
+    );
     #[cfg(target_os = "macos")]
     {
         let _ = purpose;
@@ -200,6 +214,9 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
                 None if script == INSTRUCTIONS_SCRIPT => {
                     command.arg(format!("--title={INSTRUCTIONS_TITLE}"));
                 }
+                None if script == HARNESS_FILE_SCRIPT => {
+                    command.arg(format!("--title={HARNESS_FILE_TITLE}"));
+                }
                 None => {
                     command
                         .args(["--multiple", "--separator=\n"])
@@ -216,6 +233,9 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
             } else if script == INSTRUCTIONS_SCRIPT {
                 command.args(["--getopenfilename", "."]);
                 command.args(["--title", INSTRUCTIONS_TITLE]);
+            } else if script == HARNESS_FILE_SCRIPT {
+                command.args(["--getopenfilename", "."]);
+                command.args(["--title", HARNESS_FILE_TITLE]);
             } else {
                 command.args(["--getopenfilename", ".", "--multiple", "--separate-output"]);
                 command.args(["--title", DOCUMENTS_TITLE]);
@@ -246,6 +266,7 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
                 Some(FolderPurpose::Memory) => WINDOWS_MEMORY_FOLDER_SCRIPT,
                 Some(FolderPurpose::Plugin) => WINDOWS_PLUGIN_FOLDER_SCRIPT,
                 None if script == INSTRUCTIONS_SCRIPT => WINDOWS_INSTRUCTIONS_SCRIPT,
+                None if script == HARNESS_FILE_SCRIPT => WINDOWS_HARNESS_FILE_SCRIPT,
                 None => WINDOWS_DOCUMENTS_SCRIPT,
             })
             .creation_flags(CREATE_NO_WINDOW);

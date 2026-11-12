@@ -665,6 +665,23 @@ impl EngineService {
             .register_claude_executable(host)
     }
 
+    /// Hands the engine the harness search that Check again, Choose file and a sign-in retry
+    /// use; an engine never given one looks only at a chosen file. Input: the search engine
+    /// start used. Output: Ok, or the refusal code.
+    pub fn set_harness_search(
+        &mut self,
+        search: crate::harnesses::Search,
+    ) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        self.owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?
+            .set_harness_search(search)
+    }
+
     /// Registers the native RCLI host for master turns and API-key writes.
     /// Input: absolute path to the bundled `crazyagent-rcli` executable.
     /// Output: Ok once both identities are captured before the runtime freezes.
