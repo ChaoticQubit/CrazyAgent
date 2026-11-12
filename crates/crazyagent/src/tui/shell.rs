@@ -105,6 +105,16 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         kind: "Settings",
         place: Place::TicketSettings { project: None },
     });
+    out.push(Target {
+        label: "Settings / App plugins".into(),
+        kind: "Settings",
+        place: Place::AppPlugins,
+    });
+    out.push(Target {
+        label: "Settings / Search".into(),
+        kind: "Settings",
+        place: Place::SearchSettings,
+    });
     for (label, place) in [
         ("New project", Place::NewProject),
         ("Add account", Place::AddAccount),
