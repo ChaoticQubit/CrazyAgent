@@ -236,7 +236,7 @@ fn a_master_starts_on_the_owner_s_master_model_and_an_agent_on_its_record() {
         start_model(&db, &project(), 1, "codex", true).unwrap(),
         None
     );
-    owner_models(&db, &["gpt-a", "gpt-b"], &[], None);
+    owner_models(&db, &["gpt-a", "gpt-b"], &["gpt-b"], None);
     let catalog = crate::model_choice::catalog("codex");
     let scope = crate::harness_settings::Scope::App;
     let written = set(
@@ -299,4 +299,51 @@ fn a_hint_rule_pins_an_unticked_pick_and_a_default_rule_runs_the_default_and_say
         wanted(&db, overruled, &project(), "codex").unwrap(),
         Some("gpt-b".to_owned())
     );
+}
+
+#[test]
+fn a_pin_or_record_the_owner_since_took_off_the_list_starts_on_the_default() {
+    let (_tmp, mut db) = engine();
+    owner_models(&db, &["gpt-a", "gpt-b"], &["gpt-a"], Some("gpt-b"));
+    let id = task(&db, "Picked");
+    let tx = db.transaction().unwrap();
+    assert_eq!(
+        pin(&tx, &project(), id, "codex", Some(&pick("gpt-a"))).unwrap(),
+        Ok(" on gpt-a".to_owned())
+    );
+    tx.commit().unwrap();
+    record_agent(&db, &project(), 4, Some("gpt-a")).unwrap();
+    let starts = |db: &Connection| {
+        (
+            wanted(db, id, &project(), "codex").unwrap(),
+            start_model(db, &project(), 4, "codex", false).unwrap(),
+        )
+    };
+    let on = |model: &str| Some(model.to_owned());
+    assert_eq!(starts(&db), (on("gpt-a"), on("gpt-a")));
+    let catalog = crate::model_choice::catalog("codex");
+    let scope = crate::harness_settings::Scope::App;
+    let version = crate::model_choice::store::values(&db, "codex", &catalog, &scope)
+        .unwrap()
+        .rows
+        .iter()
+        .find(|row| row.slot == Slot::Allowed)
+        .unwrap()
+        .version;
+    let written = set(
+        &db,
+        "codex",
+        &catalog,
+        &scope,
+        Slot::Allowed,
+        &json!([]),
+        version,
+    )
+    .unwrap();
+    assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    assert_eq!(starts(&db), (on("gpt-b"), on("gpt-b")));
+    assert!(crate::model_choice::store::custom_remove(&db, "codex", "gpt-b").unwrap());
+    assert_eq!(starts(&db), (None, None));
+    assert_eq!(pinned(&db, id).unwrap(), Some(pick("gpt-a")));
+    assert_eq!(agent_model(&db, 4).unwrap(), on("gpt-a"));
 }
