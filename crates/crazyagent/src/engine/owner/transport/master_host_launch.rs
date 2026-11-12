@@ -1025,6 +1025,12 @@ fn turn_sandbox(
         .iter()
         .try_fold(sandbox, |sandbox, folder| sandbox.hide(folder))
         .map_err(refused)?;
+    let sandbox = if policy.access == AgentAccess::Full {
+        sandbox
+    } else {
+        crate::sandbox::shared_folders::apply(sandbox, repository, &policy.shared_folders)
+            .map_err(failure)?
+    };
     #[cfg(target_os = "linux")]
     let sandbox = {
         let sandbox = sandbox.limit_sockets(stored_sandbox_settings(root)?.linux_sockets);

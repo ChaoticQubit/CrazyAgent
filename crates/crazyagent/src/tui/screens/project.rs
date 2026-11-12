@@ -3057,7 +3057,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
         "agent_access_unavailable" => "That access level can't run agents on this computer.",
         crate::setup::AGENT_GIT_NEEDS_TOOLS => crate::setup::plain_reason(code),
-        "agent_policy_invalid" => "Each toolchain can be listed once.",
+        "agent_policy_invalid" => {
+            "That choice isn't valid: each toolchain once, at most 16 picked folders and 16 secret paths."
+        }
         "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access. Try again.",
         "agent_access_lowered" => {
             "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it."
@@ -3070,6 +3072,18 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "agent_project_unreadable" => {
             "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again."
+        }
+        "shared_folders_unlisted" => {
+            "CrazyAgent couldn't list the project folder's files with git, so the agent didn't start. Choose All local folders with Read-only in Agent access, or check the project's git."
+        }
+        "shared_folders_too_many" => {
+            "The project folder has more than 256 untracked files and folders to keep out, or more than 32 folders to open for writing, so the agent didn't start. Choose All local folders in Agent access, or gather those files into fewer folders."
+        }
+        "shared_folders_refused" => {
+            "The sandbox couldn't keep the project's secret files closed or open a shared folder, so the agent didn't start. Check Shared project folders in Agent access."
+        }
+        "shared_folders_need_macos" => {
+            "On Linux and Windows only All local folders with Read-only can start agents. Change Shared project folders in Agent access."
         }
         "read_path_missing" => "One of those folders doesn't exist on this computer.",
         "read_path_not_folder" => "One of those paths is a file. Add folders only.",

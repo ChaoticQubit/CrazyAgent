@@ -2910,7 +2910,8 @@ impl NewProjectPlan {
     }
 }
 
-/// Records a New Project whose folder the owner transport built.
+/// Records a New Project whose folder the owner transport built, with a first agent
+/// policy that records the toolchains the owner has installed (F26).
 /// Takes the transaction, configuration, the Create action and the staged
 /// result. Returns Applied once the rows are written, the brief is in place
 /// and the folder is moved into the home, else the refusal; the checks run
@@ -2952,6 +2953,17 @@ pub(crate) fn record_new(
     )?;
     if outcome == Outcome::Applied {
         let stored = load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
+        if !crate::sandbox::policy::saved(tx, project_id.as_str()).map_err(error)? {
+            let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
+            let policy = crate::sandbox::policy::AgentPolicy {
+                toolchains: crate::sandbox::policy::recorded_toolchains(
+                    &staged.staging,
+                    homes.as_ref(),
+                ),
+                ..Default::default()
+            };
+            crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+        }
         let state = crate::projects_home::state_folder(&staged.staging);
         assert_ne!(state, staged.staging);
         let context = open_beneath(&state, &[CONTEXT_DIRECTORY]).map_err(error)?;

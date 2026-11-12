@@ -1,3 +1,4 @@
+use super::shared_folders::SharedFolders;
 use super::toolchains::{ToolHomes, Toolchain};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_agent_policy (
     body TEXT NOT NULL
 )";
 
-const BODY_BYTES_MAX: usize = 4096;
+const BODY_BYTES_MAX: usize = 16 * 1024;
 
 #[cfg(target_os = "windows")]
 const WINDOWS_UNAVAILABLE: &str =
@@ -373,7 +374,9 @@ pub struct ToolchainChoice {
 /// the IDE may do to agent files (Allow all changes when none was saved) and who shares the
 /// agents' tool cache (T8; a policy saved before that setting reads Shared), when running
 /// agents pick up a wider policy and the narrow grants the owner allowed (F08; a policy saved
-/// before those settings reads When the agent is idle and no grants).
+/// before those settings reads When the agent is idle and no grants), and which of the
+/// project folder's local folders agents see and how (DEC-147.9; a policy saved before that
+/// setting reads All and Read-only).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
@@ -391,16 +394,20 @@ pub struct AgentPolicy {
     pub apply_changes: AccessApply,
     #[serde(default)]
     pub grants: Vec<AccessGrant>,
+    #[serde(default)]
+    pub shared_folders: SharedFolders,
 }
 
 impl AgentPolicy {
-    /// Checks a policy a client sent: each toolchain at most once, and at most
-    /// [`GRANT_SOCKETS_MAX`] sockets, [`GRANT_PORTS_MAX`] ports and one temp folder, each
-    /// plain and named once. Takes the policy. Returns a plain refusal code.
+    /// Checks a policy a client sent: each toolchain at most once, a shared folders choice
+    /// in shape ([`SharedFolders::validate`]), and at most [`GRANT_SOCKETS_MAX`] sockets,
+    /// [`GRANT_PORTS_MAX`] ports and one temp folder, each plain and named once. Takes the
+    /// policy. Returns a plain refusal code.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.toolchains.len() > Toolchain::ALL.len() {
             return Err("agent_policy_invalid");
         }
+        self.shared_folders.validate()?;
         for (index, choice) in self.toolchains.iter().enumerate() {
             if self.toolchains[..index]
                 .iter()
@@ -461,6 +468,7 @@ impl AgentPolicy {
             ide_agent_files: self.ide_agent_files,
             apply_changes: self.apply_changes,
             grants: self.grants.clone(),
+            shared_folders: self.shared_folders.clone(),
         };
         assert!(pinned.validate().is_ok());
         pinned
@@ -468,8 +476,9 @@ impl AgentPolicy {
 
     /// What a client shows: the level, every level with its availability, each toolchain
     /// family the owner has installed, the project uses or the owner chose, the IDE hooks
-    /// and agent files choices, the tool cache choice with every choice, and the policy's
-    /// version, which a save names. Inputs: the project folder, the
+    /// and agent files choices, the tool cache choice with every choice, the shared folders
+    /// choice with the top-level folders it can pick, and the policy's version, which a save
+    /// names. Inputs: the project folder, the
     /// owner's tool homes and the version. Output: the view.
     pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
         let allowed = self.allowed(project);
@@ -535,6 +544,8 @@ impl AgentPolicy {
                 },
             },
             grant_log: Vec::new(),
+            shared_folders: self.shared_folders.clone(),
+            local_folders: super::shared_folders::local_folders(project),
         }
     }
 
@@ -688,6 +699,10 @@ pub struct PolicyView {
     pub temp_folder: TempFolderView,
     #[serde(default)]
     pub grant_log: Vec<super::grants::LogView>,
+    #[serde(default)]
+    pub shared_folders: SharedFolders,
+    #[serde(default)]
+    pub local_folders: Vec<String>,
 }
 
 /// One Apply access changes choice with the name shown to the owner (F08).
@@ -768,6 +783,38 @@ pub struct ToolchainView {
     pub installed: bool,
     pub used: bool,
     pub allowed: bool,
+}
+
+/// The toolchain choices a project records when it is made (F26): every family the project
+/// uses now or the owner has installed, allowed, so a project that starts empty still gets
+/// the owner's Rust, Node.js and Python once its code lands; a family neither used nor
+/// installed keeps following the project. The owner can turn each one off later. Inputs:
+/// the project folder and the owner's tool homes, none when unknown. Output: the choices in
+/// display order.
+pub fn recorded_toolchains(project: &Path, homes: Option<&ToolHomes>) -> Vec<ToolchainChoice> {
+    let recorded: Vec<ToolchainChoice> = Toolchain::ALL
+        .into_iter()
+        .filter(|toolchain| {
+            toolchain.used_by(project) || homes.is_some_and(|homes| toolchain.installed(homes))
+        })
+        .map(|toolchain| ToolchainChoice {
+            toolchain,
+            allowed: true,
+        })
+        .collect();
+    assert!(recorded.len() <= Toolchain::ALL.len());
+    recorded
+}
+
+/// Whether a project's agent policy was ever saved. Inputs: the open connection or
+/// transaction and the project id. Output: the answer, or the database error.
+pub fn saved(connection: &Connection, project: &str) -> rusqlite::Result<bool> {
+    connection.execute(TABLE, [])?;
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_agent_policy WHERE project=?1)",
+        [project],
+        |row| row.get(0),
+    )
 }
 
 /// Replaces a project's agent policy. Inputs: the open connection or transaction, the
@@ -1026,6 +1073,45 @@ mod tests {
         assert!(!AgentPolicy::default().revokes(&[]));
     }
 
+    /// F26: a new project records every family it uses or the owner has installed, so an
+    /// empty project still gets the owner's toolchains later; a family neither used nor
+    /// installed keeps following the project.
+    #[test]
+    fn a_new_project_records_the_toolchains_it_uses_or_the_owner_has_installed() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let homes = ToolHomes::at(home.path());
+        assert!(recorded_toolchains(project.path(), Some(&homes)).is_empty());
+        assert!(recorded_toolchains(project.path(), None).is_empty());
+        std::fs::create_dir_all(home.path().join(".nvm")).unwrap();
+        std::fs::write(project.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let recorded = recorded_toolchains(project.path(), Some(&homes));
+        assert_eq!(
+            recorded,
+            vec![
+                ToolchainChoice {
+                    toolchain: Toolchain::Rust,
+                    allowed: true
+                },
+                ToolchainChoice {
+                    toolchain: Toolchain::Node,
+                    allowed: true
+                },
+            ]
+        );
+        let policy = AgentPolicy {
+            toolchains: recorded,
+            ..AgentPolicy::default()
+        };
+        assert!(policy.validate().is_ok());
+        std::fs::remove_file(project.path().join("Cargo.toml")).unwrap();
+        assert_eq!(
+            policy.allowed(project.path()),
+            vec![Toolchain::Rust, Toolchain::Node],
+            "a recorded family stays granted after its marker goes"
+        );
+    }
+
     #[test]
     fn a_network_choice_is_wider_only_than_the_narrower_ones() {
         let (open, https, none) = (AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None);
@@ -1097,6 +1183,7 @@ mod tests {
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
             network: AgentNetwork::default(),
             ..Default::default()
         };
@@ -1209,6 +1296,7 @@ mod tests {
             ide_git_hooks: true,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
             ..Default::default()
         };
         save(&connection, "p", &policy).unwrap();

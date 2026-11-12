@@ -8381,6 +8381,15 @@ impl TeamRuntime {
         for folder in &hidden {
             sandbox = sandbox.hide(folder).map_err(sandboxed)?;
         }
+        if policy.access != AgentAccess::Full {
+            sandbox = crate::sandbox::shared_folders::apply(sandbox, &root, &policy.shared_folders)
+                .map_err(|code| {
+                    with_code(
+                        "the project's shared folders could not be given to the agent",
+                        Some(code),
+                    )
+                })?;
+        }
         let mut native_tmux = None;
         let mut teammates = None;
         if native {

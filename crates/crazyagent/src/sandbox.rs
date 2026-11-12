@@ -22,6 +22,7 @@ pub mod ide_shell;
 pub mod linux;
 pub mod model_proxy;
 pub mod policy;
+pub mod shared_folders;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
 #[cfg(target_os = "macos")]
@@ -107,6 +108,10 @@ pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sa
 /// Seatbelt holds the per-path rule, and no IDE sandbox runs there in V1 (DEC-124).
 pub const AGENT_FILES_NEED_SEATBELT: &str = "agent folder protection needs the macOS sandbox";
 
+/// Why a sandbox that opens shared project folders for writing does not start on Linux or
+/// Windows: only Seatbelt keeps secret files closed inside those folders (DEC-147.9).
+pub const SHARED_WRITES_NEED_SEATBELT: &str = "writable shared folders need the macOS sandbox";
+
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
@@ -124,6 +129,9 @@ pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
 /// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
 /// git-ignored project paths (MAP-2). A project with more builds no graph.
 pub const KEPT_OUT_MAX: usize = 1024;
+/// The most top-level names a Chosen folders or None launch keeps open in the project
+/// folder: every present entry, the engine's names and the picked ones.
+pub const OPEN_TOPS_MAX: usize = 512;
 /// The opening of the Seatbelt rule for paths kept out: contents, folder listings and
 /// attribute values are denied with every write, run, link and clone, while names, sizes
 /// and dates stay readable, so a tool that only stats such a path does not fail.
@@ -834,6 +842,10 @@ pub struct ProjectSandbox {
     agent_files: Option<policy::AgentFilesRule>,
     granted: Vec<PathBuf>,
     owner_tmp: Option<PathBuf>,
+    project_secrets: Option<PathBuf>,
+    secrets_revealed: Vec<PathBuf>,
+    shared_writes: Vec<PathBuf>,
+    open_tops: Option<Vec<String>>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -915,6 +927,10 @@ impl ProjectSandbox {
             agent_files: None,
             granted: Vec::new(),
             owner_tmp: None,
+            project_secrets: None,
+            secrets_revealed: Vec::new(),
+            shared_writes: Vec::new(),
+            open_tops: None,
         })
     }
 
@@ -1600,6 +1616,218 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Keeps the secret files and folders of the project folder `root` closed to the agent
+    /// (DEC-147.9): contents, attribute values, writes, runs, links and clones of every path
+    /// there with a name in [`shared_folders::SECRET_NAMES`], in any letter case, are denied,
+    /// names and sizes stay visible, except under `root/.git` and inside the agent's own
+    /// writable roots below it, its worktree or clone, never `root` itself. Each of `revealed`, the secrets the owner
+    /// shared back, is readable again, never writable. The deny comes before every older
+    /// deny in the profile, so none of those gives way. Inputs: a clean canonical folder the
+    /// sandbox already reads and at most [`shared_folders::SECRETS_MAX`] clean paths strictly
+    /// inside it. Output: the sandbox, or `Invalid` for a second call or a path out of shape.
+    pub fn keep_project_secrets(
+        mut self,
+        root: &Path,
+        revealed: &[PathBuf],
+    ) -> Result<Self, SandboxError> {
+        if self.project_secrets.is_some() {
+            return Err(invalid("the project's secrets are already kept closed"));
+        }
+        let readable = self
+            .read_roots
+            .iter()
+            .chain([&self.project_root])
+            .any(|read| read == root);
+        if !clean_absolute(root) || !readable || canonical(root)? != root {
+            return Err(invalid(
+                "the folder whose secrets stay closed must be a canonical folder the sandbox reads",
+            ));
+        }
+        if revealed.len() > shared_folders::SECRETS_MAX
+            || !revealed.iter().all(|path| {
+                clean_absolute(path)
+                    && path.starts_with(root)
+                    && path != root
+                    && !path.starts_with(root.join(".git"))
+            })
+        {
+            return Err(invalid(
+                "a shared-back secret must be a clean path inside the project folder",
+            ));
+        }
+        self.project_secrets = Some(root.to_path_buf());
+        self.secrets_revealed = revealed.to_vec();
+        Ok(self)
+    }
+
+    /// Keeps every top-level entry of the [`Self::keep_project_secrets`] folder closed as
+    /// [`Self::keep_out`] does but `open`, so one made after launch stays closed (L4 r1 L1);
+    /// own writable roots below it stay open, never the folder itself. Input: at most
+    /// [`OPEN_TOPS_MAX`] names, each [`plain_top`]. Output: the narrowed sandbox, or `Invalid`
+    /// without that folder, for a second call or for a name out of shape.
+    pub fn open_only_tops(mut self, open: &[String]) -> Result<Self, SandboxError> {
+        if self.project_secrets.is_none() || self.open_tops.is_some() {
+            return Err(invalid(
+                "the open top-level names need the project folder, once",
+            ));
+        }
+        if open.len() > OPEN_TOPS_MAX || !open.iter().all(|name| plain_top(name)) {
+            return Err(invalid("an open top-level name must be one plain name"));
+        }
+        self.open_tops = Some(open.to_vec());
+        Ok(self)
+    }
+
+    /// Lets the agent write one shared top-level folder of the project folder that git does
+    /// not track (DEC-147.9 Read-write) as one more writable root, pinned in place; the secret
+    /// names inside it stay closed, and every older deny still wins. Never a hidden folder, an
+    /// engine folder or one named `context` ([`shared_folders::never_written`]). Input: a canonical existing folder
+    /// directly inside the folder [`Self::keep_project_secrets`] named, clear of
+    /// [`Self::secret_paths`] and of every other writable root. Output: the widened sandbox, or
+    /// `Invalid`; only Seatbelt holds it.
+    pub fn allow_shared_write(mut self, folder: &Path) -> Result<Self, SandboxError> {
+        if self.shared_writes.len() >= shared_folders::SHARED_WRITES_MAX {
+            return Err(invalid("too many shared writable folders"));
+        }
+        let in_project = self
+            .project_secrets
+            .as_ref()
+            .is_some_and(|root| folder.parent() == Some(root.as_path()));
+        let kept_read_only = match (self.project_secrets.as_ref(), folder.file_name()) {
+            (Some(root), Some(name)) => name
+                .to_str()
+                .is_none_or(|name| shared_folders::never_written(root, name)),
+            _ => true,
+        };
+        if !in_project || kept_read_only {
+            return Err(invalid(
+                "a shared writable folder must be a top-level project folder kept under its secret rule",
+            ));
+        }
+        granted_root(folder, &owner_home()?, &self.secret_paths())?;
+        if self
+            .writable_roots()
+            .any(|root| root.starts_with(folder) || folder.starts_with(root))
+        {
+            return Err(invalid(
+                "a shared writable folder must lie outside every other writable root",
+            ));
+        }
+        self.shared_writes.push(folder.to_path_buf());
+        assert!(self.writes(folder));
+        assert!(self.shared_writes.len() <= shared_folders::SHARED_WRITES_MAX);
+        Ok(self)
+    }
+
+    /// The Seatbelt rule of [`Self::open_only_tops`]: every path below the project folder is
+    /// kept out but the open top-level names and the agent's own writable roots there.
+    /// Output: the rule, empty when no names were set.
+    fn closed_tops_rule(&self) -> String {
+        let (Some(root), Some(open)) = (self.project_secrets.as_ref(), self.open_tops.as_ref())
+        else {
+            return String::new();
+        };
+        assert!(clean_absolute(root));
+        let pattern = seatbelt_pattern(root);
+        let mut text = format!("{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{pattern}/\")");
+        if !open.is_empty() {
+            let names = open
+                .iter()
+                .map(|name| regex_escape(name))
+                .collect::<Vec<_>>()
+                .join("|");
+            text.push_str(&format!(
+                "\n    (require-not (regex #\"^{pattern}/({names})(/.*)?$\"))"
+            ));
+        }
+        for own in self.writable_roots().filter(|own| {
+            own.starts_with(root) && own.as_path() != root.as_path() && clean_absolute(own)
+        }) {
+            text.push_str(&format!(
+                "\n    (require-not (subpath \"{}\"))",
+                own.display()
+            ));
+        }
+        text.push_str("))\n");
+        text
+    }
+
+    /// The Seatbelt rules of [`Self::keep_project_secrets`]: the deny of secret names in the
+    /// project folder outside `.git` and the agent's own writable roots there (never the
+    /// shared writable folders); no clone of any folder, and no move or removal of a folder
+    /// inside a shared writable folder, so no folder that holds a secret leaves the name rule
+    /// by a plain-named parent (L4 r1 H2); then the read allow of env templates
+    /// ([`shared_folders::SECRET_TEMPLATES`]) and of each shared-back secret. Output: the
+    /// rules, empty when no folder was named.
+    fn project_secret_rules(&self) -> String {
+        let Some(root) = self
+            .project_secrets
+            .as_ref()
+            .filter(|root| clean_absolute(root))
+        else {
+            return String::new();
+        };
+        let names = shared_folders::SECRET_NAMES
+            .iter()
+            .map(|name| fold_case(name))
+            .collect::<Vec<_>>()
+            .join("|");
+        let own: String = self
+            .writable_roots()
+            .filter(|own| {
+                own.starts_with(root)
+                    && own.as_path() != root.as_path()
+                    && !self.shared_writes.contains(own)
+                    && clean_absolute(own)
+            })
+            .map(|own| format!("\n    (require-not (subpath \"{}\"))", own.display()))
+            .collect();
+        let mut text = format!(
+            "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{}/(.*/)?({names})(/.*)?$\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
+            seatbelt_pattern(root),
+            root.display()
+        );
+        text.push_str("(deny file-clone (vnode-type DIRECTORY))\n");
+        for folder in self
+            .shared_writes
+            .iter()
+            .filter(|folder| clean_absolute(folder))
+        {
+            text.push_str(&format!(
+                "(deny file-write-unlink\n  (require-all\n    (subpath \"{}\")\n    (vnode-type DIRECTORY)))\n",
+                folder.display()
+            ));
+        }
+        text.push_str(&format!(
+            "(allow file-read-data file-read-xattr\n  (regex #\"^{}/(.*/)?{}$\"))\n",
+            seatbelt_pattern(root),
+            fold_case(shared_folders::SECRET_TEMPLATES)
+        ));
+        let revealed: Vec<&PathBuf> = self
+            .secrets_revealed
+            .iter()
+            .filter(|path| clean_absolute(path))
+            .collect();
+        if !revealed.is_empty() {
+            text.push_str("(allow file-read-data file-read-xattr");
+            for path in revealed {
+                text.push_str(&format!("\n  (subpath \"{}\")", path.display()));
+            }
+            text.push_str(")\n");
+        }
+        text
+    }
+
+    /// The project folder whose secret names this sandbox keeps closed, if any.
+    pub fn project_secrets(&self) -> Option<&Path> {
+        self.project_secrets.as_deref()
+    }
+
+    /// The shared top-level project folders this sandbox lets the agent write.
+    pub fn shared_writes(&self) -> &[PathBuf] {
+        &self.shared_writes
+    }
+
     /// Holds the project's agent folders choice in this sandbox (DEC-124): a Sandboxed IDE
     /// terminal keeps to what the owner chose for the IDE. Only Seatbelt holds it, so the
     /// Linux and Windows boundaries refuse a sandbox with a choice other than Allow all
@@ -1975,6 +2203,7 @@ impl ProjectSandbox {
             .chain(self.shared.iter())
             .chain(self.tool_cache.iter().map(|(root, _)| root))
             .chain(self.owner_tmp.iter())
+            .chain(self.shared_writes.iter())
     }
 
     /// The read-only toolchain folders, Seatbelt only, with credential names carved out.
@@ -2069,6 +2298,7 @@ impl ProjectSandbox {
                 link.display()
             ));
         }
+        text.push_str(&self.project_secret_rules());
         text.push_str("(deny file-read* file-write*");
         for secret in self.secret_paths() {
             if clean_absolute(&secret) {
@@ -2105,6 +2335,7 @@ impl ProjectSandbox {
             }
             text.push_str(")\n");
         }
+        text.push_str(&self.closed_tops_rule());
         for file in self.revealed.iter().filter(|file| clean_absolute(file)) {
             text.push_str(&format!(
                 "(allow file-read* (literal \"{}\"))\n",
@@ -2724,8 +2955,15 @@ impl InstalledSandbox {
     /// install refusal, or `Unavailable` where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() {
+        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
+        {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
+        }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if !sandbox.shared_writes.is_empty() {
+            return Err(SandboxError::Unavailable(
+                SHARED_WRITES_NEED_SEATBELT.into(),
+            ));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if sandbox
@@ -3052,6 +3290,45 @@ pub(crate) fn any_case(text: &str) -> String {
 
 /// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
 /// without a quote or backslash. Output: the pattern text, without anchors.
+/// A Seatbelt regex fragment matched in any letter case, as [`any_case`] does for plain
+/// text: each ASCII letter becomes both cases, `k` also the Kelvin sign and `s` the long s,
+/// which a case-insensitive volume folds the same; every other character, regex syntax
+/// included, stays as written. Input: a fragment with no bracket class. Output: the pattern.
+pub(crate) fn fold_case(pattern: &str) -> String {
+    assert!(!pattern.contains('[') && !pattern.contains('"'));
+    pattern
+        .chars()
+        .map(|character| {
+            if character.eq_ignore_ascii_case(&'k') {
+                "(k|K|\u{212a})".to_owned()
+            } else if character.eq_ignore_ascii_case(&'s') {
+                "(s|S|\u{17f})".to_owned()
+            } else if character.is_ascii_alphabetic() {
+                format!(
+                    "[{}{}]",
+                    character.to_ascii_lowercase(),
+                    character.to_ascii_uppercase()
+                )
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Whether `name` can be one top-level name [`ProjectSandbox::open_only_tops`] keeps open:
+/// one path part, never `.` or `..`, at most 255 bytes, with no control character, quote or
+/// backslash, so it sits in a Seatbelt pattern as written. Takes the name. Returns the answer.
+pub(crate) fn plain_top(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '"' | '\\' | '\''))
+}
+
 fn regex_escape(text: &str) -> String {
     assert!(!text.contains('"') && !text.contains('\\'));
     let mut pattern = String::with_capacity(text.len() * 2);

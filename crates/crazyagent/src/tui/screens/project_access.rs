@@ -3,6 +3,9 @@ use super::project_team::window;
 use crate::sandbox::policy::{
     AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ToolchainChoice,
 };
+use crate::sandbox::shared_folders::{
+    CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
+};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
@@ -42,12 +45,28 @@ pub(in crate::tui) const AGENT_FILES_IGNORED_UNDER_FULL: &str =
 pub(in crate::tui) const NETWORK_IGNORED_UNDER_FULL: &str =
     "Full access runs agents without a sandbox, so this choice does not apply.";
 
-const TEXT_WIDTH: usize = 56;
+/// The shared folders setting's name (DEC-147.9), the same in the desktop app.
+pub(in crate::tui) const SHARED_FOLDERS: &str = "Shared project folders";
 
-/// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level,
-/// one switch per toolchain family, the network choice, the IDE hooks switch and the IDE agent
-/// folders choice. Row 0 is the level, each next row one toolchain of the view, then the
-/// network row, the IDE hooks switch, and the last row the agent folders choice. Busy while the engine saves; a refusal keeps the choices with the reason.
+/// What stays closed in shared folders, the same in the desktop app.
+pub(in crate::tui) const SHARED_SECRETS_LINE: &str = "Secret files stay closed to agents wherever they sit: .env files, keys, certificates and credential files. Their names stay listed.";
+
+/// When a changed shared folders choice reaches agents, the same in the desktop app.
+pub(in crate::tui) const SHARED_FOLDERS_NEXT_START: &str =
+    "A change reaches each agent, research job and master turn when it next starts.";
+
+/// Why the shared folders choice has no effect under Full access, the same in the desktop app.
+pub(in crate::tui) const SHARED_FOLDERS_IGNORED_UNDER_FULL: &str = "Full access runs agents without a sandbox, so they see the whole project folder, secret files included.";
+
+const TEXT_WIDTH: usize = 56;
+const SECRETS_SHOWN_BYTES_MAX: usize = 256;
+
+/// The Agent access box over the Settings tab (DEC-101, DEC-102, DEC-147.9): the access level,
+/// one switch per toolchain family, the network, the IDE hooks switch, the IDE agent folders
+/// choice and the shared project folders. Row 0 is the level, each next row one toolchain,
+/// then the network, hooks, agent folders and shared folders rows, one row per top-level
+/// folder while Chosen folders is picked, and last the Read-only or Read-write row. Busy
+/// while the engine saves; a refusal keeps the choices with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
@@ -56,6 +75,8 @@ pub(in crate::tui) struct AccessEdit {
     pub allowed: Vec<bool>,
     pub ide_git_hooks: bool,
     pub ide_agent_files: IdeAgentFiles,
+    pub shared: SharedFolders,
+    pub folders: Vec<String>,
     pub cursor: usize,
     pub confirm_full: bool,
     pub busy: bool,
@@ -80,6 +101,8 @@ impl AccessEdit {
             allowed: view.toolchains.iter().map(|row| row.allowed).collect(),
             ide_git_hooks: view.ide_git_hooks,
             ide_agent_files: view.ide_agent_files,
+            shared: view.shared_folders.clone(),
+            folders: pickable_folders(&view.local_folders, &view.shared_folders.chosen),
             view: view.clone(),
             cursor: 0,
             confirm_full: false,
@@ -93,7 +116,7 @@ impl AccessEdit {
     /// Output: what the screen does next.
     pub fn key(&mut self, key: KeyEvent) -> AccessKey {
         assert_eq!(self.allowed.len(), self.view.toolchains.len());
-        assert!(self.cursor <= self.files_row());
+        assert!(self.cursor <= self.last_row());
         if self.busy {
             return match key.code {
                 KeyCode::Esc => AccessKey::Close,
@@ -116,7 +139,7 @@ impl AccessEdit {
         match key.code {
             KeyCode::Esc => return AccessKey::Close,
             KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.files_row()),
+            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.last_row()),
             KeyCode::Left => self.change(false),
             KeyCode::Right | KeyCode::Char(' ') => self.change(true),
             KeyCode::Enter if self.access == AgentAccess::Full => {
@@ -130,8 +153,9 @@ impl AccessEdit {
 
     /// The policy the box would save: the chosen level, a choice for each toolchain whose
     /// switch differs from the project's own use, so the others keep following the project,
-    /// the IDE hooks switch, the agent folders choice, and the tool cache choice, the Apply
-    /// access changes choice and the grants as the project saved them (T8, F08).
+    /// the IDE hooks switch, the agent folders choice, the tool cache choice, the Apply access
+    /// changes choice and the grants as the project saved them (T8, F08), and the shared folders
+    /// choice with its shared-back secrets kept.
     pub fn policy(&self) -> AgentPolicy {
         let toolchains: Vec<ToolchainChoice> = self
             .view
@@ -158,6 +182,7 @@ impl AccessEdit {
                 .iter()
                 .map(|row| row.grant.clone())
                 .collect(),
+            shared_folders: self.shared.clone(),
         };
         assert!(policy.validate().is_ok());
         policy
@@ -206,7 +231,7 @@ impl AccessEdit {
         rows
     }
 
-    /// The box's settings lines, through the blank line after the agent folders choice, and the
+    /// The box's settings lines, through the blank line after the shared folders lines, and the
     /// line the cursor's row is on. Input: the look. Output: the rows, that line and the last
     /// line of the help under it.
     fn form(&self, look: &Look) -> (Vec<Row>, usize, usize) {
@@ -387,6 +412,7 @@ impl AccessEdit {
         if self.cursor == files {
             end = body.len() - 1;
         }
+        self.shared_form(look, &mut body, &mut at, &mut end);
         body.push(Row::default());
         assert!(at < body.len(), "the cursor's row is a settings line");
         assert!(
@@ -426,12 +452,148 @@ impl AccessEdit {
         rows
     }
 
+    /// The shared folders lines: the choice with its help, one switch per top-level folder
+    /// while Chosen folders is picked, Read-only or Read-write with its help, what stays closed
+    /// with the secrets shared back and the ones the choice cannot reach, when a change
+    /// applies, the Linux and Windows gap, and the Full access note. Inputs: the look, the
+    /// lines so far, and the cursor's line and the last line of its help, moved here when the
+    /// cursor is on one of these rows.
+    fn shared_form(&self, look: &Look, body: &mut Vec<Row>, at: &mut usize, end: &mut usize) {
+        let mark = |row: usize| if self.cursor == row { "> " } else { "  " };
+        let style = |row: usize| {
+            if self.cursor == row {
+                look.selection
+            } else {
+                look.fg
+            }
+        };
+        let help = |text: &str| -> Vec<Row> {
+            wrap_words(text, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(format!("              {line}"), look.muted))
+                .collect()
+        };
+        body.push(Row::default());
+        body.push(Row::of(SHARED_FOLDERS, look.accent));
+        let scope = self.scope_row();
+        if self.cursor == scope {
+            *at = body.len();
+        }
+        body.push(
+            Row::of(mark(scope), look.accent)
+                .push("Folders     ", look.muted)
+                .push(format!("< {} >", self.shared.scope.label()), style(scope)),
+        );
+        body.extend(help(self.shared.scope.help()));
+        if self.cursor == scope {
+            *end = body.len() - 1;
+        }
+        if self.shared.scope == SharedScope::Chosen {
+            if self.folders.is_empty() {
+                body.push(Row::of(
+                    "  This project folder has no top-level folders to pick.",
+                    look.muted,
+                ));
+            }
+            for (index, name) in self.folders.iter().enumerate() {
+                let row = scope + 1 + index;
+                if self.cursor == row {
+                    *at = body.len();
+                    *end = *at;
+                }
+                let state = if self.shared.chosen.contains(name) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
+                body.push(
+                    Row::of(mark(row), look.accent).push(format!("{state} {name}"), style(row)),
+                );
+            }
+        }
+        let access = self.shared_access_row();
+        if self.cursor == access {
+            *at = body.len();
+        }
+        body.push(
+            Row::of(mark(access), look.accent)
+                .push("Shared as   ", look.muted)
+                .push(format!("< {} >", self.shared.access.label()), style(access)),
+        );
+        body.extend(help(self.shared.access.help()));
+        if self.cursor == access {
+            *end = body.len() - 1;
+        }
+        let listed = self.shared.secrets.join(", ");
+        let secrets = if self.shared.secrets.is_empty() {
+            "none".to_owned()
+        } else if listed.len() > SECRETS_SHOWN_BYTES_MAX {
+            format!("{} paths", self.shared.secrets.len())
+        } else {
+            listed
+        };
+        for text in [
+            format!(
+                "{SHARED_SECRETS_LINE} Shared back for reading: {secrets}. Change these in the desktop app."
+            ),
+            SHARED_FOLDERS_NEXT_START.to_owned(),
+            OFF_MACOS_LINE.to_owned(),
+        ] {
+            body.extend(
+                wrap_words(&text, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(format!("  {line}"), look.muted)),
+            );
+        }
+        let unreachable = self.shared.unreachable_secrets();
+        if !unreachable.is_empty() {
+            let listed = unreachable.join(", ");
+            let shown = if listed.len() > SECRETS_SHOWN_BYTES_MAX {
+                format!("{} paths", unreachable.len())
+            } else {
+                listed
+            };
+            body.extend(
+                wrap_words(&format!("{UNREACHABLE_SECRETS_LINE} {shown}."), TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(format!("  {line}"), look.warning)),
+            );
+        }
+        if self.access == AgentAccess::Full {
+            body.extend(
+                wrap_words(SHARED_FOLDERS_IGNORED_UNDER_FULL, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(format!("  {line}"), look.warning)),
+            );
+        }
+    }
+
     fn hooks_row(&self) -> usize {
         self.allowed.len() + 2
     }
 
     fn files_row(&self) -> usize {
         self.hooks_row() + 1
+    }
+
+    fn scope_row(&self) -> usize {
+        self.files_row() + 1
+    }
+
+    fn shown_folders(&self) -> usize {
+        if self.shared.scope == SharedScope::Chosen {
+            self.folders.len()
+        } else {
+            0
+        }
+    }
+
+    fn shared_access_row(&self) -> usize {
+        self.scope_row() + self.shown_folders() + 1
+    }
+
+    fn last_row(&self) -> usize {
+        self.shared_access_row()
     }
 
     fn change(&mut self, forward: bool) {
@@ -452,9 +614,68 @@ impl AccessEdit {
             self.ide_agent_files = next_agent_files(self.ide_agent_files, forward);
             return;
         }
+        if self.cursor == self.scope_row() {
+            self.shared.scope = next_scope(self.shared.scope, forward);
+            return;
+        }
+        if self.cursor == self.shared_access_row() {
+            self.shared.access = next_shared_access(self.shared.access);
+            return;
+        }
+        if self.cursor > self.scope_row() {
+            self.toggle_folder(self.cursor - self.scope_row() - 1);
+            return;
+        }
         let row = self.cursor - 1;
         assert!(row < self.allowed.len());
         self.allowed[row] = !self.allowed[row];
+    }
+
+    /// Picks or unpicks one top-level folder for Chosen folders, refusing a pick past
+    /// [`CHOSEN_MAX`] with the reason. Input: the folder's place in the list.
+    fn toggle_folder(&mut self, index: usize) {
+        assert!(self.shared.scope == SharedScope::Chosen && index < self.folders.len());
+        let name = &self.folders[index];
+        if let Some(at) = self.shared.chosen.iter().position(|item| item == name) {
+            self.shared.chosen.remove(at);
+            return;
+        }
+        if self.shared.chosen.len() >= CHOSEN_MAX {
+            self.error = Some(format!("Pick at most {CHOSEN_MAX} folders."));
+            return;
+        }
+        self.shared.chosen.push(name.clone());
+        assert!(self.shared.chosen.len() <= CHOSEN_MAX);
+    }
+}
+
+/// The top-level folders the owner may pick: the ones the engine found and any picked before
+/// that is gone now, so it can still be unpicked. Inputs: the engine's folders and the picked
+/// ones. Output: the names, sorted, each once.
+pub(in crate::tui) fn pickable_folders(local: &[String], chosen: &[String]) -> Vec<String> {
+    let mut folders: Vec<String> = local.iter().chain(chosen).cloned().collect();
+    folders.sort();
+    folders.dedup();
+    folders
+}
+
+/// The next shared folders choice, cycling in either direction. Input: the current choice
+/// and the direction. Output: the next choice.
+pub(in crate::tui) fn next_scope(current: SharedScope, forward: bool) -> SharedScope {
+    let at = SharedScope::ALL
+        .iter()
+        .position(|scope| *scope == current)
+        .unwrap_or(0);
+    let count = SharedScope::ALL.len();
+    let step = if forward { 1 } else { count - 1 };
+    SharedScope::ALL[(at + step) % count]
+}
+
+/// The other shared folders access choice. Input: the current one. Output: the other.
+pub(in crate::tui) fn next_shared_access(current: SharedAccess) -> SharedAccess {
+    match current {
+        SharedAccess::ReadOnly => SharedAccess::ReadWrite,
+        SharedAccess::ReadWrite => SharedAccess::ReadOnly,
     }
 }
 
