@@ -1,8 +1,9 @@
 use super::{Hybrid, Progress};
+use crate::app_plugins::manifest;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::search_index::Source;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 
 #[cfg(test)]
 mod tests;
@@ -26,10 +27,65 @@ pub(crate) const QUERY_ROUND_MAX: usize = 16;
 /// The most stale vectors one round deletes.
 pub(crate) const SWEEP_ROUND_MAX: usize = 10_000;
 /// The fewest and most dimensions a plugin's vectors may have (manifest bounds).
-pub(crate) const DIMENSIONS_MIN: usize = 64;
-pub(crate) const DIMENSIONS_MAX: usize = 1024;
+pub(crate) const DIMENSIONS_MIN: usize = manifest::DIMENSIONS_MIN as usize;
+pub(crate) const DIMENSIONS_MAX: usize = manifest::DIMENSIONS_MAX as usize;
 /// The most bytes of a plugin key: a plugin name, a colon and a SHA-256.
 pub(crate) const KEY_BYTES_MAX: usize = 128;
+const TABLES: &str = "CREATE TABLE IF NOT EXISTS search_vectors (
+    chunk INTEGER NOT NULL,
+    plugin_key TEXT NOT NULL CHECK (length(plugin_key) BETWEEN 1 AND 128),
+    project TEXT,
+    source TEXT NOT NULL CHECK (source IN ('session', 'memory')),
+    at_ms INTEGER NOT NULL,
+    vector BLOB NOT NULL CHECK (length(vector) BETWEEN 256 AND 4096 AND length(vector) % 4 = 0),
+    PRIMARY KEY (chunk, plugin_key)
+);
+CREATE INDEX IF NOT EXISTS search_vectors_scan ON search_vectors(plugin_key, project, source, at_ms);
+CREATE INDEX IF NOT EXISTS search_vectors_room ON search_vectors(plugin_key, project, at_ms);
+CREATE TABLE IF NOT EXISTS search_vector_pending (
+    chunk INTEGER PRIMARY KEY,
+    project TEXT,
+    source TEXT NOT NULL CHECK (source IN ('session', 'memory')),
+    at_ms INTEGER NOT NULL,
+    dropped INTEGER NOT NULL DEFAULT 0 CHECK (dropped IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS search_vector_pending_next ON search_vector_pending(project, dropped, at_ms);
+CREATE INDEX IF NOT EXISTS search_vector_pending_scope ON search_vector_pending(project, source, dropped);
+CREATE TABLE IF NOT EXISTS search_vector_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    plugin_key TEXT NOT NULL CHECK (length(plugin_key) BETWEEN 1 AND 128)
+);
+CREATE TABLE IF NOT EXISTS search_query_vectors (
+    plugin_key TEXT NOT NULL CHECK (length(plugin_key) BETWEEN 1 AND 128),
+    query_sha TEXT NOT NULL CHECK (length(query_sha) = 64),
+    query TEXT CHECK (query IS NULL OR length(CAST(query AS BLOB)) BETWEEN 1 AND 2000),
+    asked_ms INTEGER NOT NULL,
+    vector BLOB CHECK (vector IS NULL OR (length(vector) BETWEEN 256 AND 4096 AND length(vector) % 4 = 0)),
+    PRIMARY KEY (plugin_key, query_sha),
+    CHECK ((vector IS NULL) = (query IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS search_query_vectors_asked ON search_query_vectors(plugin_key, asked_ms);";
+const TRIGGERS: [&str; 3] = [
+    "search_vectors_added",
+    "search_vectors_gone",
+    "search_vectors_stale",
+];
+const TRIGGER_SQL: &str = "CREATE TRIGGER IF NOT EXISTS search_vectors_added AFTER INSERT ON search_chunks BEGIN
+    DELETE FROM search_vector_pending WHERE chunk = new.id;
+    INSERT INTO search_vector_pending(chunk, project, source, at_ms) VALUES (new.id, new.project, new.source, new.at_ms);
+END;
+CREATE TRIGGER IF NOT EXISTS search_vectors_gone AFTER DELETE ON search_chunks BEGIN
+    DELETE FROM search_vectors WHERE chunk = old.id;
+    DELETE FROM search_vector_pending WHERE chunk = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS search_vectors_stale AFTER UPDATE OF text, project, source, at_ms ON search_chunks BEGIN
+    DELETE FROM search_vectors WHERE chunk = old.id;
+    DELETE FROM search_vector_pending WHERE chunk = old.id;
+    INSERT INTO search_vector_pending(chunk, project, source, at_ms) VALUES (new.id, new.project, new.source, new.at_ms);
+END;";
+const SWEEP: &str = "DELETE FROM search_vectors WHERE NOT EXISTS (SELECT 1 FROM search_chunks WHERE id = search_vectors.chunk);
+DELETE FROM search_vector_pending WHERE NOT EXISTS (SELECT 1 FROM search_chunks WHERE id = search_vector_pending.chunk);
+DELETE FROM search_vector_state;";
 
 /// The ranking is words only: the chosen plugin can't be used now.
 pub(crate) const NOTE_UNAVAILABLE: &str =
@@ -80,9 +136,118 @@ impl Plugin {
     /// plugin re-embeds. Inputs: the name, the SHA-256 hex, the dimensions and the batch.
     /// Output: the plugin.
     pub(crate) fn new(name: &str, sha256: &str, dimensions: usize, batch: usize) -> Self {
-        let _ = (name, sha256, dimensions, batch);
-        unimplemented!("v3 hybrid part 1")
+        assert!(
+            manifest::valid_name(name),
+            "a loaded plugin has a valid name"
+        );
+        assert!(sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!((DIMENSIONS_MIN..=DIMENSIONS_MAX).contains(&dimensions));
+        assert!((1..=usize::from(manifest::BATCH_MAX)).contains(&batch));
+        let key = format!("{name}:{sha256}");
+        assert!(key.len() <= KEY_BYTES_MAX);
+        Self {
+            key,
+            dimensions,
+            batch,
+        }
     }
+
+    /// The bytes one stored vector of this plugin takes. Output: the dimensions times four.
+    fn vector_bytes(&self) -> u64 {
+        let bytes = self.dimensions as u64 * 4;
+        assert!((DIMENSIONS_MIN as u64 * 4..=DIMENSIONS_MAX as u64 * 4).contains(&bytes));
+        bytes
+    }
+}
+
+fn storage(_: impl std::fmt::Display) -> EngineError {
+    EngineError("search_index_unavailable".to_owned())
+}
+
+/// How many of the three vector triggers exist on the chunk table. Input: the database.
+/// Output: the count, 0 to 3.
+fn triggers_found(connection: &Connection) -> Result<usize, EngineError> {
+    let found: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name IN (?1,?2,?3)",
+            TRIGGERS,
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    assert!((0..=3).contains(&found));
+    Ok(found as usize)
+}
+
+/// Brings the vectors in line with the plugin key before a round: when the stored key is
+/// another, deletes at most [`SWEEP_ROUND_MAX`] of the other keys' vectors, and once none
+/// is left drops their query vectors, queues every chunk with no vector of this key and
+/// stores the key. Inputs: the connection and the plugin key. Output: whether the vectors
+/// are this key's alone, so the round may embed.
+fn settle(connection: &mut Connection, key: &str) -> Result<bool, EngineError> {
+    assert!(!key.is_empty() && key.len() <= KEY_BYTES_MAX);
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(storage)?;
+    let state: Option<String> = tx
+        .query_row(
+            "SELECT plugin_key FROM search_vector_state WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    if state.as_deref() == Some(key) {
+        return Ok(true);
+    }
+    let mut deleted = 0;
+    for side in ["<", ">"] {
+        let left = SWEEP_ROUND_MAX - deleted;
+        deleted += tx
+            .execute(
+                &format!(
+                    "DELETE FROM search_vectors WHERE rowid IN
+                     (SELECT rowid FROM search_vectors WHERE plugin_key {side} ?1 LIMIT ?2)"
+                ),
+                params![key, left as i64],
+            )
+            .map_err(storage)?;
+        assert!(deleted <= SWEEP_ROUND_MAX);
+    }
+    let others: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM search_vectors WHERE plugin_key < ?1)
+                 OR EXISTS (SELECT 1 FROM search_vectors WHERE plugin_key > ?1)",
+            [key],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if others {
+        tx.commit().map_err(storage)?;
+        return Ok(false);
+    }
+    tx.execute(
+        "DELETE FROM search_query_vectors WHERE plugin_key <> ?1",
+        [key],
+    )
+    .map_err(storage)?;
+    tx.execute_batch("DELETE FROM search_vector_pending;")
+        .map_err(storage)?;
+    tx.execute(
+        "INSERT INTO search_vector_pending(chunk, project, source, at_ms)
+         SELECT id, project, source, at_ms FROM search_chunks
+         WHERE NOT EXISTS (SELECT 1 FROM search_vectors
+                           WHERE chunk = search_chunks.id AND plugin_key = ?1)",
+        [key],
+    )
+    .map_err(storage)?;
+    tx.execute(
+        "INSERT INTO search_vector_state(id, plugin_key) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET plugin_key = excluded.plugin_key",
+        [key],
+    )
+    .map_err(storage)?;
+    tx.commit().map_err(storage)?;
+    Ok(true)
 }
 
 /// One call that turns texts into vectors, one per text in order.
@@ -92,8 +257,13 @@ pub(crate) type Embed<'a> = dyn FnMut(&[&str]) -> Result<Vec<Vec<f32>>, EngineEr
 /// transaction that deletes or rewrites it, and sweeps vectors left by chunks deleted before.
 /// Input: the engine database, after the search index tables. Output: done, or the failure.
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
-    let _ = connection;
-    unimplemented!("v3 hybrid part 1")
+    connection.execute_batch(TABLES).map_err(storage)?;
+    if triggers_found(connection)? < TRIGGERS.len() {
+        connection.execute_batch(SWEEP).map_err(storage)?;
+        connection.execute_batch(TRIGGER_SQL).map_err(storage)?;
+    }
+    assert_eq!(triggers_found(connection)?, TRIGGERS.len());
+    Ok(())
 }
 
 /// Embeds the newest chunks of a project, then app-wide memories, that have no vector for
