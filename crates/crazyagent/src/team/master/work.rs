@@ -314,6 +314,19 @@ pub(super) fn inspect_work(
         }
         sections.push(format!("Overlapping claims:\n{}", lines.join("\n")));
     }
+    if master || !led.is_empty() {
+        let retired = crate::team::names::retired(connection, project)?;
+        if !retired.is_empty() {
+            let mut lines = Vec::with_capacity(retired.len());
+            for (_, id) in &retired {
+                lines.push(format!("- {}", crate::team::events::label(connection, *id)?));
+            }
+            sections.push(format!(
+                "Retired handles: these agents finished and their worktrees were cleaned up after their work landed, so a message or wake to one is refused:\n{}",
+                lines.join("\n")
+            ));
+        }
+    }
     if master {
         sections.push(match crate::team::events::status(connection, project) {
             Ok(status) => format!("The team:\n{}", status.text()),
@@ -394,14 +407,18 @@ pub(super) fn update_work(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(state)?;
     let Some(target) = named_agent(&tx, project, agent, name)? else {
-        return Ok((
-            format!(
-                "Not sent: no agent of this project is called {}. Call {}() for the team.",
-                bound_text(name, AGENT_SHOWN_MAX),
+        let shown = bound_text(name, AGENT_SHOWN_MAX);
+        let said = match crate::team::names::waiting_task(&tx, project, name)? {
+            Some(task) => format!(
+                "Not sent: {shown} is the handle of task {task}, which has not started yet. Send it again once {}() shows it running.",
                 tool::INSPECT_WORK_TOOL
             ),
-            true,
-        ));
+            None => format!(
+                "Not sent: no agent of this project is called {shown}. Call {}() for the team.",
+                tool::INSPECT_WORK_TOOL
+            ),
+        };
+        return Ok((said, true));
     };
     let stopped = !running(&tx, project, target)?;
     let wakes = sending.kind == Update::Message

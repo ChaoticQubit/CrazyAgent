@@ -2173,6 +2173,14 @@ pub(super) fn wake_in(
         None => super::events::resolve(tx, project, agent)?,
     };
     let Some(id) = found else {
+        if let Some(task) = super::names::waiting_task(tx, project, agent)? {
+            return Ok((
+                format!(
+                    "Not woken: {shown} is the handle of task {task}, which has not started yet, so it needs no wake."
+                ),
+                true,
+            ));
+        }
         return Ok((unknown, true));
     };
     let label = super::events::label(tx, id)?;

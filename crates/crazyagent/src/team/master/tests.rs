@@ -3067,6 +3067,58 @@ fn a_reply_to_a_finished_worker_wakes_it_and_a_refused_wake_stores_no_reply() {
     assert!(pinned(&fixture, gone).is_empty());
 }
 
+/// A message to the handle the master gave a task that has not started names that task
+/// instead of "no agent is called" (F16, DM "@classifier-storage not recognized"), and the
+/// master reads the project's retired handles in inspect_work (F10).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_waiting_task_s_handle_is_named_as_waiting_and_retired_handles_are_listed() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','claude-code',1,'Own the store','queued',?2)",
+            params![PROJECT, NOW],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_roles(task,project,role) VALUES (?1,?2,'classifier-storage')",
+            params![task, PROJECT],
+        )
+        .unwrap();
+    assert_eq!(
+        as_master(
+            &mut fixture,
+            tool::UPDATE_WORK_TOOL,
+            json!({"to": "@classifier-storage", "text": "Use the Store API."})
+        ),
+        (
+            format!(
+                "Not sent: @classifier-storage is the handle of task {task}, which has not started yet. Send it again once inspect_work() shows it running."
+            ),
+            true
+        )
+    );
+    let count: i64 = fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM coord_messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let gone = named_sub(&fixture, "core-policy", "stopped");
+    no_worktree(&fixture, gone);
+    let label = super::super::events::label(&fixture.connection, gone).unwrap();
+    let (said, refused) = as_master(&mut fixture, tool::INSPECT_WORK_TOOL, json!({}));
+    assert!(!refused, "{said}");
+    assert!(
+        said.contains(&format!("Retired handles: these agents finished and their worktrees were cleaned up after their work landed, so a message or wake to one is refused:\n- {label}")),
+        "{said}"
+    );
+}
+
 /// Runs git in `dir` with an isolated home and no system config, as the owner or an agent
 /// would in a merge test. Takes the folder and the arguments. Returns standard output.
 #[cfg(target_os = "macos")]
