@@ -4389,8 +4389,8 @@ fn a_master_stopped_for_another_reason_says_why_and_s_tries_again() {
 }
 
 /// A master terminal the view attached that sends no first frame within a minute is overdue
-/// too: the view says so instead of the terminal box, gives the keys back to the view so
-/// nothing typed reaches the silent terminal, and s tries again (owner 11-12).
+/// too: the view says so instead of the terminal box and drops every key but s, Esc and
+/// Ctrl-], so nothing typed reaches the silent terminal or the view; s tries again (owner 11-12).
 #[test]
 fn an_attached_master_terminal_that_never_opens_after_a_minute_says_so_and_keeps_the_keys() {
     let mut screen = super::Team::master(project(), "Tidepool".into());
@@ -4418,7 +4418,8 @@ fn an_attached_master_terminal_that_never_opens_after_a_minute_says_so_and_keeps
     );
     assert!(body.contains("s tries again."), "{body}");
     assert!(rows[23].contains("s Try again"), "{}", rows[23]);
-    assert!(!rows[23].contains("Leave terminal"), "{}", rows[23]);
+    assert!(rows[23].contains("Leave terminal"), "{}", rows[23]);
+    assert!(!rows[23].contains("New line"), "{}", rows[23]);
     shell.key(Key::Char('x'));
     assert!(
         requests(&mut shell)
@@ -5507,6 +5508,61 @@ fn a_closed_master_terminal_with_no_new_one_waits_afresh_and_is_overdue_after_a_
     assert!(body.contains("s tries again."), "{body}");
     assert!(!body.contains("This run finished."), "{body}");
     assert!(rows[23].contains("s Try again"), "{}", rows[23]);
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 1);
+}
+
+/// Keys typed into the master's terminal while it starts stay terminal keys when the wait
+/// passes its minute: no view or shell key acts on them (l, ?, ] and n do nothing, the
+/// hints keep Ctrl-] and drop Ctrl-J), and s tries again, as over a closed terminal
+/// (rv-code V240-MASTER-UI F1).
+#[test]
+fn keys_typed_into_the_master_terminal_across_the_minute_never_act_on_the_view() {
+    use crate::tui::screens::Screen;
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
+    ctx.width = 80;
+    ctx.height = 24;
+    ctx.link = Link::Ready;
+    let mut screen = super::Team::master(project(), "Tidepool".into());
+    screen.shown(&mut ctx);
+    screen.arrive(&switch(Some(true), None), &mut ctx);
+    for key in [Key::Char('p'), Key::Char('l')] {
+        screen.key(&key, &mut ctx);
+    }
+    assert_eq!(
+        screen.held.len(),
+        2,
+        "keys typed while it starts wait for the terminal"
+    );
+    screen.waiting_since = Some(crate::tui::clock::now_ms() - 61_000);
+    let mut shell = Shell::with(ctx, Box::new(screen));
+    requests(&mut shell);
+    for key in [
+        Key::Char('l'),
+        Key::Char('?'),
+        Key::Char(']'),
+        Key::Char('n'),
+    ] {
+        shell.key(key);
+    }
+    assert_eq!(shell.ctx.sessions_key, None);
+    let rows = render(&mut shell);
+    assert!(rows[0].contains("Tidepool  /  Master"), "{}", rows[0]);
+    let seen = rows.join("\n");
+    assert!(!seen.contains("? Close"), "no help overlay: {seen}");
+    assert!(
+        seen.contains("The master's terminal hasn't opened after a minute."),
+        "{seen}"
+    );
+    assert!(rows[23].contains("s Try again"), "{}", rows[23]);
+    assert!(rows[23].contains("Leave terminal"), "{}", rows[23]);
+    assert!(!rows[23].contains("New line"), "{}", rows[23]);
     shell.key(Key::Char('s'));
     assert_eq!(starts_asked(&mut shell), 1);
 }
