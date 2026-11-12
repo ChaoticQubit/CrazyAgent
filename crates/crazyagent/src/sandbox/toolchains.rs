@@ -78,22 +78,26 @@ const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
 /// `crazyagent/main` only while that name resolves to the commit `refs/crazyagent/main`
 /// holds, a courtesy check, since the copy lets an agent set that ref and the engine's turn
 /// end check is what refuses a merge of anything else, a lead its own workers'
-/// `BRANCH--NAME` branches, and the free copy runs every command as is.
+/// `BRANCH--NAME` branches, telling a lead with main on how to merge main (F19), and the
+/// free copy runs every command as is.
 #[cfg(unix)]
 const GIT_SCRIPT: &str = r##"#!/bin/sh
 git='@GIT@'
 lead=@LEAD@
 free=@FREE@
 main=@MAIN@
-main_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another agent branch into it (DEC-107). To bring the project main into your branch, run: git merge crazyagent/main. If you need work from another agent, stop and tell your lead what you need; the master tells the owner.'
-worker_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another branch into it (DEC-107). If you need work from another branch, stop and tell your lead what you need; the master tells the owner.'
+main_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another agent branch into it (DEC-107). To bring the project main into your branch, run: git merge crazyagent/main. Work from the lead branch reaches yours through Update on your change set: stop and tell your lead what you need; the master tells the owner.'
+worker_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another branch into it (DEC-107). Work from the lead branch reaches yours through Update on your change set: stop and tell your lead what you need; the master tells the owner.'
 lead_reason='A lead merges only the branches of its own workers, named BRANCH--NAME after its own branch, and never pulls, rebases or cherry-picks other branches (DEC-107). The engine merge tool merges app-spawned workers. If you need other work, stop and tell the master what you need.'
+lead_main_reason='A lead merges only the branches of its own workers, named BRANCH--NAME after its own branch, and the project main, and never pulls, rebases or cherry-picks other branches (DEC-107). To bring the project main into your branch, run: git merge crazyagent/main. The engine merge tool merges app-spawned workers. If you need other work, stop and tell the master what you need.'
 refuse() {
   printf 'crazyagent: git %s is refused. %s\n' "$1" "$2" >&2
   exit 1
 }
 reason() {
-  if [ "$lead" = 1 ]; then
+  if [ "$lead" = 1 ] && [ "$main" = 1 ]; then
+    printf '%s' "$lead_main_reason"
+  elif [ "$lead" = 1 ]; then
     printf '%s' "$lead_reason"
   elif [ "$main" = 1 ]; then
     printf '%s' "$main_reason"

@@ -559,6 +559,7 @@ fallback_allowed = false
             tools_off: prepared.tools_off.clone(),
             steps: prepared.steps,
             time: prepared.time,
+            frames: prepared.frames,
         }
     }
 

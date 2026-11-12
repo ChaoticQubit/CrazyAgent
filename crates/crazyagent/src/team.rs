@@ -4074,8 +4074,59 @@ pub fn background_at_end(
     }
 }
 
-/// Tells whether the owner asked to approve each merge of a finished harness into the
-/// Master's branch, so the master's merge leaves it as a pending Accept instead; off by
+/// The most owner messages one "accept all" check reads, newest first (DEC-147.7).
+const ACCEPT_ALL_READ_MAX: i64 = 32;
+
+/// Tells whether the owner sent "accept all" to the team in the app at or after a time
+/// (DEC-147.7): an owner-authored team message whose whole text, trimmed and in any case, is
+/// those two words with at most a closing full stop or exclamation mark. A master or engine
+/// message never counts. Takes a connection, the project and the time in milliseconds.
+/// Returns the answer, or any SQLite failure.
+pub fn owner_said_accept_all(
+    connection: &Connection,
+    project: &ProjectId,
+    since_ms: i64,
+) -> Result<bool, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT text FROM team_messages WHERE project=?1 AND author=?2 AND created_ms>=?3
+             ORDER BY id DESC LIMIT ?4",
+        )
+        .map_err(error)?;
+    let texts = statement
+        .query_map(
+            params![
+                project.as_str(),
+                MessageAuthor::Owner.name(),
+                since_ms,
+                ACCEPT_ALL_READ_MAX
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(error)?;
+    for text in texts {
+        if says_accept_all(&text.map_err(error)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Tells whether one owner message is "accept all" and nothing else, so "don't accept all"
+/// or a longer sentence never grants a merge. Takes the text. Returns the answer.
+fn says_accept_all(text: &str) -> bool {
+    let text = text.trim().trim_end_matches(['.', '!']).trim_end();
+    let mut words = text.split_whitespace();
+    matches!(
+        (words.next(), words.next(), words.next()),
+        (Some(first), Some(second), None)
+            if first.eq_ignore_ascii_case("accept") && second.eq_ignore_ascii_case("all")
+    )
+}
+
+/// Tells whether the owner's "Master accepts change sets" setting is Only when I click or say
+/// accept all (DEC-147.7), so the master's merge of a finished harness leaves it as a pending
+/// Accept unless the owner said accept all since the set last changed; off, Itself, by
 /// default. Takes a connection and the project. Returns the setting.
 pub fn ask_before_merge(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
     let ask: Option<bool> = connection

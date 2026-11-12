@@ -1,9 +1,9 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
-export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
+export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Overlaps, QuestionsTo, SubagentMode, ToolSwitch, ToolView } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
@@ -13,6 +13,16 @@ export type Result<T> = { kind: "ok"; value: T } | Failure;
 
 const FALLBACK = "Something went wrong. Try again.";
 const UNREACHABLE = "engine_unreachable";
+const STALE_ENGINE = "engine_stopped_unclean";
+/** The engine causes of a refused connect where the locator still names an engine that stopped
+ * without its cleanup (F35), as the engine's `STALE_ENGINE_CODES` lists them. */
+export const STALE_ENGINE_CAUSES: readonly string[] = [
+  "owner_locator_database_mismatch",
+  "owner_locator_replaced_or_unsafe",
+  "owner_generation_replaced_or_unsafe",
+  "owner_endpoint_replaced_or_unsafe",
+  "owner_ordinary_socket_mismatch",
+];
 const PAGE_LIMIT = 200;
 const ACCOUNT_PAGES_MAX = 100;
 
@@ -20,6 +30,8 @@ const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
   engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
+  engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",
+  engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
@@ -114,6 +126,7 @@ const COPY: Record<string, string> = {
   memory_changed: "This memory changed. Reload it and try again.",
   memory_not_kept: "Only memories you kept can be made global.",
   memory_already_global: "This memory is already in global memory.",
+  memory_not_movable: "Only an app-wide memory an agent saved can be moved to a project.",
   memory_project_missing: "That project no longer exists.",
   memory_search_invalid: "Keep the search on one line, up to 100 characters.",
   memory_page_invalid: "Show between 1 and 20 memories at a time.",
@@ -187,6 +200,7 @@ export function classifyFailure(error: unknown): Failure {
   const raw = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "unknown";
   const code = ["not_connected", "not_configured", "owner_unavailable", "owner_revoked"].includes(raw) ? UNREACHABLE : raw;
   const cause = typeof error === "object" && error !== null && "cause" in error && typeof error.cause === "string" ? error.cause : undefined;
+  if (code === UNREACHABLE && cause !== undefined && STALE_ENGINE_CAUSES.includes(cause)) return { kind: "error", code: STALE_ENGINE, cause, message: plainError(STALE_ENGINE) };
   return cause === undefined ? { kind: "error", code, message: plainError(code) } : { kind: "error", code, cause, message: plainError(code, cause) };
 }
 
@@ -330,6 +344,8 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_delete: "deleting a memory",
   memory_approve: "approving a memory",
   memory_agent_writes: "saving agent memory writes",
+  memory_agent_scope: "saving where agents save memories",
+  memory_move: "moving a memory",
   memory_forget: "forgetting a memory",
   memory_remember: "saving a memory",
   memory_selection: "changing the memory selection",
@@ -340,6 +356,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   quit_settings: "changing what quitting does to team agents",
   master_step_settings: "changing the master step limit",
   master_time_settings: "changing the master time limit",
+  master_frame_settings: "changing the master frame size limit",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
@@ -502,6 +519,25 @@ export function getMasterTimeSettings(): Promise<Result<MasterTimeSettings>> {
 /** Saves the master time limit. Input: the full setting. Output: ok once saved. */
 export function saveMasterTimeSettings(settings: MasterTimeSettings): Promise<Result<void>> {
   return change("desktop_set_master_time_settings", { settings, generation: nextGeneration() });
+}
+
+/** The largest one message the engine writes to a Claude or Codex master, the engine's
+ * `FrameSize`. */
+export type FrameSize = "kib64" | "kib256" | "mib1";
+
+/** The owner's master frame size limit setting, the engine's `MasterFrameSettings`. */
+export interface MasterFrameSettings {
+  limit: FrameSize;
+}
+
+/** Reads the master frame size limit. Output: the stored setting, or 64 KiB before the first save. */
+export function getMasterFrameSettings(): Promise<Result<MasterFrameSettings>> {
+  return call<MasterFrameSettings>("desktop_master_frame_settings");
+}
+
+/** Saves the master frame size limit. Input: the full setting. Output: ok once saved. */
+export function saveMasterFrameSettings(settings: MasterFrameSettings): Promise<Result<void>> {
+  return change("desktop_set_master_frame_settings", { settings, generation: nextGeneration() });
 }
 
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
@@ -1121,6 +1157,18 @@ export function setAgentMemoryWrites(writes: AgentMemoryWrites): Promise<Result<
   return change("desktop_set_agent_memory_writes", { writes, generation: nextGeneration() });
 }
 
+/** Moves one app-wide memory an agent saved into one project, so only that project's agents
+ * read it. Input: memory id and project id. Output: ok once moved. */
+export function moveMemory(id: string, project: string): Promise<Result<void>> {
+  return change("desktop_move_memory", { id, project, generation: nextGeneration() });
+}
+
+/** Saves the owner's Where agents save memories setting: in the agent's own project only, or
+ * where the agent asks, app-wide included. Input: the choice. Output: ok once saved. */
+export function setAgentMemoryScope(scope: AgentMemoryScope): Promise<Result<void>> {
+  return change("desktop_set_agent_memory_scope", { scope, generation: nextGeneration() });
+}
+
 /** Picks the research memories in a project nobody reviewed yet. Inputs: the project and its
  * memory list. Output: the suggestions, in engine order. */
 export function suggestionsFrom(project: { id: string; name: string }, items: MemoryItem[]): Suggestion[] {
@@ -1390,7 +1438,7 @@ export function setBackgroundAtEnd(id: string, choice: BackgroundAtEnd): Promise
   return call<IntentReceipt>("desktop_team_background", { id, choice, generation: nextGeneration() });
 }
 
-/** Turns the project's "Ask me before merging into the master's branch" setting on or off;
+/** Turns the project's "Master accepts change sets" setting on or off;
  * on, the master's merge of a finished harness waits for the owner's Accept in Changes.
  * Inputs: the project id and the switch. Output: the engine receipt, not ready, or a plain
  * error. */

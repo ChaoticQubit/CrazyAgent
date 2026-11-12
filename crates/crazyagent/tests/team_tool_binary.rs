@@ -161,7 +161,11 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
             "Task 7 is queued for codex.",
             false,
         ),
-        (Call::InspectWork, "No sub-agent is working.", true),
+        (
+            Call::InspectWork { task: None },
+            "No sub-agent is working.",
+            true,
+        ),
     ];
     for (expected, text, error) in answered {
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -395,7 +399,11 @@ fn served_in_a_teammate_pane(
 #[test]
 fn a_teammate_s_server_is_named_by_its_process_even_when_its_env_claims_the_lead_s_pane() {
     let (taken, names, answered, lead, teammate) = served_in_a_teammate_pane(false);
-    assert_eq!(taken, [Some(Call::InspectWork)], "{answered}");
+    assert_eq!(
+        taken,
+        [Some(Call::InspectWork { task: None })],
+        "{answered}"
+    );
     assert!(answered.contains("Taken."), "{answered}");
     assert_eq!(
         names,
@@ -665,7 +673,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
     assert_eq!(
         text(&answers[0]),
         (
-            "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.".to_owned(),
+            "Kept in this project's memory, not app-wide: the owner keeps agent memories in their project. Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.".to_owned(),
             false
         )
     );

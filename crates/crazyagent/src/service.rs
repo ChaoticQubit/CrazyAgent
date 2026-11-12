@@ -1152,6 +1152,27 @@ fn logged_ready(layout: &Layout, since: u64) -> bool {
         && text.lines().any(|line| line == "ready")
 }
 
+/// Whether the last upgrade backup of the engine at a layout failed, as the record the
+/// engine leaves beside its database says (F36), read without an engine. Input: the layout.
+/// Output: the backup code, or none; always none where no engine database runs.
+pub fn backup_failure(layout: &Layout) -> Option<&'static str> {
+    #[cfg(unix)]
+    return crate::storage::backup_failure(layout.root());
+    #[cfg(not(unix))]
+    {
+        let _ = layout;
+        None
+    }
+}
+
+/// Why an engine that did not start may have stopped: its upgrade backup failed. Input: the
+/// layout. Output: the words to add to the start failure, empty when no backup failed.
+fn backup_reason(layout: &Layout) -> String {
+    backup_failure(layout).map_or_else(String::new, |code| {
+        format!(": it could not back up its data before an upgrade, so it changed nothing ({code})")
+    })
+}
+
 /// Waits until the engine at a layout has written `ready` to its log after a start and
 /// answers an authenticated read. Inputs: the layout, the bound, the detached engine to
 /// watch, if any, and the log length before the start. Output: Ok once both hold, or an
@@ -1178,14 +1199,16 @@ pub async fn wait_ready(
             && let Ok(Some(status)) = child.try_wait()
         {
             return Err(failure(format!(
-                "the engine stopped while starting ({status}); see {}",
+                "the engine stopped while starting ({status}){}; see {}",
+                backup_reason(layout),
                 layout.engine_log().display()
             )));
         }
         if Instant::now() >= deadline {
             return Err(failure(format!(
-                "the engine did not answer within {} s; see {}",
+                "the engine did not answer within {} s{}; see {}",
                 bound.as_secs(),
+                backup_reason(layout),
                 layout.engine_log().display()
             )));
         }

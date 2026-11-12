@@ -2202,7 +2202,7 @@ fn record_as(
     }
     super::merges::refuse_outside_merges(db, workspace, &shared, &head)?;
     let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
-    let line = super::commit_subject(&turn.prompt_line, &roots);
+    let line = super::commit_subject(super::unprompted(&turn.prompt_line), &roots);
     let message = format!(
         "{}\n\nTurn {turn_id} ended: {}.\n",
         if line.is_empty() { "Agent turn" } else { &line },
@@ -2249,6 +2249,8 @@ fn record_as(
             regenerated_head: None,
             regenerated_files: Vec::new(),
             accepted_in: None,
+            summary: String::new(),
+            landing_result: super::LandingResult::None,
             files: 0,
             added: 0,
             removed: 0,
@@ -2270,6 +2272,7 @@ fn record_as(
     record.state = ChangeState::Pending;
     record.waiting = false;
     record.conflicts.clear();
+    record.landing_result = super::LandingResult::None;
     record.last_outcome = turn.outcome;
     record.turn = turn_id;
     record.head = current.clone();

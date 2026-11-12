@@ -271,7 +271,7 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "model", title: "Model and harness", about: "Which harnesses run, on which accounts, and how many.", icon: "cpu",
     rows: ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"] },
   { id: "access", title: "Access and merging", about: "What agents may touch, and who merges finished work.", icon: "shield-check",
-    rows: ["Agent access", MERGE_INTO_MAIN, "Ask me before merging into the master's branch", "Agent branches", RESTARTS_FROM_MAIN, "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
+    rows: ["Agent access", MERGE_INTO_MAIN, "Master accepts change sets", "Agent branches", RESTARTS_FROM_MAIN, "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
     rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply", "End a turn after done"] },
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
@@ -671,18 +671,18 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               <RadioCard name={`${prefix}-merge`} value="merges" checked={masterLands === "merges"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("merges"); }}
                 title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
-                details={["A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Ask me before merging is off. Anything else in the set makes all of it wait for your Accept."]} />
+                details={["A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Master accepts change sets is Itself. Anything else in the set makes all of it wait for your Accept."]} />
               <RadioCard name={`${prefix}-merge`} value="waits" checked={masterLands === "waits"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("waits"); }}
                 title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
             </div>
             {!status.master_lands && <span className="tg-terminal-note">{status.access_unreadable ? ACCESS_UNREADABLE : "Only at Full access."}</span>}
           </SettingRow>
-          <SettingRow label="Ask me before merging into the master's branch">
-            <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>
-            <Segmented label="Ask me before merging into the master's branch" value={askMerge} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
-              options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
-            <span className="tg-terminal-note">On stops the master merging by itself: each finished harness's work waits in Changes for your Accept, and so does a master change set that fixes a conflict.</span>
+          <SettingRow label="Master accepts change sets">
+            <span className="set-label" aria-hidden="true">Master accepts change sets</span>
+            <Segmented label="Master accepts change sets" value={askMerge} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
+              options={[{ value: "off", label: "Itself" }, { value: "on", label: "Only when I click or say accept all" }]} />
+            <span className="tg-terminal-note">Itself is the default: the master merges each finished harness's work. Only when I click or say accept all stops that: the work, and a master change set that fixes a conflict, waits in Changes until you click Accept or send accept all to the team.</span>
           </SettingRow>
           <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => settingMatches(row, words))}>Branches</h3>
           <SettingRow label="Agent branches">

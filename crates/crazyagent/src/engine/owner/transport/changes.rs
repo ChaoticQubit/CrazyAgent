@@ -1,12 +1,15 @@
 use super::*;
 use crate::landing::{
     self, AcceptOutcome, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeDiff, ChangeSetId, ChangeSetView,
-    LIST_MAX, MESSAGE_BYTES_MAX, TargetBranches, WaitingChanges,
+    DIRTY_FILES_MAX, DIRTY_PATH_BYTES_MAX, LIST_MAX, MESSAGE_BYTES_MAX, OwnerDirty, TargetBranches,
+    WaitingChanges,
 };
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
 
-const REQUEST_BYTES_MAX: usize = 1024 + 4 * MESSAGE_BYTES_MAX;
+const REQUEST_BYTES_MAX: usize =
+    1024 + 4 * MESSAGE_BYTES_MAX + DIRTY_FILES_MAX * (DIRTY_PATH_BYTES_MAX + 8);
+const _: () = assert!(REQUEST_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
 pub(crate) const CHANGES_TIMEOUT: Duration = Duration::from_secs(120);
 const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -38,6 +41,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_owner_dirty",
     "changes_owner_identity_missing",
     "changes_owner_unavailable",
+    "changes_owner_untracked",
     "changes_reply_bounds",
     "changes_request_bounds",
     "changes_request_invalid",
@@ -106,6 +110,18 @@ enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<ProjectId>,
     },
+    OwnerDirty {
+        id: ChangeSetId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+    CommitOwnerFiles {
+        id: ChangeSetId,
+        files: Vec<String>,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -117,14 +133,37 @@ struct Envelope {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    List { change_sets: Vec<ChangeSetView> },
-    Diff { diff: ChangeDiff },
-    Accepted { outcome: AcceptOutcome },
-    Branches { branches: TargetBranches },
-    Discarded { restorable_until_ms: u64 },
-    Waiting { waiting: WaitingChanges },
+    List {
+        change_sets: Vec<ChangeSetView>,
+    },
+    Diff {
+        diff: ChangeDiff,
+    },
+    Accepted {
+        outcome: AcceptOutcome,
+    },
+    Branches {
+        branches: TargetBranches,
+    },
+    Discarded {
+        restorable_until_ms: u64,
+    },
+    Waiting {
+        waiting: WaitingChanges,
+    },
+    OwnerDirty {
+        files: Vec<String>,
+        #[serde(default)]
+        untracked: Vec<String>,
+    },
+    Committed {
+        commit: String,
+        branch: String,
+    },
     Done,
-    Rejected { code: String },
+    Rejected {
+        code: String,
+    },
 }
 
 /// Names the requests that only read, for the log of replies this client could not read.
@@ -135,6 +174,7 @@ fn read_kind(action: &Action) -> Option<&'static str> {
         Action::Diff { .. } => Some("changes.diff"),
         Action::Branches { .. } => Some("changes.branches"),
         Action::Waiting { .. } => Some("changes.waiting"),
+        Action::OwnerDirty { .. } => Some("changes.owner_dirty"),
         _ => None,
     }
 }
@@ -166,8 +206,28 @@ impl Action {
             Self::Accept {
                 target: Some(target),
                 ..
+            }
+            | Self::OwnerDirty {
+                target: Some(target),
+                ..
+            }
+            | Self::CommitOwnerFiles {
+                target: Some(target),
+                ..
             } if target.is_empty() || target.len() > BRANCH_BYTES_MAX => {
                 Err(failure("changes_target_invalid"))
+            }
+            Self::CommitOwnerFiles { message, .. } if message.len() > MESSAGE_BYTES_MAX => {
+                Err(failure("changes_message_invalid"))
+            }
+            Self::CommitOwnerFiles { files, .. }
+                if files.is_empty()
+                    || files.len() > DIRTY_FILES_MAX
+                    || files
+                        .iter()
+                        .any(|file| file.is_empty() || file.len() > DIRTY_PATH_BYTES_MAX) =>
+            {
+                Err(failure("changes_request_invalid"))
             }
             _ => Ok(()),
         }
@@ -256,6 +316,51 @@ impl OwnerClient {
         };
         match self.changes_exchange(action).await? {
             Reply::Accepted { outcome } => Ok(outcome),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Lists the files in the owner's project folder that keep a change set's Accept from
+    /// landing (F21), for the "commit these files first" box. Inputs: the change set and the
+    /// branch the owner picked, None for the Land on branch. Output: the tracked and the
+    /// untracked files, both empty when none blocks; a reply past `DIRTY_FILES_MAX` is refused.
+    pub async fn owner_dirty(
+        &self,
+        id: ChangeSetId,
+        target: Option<String>,
+    ) -> Result<OwnerDirty, EngineError> {
+        match self
+            .changes_exchange(Action::OwnerDirty { id, target })
+            .await?
+        {
+            Reply::OwnerDirty { files, untracked }
+                if files.len() + untracked.len() <= DIRTY_FILES_MAX =>
+            {
+                Ok(OwnerDirty { files, untracked })
+            }
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Commits the owner's files that keep a change set's Accept from landing, and nothing
+    /// else, with the owner's message (F21); the owner then accepts again. Inputs: the change
+    /// set, the files the box listed, the message and the branch the owner picked, None for
+    /// the Land on branch. Output: the commit and its branch.
+    pub async fn commit_owner_files(
+        &self,
+        id: ChangeSetId,
+        files: Vec<String>,
+        message: String,
+        target: Option<String>,
+    ) -> Result<(String, String), EngineError> {
+        let action = Action::CommitOwnerFiles {
+            id,
+            files,
+            message,
+            target,
+        };
+        match self.changes_exchange(action).await? {
+            Reply::Committed { commit, branch } if valid_commit(&commit) => Ok((commit, branch)),
             _ => Err(unknown()),
         }
     }
@@ -449,6 +554,7 @@ async fn prepare(
             | Action::Diff { .. }
             | Action::Waiting { .. }
             | Action::Branches { .. }
+            | Action::OwnerDirty { .. }
     ) {
         return Ok(Prepared::Change(root, action));
     }
@@ -598,6 +704,24 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
             )
         }
         Action::Update { id } => (Reply::Done, crate::landing_turns::update(&db, &id)?),
+        Action::OwnerDirty { id, target } => {
+            let OwnerDirty { files, untracked } =
+                landing::owner_dirty(&db, &id, target.as_deref())?;
+            (Reply::OwnerDirty { files, untracked }, false)
+        }
+        Action::CommitOwnerFiles {
+            id,
+            files,
+            message,
+            target,
+        } => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or_else(|| failure("changes_owner_identity_missing"))?;
+            let (commit, branch) =
+                landing::commit_owner_files(&db, &home, &id, &files, &message, target.as_deref())?;
+            (Reply::Committed { commit, branch }, false)
+        }
     })
 }
 

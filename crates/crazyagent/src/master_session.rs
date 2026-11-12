@@ -191,6 +191,9 @@ pub enum MasterReason {
     RepositoryMissing,
     RepositoryConfigRefused,
     InstructionsTooLarge,
+    ProtocolFault,
+    FrameLimit,
+    WorktreeUncertain,
     Cancelled,
     Unknown,
 }

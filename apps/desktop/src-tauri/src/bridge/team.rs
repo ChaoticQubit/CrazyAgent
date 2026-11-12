@@ -387,7 +387,7 @@ impl NativeBridge {
         .await
     }
 
-    /// Turns a project's "Ask me before merging into the master's branch" setting on or
+    /// Turns a project's "Master accepts change sets" setting on or
     /// off: on, the master's merge of a finished harness waits for the owner's Accept.
     /// Takes the project id, the switch and the client generation. Returns the actual
     /// commit receipt.

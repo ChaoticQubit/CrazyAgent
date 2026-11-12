@@ -504,14 +504,14 @@ fn a_change_set_over_the_tree_bound_refuses_and_lands_nothing() {
 }
 
 #[test]
-fn accept_refuses_a_dirty_owner_checkout_and_changes_nothing() {
+fn accept_refuses_an_owner_file_in_the_way_of_the_change_set_and_changes_nothing() {
     let fx = Fixture::new();
     let db = fx.store();
     let (worktree, git_dir) = fx.worktree("agent-1");
     std::fs::write(worktree.join("edit.txt"), "agent edit\n").unwrap();
     let id = record_one(&db, &fx.workspace(&worktree, &git_dir));
     let expected = reviewed_head(&db, &fx.project, &id);
-    std::fs::write(fx.repo.join("tracked.txt"), "owner uncommitted\n").unwrap();
+    std::fs::write(fx.repo.join("edit.txt"), "owner uncommitted\n").unwrap();
     let before = checkout_state(&fx.repo);
     let err = landing::accept(
         &db,

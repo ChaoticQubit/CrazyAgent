@@ -119,6 +119,30 @@ fn engine_version_valid(version: &str) -> bool {
     version.len() <= ENGINE_VERSION_BYTES_MAX && !version.chars().any(char::is_control)
 }
 
+/// The codes a client meets when the locator still names an engine that stopped without
+/// its cleanup and no engine has published a new one yet (F35). The engine sets such a
+/// locator aside at its next start, logging one line for it.
+pub const STALE_ENGINE_CODES: [&str; 5] = [
+    "owner_locator_database_mismatch",
+    "owner_locator_replaced_or_unsafe",
+    "owner_generation_replaced_or_unsafe",
+    "owner_endpoint_replaced_or_unsafe",
+    "owner_ordinary_socket_mismatch",
+];
+
+/// The owner's line, the same in every client, for a connect refused by one of
+/// [`STALE_ENGINE_CODES`].
+pub const STALE_ENGINE_TEXT: &str = "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.";
+
+/// The plain line for a client that cannot connect, when the cause is a locator an engine
+/// that stopped left behind. Input: the connect failure code. Output: the line, or none for
+/// any other code.
+pub fn stale_engine_text(code: &str) -> Option<&'static str> {
+    STALE_ENGINE_CODES
+        .contains(&code)
+        .then_some(STALE_ENGINE_TEXT)
+}
+
 fn fail(code: &str) -> EngineError {
     EngineError(code.into())
 }
@@ -138,6 +162,19 @@ fn hex(value: &str, len: usize) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The most anchor entries one stale sweep looks at; the anchor holds a handful.
+#[cfg(unix)]
+const STALE_SWEEP_ENTRIES_MAX: usize = 4096;
+
+/// Whether an anchor entry name is one `set_aside` gave `base`: `<base>.stale-<8 hex>`.
+/// Inputs: the entry name and the base name. Output: the answer.
+#[cfg(unix)]
+fn stale_of(name: &str, base: &str) -> bool {
+    name.strip_prefix(base)
+        .and_then(|rest| rest.strip_prefix(".stale-"))
+        .is_some_and(|suffix| hex(suffix, 8))
 }
 
 #[cfg(unix)]
@@ -878,8 +915,71 @@ impl EngineService {
         };
         self.publish(value, previous)?;
         self.sweep_generations();
+        self.sweep_stale(ordinary).await;
         cancelled(shutdown)?;
         Ok(())
+    }
+
+    /// Removes the stale entries this or an earlier start set aside in the anchor, once the
+    /// locator names this run (F40): a `<locator>.stale-<8 hex>` that is still a private file
+    /// of this user, and an `<ordinary>.stale-<8 hex>` that is still a private socket of this
+    /// user with no listener. The engine database lock makes this the only engine on the
+    /// anchor. Anything else, a live listener included, is kept and logged once. Input: the
+    /// ordinary socket name. Output: none.
+    #[cfg(unix)]
+    async fn sweep_stale(&self, ordinary: &str) {
+        let Ok(entries) = std::fs::read_dir(&self.anchor.path) else {
+            eprintln!("owner_stale_sweep_unavailable");
+            return;
+        };
+        let mut seen = 0;
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > STALE_SWEEP_ENTRIES_MAX {
+                eprintln!("owner_stale_sweep_bounded");
+                return;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let removable = if stale_of(&name, LOCATOR) {
+                self.anchor
+                    .metadata(&name)
+                    .is_ok_and(|metadata| safe_file(&metadata))
+            } else if stale_of(&name, ordinary) {
+                self.dead_socket(&name).await
+            } else {
+                continue;
+            };
+            let removed = removable
+                && rustix::fs::unlinkat(
+                    &self.anchor.directory,
+                    name.as_str(),
+                    rustix::fs::AtFlags::empty(),
+                )
+                .is_ok();
+            if !removed {
+                eprintln!("owner_stale_entry_kept name={name}");
+            }
+        }
+    }
+
+    /// Whether one anchor entry is a private socket of this user that no listener answers,
+    /// checked before and after the connect so a socket replaced meanwhile is kept. Input: the
+    /// entry name. Output: the answer.
+    #[cfg(unix)]
+    async fn dead_socket(&self, name: &str) -> bool {
+        let path = self.anchor.path.join(name);
+        let Ok(metadata) = self.anchor.metadata(name) else {
+            return false;
+        };
+        let identity = Identity::of(&metadata);
+        if check_socket(&self.anchor, &path, identity).is_err() {
+            return false;
+        }
+        let refused = matches!(
+            tokio::time::timeout(self.timeout, crate::spawn_gate::connect_unix(&path)).await,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused
+        );
+        refused && check_socket(&self.anchor, &path, identity).is_ok()
     }
 
     /// Removes the owner generation folders an earlier engine run left in the anchor after
@@ -1508,7 +1608,8 @@ mod tests {
     /// locator an engine stopped by it left names its database, generation and sockets on
     /// the device the volume had before, while those objects are still there. The next
     /// engine holds the engine lock, so it sets the locator and the dead ordinary socket
-    /// aside, never deleting them, sweeps the old generation and starts like a clean restart.
+    /// aside, sweeps the old generation and starts like a clean restart; once its own
+    /// locator is published it removes both set-aside entries (F40).
     #[tokio::test]
     async fn an_engine_starts_like_a_clean_restart_after_a_reboot_renumbered_its_volume() {
         let root = tempfile::tempdir().unwrap();
@@ -1554,29 +1655,25 @@ mod tests {
         );
         let mut second = started.unwrap();
         second.ensure_ready(&stopped).unwrap();
-        let locators = set_aside(root.path(), "owner-current.stale-");
-        let sockets = set_aside(root.path(), "e.sock.stale-");
         assert_eq!(
-            (locators.len(), sockets.len()),
-            (1, 1),
-            "the stale locator and socket are kept aside, not deleted"
+            (
+                set_aside(root.path(), "owner-current.stale-"),
+                set_aside(root.path(), "e.sock.stale-")
+            ),
+            (Vec::new(), Vec::new()),
+            "the stale locator and dead socket are removed once the new locator is published"
         );
-        assert_eq!(std::fs::read(&locators[0]).unwrap(), stale);
-        assert!(
-            std::fs::symlink_metadata(&sockets[0])
-                .unwrap()
-                .file_type()
-                .is_socket()
-        );
+        assert_ne!(std::fs::read(&path).unwrap(), stale);
         assert!(!generation.exists(), "the earlier generation is swept");
         second.shutdown().await.unwrap();
-        assert_eq!(set_aside(root.path(), "owner-current.stale-"), locators);
-        assert_eq!(set_aside(root.path(), "e.sock.stale-"), sockets);
+        assert!(set_aside(root.path(), "owner-current.stale-").is_empty());
+        assert!(set_aside(root.path(), "e.sock.stale-").is_empty());
     }
 
     /// An engine stopped without its cleanup leaves its ordinary socket file behind with no
     /// listener; with no locator naming it, the next engine holds the engine lock, finds no
-    /// listener there and sets the socket file aside instead of refusing to start.
+    /// listener there and sets the socket file aside instead of refusing to start, then
+    /// removes it once its own locator is published (F40).
     #[tokio::test]
     async fn an_engine_starts_beside_the_socket_a_dropped_listener_left() {
         let root = tempfile::tempdir().unwrap();
@@ -1604,18 +1701,119 @@ mod tests {
         );
         let mut service = started.unwrap();
         service.ensure_ready(&stopped).unwrap();
-        let aside = set_aside(root.path(), "e.sock.stale-");
         assert_eq!(
-            aside.len(),
-            1,
-            "the stale socket is kept aside, not deleted"
+            set_aside(root.path(), "e.sock.stale-"),
+            Vec::<PathBuf>::new(),
+            "the dead socket set aside at start is removed"
         );
         assert!(
-            std::fs::symlink_metadata(&aside[0])
+            std::fs::symlink_metadata(&socket)
                 .unwrap()
                 .file_type()
-                .is_socket()
+                .is_socket(),
+            "the new engine listens at the socket path"
         );
         service.shutdown().await.unwrap();
+    }
+
+    /// Earlier starts left set-aside entries in the anchor (F40: four sockets and four
+    /// locators on the owner's machine). A start removes each one that is still a private
+    /// locator file or a private socket with no listener, and keeps a set-aside socket some
+    /// process still listens on, a locator copy that is not private and any other name.
+    #[tokio::test]
+    async fn a_start_removes_the_dead_entries_earlier_starts_set_aside_and_keeps_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let private = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let dead = root.path().join("e.sock.stale-0000000a");
+        drop(crate::spawn_gate::bind_unix_std(&dead).unwrap());
+        private(&dead, 0o600);
+        let live = root.path().join("e.sock.stale-0000000b");
+        let listener = crate::spawn_gate::bind_unix_std(&live).unwrap();
+        private(&live, 0o600);
+        let old_locator = root.path().join("owner-current.stale-0000000c");
+        std::fs::write(&old_locator, b"{}").unwrap();
+        private(&old_locator, 0o600);
+        let shared_locator = root.path().join("owner-current.stale-0000000d");
+        std::fs::write(&shared_locator, b"{}").unwrap();
+        private(&shared_locator, 0o644);
+        let unrelated = root.path().join("owner-current.stale-notes");
+        std::fs::write(&unrelated, b"owner notes").unwrap();
+        private(&unrelated, 0o600);
+        let other_socket = root.path().join("other.sock.stale-0000000e");
+        drop(crate::spawn_gate::bind_unix_std(&other_socket).unwrap());
+        private(&other_socket, 0o600);
+
+        let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        service.ensure_ready(&stopped).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&dead).is_err(),
+            "a dead set-aside socket is removed"
+        );
+        assert!(
+            std::fs::symlink_metadata(&old_locator).is_err(),
+            "a private set-aside locator is removed"
+        );
+        assert_eq!(
+            set_aside(root.path(), "e.sock.stale-"),
+            vec![live.clone()],
+            "a set-aside socket a process listens on is kept"
+        );
+        assert_eq!(
+            set_aside(root.path(), "owner-current.stale-"),
+            vec![shared_locator.clone(), unrelated.clone()],
+            "a locator copy that is not private and a name set_aside never gives are kept"
+        );
+        assert!(std::fs::symlink_metadata(&other_socket).is_ok());
+        service.shutdown().await.unwrap();
+        drop(listener);
+    }
+
+    /// F35: a client refused by a locator a stopped engine left gets one plain line, and
+    /// every such code is one this module really returns.
+    #[test]
+    fn a_connect_refused_by_a_stale_locator_gets_one_plain_line() {
+        let source = include_str!("bootstrap.rs");
+        for code in STALE_ENGINE_CODES {
+            assert!(
+                source.contains(&format!("fail(\"{code}\")")),
+                "{code} is not a bootstrap refusal"
+            );
+            assert_eq!(stale_engine_text(code), Some(STALE_ENGINE_TEXT));
+        }
+        for code in [
+            "owner_locator_missing",
+            "owner_anchor_requires_private_directory",
+            "owner_bootstrap_capabilities_unavailable",
+            "",
+        ] {
+            assert_eq!(stale_engine_text(code), None, "{code}");
+        }
+        assert!(!STALE_ENGINE_TEXT.contains('_'));
+    }
+
+    #[test]
+    fn only_the_names_set_aside_gives_count_as_stale() {
+        assert!(stale_of("e.sock.stale-0123abcd", "e.sock"));
+        assert!(stale_of("owner-current.stale-ffffffff", LOCATOR));
+        for name in [
+            "e.sock",
+            "e.sock.stale-",
+            "e.sock.stale-0123ABCD",
+            "e.sock.stale-0123abc",
+            "e.sock.stale-0123abcde",
+            "e.sockx.stale-0123abcd",
+            "owner-current.stale-0123abcd",
+        ] {
+            assert!(!stale_of(name, "e.sock"), "{name}");
+        }
     }
 }

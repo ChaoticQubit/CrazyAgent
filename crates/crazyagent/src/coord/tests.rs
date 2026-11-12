@@ -1993,12 +1993,31 @@ fn overlap(mine: &str, theirs: &str) -> Vec<String> {
         .collect()
 }
 
+/// F31: overlap is file-level. Two agents claiming different files of one folder never
+/// overlap, so neither hears of the other, while a file inside a folder the other claims and
+/// the same file still do.
+#[cfg(unix)]
+#[test]
+fn two_files_of_one_folder_never_overlap_but_one_file_two_agents_claim_does() {
+    assert!(overlap("docs/design/inbox-ui.md", "docs/design/architecture.md").is_empty());
+    assert!(overlap("src/lexer.rs", "src/parser.rs").is_empty());
+    assert_eq!(
+        overlap("docs/design/inbox-ui.md", "docs/design/"),
+        ["docs/design/inbox-ui.md is inside docs/design/"]
+    );
+    assert_eq!(
+        overlap("docs/design/inbox-ui.md", "docs/design/inbox-ui.md"),
+        ["same file docs/design/inbox-ui.md"]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn an_overlap_names_why_two_claims_meet() {
     for (mine, theirs, reason) in [
         ("src/a.rs", "src/a.rs", Some("same file src/a.rs")),
-        ("src/a.rs", "src/b.rs", Some("same folder src")),
+        ("src/a.rs", "src/b.rs", None),
+        ("docs/research/a.md", "docs/research/b.md", None),
         ("a.rs", "b.rs", None),
         ("src/ui/a.rs", "src/", Some("src/ui/a.rs is inside src/")),
         (

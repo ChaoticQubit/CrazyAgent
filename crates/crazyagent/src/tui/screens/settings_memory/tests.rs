@@ -126,13 +126,12 @@ fn engine_rows(rows: &mut [String], from: usize, saved_at: usize) {
 
 fn with_writes(rows: &mut Vec<String>, width: usize, hints: &str) {
     rows[5] = format!("{:<width$}", format!("  {SUBTITLE}"));
-    rows.insert(
-        6,
-        format!(
-            "{:<width$}",
-            "  Agent memory writes  ← Loading →  w to change"
-        ),
-    );
+    let settings = if width >= 120 {
+        "  Agent memory writes  ← Loading →  w to change   Saved in  ← Loading →  p to change"
+    } else {
+        "  Writes ← Loading →  w   Saved in ← Loading →  p"
+    };
+    rows.insert(6, format!("{settings:<width$}"));
     let spare = rows.len() - 2;
     assert!(
         rows[spare].trim().is_empty(),
@@ -297,6 +296,10 @@ fn add_memory_saves_a_note_for_the_chosen_projects() {
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
     ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
+    ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
 
     screen.key(&Key::Char('a'), &mut ctx);
@@ -316,6 +319,10 @@ fn research_suggestions_come_first_and_save_for_every_project() {
     assert!(matches!(
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
+    ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
     ));
     match job(&mut ctx) {
         SettingsJob::Suggestions { projects } => assert_eq!(projects.len(), 3),
@@ -380,6 +387,10 @@ fn research_suggestions_come_first_and_save_for_every_project() {
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
     ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
+    ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
 }
 
@@ -421,6 +432,10 @@ fn a_suggestion_can_be_dismissed_and_a_refusal_is_plain() {
     assert!(matches!(
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
+    ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
     ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
     screen.arrive(&settings(SettingsEvent::Memories(Ok(Vec::new()))), &mut ctx);
@@ -623,6 +638,10 @@ fn every_project_scope_is_read_and_a_new_project_reloads() {
     assert!(matches!(
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
+    ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
     ));
     match ctx.next_request() {
         Some(Request::Settings(job)) => match *job {
@@ -882,4 +901,125 @@ fn the_agent_memory_writes_row_shows_the_engine_choice_and_how_to_change_it() {
         assert!(shown.contains(chosen), "{shown}");
         assert!(shown.contains("w to change"), "{shown}");
     }
+}
+
+/// F34: `m` on an app-wide memory an agent saved opens Move memory, the arrows pick the
+/// project and Enter sends one move; the list reloads once it lands, and an owner's own note
+/// never opens it.
+#[test]
+fn m_moves_an_app_wide_agent_memory_into_the_chosen_project() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut list = memories();
+    list.insert(
+        0,
+        saved(
+            8,
+            "Parser gotcha.",
+            MemoryScope::Global,
+            MemoryOrigin::Agent {
+                agent: "Master".into(),
+            },
+        ),
+    );
+    let mut screen = Memory::with(list);
+
+    screen.key(&Key::Char('m'), &mut ctx);
+    assert!(matches!(screen.mode, Mode::Move { project: 0 }));
+    let shown = screen.modal(&ctx).unwrap().0;
+    assert_eq!(shown.title, "Move memory");
+    screen.key(&Key::Right, &mut ctx);
+    assert!(matches!(screen.mode, Mode::Move { project: 1 }));
+    screen.key(&Key::Enter, &mut ctx);
+    match job(&mut ctx) {
+        SettingsJob::MoveMemory {
+            memory,
+            project,
+            generation,
+        } => {
+            assert_eq!(memory.as_str(), "memory-8");
+            assert_eq!(project.as_str(), "ledgerline");
+            assert!(generation > 0);
+        }
+        other => panic!("move expected, got {other:?}"),
+    }
+    screen.key(&Key::Char('m'), &mut ctx);
+    assert!(matches!(screen.mode, Mode::List), "one move at a time");
+    screen.arrive(&settings(SettingsEvent::MemoryMoved(Ok(()))), &mut ctx);
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Memory moved. Only agents in that project get it now."
+    );
+    assert!(
+        matches!(job(&mut ctx), SettingsJob::Memories { .. }),
+        "the list reloads"
+    );
+    while ctx.next_request().is_some() {}
+
+    screen.key(&Key::Char('m'), &mut ctx);
+    screen.key(&Key::Esc, &mut ctx);
+    assert!(matches!(screen.mode, Mode::List), "Esc cancels");
+    assert_eq!(ctx.queued(), 0);
+    screen.key(&Key::Down, &mut ctx);
+    screen.key(&Key::Char('m'), &mut ctx);
+    assert!(
+        matches!(screen.mode, Mode::List),
+        "an owner's own note is never moved"
+    );
+}
+
+/// F34: the memory settings row shows where agents save, `p` switches between This project
+/// only and Agent chooses one change at a time, and each answer says what agents now do.
+#[test]
+fn p_switches_where_agents_save_memories_between_both_options() {
+    let mut shell = Shell::with(memory_ctx(120, 36), Box::new(Memory::with(memories())));
+    let row = |shell: &mut Shell| {
+        render(shell, 120, 36)
+            .into_iter()
+            .find(|row| row.contains("Saved in"))
+            .unwrap_or_else(|| panic!("no Saved in row"))
+    };
+    for (reach, chosen) in [
+        (AgentScope::Project, "This project only"),
+        (AgentScope::Agent, "Agent chooses"),
+    ] {
+        shell.arrive(settings(SettingsEvent::AgentScope(Ok(reach))));
+        let shown = row(&mut shell);
+        assert!(shown.contains(chosen), "{shown}");
+        assert!(shown.contains("p to change"), "{shown}");
+    }
+
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::with(memories());
+    screen.key(&Key::Char('p'), &mut ctx);
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope {
+            set: Some((AgentScope::Agent, generation))
+        } if generation > 0
+    ));
+    screen.key(&Key::Char('p'), &mut ctx);
+    assert_eq!(ctx.queued(), 0, "one change at a time");
+    screen.arrive(
+        &settings(SettingsEvent::AgentScope(Ok(AgentScope::Agent))),
+        &mut ctx,
+    );
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Agents now choose where a memory is saved, app-wide included."
+    );
+    screen.key(&Key::Char('p'), &mut ctx);
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope {
+            set: Some((AgentScope::Project, _))
+        }
+    ));
+    screen.arrive(
+        &settings(SettingsEvent::AgentScope(Ok(AgentScope::Project))),
+        &mut ctx,
+    );
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Agents now save memories in their own project only."
+    );
 }
