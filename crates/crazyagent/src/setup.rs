@@ -6,6 +6,8 @@ pub mod fetch;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(unix)]
+pub mod node;
 pub mod pack;
 #[cfg(unix)]
 pub mod pinned;
