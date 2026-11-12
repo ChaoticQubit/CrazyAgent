@@ -8,7 +8,9 @@ use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Modal, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{AccountRow, account_label};
+use crate::usage::extras::LimitExtras;
 use ratatui::text::Line;
+use std::collections::HashMap;
 
 const RESERVE_STEP: u8 = 5;
 const NAME_WIDTH: usize = 28;
@@ -188,13 +190,15 @@ fn shown_name(id: &CredentialRef, provider: Option<&str>, accounts: &[AccountRow
 }
 
 /// The "Next accounts" lines for one pool: each account work would try now, numbered in
-/// order, then each held account with why, each followed by one line per project that holds
-/// it. Takes the pool, its ranking read, the owner's account rows for the names, now and the
-/// UTC offset. Returns the lines.
+/// order, then each held account with why, each followed by its free resets and credits line
+/// when read (DEC-154) and one line per project that holds it. Takes the pool, its ranking
+/// read, the owner's account rows for the names, the extras by account id, now and the UTC
+/// offset. Returns the lines.
 pub fn ranking_lines(
     pool: &PoolSummary,
     ranking: Option<&Result<Vec<PoolRanking>, String>>,
     accounts: &[AccountRow],
+    extras: &HashMap<String, LimitExtras>,
     now_ms: i64,
     offset: i64,
 ) -> Vec<String> {
@@ -236,6 +240,14 @@ pub fn ranking_lines(
             clipped(&name, NAME_WIDTH - 4),
             standing_line(&account.standing, now_ms, offset)
         ));
+        if let Some(read) = extras.get(account.connection.as_str()) {
+            let line = crate::tui::screens::usage::extras::extras_line(read, now_ms, offset);
+            lines.extend(
+                crate::tui::text::wrap(&line, DETAIL_WIDTH)
+                    .into_iter()
+                    .map(|part| format!("    {part}")),
+            );
+        }
         lines.extend(account.held_for.iter().map(|hold| {
             format!(
                 "    Held for {} until {}",
@@ -346,13 +358,14 @@ impl ChoiceEditor {
     }
 
     /// The editor as a modal: one line per row with the focused row marked, then the
-    /// pool's next accounts. Takes the schedule, the pool, the ranking read and the
-    /// context. Returns the modal and its hints.
+    /// pool's next accounts. Takes the schedule, the pool, the ranking read, the extras by
+    /// account id and the context. Returns the modal and its hints.
     pub fn modal(
         &self,
         schedule: &Schedule,
         pool: &PoolSummary,
         ranking: Option<&Result<Vec<PoolRanking>, String>>,
+        extras: &HashMap<String, LimitExtras>,
         ctx: &Ctx,
     ) -> (Modal, Vec<Hint>) {
         let mark = |row: usize| if row == self.row { "> " } else { "  " };
@@ -402,6 +415,7 @@ impl ChoiceEditor {
                 pool,
                 ranking,
                 accounts,
+                extras,
                 crate::tui::clock::now_ms(),
                 crate::tui::clock::local_offset(),
             )

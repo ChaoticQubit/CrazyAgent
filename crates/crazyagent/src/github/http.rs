@@ -43,7 +43,11 @@ fn quoted(value: &str) -> Result<String, EngineError> {
 }
 
 impl Request<'_> {
-    fn config(&self) -> Result<Vec<u8>, EngineError> {
+    /// Builds curl's config: the URL, headers, token, and either the form body or a JSON
+    /// body sent as given, never both. Input: the JSON body, none for a form or no body.
+    /// Output: the config bytes, or `github_request_invalid` for a control character.
+    fn config(&self, json: Option<&str>) -> Result<Vec<u8>, EngineError> {
+        assert!(json.is_none() || self.form.is_none());
         let mut config = format!(
             "url = {}\nheader = {}\nuser-agent = {}\n",
             quoted(self.url.as_str())?,
@@ -71,12 +75,28 @@ impl Request<'_> {
                 .finish();
             config.push_str(&format!("data = {}\n", quoted(&body)?));
         }
+        if let Some(json) = json {
+            config.push_str("request = \"POST\"\n");
+            config.push_str("header = \"Content-Type: application/json\"\n");
+            config.push_str(&format!("data-raw = {}\n", quoted(json)?));
+        }
         Ok(config.into_bytes())
     }
 
     /// Builds the curl command without running it. Output: the command, whose arguments
     /// and environment hold no URL, header or secret, and the config bytes for its stdin.
     pub(crate) fn command(&self) -> Result<(Command, Vec<u8>), EngineError> {
+        self.command_with(None)
+    }
+
+    /// Builds the curl command for a POST of a JSON body without running it. Input: the
+    /// body. Output: the command, whose arguments and environment hold no URL, header,
+    /// body or secret, and the config bytes for its stdin.
+    pub(crate) fn json_command(&self, json: &str) -> Result<(Command, Vec<u8>), EngineError> {
+        self.command_with(Some(json))
+    }
+
+    fn command_with(&self, json: Option<&str>) -> Result<(Command, Vec<u8>), EngineError> {
         let secure = self.url.scheme() == "https";
         let loopback = self.url.scheme() == "http"
             && self.allow_http
@@ -101,55 +121,69 @@ impl Request<'_> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        Ok((command, self.config()?))
+        Ok((command, self.config(json)?))
     }
 
     /// Sends the request and waits at most 30 s. Output: the reply, or
     /// `github_unreachable` when curl could not finish the exchange.
     pub(crate) fn send(&self) -> Result<Reply, EngineError> {
-        let (mut command, mut config) = self.command()?;
-        let spawned = crate::spawn_gate::spawn(&mut command);
-        let mut child = match spawned {
-            Ok(child) => child,
-            Err(_) => {
-                config.fill(0);
-                return Err(failure("github_unreachable"));
-            }
-        };
-        let mut stdin = child.stdin.take().expect("curl stdin is piped");
-        let written = stdin.write_all(&config);
-        config.fill(0);
-        drop(stdin);
-        let stdout = child.stdout.take().expect("curl stdout is piped");
-        let reader = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let read = stdout
-                .take(BODY_BYTES_MAX as u64 + 16)
-                .read_to_end(&mut bytes);
-            (read, bytes)
-        });
-        let deadline = Instant::now() + REQUEST_TIME + Duration::from_secs(5);
-        let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|_| failure("github_unreachable"))?
-            {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(failure("github_unreachable"));
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        let (read, bytes) = reader.join().map_err(|_| failure("github_unreachable"))?;
-        if written.is_err() || read.is_err() || !status.success() {
+        let (command, config) = self.command()?;
+        exchange(command, config)
+    }
+
+    /// POSTs a JSON body and waits at most 30 s, as `send` does. Input: the body.
+    /// Output: the reply, or `github_unreachable` when curl could not finish the exchange.
+    pub(crate) fn send_json(&self, json: &str) -> Result<Reply, EngineError> {
+        let (command, config) = self.json_command(json)?;
+        exchange(command, config)
+    }
+}
+
+/// Runs a built curl command, writes its config to curl's stdin, wipes the config and
+/// reads the reply within the request time. Inputs: the command and its config. Output:
+/// the reply, or `github_unreachable`.
+fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, EngineError> {
+    let spawned = crate::spawn_gate::spawn(&mut command);
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(_) => {
+            config.fill(0);
             return Err(failure("github_unreachable"));
         }
-        split(bytes)
+    };
+    let mut stdin = child.stdin.take().expect("curl stdin is piped");
+    let written = stdin.write_all(&config);
+    config.fill(0);
+    drop(stdin);
+    let stdout = child.stdout.take().expect("curl stdout is piped");
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout
+            .take(BODY_BYTES_MAX as u64 + 16)
+            .read_to_end(&mut bytes);
+        (read, bytes)
+    });
+    let deadline = Instant::now() + REQUEST_TIME + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|_| failure("github_unreachable"))?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(failure("github_unreachable"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (read, bytes) = reader.join().map_err(|_| failure("github_unreachable"))?;
+    if written.is_err() || read.is_err() || !status.success() {
+        return Err(failure("github_unreachable"));
     }
+    split(bytes)
 }
 
 fn split(mut bytes: Vec<u8>) -> Result<Reply, EngineError> {

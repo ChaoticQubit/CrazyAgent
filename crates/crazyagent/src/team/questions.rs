@@ -109,6 +109,35 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     crate::questions::initialize(connection)
 }
 
+/// The projects whose Questions inbox may hold something: an open question an agent put to
+/// the owner, or an agent waiting on the owner in its terminal. Takes the connection and the
+/// most projects to list. Returns the project names in order, at most `limit` of them.
+pub(crate) fn inbox_projects(
+    connection: &Connection,
+    limit: i64,
+) -> Result<Vec<String>, EngineError> {
+    assert!(limit > 0);
+    let projects: Vec<String> = connection
+        .prepare(&format!(
+            "SELECT project FROM coord_messages WHERE kind=?1 AND to_kind='{OWNER}'
+               AND from_kind='{AGENT}' AND from_agent IS NOT NULL AND receipt IN ({})
+             UNION
+             SELECT t.project FROM coord_activity c JOIN team_agents t ON t.id=c.agent
+             WHERE c.waiting IS NOT NULL AND c.waiting_since IS NOT NULL
+             ORDER BY 1 LIMIT ?2",
+            open_receipts()
+        ))
+        .map_err(error)?
+        .query_map(params![MessageKind::Question.as_str(), limit], |row| {
+            row.get(0)
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(projects.len() <= usize::try_from(limit).unwrap_or(usize::MAX));
+    Ok(projects)
+}
+
 /// Reads one project's Questions inbox for the owner, bounded to one owner reply: texts are
 /// cut to a shared cap, halved until the inbox fits, then the least urgent questions move
 /// into `more`. Takes the connection and the project. Returns the inbox, or

@@ -1,4 +1,5 @@
 use super::account_choice::ChoiceEditor;
+use super::spend::Spend;
 use super::{draw_page, step};
 use crate::config::{POOL_MEMBERS_MAX, plain_problem};
 use crate::pools::{MemberStatus, PoolSummary};
@@ -14,6 +15,7 @@ use crate::tui::seam::{Arrival, PoolChange, Request};
 use crate::tui::text::{cells, join, list_row, restyle, row, styled, thumb, with_bar, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::buttons;
+use crate::usage::extras::LimitExtras;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
@@ -22,6 +24,10 @@ const ROWS_START: usize = 10;
 const TABS_HEIGHT: usize = 2;
 const HEAD_HEIGHT: usize = 4;
 const MODAL_TEXT: usize = 50;
+/// How often Pools on top asks the engine for the detail rows again, as the desktop's Pools
+/// reread does, so the engine's lease on them never lapses while Pools stays open. The shell
+/// shows the top screen every few seconds; only an ask this old is sent again.
+const DETAIL_ASK_EVERY_MS: i64 = 60_000;
 
 /// Settings, Pools: every pool with its size, readiness and the projects using
 /// it.
@@ -36,6 +42,9 @@ pub struct Pools {
     saving: Vec<u64>,
     ranking: Option<Result<Vec<PoolRanking>, String>>,
     choice: Option<ChoiceEditor>,
+    spend: Spend,
+    extras: std::collections::HashMap<String, LimitExtras>,
+    detail_asked_ms: Option<i64>,
 }
 
 struct Confirm {
@@ -66,7 +75,26 @@ impl Pools {
             saving: Vec::new(),
             ranking: None,
             choice: None,
+            spend: Spend::new(),
+            extras: std::collections::HashMap::new(),
+            detail_asked_ms: None,
         }
+    }
+
+    /// Asks the engine for every account's extras with the detail rows, which it reads only
+    /// while Pools is open (DEC-154), unless it asked within `DETAIL_ASK_EVERY_MS`; a clock
+    /// that went back asks again. Inputs: the context and now.
+    fn ask_detail(&mut self, ctx: &mut Ctx, now_ms: i64) {
+        if self
+            .detail_asked_ms
+            .is_some_and(|at| at <= now_ms && now_ms - at <= DETAIL_ASK_EVERY_MS)
+        {
+            return;
+        }
+        ctx.request(Request::Settings(Box::new(SettingsJob::Extras {
+            detail: true,
+        })));
+        self.detail_asked_ms = Some(now_ms);
     }
 
     fn chosen_pool<'a>(&self, ctx: &'a Ctx) -> Option<&'a PoolSummary> {
@@ -257,7 +285,7 @@ impl Screen for Pools {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        match ctx.store.pools.ready() {
+        let mut hints = match ctx.store.pools.ready() {
             Some(pools) if pools.is_empty() => {
                 vec![
                     hint("Enter", "New pool"),
@@ -273,7 +301,11 @@ impl Screen for Pools {
                 sections_hint(ctx.glyphs),
                 hint("Esc", "Home"),
             ],
-        }
+        };
+        let tail = hints.split_off(hints.len() - 2);
+        hints.extend(self.spend.hints(ctx));
+        hints.extend(tail);
+        hints
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -282,6 +314,9 @@ impl Screen for Pools {
         }
         if self.choice.is_some() {
             return self.choice_key(key, ctx);
+        }
+        if self.spend.asking() {
+            return self.spend.key(key, ctx);
         }
         let count = ctx.store.pools.ready().map_or(0, Vec::len);
         match key {
@@ -337,7 +372,7 @@ impl Screen for Pools {
                 self.follow(count);
                 Flow::Handled
             }
-            _ => Flow::Ignored,
+            _ => self.spend.key(key, ctx),
         }
     }
 
@@ -346,6 +381,7 @@ impl Screen for Pools {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        self.spend.arrive(arrival, ctx);
         match settings_event(arrival) {
             Some(SettingsEvent::Schedule(Ok(schedule))) if self.saving.is_empty() => {
                 self.schedule = Some(schedule.clone());
@@ -371,6 +407,12 @@ impl Screen for Pools {
                 ctx.request(Request::Settings(Box::new(SettingsJob::Ranking)));
             }
             Some(SettingsEvent::Ranking(result)) => self.ranking = Some(result.clone()),
+            Some(SettingsEvent::Extras(Ok(rows))) => {
+                self.extras = rows
+                    .iter()
+                    .map(|row| (row.account.as_str().to_owned(), row.extras.clone()))
+                    .collect();
+            }
             _ => {}
         }
         match arrival {
@@ -396,10 +438,13 @@ impl Screen for Pools {
     }
 
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        if let Some(asked) = self.spend.modal(ctx) {
+            return Some(asked);
+        }
         if let (Some(editor), Some(schedule), Some(pool)) =
             (&self.choice, &self.schedule, self.chosen_pool(ctx))
         {
-            return Some(editor.modal(schedule, pool, self.ranking.as_ref(), ctx));
+            return Some(editor.modal(schedule, pool, self.ranking.as_ref(), &self.extras, ctx));
         }
         let confirm = self.confirm.as_ref()?;
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
@@ -452,6 +497,9 @@ impl Screen for Pools {
         ctx.request(Request::Projects);
         ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
         ctx.request(Request::Settings(Box::new(SettingsJob::Ranking)));
+        let now_ms = crate::tui::clock::now_ms();
+        self.spend.shown(ctx, now_ms);
+        self.ask_detail(ctx, now_ms);
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
@@ -474,13 +522,15 @@ impl Screen for Pools {
                 );
                 content.push(Line::default());
                 content.push(buttons(&["New pool"], Some(0), theme));
+                content.extend(self.spend.lines(ctx, limit));
                 content
             }
             Load::Ready(pools) => {
                 let wide = ctx.wide();
                 let widths = Self::widths(wide);
+                let spend = self.spend.lines(ctx, limit);
                 self.rows = (area.height as usize)
-                    .saturating_sub(TABS_HEIGHT + HEAD_HEIGHT)
+                    .saturating_sub(TABS_HEIGHT + HEAD_HEIGHT + spend.len())
                     .max(1);
                 self.follow(pools.len());
                 let windowed = pools.len() > self.rows;
@@ -545,6 +595,7 @@ impl Screen for Pools {
                 }
                 assert_eq!(content.len(), HEAD_HEIGHT);
                 content.extend(shown);
+                content.extend(spend);
                 content
             }
             Load::Failed(_) => vec![
@@ -1410,6 +1461,139 @@ mod tests {
         assert_eq!(
             line(Standing::Paused { until_ms: 2 * HOUR }),
             "paused until 02:00"
+        );
+    }
+
+    /// DEC-154: Pools asks the engine for the detail rows when it opens and again while it
+    /// stays open, and each account in Next accounts shows its free resets and credits line
+    /// under it, word for word the desktop's.
+    #[test]
+    fn pools_asks_for_the_detail_rows_and_each_next_account_shows_its_free_resets_line() {
+        use crate::scheduling::{PoolRanking, RankedAccount, Standing, Strategy};
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.shown(&mut ctx);
+        let mut details = Vec::new();
+        while let Some(request) = ctx.next_request() {
+            if let Request::Settings(job) = request
+                && let SettingsJob::Extras { detail } = *job
+            {
+                details.push(detail);
+            }
+        }
+        assert_eq!(
+            details,
+            [true],
+            "Pools asks for the detail rows once it opens"
+        );
+
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        screen.arrive(
+            &settings(SettingsEvent::Ranking(Ok(vec![PoolRanking {
+                pool: CredentialRef::new("pool-main").unwrap(),
+                strategy: Strategy::UseItOrLoseIt,
+                accounts: vec![RankedAccount {
+                    connection: CredentialRef::new("member-1").unwrap(),
+                    standing: Standing::NeverUse,
+                    held_for: Vec::new(),
+                }],
+                own_order_projects: 0,
+            }]))),
+            &mut ctx,
+        );
+        let mut extras = crate::usage::extras::LimitExtras {
+            harness: "Codex".into(),
+            adapter: crate::usage::extras::Adapter::Codex,
+            may_break: false,
+            resets: Some(crate::usage::extras::Resets {
+                count: 2,
+                kinds: vec![crate::usage::extras::ResetKind::Weekly],
+                next_expiry_ms: None,
+            }),
+            credits: None,
+            spend: crate::usage::extras::Spend::NotReported,
+            not_reported: "not reported by Codex".into(),
+            resets_checked_ms: None,
+            credits_checked_ms: None,
+            resets_gained_ms: None,
+        };
+        screen.arrive(
+            &settings(SettingsEvent::Extras(Ok(vec![
+                crate::engine::owner::AccountExtras {
+                    account: CredentialRef::new("member-1").unwrap(),
+                    extras: extras.clone(),
+                },
+            ]))),
+            &mut ctx,
+        );
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        let at = shown.find("member-1").expect("the account shows");
+        let line = shown
+            .find("    2 free resets (weekly) \u{b7} Credits: not reported by Codex")
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(line > at, "the line comes under its account: {shown}");
+
+        extras.resets = None;
+        screen.arrive(
+            &settings(SettingsEvent::Extras(Ok(vec![
+                crate::engine::owner::AccountExtras {
+                    account: CredentialRef::new("member-1").unwrap(),
+                    extras,
+                },
+            ]))),
+            &mut ctx,
+        );
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        assert!(
+            shown.contains("    Free resets and credits: not reported by Codex"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains(" 0 free"),
+            "nothing missing reads as 0: {shown}"
+        );
+    }
+
+    #[test]
+    fn pools_on_top_asks_for_the_detail_rows_again_only_once_a_minute_has_passed() {
+        let extras_asks = |ctx: &mut Ctx| {
+            let mut asks = 0;
+            while let Some(request) = ctx.next_request() {
+                if let Request::Settings(job) = request
+                    && matches!(*job, SettingsJob::Extras { detail: true })
+                {
+                    asks += 1;
+                }
+            }
+            asks
+        };
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.arrive(&Arrival::Pools(Ok(Vec::new())), &mut ctx);
+        assert_eq!(ctx.queued(), 0, "a screen never shown asks for nothing");
+        screen.shown(&mut ctx);
+        assert_eq!(extras_asks(&mut ctx), 1);
+        screen.shown(&mut ctx);
+        assert_eq!(
+            extras_asks(&mut ctx),
+            0,
+            "the shell's 5 s refresh never asks again so soon"
+        );
+        screen.arrive(&Arrival::Pools(Ok(Vec::new())), &mut ctx);
+        assert_eq!(extras_asks(&mut ctx), 0, "an arrival never asks on its own");
+        screen.detail_asked_ms = Some(crate::tui::clock::now_ms() - DETAIL_ASK_EVERY_MS - 1);
+        screen.shown(&mut ctx);
+        assert_eq!(extras_asks(&mut ctx), 1, "a minute on, the ask is renewed");
+        screen.detail_asked_ms = Some(crate::tui::clock::now_ms() + DETAIL_ASK_EVERY_MS);
+        screen.shown(&mut ctx);
+        assert_eq!(
+            extras_asks(&mut ctx),
+            1,
+            "a clock that went back asks again"
         );
     }
 }

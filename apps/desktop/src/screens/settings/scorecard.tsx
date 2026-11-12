@@ -2,7 +2,7 @@ import { useState } from "react";
 import { call, knownError, namedFailure, type Result } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, Switch, TextField } from "../../ui";
-import { agoText, dayLabel, offsetMinutes } from "./usage";
+import { agoText, dayLabel, offsetMinutes } from "../metrics/usage-model";
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -210,10 +210,10 @@ function spanText(span: Span, offset: number): string {
 }
 
 function Score({ label, value, target, met }: { label: string; value: string; target: string; met: boolean }) {
-  return <div className="usage-tile">
-    <span className="muted small">{label}</span>
-    <span className="usage-tile-value">{value}</span>
-    <span className="muted small">{target}</span>
+  return <div className="mx-tile">
+    <span className="mx-tile-key">{label}</span>
+    <span className="mx-tile-value">{value}</span>
+    <span className="mx-tile-detail">{target}</span>
     <span className={`badge ${met ? "tone-ok" : "tone-warn"}`}>{met ? "Target met" : "Not met yet"}</span>
   </div>;
 }
@@ -223,7 +223,7 @@ function Scores({ card }: { card: Scorecard }) {
   const cut = coordinationCut(coordination);
   const asked = card.settings.daily_question === "on" || card.answered_days > 0;
   const baseline = `Baseline ${perTaskText(perTask(coordination.baseline))}${cut === null ? "" : `, ${cutText(cut)}`}`;
-  return <div className="usage-tiles">
+  return <div className="mx-tiles">
     <Score label="Real tasks" value={String(card.real)} target={`Target ${targets.tasks} done tickets you accepted`} met={met.tasks} />
     <Score label="Clean" value={`${card.clean} of ${card.real}`} target={`Target ${targets.clean_of_ten} of 10, from ${targets.tasks} tasks`} met={met.clean} />
     <Score label="Coordination per task" value={perTaskText(perTask(coordination.measured))}
@@ -366,8 +366,9 @@ export function ScorecardView({ card, projects, nowMs, failure, busy, onSave, on
   </div>;
 }
 
-/** Settings, Usage, the go/no-go scorecard: reads it in the viewer's local days and saves its
- * settings by version, reloading the saved ones when another window changed them first. */
+/** The go/no-go scorecard at the foot of the app Metrics page: reads it in the viewer's local
+ * days and saves its settings by version, reloading the saved ones when another window
+ * changed them first. Input: none. Output: the scorecard panels. */
 export function ScorecardPanel() {
   const session = useAppSession();
   const [nowMs, setNowMs] = useState(() => Date.now());
