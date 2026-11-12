@@ -60,3 +60,11 @@ test("calls outside the desktop shell report the engine as unreachable instead o
   assert.equal(result.kind, "error");
   assert.equal(result.code, "engine_unreachable");
 });
+
+test("an engine that did not start because its upgrade backup failed says so plainly (F36)", () => {
+  const failed = api.classifyFailure({ code: "engine_backup_failed" });
+  assert.equal(failed.code, "engine_backup_failed");
+  assert.equal(failed.message,
+    "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.");
+  assert.notEqual(failed.message, api.plainError("engine_start_failed"));
+});
