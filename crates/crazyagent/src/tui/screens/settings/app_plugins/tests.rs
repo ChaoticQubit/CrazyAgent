@@ -873,3 +873,34 @@ fn app_plugins_open_from_go_to_and_a_refused_read_offers_r() {
     shell.key(Key::Char('r'));
     assert!(matches!(one(&mut shell), AppPluginsJob::List));
 }
+
+#[test]
+fn every_refusal_sentence_matches_the_desktop_words() {
+    let desktop = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/desktop/src/api-app-plugins.ts"
+    ))
+    .unwrap();
+    let start = desktop
+        .find("export const APP_PLUGIN_REFUSALS")
+        .expect("the desktop refusal map");
+    let block = &desktop[start..];
+    let block = &block[..block.find("\n};").expect("the map ends")];
+    let mut checked = 0;
+    for line in block.lines().skip(1) {
+        let (code, words) = line
+            .trim()
+            .split_once(": \"")
+            .expect("one code: \"sentence\", per line");
+        let words = words
+            .strip_suffix("\",")
+            .expect("each sentence ends the line");
+        if code.starts_with("picker_") {
+            continue;
+        }
+        assert_eq!(sentence(code), words, "{code} reads the same in the TUI");
+        checked += 1;
+    }
+    assert!(checked >= 27, "the desktop map was read: {checked}");
+    assert!(sentence("app_plugin_name_invalid").starts_with("A plugin name is"));
+}
