@@ -13,40 +13,45 @@ use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
 use std::collections::BTreeSet;
 
-/// The most projects whose team Questions inbox one tick reads.
+/// The most projects with open team inbox state whose inbox one tick reads.
 const TEAM_PROJECTS_MAX: i64 = 64;
 
 const _: () = assert!(TEAM_PROJECTS_MAX * 64 <= 8 * SOURCE_ROWS_MAX as i64);
 
 type Source = fn(&Connection, &ModelAccess) -> Result<Option<Found>, EngineError>;
 
-/// What one source read: its conditions, and whether a cap stopped it before the end of its
-/// state, so items it did not reach may still hold and stay open.
+/// What one source read: its conditions, whether a cap stopped it before the end of its
+/// state, and the projects whose own part a cap cut short, so items it did not reach may
+/// still hold and stay open.
 pub(super) struct Found {
     conditions: Vec<Condition>,
     capped: bool,
+    capped_projects: Vec<ProjectId>,
 }
 
 impl Found {
-    /// One source's read. Inputs: the conditions and whether a row, project or inbox cap was
-    /// reached. Output: the read, capped as well when the list itself is full.
-    fn read(conditions: Vec<Condition>, capped: bool) -> Self {
+    /// One source's read. Inputs: the conditions, whether a row or project cap was reached
+    /// and the projects an inbox cap cut short. Output: the read, capped as well when the
+    /// list itself is full.
+    fn read(conditions: Vec<Condition>, capped: bool, capped_projects: Vec<ProjectId>) -> Self {
         assert!(conditions.len() <= SOURCE_ROWS_MAX);
+        assert!(capped_projects.len() <= SOURCE_ROWS_MAX);
         let full = conditions.len() == SOURCE_ROWS_MAX;
         Self {
             conditions,
             capped: capped || full,
+            capped_projects,
         }
     }
 }
 
-/// The conditions that hold now: the kinds whose sources were read, those of them a cap
-/// stopped before the end, their conditions, and the first failure of a source that could
-/// not be read.
+/// The conditions that hold now: the kinds whose sources were read, the parts a cap stopped
+/// before the end (a whole kind, or one project of it), their conditions, and the first
+/// failure of a source that could not be read.
 #[derive(Default)]
 pub(super) struct Live {
     pub kinds: Vec<NoticeKind>,
-    pub partial: Vec<NoticeKind>,
+    pub partial: Vec<(NoticeKind, Option<ProjectId>)>,
     pub conditions: Vec<Condition>,
     pub problem: Option<EngineError>,
 }
@@ -74,7 +79,10 @@ pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
                 );
                 live.kinds.push(kind);
                 if found.capped {
-                    live.partial.push(kind);
+                    live.partial.push((kind, None));
+                }
+                for project_id in found.capped_projects {
+                    live.partial.push((kind, Some(project_id)));
                 }
                 live.conditions.extend(found.conditions);
             }
@@ -84,7 +92,11 @@ pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
             }
         }
     }
-    assert!(live.partial.iter().all(|kind| live.kinds.contains(kind)));
+    assert!(
+        live.partial
+            .iter()
+            .all(|(kind, _)| live.kinds.contains(kind))
+    );
     live
 }
 
@@ -117,8 +129,9 @@ fn push(found: &mut Vec<Condition>, keys: &mut BTreeSet<String>, condition: Cond
 /// master and team alike, keyed by its team message when it has one so linking it never
 /// opens a second item, then each team project's Questions inbox: team questions not yet
 /// linked and agents waiting on the owner in their own terminal. Inputs: the database and
-/// the model access (unused). Output: the read, capped when the log, the team projects or an
-/// inbox held more than it shows, or none without the questions log.
+/// the model access (unused). Output: the read, capped when the log or the team projects
+/// with open inbox state held more than it reads, with each project whose inbox held more
+/// than it shows, or none without the questions log.
 fn questions(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, EngineError> {
     if !tables_exist(connection, &["questions_log"])? {
         return Ok(None);
@@ -176,27 +189,25 @@ fn questions(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, 
         "coord_activity",
         "team_owner_alerts",
     ];
+    let mut capped_projects = Vec::new();
     if tables_exist(connection, &team)? {
         let (projects, more) = team_projects(connection)?;
         capped |= more;
         for project_id in projects {
-            capped |= inbox(connection, &project_id, &mut found, &mut keys)?;
+            if inbox(connection, &project_id, &mut found, &mut keys)? {
+                capped_projects.push(project_id);
+            }
         }
     }
     assert!(found.len() <= SOURCE_ROWS_MAX);
-    Ok(Some(Found::read(found, capped)))
+    Ok(Some(Found::read(found, capped, capped_projects)))
 }
 
-/// The team projects whose inbox one tick reads. Input: the database. Output: at most
+/// The team projects whose inbox one tick reads: those with an open question to the owner
+/// or an agent waiting on the owner. Input: the database. Output: at most
 /// `TEAM_PROJECTS_MAX` projects, and whether more were left out.
 fn team_projects(connection: &Connection) -> Result<(Vec<ProjectId>, bool), EngineError> {
-    let mut projects: Vec<String> = connection
-        .prepare("SELECT DISTINCT project FROM team_agents ORDER BY project LIMIT ?1")
-        .map_err(error)?
-        .query_map([TEAM_PROJECTS_MAX + 1], |row| row.get(0))
-        .map_err(error)?
-        .collect::<Result<_, _>>()
-        .map_err(error)?;
+    let mut projects = crate::team::questions::inbox_projects(connection, TEAM_PROJECTS_MAX + 1)?;
     let cap = usize::try_from(TEAM_PROJECTS_MAX).expect("the project cap is small");
     let more = projects.len() > cap;
     projects.truncate(cap);
@@ -281,7 +292,7 @@ fn accounts(connection: &Connection, access: &ModelAccess) -> Result<Option<Foun
         push(&mut found, &mut keys, condition);
     }
     let capped = access.connections.len() > SOURCE_ROWS_MAX;
-    Ok(Some(Found::read(found, capped)))
+    Ok(Some(Found::read(found, capped, Vec::new())))
 }
 
 /// Projects with work waiting for a pool (decision 1): research jobs and team tasks in
@@ -324,7 +335,7 @@ fn pools(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, Engi
         };
         push(&mut found, &mut keys, condition);
     }
-    Ok(Some(Found::read(found, capped)))
+    Ok(Some(Found::read(found, capped, Vec::new())))
 }
 
 /// The words of a pool item. Inputs: the research jobs and team tasks waiting. Output:
@@ -394,7 +405,7 @@ fn memories(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, E
         };
         push(&mut found, &mut keys, condition);
     }
-    Ok(Some(Found::read(found, capped)))
+    Ok(Some(Found::read(found, capped, Vec::new())))
 }
 
 /// Change sets waiting for the owner (decision 1): pending, in conflict or updating, one
@@ -451,5 +462,5 @@ fn change_sets(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>
         };
         push(&mut found, &mut keys, condition);
     }
-    Ok(Some(Found::read(found, capped)))
+    Ok(Some(Found::read(found, capped, Vec::new())))
 }
