@@ -12,6 +12,18 @@ use crate::engine::owner::transport::native_auth_channel::{
 /// the sign-in an earlier run proved.
 const UNRUN_CHECKS_MAX: i64 = 16;
 
+/// The codes an existing-account check settles with when it ended before the provider
+/// answered: an engine stop or a custodian that ended unnamed, a custody session the engine
+/// lost, a status command or bootstrap past its bound. None of them says the account is
+/// signed out, so a restart re-proof looks past them ([`never_ran`]).
+const UNANSWERED_CHECK_CODES: [&str; 5] = [
+    "native_auth_interrupted",
+    "native_auth_recovery_required",
+    "native_auth_claude_deadline",
+    "native_auth_codex_deadline",
+    "native_auth_bootstrap_timeout",
+];
+
 /// The failure codes a sign-in custodian may name that its settled attempt records (OP-7):
 /// each tells the owner something a plain retry does not, and the app has a sentence for
 /// each. Any other cause a custodian names settles the attempt as `native_auth_interrupted`.
@@ -1327,12 +1339,22 @@ fn earlier_run(
     Ok(None)
 }
 
-/// Tells whether an operation was an account check the host never ran, which says nothing
-/// about the sign-in it would have checked. Input: the operation's fact. Output: true for
-/// an existing-account check that ended unavailable because the host could not run it.
+/// Tells whether an operation was an account check that got no answer from the provider,
+/// which says nothing about the sign-in it would have checked: the host could not run it,
+/// or it ended unanswered, cut by an engine stop, a lost custody session or its time bound.
+/// Input: the operation's fact. Output: true for such an existing-account check.
 fn never_ran(fact: &NativeAuthFact) -> bool {
-    fact.phase == NativeAuthPhase::Unavailable
-        && fact.code.as_deref() == Some("native_auth_host_unavailable")
+    let unanswered = match fact.phase {
+        NativeAuthPhase::Unavailable => {
+            fact.code.as_deref() == Some("native_auth_host_unavailable")
+        }
+        NativeAuthPhase::Failed | NativeAuthPhase::Uncertain => fact
+            .code
+            .as_deref()
+            .is_some_and(|code| UNANSWERED_CHECK_CODES.contains(&code)),
+        _ => false,
+    };
+    unanswered
         && matches!(
             fact.action,
             NativeAuthAction::SignIn {
