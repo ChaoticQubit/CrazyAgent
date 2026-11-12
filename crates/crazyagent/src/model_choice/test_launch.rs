@@ -239,7 +239,8 @@ mod run {
         if !runner.can_run(harness) {
             return pending(NotStarted::NotInstalled);
         }
-        let projects = root.join(crate::project_setup::PROJECTS_DIRECTORY);
+        let projects = private_folder(root.join(crate::project_setup::PROJECTS_DIRECTORY))
+            .ok_or(UNAVAILABLE)?;
         let resolver = SettingsResolver::new(global, project, &projects, &database)
             .map_err(|_| UNAVAILABLE)?;
         let account = match resolver.pool_pick("", request.pool, &[harness]) {

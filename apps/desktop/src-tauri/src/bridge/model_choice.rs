@@ -2,11 +2,12 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{MODEL_CHOICE_PROTOCOL_CODES, ModelAdded, OwnerClient};
 use crazyagent::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
+use crazyagent::model_choice::test_launch::Tested;
 use crazyagent::model_choice::{
     ALLOWED_MAX, CATALOG_MODELS_MAX, CUSTOM_MAX, MODEL_BYTES_MAX, Models, Slot,
     UNQUALIFIED_REASON_BYTES_MAX, Written, shipped,
 };
-use crazyagent::protocol::ProjectId;
+use crazyagent::protocol::{CredentialRef, ProjectId};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -20,6 +21,15 @@ pub struct ModelsPage {
     pub project_id: Option<String>,
     pub qualified_versions: Vec<String>,
     pub sources: Vec<String>,
+}
+
+/// What one test launch decided, as the window shows it (DEC-150 M-6): verified, failed or
+/// pending, the pending reason, and the harness's app-wide section after it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModelTested {
+    pub tested: Tested,
+    pub reason: Option<String>,
+    pub models: Models,
 }
 
 /// The bridge failure for an engine model choice error: a known code reaches the window as
@@ -283,6 +293,33 @@ impl NativeBridge {
                 .await
                 .map_err(model_choice_error)?;
             Ok(removed)
+        }))
+    }
+
+    /// Runs the test launch of one pending owner id on the pool the owner picked, without
+    /// the bridge lock, until the engine decides, at most about two and a half minutes
+    /// (DEC-150 M-6). Inputs: the harness, the id and the pool id. Output: what it decided,
+    /// `model_choice_pool_unknown` for a pool id that cannot name a pool, or the refusal.
+    pub fn test_model(
+        &self,
+        harness: String,
+        model: String,
+        pool: String,
+    ) -> Result<Unlocked<ModelTested>, BridgeError> {
+        let harness = window_harness(harness)?;
+        let model = window_model(model)?;
+        let pool = CredentialRef::new(pool).map_err(|_| failure("model_choice_pool_unknown"))?;
+        let client = self.model_choice_client()?;
+        Ok(Box::pin(async move {
+            let (tested, reason, models) = client
+                .model_choice_test(&harness, &model, pool)
+                .await
+                .map_err(model_choice_error)?;
+            Ok(ModelTested {
+                tested,
+                reason,
+                models,
+            })
         }))
     }
 

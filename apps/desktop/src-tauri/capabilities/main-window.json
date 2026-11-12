@@ -15,6 +15,7 @@
     "allow-desktop-reset-model-choice",
     "allow-desktop-add-model",
     "allow-desktop-remove-model",
+    "allow-desktop-test-model",
     "allow-desktop-model-rules",
     "allow-desktop-set-model-rule",
     "allow-desktop-harness-versions",

@@ -11,7 +11,7 @@ use bridge::checks::TestsReply;
 use bridge::harness_settings::HarnessSettingsPage;
 use bridge::intake::FolderSize;
 use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
-use bridge::model_choice::ModelsPage;
+use bridge::model_choice::{ModelTested, ModelsPage};
 use bridge::notify::Notices;
 use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
@@ -4601,6 +4601,19 @@ async fn desktop_remove_model(
 }
 
 #[tauri::command]
+async fn desktop_test_model(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    harness: String,
+    model: String,
+    pool: String,
+) -> Result<ModelTested, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.test_model(harness, model, pool)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_model_rules(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5351,6 +5364,7 @@ native_commands! {
     desktop_reset_model_choice,
     desktop_add_model,
     desktop_remove_model,
+    desktop_test_model,
     desktop_model_rules,
     desktop_set_model_rule,
     desktop_harness_versions,

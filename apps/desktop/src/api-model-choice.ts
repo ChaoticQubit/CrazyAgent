@@ -69,6 +69,17 @@ export interface ModelRules {
  * it, or it already passed. */
 export type ModelAdded = "pending" | "listed" | "verified";
 
+/** What a test launch decided about an owner id (DEC-150 M-6). */
+export type TestOutcome = "verified" | "failed" | "pending";
+
+/** One test launch's answer: what it decided, the reason an id still waits, and the
+ * harness's app-wide section after it. */
+export interface ModelTested {
+  tested: TestOutcome;
+  reason: string | null;
+  models: Models;
+}
+
 /** What a Save on one slot sends: nothing, a reset or a new value. */
 export type ModelChange<T> = { kind: "none" } | { kind: "reset" } | { kind: "set"; value: T };
 
@@ -138,10 +149,13 @@ const REFUSALS: Record<string, string> = {
   model_choice_harness_unknown: "CrazyAgent doesn't know this harness.",
   model_choice_not_supported: `${NOT_SUPPORTED}.`,
   model_choice_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the page before you try again.",
+  model_choice_pool_needed: "Pick a pool with at least one account to run the test launch.",
+  model_choice_pool_unknown: "That pool no longer exists, so nothing was tested. Pick another one.",
   model_choice_project_unknown: "This project is no longer in CrazyAgent.",
   model_choice_reply_bounds: "The engine's answer was too large to read. Open the page again.",
   model_choice_request_bounds: "This change is too large for the engine. Choose fewer models.",
   model_choice_request_invalid: "The engine couldn't read this change. Open the page again.",
+  model_choice_test_busy: "A test launch for this harness is already running. Try again when it ends.",
   model_choice_unavailable: "Model choice isn't ready in this engine yet.",
   model_choice_value_invalid: "This harness doesn't offer that model, or the id has characters a model id can't have. Use letters, digits and - _ . : / @ + only.",
   owner_authentication_failed: "CrazyAgent couldn't confirm this app with the engine. Restart the app, then try again.",
@@ -369,6 +383,19 @@ export function addModel(harness: string, model: string): Promise<Result<ModelAd
  * there, or the refusal. */
 export function removeModel(harness: string, model: string): Promise<Result<boolean>> {
   return call<boolean>("desktop_remove_model", { harness, model });
+}
+
+/** Tells whether a harness has a test launch for the owner's ids: Claude Code and Codex.
+ * Input: the harness id. Output: true when Test can be offered. */
+export function testLaunchHarness(harness: string): boolean {
+  return harness === "claude-code" || harness === "codex";
+}
+
+/** Runs the test launch of one pending owner id on the pool the owner picked; it can take up
+ * to about two and a half minutes. Inputs: the harness, the id and the pool id. Output: what
+ * it decided, or the refusal. */
+export function testModel(harness: string, model: string, pool: string): Promise<Result<ModelTested>> {
+  return call<ModelTested>("desktop_test_model", { harness, model, pool });
 }
 
 /** Reads the owner's two model rules. Output: the rules, or the refusal. */

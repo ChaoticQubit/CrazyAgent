@@ -3851,6 +3851,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.remove_model(harness, model)?; call.await }.await;
             routed(result)
         }
+        "desktop_test_model" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                harness: String,
+                model: String,
+                pool: String,
+            }
+            let Args { harness, model, pool } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.test_model(harness, model, pool)?; call.await }.await;
+            routed(result)
+        }
         "desktop_model_rules" => {
             let result: Result<_, BridgeError> = async { let call = read(state).await?.model_rules()?; call.await }.await;
             routed(result)
