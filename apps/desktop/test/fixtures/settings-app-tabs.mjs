@@ -50,6 +50,25 @@ function ticketPage(scene) {
     return { key, options, proposed, custom: key === "cycle_days" ? { min: 1, max: 90 } : null, here, below: proposed, effective: here ?? proposed };
   }) };
 }
+const CHECK_ROWS = [
+  ["gate", ["off", "warn", "require"], "warn"],
+  ["parallel", [1, 2, 3, 4], 1],
+  ["keep_failed_snapshots", [0, 1, 2, 3, 4, 5], 2],
+  ["agent_requests", [0, 2, 6, 12], 6],
+  ["inventory", ["last_known", "run_base", "off"], "last_known"],
+  ["skip_markers", ["flag", "refuse", "off"], "flag"],
+  ["protected_change", ["refuse", "flag"], "refuse"],
+  ["removed_tests", ["off", "flag", "refuse"], "flag"],
+];
+
+/** The app's checks settings view as the engine sends it, every key on its proposal unless
+ * the scene saves one. Input: the scene. Output: the reply. */
+function checksReply(scene) {
+  const values = scene.checksHere ?? {};
+  const below = Object.fromEntries(CHECK_ROWS.map(([key, , proposed]) => [key, proposed]));
+  const effective = Object.fromEntries(CHECK_ROWS.map(([key, , proposed]) => [key, values[key] ?? proposed]));
+  return { kind: "settings", settings: { project: null, values, version: 5, below, effective, choices: CHECK_ROWS.map(([key, options, proposed]) => ({ key, options, proposed, custom: null })) } };
+}
 let root = null;
 
 /** Lets the engine's answers and the renders they cause land. Input: the wait in
@@ -93,6 +112,7 @@ function answer(scene, command, args) {
     case "desktop_link_cli": throw FAILURE;
     case "desktop_ticket_settings": return read(scene.tickets, command, ticketPage(scene));
     case "desktop_save_ticket_settings": throw FAILURE;
+    case "desktop_checks": if (args.op === "settings_show") return read(scene.checks, command, checksReply(scene)); throw FAILURE;
     default: throw `Command ${command} not found`;
   }
 }
