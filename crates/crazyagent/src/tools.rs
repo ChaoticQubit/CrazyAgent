@@ -49,6 +49,19 @@ const NODE_VERSION_FOLDERS: [(&str, &str); 5] = [
     ),
 ];
 
+/// The data root of the engine this process runs, recorded once at its start
+/// ([`record_engine_root`]).
+static ENGINE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Records the data root of the engine this process runs, once, at its start, so a launch
+/// looks in the same places setup does ([`Places::from_environment`]). Only the engine
+/// binary records it; recording another root later is a bug. Input: the absolute root.
+pub fn record_engine_root(root: &Path) {
+    assert!(root.is_absolute());
+    let kept = ENGINE_ROOT.get_or_init(|| root.to_path_buf());
+    assert_eq!(kept, root, "one engine root per process");
+}
+
 /// The owner line when tmux is found nowhere the resolver looks, with how to install it.
 /// The live master's problem line, its team note and the setup row show it word for word.
 #[cfg(target_os = "macos")]
@@ -158,6 +171,14 @@ impl Places {
     /// refused, though its setup folder is not looked in. Input: the engine root. Output:
     /// the places ([`Places::engine`]).
     pub fn from_environment(engine_root: Option<&Path>) -> Self {
+        Self::at_roots(engine_root, ENGINE_ROOT.get().map(PathBuf::as_path))
+    }
+
+    /// Builds the engine's places as [`Places::from_environment`] does, with the engine
+    /// root this process recorded given explicitly so rows never record the global. Inputs:
+    /// the engine root given, if any, and the recorded one. Output: the places.
+    fn at_roots(engine_root: Option<&Path>, recorded: Option<&Path>) -> Self {
+        let _ = recorded;
         let app = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.canonicalize().ok())
