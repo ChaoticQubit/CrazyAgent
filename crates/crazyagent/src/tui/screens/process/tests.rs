@@ -1108,6 +1108,28 @@ fn the_app_page_has_no_agent_settings() {
     assert_eq!(requests(&mut shell), vec![]);
 }
 
+/// Settings > Process keeps every hint on the bar at 80x24 (backlog 27, review F1): its
+/// keys wrap to more bar rows instead of dropping `Esc Home`, the same as every other
+/// settings screen. Reads the hints from the one-row bar at 240 columns first.
+#[test]
+fn every_app_process_hint_stays_on_the_bar_at_80_by_24() {
+    use crate::tui::screens::settings_accounts::tests::{bar_rows, every_hint_once, wide_hints};
+    let mut shell = opened(Scope::App, "Use tdd.\n");
+    let rows = render(&mut shell, 240, 24);
+    let wide = bar_rows(&rows);
+    assert_eq!(wide.len(), 1, "{wide:?}");
+    let hints = wide_hints(&wide[0]);
+    assert!(hints.iter().any(|hint| hint == "Esc Home"), "{hints:?}");
+    assert!(hints.iter().any(|hint| hint == "Ctrl-S Save"), "{hints:?}");
+    let rows = render(&mut shell, 80, 24);
+    every_hint_once(&rows, &hints, "80x24");
+    assert!(
+        rows.iter().any(|row| row.contains("Use tdd.")),
+        "the saved text stays in view:\n{}",
+        rows.join("\n")
+    );
+}
+
 #[test]
 fn a_text_over_64_kb_says_why_and_is_never_sent() {
     let mut shell = opened(Scope::App, "");
