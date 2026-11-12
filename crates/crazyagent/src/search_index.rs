@@ -288,8 +288,31 @@ pub(crate) fn forget_key(
 /// Removes a deleted master session's engine turns from the index, in whichever project
 /// they were. Inputs: the database and the session id. Output: done, or the database
 /// failure.
-pub(crate) fn forget_session(_connection: &Connection, _session: &str) -> Result<(), EngineError> {
-    unimplemented!("search index forget_session")
+pub(crate) fn forget_session(connection: &Connection, session: &str) -> Result<(), EngineError> {
+    if !made(connection)? {
+        return Ok(());
+    }
+    let key = format!("session/{session}");
+    connection
+        .execute(
+            "DELETE FROM search_chunks WHERE source='session' AND key=?1",
+            [key.as_str()],
+        )
+        .map_err(storage)?;
+    connection
+        .execute("DELETE FROM search_sources WHERE key=?1", [key.as_str()])
+        .map_err(storage)?;
+    Ok(())
+}
+
+fn made(connection: &Connection) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='search_chunks')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)
 }
 
 /// Turns an untrusted query into an FTS5 expression of plain words: at most `WORDS_MAX`
