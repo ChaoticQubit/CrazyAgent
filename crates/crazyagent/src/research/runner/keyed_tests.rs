@@ -45,6 +45,7 @@ fn a_keyed_research_codex_reads_its_relay_token_from_a_file_in_its_home() {
         Path::new("/work/report.md"),
         Path::new("/home/agent"),
         false,
+        crate::trust::Trust::Reviewed,
         &relayed,
     )
     .unwrap();
@@ -71,6 +72,7 @@ fn a_keyed_research_codex_reads_its_relay_token_from_a_file_in_its_home() {
             Path::new("/work/report.md"),
             Path::new("/home/agent"),
             false,
+            crate::trust::Trust::Reviewed,
             &unrelayed,
         )
         .is_err(),

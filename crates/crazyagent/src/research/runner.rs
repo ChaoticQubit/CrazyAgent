@@ -1709,15 +1709,7 @@ impl ResearchRunner {
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
-                codex_arguments(
-                    &mut command,
-                    &folder,
-                    &output,
-                    &home,
-                    false,
-                    trust,
-                    account,
-                )?;
+                codex_arguments(&mut command, &folder, &output, &home, false, trust, account)?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
@@ -4363,7 +4355,9 @@ mod tests {
         assert_eq!(untrusted.last().map(String::as_str), Some("-"));
         let reviewed = args(crate::trust::Trust::Reviewed);
         assert!(
-            reviewed.iter().all(|argument| !argument.contains("project_doc_max_bytes"))
+            reviewed
+                .iter()
+                .all(|argument| !argument.contains("project_doc_max_bytes"))
                 && reviewed.iter().any(|argument| *argument == wanted),
             "{reviewed:?}"
         );

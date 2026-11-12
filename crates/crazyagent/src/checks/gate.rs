@@ -237,10 +237,11 @@ pub fn assess(
             }
         }
         if skips {
-            let added: BTreeSet<String> = integrity::skips(db, &project, change_set, &view.head, &files)?
-                .into_iter()
-                .map(|skip| skip.path)
-                .collect();
+            let added: BTreeSet<String> =
+                integrity::skips(db, &project, change_set, &view.head, &files)?
+                    .into_iter()
+                    .map(|skip| skip.path)
+                    .collect();
             if !added.is_empty() {
                 note.gaps.push(Gap::new(NEW_SKIPS, None, None, added));
             }

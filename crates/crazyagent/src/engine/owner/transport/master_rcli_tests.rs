@@ -310,6 +310,7 @@ fn an_rcli_master_turn_after_an_instruction_change_is_given_the_new_text() {
         folder: None,
         mode: crate::instruction_files::Mode::Both,
         repeated: crate::agent_home::Repeated::LeaveOut,
+        trust: crate::trust::Trust::Reviewed,
     };
     let startup = "## Project\n\nThe brief.\n";
 

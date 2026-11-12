@@ -1502,7 +1502,9 @@ pub fn accept(
     #[cfg(unix)]
     {
         untrusted_config(db, id)?;
-        owner::accept(db, owner_home, id, expected_head, message, place, &|_| false)
+        owner::accept(db, owner_home, id, expected_head, message, place, &|_| {
+            false
+        })
     }
     #[cfg(not(unix))]
     {

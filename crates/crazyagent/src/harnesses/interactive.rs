@@ -3,8 +3,8 @@ use super::launch::CLAUDE_NATIVE_TEAM_TOOLS;
 use super::launch::{
     AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_ENGINE_KEYS, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP,
     CLAUDE_TOOLS_OFF, CODEX_ENGINE_KEYS, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError,
-    LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare,
-    claude_denied, codex_launch_settings, failure, harness_id, key_file_text, validate,
+    LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
+    codex_launch_settings, failure, harness_id, key_file_text, validate,
 };
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
 use crate::harness_settings::{Apply, apply};

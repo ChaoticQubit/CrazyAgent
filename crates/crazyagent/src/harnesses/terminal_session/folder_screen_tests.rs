@@ -110,6 +110,7 @@ pub(crate) fn start(name: &str, first: &str, then: Option<&str>, codex_folder: b
         unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crate::trust::Trust::Reviewed,
     };
     let session = TerminalSession::start(host, AgentId::new(name).unwrap(), request, None).unwrap();
     Pane {

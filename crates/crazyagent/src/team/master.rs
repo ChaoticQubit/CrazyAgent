@@ -1968,34 +1968,32 @@ fn remember(
 ) -> Result<(String, bool), EngineError> {
     let app = scope == tool::MemoryReach::App;
     let saved = crate::memory::library::agent_remember(connection, project, agent, app, text)?;
-    Ok(
-        match saved {
-            Ok(saved) => (
-                format!(
-                    "{}{}",
-                    if saved.narrowed {
-                        "Kept in this project's memory, not app-wide: the owner keeps agent memories in their project. "
-                    } else {
-                        ""
-                    },
-                    if saved.waiting {
-                        "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab."
-                    } else {
-                        "Saved to memory. recall finds it now, and agents started from now on get it."
-                    }
-                ),
-                false,
+    Ok(match saved {
+        Ok(saved) => (
+            format!(
+                "{}{}",
+                if saved.narrowed {
+                    "Kept in this project's memory, not app-wide: the owner keeps agent memories in their project. "
+                } else {
+                    ""
+                },
+                if saved.waiting {
+                    "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab."
+                } else {
+                    "Saved to memory. recall finds it now, and agents started from now on get it."
+                }
             ),
-            Err(code) => (
-                format!(
-                    "Not saved: {}",
-                    crate::memory::library::plain_problem(&code)
-                        .unwrap_or("the memory could not be saved.")
-                ),
-                true,
+            false,
+        ),
+        Err(code) => (
+            format!(
+                "Not saved: {}",
+                crate::memory::library::plain_problem(&code)
+                    .unwrap_or("the memory could not be saved.")
             ),
-        },
-    )
+            true,
+        ),
+    })
 }
 
 fn recall(
