@@ -259,8 +259,8 @@ pub enum Place {
 
 /// One item a screen picks when a notification opens it (DEC-136a): a logged question on
 /// the Questions tab, a change set on the Changes tab, an agent in the Team screen's
-/// Questions box, or the first suggested memory in Memory. The screen picks it on its first read and keeps its usual first pick
-/// when the item is no longer listed.
+/// Questions box, or the first suggested memory in Memory. The screen picks it on its first
+/// read and keeps its usual first pick when the item is no longer listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spot {
     Question(u64),

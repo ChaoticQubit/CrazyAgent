@@ -372,9 +372,9 @@ fn project_name(id: &ProjectId, ctx: &Ctx) -> String {
 
 /// The TUI page that fixes or shows one item's target and the item to pick there: the
 /// notified question or change set, an agent's question or wait in its Team screen's
-/// Questions box, or the first suggested memory. Inputs: the target and the context, whose project list names the
-/// project. Output: the place and the item, or the sentence the message line shows when
-/// the TUI has no such page or the project is not listed.
+/// Questions box, or the first suggested memory. Inputs: the target and the context, whose
+/// project list names the project. Output: the place and the item, or the sentence the
+/// message line shows when the TUI has no such page or the project is not listed.
 fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<(Place, Option<Spot>), &'static str> {
     let project = |id: &ProjectId| -> Result<(ProjectId, String), &'static str> {
         let cards = ctx.store.projects.ready().ok_or(LOADING)?;
