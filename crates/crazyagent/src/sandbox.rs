@@ -171,7 +171,7 @@ const LOCK_FOLDER: &str = r#"\.lock$"#;
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
-const TOOL_FILES_MAX: usize = 4;
+const TOOL_FILES_MAX: usize = 5;
 const EXECS_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
@@ -1928,8 +1928,9 @@ impl ProjectSandbox {
     }
 
     /// Lets a native-mode lead run its own tmux server (DEC-104): an exact socket grant, as
-    /// `allow_unix_socket` gives, for its own socket in its short temp folder, and read
-    /// access to the tmux program's folder when no system root covers it. No other Unix
+    /// `allow_unix_socket` gives, for its own socket in its short temp folder, and the tmux
+    /// program itself, readable and startable as one file, never its folder: the bundled one
+    /// sits in the app's `Contents/MacOS` beside the engine (DEC-157). No other Unix
     /// socket becomes reachable, the engine's own tmux server included, and the server and
     /// every engine client on it stay inside this profile; its teammates run in a server of
     /// their own (see [`Self::serve_tmux_server`]). Only Seatbelt holds it. Input: the socket
@@ -2127,16 +2128,14 @@ impl ProjectSandbox {
         if !clean_absolute(tmux) || !tmux.is_file() || canonical(tmux)? != tmux {
             return Err(invalid("the tmux program must be a canonical file"));
         }
-        let folder = tmux
-            .parent()
-            .ok_or_else(|| invalid("the tmux program must sit in a folder"))?;
-        let covered = SYSTEM_READ_ROOTS
-            .iter()
-            .any(|root| folder.starts_with(root))
-            || self.read_roots.iter().any(|root| folder.starts_with(root));
-        if !covered {
-            self = self.allow_read(folder)?;
+        if !self.tool_files.iter().any(|file| file == tmux) {
+            if self.tool_files.len() >= TOOL_FILES_MAX {
+                return Err(invalid("too many toolchain files"));
+            }
+            self.tool_files.push(tmux.to_path_buf());
         }
+        self = self.allow_exec(tmux)?;
+        assert!(self.tool_files.iter().any(|file| file == tmux));
         self = if served_only {
             self.serve_unix_socket(socket)?
         } else {
