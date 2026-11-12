@@ -96,6 +96,20 @@ pub fn ago(ms: i64, now: i64, offset: i64) -> String {
     format!("{} {date}", MONTHS[month as usize - 1])
 }
 
+/// A coming day: "today 14:30" on the same local day, else "Nov 20", as the desktop says
+/// when a free reset expires.
+/// Inputs: the time, now, both in epoch milliseconds, and the UTC offset.
+/// Output: the plain phrase.
+pub fn expiry(ms: i64, now: i64, offset: i64) -> String {
+    let day = |at: i64| (at.div_euclid(1000) + offset).div_euclid(86_400);
+    if day(ms) == day(now) {
+        return format!("today {}", clock(ms, offset));
+    }
+    let (_, month, date) = civil(day(ms));
+    assert!((1..=12).contains(&month));
+    format!("{} {date}", MONTHS[month as usize - 1])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

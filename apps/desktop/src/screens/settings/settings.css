@@ -71,7 +71,8 @@
 .pool-limit.full { color: var(--danger); font-weight: 600; }
 .pool-limit.full .pool-bar i { background: var(--danger); }
 .pool-limit-none { font: 11px/16px var(--mono); color: var(--text-3); text-align: right; }
-@container (max-width: 560px) { .pool-row { grid-template-columns: 24px minmax(0, 1fr); } .pool-right { grid-column: 2; margin-top: 6px; } .pool-limit-none { text-align: left; } }
+.pool-extras { margin-top: 2px; font: 11px/16px var(--mono); color: var(--text-2); text-align: right; overflow-wrap: anywhere; }
+@container (max-width: 560px) { .pool-row { grid-template-columns: 24px minmax(0, 1fr); } .pool-right { grid-column: 2; margin-top: 6px; } .pool-limit-none, .pool-extras { text-align: left; } }
 .pool-left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .pool-app-order { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
 .pool-app-order h3 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 600; }

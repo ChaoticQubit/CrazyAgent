@@ -291,6 +291,7 @@ fn main() {
         "desktop_usage_report",
         "desktop_usage_metrics",
         "desktop_usage_refresh",
+        "desktop_usage_extras",
         "desktop_usage_notices",
         "desktop_usage_set_money",
         "desktop_usage_decide_recount",

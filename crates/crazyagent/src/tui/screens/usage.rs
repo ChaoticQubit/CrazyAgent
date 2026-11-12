@@ -9,6 +9,7 @@ use crate::tui::seam::Arrival;
 use crate::tui::text::{indent, row, styled, wrap};
 use crate::tui::theme::{Role, Theme};
 use crate::usage::RecountStatus;
+use crate::usage::extras::LimitExtras;
 use crate::usage::health::{StepHealth, UsageStep};
 use crate::usage::metrics::{ActivityRow, ModelRow};
 use crate::usage::money::{MainNumber, MoneyView, PriceSource};
@@ -281,14 +282,16 @@ fn refusal(code: &str) -> &'static str {
     }
 }
 
-/// Names shown in place of ids: projects, pools and accounts by id, and each key, URL or
-/// local account by id with what it has in place of a 5-hour or weekly window.
+/// Names shown in place of ids: projects, pools and accounts by id, each key, URL or local
+/// account by id with what it has in place of a 5-hour or weekly window, and each account's
+/// free resets and credits as stored, by id (DEC-154).
 #[derive(Default)]
 pub struct Names {
     pub projects: HashMap<String, String>,
     pub pools: HashMap<String, String>,
     pub accounts: HashMap<String, String>,
     pub no_window: Vec<(String, &'static str)>,
+    pub extras: HashMap<String, LimitExtras>,
 }
 
 impl Names {
@@ -414,6 +417,29 @@ fn limits_lines(
         )
     )));
     lines
+}
+
+/// An account's free resets and credits line under its limits, wrapped to the width, when the
+/// extras read has the account. Inputs: the names with the extras, the account id, now, the
+/// local offset in seconds, the content width and the theme. Output: the lines, none unread.
+fn extras_lines(
+    names: &Names,
+    account: &str,
+    now_ms: i64,
+    offset: i64,
+    limit: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let Some(extras) = names.extras.get(account) else {
+        return Vec::new();
+    };
+    wrap(
+        &extras::extras_line(extras, now_ms, offset),
+        limit.saturating_sub(4).max(8),
+    )
+    .into_iter()
+    .map(|part| styled(format!("    {part}"), Role::Muted, theme))
+    .collect()
 }
 
 fn group(
@@ -667,6 +693,14 @@ pub fn summary(
             limits_lines(limits, names, now_ms, offset, limit, theme),
             2,
         ));
+        lines.extend(extras_lines(
+            names,
+            limits.account.as_str(),
+            now_ms,
+            offset,
+            limit,
+            theme,
+        ));
     }
     for (account, note) in plain {
         lines.push(styled(
@@ -675,6 +709,7 @@ pub fn summary(
             theme,
         ));
         lines.push(styled(format!("    {note}"), Role::Muted, theme));
+        lines.extend(extras_lines(names, account, now_ms, offset, limit, theme));
     }
     if total.headline() == 0 && report.lines.is_empty() && unreported.is_empty() {
         lines.push(Line::default());
@@ -727,6 +762,7 @@ pub fn summary(
 pub struct UsagePage {
     range: UsageRange,
     report: Option<(UsageRange, Box<UsageReport>)>,
+    extras: HashMap<String, LimitExtras>,
     asked: Option<(UsageRange, Option<i64>)>,
     load: Load<()>,
     waiting: bool,
@@ -744,6 +780,7 @@ impl UsagePage {
         Self {
             range: UsageRange::Week,
             report: None,
+            extras: HashMap::new(),
             asked: None,
             load: Load::Idle,
             waiting: false,
@@ -783,6 +820,7 @@ impl UsagePage {
                 offset_minutes: i32::try_from(offset / 60).unwrap_or(0),
             },
         );
+        send(ctx, SettingsJob::Extras { detail: false });
     }
 
     /// The page's lines. Inputs: the content width, now, the local offset in seconds and
@@ -808,15 +846,9 @@ impl UsagePage {
             ],
             (_, Some((range, report))) => {
                 let mut shown = recount_head(report, limit);
-                shown.extend(summary(
-                    report,
-                    *range,
-                    &Names::of(ctx),
-                    now_ms,
-                    offset,
-                    limit,
-                    ctx,
-                ));
+                let mut names = Names::of(ctx);
+                names.extras = self.extras.clone();
+                shown.extend(summary(report, *range, &names, now_ms, offset, limit, ctx));
                 shown
             }
             _ => vec![
@@ -915,6 +947,12 @@ impl Screen for UsagePage {
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match settings_event(arrival) {
             Some(SettingsEvent::Usage(result)) => self.apply(result, ctx),
+            Some(SettingsEvent::Extras(Ok(rows))) => {
+                self.extras = rows
+                    .iter()
+                    .map(|row| (row.account.as_str().to_owned(), row.extras.clone()))
+                    .collect();
+            }
             Some(SettingsEvent::UsageRefreshed(Ok(()))) => ctx.say(Message::success(
                 "Checking limits now.",
                 "Press r in a minute to read them.",
@@ -958,6 +996,8 @@ impl Screen for UsagePage {
         Some(Place::Usage)
     }
 }
+
+pub(in crate::tui) mod extras;
 
 #[cfg(all(test, unix))]
 mod tests;
