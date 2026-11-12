@@ -286,6 +286,8 @@
     "allow-desktop-set-master-step-settings",
     "allow-desktop-master-time-settings",
     "allow-desktop-set-master-time-settings",
+    "allow-desktop-master-frame-settings",
+    "allow-desktop-set-master-frame-settings",
     "allow-desktop-adoption",
     "allow-desktop-pick-folder",
     "allow-desktop-pick-documents",

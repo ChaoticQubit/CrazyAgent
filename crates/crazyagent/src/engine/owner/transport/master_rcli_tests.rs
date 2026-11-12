@@ -216,6 +216,24 @@ fn an_rcli_turn_its_clock_ended_names_the_time_limit_it_ran_under() {
     assert_eq!(reason("master_time_limit_600"), MasterReason::Unknown);
 }
 
+/// F39, DEC-141: an rcli master's turn names the same plain reason as a Claude Code or
+/// Codex master for a session or bootstrap that no longer matches and for a master worktree
+/// the engine could not check.
+#[test]
+fn an_rcli_master_names_the_shared_configured_master_reasons() {
+    for code in [
+        "master_session_scope_conflict",
+        "master_project_scope_conflict",
+        "master_bootstrap_scope_conflict",
+    ] {
+        assert_eq!(reason(code), MasterReason::ConnectionChanged, "{code}");
+    }
+    assert_eq!(
+        reason("master_bootstrap_uncertain"),
+        MasterReason::WorktreeUncertain
+    );
+}
+
 #[test]
 fn real_exit_categories_never_qualify_a_provider_reply_or_authentication() {
     for code in [

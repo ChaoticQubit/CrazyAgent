@@ -37,6 +37,14 @@ const LIMITS = {
       minutes60: "60 min A turn stops after 60 minutes.",
     },
   },
+  frames: {
+    name: "frame-limit", form: "Master frame size limit", command: "desktop_master_frame_settings", saved: "Master frame size limit saved.",
+    cards: {
+      kib64: "64 KiB The engine's own message size; enough for most turns.",
+      kib256: "256 KiB Room for long instructions and large pasted text.",
+      mib1: "1 MiB The largest; for a turn that still stops at 256 KiB.",
+    },
+  },
 };
 
 /** The page read of one limit's checked option. Input: the limit's entry. Output: the script. */
@@ -196,6 +204,7 @@ async function master(me, open) {
   await open("#/settings/master", "the Master setting", (text) => text.includes(TOP));
   await me.waitFor("the four step options", (text) => ["Master step limit", "No limit", "50 steps", "100 steps", "200 steps", "reply with 'continue' to go on"].every((words) => text.includes(words)));
   await me.waitFor("the four time options", (text) => ["Master time limit", "10 min", "30 min", "60 min", "Stopped after N minutes"].every((words) => text.includes(words)));
+  await me.waitFor("the three frame size options", (text) => ["Master frame size limit", "64 KiB", "256 KiB", "1 MiB", "rcli keeps 64 KiB"].every((words) => text.includes(words)));
 }
 
 /** One stored master limit as the engine reads it. Inputs: the bridge and the limit's entry.
@@ -264,5 +273,26 @@ for (const limit of ["minutes10", "minutes30", "minutes60"]) {
     await picked(tools, LIMITS.time, limit);
     await until("the step limit untouched by a time limit save", "no_limit", () => stored(tools.bridge, LIMITS.steps));
     await tools.me.capture(`master-time-limit-${limit}`);
+  }));
+}
+
+test("Master frame size limit: 64 KiB is the default, and picking it again after 256 KiB is saved and stays after a reload and an engine restart (F39)", { timeout: 600000 }, (t) => onEngine(t, "ca-frames-kib64-", async (tools) => {
+  const { bridge, me, page, open } = tools;
+  await master(me, open);
+  await until("the default in the engine", "kib64", () => stored(bridge, LIMITS.frames));
+  await until("the default on the page, with Save waiting for a change", ["kib64", true], () => page.evaluate(resting(LIMITS.frames)));
+  await save(tools, LIMITS.frames, "kib256");
+  await until("the step limit untouched by a frame size save", "no_limit", () => stored(bridge, LIMITS.steps));
+  await until("the time limit untouched by a frame size save", "no_limit", () => stored(bridge, LIMITS.time));
+  await picked(tools, LIMITS.frames, "kib64");
+  await me.capture("master-frame-limit-kib64");
+}));
+
+for (const limit of ["kib256", "mib1"]) {
+  test(`Master frame size limit: ${LIMITS.frames.cards[limit].split(" ").slice(0, 2).join(" ")} is saved and stays after a reload and an engine restart (F39)`, { timeout: 600000 }, (t) => onEngine(t, `ca-frames-${limit}-`, async (tools) => {
+    await master(tools.me, tools.open);
+    await picked(tools, LIMITS.frames, limit);
+    await until("the time limit untouched by a frame size save", "no_limit", () => stored(tools.bridge, LIMITS.time));
+    await tools.me.capture(`master-frame-limit-${limit}`);
   }));
 }

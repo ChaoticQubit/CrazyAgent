@@ -320,6 +320,61 @@ fn a_tick_keeps_why_a_codex_agent_s_bridge_was_refused() {
     assert_eq!(deliveries.bridge_refused.get(&agent), Some(&refused));
 }
 
+/// F38: a Codex bridge that runs on a release newer than the checked ones leaves one
+/// engine notice in that agent's Messages timeline, naming the release numbers, once per
+/// release: later deliveries, a bridge refusal in between and an engine restart, which
+/// keeps no memory here, leave no second one; another agent and another release get their own.
+#[test]
+fn a_newer_codex_release_is_named_once_in_the_agents_messages() {
+    let fixture = Fixture::new();
+    let first = fixture.agent("sub", "codex", "working", None);
+    let second = fixture.agent("sub", "codex", "working", None);
+    let mut refused = BTreeMap::new();
+    let notices = |agent: i64| -> Vec<String> {
+        let mut statement = fixture
+            .db
+            .prepare("SELECT text FROM team_agent_messages WHERE agent=?1 ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([agent], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let warned = |agent, release| warn_newer(&fixture.db, &project(), agent, release, 5).unwrap();
+    assert!(warned(first, (0, 167, 1)));
+    assert!(!warned(first, (0, 167, 1)));
+    assert!(!warned(first, (0, 167, 1)));
+    assert_eq!(notices(first), vec![codex::newer_notice((0, 167, 1))]);
+    assert!(warned(second, (0, 167, 1)));
+    assert_eq!(notices(second).len(), 1);
+    assert!(note_refusal(
+        &mut refused,
+        first,
+        Some("codex_bridge_not_running")
+    ));
+    assert!(!note_refusal(&mut refused, first, None));
+    assert!(!warned(first, (0, 167, 1)), "a refusal in between");
+    assert_eq!(notices(first).len(), 1);
+    assert!(warned(first, (0, 168, 0)), "another release");
+    assert_eq!(
+        notices(first),
+        vec![
+            codex::newer_notice((0, 167, 1)),
+            codex::newer_notice((0, 168, 0))
+        ]
+    );
+    assert!(!warned(first, (0, 168, 0)));
+    assert!(!warned(first, (0, 167, 1)));
+    assert_eq!(notices(first).len(), 2);
+    assert_eq!(notices(second).len(), 1);
+    assert!(
+        notices(first)
+            .iter()
+            .all(|text| !text.contains("codex_cli_rs"))
+    );
+}
+
 /// K2b: messages delivered or typed to an agent whose session stopped or failed go back
 /// to Sent on the next tick, so its next session gets them; a live agent's stay.
 #[test]

@@ -1,5 +1,6 @@
 use super::*;
 use crate::cleanup_settings::CleanupSettings;
+use crate::master_frame_limit::MasterFrameSettings;
 use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
 use crate::owner_profile::OwnerProfile;
@@ -161,6 +162,34 @@ impl OwnerController {
         self.read(OwnerRead::MasterTimeSettings).await?;
         self.begin_mutation(
             OwnerMutation::SetMasterTimeSettings { settings },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Reads the largest one message the engine writes to a configured master's harness.
+    /// Input: none. Output: the stored setting, or the default before the first save.
+    pub async fn master_frame_settings(&mut self) -> Result<MasterFrameSettings, EngineError> {
+        match self.read(OwnerRead::MasterFrameSettings).await?.data {
+            OwnerData::MasterFrameSettings { settings } => Ok(settings),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Saves the largest one message the engine writes to a configured master's harness, as
+    /// one retained owner mutation. Input: the full setting and a nonzero client generation.
+    /// Output: the engine response.
+    pub async fn set_master_frame_settings(
+        &mut self,
+        settings: MasterFrameSettings,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        if self.pending.is_some() || self.pending_account_profile.is_some() {
+            return Err(EngineError("controller_pending_intent".into()));
+        }
+        self.read(OwnerRead::MasterFrameSettings).await?;
+        self.begin_mutation(
+            OwnerMutation::SetMasterFrameSettings { settings },
             generation,
         )?;
         self.send_pending().await
