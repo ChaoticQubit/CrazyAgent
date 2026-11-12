@@ -514,8 +514,10 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
             worktree_lease: RequestId::new("claude-master-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        crate::protocol::ProjectId::new("claude-master-project").unwrap(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -574,6 +576,20 @@ async fn stand_in_master_under(
     unconfined: bool,
     clock: Option<Duration>,
 ) -> ClaudeHost {
+    let frames = crate::master_frame_limit::FrameSize::default();
+    stand_in_master_framed(fixture, body, unconfined, clock, frames).await
+}
+
+/// Starts a stand-in Claude Code master host running `body` under a wall clock and a
+/// master frame size limit. Takes the fixture, the script body, the access, the clock and
+/// the frame size. Returns the host.
+async fn stand_in_master_framed(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    body: &str,
+    unconfined: bool,
+    clock: Option<Duration>,
+    frames: crate::master_frame_limit::FrameSize,
+) -> ClaudeHost {
     let profile = fixture.lease("claude-group-turn", 1).unwrap();
     let home = profile.profile_path().unwrap();
     let harness = fixture.stand_in("claude", body);
@@ -597,8 +613,10 @@ async fn stand_in_master_under(
             worktree_lease: RequestId::new("claude-group-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         clock,
         ResourceBudget::unit(),
+        frames,
     )
     .await
     .unwrap()
@@ -848,6 +866,59 @@ async fn cancelling_a_full_access_claude_master_names_what_left_its_session_and_
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// L1 r1 security L1: a Claude host turn's leftovers follow its project's setting and show
+/// in that project's owner view. Under Ask the hold waits with the account kept and nothing
+/// signalled; the owner's Keep lets the account go at once while the orphan still runs.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_claude_host_hold_follows_its_projects_ask_then_keep_and_is_listed_for_the_owner() {
+    use crate::engine::master_host_fixture::{MasterFixture, ORPHANING_HARNESS, Orphan};
+    use crate::harnesses::leftovers::{self, HoldState, LeftoverMode};
+
+    let mut fixture = MasterFixture::new("claude");
+    let project = fixture.project_id.as_str().to_owned();
+    leftovers::set_mode(&project, LeftoverMode::Ask);
+    let body = format!("{ORPHANING_HARNESS}exec /bin/sleep 30\n");
+    let mut claude = stand_in_master_at(&mut fixture, &body, true).await;
+    let orphan = Orphan::wait(&fixture.project);
+    let cancelled = claude.cancel().await;
+    assert_eq!(
+        cancelled.map_err(|error| error.0),
+        Err(leftovers::LEFT.to_owned())
+    );
+    let listed = leftovers::held_in(&project);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].who, "a Claude host turn");
+    assert_eq!(listed[0].state, HoldState::Held);
+    assert!(listed[0].holds_account);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        rustix::process::test_kill_process(orphan.0),
+        Ok(()),
+        "Ask signalled the orphan"
+    );
+    assert_eq!(
+        fixture
+            .sign_in("claude-ask-busy", 2)
+            .err()
+            .map(|error| error.0)
+            .as_deref(),
+        Some("native_profile_in_use"),
+        "Ask let the account go before the owner chose"
+    );
+    assert!(leftovers::keep_held(listed[0].key, &project));
+    assert!(
+        fixture.sign_in("claude-kept-next", 3).is_ok(),
+        "Keep held the account"
+    );
+    let kept = leftovers::held_in(&project);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].state, HoldState::Kept);
+    assert!(!kept[0].holds_account);
+    assert_eq!(rustix::process::test_kill_process(orphan.0), Ok(()));
+    drop(orphan);
 }
 
 #[cfg(target_os = "macos")]
@@ -1239,8 +1310,10 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
             worktree_lease: RequestId::new("claude-tools-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -1330,8 +1403,10 @@ async fn held_turn(
             worktree_lease: RequestId::new("claude-steps-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -1661,8 +1736,10 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             worktree_lease: RequestId::new("claude-late-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -1890,11 +1967,13 @@ async fn a_claude_master_turn_reads_a_tool_result_past_a_mebibyte_within_its_all
             worktree_lease: RequestId::new("claude-large-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget {
             output_bytes: 64 * 1024 * 1024,
             ..ResourceBudget::unit()
         },
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -1982,4 +2061,58 @@ async fn a_claude_master_with_no_clock_outlasts_the_quiet_turn_a_clock_ends() {
         took >= Duration::from_secs(5),
         "the turn ran whole: {took:?}"
     );
+}
+
+/// A stand-in Claude Code that reads a turn and replies with the byte length of the turn
+/// line it read.
+const FRAME_SIZE_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-said","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"%s"}]}}\n' "${#turn}"
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A Claude master host takes a turn as large as the owner's master frame size limit
+/// allows (F39): a prompt close to the chosen limit reaches the harness whole, past the
+/// 64 KiB engine wire size under 256 KiB and 1 MiB, and a prompt past the limit is
+/// refused with `claude_host_input_limit` before anything is written.
+#[tokio::test]
+async fn a_claude_master_takes_a_turn_up_to_its_frame_size_limit() {
+    use crate::adapters::events::EventKind;
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::master_frame_limit::FrameSize;
+
+    for limit in FrameSize::ALL {
+        let mut fixture = MasterFixture::new("claude");
+        let clock = Some(Duration::from_secs(60));
+        let mut claude =
+            stand_in_master_framed(&mut fixture, FRAME_SIZE_HARNESS, false, clock, limit).await;
+        let over = "x".repeat(limit.bytes() + 1);
+        let refused = claude
+            .start_turn(RequestId::new("claude-frame-over").unwrap(), &over)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "claude_host_input_limit");
+        let text = "x".repeat(limit.bytes() - 1024);
+        claude
+            .start_turn(RequestId::new("claude-frame-turn").unwrap(), &text)
+            .await
+            .unwrap();
+        let mut said = Vec::new();
+        loop {
+            match claude.next_event().await.unwrap().kind {
+                EventKind::AssistantText { text, .. } => said.push(text),
+                EventKind::TurnFinished { .. } => break,
+                _ => {}
+            }
+        }
+        let line: usize = said.concat().parse().unwrap();
+        assert!(
+            line > limit.bytes() - 1024 && line < limit.bytes(),
+            "{line}"
+        );
+        let _ = claude.close().await;
+    }
 }

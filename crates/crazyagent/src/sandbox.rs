@@ -831,6 +831,7 @@ pub struct ProjectSandbox {
     lead_branch: Option<String>,
     adds_worktrees: bool,
     agent_files: Option<policy::AgentFilesRule>,
+    node_bin: Option<PathBuf>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -910,6 +911,7 @@ impl ProjectSandbox {
             lead_branch: None,
             adds_worktrees: false,
             agent_files: None,
+            node_bin: None,
         })
     }
 
@@ -1274,6 +1276,62 @@ impl ProjectSandbox {
         }
         granted_root(root, &owner_home()?, &self.secret_paths())?;
         self.read_roots.push(root.to_path_buf());
+        Ok(self)
+    }
+
+    /// Lets a Node script harness find the `node` beside it, as its sign-in does: under an npm
+    /// prefix ([`crate::harnesses::node_prefix`]) only `bin` and the harness's package folder
+    /// become readable, Seatbelt denying credential names such as `etc/npmrc` below each, and
+    /// `bin` goes first on PATH; a prefix in the project or agent-writable is skipped. Input:
+    /// the canonical program. Output: the sandbox, or a refusal of either folder.
+    pub fn allow_node_for(mut self, program: &Path) -> Result<Self, SandboxError> {
+        let Some(prefix) = crate::harnesses::node_prefix(program) else {
+            return Ok(self);
+        };
+        let Some(package) = node_package(&prefix, program) else {
+            return Ok(self);
+        };
+        let folders = [canonical(&prefix.join("bin"))?, canonical(&package)?];
+        let agents = folders.iter().any(|folder| {
+            crate::harnesses::in_crazyagent_folder(folder)
+                || folder.starts_with(&self.project_root)
+                || self
+                    .writable_roots()
+                    .any(|root| folder.starts_with(root) || root.starts_with(folder))
+        });
+        if agents {
+            return Ok(self);
+        }
+        for folder in folders {
+            let covered = SYSTEM_READ_ROOTS
+                .iter()
+                .map(Path::new)
+                .chain(self.read_roots.iter().map(PathBuf::as_path))
+                .chain(self.tool_roots.iter().map(PathBuf::as_path))
+                .any(|root| folder.starts_with(root));
+            if !covered {
+                self = self.allow_node_folder(&folder)?;
+            }
+        }
+        self.node_bin = Some(prefix.join("bin"));
+        assert!(self.node_bin.as_deref().is_some_and(Path::is_absolute));
+        Ok(self)
+    }
+
+    /// Grants one folder of a Node script harness read-only: under Seatbelt as a toolchain
+    /// folder, so every credential name below it stays denied, elsewhere as a read root.
+    /// Input: a canonical existing folder. Output: the widened sandbox, or a refusal when the
+    /// folder fails [`Self::allow_read`]'s checks or the toolchain folders are full.
+    fn allow_node_folder(mut self, folder: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            return self.allow_read(folder);
+        }
+        if self.tool_roots.len() >= TOOL_ROOTS_MAX {
+            return Err(invalid("too many toolchain folders"));
+        }
+        granted_root(folder, &owner_home()?, &self.secret_paths())?;
+        self.tool_roots.push(folder.to_path_buf());
+        assert!(self.tool_roots.len() <= TOOL_ROOTS_MAX);
         Ok(self)
     }
 
@@ -2501,14 +2559,18 @@ impl ProjectSandbox {
     }
 
     /// The variables every command this sandbox builds starts with: HOME, TMPDIR (the short
-    /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies, the
-    /// C locale and [`toolchains::agent_env`]. A harness's PATH also starts with the agent's
-    /// own `getconf` and `git` ([`toolchains::with_agent_git`]); an engine command's never
-    /// does. Takes whether the command is a harness. Returns the variables.
+    /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies after
+    /// any [`Self::allow_node_for`] folder, the C locale and [`toolchains::agent_env`]. Only a
+    /// harness's PATH starts with the agent's own `getconf` and `git`
+    /// ([`toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self.scratch.as_ref().unwrap_or(&self.agent_tmp);
         let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let path = match self.node_bin.as_deref().and_then(Path::to_str) {
+            Some(bin) => format!("{bin}:{path}"),
+            None => path,
+        };
         let path = if harness {
             toolchains::with_agent_git(&self.agent_home, path)
         } else {
@@ -3175,7 +3237,12 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// Codex launch, and no move or removal of the `skills` folder, so no folder built elsewhere
 /// is moved in, nor a flag on `skills` or anywhere in `.system` that would keep the engine
 /// from removing it (CTX-M1 r1), each name in any letter case. Its own run cannot change the
-/// text it runs with until the next launch rewrites it. They must follow every write allow.
+/// text it runs with until the next launch rewrites it. They also keep the agent's own
+/// keychain and keychain settings, which the engine sets up with `security` calls before a
+/// launch, out of its reach (DEC-146): no write under `Library/Keychains` nor to
+/// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link
+/// in place of `Library` or `Library/Preferences`, so no link an agent plants leads one of
+/// those calls to another keychain or settings file. They must follow every write allow.
 /// Input: the home. Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
@@ -3190,6 +3257,7 @@ fn launch_denies(home: &Path) -> String {
         "output-styles",
         "rules",
         ".agents",
+        "Library/Keychains",
     ];
     let files = [
         Harness::Claude.instruction_file(),
@@ -3197,6 +3265,7 @@ fn launch_denies(home: &Path) -> String {
         "AGENTS.override.md",
         "config.toml",
         "settings.json",
+        "Library/Preferences/com.apple.security.plist",
     ];
     let mut text = String::from("(deny file-write*\n");
     for folder in folders {
@@ -3213,7 +3282,12 @@ fn launch_denies(home: &Path) -> String {
         other_than(crate::launch_context::CODEX_SYSTEM_SKILLS),
         any_case(crate::launch_context::CODEX_SYSTEM_SKILLS)
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 15);
+    let library = format!("{home}/{}", any_case("Library"));
+    let preferences = format!("{library}/{}", any_case("Preferences"));
+    text.push_str(&format!(
+        "(deny {PINNED_WRITES}\n  (regex #\"^{library}$\")\n  (regex #\"^{preferences}$\"))\n(deny file-write-create\n  (require-all\n    (require-any\n      (regex #\"^{library}$\")\n      (regex #\"^{preferences}$\"))\n    (vnode-type SYMLINK)))\n"
+    ));
+    assert_eq!(text.matches("(regex #\"^/").count(), 21);
     text
 }
 
@@ -3364,6 +3438,22 @@ fn windows_clean_text(text: &str) -> bool {
 /// `canonicalize` adds to a drive path is removed, so the result equals the plain drive path;
 /// any other verbatim form stays as it is and fails [`clean_absolute`]. Input: the path.
 /// Output: the canonical path, or the I/O error.
+/// The npm package folder a Node script harness sits in: `<prefix>/lib/node_modules/<name>`,
+/// or `<prefix>/lib/node_modules/@scope/<name>` for a scoped package, which holds the
+/// harness's own dependencies. Inputs: the prefix and the program under it. Output: the
+/// folder, or none when the program is not inside one.
+fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
+    let modules = prefix.join("lib").join("node_modules");
+    let mut parts = program.strip_prefix(&modules).ok()?.components();
+    let first = parts.next()?.as_os_str();
+    let package = if first.to_str()?.starts_with('@') {
+        modules.join(first).join(parts.next()?.as_os_str())
+    } else {
+        modules.join(first)
+    };
+    (program != package.as_path() && program.starts_with(&package)).then_some(package)
+}
+
 pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
     let resolved = path.canonicalize()?;
     #[cfg(target_os = "windows")]

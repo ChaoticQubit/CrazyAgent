@@ -281,8 +281,11 @@ test("Agents tab coordination: each harness's mode and delivery, questions, over
   await choose(page, mode("claude-code"), "native");
   wanted.harnesses[0] = ["claude-code", "native", "auto"];
   await both("Claude Code on native teammates", wanted);
+  await choose(page, mode("codex"), "native");
+  wanted.harnesses[1] = ["codex", "native", "auto"];
+  await both("Codex on native sub-agents", wanted);
   await choose(page, delivery("codex"), "typing_only");
-  wanted.harnesses[1] = ["codex", "app_spawned", "typing_only"];
+  wanted.harnesses[1] = ["codex", "native", "typing_only"];
   await both("Codex messages by typing only", wanted);
   await me.click("Me directly", radios("Sub-agent questions go to"));
   wanted.questions = "me";

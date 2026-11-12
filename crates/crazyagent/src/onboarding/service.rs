@@ -1190,6 +1190,7 @@ pub fn start_for_engine(
     _project: &Path,
     _codex: Option<&Path>,
     _claude: Option<&Path>,
+    _lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<OnboardingService, String> {
     Err("onboarding_runtime_unavailable".into())
 }
@@ -1207,6 +1208,7 @@ pub fn start_for_engine(
     project: &Path,
     codex: Option<&Path>,
     claude: Option<&Path>,
+    lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<OnboardingService, String> {
     let runtime = runtime
         .canonicalize()
@@ -1243,6 +1245,9 @@ pub fn start_for_engine(
         runner = runner
             .with_claude(claude)
             .map_err(|error| error.to_string())?;
+    }
+    if let Some(lookup) = lookup {
+        runner = runner.with_harness_lookup(lookup);
     }
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
     Ok(OnboardingService::begin(

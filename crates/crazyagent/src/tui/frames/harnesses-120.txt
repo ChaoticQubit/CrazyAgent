@@ -3,7 +3,8 @@
   @ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   § Process   ⁂ Memory 41   ◉ Profile          
 ───────────────────────────────━━━━━━━━━━━━━━━━━━───────────────────────────────────────────────────────────────────────
   Harnesses                                                                                           2 of 9 installed  
-  Agents run inside these tools. CrazyAgent finds them on this Mac and never installs them.                             
+  Agents run inside these tools. CrazyAgent finds them on this Mac. It can install one with Homebrew or npm and update  
+  one with that harness's own updater, each only when you choose it.                                                    
                                                                                                                         
     Harness         Status           Control            Works with                                                      
   > Codex           ✓ Ready          Full control       ChatGPT, OpenAI API                                             
@@ -32,5 +33,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
-                                                                                                                        
- ↑↓ Move   r Check again   Shift-←→ Sections   Esc Home                                                          ? Help 
+ ↑↓ Move   r Check again   c Check for updates   u Update   Shift-←→ Sections   Esc Home                         ? Help 

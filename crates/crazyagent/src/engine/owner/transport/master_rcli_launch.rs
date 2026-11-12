@@ -42,7 +42,7 @@ impl OwnerRuntimeHandle {
                 session_id: prepared.session.session_id.clone(),
                 instance_id,
                 connection: prepared.attempt.connection.clone(),
-                target_profile_ref: prepared.session.selection.target_profile_ref.clone(),
+                target_profile_ref: prepared.attempt.request.target_profile_ref.clone(),
             },
             executable: executable_path,
             artifact_sha256,
@@ -90,18 +90,17 @@ fn validate_prepared(
     if session.phase != MasterSessionPhase::Configured
         || session.current_turn.is_none()
         || session.owner.origin != "native_owner"
-        || session.owner.engine_epoch != identity.engine_epoch
+        || session.engine_epoch() != identity.engine_epoch
         || prepared.attempt.completion.is_some()
         || request.project_id != session.project_id
         || !prepared.attempt_on_current_turn()
         || request.role != Role::ProjectLeader
         || request.pool_ref != session.selection.pool_ref
-        || request.target_profile_ref != session.selection.target_profile_ref
-        || request.route != session.selection.route
+        || (request.target_profile_ref.clone(), request.route.clone())
+            != crate::storage::member_request(session, connection)
         || request.route.account_ref != connection.account_ref
-        || prepared.attempt.config_id != session.config_id
-        || binding.config_id != session.config_id
-        || binding.source_hash != session.source_hash
+        || &prepared.attempt.config_id != session.binding().0
+        || (&binding.config_id, binding.source_hash.as_str()) != session.binding()
         || binding.connection != *connection
         || lease.state != LeaseState::Ready
         || lease.project_id != session.project_id
@@ -560,6 +559,7 @@ fallback_allowed = false
             tools_off: prepared.tools_off.clone(),
             steps: prepared.steps,
             time: prepared.time,
+            frames: prepared.frames,
         }
     }
 

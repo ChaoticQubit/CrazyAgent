@@ -30,6 +30,15 @@ impl CodexHostProtocol {
         })
     }
 
+    /// Bounds each frame the host writes by the owner's master frame size limit (F39), before
+    /// its first frame. Input: the bound in bytes, from the engine wire frame to
+    /// `master_frame_limit::BYTES_MAX`. Output: none.
+    pub fn limit_frames(&mut self, bytes: usize) {
+        assert_eq!(self.protocol.state(), State::New);
+        self.protocol = std::mem::take(&mut self.protocol).with_frame_limit(bytes);
+        assert_eq!(self.protocol.frame_limit(), bytes);
+    }
+
     pub fn initialize(&mut self) -> Result<Vec<u8>, EngineError> {
         self.protocol.initialize().map_err(protocol_error)
     }
@@ -128,6 +137,12 @@ impl CodexHostProtocol {
 
     pub fn state(&self) -> State {
         self.protocol.state()
+    }
+
+    /// The steps the running turn has taken, as the master step limit counts them (PA-9).
+    /// Input: none. Output: the count.
+    pub fn steps(&self) -> u16 {
+        self.protocol.steps()
     }
 
     /// Names the frame the Codex protocol last refused, for the master's stream diagnostic.

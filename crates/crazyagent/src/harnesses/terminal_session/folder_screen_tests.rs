@@ -373,3 +373,111 @@ fn a_launch_with_no_codex_folder_presses_nothing_and_is_ready_at_the_box() {
     assert_eq!(pane.keys(), Vec::<String>::new());
     pane.close();
 }
+
+/// Writes a Codex rollout for the pane's working folder into its home's sessions, as Codex
+/// 0.164 does, and returns its path. Takes the pane and the lines after the session meta.
+fn codex_rollout(pane: &Pane, lines: &[&str]) -> PathBuf {
+    let base = pane._root.path().canonicalize().unwrap();
+    let folder = base.join("home").join("sessions").join("2026/11/11");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("rollout-2026-11-11T13-00-00-background.jsonl");
+    let meta = serde_json::json!({
+        "type": "session_meta",
+        "payload": {"id": "s", "cwd": base.join("work").to_string_lossy(), "history_mode": "paginated"}
+    });
+    let mut body = format!("{meta}\n");
+    for line in lines {
+        body.push_str(line);
+        body.push('\n');
+    }
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+/// Appends lines to a rollout. Takes the path and the lines.
+fn append_rollout(path: &Path, lines: &[&str]) {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    for line in lines {
+        writeln!(file, "{line}").unwrap();
+    }
+}
+
+/// Reads the session's events until none comes for half a second. Takes the pane.
+/// Returns the events.
+fn pane_events(pane: &mut Pane) -> Vec<crate::harnesses::launch::LaunchEvent> {
+    let mut events = Vec::new();
+    while let Some(event) = pane.session.next_event(Duration::from_millis(500)).unwrap() {
+        events.push(event);
+    }
+    events
+}
+
+const CODEX_TURN: &str = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+const CODEX_EXEC: &str = r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{\"cmd\":\"sleep 40\"}"}}"#;
+const CODEX_RUNNING: &str = r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"Chunk ID: 1\nWall time: 10.0 seconds\nProcess running with session ID 4821\nOutput:\n"}}"#;
+const CODEX_REPLY: &str = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Waiting for the check."}]}}"#;
+const CODEX_DONE: &str = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Waiting for the check."}}"#;
+const CODEX_ENDED: &str = r#"{"type":"event_msg","payload":{"type":"item_completed","thread_id":"t","turn_id":"u","item":{"type":"CommandExecution","id":"c1","process_id":"4821","command":["sleep","40"],"cwd":"/w","parsed_cmd":[],"source":"agent","status":"completed","exit_code":0}}}"#;
+
+/// A Codex pane holds its engine-typed turn for a command it left running in the background
+/// as a Claude Code pane does (PA-10): the turn's end is not given while the command runs,
+/// and since Codex starts no turn when the command ends, the session ends the held turn
+/// itself once Codex records that end. A command whose end is read before its start holds
+/// nothing.
+#[test]
+fn a_codex_pane_holds_its_turn_for_a_background_command_until_codex_records_its_end() {
+    use crate::harnesses::launch::LaunchEvent;
+    let mut pane = start("codex-background", INPUT_BOX, None, false);
+    assert!(pane.ready_within(READY_WITHIN));
+    assert!(pane.session.reader.reports_background());
+    pane.session.send("Run the check.").unwrap();
+    let path = codex_rollout(
+        &pane,
+        &[
+            CODEX_TURN,
+            CODEX_EXEC,
+            CODEX_RUNNING,
+            CODEX_REPLY,
+            CODEX_DONE,
+        ],
+    );
+    let first = pane_events(&mut pane);
+    assert!(
+        !first
+            .iter()
+            .any(|event| matches!(event, LaunchEvent::TurnFinished { .. })),
+        "{first:?}"
+    );
+    assert!(pane.session.held(), "{first:?}");
+    assert_eq!(pane.session.background_running(), 1);
+
+    append_rollout(&path, &[CODEX_ENDED]);
+    let last = pane_events(&mut pane);
+    assert_eq!(last, vec![LaunchEvent::TurnFinished { success: true }]);
+    assert!(!pane.session.held());
+    assert_eq!(pane.session.background_running(), 0);
+
+    pane.session.send("Run it again.").unwrap();
+    let early = CODEX_ENDED.replace("4821", "4822");
+    let late = CODEX_RUNNING.replace("4821", "4822");
+    append_rollout(
+        &path,
+        &[
+            CODEX_TURN,
+            CODEX_EXEC,
+            &early,
+            &late,
+            CODEX_REPLY,
+            CODEX_DONE,
+        ],
+    );
+    let again = pane_events(&mut pane);
+    assert!(
+        again.contains(&LaunchEvent::TurnFinished { success: true }),
+        "{again:?}"
+    );
+    assert!(!pane.session.held());
+    assert_eq!(pane.session.background_running(), 0);
+    pane.close();
+}

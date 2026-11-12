@@ -396,7 +396,11 @@ impl Questions {
         }
         if inbox.questions.is_empty() && inbox.more == 0 {
             lines.push(styled(
-                cut("No questions for you.", limit, ctx.glyphs.ellipsis),
+                cut(
+                    "No questions here. Agents' questions wait on the Questions page.",
+                    limit,
+                    ctx.glyphs.ellipsis,
+                ),
                 Role::Muted,
                 theme,
             ));

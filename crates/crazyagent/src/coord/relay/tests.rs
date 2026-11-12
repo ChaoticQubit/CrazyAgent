@@ -503,6 +503,7 @@ fn an_overlap_question_is_answered_with_other_agents_active_claims_only() {
             serde_json::to_vec(&Ask {
                 to: to.to_owned(),
                 path: path.to_owned(),
+                more: Vec::new(),
             })
             .unwrap(),
         )
@@ -776,4 +777,95 @@ fn a_letters_wake_line_holds_none_of_the_seven_breaks() {
             "{line_break:?}"
         );
     }
+}
+
+/// A Codex agent's mailbox serves its edit guard alone (PA-12): the engine answers one
+/// overlap question for every file of a patch with the other agents' claims, holds a
+/// question naming more than `ASK_PATHS_MAX` files (PA1213-F2), and writes it no letters,
+/// which its app-server bridge or typing delivers; its hook command runs the engine's
+/// `codex-edit` hook on that mailbox, and a path a shell could misread is refused.
+#[test]
+fn a_codex_mailbox_answers_overlap_questions_and_takes_no_letters() {
+    let team = Team::new();
+    let lead = team.agent("sub_agent", None, None);
+    let other = team.agent("sub_agent", None, None);
+    team.db
+        .execute("UPDATE team_agents SET harness='codex' WHERE id=?1", [lead])
+        .unwrap();
+    crate::coord::start_work(
+        &team.db,
+        &team.project,
+        other,
+        "Parser".to_owned(),
+        vec!["src/a.rs".to_owned()],
+        now(),
+    )
+    .unwrap();
+    let to_codex = team.note(other, lead, "Take the lexer.");
+    let held = format!("{:032x}", 1);
+    let wide = format!("{:032x}", 2);
+    let ask = |id: &str, more: Vec<String>| {
+        std::fs::write(
+            team.entry(&format!("{id}{ASK}")),
+            serde_json::to_vec(&Ask {
+                to: LEAD_TAG.to_owned(),
+                path: "src/z.rs".to_owned(),
+                more,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    ask(&held, vec!["src/y.rs".to_owned(), "src/a.rs".to_owned()]);
+    ask(
+        &wide,
+        (0..ASK_PATHS_MAX).map(|n| format!("src/f{n}.rs")).collect(),
+    );
+
+    team.serve(lead, false);
+
+    let answer = |id: &str| {
+        let bytes = std::fs::read(team.entry(&format!("{id}{ANSWER}"))).unwrap();
+        serde_json::from_slice::<Answer>(&bytes).unwrap().held
+    };
+    assert_eq!(
+        answer(&held),
+        [Held {
+            by: crate::team::events::label(&team.db, other).unwrap(),
+            pattern: "src/a.rs".to_owned(),
+        }],
+        "one answer covers every file of the patch (PA1213-F2)"
+    );
+    assert_eq!(
+        answer(&wide),
+        [Held {
+            by: "CrazyAgent".to_owned(),
+            pattern: "more files than one check reads; split the patch".to_owned(),
+        }],
+        "a question past ASK_PATHS_MAX files is held, never read in part"
+    );
+    assert_eq!(team.letter(to_codex), None, "no letter for a Codex agent");
+    assert_eq!(team.receipt(to_codex), Receipt::Sent);
+    assert!(
+        team.entry(ROSTER_FILE).is_file(),
+        "its guard reads the roster"
+    );
+
+    let engine = Path::new("/opt/crazy agent/bin/crazyagent");
+    let fresh = team.home.join("codex-calls");
+    assert_eq!(
+        codex_edit_hook(&fresh, engine).unwrap(),
+        format!(
+            "'/opt/crazy agent/bin/crazyagent' coord-hook codex-edit '{}'",
+            fresh.display()
+        )
+    );
+    assert_eq!(mode(&fresh) & 0o777, 0o700);
+    for bad in ["/tmp/it's", "/tmp/$HOME", "relative/calls"] {
+        assert_eq!(
+            codex_edit_hook(Path::new(bad), engine).unwrap_err().0,
+            "coord_relay_path_invalid"
+        );
+    }
+    assert_eq!(CODEX_EDIT_MATCHER, "apply_patch|Bash");
 }

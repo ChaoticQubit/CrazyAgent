@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
+import { chromeExecutable, startChrome } from "./chrome.mjs";
 
-const CHROME = process.env.CRAZYAGENT_CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const STARTUP_MS = 15000;
 const CALL_MS = 15000;
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -82,25 +80,13 @@ async function connect(url) {
   return { send, on, close: () => socket.close() };
 }
 
-/** Starts the one headless Google Chrome a test file's pages run in, before any test starts, so
- * its start counts against STARTUP_MS and never against a test's own time. Chrome stops once the
- * file has nothing left to run, or is killed if the process ends another way. Output: the
- * DevTools origin and browser endpoint. */
+/** Starts the one headless Chrome for Testing named by CRAZYAGENT_CHROME that a test file's pages
+ * run in, before any test starts, so its start counts against STARTUP_MS and never against a
+ * test's own time. Chrome stops once the file has nothing left to run; `startChrome` kills it and
+ * removes its profile if the process exits or is signalled first. Output: the DevTools origin and
+ * browser endpoint. */
 async function launch() {
-  assert.ok(existsSync(CHROME), `these tests need Google Chrome at ${CHROME}; set CRAZYAGENT_CHROME to its executable`);
-  const profile = mkdtempSync(join(tmpdir(), "ca-chrome-"));
-  const chrome = spawn(CHROME, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`,
-    "--no-first-run", "--no-default-browser-check", "--disable-extensions", "about:blank"], { stdio: "ignore" });
-  const exited = new Promise((resolve) => chrome.once("exit", resolve));
-  const running = () => chrome.exitCode === null && chrome.signalCode === null;
-  chrome.unref();
-  process.once("exit", () => { if (running()) chrome.kill("SIGKILL"); });
-  const stop = async () => {
-    chrome.ref();
-    if (running()) chrome.kill("SIGTERM");
-    await exited;
-    rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-  };
+  const { chrome, profile, stop } = startChrome(chromeExecutable());
   try {
     const endpoint = await devtoolsEndpoint(profile, chrome);
     const browser = await connect(endpoint.browser);

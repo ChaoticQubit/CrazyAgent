@@ -56,9 +56,11 @@ class SandboxedPty {
     #closed = new Signal();
     onDidWrite = this.#wrote.event;
     onDidClose = this.#closed.event;
+    ready;
     #open;
     #level;
     #text = new TextDecoder("utf-8");
+    #settle = () => undefined;
     #socket;
     #size = SIZE_DEFAULT;
     #attached = false;
@@ -66,6 +68,9 @@ class SandboxedPty {
     constructor(open, level) {
         this.#open = open;
         this.#level = level;
+        this.ready = new Promise((resolve) => {
+            this.#settle = resolve;
+        });
     }
     open(initial) {
         const opened = clampSize(initial);
@@ -114,6 +119,7 @@ class SandboxedPty {
         if (this.#ended)
             return;
         this.#ended = true;
+        this.#settle(false);
         this.#send({ kind: "detach" });
         this.#socket?.end();
     }
@@ -122,6 +128,7 @@ class SandboxedPty {
             return;
         if (!this.#attached && frame.kind === "ok") {
             this.#attached = true;
+            this.#settle(true);
         }
         else if (!this.#attached && frame.kind === "rejected") {
             this.#stop(String(frame.code));
@@ -142,6 +149,7 @@ class SandboxedPty {
         if (this.#ended)
             return;
         this.#ended = true;
+        this.#settle(false);
         this.#socket?.destroy();
         const rest = this.#text.decode();
         if (rest.length > 0)

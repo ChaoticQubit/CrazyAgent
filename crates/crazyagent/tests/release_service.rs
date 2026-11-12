@@ -171,7 +171,7 @@ fn a_path_harness_the_engine_cannot_register_is_skipped_not_fatal() {
     let stderr = stopped_stderr(Engine(child));
     assert!(
         stderr.contains(&format!(
-            "codex at {} could not be registered (native_auth_host_executable_unsafe)",
+            "the found codex file {} is not used (harness_path_changeable)",
             codex.display()
         )),
         "{stderr}"

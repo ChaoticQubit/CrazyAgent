@@ -1,6 +1,13 @@
 use super::*;
+use crate::harnesses::finding::{self, Found};
+use crate::harnesses::update::{
+    CheckWhen, HarnessVersions, InstallFromApp, OnlineLookup, UpdateMode,
+};
 use crate::harnesses::{HarnessEntry, Search};
 use serde::{Deserialize, Serialize};
+
+mod updates;
+pub(super) use updates::{UPDATES_TIMEOUT, slow};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -8,18 +15,59 @@ struct Envelope {
     harness_catalog: Action,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
     List,
     Check,
+    Versions {
+        id: String,
+        look: bool,
+    },
+    Update {
+        id: String,
+    },
+    Install {
+        id: String,
+    },
+    Settings,
+    SetSettings {
+        mode: UpdateMode,
+        when: CheckWhen,
+        online: OnlineLookup,
+        install: InstallFromApp,
+    },
+    Find {
+        id: String,
+    },
+    ChoosePath {
+        id: String,
+        path: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum WireReply {
-    Catalog { entries: Vec<HarnessEntry> },
-    Rejected { code: String },
+    Catalog {
+        entries: Vec<HarnessEntry>,
+    },
+    Rejected {
+        code: String,
+    },
+    Versions {
+        versions: Box<HarnessVersions>,
+    },
+    Started,
+    Settings {
+        mode: UpdateMode,
+        when: CheckWhen,
+        online: OnlineLookup,
+        install: InstallFromApp,
+    },
+    Found {
+        found: Found,
+    },
 }
 
 impl OwnerClient {
@@ -70,13 +118,38 @@ impl OwnerClient {
                 })
             })? {
                 WireReply::Catalog { entries } if !entries.is_empty() => Ok(entries),
-                WireReply::Catalog { .. } => Err(failure("harness_catalog_reply_invalid")),
                 WireReply::Rejected { code } => Err(EngineError(code)),
+                _ => Err(failure("harness_catalog_reply_invalid")),
             }
         })
         .await
         .map_err(|_| failure("harness_catalog_timeout"))?
     }
+}
+
+/// Has Check again pin Codex and Claude Code when the engine started without them, after the
+/// grant is checked, so the list and sign-in agree without a restart; a harness that is
+/// still missing or refused only stays out of the pinned slots. Inputs: the engine,
+/// authority, packet, admission and runtime. Output: Ok, or the grant refusal.
+async fn look_again(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    packet: &[u8; 37],
+    admission: &Admission,
+    runtime: &OwnerRuntimeHandle,
+) -> Result<(), EngineError> {
+    {
+        let _barrier = engine.owner_egress.write().await;
+        if &authority.authenticate(packet)? != admission {
+            return Err(failure("owner_grant_stale_or_revoked"));
+        }
+    }
+    for id in finding::CHOOSABLE {
+        if let Ok(Found::Refused { code, .. }) = runtime.look_again(id) {
+            eprintln!("{id} was found on Check again but not used ({code})");
+        }
+    }
+    Ok(())
 }
 
 /// Encodes this protocol's refusal of a request the engine did not run.
@@ -94,7 +167,7 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    if bytes.len() > 256 {
+    if bytes.len() > updates::REQUEST_BYTES_MAX {
         return Err(failure("harness_catalog_request_bounds"));
     }
     let Envelope {
@@ -104,7 +177,12 @@ pub(super) async fn serve(
         engine: engine.clone(),
         authority: authority.clone(),
     };
-    let mut search = Search::from_environment();
+    if matches!(action, Action::Check) {
+        look_again(engine, authority, packet, admission, &runtime).await?;
+    }
+    let mut search = runtime
+        .held_search()?
+        .unwrap_or_else(Search::from_environment);
     for (id, executable) in [
         ("codex", runtime.registered_codex_executable()),
         ("claude-code", runtime.registered_claude_executable()),
@@ -115,6 +193,9 @@ pub(super) async fn serve(
         {
             search = search.with_registered(id, path.to_path_buf());
         }
+    }
+    if !matches!(action, Action::List | Action::Check) {
+        return updates::serve(stream, engine, authority, packet, admission, search, action).await;
     }
     let entries = engine
         .harness_probe

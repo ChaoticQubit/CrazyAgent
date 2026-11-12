@@ -135,7 +135,7 @@ test("Background commands at task end defaults to a 30 minute grace time, offers
   assert.match(unset, /<option value="wait">Wait for them<\/option><option value="grace" selected="">Stop them after a grace time<\/option><option value="stop">Stop them when the turn ends<\/option>/);
   assert.match(unset, /<label for="tg-grace-chores">Grace time in seconds<\/label><input id="tg-grace-chores"[^>]* value="1800"/, "with no choice saved the 30 minute default shows");
   assert.ok(unset.includes("The default is a grace time of 30 minutes (1800 seconds)."), "the setting says its default");
-  assert.ok(unset.includes("Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice."), "the setting says which agents it acts on");
+  assert.ok(unset.includes("Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none."), "the setting says which agents it acts on");
   const wait = render({ background_at_end: { mode: "wait" } });
   assert.match(wait, /<option value="wait" selected="">Wait for them<\/option><option value="grace">Stop them after a grace time<\/option><option value="stop">Stop them when the turn ends<\/option>/);
   assert.doesNotMatch(wait, /id="tg-grace-chores"/, "no grace time to type while Wait is on");

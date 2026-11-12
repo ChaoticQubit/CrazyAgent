@@ -1,0 +1,18 @@
+#!/bin/bash
+real="${CRAZYAGENT_REAL_HDIUTIL:-/usr/bin/hdiutil}"
+tries=3
+if [ "$#" -lt 2 ] || [ "$1" != create ]; then exec "$real" "$@"; fi
+image="${!#}"
+case "$image" in ""|-*) exec "$real" "$@" ;; esac
+if [ -e "$image" ] || [ -e "$image.dmg" ]; then exec "$real" "$@"; fi
+try=1
+while true; do
+  echo "hdiutil-retry: hdiutil create, try $try of $tries" >&2
+  "$real" "$@"
+  status=$?
+  if [ "$status" -eq 0 ] || [ "$try" -ge "$tries" ]; then exit "$status"; fi
+  rm -rf "$image" "$image.dmg"
+  echo "hdiutil-retry: hdiutil create failed with status $status; removed the partial image, trying again" >&2
+  sleep $((try * 5))
+  try=$((try + 1))
+done

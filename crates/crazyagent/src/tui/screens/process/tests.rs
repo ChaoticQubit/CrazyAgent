@@ -705,7 +705,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         "{shown}"
     );
     assert!(
-        shown.contains("Keep transcripts for headless Claude runs: On"),
+        shown.contains("Keep transcripts for headless runs: On"),
         "{shown}"
     );
     assert!(shown.contains("Ctrl-F changes"), "{shown}");
@@ -751,10 +751,15 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         version += 1;
         shell.arrive(settings(save, Ok(at(stored, version))));
         let words = if transcripts { ": On" } else { ": Off" };
-        assert!(
-            screen(&mut shell)
-                .contains(&format!("Keep transcripts for headless Claude runs{words}"))
-        );
+        let shown = screen(&mut shell);
+        assert!(shown.contains(&format!("Keep transcripts for headless runs{words}")));
+        for harness in ["Claude Code", "Codex"] {
+            assert_eq!(
+                shown.contains(harness),
+                !transcripts,
+                "DEC-141 PA-14: Off says what each headless harness keeps: {shown}"
+            );
+        }
     }
     for (edits, words, note) in [
         (
@@ -807,7 +812,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     let shown = screen(&mut shell);
     let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
     assert!(
-        shown.contains("Keep transcripts for headless Claude runs: On"),
+        shown.contains("Keep transcripts for headless runs: On"),
         "{shown}"
     );
     assert!(
@@ -994,7 +999,7 @@ fn a_stale_agent_setting_reads_the_saved_settings_again_and_the_next_change_name
         "{shown}"
     );
     assert!(
-        shown.contains("Keep transcripts for headless Claude runs: Off"),
+        shown.contains("Keep transcripts for headless runs: Off"),
         "{shown}"
     );
     shell.key(Key::Ctrl('t'));
@@ -1073,7 +1078,7 @@ fn a_settings_save_the_engine_cannot_confirm_reads_the_settings_again_before_the
     shell.arrive(adoption_reply(&project, Ok(no_agents(&project))));
     let shown = screen(&mut shell);
     assert!(
-        shown.contains("Keep transcripts for headless Claude runs: Off"),
+        shown.contains("Keep transcripts for headless runs: Off"),
         "{shown}"
     );
     shell.key(Key::Ctrl('t'));

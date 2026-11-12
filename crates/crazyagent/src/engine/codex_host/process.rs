@@ -2,6 +2,7 @@ use super::process_custody;
 use crate::adapters::codex::FRAME_BYTES_MAX;
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::protocol::ProjectId;
 use crate::routing::ResourceBudget;
 use std::collections::VecDeque;
 use std::process::{Command, ExitStatus};
@@ -72,6 +73,7 @@ pub(super) struct CodexHostProcess {
     close_time: Duration,
     pid: u32,
     pending_input: Option<PendingInput>,
+    frame_max: usize,
 }
 
 struct PendingInput {
@@ -92,13 +94,14 @@ impl CodexHostProcess {
     /// Starts the harness under custody with its account lease. A Full access harness,
     /// `unconfined`, has what it left outside its group checked when it ends, which a close
     /// waits `STOP_TIME` longer for. Inputs: the wrapped command, the budget, the wall clock
-    /// the harness runs under, none for no clock, the lease and whether the harness runs
+    /// the harness runs under, none for no clock, the lease with the project whose leftover
+    /// setting and owner view what it leaves running follow, and whether the harness runs
     /// unconfined. Output: the running process or a plain code.
     pub(super) async fn spawn_guarded(
         command: Command,
         budget: &ResourceBudget,
         run_time: Option<Duration>,
-        profile: Option<NativeProfileUse>,
+        lease: Option<(NativeProfileUse, ProjectId)>,
         unconfined: bool,
     ) -> Result<Self, EngineError> {
         budget.validate().map_err(EngineError)?;
@@ -131,7 +134,7 @@ impl CodexHostProcess {
             .name("codex-host-custody".into())
             .spawn(move || {
                 process_custody::run(
-                    command, profile, unconfined, receiver, retained, deadline, limit,
+                    command, lease, unconfined, receiver, retained, deadline, limit,
                 );
             })
             .map_err(|_| EngineError("codex_host_custodian_unavailable".into()))?;
@@ -149,6 +152,7 @@ impl CodexHostProcess {
             close_time,
             pid: 0,
             pending_input: None,
+            frame_max: FRAME_BYTES_MAX,
         };
         process.await_start().await?;
         assert!(process.pid() > 1);
@@ -205,8 +209,17 @@ impl CodexHostProcess {
         }
     }
 
+    /// Bounds each frame this process takes for the harness by the owner's master frame size
+    /// limit (F39) in place of the engine wire frame. Input: the bound in bytes, from
+    /// `FRAME_BYTES_MAX` to `master_frame_limit::BYTES_MAX`. Output: none.
+    pub(super) fn limit_input(&mut self, bytes: usize) {
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&bytes));
+        assert!(self.pending_input.is_none());
+        self.frame_max = bytes;
+    }
+
     pub(super) async fn send(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
-        if bytes.is_empty() || bytes.len() > FRAME_BYTES_MAX + 1 {
+        if bytes.is_empty() || bytes.len() > self.frame_max + 1 {
             return Err(EngineError("codex_host_input_limit".into()));
         }
         if self.shared.close_stdin.load(Ordering::Acquire) {

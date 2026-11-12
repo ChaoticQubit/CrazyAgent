@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { reduceNativeAuth, nativeAuthFailureCode, nativeAuthError } = await import("../src/native-auth.ts");
+const { reduceNativeAuth, nativeAuthFailureCode, nativeAuthError, SIGN_IN_WAYS, signInMethodFor, signInWay, signInWayUnavailable } = await import("../src/native-auth.ts");
 const { SignInPanel } = await import("../src/screens/settings/sign-in.tsx");
 
 function syntheticDetail() {
@@ -96,7 +96,12 @@ test("synthetic typed selection opens inspectable auth without starting or editi
   assert.equal(state.in_flight, undefined);
   const existing = reduceNativeAuth(state, { kind: "begin", action: "codex_existing", request: 1 });
   assert.deepEqual(existing.in_flight, { action: "codex_existing", request: 1 });
-  assert.match(markup(state, { method: "codex_existing" }), /Codex itself is not changed\.[\s\S]*>Use this sign-in<\/button>/);
+  assert.match(markup(state, { method: "codex_existing" }), /Nothing else on this Mac is read\.[\s\S]*>Check this account&#x27;s sign-in<\/button>/);
+  const claudeCheck = structuredClone(detail);
+  claudeCheck.record.connection.harness = "claude";
+  assert.deepEqual(reduceNativeAuth(opened(claudeCheck), { kind: "begin", action: "claude_existing", request: 1 }).in_flight,
+    { action: "claude_existing", request: 1 });
+  assert.equal(reduceNativeAuth(opened(claudeCheck), { kind: "begin", action: "codex_existing", request: 1 }).in_flight, undefined);
   assert.match(markup(state), />Get sign-in code<\/button>/);
   const wrong = reduceNativeAuth(state, { kind: "begin", action: "claude_official", request: 1 });
   assert.equal(wrong.in_flight, undefined);
@@ -118,7 +123,7 @@ test("synthetic typed selection opens inspectable auth without starting or editi
     assert.ok(blocked.error);
     assert.equal(reduceNativeAuth(blocked, { kind: "begin", action: "codex_browser", request: 1 }).in_flight, undefined);
     assert.match(markup(blocked), /role="alert"/);
-    assert.doesNotMatch(markup(blocked), /Get sign-in code|Use this sign-in/);
+    assert.doesNotMatch(markup(blocked), /Get sign-in code|Check this account/);
   }
 });
 
@@ -273,7 +278,7 @@ test("the sign-in panel offers no read or cancel without an operation, and the r
     phase: "unavailable", code: "native_auth_host_unavailable", challenge: null,
   }));
   assert.equal(unavailable.presentation.phase, "unavailable");
-  assert.match(markup(unavailable), /Codex isn&#x27;t installed on this Mac, so ChatGPT sign-in isn&#x27;t available\./);
+  assert.match(markup(unavailable), /CrazyAgent didn&#x27;t find a Codex it can run on this Mac, so ChatGPT sign-in isn&#x27;t available\. Install Codex, then choose Check again, or choose its file\./);
   assert.doesNotMatch(markup(unavailable), /native_auth_host_unavailable/);
   assert.doesNotMatch(markup(unavailable), /SYNTHETIC_STATE|SYNTHETIC_EMAIL/);
 });
@@ -285,4 +290,31 @@ test("PROTO-3-LOWS: a busy engine reads as busy, never as an uncertain delivery"
     nativeAuthFailureCode({ code: "owner_busy_elsewhere" }),
     "native_auth_outcome_unknown_read_same_operation",
   );
+});
+
+test("every harness kind maps each sign-in way the same as the engine, or says it has none (DEC-141 PA-13)", () => {
+  const expected = {
+    claude: { browser: "claude_official", code: undefined, check: "claude_existing" },
+    codex: { browser: "codex_browser", code: "codex_device_code", check: "codex_existing" },
+    rcli: { browser: undefined, code: undefined, check: undefined },
+  };
+  const seen = new Set();
+  for (const [harness, ways] of Object.entries(expected)) {
+    for (const way of SIGN_IN_WAYS) {
+      const method = signInMethodFor(harness, way);
+      assert.equal(method, ways[way], `${harness} ${way}`);
+      if (method) {
+        assert.equal(signInWay(method), way);
+        assert.ok(!seen.has(method), method);
+        seen.add(method);
+        assert.equal(signInWayUnavailable(harness, way), undefined);
+      } else {
+        assert.ok(signInWayUnavailable(harness, way), `${harness} ${way} says why`);
+      }
+    }
+    assert.ok(signInMethodFor(harness, "check") === undefined || signInMethodFor(harness, "browser"), `${harness} checks only what it can sign in`);
+  }
+  assert.equal(seen.size, 5);
+  assert.equal(signInWayUnavailable("claude", "code"), "Claude Code has no sign-in code. It signs in through your browser.");
+  assert.equal(signInMethodFor("constructor", "browser"), undefined);
 });

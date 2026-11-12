@@ -1213,6 +1213,7 @@ pub(in crate::tui) mod tests {
             name: name.into(),
             provider: "Claude".into(),
             status: status.label().into(),
+            no_window: None,
         }
     }
 

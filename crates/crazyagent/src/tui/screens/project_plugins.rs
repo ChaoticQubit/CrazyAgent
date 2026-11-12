@@ -720,14 +720,18 @@ impl ProjectPlugins {
 
     fn heading(&self, name: &str, count: usize, content: usize, look: &Look) -> Row {
         let left = Row::of(name, look.heading).push(format!("  {count}"), look.muted);
-        if name == "Skills" {
-            spread(
+        match name {
+            "Skills" => spread(
                 content,
                 left,
                 Row::of("From Settings, plus this project", look.muted),
-            )
-        } else {
-            left
+            ),
+            "Hooks" => spread(
+                content,
+                left,
+                Row::of(crate::coord::settings::HOOKS_NONE_SHORT, look.muted),
+            ),
+            _ => left,
         }
     }
 

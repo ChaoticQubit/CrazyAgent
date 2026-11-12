@@ -19,6 +19,7 @@ mod coord;
 mod ide;
 mod intake;
 mod memory;
+mod overview;
 mod owner_setup;
 mod plugins;
 mod process;
@@ -46,6 +47,77 @@ impl OwnerController {
             .as_ref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?;
         client.harness_catalog(check).await
+    }
+
+    fn harness_client(&self) -> Result<&Arc<OwnerClient>, EngineError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))
+    }
+
+    /// Reads one harness's versions row for the Harnesses page. Inputs: the catalog id and
+    /// whether the engine should check for a newer version now. Output: the row, the
+    /// engine's refusal code, or `controller_disconnected` without a connection.
+    pub async fn harness_versions(
+        &self,
+        id: &str,
+        look: bool,
+    ) -> Result<crate::harnesses::update::HarnessVersions, EngineError> {
+        self.harness_client()?.harness_versions(id, look).await
+    }
+
+    /// Starts the update of one installed harness after the owner confirmed its command.
+    /// Input: the catalog id. Output: Ok once it runs in the background, the engine's
+    /// refusal code, or `controller_disconnected` without a connection.
+    pub async fn harness_update(&self, id: &str) -> Result<(), EngineError> {
+        self.harness_client()?.harness_update(id).await
+    }
+
+    /// Starts the install of one harness that is not installed after the owner confirmed
+    /// its command. Input: the catalog id. Output: Ok once it runs in the background, the
+    /// engine's refusal code, or `controller_disconnected` without a connection.
+    pub async fn harness_install(&self, id: &str) -> Result<(), EngineError> {
+        self.harness_client()?.harness_install(id).await
+    }
+
+    /// Has the engine look for Codex or Claude Code again and pin it when it can. Input: the
+    /// catalog id. Output: what was found, the engine's refusal code, or
+    /// `controller_disconnected` without a connection.
+    pub async fn harness_find(
+        &self,
+        id: &str,
+    ) -> Result<crate::harnesses::finding::Found, EngineError> {
+        self.harness_client()?.harness_find(id).await
+    }
+
+    /// Saves, or with none clears, the file the owner chose for Codex or Claude Code, then
+    /// looks again with it. Inputs: the catalog id and the absolute path. Output: what was
+    /// found, the engine's refusal code, or `controller_disconnected` without a connection.
+    pub async fn harness_choose_path(
+        &self,
+        id: &str,
+        path: Option<&Path>,
+    ) -> Result<crate::harnesses::finding::Found, EngineError> {
+        self.harness_client()?.harness_choose_path(id, path).await
+    }
+
+    /// Reads the owner's harness update settings. Output: the settings, the engine's
+    /// refusal code, or `controller_disconnected` without a connection.
+    pub async fn harness_update_settings(
+        &self,
+    ) -> Result<crate::harnesses::update::UpdateSettings, EngineError> {
+        self.harness_client()?.harness_update_settings().await
+    }
+
+    /// Saves the owner's harness update settings. Input: the settings. Output: the
+    /// settings as stored, the engine's refusal code, or `controller_disconnected`.
+    pub async fn harness_set_update_settings(
+        &self,
+        settings: crate::harnesses::update::UpdateSettings,
+    ) -> Result<crate::harnesses::update::UpdateSettings, EngineError> {
+        self.harness_client()?
+            .harness_set_update_settings(settings)
+            .await
     }
 }
 

@@ -28,7 +28,8 @@ const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
-const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.";
+const DISCARD_LEAD_REFUSED: &str = "Not discarded: only the master discards a change set. Tell your lead or the master why the work should not land.";
+const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run your sub-agents natively. Start them with your own harness instead: an agent team in Claude Code, sub-agents in Codex.";
 const MASTER_LABEL: &str = "Master";
 const RECALL_LEFT_OUT: &str =
     "More memories matched and were left out. Search for something narrower.\n";
@@ -377,8 +378,9 @@ pub(crate) fn clear_problem(
     Ok(())
 }
 
-/// Records that a live master's pane runs, so engine input finds it. Takes the engine
-/// database, the project and the team agent id. Returns any SQLite failure.
+/// Records that a live master's pane runs, so engine input finds it, and starts its Master
+/// run time clock now, on a launch and an adopt alike (F01). Takes the engine database, the
+/// project and the team agent id. Returns any SQLite failure.
 pub(crate) fn pane_ready(
     connection: &Connection,
     project: &ProjectId,
@@ -390,11 +392,13 @@ pub(crate) fn pane_ready(
             params![project.as_str(), agent],
         )
         .map_err(state)?;
+    super::master_limits::clock_started(connection, project, agent, now_ms())?;
     release_input(connection, agent)
 }
 
-/// Records that a live master's pane ended; another agent's entry is left alone.
-/// Takes the engine database, the project and the team agent id. Returns any SQLite failure.
+/// Records that a live master's pane ended and drops its Master run time clock; another
+/// agent's entry and clock are left alone. Takes the engine database, the project and the
+/// team agent id. Returns any SQLite failure.
 pub(crate) fn pane_ended(
     connection: &Connection,
     project: &ProjectId,
@@ -406,6 +410,7 @@ pub(crate) fn pane_ended(
             params![project.as_str(), agent],
         )
         .map_err(state)?;
+    super::master_limits::clock_ended(connection, project, agent)?;
     release_input(connection, agent)
 }
 
@@ -1305,6 +1310,9 @@ fn answer(
         }
         Call::Stop { agent } => return work::stop(connection, answering, master, true, &agent),
         Call::Merge { agent } => return merge::merge(connection, answering, &agent),
+        Call::Discard { agent, reason } => {
+            return merge::discard(connection, answering, &agent, &reason);
+        }
         call @ (Call::Sessions { .. } | Call::Session { .. }) => {
             super::history::answer(connection, project, answering.agents, call)
                 .expect("a past-conversation call has an answer")
@@ -1319,6 +1327,7 @@ fn answer(
             options,
             recommended,
             context,
+            replaces,
         } => {
             let ask = crate::questions::Ask {
                 question,
@@ -1327,13 +1336,24 @@ fn answer(
                 recommended,
                 context,
             };
-            ask_owner(connection, project, &ask)?
+            match replaces {
+                Some(old) => reask_owner(connection, project, &ask, old)?,
+                None => ask_owner(connection, project, &ask)?,
+            }
         }
         Call::RecordAnswer {
             question,
             version,
             owner_turn,
         } => record_answer(connection, project, question, version, owner_turn)?,
+        Call::RelayAnswer {
+            question,
+            version,
+            answer,
+        } => relay_answer(connection, project, question, version, &answer)?,
+        Call::Withdraw { question, version } => {
+            withdraw_question(connection, project, question, version)?
+        }
         call => return answer_work(connection, answering, master, true, call),
     })
 }
@@ -1367,7 +1387,11 @@ pub(super) fn answer_sub(
         )?,
         Call::Stop { agent: name } => work::stop(connection, answering, agent, false, &name)?,
         Call::Merge { agent: name } => work::lead_merge(connection, answering, agent, &name)?,
-        call @ (Call::Ask { .. } | Call::RecordAnswer { .. }) => {
+        Call::Discard { .. } => (DISCARD_LEAD_REFUSED.to_owned(), true),
+        call @ (Call::Ask { .. }
+        | Call::RecordAnswer { .. }
+        | Call::RelayAnswer { .. }
+        | Call::Withdraw { .. }) => {
             tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }
         Call::Sessions { .. }
@@ -1395,7 +1419,12 @@ fn answer_work(
         Call::StartWork { title, claims } => {
             work::start_work(connection, answering, agent, &title, &claims)
         }
-        Call::InspectWork => work::inspect_work(connection, answering, agent, master),
+        Call::InspectWork { task: None } => {
+            work::inspect_work(connection, answering, agent, master)
+        }
+        Call::InspectWork { task: Some(task) } => {
+            work::inspect_task(connection, answering, agent, master, task)
+        }
         Call::UpdateWork {
             kind,
             text,
@@ -1630,8 +1659,8 @@ fn lead_delegate(
 }
 
 /// Tells whether a project's pool holds an account a harness kind can run on now
-/// (DEC-104 K5b), so a lead starts sub-agents only of kinds with one: a keyless endpoint,
-/// or a native managed profile whose latest sign-in observed an account. Takes the
+/// (DEC-104 K5b), so a lead starts sub-agents only of kinds with one: an endpoint, keyed or
+/// not, or a native managed profile whose latest sign-in observed an account. Takes the
 /// database, the live access, the project and the launch harness. Returns the answer, or
 /// a SQLite failure.
 fn signed_in_account(
@@ -1686,6 +1715,7 @@ fn lead_status(
     }
     let mut status = super::events::status(connection, project)?;
     status.agents.retain(|line| workers.contains(&line.agent));
+    status.queued.retain(|queued| queued.parent == Some(lead));
     status.events.retain(|event| workers.contains(&event.agent));
     status.finished = super::events::finished_agents(connection, project, now_ms())?
         .into_iter()
@@ -1872,7 +1902,8 @@ fn land_on_lead(
 }
 
 /// Answers one saved-memory call of a project's agent: `remember` saves under the owner's
-/// Agent memory writes setting and `recall` searches what agents may read. Takes the
+/// Agent memory writes and Where agents save memories settings and `recall` searches what
+/// agents may read. Takes the
 /// engine database, the project, the agent's label and the call. Returns the text and
 /// whether it is an error, or a SQLite failure; none for any other call.
 pub(super) fn memory_answer(
@@ -1898,12 +1929,20 @@ fn remember(
     let app = scope == tool::MemoryReach::App;
     Ok(
         match crate::memory::library::agent_remember(connection, project, agent, app, text)? {
-            Ok(true) => (
-                "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.".to_owned(),
-                false,
-            ),
-            Ok(false) => (
-                "Saved to memory. recall finds it now, and agents started from now on get it.".to_owned(),
+            Ok(saved) => (
+                format!(
+                    "{}{}",
+                    if saved.narrowed {
+                        "Kept in this project's memory, not app-wide: the owner keeps agent memories in their project. "
+                    } else {
+                        ""
+                    },
+                    if saved.waiting {
+                        "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab."
+                    } else {
+                        "Saved to memory. recall finds it now, and agents started from now on get it."
+                    }
+                ),
                 false,
             ),
             Err(code) => (
@@ -2040,6 +2079,141 @@ fn record_answer(
     })
 }
 
+/// Asks a live master's choice question in place of an old free-text one, its own or an
+/// engine step's (F14): the old one leaves the owner's list as asked again. Takes the
+/// database, the master's project, the new question and the old one's id. Returns the
+/// sentence the master reads, or a SQLite failure.
+fn reask_owner(
+    connection: &Connection,
+    project: &ProjectId,
+    ask: &crate::questions::Ask,
+    old: u64,
+) -> Result<(String, bool), EngineError> {
+    use crate::questions::Asker;
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    Ok(
+        match crate::questions::reask(connection, project, &Asker::Master(master), ask, old) {
+            Ok(id) => (
+                format!(
+                    "Question {id} is logged in place of question {old}, and the owner is notified. Their answer or dismissal comes to you once as a message from the owner, so do not ask it again."
+                ),
+                false,
+            ),
+            Err(problem) => match problem.0.as_str() {
+                "questions_replace_invalid" => (
+                    format!(
+                        "Not asked: question {old} is not an open free-text question of this project asked by you or by an engine step, or the new one is not of kind single or multi."
+                    ),
+                    true,
+                ),
+                "questions_full" => (QUESTIONS_FULL.to_owned(), true),
+                "questions_asker_full" => (ASKER_FULL.to_owned(), true),
+                "questions_ask_invalid" | "questions_text_invalid" => {
+                    (ASK_REFUSED.to_owned(), true)
+                }
+                _ => (unlogged(&problem), true),
+            },
+        },
+    )
+}
+
+/// Records the answer the owner typed into a live master's own terminal, as the master
+/// reports it (F12): taken only after the owner typed there since the question was asked,
+/// one question per owner answer. Takes the database, the master's project, the question
+/// id, the version the master read and the answer. Returns the sentence the master reads,
+/// or a SQLite failure.
+fn relay_answer(
+    connection: &Connection,
+    project: &ProjectId,
+    id: u64,
+    version: u64,
+    answer: &str,
+) -> Result<(String, bool), EngineError> {
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    let typed = owner_key_ms(connection, None, master)?;
+    let relayed = crate::questions::relay(connection, project, master, id, version, answer, typed);
+    Ok(match relayed {
+        Ok(crate::questions::Settlement::Settled) => (
+            format!("Recorded your report of the owner's answer to question {id}."),
+            false,
+        ),
+        Ok(crate::questions::Settlement::Stale) => (
+            format!(
+                "Not recorded: question {id} is already answered or dismissed, or changed since version {version}."
+            ),
+            true,
+        ),
+        Err(problem) => match problem.0.as_str() {
+            "questions_not_found" => (
+                format!("Not recorded: this project has no question {id}."),
+                true,
+            ),
+            "questions_in_terminal" => (
+                format!(
+                    "Not recorded: question {id} waits in an agent's terminal, so the owner answers it there."
+                ),
+                true,
+            ),
+            "questions_owner_not_typed" => (
+                format!(
+                    "Not recorded: the owner has not typed in your terminal since question {id} was asked. Record an answer only after the owner gives it to you."
+                ),
+                true,
+            ),
+            "questions_owner_turn_used" => (
+                "Not recorded: the owner's last answer in your terminal already answered another question. Ask the owner, or wait for their answer in the Questions view.".to_owned(),
+                true,
+            ),
+            "questions_answer_invalid" | "questions_text_invalid" => (
+                "Not recorded: the answer is blank, longer than 4096 bytes or holds hidden characters.".to_owned(),
+                true,
+            ),
+            _ => (unlogged(&problem), true),
+        },
+    })
+}
+
+/// Takes a question a live master no longer needs off the owner's list (F12): its own, or
+/// one a sub-agent of the project asked. Takes the database, the master's project, the
+/// question id and the version the master read. Returns the sentence the master reads, or
+/// a SQLite failure.
+fn withdraw_question(
+    connection: &Connection,
+    project: &ProjectId,
+    id: u64,
+    version: u64,
+) -> Result<(String, bool), EngineError> {
+    use crate::questions::{Asker, Settlement};
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    let withdrawn =
+        crate::questions::withdraw(connection, project, &Asker::Master(master), id, version);
+    Ok(match withdrawn {
+        Ok(Settlement::Settled) => (
+            format!("Question {id} is withdrawn and off the owner's list."),
+            false,
+        ),
+        Ok(Settlement::Stale) => (
+            format!(
+                "Not withdrawn: question {id} is already answered or dismissed, or changed since version {version}."
+            ),
+            true,
+        ),
+        Err(problem) if problem.0 == "questions_not_found" => (
+            format!(
+                "Not withdrawn: question {id} is not a question of this project asked by you or by a sub-agent."
+            ),
+            true,
+        ),
+        Err(problem) => (unlogged(&problem), true),
+    })
+}
+
 /// Reads the team agent id of a project's live master. Takes the database and project.
 /// Returns the id, none when no live master is on record, or a SQLite failure.
 fn live_master(connection: &Connection, project: &ProjectId) -> Result<Option<i64>, EngineError> {
@@ -2073,6 +2247,11 @@ fn delegate(
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(state)?;
+    let key = super::master_limits::live_key(&tx, project)?;
+    let rounds = super::master_limits::rounds(&tx, project)?;
+    if !rounds.open() && !super::master_limits::joins_round(&tx, project, key)? {
+        return Ok((rounds.refusal(), true));
+    }
     let admitted = super::admit(
         &tx,
         answering.access,
@@ -2080,7 +2259,7 @@ fn delegate(
         harness,
         task,
         TaskSource::Master,
-        None,
+        Some(key),
         now_ms(),
     )?;
     let id = match admitted {
@@ -2111,7 +2290,7 @@ fn delegate(
         {
             return Ok((
                 format!(
-                    "Not handed off: a {} lead has no native teammates; leave mode out or use app_spawned (native_mode_unsupported).",
+                    "Not handed off: a {} lead has no native sub-agents; leave mode out or use app_spawned (native_mode_unsupported).",
                     super::bound_text(&chosen, AGENT_SHOWN_MAX)
                 ),
                 true,

@@ -34,6 +34,7 @@ fn accounts() -> Vec<AccountRow> {
         name: name.into(),
         provider: String::new(),
         status: String::new(),
+        no_window: None,
     })
     .collect()
 }
@@ -105,6 +106,7 @@ fn task(id: i64, source: TaskSource, prompt: &str, status: TaskStatus) -> TeamTa
         started_ms: None,
         finished_ms: None,
         parent: None,
+        wait: None,
     }
 }
 
@@ -147,6 +149,11 @@ fn team() -> TeamStatus {
         child_landing: crate::team::ChildLanding::Lead,
         max_harnesses: None,
         max_teammates: None,
+        master_rounds: None,
+        rounds_used: 0,
+        rounds_kept_going: false,
+        master_run_secs: Some(crate::team::master_limits::RUN_DEFAULT_SECS),
+        master_deadline_ms: None,
         token_budget: None,
         budget_used: None,
         budget_reached: false,
@@ -158,10 +165,13 @@ fn team() -> TeamStatus {
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftover_holds: Vec::new(),
+        leftovers: crate::team::LeftoverMode::End,
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,
         reask_empty_reply: true,
+        done_quiet_secs: Some(crate::team::DONE_QUIET_DEFAULT_SECS),
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
@@ -791,6 +801,7 @@ fn two_accounts_with_one_name_show_their_ids() {
         name: name.into(),
         provider: String::new(),
         status: String::new(),
+        no_window: None,
     };
     let rows = [
         row("claude-account-1a", "Claude"),
@@ -1943,11 +1954,17 @@ fn stored() -> crate::project_setup::StoredSetup {
 
 /// Team settings name the saved master harness on the plan line and, after the On harness
 /// switch choice, when a saved change reaches the running master; at 80 columns too, where a
-/// setting of its own would fold the first settings row away.
+/// setting of its own would fold the first settings row away. In a short window the focused
+/// agent's Tools and Working copy rows give way first, then the plan line, as `draw` orders
+/// them: at 80 by 25 the plan line shows, at 80 by 24 it gives way, and every setting, Left
+/// running included, shows at both (v2.3.2 gate rows 26 and 27).
 #[test]
 fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_master() {
     let view = loaded();
-    for (width, height) in [(160, 36), (80, 24)] {
+    let tall = frame(&view, 160, 36);
+    assert!(find(&tall, "Working copy").contains("agent-1"));
+    assert!(find(&tall, "Tools").contains("On, inside the project folder"));
+    for (width, height) in [(160, 36), (80, 25)] {
         let rows = frame(&view, width, height);
         assert!(find(&rows, "leads.").contains("Codex leads."));
         assert!(
@@ -1957,6 +1974,23 @@ fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_m
             rows.join("\n")
         );
     }
+    for height in [24, 25] {
+        let rows = frame(&view, 80, height);
+        assert!(find(&rows, "Account").contains("ChatGPT Pro - main"));
+        assert!(
+            rows.iter().all(|row| !row.contains("Working copy")
+                && !row.contains("On, inside the project folder")),
+            "{}",
+            rows.join("\n")
+        );
+    }
+    let short = frame(&view, 80, 24);
+    assert!(
+        find(&short, "On harness switch")
+            .contains("On harness switch  Carry over, when the master is idle")
+    );
+    assert!(find(&short, "Max teammates").contains("Max teammates  No limit"));
+    assert!(find(&short, "Left running").contains("Left running  End them"));
     let mut later = team();
     later.apply_harness_switch = crate::team::SwitchApply::NextStart;
     let mut view = TeamView::new(project());
@@ -2573,7 +2607,7 @@ fn m_edits_the_masters_branch_and_an_empty_name_goes_back_to_the_default() {
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
     assert!(!view.typing());
     assert!(view.branch_edit.is_none());
-    assert!(view.help().contains(&("g", "Ask before merge")));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
 }
 
 #[test]
@@ -2687,8 +2721,8 @@ fn g_turns_ask_before_merge_on_and_off() {
         Some(Notice::plain("The team is still loading."))
     );
     let mut view = loaded();
-    assert!(view.help().contains(&("g", "Ask before merge")));
-    assert!(shows(&view, "Ask before merge  Off"));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
+    assert!(shows(&view, "Master accepts change sets  Itself"));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2701,13 +2735,16 @@ fn g_turns_ask_before_merge_on_and_off() {
     assert_eq!(
         view.notice,
         Some(Notice::plain(
-            "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+            "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
         ))
     );
     let mut asking = team();
     asking.ask_before_merge = true;
     reread(&mut view, asking, NOW + 10);
-    assert!(shows(&view, "Ask before merge  On"));
+    assert!(shows(
+        &view,
+        "Master accepts change sets  Only when I click or say accept all"
+    ));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2719,9 +2756,7 @@ fn g_turns_ask_before_merge_on_and_off() {
     applied(&mut view, reply);
     assert_eq!(
         view.notice,
-        Some(Notice::plain(
-            "The master now merges a finished harness without asking."
-        ))
+        Some(Notice::plain("The master now accepts change sets itself."))
     );
 }
 
@@ -2889,6 +2924,60 @@ fn capital_v_stores_the_choice_with_no_master_yet() {
     );
     assert!(shows(&view, "Live terminal"), "the strip offers it");
     assert!(view.help().contains(&("V", "Live terminal")));
+}
+
+/// D moves "End a turn after done" through every option (F15): 10 min shows for a team that
+/// made no choice, then 1 h, Off, 2 min and 10 min, each sent with its plain notice.
+#[test]
+fn capital_d_moves_end_a_turn_after_done_through_every_option() {
+    let mut view = loaded();
+    assert!(view.help().contains(&("D", "End a turn after done")));
+    assert!(shows(&view, "End a turn after done  10 min"));
+    let steps = [
+        (
+            Some(600),
+            Some(3600),
+            "1 h",
+            "A task turn now ends 1 h after its agent says done and goes quiet.",
+        ),
+        (
+            Some(3600),
+            None,
+            "Off",
+            "A task turn now ends only when its agent ends it.",
+        ),
+        (
+            None,
+            Some(120),
+            "2 min",
+            "A task turn now ends 2 min after its agent says done and goes quiet.",
+        ),
+        (
+            Some(120),
+            Some(600),
+            "10 min",
+            "A task turn now ends 10 min after its agent says done and goes quiet.",
+        ),
+    ];
+    for (at, (from, to, shown, notice)) in steps.into_iter().enumerate() {
+        let mut saved = team();
+        saved.done_quiet_secs = from;
+        reread(&mut view, saved, NOW + 10_000 * (2 * at as i64 + 1));
+        let reply = view.key(press(KeyCode::Char('D')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::DoneQuiet {
+                project_id: project(),
+                secs: to,
+            })
+        );
+        applied(&mut view, reply);
+        assert_eq!(view.notice, Some(Notice::plain(notice)));
+        let mut after = team();
+        after.done_quiet_secs = to;
+        reread(&mut view, after, NOW + 10_000 * (2 * at as i64 + 2));
+        assert!(shows(&view, &format!("End a turn after done  {shown}")));
+    }
 }
 
 /// R flips Re-ask empty reply: On is shown for a team that has made no choice, R sends Off
@@ -3190,39 +3279,80 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         view.key(press(KeyCode::Down));
     }
     assert_eq!(view.coord.as_ref().unwrap().row, 2);
-    assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
-    assert!(
-        view.notice
-            .as_ref()
-            .unwrap()
-            .text
-            .contains("has no native teammates"),
-        "{:?}",
-        view.notice
+    let reply = view.key(press(KeyCode::Right));
+    coord_send(&mut view, &mut controller, reply, 3).await;
+    assert_eq!(
+        harness_row(&view, HarnessKind::Codex).0,
+        SubagentMode::Native
     );
-    assert!(!view.busy(), "a refused mode sends nothing");
+    assert!(
+        frame(&view, 116, 30)
+            .iter()
+            .any(|row| row.contains("Codex sub-agents")
+                && row.contains("shown in the lead's terminal only")),
+        "the Codex row says where its native sub-agents show"
+    );
 
     view.key(press(KeyCode::Down));
     let reply = view.key(press(KeyCode::Left));
-    coord_send(&mut view, &mut controller, reply, 3).await;
+    coord_send(&mut view, &mut controller, reply, 4).await;
     assert_eq!(
         harness_row(&view, HarnessKind::Codex),
-        (SubagentMode::AppSpawned, Delivery::TypingOnly)
+        (SubagentMode::Native, Delivery::TypingOnly)
     );
 
-    for _ in 0..5 {
+    let (lines, _) = view.rows(116, 40, &accounts(), &Look::plain());
+    let shown: Vec<String> = lines.iter().map(Row::text).collect();
+    for label in ["rcli sub-agents", "Messages to rcli agents"] {
+        let line = shown
+            .iter()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("{label} keeps its row: {shown:?}"));
+        assert!(
+            line.contains(crate::team::NO_SUB_AGENTS),
+            "{label} says it cannot apply in the desktop's words: {line}"
+        );
+    }
+    let before = harness_row(&view, HarnessKind::Rcli);
+    for (row, label) in [(4, "rcli sub-agents"), (5, "Messages to rcli agents")] {
+        view.key(press(KeyCode::Down));
+        assert_eq!(view.coord.as_ref().unwrap().row, row);
+        assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
+        let said = format!("{label} - {}", crate::team::NO_SUB_AGENTS);
+        assert!(
+            view.notice
+                .as_ref()
+                .is_some_and(|notice| notice.text == said),
+            "row {row}: {:?}",
+            view.notice
+        );
+        assert!(
+            !view.busy(),
+            "row {row}: a row that cannot apply sends nothing"
+        );
+    }
+    assert_eq!(harness_row(&view, HarnessKind::Rcli), before);
+
+    for _ in 0..3 {
         view.key(press(KeyCode::Down));
     }
     assert_eq!(view.coord.as_ref().unwrap().row, 8);
     for (generation, overlaps) in [
-        (4, Overlaps::Block),
-        (5, Overlaps::Off),
-        (6, Overlaps::Wait),
-        (7, Overlaps::Warn),
+        (5, Overlaps::Block),
+        (6, Overlaps::Off),
+        (7, Overlaps::Wait),
+        (8, Overlaps::Warn),
     ] {
         let reply = view.key(press(KeyCode::Right));
         coord_send(&mut view, &mut controller, reply, generation).await;
         assert_eq!(coordination_of(&view).settings.overlaps, overlaps);
+        let shown = frame(&view, 120, 40);
+        assert_eq!(
+            find(&shown, "Overlapping edits").contains(OVERLAPS_HOLD_NOTE.trim()),
+            matches!(overlaps, Overlaps::Block | Overlaps::Wait),
+            "only Block and Wait say Claude Code on a key or URL is not held:\n{}",
+            shown.join("\n")
+        );
     }
 
     for _ in 0..4 {
@@ -3242,12 +3372,12 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
     clear_counted(&mut view);
     typed(&mut view, "a, a b*");
     let reply = view.key(press(KeyCode::Enter));
-    coord_send(&mut view, &mut controller, reply, 8).await;
+    coord_send(&mut view, &mut controller, reply, 9).await;
     assert!(!view.typing(), "an applied list closes the input");
     assert_eq!(coordination_of(&view).settings.counted_tools, ["a", "b*"]);
 
     let reply = view.key(press(KeyCode::Char('r')));
-    coord_send(&mut view, &mut controller, reply, 9).await;
+    coord_send(&mut view, &mut controller, reply, 10).await;
     assert_eq!(
         coordination_of(&view).settings.counted_tools,
         COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec()
@@ -3862,7 +3992,7 @@ fn f_moves_the_new_folder_limit_through_every_choice() {
 #[test]
 fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     use crate::team::BackgroundAtEnd;
-    const SCOPE: &str = "Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice.";
+    const SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
     let mut view = TeamView::new(project());
     for key in ['B', 'G'] {
         assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
@@ -4406,7 +4536,8 @@ fn p_then_a_number_stops_that_running_teammate_of_the_selected_harness() {
 }
 
 /// The team view's help (S3, feat/harness-comms b07fcf11) names every key once, each with
-/// its own label, Stop teammate on p beside Stop agent on z.
+/// its own label, Stop teammate on p beside Stop agent on z, and Master run time on N so
+/// that D stays End a turn after done.
 #[test]
 fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
     let help = loaded().help();
@@ -4424,8 +4555,11 @@ fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
         ("p", "Stop teammate"),
         ("z", "Stop agent"),
         ("m", "Master's branch"),
-        ("g", "Ask before merge"),
+        ("g", "Master accepts change sets"),
         ("T", "Token budget"),
+        ("U", "Sub-agent rounds"),
+        ("N", "Master run time"),
+        ("D", "End a turn after done"),
     ] {
         assert!(help.contains(&pair), "{pair:?} is missing: {help:?}");
     }
@@ -4551,6 +4685,177 @@ fn e_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access()
         TeamReply::Change(TeamAction::MasterLands {
             project_id: project(),
             mode: MasterLands::Merges,
+        })
+    );
+}
+
+/// PA-11 (DEC-141): every harness kind says what its Delivery choices do there, Native only
+/// included, in the sentences the app shows under its Messages to row. The match names every
+/// kind, so a new one fails to build until it has its sentence.
+#[test]
+fn every_harness_kind_says_what_its_delivery_choices_do() {
+    for kind in HarnessKind::ALL {
+        let said = delivery_scope(kind);
+        let native = match kind {
+            HarnessKind::ClaudeCode => "Native only uses the relay alone and never types.",
+            HarnessKind::Codex => {
+                "Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle."
+            }
+            HarnessKind::Rcli => "rcli runs no team agents, so no message goes to one here.",
+        };
+        assert!(said.contains(native), "{kind:?}: {said}");
+    }
+}
+
+/// Sub-agent rounds per message (U) and Master run time (N) each step through every choice
+/// and back (F09, F01): each key sends its change, the engine's answer says the new choice
+/// and the team rows show what the engine stored.
+#[test]
+fn master_rounds_and_run_time_step_through_every_choice() {
+    let shows =
+        |view: &TeamView, text: &str| frame(view, 120, 60).iter().any(|row| row.contains(text));
+    let mut view = loaded();
+    let mut stored = team();
+    let mut at = NOW;
+    assert!(shows(&view, "Sub-agent rounds  Until the goal is done"));
+    for max in [Some(1), Some(2), Some(3), Some(5), Some(10), Some(20), None] {
+        let reply = view.key(press(KeyCode::Char('U')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::MasterRounds {
+                project_id: project(),
+                max,
+            }),
+            "{max:?}"
+        );
+        stored.master_rounds = max;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(format!(
+                "Sub-agent rounds per message is now {}.",
+                rounds_choice(max)
+            )))
+        );
+        assert!(
+            shows(&view, &format!("Sub-agent rounds  {}", rounds_choice(max))),
+            "{max:?}"
+        );
+    }
+
+    assert!(shows(&view, "Master run time  7 days"));
+    for (secs, words) in [
+        (Some(1_209_600), "14 days"),
+        (Some(2_592_000), "30 days"),
+        (None, "No limit"),
+        (Some(86_400), "1 day"),
+        (Some(259_200), "3 days"),
+        (Some(604_800), "7 days"),
+    ] {
+        let reply = view.key(press(KeyCode::Char('N')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::MasterRunTime {
+                project_id: project(),
+                secs,
+            }),
+            "{secs:?}"
+        );
+        stored.master_run_secs = secs;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(format!("Master run time is now {words}.")))
+        );
+        assert!(
+            shows(&view, &format!("Master run time  {words}")),
+            "{secs:?}"
+        );
+    }
+}
+
+/// O moves Left running after a stop from End them to Keep running to Ask me and back, each
+/// with its notice, and the Team rows show the choice (DEC-147.4).
+#[test]
+fn o_cycles_the_leftover_setting_and_the_team_rows_show_it() {
+    let mut view = loaded();
+    assert!(view.help().contains(&("O", "Left running after a stop")));
+    assert!(shows(&view, "Left running  End them"));
+    let mut stored = team();
+    let mut at = NOW;
+    for (mode, shown) in [
+        (
+            crate::team::LeftoverMode::Keep,
+            "Left running  Keep running",
+        ),
+        (crate::team::LeftoverMode::Ask, "Left running  Ask me"),
+        (crate::team::LeftoverMode::End, "Left running  End them"),
+    ] {
+        let reply = view.key(press(KeyCode::Char('O')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::LeftoversAtEnd {
+                project_id: project(),
+                mode,
+            }),
+            "{mode:?}"
+        );
+        applied(&mut view, reply);
+        stored.leftovers = mode;
+        at += 60_000;
+        reread(&mut view, stored.clone(), at);
+        assert!(shows(&view, shown), "{shown}");
+    }
+}
+
+/// X ends and K keeps what the oldest listed hold left running, skipping a hold already in
+/// that state; with nothing listed both only say so. Each hold has its own row (DEC-147.4).
+#[test]
+fn x_ends_and_k_keeps_the_oldest_hold_and_each_hold_has_a_row() {
+    use crate::harnesses::leftovers::{HeldView, HoldState};
+    let mut view = loaded();
+    for key in ['X', 'K'] {
+        assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
+        assert_eq!(
+            view.notice,
+            Some(Notice::plain(
+                "Nothing an agent left running waits for you."
+            ))
+        );
+    }
+    let hold = |key: u64, who: &str, state: HoldState| HeldView {
+        key,
+        who: who.to_owned(),
+        names: format!("{key} node"),
+        state,
+        since_ms: NOW,
+        holds_account: state != HoldState::Kept,
+    };
+    let mut stored = team();
+    stored.leftover_holds = vec![
+        hold(3, "team agent 156", HoldState::Ending),
+        hold(4, "the master", HoldState::Held),
+    ];
+    reread(&mut view, stored, NOW + 60_000);
+    assert!(shows(&view, "Left running  team agent 156: 3 node"));
+    assert!(shows(&view, "Left running  the master: 4 node"));
+    assert_eq!(
+        view.key(press(KeyCode::Char('X'))),
+        TeamReply::Change(TeamAction::EndLeftovers {
+            project_id: project(),
+            key: 4,
+        }),
+        "X skips the hold already ending"
+    );
+    let mut view = loaded();
+    let mut stored = team();
+    stored.leftover_holds = vec![hold(3, "team agent 156", HoldState::Ending)];
+    reread(&mut view, stored, NOW + 60_000);
+    assert_eq!(
+        view.key(press(KeyCode::Char('K'))),
+        TeamReply::Change(TeamAction::KeepLeftovers {
+            project_id: project(),
+            key: 3,
         })
     );
 }

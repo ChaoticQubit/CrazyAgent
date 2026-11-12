@@ -3,6 +3,35 @@ import { displayText } from "./screens/conversation";
 
 export type NativeAuthMethod = "codex_browser" | "codex_device_code" | "codex_existing" | "claude_official" | "claude_existing";
 export type NativeAuthCommand = NativeAuthMethod | "read" | "cancel" | "logout";
+export type SignInWay = "browser" | "code" | "check";
+export const SIGN_IN_WAYS: readonly SignInWay[] = ["browser", "code", "check"];
+export const CHECK_SIGN_IN = "Check this account's sign-in";
+const SIGN_IN_METHODS: Readonly<Record<string, Partial<Record<SignInWay, NativeAuthMethod>>>> = {
+  codex: { browser: "codex_browser", code: "codex_device_code", check: "codex_existing" },
+  claude: { browser: "claude_official", check: "claude_existing" },
+};
+
+/** Maps one harness-agnostic sign-in way to the managed sign-in that harness runs for it,
+ * mirroring the engine's NativeAuthMethod::for_way (DEC-141). Inputs: the engine harness name
+ * ("codex", "claude") and the way. Output: the method, or undefined when the harness has none. */
+export function signInMethodFor(harness: string, way: SignInWay): NativeAuthMethod | undefined {
+  return Object.hasOwn(SIGN_IN_METHODS, harness) ? SIGN_IN_METHODS[harness]![way] : undefined;
+}
+
+/** Names the way a managed sign-in method belongs to. Input: the method. Output: browser,
+ * code or check. */
+export function signInWay(method: NativeAuthMethod): SignInWay {
+  return method === "codex_device_code" ? "code" : method === "codex_existing" || method === "claude_existing" ? "check" : "browser";
+}
+
+/** Says why a harness cannot run a sign-in way, mirroring SignInWay::unavailable in the engine.
+ * Inputs: the engine harness name and the way. Output: the sentence, or undefined when the
+ * harness runs it. */
+export function signInWayUnavailable(harness: string, way: SignInWay): string | undefined {
+  if (signInMethodFor(harness, way)) return undefined;
+  return harness === "claude" && way === "code" ? "Claude Code has no sign-in code. It signs in through your browser."
+    : "This account kind has no managed sign-in.";
+}
 export type NativeAuthAction = { kind: "sign_in"; method: NativeAuthMethod } | { kind: "logout" };
 export type NativeAuthPhase = "starting" | "awaiting_owner" | "checking_account" |
   "authenticated_observed" | "unauthenticated_observed" | "cancelling" |
@@ -117,9 +146,7 @@ export function nativeAuthAllowed(state: NativeAuthState, action: NativeAuthComm
   }
   if (nativeAuthActive(state)) return false;
   if (action === "logout") return state.confirming_logout;
-  return state.context.harness === "codex" ?
-    action === "codex_browser" || action === "codex_device_code" || action === "codex_existing" :
-    state.context.harness === "claude" && action === "claude_official";
+  return SIGN_IN_WAYS.some((way) => signInMethodFor(state.context.harness, way) === action);
 }
 
 function actionFor(command: NativeAuthCommand): NativeAuthAction | undefined {

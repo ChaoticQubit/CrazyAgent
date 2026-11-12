@@ -16,7 +16,7 @@
     postgres-local          ! Needs approval        uvx mcp-server-postgres                                             
     figma                   ✗ Can't start           https://mcp.figma.com/mcp                                           
                                                                                                                         
-  Hooks  0                                                                                                              
+  Hooks  0   Claude Code on a key or URL and rcli run none                                                              
   No hooks yet. Press h to add a plugin folder's hooks.                                                                 
                                                                                                                         
                                                                                                                         

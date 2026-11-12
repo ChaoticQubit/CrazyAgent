@@ -4,6 +4,7 @@ import { CONTRAST_MIN, argsOf, commands, contrasts, count, dialog, doublePress, 
 
 const PURPOSE = "Facts agents keep across projects, with who saved each one. Agents read them at launch.";
 const WRITES = "When an agent saves a memory";
+const REACH = "Where agents save memories";
 const SAVED = "Saved memories";
 const NOTE = "Something agents should remember (app-wide)";
 const ESCAPE = { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 };
@@ -46,6 +47,43 @@ test("a press on the writes label focuses the choice and a real key changes it",
   assert.deepEqual(seen.sent.map((args) => args.writes), ["ask"]);
   assert.match(section(seen.sections, "Agent memory writes").rows[0].help, /Agents' memories wait here until you approve them\./);
   assert.deepEqual(seen.toasts, ["Agents now ask you before a memory is saved."]);
+});
+
+test("F34: Where agents save memories goes from This project only to Agent chooses with a real key", async () => {
+  const seen = await on({}, async (page) => {
+    await press(page, 'label[for="memory-agent-scope"]');
+    const focused = await page.evaluate("Fixture.focused()");
+    await stroke(page, { key: "a", code: "KeyA", text: "a", windowsVirtualKeyCode: 65 });
+    return { focused, sent: await argsOf(page, "desktop_set_agent_memory_scope"), sections: await read(page), toasts: await toasts(page) };
+  });
+  assert.equal(seen.focused.id, "memory-agent-scope");
+  assert.deepEqual(seen.sent.map((args) => args.scope), ["agent"]);
+  assert.match(section(seen.sections, "Agent memory writes").rows[1].help, /Agents may save a memory app-wide, where every project's agents read it\./);
+  assert.deepEqual(seen.toasts, ["Agents now choose where a memory is saved, app-wide included."]);
+});
+
+test("F34: Where agents save memories goes from Agent chooses back to This project only with a real key", async () => {
+  const seen = await on({ reach: "agent" }, async (page) => {
+    const before = section(await read(page), "Agent memory writes").rows[1];
+    await press(page, 'label[for="memory-agent-scope"]');
+    await stroke(page, { key: "t", code: "KeyT", text: "t", windowsVirtualKeyCode: 84 });
+    return { before, sent: await argsOf(page, "desktop_set_agent_memory_scope"), sections: await read(page), toasts: await toasts(page) };
+  });
+  assert.equal(seen.before.label, REACH);
+  assert.match(seen.before.help, /Agents may save a memory app-wide/);
+  assert.deepEqual(seen.sent.map((args) => args.scope), ["project"]);
+  assert.match(section(seen.sections, "Agent memory writes").rows[1].help, /An agent's memory stays in its own project, even when it asks to save it app-wide\./);
+  assert.deepEqual(seen.toasts, ["Agents now save memories in their own project only."]);
+});
+
+test("F34: an app-wide memory an agent saved moves into the project chosen with a real key", async () => {
+  const seen = await on({ memories: "moving" }, async (page) => {
+    await page.evaluate(`document.getElementById("memory-move-m3").focus()`);
+    await stroke(page, { key: "h", code: "KeyH", text: "h", windowsVirtualKeyCode: 72 });
+    return { sent: await argsOf(page, "desktop_move_memory"), toasts: await toasts(page) };
+  });
+  assert.deepEqual(seen.sent.map((args) => [args.id, args.project]), [["m3", "harbor"]]);
+  assert.deepEqual(seen.toasts, ["Memory moved. Only agents in Harbor Notes get it now."]);
 });
 
 test("a saved memory has its text left, its source under it and its actions right", async () => {
@@ -257,8 +295,8 @@ test("with no project Import memory says to add one first", async () => {
 });
 
 test("real Tab keys walk the setting, the suggestion, the filters, the memories and the forms", async () => {
-  const walked = await on({}, (page) => tabStops(page, 13));
-  assert.deepEqual(walked, [WRITES, "Save to memory", "Edit", "Dismiss", "Show", "Search memory", "Delete", "Approve", "Delete", NOTE, "Add memory", "Into project", "Import memory"]);
+  const walked = await on({}, (page) => tabStops(page, 14));
+  assert.deepEqual(walked, [WRITES, REACH, "Save to memory", "Edit", "Dismiss", "Show", "Search memory", "Delete", "Approve", "Delete", NOTE, "Add memory", "Into project", "Import memory"]);
 });
 
 for (const theme of ["light", "dark"]) {

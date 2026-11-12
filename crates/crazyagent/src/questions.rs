@@ -57,8 +57,36 @@ const QUOTED_BYTES_MAX: usize = 200;
 const BUSY_WAIT: Duration = Duration::from_secs(5);
 const PICKS_SEPARATOR: &str = "; ";
 const COMMENT_PREFIX: &str = "\nComment: ";
-const KIND_COLUMN: &str = "ALTER TABLE questions_log ADD COLUMN kind TEXT NOT NULL DEFAULT ''";
-const COLUMNS: &str = "id,project,asker,question,options_json,recommended,context,status,answer,answered_by,created_ms,settled_ms,kind";
+const ADDED_COLUMNS: [(&str, &str); 5] = [
+    (
+        "kind",
+        "ALTER TABLE questions_log ADD COLUMN kind TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "coord_message",
+        "ALTER TABLE questions_log ADD COLUMN coord_message INTEGER",
+    ),
+    (
+        "closed_by",
+        "ALTER TABLE questions_log ADD COLUMN closed_by TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "relay_key_ms",
+        "ALTER TABLE questions_log ADD COLUMN relay_key_ms INTEGER",
+    ),
+    (
+        "reask",
+        "ALTER TABLE questions_log ADD COLUMN reask INTEGER NOT NULL DEFAULT 0",
+    ),
+];
+const REASK_COLUMN: &str = "reask";
+const REASK_OLD: &str = "UPDATE questions_log SET reask=1 WHERE status='pending' AND asker LIKE 'engine:%' AND options_json='[]'";
+const LINK_INDEX: &str = "CREATE UNIQUE INDEX IF NOT EXISTS questions_log_coord ON questions_log(coord_message) WHERE coord_message IS NOT NULL";
+const LINKED_ASSUMPTION: &str = "Until you answer, the asker assumes: ";
+const COORD_DISMISSED: &str = "The owner dismissed this question. No answer comes.";
+const REASK_NOTE: &str = "The owner's questions below were asked as free text before CrazyAgent offered choices, and the owner wants them asked again as choices. For each one, call ask with kind single or multi, 2 to 6 short options in plain words without file or code names, the option you recommend, and replaces set to its number, so the old question leaves the owner's list. Questions: ";
+const REASKS_PER_NOTE_MAX: usize = 16;
+const COLUMNS: &str = "id,project,asker,question,options_json,recommended,context,status,answer,answered_by,created_ms,settled_ms,kind,closed_by";
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS questions_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
@@ -76,7 +104,11 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS questions_log (
     noted_ms INTEGER,
     created_ms INTEGER NOT NULL,
     settled_ms INTEGER,
-    kind TEXT NOT NULL DEFAULT ''
+    kind TEXT NOT NULL DEFAULT '',
+    coord_message INTEGER,
+    closed_by TEXT NOT NULL DEFAULT '',
+    relay_key_ms INTEGER,
+    reask INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS questions_log_status ON questions_log(project, status, id);
 CREATE INDEX IF NOT EXISTS questions_log_asker ON questions_log(project, asker, status);";
@@ -102,6 +134,8 @@ const _: () = assert!(
 );
 const _: () = assert!(OPTIONS_MIN <= OPTIONS_MAX);
 const _: () = assert!(ASKS_FROM_ONE_REPLY_MAX as i64 <= PENDING_PER_ASKER_MAX);
+const _: () = assert!(REASKS_PER_NOTE_MAX <= NOTES_MAX);
+const _: () = assert!(crate::coord::BODY_BYTES_MAX <= ANSWER_BYTES_MAX);
 
 /// Who asked the owner, apart from the engine's own steps: a team master (live or run
 /// through drop files) by its team agent id, a conversation master by its session, a team
@@ -156,6 +190,27 @@ pub enum QuestionKind {
     Text,
 }
 
+/// Who closed a question when the owner neither answered nor dismissed it in a Questions
+/// view (F12, F14): the master withdrew it, it was asked again as a choice question, or the
+/// master reported the answer the owner typed in its terminal. Stored as `master`,
+/// `replaced` and `relay`, empty for none; a name from a later engine reads as none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosedBy {
+    Master,
+    Replaced,
+    Relay,
+}
+
+/// One owner dismissal of many questions at once: the ids dismissed, the ids that were
+/// settled or changed since the owner read them, and each id refused with its code.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkDismissal {
+    pub settled: Vec<u64>,
+    pub stale: Vec<u64>,
+    pub refused: Vec<(u64, String)>,
+}
+
 /// The owner's answer: picked options by position and an optional comment. A text question
 /// takes the comment only; a single question at most one pick; a multi question any
 /// distinct picks. A pick, a comment or both must be given.
@@ -205,6 +260,8 @@ pub struct Question {
     pub answered_by: Option<AnsweredBy>,
     pub created_ms: u64,
     pub settled_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<ClosedBy>,
 }
 
 /// One page of a project's questions, pending ones first; `next` goes back as `after`.
@@ -221,10 +278,32 @@ pub struct Note {
     pub text: String,
 }
 
+#[derive(Clone, Copy)]
 enum How<'a> {
     Answer(&'a str, AnsweredBy),
     Dismiss,
     Terminal,
+    Withdraw { own: bool },
+    Replace,
+    Relay { text: &'a str, key: i64, own: bool },
+    Carried(Option<&'a str>),
+}
+
+impl ClosedBy {
+    fn name(closed: Option<Self>) -> &'static str {
+        match closed {
+            None => "",
+            Some(Self::Master) => "master",
+            Some(Self::Replaced) => "replaced",
+            Some(Self::Relay) => "relay",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        [Self::Master, Self::Replaced, Self::Relay]
+            .into_iter()
+            .find(|closed| Self::name(Some(*closed)) == value)
+    }
 }
 
 impl Asker {
@@ -448,7 +527,7 @@ pub fn ask(
         .source()
         .ok_or_else(|| failure("questions_ask_invalid"))?;
     let tx = immediate(db)?;
-    let id = insert(&tx, project, &asker.name(), source, ask, false)?;
+    let id = insert(&tx, project, &asker.name(), source, ask, false, None)?;
     if let Asker::Agent(agent) = asker {
         let text = format!(
             "Agent {agent} asked the owner question {id}, in its own words {}. The owner's answer comes to you too, and CrazyAgent types it into agent {agent}'s terminal.",
@@ -484,7 +563,7 @@ pub fn raise(
         .name()
         .ok_or_else(|| failure("questions_ask_invalid"))?;
     let tx = immediate(db)?;
-    let id = insert(&tx, project, &asker, "engine", ask, true)?;
+    let id = insert(&tx, project, &asker, "engine", ask, true, None)?;
     tx.commit().map_err(unavailable)?;
     page::refresh(db, project);
     Ok(id)
@@ -530,6 +609,313 @@ pub fn dismiss(db: &Connection, id: u64, version: u64) -> Result<Settlement, Eng
     let project = question.project.clone();
     let settled = settle(&tx, question, How::Dismiss, &owner(), version)?;
     finish(db, tx, &project, settled)
+}
+
+/// Dismisses up to `LISTED_MAX` questions the owner picked at once (F12, DEC-147.8), each
+/// as `dismiss` does in its own transaction, so a question whose asker's conversation is
+/// full stops only itself. Inputs: the engine connection and each question's id with the
+/// version the owner read. Output: what happened to each, or `questions_bulk_invalid` for
+/// an empty list or one longer than `LISTED_MAX`.
+pub fn dismiss_many(db: &Connection, items: &[(u64, u64)]) -> Result<BulkDismissal, EngineError> {
+    if items.is_empty() || items.len() > LISTED_MAX {
+        return Err(failure("questions_bulk_invalid"));
+    }
+    let mut outcome = BulkDismissal::default();
+    for &(id, version) in items {
+        match dismiss(db, id, version) {
+            Ok(Settlement::Settled) => outcome.settled.push(id),
+            Ok(Settlement::Stale) => outcome.stale.push(id),
+            Err(problem) => outcome.refused.push((id, problem.0)),
+        }
+    }
+    let told = outcome.settled.len() + outcome.stale.len() + outcome.refused.len();
+    assert_eq!(told, items.len());
+    Ok(outcome)
+}
+
+/// Withdraws one pending question for a master that no longer needs it (F12): its own, or
+/// one a sub-agent of its project asked, linked team questions included, never an engine
+/// step's question or a terminal box. The master gets no message; a sub-agent asker is told
+/// once. Inputs: the engine connection, the project, the master as asker, the question id
+/// and the version it read. Output: Settled, Stale, or `questions_not_found` for a question
+/// it may not withdraw.
+pub fn withdraw(
+    db: &Connection,
+    project: &ProjectId,
+    master: &Asker,
+    id: u64,
+    version: u64,
+) -> Result<Settlement, EngineError> {
+    assert!(matches!(master, Asker::Master(_) | Asker::Session(_)));
+    let tx = immediate(db)?;
+    let question = found(&tx, id)?;
+    let own = question.asker == master.name();
+    if &question.project != project || !(own || question.asker.starts_with("agent:")) {
+        return Err(failure("questions_not_found"));
+    }
+    let writer = asker_writer(&master.name()).unwrap_or_else(owner);
+    let settled = settle(&tx, question, How::Withdraw { own }, &writer, version)?;
+    finish(db, tx, project, settled)
+}
+
+/// Records the owner's answer a live team master saw typed into its own terminal (F12): it
+/// is taken only when the owner typed into that terminal after the question was asked, and
+/// one owner key time answers at most one question. The text is the master's report of the
+/// answer, kept as answered in the master's terminal and never shown as the owner's words.
+/// Inputs: the engine connection, the project, the master's team agent id, the question id,
+/// the version it read, the answer and when the owner last typed into its terminal. Output:
+/// Settled, Stale, or `questions_not_found`, `questions_in_terminal`,
+/// `questions_owner_not_typed`, `questions_owner_turn_used`, `questions_answer_invalid` or
+/// `questions_text_invalid`.
+pub fn relay(
+    db: &Connection,
+    project: &ProjectId,
+    master: i64,
+    id: u64,
+    version: u64,
+    answer: &str,
+    owner_key_ms: Option<i64>,
+) -> Result<Settlement, EngineError> {
+    let agent = AgentId::team(master).map_err(|_| failure("questions_not_found"))?;
+    let tx = immediate(db)?;
+    let question = found(&tx, id)?;
+    if &question.project != project {
+        return Err(failure("questions_not_found"));
+    }
+    if question.status != QuestionStatus::Pending {
+        return Ok(Settlement::Stale);
+    }
+    if is_terminal(&question.asker) {
+        return Err(failure("questions_in_terminal"));
+    }
+    let asked = i64::try_from(question.created_ms).map_err(unavailable)?;
+    let Some(key) = owner_key_ms.filter(|at| *at >= asked) else {
+        return Err(failure("questions_owner_not_typed"));
+    };
+    let used: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM questions_log WHERE project=?1 AND relay_key_ms=?2)",
+            params![project.as_str(), key],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if used {
+        return Err(failure("questions_owner_turn_used"));
+    }
+    let text = answer_text(answer)?;
+    let own = question.asker == Asker::Master(master).name();
+    let how = How::Relay {
+        text: &text,
+        key,
+        own,
+    };
+    let settled = settle(&tx, question, how, &Writer::Agent(agent), version)?;
+    finish(db, tx, project, settled)
+}
+
+/// Asks a choice question in place of a pending free-text one (F14, DEC-147.8): the old one
+/// closes as asked again in the same transaction, then the new one is logged, under the old
+/// asker when an engine step asked it, so that step's cap is not crossed, else under the
+/// caller. The old one must be a text question of the project asked by the caller or, for a
+/// master, by an engine step, and the new one single or multi. Inputs: the engine connection, the
+/// project, the caller, the new ask and the old question's id. Output: the new id, or
+/// `questions_replace_invalid` and the refusals `ask` names.
+pub fn reask(
+    db: &Connection,
+    project: &ProjectId,
+    asker: &Asker,
+    ask: &Ask,
+    replaces: u64,
+) -> Result<u64, EngineError> {
+    let source = asker
+        .source()
+        .ok_or_else(|| failure("questions_ask_invalid"))?;
+    let invalid = || failure("questions_replace_invalid");
+    if ask.kind == QuestionKind::Text {
+        return Err(invalid());
+    }
+    let tx = immediate(db)?;
+    let old = match found(&tx, replaces) {
+        Err(problem) if problem.0 == "questions_not_found" => return Err(invalid()),
+        read => read?,
+    };
+    let engine = old.asker.starts_with("engine:") && !matches!(asker, Asker::Agent(_));
+    let mine = old.asker == asker.name();
+    if &old.project != project
+        || old.status != QuestionStatus::Pending
+        || old.kind != QuestionKind::Text
+        || !(engine || mine)
+    {
+        return Err(invalid());
+    }
+    let (name, from) = if engine {
+        (old.asker.clone(), "engine")
+    } else {
+        (asker.name(), source)
+    };
+    let writer = asker_writer(&asker.name()).unwrap_or_else(owner);
+    if settle(&tx, old, How::Replace, &writer, 0)? != Settlement::Settled {
+        return Err(invalid());
+    }
+    let id = insert(&tx, project, &name, from, ask, false, None)?;
+    assert!(id != replaces);
+    tx.commit().map_err(unavailable)?;
+    page::refresh(db, project);
+    Ok(id)
+}
+
+/// Links one question an agent put to the owner through the team (F12) into the questions
+/// log, in the team tick's transaction, so the owner answers it where every other question
+/// waits. The text is shown escaped and cut to the question bound, an "Assumption:" part
+/// goes to the context, and no notification is made, since the team alert made one by
+/// severity. A linked question skips the per-asker cap but not the project's. Inputs: the
+/// transaction, the project, the asker, the team message's body and id. Output: the question
+/// id, or none while the project is full or when the text cannot be stored.
+pub(crate) fn link_coord(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    asker: &Asker,
+    body: &str,
+    message: i64,
+) -> Result<Option<u64>, EngineError> {
+    let source = asker
+        .source()
+        .ok_or_else(|| failure("questions_ask_invalid"))?;
+    let (question, assumption) = crate::team::questions::split_assumption(body);
+    let question = bound_text(&crate::memory::visible_text(&question), QUESTION_BYTES_MAX);
+    let context = assumption.map(|kept| {
+        bound_text(
+            &format!("{LINKED_ASSUMPTION}{}", crate::memory::visible_text(&kept)),
+            CONTEXT_BYTES_MAX,
+        )
+    });
+    let ask = Ask {
+        question,
+        kind: QuestionKind::Text,
+        options: Vec::new(),
+        recommended: None,
+        context,
+    };
+    match insert(
+        tx,
+        project,
+        &asker.name(),
+        source,
+        &ask,
+        false,
+        Some(message),
+    ) {
+        Ok(id) => Ok(Some(id)),
+        Err(problem)
+            if matches!(
+                problem.0.as_str(),
+                "questions_full"
+                    | "questions_ask_invalid"
+                    | "questions_text_invalid"
+                    | "questions_project_missing"
+            ) =>
+        {
+            eprintln!(
+                "questions_link_skipped project={} code={}",
+                project.as_str(),
+                problem.0
+            );
+            Ok(None)
+        }
+        Err(problem) => Err(problem),
+    }
+}
+
+/// Settles the linked row of a team question the team side closed (F12): answered with the
+/// owner's reply when one came, else dismissed with its asker as the writer, and told to no
+/// one, since the team side carried it. Inputs: the transaction, the team message and the
+/// owner's reply, if any. Output: the project whose page changed, or none when no pending
+/// row is linked to that message.
+pub(crate) fn settle_linked(
+    tx: &Transaction<'_>,
+    message: i64,
+    reply: Option<&str>,
+) -> Result<Option<ProjectId>, EngineError> {
+    ensure(tx)?;
+    let mut rows = select(
+        tx,
+        &format!("SELECT {COLUMNS} FROM questions_log WHERE coord_message=?1 AND status='pending'"),
+        [message],
+    )?;
+    assert!(rows.len() <= 1);
+    let Some(question) = rows.pop() else {
+        return Ok(None);
+    };
+    let project = question.project.clone();
+    let reply = reply
+        .map(crate::memory::visible_text)
+        .and_then(|text| plain(&bound_text(&text, ANSWER_BYTES_MAX), ANSWER_BYTES_MAX, true));
+    let writer = match reply {
+        Some(_) => owner(),
+        None => asker_writer(&question.asker).unwrap_or_else(owner),
+    };
+    let settled = settle(tx, question, How::Carried(reply.as_deref()), &writer, 0)?;
+    Ok((settled == Settlement::Settled).then_some(project))
+}
+
+/// Sends the master of each project one engine note that lists the old free-text engine
+/// questions still waiting (F14, DEC-147.8) and asks it to ask each again as a choice
+/// question with `replaces`; a note a full conversation refuses waits for a later tick.
+/// Input: the team tick's transaction. Output: how many notes were sent.
+pub(crate) fn send_reask_notes(tx: &Transaction<'_>) -> Result<usize, EngineError> {
+    ensure(tx)?;
+    let due = select(
+        tx,
+        &format!(
+            "SELECT {COLUMNS} FROM questions_log WHERE reask=1 AND status='pending'
+             ORDER BY project, id LIMIT ?1"
+        ),
+        [PENDING_PER_PROJECT_MAX],
+    )?;
+    let mut sent = 0;
+    for listed in due.chunk_by(|one, next| one.project == next.project) {
+        let listed = &listed[..listed.len().min(REASKS_PER_NOTE_MAX)];
+        let project = &listed[0].project;
+        let names: Vec<String> = listed
+            .iter()
+            .map(|question| format!("{} {}", question.id, quoted(&question.question)))
+            .collect();
+        let text = format!("{REASK_NOTE}{}.", names.join("; "));
+        let appended = append_message(
+            tx,
+            project,
+            MessageAuthor::Engine,
+            &text,
+            MessageState::Pending,
+            now_ms(),
+        )?;
+        if appended.is_err() {
+            continue;
+        }
+        for question in listed {
+            tx.execute(
+                "UPDATE questions_log SET reask=2 WHERE id=?1 AND reask=1",
+                [column(question.id)],
+            )
+            .map_err(unavailable)?;
+        }
+        sent += 1;
+    }
+    assert!(sent <= due.len());
+    Ok(sent)
+}
+
+/// Makes the questions log, its later columns and its team link index on an engine
+/// database at start, so team reads that join it find it. Input: the engine connection.
+/// Output: nothing, or `questions_unavailable`.
+pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
+    ensure(connection)
+}
+
+/// Rewrites a project's questions page after a caller's transaction settled some of its
+/// questions. Inputs: the engine connection and the project.
+pub(crate) fn refresh_page(db: &Connection, project: &ProjectId) {
+    page::refresh(db, project);
 }
 
 /// Records an answer the owner gave in a team master's chat. The master names the owner's
@@ -712,7 +1098,8 @@ fn notes_of(db: &Connection, project: &ProjectId, asker: &str) -> Result<Vec<Not
         &tx,
         &format!(
             "SELECT {COLUMNS} FROM questions_log WHERE project=?1 AND asker=?2
-             AND status IN ('answered','dismissed') AND noted_ms IS NULL ORDER BY id LIMIT ?3"
+             AND (status IN ('answered','dismissed') OR (status='answered_in_terminal' AND answer IS NOT NULL))
+             AND noted_ms IS NULL ORDER BY id LIMIT ?3"
         ),
         params![project.as_str(), asker, NOTES_MAX as i64],
     )?;
@@ -861,10 +1248,11 @@ pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), E
     Ok(())
 }
 
-/// Logs one checked question inside the caller's transaction and notifies the owner.
-/// Inputs: the transaction, the project, the stored asker name and source, the ask, and
-/// whether a pending question of the same asker and text is returned instead. Output: the
-/// question id, or the refusals `ask` names.
+/// Logs one checked question inside the caller's transaction and notifies the owner; a
+/// question linked to a team message skips the per-asker cap and the notice, which its team
+/// alert made. Inputs: the transaction, the project, the stored asker name and source, the
+/// ask, whether a pending question of the same asker and text is returned instead, and the
+/// linked team message, if any. Output: the question id, or the refusals `ask` names.
 fn insert(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -872,6 +1260,7 @@ fn insert(
     source: &str,
     ask: &Ask,
     once: bool,
+    coord: Option<i64>,
 ) -> Result<u64, EngineError> {
     ensure(tx)?;
     let known: bool = tx
@@ -905,7 +1294,7 @@ fn insert(
             |row| row.get(0),
         )
         .map_err(unavailable)?;
-    if mine >= PENDING_PER_ASKER_MAX {
+    if coord.is_none() && mine >= PENDING_PER_ASKER_MAX {
         return Err(failure("questions_asker_full"));
     }
     if pending_count(tx, project)? >= PENDING_PER_PROJECT_MAX {
@@ -924,8 +1313,8 @@ fn insert(
         "a text question never has options"
     );
     tx.execute(
-        "INSERT INTO questions_log(project,asker,source,question,options_json,recommended,context,status,turn_floor,created_ms,kind)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10)",
+        "INSERT INTO questions_log(project,asker,source,question,options_json,recommended,context,status,turn_floor,created_ms,kind,coord_message)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10,?11)",
         params![
             project.as_str(),
             asker,
@@ -936,18 +1325,22 @@ fn insert(
             ask.context,
             floor,
             now,
-            ask.kind.as_str()
+            ask.kind.as_str(),
+            coord
         ],
     )
     .map_err(unavailable)?;
     let id = tx.last_insert_rowid();
     assert!(id > 0);
-    let first = ask.question.lines().next().unwrap_or_default();
-    let notice = bound_text(
-        &format!("{}: {}", capital(&asker_label(asker)), flat(first)),
-        events::ESCALATION_BYTES_MAX,
-    );
-    events::notify(tx, project, NotificationKind::Question, &notice, now).map_err(unavailable)?;
+    if coord.is_none() {
+        let first = ask.question.lines().next().unwrap_or_default();
+        let notice = bound_text(
+            &format!("{}: {}", capital(&asker_label(asker)), flat(first)),
+            events::ESCALATION_BYTES_MAX,
+        );
+        events::notify(tx, project, NotificationKind::Question, &notice, now)
+            .map_err(unavailable)?;
+    }
     prune(tx, project)?;
     u64::try_from(id).map_err(unavailable)
 }
@@ -969,9 +1362,12 @@ fn finish(
 }
 
 /// Settles one pending question once: the versioned write of its item refuses a writer that
-/// read another version, and the asker is told through at most one team message, both in
-/// the caller's transaction. Inputs: the transaction, the question, how it settles, the
-/// writer and the version it read. Output: Settled or Stale, or `questions_delivery_full`.
+/// read another version, and the asker is told at most once, both in the caller's
+/// transaction. A question linked to a team message is told through the team side only: the
+/// owner's answer or dismissal as one team reply from the owner, a withdrawal, re-ask or
+/// relay by ending the team message, so no asker hears it twice. Inputs: the transaction,
+/// the question, how it settles, the writer and the version it read. Output: Settled or
+/// Stale, or `questions_delivery_full`.
 fn settle(
     tx: &Transaction<'_>,
     question: Question,
@@ -988,19 +1384,70 @@ fn settle(
         Err(versioned::Refusal::Stale(_)) => return Ok(Settlement::Stale),
         Err(versioned::Refusal::Failed(problem)) => return Err(problem),
     }
-    let (status, answer, by) = match how {
-        How::Answer(text, by) => (QuestionStatus::Answered, Some(text), Some(by)),
-        How::Dismiss => (QuestionStatus::Dismissed, None, None),
-        How::Terminal => (QuestionStatus::AnsweredInTerminal, None, None),
+    let (status, answer, by, closed) = match how {
+        How::Answer(text, by) => (QuestionStatus::Answered, Some(text), Some(by), None),
+        How::Dismiss => (QuestionStatus::Dismissed, None, None, None),
+        How::Terminal => (QuestionStatus::AnsweredInTerminal, None, None, None),
+        How::Withdraw { .. } => (
+            QuestionStatus::Dismissed,
+            None,
+            None,
+            Some(ClosedBy::Master),
+        ),
+        How::Replace => (
+            QuestionStatus::Dismissed,
+            None,
+            None,
+            Some(ClosedBy::Replaced),
+        ),
+        How::Relay { text, .. } => (
+            QuestionStatus::AnsweredInTerminal,
+            Some(text),
+            None,
+            Some(ClosedBy::Relay),
+        ),
+        How::Carried(Some(text)) => (
+            QuestionStatus::Answered,
+            Some(text),
+            Some(AnsweredBy::Owner),
+            None,
+        ),
+        How::Carried(None) => (QuestionStatus::Dismissed, None, None, None),
     };
-    let message = if by == Some(AnsweredBy::Chat) {
+    let linked = coord_link(tx, question.id)?;
+    let carried = matches!(how, How::Carried(_));
+    assert!(!carried || linked.is_some());
+    let by_owner = matches!(how, How::Answer(..) | How::Dismiss);
+    let told = match linked {
+        Some(_) if carried => true,
+        Some(coord) if by_owner => tell_coord(tx, coord, answer)?,
+        Some(coord) => {
+            end_coord(tx, coord)?;
+            false
+        }
+        None => false,
+    };
+    let message = if told || by == Some(AnsweredBy::Chat) {
         None
-    } else {
+    } else if by_owner || matches!(how, How::Terminal) {
         deliver(tx, &question, answer)?
+    } else {
+        None
     };
+    let noted = told
+        || matches!(
+            how,
+            How::Replace | How::Withdraw { own: true } | How::Relay { own: true, .. }
+        );
+    let key = match how {
+        How::Relay { key, .. } => Some(key),
+        _ => None,
+    };
+    let now = now_ms();
     let changed = tx
         .execute(
-            "UPDATE questions_log SET status=?2, answer=?3, answered_by=?4, message=?5, settled_ms=?6
+            "UPDATE questions_log SET status=?2, answer=?3, answered_by=?4, message=?5, settled_ms=?6,
+             closed_by=?7, relay_key_ms=?8, noted_ms=CASE WHEN ?9 THEN ?6 ELSE noted_ms END
              WHERE id=?1 AND status='pending'",
             params![
                 column(question.id),
@@ -1008,13 +1455,95 @@ fn settle(
                 answer,
                 by.map(AnsweredBy::name),
                 message,
-                now_ms()
+                now,
+                ClosedBy::name(closed),
+                key,
+                noted
             ],
         )
         .map_err(unavailable)?;
     assert_eq!(changed, 1);
     prune(tx, &project)?;
     Ok(Settlement::Settled)
+}
+
+/// Reads the team message a question is linked to (F12). Inputs: the transaction and the
+/// question id. Output: the message id, or none for a question asked here.
+fn coord_link(tx: &Transaction<'_>, id: u64) -> Result<Option<i64>, EngineError> {
+    tx.query_row(
+        "SELECT coord_message FROM questions_log WHERE id=?1",
+        [column(id)],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(unavailable)
+}
+
+/// Says whether a linked team question still waits for an answer. Inputs: the transaction
+/// and the message id. Output: true for a receipt of Sent, Delivered, Typed or Read.
+fn coord_open(tx: &Transaction<'_>, message: i64) -> Result<bool, EngineError> {
+    let receipt: Option<String> = tx
+        .query_row(
+            "SELECT receipt FROM coord_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    Ok(receipt
+        .as_deref()
+        .and_then(crate::coord::Receipt::parse)
+        .is_some_and(|receipt| {
+            matches!(
+                receipt,
+                crate::coord::Receipt::Sent
+                    | crate::coord::Receipt::Delivered
+                    | crate::coord::Receipt::Typed
+                    | crate::coord::Receipt::Read
+            )
+        }))
+}
+
+/// Tells the asker of a linked team question the owner's answer or dismissal as one team
+/// reply from the owner, while the team message still waits. Inputs: the transaction, the
+/// message id and the owner's answer, none when dismissed. Output: whether it was told, or
+/// `questions_unavailable` when the team reply cannot be written.
+fn tell_coord(
+    tx: &Transaction<'_>,
+    message: i64,
+    answer: Option<&str>,
+) -> Result<bool, EngineError> {
+    if !coord_open(tx, message)? {
+        return Ok(false);
+    }
+    let body = match answer {
+        Some(text) => bound_text(text, crate::coord::BODY_BYTES_MAX),
+        None => COORD_DISMISSED.to_owned(),
+    };
+    assert!(!body.is_empty() && body.len() <= crate::coord::BODY_BYTES_MAX);
+    crate::coord::reply(tx, crate::coord::Party::Owner, message, body, now_ms())
+        .map_err(unavailable)?;
+    Ok(true)
+}
+
+/// Ends a linked team question nobody answers any more, from any open receipt, so its team
+/// alert settles. Inputs: the transaction and the message id. Output: nothing, or
+/// `questions_unavailable`.
+fn end_coord(tx: &Transaction<'_>, message: i64) -> Result<(), EngineError> {
+    crate::coord::withdraw(tx, message, now_ms()).map_err(unavailable)?;
+    Ok(())
+}
+
+/// The versioned writer for a stored asker that is a team agent: a team master or a
+/// sub-agent. Input: the stored asker name. Output: the writer, none for any other asker.
+fn asker_writer(asker: &str) -> Option<Writer> {
+    let id = asker
+        .strip_prefix("master:")
+        .filter(|rest| !rest.starts_with("session:"))
+        .or_else(|| asker.strip_prefix("agent:"))?;
+    let agent = AgentId::team(id.parse::<i64>().ok()?).ok()?;
+    Some(Writer::Agent(agent))
 }
 
 /// Queues the one team message that tells an asker how the owner settled its question: an
@@ -1091,9 +1620,15 @@ fn deliver(
 /// `your question 4 ("Ship?")`, and a closing line, if any. Output: the text.
 fn told(question: &Question, answer: Option<&str>, named: &str, tail: &str) -> String {
     assert!(named.contains(&question.id.to_string()));
-    match answer {
-        Some(answer) => format!("The owner answered {named}:\n{answer}{tail}"),
-        None => format!("The owner dismissed {named}. No answer comes.{tail}"),
+    match (question.closed_by, answer) {
+        (Some(ClosedBy::Relay), Some(answer)) => format!(
+            "The owner answered {named} in the master's terminal. The master reports the answer as:\n{answer}{tail}"
+        ),
+        (Some(ClosedBy::Master), _) => {
+            format!("The master withdrew {named}. No answer comes.{tail}")
+        }
+        (_, Some(answer)) => format!("The owner answered {named}:\n{answer}{tail}"),
+        (_, None) => format!("The owner dismissed {named}. No answer comes.{tail}"),
     }
 }
 
@@ -1190,6 +1725,7 @@ fn select(
         i64,
         Option<i64>,
         String,
+        String,
     );
     let rows: Vec<Row> = {
         let mut statement = tx.prepare(query).map_err(unavailable)?;
@@ -1209,6 +1745,7 @@ fn select(
                     row.get(10)?,
                     row.get(11)?,
                     row.get(12)?,
+                    row.get(13)?,
                 ))
             })
             .map_err(unavailable)?
@@ -1230,6 +1767,7 @@ fn select(
         created,
         settled,
         kind,
+        closed_by,
     ) in rows
     {
         let id = u64::try_from(id).map_err(unavailable)?;
@@ -1271,6 +1809,7 @@ fn select(
             answered_by,
             created_ms: u64::try_from(created).map_err(unavailable)?,
             settled_ms,
+            closed_by: ClosedBy::parse(&closed_by),
         });
     }
     Ok(questions)
@@ -1358,21 +1897,33 @@ fn is_terminal(asker: &str) -> bool {
     asker.starts_with("terminal:")
 }
 
-/// Makes the questions log when it is missing and adds the kind column to a log made
-/// before kinds. Input: the transaction. Output: nothing, or `questions_unavailable`.
-fn ensure(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    tx.execute_batch(SCHEMA).map_err(unavailable)?;
-    let has_kind: bool = tx
-        .query_row(
-            "SELECT COUNT(*)>0 FROM pragma_table_info('questions_log') WHERE name='kind'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(unavailable)?;
-    if !has_kind {
-        tx.execute_batch(KIND_COLUMN).map_err(unavailable)?;
+/// Makes the questions log when it is missing, adds each later column to a log made before
+/// it and the team link index. Adding the re-ask column marks every pending engine question
+/// without options as due to be asked again as a choice (F14). Input: the connection or
+/// transaction. Output: nothing, or `questions_unavailable`.
+fn ensure(db: &Connection) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    let present: Vec<String> = {
+        let mut statement = db
+            .prepare("SELECT name FROM pragma_table_info('questions_log')")
+            .map_err(unavailable)?;
+        statement
+            .query_map([], |row| row.get(0))
+            .map_err(unavailable)?
+            .collect::<Result<_, _>>()
+            .map_err(unavailable)?
+    };
+    assert!(present.iter().any(|name| name == "id"));
+    for (name, alter) in ADDED_COLUMNS {
+        if present.iter().any(|column| column == name) {
+            continue;
+        }
+        db.execute_batch(alter).map_err(unavailable)?;
+        if name == REASK_COLUMN {
+            db.execute_batch(REASK_OLD).map_err(unavailable)?;
+        }
     }
-    Ok(())
+    db.execute_batch(LINK_INDEX).map_err(unavailable)
 }
 
 /// Reads the questions a producer agent returned in its `{"questions": [...]}` block: each

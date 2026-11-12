@@ -638,7 +638,7 @@ impl TeamRuntime {
     fn stop(&mut self, id: i64) {
         let worker = self.workers.get_mut(&id).expect("worker exists");
         worker.busy = None;
-        worker.stopping = true;
+        worker.stop_for("engine_stop:recovery");
         let _ = worker.orders.send(Order::Stop);
     }
 

@@ -9,8 +9,8 @@ const PROJECT: &str = "alpha";
 
 /// Records a project with a stored setup whose folder is `folder`, the rows a project
 /// created through setup has, the project row through the engine's own create path. The
-/// write takes the write lock at its start, so beside an engine still writing it waits its
-/// turn; a lock taken only at the first write fails at once when another writer got in first.
+/// write lock is taken at the start, as the engine's own writes take it, so a started
+/// engine's write is waited for; a read first would fail at once when that write commits.
 /// Inputs: the engine database, the project id and its folder.
 pub(crate) fn add_project(db: &Connection, project: &str, folder: &Path) {
     let setup = StoredSetup {
@@ -49,6 +49,35 @@ pub(crate) fn add_project(db: &Connection, project: &str, folder: &Path) {
     )
     .unwrap();
     tx.commit().unwrap();
+}
+
+/// The fixture adds a project while another connection is in the middle of a write, as a
+/// started engine is: it waits for that write to commit and then adds the project.
+#[test]
+fn add_project_waits_for_another_writer_and_does_not_fail_on_a_stale_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("engine.db");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let other = Connection::open(&path).unwrap();
+    other
+        .execute_batch("BEGIN IMMEDIATE; CREATE TABLE writer_was_here (n INTEGER);")
+        .unwrap();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        other.execute_batch("COMMIT;").unwrap();
+    });
+    add_project(&db, PROJECT, tmp.path());
+    writer.join().unwrap();
+    let count = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+    assert_eq!(count("SELECT COUNT(*) FROM projects WHERE id='alpha'"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM project_setups"), 1);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM sqlite_master WHERE name='writer_was_here'"),
+        1,
+        "the other writer's work is kept"
+    );
 }
 
 /// Runs git in `dir` with no global or system configuration. Inputs: the folder and the

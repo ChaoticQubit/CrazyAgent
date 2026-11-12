@@ -1223,6 +1223,7 @@ mod live {
         Plan {
             harness: plan.harness.clone(),
             executable: plan.executable.clone(),
+            entry: plan.entry.clone(),
             working_dir: plan.working_dir.clone(),
             model: plan.model.clone(),
             tools: plan.tools,
@@ -1239,9 +1240,11 @@ mod live {
             continues: plan.continues,
             native: plan.native,
             tmux: plan.tmux.clone(),
+            native_threads: plan.native_threads,
             hookless: plan.hookless,
             scratch_pin: plan.scratch_pin,
             proxy: plan.proxy.clone(),
+            relay: plan.relay.clone(),
             terminal_display: plan.terminal_display,
             task_start: plan.task_start.clone(),
         }
@@ -1296,7 +1299,16 @@ mod live {
         let thread = std::thread::spawn(move || {
             let cancel = AtomicBool::new(false);
             let interrupt = AtomicBool::new(false);
-            per_turn(&plan, &home, &ordered, &reports, &cancel, &interrupt)
+            per_turn(
+                &plan,
+                &home,
+                &ordered,
+                &reports,
+                &cancel,
+                &interrupt,
+                &AtomicBool::new(false),
+                &crate::team::runtime::test_by(),
+            )
         });
         (reported, thread)
     }

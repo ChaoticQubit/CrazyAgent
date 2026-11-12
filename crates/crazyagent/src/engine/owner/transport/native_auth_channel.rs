@@ -18,6 +18,7 @@ use crate::engine::native_auth_host::RegisteredNativeAuthHost;
 use crate::engine::native_auth_host::custody::Retirement;
 use crate::engine::native_auth_host::custody::cleanup_direct_child;
 use crate::engine::owner::native_auth::{CodexAuthObservation, CodexLog, apply_codex_presentation};
+use crate::harnesses::finding::Found;
 use crate::storage::{NativeAuthDispatch, NativeAuthWork};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -105,6 +106,7 @@ pub(super) struct NativeAuthHostRegistration {
     claude_executable: Option<Arc<RegisteredNativeAuthHost>>,
     rcli_master_executable: Option<Arc<RegisteredNativeAuthHost>>,
     rcli_private_key_executable: Option<Arc<RegisteredNativeAuthHost>>,
+    search: Option<crate::harnesses::Search>,
     frozen: bool,
     disabled: bool,
 }
@@ -226,17 +228,38 @@ impl NativeAuthDispatchHost {
     pub(crate) fn registered_codex_executable(
         &self,
     ) -> Result<Option<Arc<RegisteredNativeAuthHost>>, EngineError> {
-        current_harness(&self.authority()?.native_auth_host, |registration| {
-            &mut registration.codex_executable
-        })
+        self.registered_or_found("codex", |registration| &mut registration.codex_executable)
     }
 
     pub(crate) fn registered_claude_executable(
         &self,
     ) -> Result<Option<Arc<RegisteredNativeAuthHost>>, EngineError> {
-        current_harness(&self.authority()?.native_auth_host, |registration| {
+        self.registered_or_found("claude-code", |registration| {
             &mut registration.claude_executable
         })
+    }
+
+    /// The pinned host for a sign-in; when none is usable, the sign-in is a retry that looks
+    /// again first ([`OwnerRuntimeHandle::look_again`]), so a harness installed after engine
+    /// start, or reinstalled after its pinned file vanished, is used without a restart.
+    /// Inputs: the catalog id and its slot. Output: the host, none, or the refusal.
+    fn registered_or_found(
+        &self,
+        harness: &str,
+        slot: HarnessSlot,
+    ) -> Result<Option<Arc<RegisteredNativeAuthHost>>, EngineError> {
+        let authority = self.authority()?;
+        if let Ok(Some(host)) = current_harness(&authority.native_auth_host, slot) {
+            return Ok(Some(host));
+        }
+        let owner = OwnerRuntimeHandle {
+            engine: self.engine.clone(),
+            authority: authority.clone(),
+        };
+        if let Ok(Found::Refused { code, .. }) = owner.look_again(harness) {
+            eprintln!("{harness} was found for sign-in but not used ({code})");
+        }
+        current_harness(&authority.native_auth_host, slot)
     }
 
     pub(crate) async fn prepare_native_auth_custody(
@@ -481,6 +504,241 @@ impl OwnerRuntimeHandle {
         }
         registration.claude_executable = Some(Arc::new(host));
         Ok(())
+    }
+
+    /// Pins the host of Codex or Claude Code when it was installed after the engine started,
+    /// once the engine's own install or update job for it has ended ([`Self::find_harness`]
+    /// with no chosen file). Inputs: the harness id, the engine search and PATH value.
+    /// Output: true when a host was pinned now, false when there was nothing to pin, or the
+    /// refusal of the check the found file failed.
+    pub(crate) fn register_installed_harness(
+        &self,
+        harness: &str,
+        search: &crate::harnesses::Search,
+        path: Option<&std::ffi::OsStr>,
+    ) -> Result<bool, EngineError> {
+        if !crate::harnesses::finding::CHOOSABLE.contains(&harness) {
+            return Ok(false);
+        }
+        match self.find_harness(harness, None, search, path)? {
+            Found::Registered { .. } => Ok(true),
+            Found::Refused { code, .. } => Err(failure(&code)),
+            Found::Ready { .. } | Found::Missing { .. } => Ok(false),
+        }
+    }
+
+    /// Looks for Codex or Claude Code again, for Check again, Choose file, a sign-in retry
+    /// and the install pin: the chosen file, else the first search hit, that passes
+    /// [`finding::check`](crate::harnesses::finding::check), captured as at engine start. It fills
+    /// an empty slot or one whose pinned file is gone; no other pin is replaced, and a disabled
+    /// registration refuses. Inputs: the id, chosen file, search and PATH. Output: [`Found`].
+    pub(crate) fn find_harness(
+        &self,
+        harness: &str,
+        chosen: Option<&Path>,
+        search: &crate::harnesses::Search,
+        path: Option<&std::ffi::OsStr>,
+    ) -> Result<Found, EngineError> {
+        let slot: HarnessSlot = match harness {
+            "codex" => |registration| &mut registration.codex_executable,
+            "claude-code" => |registration| &mut registration.claude_executable,
+            _ => return Err(failure(crate::harnesses::finding::UNKNOWN_HARNESS)),
+        };
+        if !self.authority.usable.load(Ordering::SeqCst) {
+            return Err(failure("owner_runtime_stale"));
+        }
+        self.native_auth_owner_runtime_dir()?;
+        let held = {
+            let mut registration = self
+                .authority
+                .native_auth_host
+                .lock()
+                .map_err(|_| failure("native_auth_recovery_required"))?;
+            if registration.disabled {
+                return Err(failure("native_auth_host_registration_frozen"));
+            }
+            slot(&mut registration).clone()
+        };
+        let (held, gone) = match held {
+            Some(held) if held.vanished() => (None, Some(held)),
+            held => (held, None),
+        };
+        if let Some(held) = held {
+            let shown = held.entry().map(Path::to_path_buf);
+            return Ok(
+                match current_harness(&self.authority.native_auth_host, slot) {
+                    Ok(Some(host)) => Found::Ready {
+                        path: host.entry().map_or_else(
+                            || {
+                                host.verified_path()
+                                    .map(Path::to_path_buf)
+                                    .unwrap_or_default()
+                            },
+                            Path::to_path_buf,
+                        ),
+                    },
+                    Ok(None) => Found::Missing {
+                        looked: crate::harnesses::finding::looked(search, harness),
+                    },
+                    Err(error) => Found::Refused {
+                        path: shown.unwrap_or_default(),
+                        code: error.0,
+                    },
+                },
+            );
+        }
+        let root = super::changes::engine_root(&self.authority)?;
+        let space = {
+            let db = crate::landing::open(&root)?;
+            crate::harnesses::finding::AgentSpace::read(&root, &db)?
+        };
+        let picked = match chosen {
+            Some(chosen) => Some(
+                crate::harnesses::finding::check(harness, chosen, &space, search.home())
+                    .map_err(|error| (chosen.to_path_buf(), error)),
+            ),
+            None => crate::harnesses::finding::pick(harness, search, path, &space),
+        };
+        let entry = match picked {
+            Some(Ok(entry)) => entry,
+            Some(Err((refused, error))) => {
+                return Ok(Found::Refused {
+                    path: refused,
+                    code: error.0,
+                });
+            }
+            None => {
+                return Ok(Found::Missing {
+                    looked: crate::harnesses::finding::looked(search, harness),
+                });
+            }
+        };
+        assert!(entry.is_absolute());
+        let captured = RegisteredNativeAuthHost::capture_entry(&entry).and_then(|host| {
+            host.verified_path()?;
+            Ok(host)
+        });
+        let host = match captured {
+            Ok(host) => host,
+            Err(error) => {
+                return Ok(Found::Refused {
+                    path: entry,
+                    code: error.0,
+                });
+            }
+        };
+        let mut registration = self
+            .authority
+            .native_auth_host
+            .lock()
+            .map_err(|_| failure("native_auth_recovery_required"))?;
+        if registration.disabled {
+            return Err(failure("native_auth_host_registration_frozen"));
+        }
+        let kept = slot(&mut registration);
+        if let Some(kept) = kept.as_ref()
+            && !gone.as_ref().is_some_and(|gone| Arc::ptr_eq(kept, gone))
+        {
+            return Ok(Found::Ready {
+                path: kept.entry().map(Path::to_path_buf).unwrap_or(entry),
+            });
+        }
+        *kept = Some(Arc::new(host));
+        assert!(slot(&mut registration).is_some());
+        Ok(Found::Registered { path: entry })
+    }
+
+    /// Hands the engine the search Check again, Choose file and a sign-in retry use, once at
+    /// engine start. An engine never given one looks only at a chosen file, so an engine built
+    /// inside a test never reads this machine's harnesses. Input: the search. Output: Ok, or
+    /// `native_auth_host_registration_frozen` when one was set or registration is off.
+    pub(crate) fn set_harness_search(
+        &self,
+        search: crate::harnesses::Search,
+    ) -> Result<(), EngineError> {
+        let mut registration = self
+            .authority
+            .native_auth_host
+            .lock()
+            .map_err(|_| failure("native_auth_recovery_required"))?;
+        if registration.disabled || registration.search.is_some() {
+            return Err(failure("native_auth_host_registration_frozen"));
+        }
+        registration.search = Some(search);
+        assert!(registration.search.is_some());
+        Ok(())
+    }
+
+    /// The search set at engine start ([`Self::set_harness_search`]), none for an engine
+    /// built without one. Output: the search, or `native_auth_recovery_required`.
+    pub(crate) fn held_search(&self) -> Result<Option<crate::harnesses::Search>, EngineError> {
+        let registration = self
+            .authority
+            .native_auth_host
+            .lock()
+            .map_err(|_| failure("native_auth_recovery_required"))?;
+        Ok(registration.search.clone())
+    }
+
+    /// The search a late pin uses: the one set at engine start, else one that looks nowhere,
+    /// so an engine built inside a test never pins this machine's harnesses.
+    /// Output: the search, or `native_auth_recovery_required`.
+    pub(crate) fn harness_search(&self) -> Result<crate::harnesses::Search, EngineError> {
+        Ok(self
+            .held_search()?
+            .unwrap_or_else(|| crate::harnesses::Search::new(Vec::new(), None, Vec::new())))
+    }
+
+    /// Looks for Codex or Claude Code again as Check again and a sign-in retry do: the file
+    /// the owner chose, when it still passes its checks, else the search set at engine start
+    /// (none set: no search), off the async worker since a capture hashes the whole file. A
+    /// refused chosen file is the answer when nothing usable is found. Input: the catalog
+    /// id. Output: what was found ([`Found`]), or the refusal code.
+    pub(crate) fn look_again(&self, harness: &str) -> Result<Found, EngineError> {
+        use crate::harnesses::finding;
+        let root = super::changes::engine_root(&self.authority)?;
+        let search = self.harness_search()?;
+        let db = crate::landing::open(&root)?;
+        finding::initialize(&db)?;
+        let stored = finding::chosen(&db, harness)?;
+        let space = finding::AgentSpace::read(&root, &db)?;
+        drop(db);
+        let (chosen, refused) = match stored {
+            Some(stored) => match finding::check(harness, &stored, &space, search.home()) {
+                Ok(checked) => (Some(checked), None),
+                Err(error) => (None, Some((stored, error.0))),
+            },
+            None => (None, None),
+        };
+        let work = || self.find_harness(harness, chosen.as_deref(), &search, None);
+        #[cfg(unix)]
+        let found = crate::engine::off_worker(work)?;
+        #[cfg(not(unix))]
+        let found = work()?;
+        Ok(match (found, refused) {
+            (Found::Missing { .. } | Found::Refused { .. }, Some((path, code))) => {
+                Found::Refused { path, code }
+            }
+            (found, _) => found,
+        })
+    }
+
+    /// Hands the team runtime, usage upkeep, research and onboarding the engine's answer for
+    /// a harness they were not given at engine start: the entry of the Codex or Claude Code
+    /// host pinned now, so a harness the engine refused or never pinned is never launched.
+    /// Input: none. Output: the lookup.
+    pub fn harness_lookup(&self) -> crate::paths::HarnessLookup {
+        let owner = self.clone();
+        Arc::new(move |harness: &str| {
+            let host = match harness {
+                "codex" => owner.registered_codex_executable(),
+                "claude-code" => owner.registered_claude_executable(),
+                _ => return None,
+            };
+            let entry = host.ok()?.entry()?.to_path_buf();
+            assert!(entry.is_absolute());
+            Some(entry)
+        })
     }
 
     pub(crate) fn register_rcli_master_executable(

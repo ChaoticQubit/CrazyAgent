@@ -615,8 +615,8 @@ export function dependencyView(dependency: Dependency): { title: string; about: 
 export function packStateView(state: PackState, hooksRefused: string | null = null): { word: string; tone: Tone; line: string | null } {
   const hooks = hooksRefused ? `Hooks not added: ${displayText(hooksRefused)}` : null;
   switch (state.state) {
-    case "on": return { word: "On", tone: "ok", line: hooks };
-    case "off": return { word: "Off", tone: "neutral", line: hooks };
+    case "on": return { word: "On", tone: hooks ? "warn" : "ok", line: hooks };
+    case "off": return { word: "Off", tone: hooks ? "warn" : "neutral", line: hooks };
     case "installing": return { word: "Installing", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
     default: return { word: "Not installed", tone: "neutral", line: null };

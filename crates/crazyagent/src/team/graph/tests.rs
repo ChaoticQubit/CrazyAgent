@@ -53,6 +53,7 @@ fn task(id: i64, harness: &str, status: TaskStatus, agent: Option<i64>) -> TeamT
         started_ms: None,
         finished_ms: None,
         parent: None,
+        wait: None,
     }
 }
 
@@ -82,6 +83,11 @@ fn status() -> TeamStatus {
         child_landing: crate::team::ChildLanding::Lead,
         max_harnesses: None,
         max_teammates: None,
+        master_rounds: None,
+        rounds_used: 0,
+        rounds_kept_going: false,
+        master_run_secs: Some(crate::team::master_limits::RUN_DEFAULT_SECS),
+        master_deadline_ms: None,
         token_budget: None,
         budget_used: None,
         budget_reached: false,
@@ -92,10 +98,13 @@ fn status() -> TeamStatus {
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftovers: crate::team::LeftoverMode::End,
+        leftover_holds: Vec::new(),
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,
         reask_empty_reply: true,
+        done_quiet_secs: Some(crate::team::DONE_QUIET_DEFAULT_SECS),
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,

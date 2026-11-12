@@ -1046,19 +1046,196 @@ fn a_port_linux_picks_for_an_open_network_agent_is_never_a_kept_port() {
     );
 }
 
+const LISTENERS: &str = "import os, socket
+def listen(name, family, address):
+    try:
+        listener = socket.socket(family, socket.SOCK_STREAM)
+    except PermissionError:
+        print(name + '=refused')
+        return
+    try:
+        if address is not None:
+            listener.bind(address)
+        listener.listen(1)
+        print(name + '=listened')
+    except PermissionError:
+        print(name + '=refused')
+    finally:
+        listener.close()
+listen('bind0', socket.AF_INET, ('127.0.0.1', 0))
+listen('listen', socket.AF_INET, None)
+listen('unix', socket.AF_UNIX, os.path.join(os.environ['TMPDIR'], 'agent.sock'))
+";
+
+/// Reads the range Linux hands out by itself on this machine. No input. Output: its first
+/// port.
+fn lowest_picked_port() -> u16 {
+    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    range
+        .split_ascii_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// REL220-F2: a listen on a socket that was never bound takes a port Linux picks with no
+/// bind check, on a limited network as on an open one. So a kept port inside the range
+/// Linux picks from refuses a limited launch with the open network's sentence, under both
+/// limited-network sockets settings, by the engine and by a helper started without it.
+#[test]
+fn a_limited_network_with_a_kept_port_linux_could_pick_is_refused_at_launch() {
+    let case = case();
+    let low = lowest_picked_port();
+    for sockets in [LinuxSockets::TcpOnly, LinuxSockets::TcpPorts] {
+        let limited = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .limit_sockets(sockets)
+            .keep_ports(&[low])
+            .unwrap();
+        match LinuxSandbox::detect(limited, Path::new(HELPER)) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(reason.contains(&format!("port {low} ")), "{reason}");
+                assert!(reason.contains("by itself"), "{reason}");
+            }
+            other => panic!("a kept port Linux could pick must refuse the launch: {other:?}"),
+        }
+    }
+    let direct = crazyagent::spawn_gate::output(
+        Command::new(HELPER)
+            .args([
+                "--limit-network",
+                "--keep-free",
+                &low.to_string(),
+                "--",
+                "/bin/true",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(
+        direct.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&direct.stderr).contains(&format!("port {low} ")),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+}
+
+/// REL220-F2 follow-up: bubblewrap starts a closed agent in a network of its own, where a
+/// port it listens on is never a host port, so a kept port inside the range Linux picks
+/// from refuses no closed bubblewrap launch. Landlock leaves the agent in the host's
+/// network, where a listen with no bind takes a picked port, so the same port still refuses
+/// an open, a limited and a closed Landlock launch.
+#[test]
+fn a_kept_port_linux_could_pick_refuses_every_landlock_launch_but_no_closed_bubblewrap_one() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let low = lowest_picked_port();
+    let kept = |network: SandboxNetwork| policy(&case, network).keep_ports(&[low]).unwrap();
+    for network in [
+        SandboxNetwork::Open,
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+        SandboxNetwork::Only(Vec::new()),
+    ] {
+        match LinuxSandbox::detect(kept(network.clone()), Path::new(HELPER)) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(
+                    reason.contains(&format!("port {low} ")),
+                    "{network:?}: {reason}"
+                );
+            }
+            other => panic!(
+                "a kept port Linux could pick must refuse a Landlock launch on {network:?}: \
+                 {other:?}"
+            ),
+        }
+    }
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        kept(SandboxNetwork::Only(Vec::new())),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        port_probe(&bubblewrap, &case, LISTENERS, &[]),
+        "bind0=listened\nlisten=listened\nunix=listened\n"
+    );
+}
+
+/// REL220-F2: a limited launch whose kept ports lie outside the range Linux picks from
+/// starts, and its agent keeps every listen: a bare TCP listen on a port Linux picks, and,
+/// on bubblewrap, a Unix socket listen. A bind stays refused on Landlock, which allows a
+/// limited agent no bind port, and the socket filter opens no Unix socket for any Landlock
+/// agent, as `a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime`
+/// shows.
+#[test]
+fn a_limited_network_agent_with_kept_ports_outside_the_picked_ones_keeps_its_listeners() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let kept: u16 = 18_080;
+    assert!(kept < lowest_picked_port());
+    let limited = |sockets: LinuxSockets| {
+        policy(&case, SandboxNetwork::Only(Vec::new()))
+            .limit_sockets(sockets)
+            .keep_ports(&[kept])
+            .unwrap()
+    };
+    for sockets in [LinuxSockets::TcpOnly, LinuxSockets::TcpPorts] {
+        let landlock = LinuxSandbox::detect(limited(sockets), Path::new(HELPER)).unwrap();
+        assert!(
+            matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+            "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
+            landlock.backend()
+        );
+        assert_eq!(
+            port_probe(&landlock, &case, LISTENERS, &[]),
+            "bind0=refused\nlisten=listened\nunix=refused\n",
+            "{sockets:?}"
+        );
+    }
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        limited(LinuxSockets::TcpOnly),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        port_probe(&bubblewrap, &case, LISTENERS, &[]),
+        "bind0=listened\nlisten=listened\nunix=listened\n"
+    );
+}
+
 /// LPF1-M1: a kept port inside the range Linux picks from could be handed to the agent
 /// with no check, so the launch is refused with a plain sentence, by the engine and by a
 /// helper started without it.
 #[test]
 fn an_open_network_with_a_kept_port_linux_could_pick_is_refused_at_launch() {
     let case = case();
-    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
-    let low: u16 = range
-        .split_ascii_whitespace()
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let low = lowest_picked_port();
     let open = policy(&case, SandboxNetwork::Open)
         .keep_ports(&[low])
         .unwrap();

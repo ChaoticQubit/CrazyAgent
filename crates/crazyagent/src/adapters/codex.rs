@@ -488,6 +488,28 @@ enum LoginState {
     Completed,
 }
 
+/// The Codex 0.164 thread items that run a tool. A model round that starts one of them is a
+/// step of the master step limit (PA-9); its token count ends the round once its tools are
+/// done (core session_turn.rs, send_token_count_event after drain_in_flight).
+const STEP_TOOLS: [&str; 8] = [
+    "commandExecution",
+    "fileChange",
+    "mcpToolCall",
+    "dynamicToolCall",
+    "collabAgentToolCall",
+    "webSearch",
+    "imageView",
+    "imageGeneration",
+];
+
+/// The steps one Codex turn has taken: model rounds that started a tool, and whether the
+/// round under way has started one yet.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Steps {
+    taken: u16,
+    tools: bool,
+}
+
 /// Tracks a bounded projection of the pinned stable Codex wire protocol.
 /// Byte inputs and returned frames describe protocol facts only.
 /// This object grants no execution, authentication or recovery authority.
@@ -504,6 +526,8 @@ pub struct CodexProtocol {
     login_ids: BTreeMap<String, LoginState>,
     refused: Option<String>,
     children: Children,
+    steps: Steps,
+    frame_max: usize,
 }
 
 impl Default for CodexProtocol {
@@ -527,10 +551,35 @@ impl CodexProtocol {
             login_ids: BTreeMap::new(),
             refused: None,
             children: Children::default(),
+            steps: Steps::default(),
+            frame_max: FRAME_BYTES_MAX,
         };
         protocol.assert_consistent();
         assert_eq!(protocol.phase, State::New);
         protocol
+    }
+
+    /// Bounds each frame this protocol writes by the owner's master frame size limit (F39)
+    /// in place of the engine wire frame. Input: the bound in bytes, from `FRAME_BYTES_MAX`
+    /// to `master_frame_limit::BYTES_MAX`; another bound is a caller fault. Output: the
+    /// protocol with that bound.
+    pub fn with_frame_limit(mut self, bytes: usize) -> Self {
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&bytes));
+        self.frame_max = bytes;
+        self.assert_consistent();
+        self
+    }
+
+    /// The bound on each frame this protocol writes. Input: none. Output: the bytes.
+    pub fn frame_limit(&self) -> usize {
+        self.frame_max
+    }
+
+    /// The steps the current turn has taken, as the master step limit counts them: model
+    /// rounds of this thread that started a tool, each counted once its token count ends
+    /// it. Input: none. Output: the count, 0 before a turn and at each new turn.
+    pub fn steps(&self) -> u16 {
+        self.steps.taken
     }
 
     pub fn state(&self) -> State {
@@ -555,7 +604,7 @@ impl CodexProtocol {
 
     pub fn initialized(&mut self) -> Result<Vec<u8>, ProtocolError> {
         self.require(State::Initialized)?;
-        let bytes = encode(json!({"method":"initialized"}))?;
+        let bytes = encode(json!({"method":"initialized"}), self.frame_max)?;
         self.phase = State::Ready;
         self.assert_consistent();
         assert!(self.pending.is_none());
@@ -711,7 +760,7 @@ impl CodexProtocol {
         if text.trim().is_empty() || text.contains('\0') {
             return Err(ProtocolError::InvalidInput);
         }
-        if text.len() > FRAME_BYTES_MAX {
+        if text.len() > self.frame_max {
             return Err(ProtocolError::FrameTooLarge);
         }
         if self.seen_turns.len() == TURNS_MAX {
@@ -725,6 +774,7 @@ impl CodexProtocol {
             }),
         )?;
         self.turn = None;
+        self.steps = Steps::default();
         self.phase = State::TurnStarting;
         self.assert_consistent();
         assert!(self.server_requests.is_empty());
@@ -770,9 +820,12 @@ impl CodexProtocol {
         }
         let id = self.next_id;
         let next = id.checked_add(1).ok_or(ProtocolError::Capacity)?;
-        let bytes = encode(json!({
-            "id":id,"method":"turn/interrupt","params":{"threadId":thread_id,"turnId":turn_id}
-        }))?;
+        let bytes = encode(
+            json!({
+                "id":id,"method":"turn/interrupt","params":{"threadId":thread_id,"turnId":turn_id}
+            }),
+            self.frame_max,
+        )?;
         self.children.interrupt(id, thread_id)?;
         self.next_id = next;
         assert!(self.children.interrupts.contains_key(&id));
@@ -798,7 +851,7 @@ impl CodexProtocol {
                 "code":-32601,"message":"unsupported native request"
             }}),
         };
-        let bytes = encode(value)?;
+        let bytes = encode(value, self.frame_max)?;
         let removed = self.server_requests.remove(id);
         assert!(removed.is_some());
         self.assert_consistent();
@@ -835,6 +888,8 @@ impl CodexProtocol {
 
     fn assert_consistent(&self) {
         assert!(self.next_id > 0);
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&self.frame_max));
+        assert!(self.turn.is_some() || self.steps == Steps::default());
         assert!(self.buffer.len() <= LINE_BYTES_MAX);
         assert!(self.seen_turns.len() <= TURNS_MAX);
         self.seen_server_ids.check();
@@ -947,7 +1002,10 @@ impl CodexProtocol {
         assert!(self.pending.is_none());
         assert!(self.next_id > 0);
         let next = self.next_id.checked_add(1).ok_or(ProtocolError::Capacity)?;
-        let bytes = encode(json!({"id":self.next_id,"method":operation.method(),"params":params}))?;
+        let bytes = encode(
+            json!({"id":self.next_id,"method":operation.method(),"params":params}),
+            self.frame_max,
+        )?;
         self.pending = Some((self.next_id, operation));
         self.next_id = next;
         self.assert_consistent();
@@ -1231,6 +1289,7 @@ impl CodexProtocol {
             }
             let inserted = self.seen_turns.insert(turn.id.clone());
             assert!(inserted);
+            self.steps = Steps::default();
         }
         let event = if turn.status == TurnStatus::InProgress {
             self.phase = State::Active;
@@ -1382,6 +1441,7 @@ impl CodexProtocol {
         if let Some(event) = self.child_frame(&method, &params)? {
             return Ok(event);
         }
+        self.count_step(&method, &params);
         match method.as_str() {
             "account/login/completed" => self
                 .login_completed(&params)
@@ -1429,6 +1489,36 @@ impl CodexProtocol {
             }
             _ => Ok(Some(Event::UnsupportedNotification { method })),
         }
+    }
+
+    /// Counts a step of the running turn (PA-9): a tool item this thread's turn starts marks
+    /// the model round as one that used tools, and the round's token count ends it as a step.
+    /// Frames of another thread or turn count nothing. Inputs: the notification's method and
+    /// params. Output: none.
+    fn count_step(&mut self, method: &str, params: &Value) {
+        let own = self.thread_id.as_deref().is_some_and(|thread| {
+            params["threadId"] == thread
+                && self.turn.as_ref().is_some_and(|turn| {
+                    turn.status == TurnStatus::InProgress && params["turnId"] == turn.id.as_str()
+                })
+        });
+        if !own {
+            return;
+        }
+        let before = self.steps;
+        match method {
+            "item/started" => {
+                let kind = params["item"]["type"].as_str().unwrap_or_default();
+                self.steps.tools |= STEP_TOOLS.contains(&kind);
+            }
+            "thread/tokenUsage/updated" if self.steps.tools => {
+                self.steps.taken = self.steps.taken.saturating_add(1);
+                self.steps.tools = false;
+            }
+            _ => {}
+        }
+        assert!(self.steps.taken >= before.taken);
+        assert!(self.steps.taken - before.taken <= 1);
     }
 
     /// Sets apart the frames of sub-agents Codex starts on its own from this thread's turn: a
@@ -1568,13 +1658,16 @@ impl CodexProtocol {
     }
 }
 
-fn encode(value: Value) -> Result<Vec<u8>, ProtocolError> {
+/// Encodes one outbound frame as a JSON line. Input: the value and the bound on the frame,
+/// its newline included. Output: the line, or `FrameTooLarge` when it would pass the bound.
+fn encode(value: Value, frame_max: usize) -> Result<Vec<u8>, ProtocolError> {
+    assert!(frame_max >= FRAME_BYTES_MAX);
     let mut bytes = serde_json::to_vec(&value).map_err(|_| ProtocolError::InvalidInput)?;
-    if bytes.len() >= FRAME_BYTES_MAX {
+    if bytes.len() >= frame_max {
         return Err(ProtocolError::FrameTooLarge);
     }
     bytes.push(b'\n');
-    assert!(bytes.len() <= FRAME_BYTES_MAX);
+    assert!(bytes.len() <= frame_max);
     assert_eq!(bytes.last(), Some(&b'\n'));
     Ok(bytes)
 }

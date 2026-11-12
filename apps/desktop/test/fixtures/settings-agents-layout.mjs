@@ -44,8 +44,8 @@ const SKILLS = [{ id: "skill-superpowers", name: "superpowers", description: "Ho
 
 const memory = (id, text, patch = {}) => ({ id, text, scope: "global", project_id: null, origin: "written", from_project_id: null, source_path: null, agent: null, ...patch });
 const MEMORIES = [memory("m1", "The owner prefers Rust for engines."), memory("m2", "Harbor deploys on Fridays.", { scope: "project", project_id: "harbor", origin: "requested", agent: "agent-7" })];
-const page = (items, next = null) => ({ items, next, agent_writes: "save" });
-const PAGES = { ok: page(MEMORIES), ask: page(MEMORIES), older: page(MEMORIES, 2), empty: page([]), long: page([memory("m1", "W".repeat(400))]) };
+const page = (items, next = null) => ({ items, next, agent_writes: "save", agent_scope: "project" });
+const PAGES = { ok: page(MEMORIES), ask: page(MEMORIES), older: page(MEMORIES, 2), empty: page([]), long: page([memory("m1", "W".repeat(400))]), moving: page([memory("m3", "Parser gotcha.", { origin: "agent", agent: "Master" })]) };
 const SUGGESTION = { id: "entry-1", version: 3, text: "Competitors charge per seat.", status: "Provisional", human_reviewed: false };
 const PROJECTS = [{ id: "harbor", name: "Harbor Notes" }];
 
@@ -53,6 +53,7 @@ let root = null;
 let sent = [];
 let told = [];
 let writes = "save";
+let reach = "project";
 
 /** Lets the engine's answers and the renders they cause land. Input: the wait in
  * milliseconds. Output: nothing. */
@@ -67,10 +68,10 @@ function failing(command, state, list) {
 }
 
 function savedPage(scene, args) {
-  if (args.before !== null) return { ...page([memory("m0", "An older memory.")]), agent_writes: writes };
+  if (args.before !== null) return { ...page([memory("m0", "An older memory.")]), agent_writes: writes, agent_scope: reach };
   const listed = failing("desktop_memories", scene.memories ?? "ok", PAGES);
   if (listed instanceof Promise) return listed;
-  return { ...listed, items: listed.items.filter((item) => !args.search || item.text.includes(args.search)), agent_writes: writes };
+  return { ...listed, items: listed.items.filter((item) => !args.search || item.text.includes(args.search)), agent_writes: writes, agent_scope: reach };
 }
 
 /** Answers one engine command for a scene. Inputs: the scene, the command and its arguments.
@@ -88,7 +89,8 @@ function answer(scene, command, args) {
   if (command === "desktop_pick_folder") return "/Users/someone/notes";
   if (command === "desktop_import_memory") return { imported: 2, skipped: 1 };
   if (command === "desktop_set_agent_memory_writes") writes = args.writes;
-  if (["desktop_set_agent_memory_writes", "desktop_add_memory", "desktop_delete_memory", "desktop_approve_memory", "desktop_review_memory", "desktop_promote_memory"].includes(command)) return APPLIED;
+  if (command === "desktop_set_agent_memory_scope") reach = args.scope;
+  if (["desktop_set_agent_memory_writes", "desktop_set_agent_memory_scope", "desktop_move_memory", "desktop_add_memory", "desktop_delete_memory", "desktop_approve_memory", "desktop_review_memory", "desktop_promote_memory"].includes(command)) return APPLIED;
   throw `Command ${command} not found`;
 }
 
@@ -99,6 +101,7 @@ export async function mount(tab, scene = {}, theme = "light") {
   sent = [];
   told = [];
   writes = scene.memories === "ask" ? "ask" : "save";
+  reach = scene.reach === "agent" ? "agent" : "project";
   window.__TAURI_INTERNALS__ = {
     plugins: {},
     transformCallback: () => 0,

@@ -1426,6 +1426,11 @@ impl ProjectPage {
                 self.retry_master(ctx);
                 Flow::Handled
             }
+            ProjectReply::RefreshOverview => {
+                let project = self.screen.project.clone();
+                self.send(SetupQuery::RefreshOverview { project }, ctx);
+                Flow::Handled
+            }
             ProjectReply::Team => Flow::Open(Place::Team {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
@@ -1439,6 +1444,10 @@ impl ProjectPage {
                 name: self.screen.name.clone(),
             }),
             ProjectReply::Process => Flow::Open(Place::ProjectProcess {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
+            ProjectReply::Memory => Flow::Open(Place::ProjectMemory {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),

@@ -28,6 +28,7 @@ mod harnesses;
 pub mod ide;
 mod ide_extensions;
 mod ide_reveal;
+mod ide_run;
 pub mod intake;
 pub mod master;
 pub mod memory;
@@ -35,6 +36,7 @@ mod model_access;
 mod native_auth;
 pub mod notify;
 pub mod open;
+mod overview;
 mod owner_setup;
 pub mod picker;
 mod plugins;
@@ -644,6 +646,7 @@ impl NativeBridge {
             OwnerMutation::SetQuitSettings { .. } => ("quit_settings", None, None),
             OwnerMutation::SetMasterStepSettings { .. } => ("master_step_settings", None, None),
             OwnerMutation::SetMasterTimeSettings { .. } => ("master_time_settings", None, None),
+            OwnerMutation::SetMasterFrameSettings { .. } => ("master_frame_settings", None, None),
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }
@@ -766,6 +769,12 @@ impl NativeBridge {
                 crazyagent::memory::library::LibraryAction::AgentWrites { .. } => {
                     ("memory_agent_writes", None, None)
                 }
+                crazyagent::memory::library::LibraryAction::AgentScope { .. } => {
+                    ("memory_agent_scope", None, None)
+                }
+                crazyagent::memory::library::LibraryAction::MoveToProject {
+                    project_id, ..
+                } => ("memory_move", Some(project_id.as_str().to_owned()), None),
             },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }

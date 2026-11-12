@@ -124,8 +124,15 @@ test("Sign in and Try again start from a fresh sign-in record, since the open dr
 
 test("a sign-in started in the drawer reloads the account list, so its row reads Signing in and the page polls it", () => {
   const source = readFileSync(new URL("../src/screens/settings/account-drawer.tsx", import.meta.url), "utf8");
-  assert.match(source, /function SignInAgain\(\{ account, onSignedIn, onStarted \}/);
+  assert.match(source, /function SignInAgain\(\{ account, way, onSignedIn, onStarted \}/);
   assert.match(source, /const attempt = signInRunning\(signIn\.state\) \? signIn\.state\?\.operation\?\.operation_id : undefined;/);
   assert.match(source, /if \(!attempt \|\| started\.current === attempt\) return;\s*started\.current = attempt;\s*onStarted\(\);/);
-  assert.match(source, /<SignInAgain account=\{account\} onStarted=\{\(\) => onChanged\(\)\}/);
+  assert.match(source, /<SignInAgain account=\{account\} way=\{signingIn\} onStarted=\{\(\) => onChanged\(\)\}/);
+});
+
+test("the drawer offers Check this account's sign-in for every subscription account and starts that check at once (PA-13)", () => {
+  const source = readFileSync(new URL("../src/screens/settings/account-drawer.tsx", import.meta.url), "utf8");
+  assert.match(source, /\{subscription && account\.status !== "signing_in" && !signingIn &&\s*<span><Button icon="refresh-cw" onClick=\{\(\) => setSigningIn\("check"\)\}>\{CHECK_SIGN_IN\}<\/Button><\/span>\}/);
+  assert.match(source, /if \(way !== "check" \|\| checked\.current \|\| stage\.kind !== "start"\) return;\s*checked\.current = true;\s*void signIn\.start\(method\);/);
+  assert.match(source, /way === "check" \? signInMethodFor\(signInHarness\(provider\), "check"\)/);
 });

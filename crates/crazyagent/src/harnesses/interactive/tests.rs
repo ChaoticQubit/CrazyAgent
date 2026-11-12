@@ -1279,6 +1279,104 @@ fn a_fullscreen_claude_code_terminal_asks_for_the_fullscreen_renderer_at_three_r
     drop(lead);
 }
 
+/// PA-7: a Codex lead in the Native mode leaves out the multi-agent v2 off switch, so the
+/// `config.toml` its context wrote turns Codex's own sub-agents on; an App-spawned Codex lead
+/// keeps both multi-agent switches off.
+#[test]
+fn a_native_codex_lead_keeps_codex_sub_agents_on_and_an_app_spawned_one_off() {
+    let case = Case::new();
+    let request = case.request("codex", case.subscription(), true);
+    let installed = project_context(&case, "data")
+        .with_native_sub_agents(3)
+        .install("codex", &case.home(), true)
+        .unwrap();
+    assert!(installed.native_threads());
+    let built = command(&request, Some(&installed), &run(None)).unwrap();
+    assert!(
+        !built
+            .argv
+            .iter()
+            .any(|argument| argument == "features.multi_agent_v2=false"),
+        "{:?}",
+        built.argv
+    );
+    let config = std::fs::read_to_string(case.home().join("config.toml")).unwrap();
+    assert!(config.contains("[features.multi_agent_v2]"), "{config}");
+    assert!(config.contains("max_threads = 3"), "{config}");
+    drop(installed);
+
+    let spawned = project_context(&case, "data-spawned")
+        .install("codex", &case.home(), true)
+        .unwrap();
+    assert!(!spawned.native_threads());
+    let built = command(&request, Some(&spawned), &run(None)).unwrap();
+    for setting in [
+        "features.multi_agent=false",
+        "features.multi_agent_v2=false",
+    ] {
+        assert!(
+            built.argv.iter().any(|argument| argument == setting),
+            "{setting}"
+        );
+    }
+    drop(spawned);
+}
+
+/// PA-7, macOS only like every agent launch: the installed Codex (the pinned 0.164.0 in CI)
+/// reads a native lead's settings and `config.toml` with multi-agent v2 on, and an
+/// App-spawned lead's with it off.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_installed_codex_reads_a_native_lead_with_its_own_sub_agents_on() {
+    let installed_codex = crate::harnesses::catalog(&crate::harnesses::Search::from_environment())
+        .into_iter()
+        .find(|entry| entry.id == "codex")
+        .and_then(|entry| entry.executable)
+        .expect("installed codex");
+    let case = Case::new();
+    let request = case.request("codex", case.subscription(), true);
+    for (data, native, expected) in [("data", true, "true"), ("data-spawned", false, "false")] {
+        let mut context = project_context(&case, data);
+        if native {
+            context = context.with_native_sub_agents(2);
+        }
+        let installed = context.install("codex", &case.home(), true).unwrap();
+        let built = command(&request, Some(&installed), &run(None)).unwrap();
+        let settings: Vec<&String> = built
+            .argv
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| &pair[1])
+            .collect();
+        let mut features = std::process::Command::new(&installed_codex);
+        features
+            .args(settings.iter().flat_map(|setting| ["-c", setting.as_str()]))
+            .args(["features", "list"])
+            .env_clear()
+            .env("HOME", case.home())
+            .env("CODEX_HOME", case.home())
+            .env("PATH", "/usr/bin:/bin")
+            .current_dir(case.path().join("work"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = crate::spawn_gate::output(&mut features).unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state = text.lines().find_map(|line| {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            (columns.first() == Some(&"multi_agent_v2"))
+                .then(|| columns.last().copied())
+                .flatten()
+        });
+        assert_eq!(state, Some(expected), "{data}: {text}");
+        drop(installed);
+    }
+}
+
 #[test]
 fn a_native_lead_runs_agent_teams_and_its_teammates_get_a_plain_quoted_script() {
     let case = Case::new();

@@ -165,6 +165,7 @@ fn fresh(width: u16, height: u16) -> Shell {
             name: name.into(),
             provider: String::new(),
             status: String::new(),
+            no_window: None,
         })
         .collect(),
     );
@@ -1118,6 +1119,11 @@ fn finished_team() -> crate::team::TeamStatus {
         child_landing: crate::team::ChildLanding::Lead,
         max_harnesses: None,
         max_teammates: None,
+        master_rounds: None,
+        rounds_used: 0,
+        rounds_kept_going: false,
+        master_run_secs: Some(crate::team::master_limits::RUN_DEFAULT_SECS),
+        master_deadline_ms: None,
         token_budget: None,
         budget_used: None,
         budget_reached: false,
@@ -1129,10 +1135,13 @@ fn finished_team() -> crate::team::TeamStatus {
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftovers: crate::team::LeftoverMode::End,
+        leftover_holds: Vec::new(),
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,
         reask_empty_reply: true,
+        done_quiet_secs: Some(crate::team::DONE_QUIET_DEFAULT_SECS),
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
@@ -1181,6 +1190,7 @@ fn finished_team() -> crate::team::TeamStatus {
             started_ms: Some(1),
             finished_ms: Some(2),
             parent: None,
+            wait: None,
         }],
         messages: Vec::new(),
         plan: Vec::new(),
@@ -1835,6 +1845,11 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         child_landing: crate::team::ChildLanding::Lead,
         max_harnesses: None,
         max_teammates: None,
+        master_rounds: None,
+        rounds_used: 0,
+        rounds_kept_going: false,
+        master_run_secs: Some(crate::team::master_limits::RUN_DEFAULT_SECS),
+        master_deadline_ms: None,
         token_budget: None,
         budget_used: None,
         budget_reached: false,
@@ -1846,10 +1861,13 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftovers: crate::team::LeftoverMode::End,
+        leftover_holds: Vec::new(),
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,
         reask_empty_reply: true,
+        done_quiet_secs: Some(crate::team::DONE_QUIET_DEFAULT_SECS),
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
@@ -1918,6 +1936,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 started_ms: Some(1),
                 finished_ms: Some(2),
                 parent: None,
+                wait: None,
             })
             .collect(),
         messages: Vec::new(),
@@ -2271,6 +2290,11 @@ fn master_status(
         child_landing: crate::team::ChildLanding::Lead,
         max_harnesses: None,
         max_teammates: None,
+        master_rounds: None,
+        rounds_used: 0,
+        rounds_kept_going: false,
+        master_run_secs: Some(crate::team::master_limits::RUN_DEFAULT_SECS),
+        master_deadline_ms: None,
         token_budget: None,
         budget_used: None,
         budget_reached: false,
@@ -2282,10 +2306,13 @@ fn master_status(
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftovers: crate::team::LeftoverMode::End,
+        leftover_holds: Vec::new(),
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,
         reask_empty_reply: true,
+        done_quiet_secs: Some(crate::team::DONE_QUIET_DEFAULT_SECS),
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
@@ -2323,6 +2350,16 @@ fn team_read(status: crate::team::TeamStatus) -> Arrival {
 /// one runs, uses `running`. Inputs: the switch, the saved and the running harness ids.
 /// Output: the arrival.
 fn harnessed(on: Option<bool>, saved: &str, running: Option<&str>) -> Arrival {
+    team_read(harnessed_status(on, saved, running))
+}
+
+/// The team status `harnessed` reads. Inputs: the switch, the saved and the running
+/// harness ids. Output: the status.
+fn harnessed_status(
+    on: Option<bool>,
+    saved: &str,
+    running: Option<&str>,
+) -> crate::team::TeamStatus {
     use crate::team::{AgentRole, TeamAgent, TeamHarness};
     let mut status = master_status(on, None, None);
     status.harnesses = vec![TeamHarness {
@@ -2368,7 +2405,7 @@ fn harnessed(on: Option<bool>, saved: &str, running: Option<&str>) -> Arrival {
             message_note: None,
         })
         .collect();
-    team_read(status)
+    status
 }
 
 /// The master view's header names the harness the running live master uses, the saved one
@@ -3629,7 +3666,7 @@ fn switch_off_unswitched() -> Arrival {
 }
 
 #[test]
-fn the_instructions_box_says_why_claude_loads_no_file_and_when_a_headless_run_reports_nothing() {
+fn the_instructions_box_says_the_same_for_every_harness_when_none_is_loaded_or_reported() {
     let ctx = Ctx::new(
         Depth::NoColor,
         Colors::Dark,
@@ -3655,41 +3692,30 @@ fn the_instructions_box_says_why_claude_loads_no_file_and_when_a_headless_run_re
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let claude = text(view.clone());
-    assert!(
-        claude.contains(
-            "Instructions: none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt"
-        ),
-        "{claude}"
-    );
-    let codex = text(AgentInstructions {
-        harness: "codex".into(),
-        ..view.clone()
-    });
-    assert!(
-        codex.contains("Instructions: none loaded by its harness"),
-        "{codex}"
-    );
-    let unreported = text(AgentInstructions {
-        sessions: 0,
-        ..view.clone()
-    });
-    assert!(
-        unreported.contains("Instructions: not reported yet")
-            && unreported.contains(
-                "A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off."
+    for harness in ["claude-code", "codex"] {
+        let reported = text(AgentInstructions {
+            harness: harness.into(),
+            ..view.clone()
+        });
+        assert!(
+            reported.contains(
+                "Instructions: none loaded by the harness itself; CrazyAgent gives its instructions at launch"
             ),
-        "{unreported}"
-    );
-    assert!(
-        !text(AgentInstructions {
-            harness: "codex".into(),
+            "DEC-141 PA-14: one line for every harness: {reported}"
+        );
+        let unreported = text(AgentInstructions {
+            harness: harness.into(),
             sessions: 0,
-            ..view
-        })
-        .contains("headless Claude"),
-        "a Codex run is never told about the Claude transcript setting"
-    );
+            ..view.clone()
+        });
+        assert!(
+            unreported.contains("Instructions: not reported yet")
+                && unreported
+                    .contains("A headless run reports nothing here while it keeps no transcript."),
+            "DEC-141 PA-14: {harness}: {unreported}"
+        );
+        assert!(!unreported.contains("Claude run"), "{unreported}");
+    }
 }
 
 #[test]
@@ -3790,6 +3816,10 @@ async fn served(
     ))))
 }
 
+/// The team screen's q box lists the team questions the one owner questions list cannot
+/// take (F12): this project already has 64 questions waiting, so the agent's question is
+/// not linked and stays in the team inbox. An answer there reaches the asker as the owner's
+/// reply, and Enter opens a waiting agent's terminal.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_opens_a_waiting_terminal()
@@ -3860,6 +3890,19 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
             .unwrap();
         engine.last_insert_rowid()
     };
+    for earlier in 0..crate::questions::PENDING_PER_PROJECT_MAX {
+        engine
+            .execute(
+                "INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms)
+                 VALUES (?1,'terminal','terminal',?2,'[]','pending',0,?3)",
+                rusqlite::params![
+                    project().as_str(),
+                    format!("Earlier question {earlier}?"),
+                    now
+                ],
+            )
+            .unwrap();
+    }
     let (asker, waiter) = (agent("working"), agent("working"));
     let question = crate::coord::send(
         &engine,
@@ -4320,7 +4363,7 @@ fn a_master_stopped_for_another_reason_offers_no_start_again() {
     requests(&mut shell);
     shell.arrive(switch(
         Some(false),
-        Some("The live master was turned off: its terminal ended. Start it again from the master view."),
+        Some("The live master was turned off: it had to start 3 times within 10 minutes. Start it again from the master view."),
     ));
     requests(&mut shell);
     let seen = render(&mut shell).join("\n");
@@ -5168,4 +5211,42 @@ fn every_code_a_check_keeps_an_agent_with_has_its_own_reason() {
         super::cleanup::kept_reason("cleanup_new_check"),
         "a check keeps it (cleanup_new_check)"
     );
+}
+
+/// While a live master runs, the master view's header ends with the time it has left
+/// under Master run time and the sub-agent rounds of the owner's current goal (F01, F09);
+/// a switch that is on with no master running shows neither.
+#[test]
+fn the_master_view_head_ends_with_the_time_left_and_the_rounds_while_the_master_runs() {
+    let mut shell = master_view(160, 24);
+    requests(&mut shell);
+    let mut status = harnessed_status(Some(true), "codex", Some("codex"));
+    status.master_rounds = Some(3);
+    status.rounds_used = 2;
+    status.master_run_secs = None;
+    status.master_deadline_ms = None;
+    shell.arrive(team_read(status));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains(
+            "Live master on. Harness: Codex. It starts when you open this view. No time limit. Sub-agent rounds: 2 of 3."
+        ),
+        "{}",
+        rows[2]
+    );
+    let mut kept = harnessed_status(Some(true), "codex", Some("codex"));
+    kept.master_rounds = Some(1);
+    kept.rounds_used = 4;
+    kept.rounds_kept_going = true;
+    kept.master_deadline_ms = Some(crate::team::now_ms() + 3 * 86_400_000 + 1_800_000);
+    shell.arrive(team_read(kept));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains("3 d 0 h left. Sub-agent rounds: 4, no limit for this goal."),
+        "{}",
+        rows[2]
+    );
+    shell.arrive(harnessed(Some(true), "codex", None));
+    let rows = render(&mut shell);
+    assert!(!rows[2].contains("Sub-agent rounds"), "{}", rows[2]);
 }

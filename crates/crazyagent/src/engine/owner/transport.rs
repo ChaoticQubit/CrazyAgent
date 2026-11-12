@@ -53,6 +53,7 @@ pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
 mod native_auth;
 pub(crate) mod native_auth_channel;
+pub(crate) mod overview;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
@@ -2201,6 +2202,7 @@ enum Protocol {
     Agents,
     Changes,
     Cleanup,
+    Overview,
     Usage,
     IdeExtensions,
     Recovery,
@@ -2235,6 +2237,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("agents", Protocol::Agents),
         ("changes", Protocol::Changes),
         ("cleanup", Protocol::Cleanup),
+        ("overview", Protocol::Overview),
         ("usage", Protocol::Usage),
         ("ide_extensions", Protocol::IdeExtensions),
         ("recovery", Protocol::Recovery),
@@ -2291,6 +2294,9 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::HarnessCatalog if harness_catalog::slow(body) => {
+                return Ok(Some(Deferred::HarnessUpdates(a)));
+            }
             Protocol::HarnessCatalog => {
                 return harness_catalog::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2308,6 +2314,7 @@ async fn serve_admitted(
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
             Protocol::IdeExtensions => return Ok(Some(Deferred::IdeExtensions(a))),
             Protocol::Cleanup => return Ok(Some(Deferred::Cleanup(a))),
+            Protocol::Overview => return Ok(Some(Deferred::Overview(a))),
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
@@ -2506,6 +2513,10 @@ async fn serve_admitted(
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
         }
+        Deferred::Overview(a) => {
+            let served = overview::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(overview::OVERVIEW_TIMEOUT, served).await;
+        }
         Deferred::SkillImport(a) => {
             let served = plugins::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(plugins::IMPORT_TIMEOUT, served).await;
@@ -2513,6 +2524,10 @@ async fn serve_admitted(
         Deferred::Usage(a) => {
             let served = usage::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
+        }
+        Deferred::HarnessUpdates(a) => {
+            let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
         }
         Deferred::Icloud(a) => {
             let served = icloud::serve(stream, engine, authority, auth, &a, body);
@@ -2569,10 +2584,12 @@ struct Tasks {
 /// write lock and rewrite a project's questions page, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
 /// copy skill folders, Roadmap requests, which read and write the roadmap status store,
-/// Usage requests, which read and write the usage store, iCloud downloads, which wait for
-/// macOS to bring a folder's files to this Mac, and Process proposals, which wait for an
-/// Edit with AI model run. Each carries the admission, and the projects home its validated
-/// request; the others read the request frame.
+/// Usage requests, which read and write the usage store, harness version, update and
+/// install requests, which wait for a harness, Homebrew, npm or a vendor's release
+/// pointer, iCloud downloads, which wait for macOS to bring a folder's files to this Mac,
+/// and Process proposals, which wait for an Edit with AI model run. Each carries the
+/// admission, and the projects home its validated request; the others read the request
+/// frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
@@ -2587,8 +2604,10 @@ enum Deferred {
     Questions(Admission),
     Roadmap(Admission),
     Cleanup(Admission),
+    Overview(Admission),
     SkillImport(Admission),
     Usage(Admission),
+    HarnessUpdates(Admission),
     Icloud(Admission),
 }
 
@@ -2627,6 +2646,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Agents => agents::refusal(code)?,
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Cleanup => cleanup::refusal(code)?,
+        Protocol::Overview => overview::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
         Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::Recovery => recovery::refusal(code)?,

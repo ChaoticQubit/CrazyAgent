@@ -129,6 +129,7 @@ struct LiveSwitch {
     saved: Option<String>,
     running: Option<String>,
     version: u64,
+    limits: Option<crate::team::master_limits::LimitsView>,
 }
 
 struct Attached {
@@ -442,6 +443,15 @@ impl Team {
                         .find(|agent| agent.role == AgentRole::Master && agent.status.live())
                         .map(|agent| agent.harness.clone()),
                     version: status.settings_version,
+                    limits: Some(crate::team::master_limits::LimitsView {
+                        rounds: crate::team::master_limits::Rounds {
+                            used: status.rounds_used,
+                            max: status.master_rounds,
+                            kept_going: status.rounds_kept_going,
+                        },
+                        run_secs: status.master_run_secs,
+                        deadline_ms: status.master_deadline_ms,
+                    }),
                 };
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
@@ -486,9 +496,10 @@ impl Team {
                 Ok(view) => {
                     self.want = None;
                     let last = self.switch.take();
-                    let (switched, saved, running) = last.map_or((None, None, None), |switch| {
-                        (switch.switched, switch.saved, switch.running)
-                    });
+                    let (switched, saved, running, limits) = last
+                        .map_or((None, None, None, None), |switch| {
+                            (switch.switched, switch.saved, switch.running, switch.limits)
+                        });
                     self.switch = Some(LiveSwitch {
                         on: Some(*on),
                         problem: None,
@@ -497,6 +508,7 @@ impl Team {
                         saved,
                         running,
                         version: version + 1,
+                        limits,
                     });
                     if let SetupView::LiveWithoutSession(why) = view {
                         ctx.say(Message::error(MASTER_NO_SESSION, &unopened(why)));
@@ -1166,7 +1178,8 @@ impl Team {
 
     /// The master view's header: whether the live master is on, the harness it runs and a
     /// saved one that waits for its next start, where the live session's master harness
-    /// last switched, and the session keys at the right edge. The state is kept whole: when
+    /// last switched, last its time left and the rounds of the current goal while a live
+    /// master runs (F01, F09), and the session keys at the right edge. The state is kept whole: when
     /// it does not fit beside both keys, only n New session shows and l Sessions stays in
     /// the hints. Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
@@ -1186,7 +1199,12 @@ impl Team {
         };
         let harness = switch
             .and_then(|switch| harness_words(switch.saved.as_deref(), switch.running.as_deref()));
-        let state = [Some(lead), harness.as_deref(), rest]
+        let limits = switch
+            .filter(|switch| switch.running.is_some())
+            .and_then(|switch| switch.limits)
+            .filter(|_| !self.paused && !off)
+            .map(|view| view.words(crate::team::now_ms()));
+        let state = [Some(lead), harness.as_deref(), rest, limits.as_deref()]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
@@ -2324,19 +2342,17 @@ fn instruction_lines(
     lines
 }
 
-const CLAUDE_GIVEN: &str =
-    "none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt";
-const CLAUDE_NO_RECORD: &str =
-    "A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off.";
+const GIVEN_AT_LAUNCH: &str =
+    "none loaded by the harness itself; CrazyAgent gives its instructions at launch";
+const NO_RECORD: &str = "A headless run reports nothing here while it keeps no transcript.";
 
 /// The lines saying what an agent's harness reported in its own session records: the
-/// instruction file names it loaded and the skills it invoked, then each file's place.
-/// Claude loads no instruction file itself, since CrazyAgent gives it the instructions in
-/// its launch prompt, and a headless Claude run writes no session record while its project
-/// keeps no transcripts, so the lines say so.
-/// Inputs: the view, the box width and context. Output: the lines and a blank line.
+/// instruction file names it loaded and the skills it invoked, then each file's place. The
+/// words are the same for every harness (DEC-141 PA-14): with no file loaded, the line says
+/// CrazyAgent gave the instructions at launch, and before any record it says a headless run
+/// that keeps no transcript reports nothing. Inputs: the view, the box width and context.
+/// Output: the lines and a blank line.
 fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
-    let claude = view.harness == "claude-code";
     let mut names: Vec<&str> = Vec::new();
     for file in &view.loaded {
         if !names.contains(&file.name.as_str()) {
@@ -2350,17 +2366,7 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
     let used: Vec<&str> = view.skills_used.iter().map(String::as_str).collect();
     let (files, skills) = match view.sessions {
         0 => ("not reported yet".to_owned(), "not reported yet".to_owned()),
-        _ => (
-            listed(
-                &names,
-                if claude {
-                    CLAUDE_GIVEN
-                } else {
-                    "none loaded by its harness"
-                },
-            ),
-            listed(&used, "none"),
-        ),
+        _ => (listed(&names, GIVEN_AT_LAUNCH), listed(&used, "none")),
     };
     let mut lines: Vec<Line<'static>> = Vec::new();
     for text in [
@@ -2369,9 +2375,9 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
     ] {
         lines.extend(wrap(&plain(&text), limit).into_iter().map(Line::raw));
     }
-    if claude && view.sessions == 0 {
+    if view.sessions == 0 {
         lines.extend(
-            wrap(CLAUDE_NO_RECORD, limit)
+            wrap(NO_RECORD, limit)
                 .into_iter()
                 .map(|line| styled(line, Role::Muted, &ctx.theme)),
         );

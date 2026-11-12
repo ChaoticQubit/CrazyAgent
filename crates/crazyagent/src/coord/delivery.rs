@@ -34,6 +34,12 @@ pub const EVENTS_KEY: &str = "events-";
 /// The idempotency key prefix of the engine's note of what the owner did to a lead's
 /// workers; [`waking`] never counts it, and alone it starts no turn of the lead's own.
 pub const NOTICES_KEY: &str = "owner-notices-";
+/// The idempotency key prefix of the engine's note that another agent's new work overlaps
+/// a claim (F31); alone such notes never start a master turn, they ride with its next one.
+pub const OVERLAP_KEY: &str = "overlap-";
+/// The most text one engine message to a master carries: its waiting messages and the due
+/// team events, composed into one notice for one turn (F31).
+const MASTER_NOTICE_BYTES_MAX: usize = crate::team::MESSAGE_BYTES_MAX * 2 - 64;
 /// The SQL test of a `coord_messages` row `m` worth a turn of its own, as [`waking`] counts
 /// it, with `?2` bound to `RESULTS_KEY` and `?3` to `EVENTS_KEY`.
 const WAKING_SQL: &str = "(m.kind IN ('prompt','question','reply') OR (m.from_kind='engine'
@@ -46,6 +52,8 @@ const RETRIES_KEPT_MAX: usize = 1024;
 const _: () = assert!(HEAD_BYTES_MAX + CUT.len() + 512 < PROMPT_BYTES_MAX);
 const _: () = assert!(NEXT_TURN_BYTES_MAX >= super::BODY_BYTES_MAX + HEAD_BYTES_MAX);
 const _: () = assert!(SENDER_BYTES_MAX + 100 < HEAD_BYTES_MAX);
+const _: () = assert!(MASTER_NOTICE_BYTES_MAX + 8 <= crate::team::master::INPUT_TEXT_MAX);
+const _: () = assert!(crate::team::MESSAGE_BYTES_MAX < MASTER_NOTICE_BYTES_MAX);
 
 /// What a tick needs besides the database: the terminal host team agents run in, none
 /// when they run headless; the owner typing signal; the team state folder that holds
@@ -226,7 +234,7 @@ fn deliver_to(
         return Ok(true);
     }
     if role == "master" {
-        return to_master(db, project, &messages, now);
+        return to_master(db, project, agent, &messages, now);
     }
     let kind = HarnessKind::from_harness(&harness);
     let delivery = match kind {
@@ -244,9 +252,9 @@ fn deliver_to(
         }
         (Some(HarnessKind::Codex), Delivery::TypingOnly) => messages.as_slice(),
         (Some(HarnessKind::Codex), _) => {
-            if let Some(done) =
-                bridge(db, agent, &status, &messages, delivery, now, reach, refused)?
-            {
+            if let Some(done) = bridge(
+                db, project, agent, &status, &messages, delivery, now, reach, refused,
+            )? {
                 return Ok(done);
             }
             messages.as_slice()
@@ -273,14 +281,16 @@ fn deliver_to(
 
 /// Hands a Codex agent's waiting messages to its app-server bridge (DEC-104 Q13), keeping
 /// the turn they went into with them (b19 P2); the owner's notices alone only steer a turn
-/// the agent runs while its status is working. Takes the database, the agent, its status,
-/// the messages, the Delivery setting, the time, the reach and the memory of refused
-/// bridges, which writes a refusal to the engine log once until it changes or the bridge
-/// takes a message. Returns what [`deliver_to`] answers once the bridge took them or they
-/// wait, or none when they fall back to typing.
+/// the agent runs while its status is working. Takes the database, the project, the agent,
+/// its status, the messages, the Delivery setting, the time, the reach and the memory of
+/// refused bridges, which writes a refusal to the engine log once until it changes or the
+/// bridge takes a message, and a bridge on a newer Codex release once ([`warn_newer`]).
+/// Returns what [`deliver_to`] answers once the bridge took them or they wait, or none when
+/// they fall back to typing.
 #[allow(clippy::too_many_arguments)]
 fn bridge(
     db: &Connection,
+    project: &ProjectId,
     agent: AgentId,
     status: &str,
     messages: &[Message],
@@ -296,11 +306,24 @@ fn bridge(
     let (text, carried) = batch(db, agent, messages)?;
     let home = crate::team::runtime::agent_home(reach.state, agent);
     match codex::deliver(&home, &text, !alone, pane_of(reach, agent)) {
-        Bridged::Delivered(turn) => {
-            note_refusal(refused, agent, None);
+        Bridged::Delivered(turn, newer) => {
             mark_all(db, &carried, Receipt::Delivered, now)?;
             if let Some(turn) = turn {
                 super::messages::delivered_into(db, &carried, &turn)?;
+            }
+            match newer {
+                Some(newer) => {
+                    note_refusal(refused, agent, None);
+                    if let Err(problem) = warn_newer(db, project, agent, newer, now) {
+                        eprintln!(
+                            "codex bridge newer release notice not kept for agent {agent}: {}",
+                            crate::protocol::plain_code(&problem.0)
+                        );
+                    }
+                }
+                None => {
+                    note_refusal(refused, agent, None);
+                }
             }
             return Ok(Some(carried.len() == messages.len()));
         }
@@ -314,6 +337,35 @@ fn bridge(
         return Ok(Some(false));
     }
     Ok(None)
+}
+
+/// Leaves one engine notice in a Codex agent's Messages timeline, and one engine log line,
+/// when its bridge runs on a release newer than the checked ones (F38): once per agent and
+/// release while the notice is kept, read from the timeline, so a bridge refusal in between
+/// or an engine restart writes no second one. Takes the database, the project, the agent,
+/// the release and the time. Returns whether the notice was written now.
+fn warn_newer(
+    db: &Connection,
+    project: &ProjectId,
+    agent: AgentId,
+    newer: (u64, u64, u64),
+    now: i64,
+) -> Result<bool, EngineError> {
+    assert!(agent > 0);
+    let notice = codex::newer_notice(newer);
+    let said = crate::team::agent_messages::Said::Notice;
+    let tx = db.unchecked_transaction().map_err(state)?;
+    if crate::team::agent_messages::said_before(&tx, project, agent, said, &notice)? {
+        return Ok(false);
+    }
+    crate::team::agent_messages::record(&tx, project, agent, said, &notice, now)?;
+    assert!(crate::team::agent_messages::said_before(
+        &tx, project, agent, said, &notice
+    )?);
+    tx.commit().map_err(state)?;
+    let (major, minor, patch) = newer;
+    eprintln!("codex bridge runs on a newer release for agent {agent}: {major}.{minor}.{patch}");
+    Ok(true)
 }
 
 /// Remembers why something was refused for an agent, so the engine log names a refusal
@@ -349,16 +401,18 @@ fn pane_of(reach: &Reach<'_>, agent: AgentId) -> Option<u32> {
     reach.host?.pane_pid(&pane).ok().flatten()
 }
 
-/// What the owner sees on an agent that the project's Delivery setting leaves with no way
-/// to get its team messages (owner 2026-11-05): a tools-off Codex app runs without the app
-/// server its bridge needs, and Native only never types into it.
-pub const NO_CHANNEL: &str = "Can't receive messages: Native only needs tools on for Codex.";
+/// What the owner sees on an agent that the project's Delivery setting leaves with no
+/// channel while it works: a tools-off Codex app runs without the app server its bridge
+/// needs, and Native only never types into it, so the engine brings its messages as a task
+/// of their own once it is idle (PA-11, DEC-141; supersedes the owner's 2026-11-05 sentence).
+pub const NO_CHANNEL: &str = "Messages come as a task of their own once it is idle: Native only never types into a tools-off Codex agent.";
 
-/// Tells whether a team agent can never get its messages under the project's Delivery
-/// setting: a tools-off Codex sub-agent in a kept session has no bridge and is never typed
-/// into under Native only, so its messages wait Sent until tools are on or the setting
-/// changes. Takes the database, the project, the agent's role, harness and tools switch,
-/// and whether it runs a kept session. Returns [`NO_CHANNEL`] for it, none otherwise.
+/// Tells whether a team agent has no channel for its messages while it works under the
+/// project's Delivery setting: a tools-off Codex sub-agent in a kept session has no bridge
+/// and is never typed into under Native only, so its messages wait Sent until the engine
+/// wakes it with a task of their own. Takes the database, the project, the agent's role,
+/// harness and tools switch, and whether it runs a kept session. Returns [`NO_CHANNEL`] for
+/// it, none otherwise.
 pub fn no_channel(
     db: &Connection,
     project: &ProjectId,
@@ -380,15 +434,25 @@ pub fn no_channel(
 
 /// Hands a project master its waiting messages through the engine's own master input
 /// (`feed_live` or the next master turn), which already waits for the owner, as one engine
-/// message once none of the master's other messages wait; the engine message and the
-/// Delivered receipts commit together, so a failure leaves both undone. Takes the database,
-/// the project, the messages and the time. Returns true once they were handed over.
+/// message once none of the master's other messages wait, with the team events due then,
+/// so one notice takes one master turn (F31); the engine message, the Delivered receipts
+/// and the events' wake commit together, so a failure leaves all undone. The engine's
+/// overlap notes alone (`OVERLAP_KEY`) start no turn: they stay Sent and ride with the
+/// master's next turn, unless `PENDING_MAX` messages wait. Takes the database, the project,
+/// the master, its waiting messages, at least one, and the time. Returns true once they
+/// were handed over or wait for that next turn.
 fn to_master(
     db: &Connection,
     project: &ProjectId,
+    master: AgentId,
     messages: &[Message],
     now: i64,
 ) -> Result<bool, EngineError> {
+    assert!(!messages.is_empty());
+    let last = messages[messages.len() - 1].id;
+    if messages.len() < PENDING_MAX && first_other(db, master, last, OVERLAP_KEY)?.is_none() {
+        return Ok(true);
+    }
     let (text, carried) = lines(db, messages, crate::team::MESSAGE_BYTES_MAX)?;
     let tx =
         rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(state)?;
@@ -402,6 +466,13 @@ fn to_master(
     if waiting > 0 {
         return Ok(false);
     }
+    let wake = crate::team::events::due(&tx, project, now)?
+        .filter(|wake| text.len() + 1 + wake.text.len() <= MASTER_NOTICE_BYTES_MAX);
+    let text = match &wake {
+        Some(wake) => format!("{text}\n{}", wake.text),
+        None => text,
+    };
+    assert!(text.len() <= MASTER_NOTICE_BYTES_MAX);
     let appended = crate::team::append_message(
         &tx,
         project,
@@ -414,6 +485,9 @@ fn to_master(
         return Ok(false);
     }
     mark_all(&tx, &carried, Receipt::Delivered, now)?;
+    if let Some(wake) = &wake {
+        crate::team::events::woke(&tx, wake, false, now)?;
+    }
     tx.commit().map_err(state)?;
     Ok(carried.len() == messages.len())
 }
@@ -452,22 +526,26 @@ fn notices_alone(
     if messages.len() >= PENDING_MAX {
         return Ok(false);
     }
-    Ok(first_other(db, agent, last.id)?.is_none())
+    Ok(first_other(db, agent, last.id, NOTICES_KEY)?.is_none())
 }
 
-/// Finds an agent's oldest Sent message up to an id that is not an owner notice
-/// (`NOTICES_KEY` engine note; a note with no key is never one). Takes the database, the
-/// agent and the last id. Returns its id, none when every such message is a notice.
+/// Finds an agent's oldest Sent message up to an id that is not a quiet engine note: one
+/// whose key starts with `quiet`, the owner's notices (`NOTICES_KEY`) for a sub-agent or the
+/// overlap notes (`OVERLAP_KEY`) for a master; a note with no key is never quiet. Takes the
+/// database, the agent, the last id and the key prefix. Returns its id, none when every
+/// such message is quiet.
 fn first_other(
     db: &Connection,
     agent: AgentId,
     last: MessageId,
+    quiet: &str,
 ) -> Result<Option<MessageId>, EngineError> {
+    assert!(quiet == NOTICES_KEY || quiet == OVERLAP_KEY);
     db.query_row(
         "SELECT MIN(id) FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
          AND receipt='sent' AND id<=?2 AND NOT (from_kind='engine' AND kind='note'
          AND ifnull(substr(idem_key,1,length(?3))=?3,0))",
-        params![agent, last, NOTICES_KEY],
+        params![agent, last, quiet],
         |row| row.get(0),
     )
     .map_err(state)
@@ -487,7 +565,7 @@ fn batch(
     if carried.len() == ready.len() {
         return Ok((text, carried));
     }
-    let Some(other) = first_other(db, agent, ready[ready.len() - 1].id)? else {
+    let Some(other) = first_other(db, agent, ready[ready.len() - 1].id, NOTICES_KEY)? else {
         return Ok((text, carried));
     };
     match ready.iter().position(|message| message.id == other) {

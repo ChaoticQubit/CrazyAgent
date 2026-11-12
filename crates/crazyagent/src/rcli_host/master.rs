@@ -4,7 +4,7 @@ use super::master_reply::{TurnCapture, has_turn};
 use super::{
     Control, ControlBody, Event, EventBody, EventSequence, HOST_PROTOCOL_VERSION, RawControl,
 };
-use crate::master_time_limit::RUN_TIME_MAX;
+use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
 use crate::protocol::{ProtocolError, RequestId};
 use crate::sandbox::InstalledSandbox;
 use std::collections::BTreeSet;
@@ -24,6 +24,7 @@ pub struct RcliMasterCompletion {
     pub turn_id: RequestId,
     pub status: RcliMasterStatus,
     pub reply: Option<String>,
+    pub failure: Option<super::RcliProviderFailure>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,6 +56,7 @@ pub struct RcliMasterHost {
     process: HostProcess,
     sequence: EventSequence,
     started: Instant,
+    start_time: Duration,
     deadline: Option<Instant>,
     ready: bool,
     stopped: bool,
@@ -93,6 +95,7 @@ impl RcliMasterHost {
             process,
             sequence,
             started,
+            start_time: START_TIME_MAX,
             deadline: run_time.map(|time| started + time),
             ready: false,
             stopped: false,
@@ -110,6 +113,21 @@ impl RcliMasterHost {
 
     pub fn binding(&self) -> &RcliMasterBinding {
         &self.launch.binding
+    }
+
+    /// How long the host waits for its harness to say it is ready when it has no run
+    /// clock. Input: the host. Output: the start bound.
+    #[cfg(test)]
+    pub(super) fn start_time(&self) -> Duration {
+        self.start_time
+    }
+
+    /// Shortens the start bound, so a test sees a start end without waiting the whole
+    /// bound. Input: the shorter bound. Output: none.
+    #[cfg(test)]
+    pub(super) fn shorten_start_time(&mut self, time: Duration) {
+        assert!(time <= self.start_time);
+        self.start_time = time;
     }
 
     /// Names the process group the rcli master runs in, which can outlive this host when
@@ -230,7 +248,7 @@ impl RcliMasterHost {
         if self.stopped {
             return Err(error("rcli_master_closed"));
         }
-        if !self.ready && self.started.elapsed() >= Duration::from_secs(5) {
+        if !self.ready && self.deadline.is_none() && self.started.elapsed() >= self.start_time {
             return Err(self.fault(error("rcli_master_startup_deadline")));
         }
         let cancel = self.active.as_ref().and_then(|turn| turn.deadline);

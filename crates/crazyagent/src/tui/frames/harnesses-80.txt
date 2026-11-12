@@ -21,4 +21,4 @@
   Can be       Master, sub-agent, research agent                                
   Accounts     7 ChatGPT accounts signed in                                     
                                                                                 
- ↑↓ Move  r Check again  Shift-←→ Sections  Esc Home                     ? Help 
+ ↑↓ Move  r Check again  c Check for updates  u Update                   ? Help 

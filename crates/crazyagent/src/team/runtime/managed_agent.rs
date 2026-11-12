@@ -876,7 +876,14 @@ impl ManagedAgent {
         let cancel = AtomicBool::new(false);
         let interrupt = AtomicBool::new(false);
         let problem = per_turn(
-            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt,
+            &self.plan,
+            &self.home,
+            &ordered,
+            &reports,
+            &cancel,
+            &interrupt,
+            &AtomicBool::new(false),
+            &super::test_by(),
         );
         drop(reports);
         (reported.iter().collect(), problem)
@@ -924,7 +931,14 @@ impl ManagedAgent {
         let cancel = AtomicBool::new(false);
         let interrupt = AtomicBool::new(false);
         let problem = per_turn(
-            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt,
+            &self.plan,
+            &self.home,
+            &ordered,
+            &reports,
+            &cancel,
+            &interrupt,
+            &AtomicBool::new(false),
+            &super::test_by(),
         );
         drop(reports);
         let finished = reported.iter().find_map(|report| match report {
@@ -1037,6 +1051,8 @@ impl ManagedAgent {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(leave),
+            &AtomicBool::new(false),
+            &super::test_by(),
         );
         drop(reports);
         (reported.iter().collect(), problem)
@@ -1067,7 +1083,7 @@ impl ManagedAgent {
             live: false,
             managed: Some(Managed {
                 home: self.home.clone(),
-                executable: self.plan.executable.clone(),
+                executable: self.plan.entry.clone(),
             }),
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),
@@ -1088,6 +1104,8 @@ impl ManagedAgent {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &super::test_by(),
         );
         drop(reports);
         (reported.iter().collect(), problem)

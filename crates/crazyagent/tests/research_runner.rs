@@ -115,6 +115,7 @@ fn endpoint(port: u16) -> ResearchAccount {
     ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "hanging-model".into(),
+        key: None,
     }
 }
 
@@ -172,6 +173,7 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
     let account = ResearchAccount::Endpoint {
         base_url: OLLAMA.into(),
         model: OLLAMA_MODEL.into(),
+        key: None,
     };
     let started = Instant::now();
     let run = runner
@@ -302,26 +304,28 @@ fn research_that_runs_out_of_time_is_stopped_and_retried_then_failed() {
     );
 }
 
+/// Owner 11-11, no output cap: research output past the bytes kept in its log never stops
+/// the agent; the run goes on until its wall time, which is the only bound that ends it.
 #[test]
-fn research_output_beyond_the_limit_stops_the_agent() {
+fn research_output_beyond_the_log_bound_does_not_stop_the_agent() {
     let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "market_research", "codex", true)
         .unwrap();
     let (port, _server) = hanging_endpoint();
-    let mut bounds = limits(Duration::from_secs(60));
+    let mut bounds = limits(Duration::from_secs(3));
     bounds.output_bytes_max = 16;
+    let started = Instant::now();
     let run = runner(&case, bounds)
         .run_once(&project(&case, Some(endpoint(port))))
         .unwrap()
         .unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(3));
     assert_eq!(run.status, ResearchStatus::Failed);
     let job = jobs.get(id).unwrap().unwrap();
-    assert_eq!(
-        job.error.as_deref(),
-        Some("Agent output exceeded the limit")
-    );
+    assert_eq!(job.error.as_deref(), Some("Agent ran out of time"));
+    assert!(job.output_bytes > 16, "{}", job.output_bytes);
     assert!(!process_group_alive(run.process_group.unwrap()));
 }
 
@@ -499,6 +503,7 @@ fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
             Some(ResearchAccount::Endpoint {
                 base_url: OLLAMA.into(),
                 model: OLLAMA_MODEL.into(),
+                key: None,
             }),
         ))
         .unwrap()
@@ -603,6 +608,7 @@ fn queued_research_runs_claude_code_in_the_project_sandbox_on_an_anthropic_endpo
     let account = ResearchAccount::AnthropicEndpoint {
         base_url: OLLAMA_ANTHROPIC.into(),
         model: OLLAMA_MODEL.into(),
+        key: None,
     };
     let started = Instant::now();
     let run = runner
@@ -670,6 +676,7 @@ fn a_job_waits_for_a_pool_when_the_account_does_not_fit_its_harness() {
     let anthropic = ResearchAccount::AnthropicEndpoint {
         base_url: "http://127.0.0.1:9".into(),
         model: "m".into(),
+        key: None,
     };
     let run = runner
         .run_once(&ResearchProject {
@@ -695,6 +702,7 @@ fn a_claude_job_without_claude_installed_fails_plainly() {
     let account = ResearchAccount::AnthropicEndpoint {
         base_url: "http://127.0.0.1:9".into(),
         model: "m".into(),
+        key: None,
     };
     let run = runner(&case, limits(Duration::from_secs(5)))
         .run_once(&project(&case, Some(account)))
@@ -880,6 +888,7 @@ fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
                     account: Some(ResearchAccount::AnthropicEndpoint {
                         base_url: format!("http://127.0.0.1:{port}"),
                         model: "hanging-model".into(),
+                        key: None,
                     }),
                 })
                 .unwrap()
@@ -1274,6 +1283,7 @@ fn a_tools_on_research_job_under_no_network_runs_with_its_model_proxy_bound() {
     let account = ResearchAccount::Endpoint {
         base_url: "https://models.crazyagent.test/v1".into(),
         model: "proxied-model".into(),
+        key: None,
     };
     ResearchRunner::new(
         &case.database,

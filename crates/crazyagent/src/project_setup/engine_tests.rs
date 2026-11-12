@@ -180,8 +180,8 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
         catalog.default_team.master, "codex",
         "codex has no sign-in in this engine, and RCLI never leads the default team"
     );
-    assert_eq!(catalog.default_team.sub_harnesses[0].harness, "codex");
-    assert_eq!(catalog.default_team.sub_harnesses[0].agents, 2);
+    assert!(catalog.default_team.sub_harnesses.is_empty());
+    assert_eq!(catalog.default_team.max_agents, TEAM_AGENTS_MAX);
     assert_eq!(
         catalog.default_team_status, None,
         "Codex can run on the pool's keyless endpoint"
@@ -673,6 +673,61 @@ fn rejected(code: &str) -> OwnerResult {
     OwnerResult::Rejected { code: code.into() }
 }
 
+/// A project created with a team size the owner set keeps that number, while one created
+/// without a team gets the open default whatever research is on: no sub-agent harness named
+/// and any harness up to `TEAM_AGENTS_MAX` (DEC-147.1).
+#[tokio::test]
+async fn a_set_team_size_is_kept_and_an_unset_one_gets_no_limit() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let set = ProjectId::new("setup-sized").unwrap();
+    let sized = TeamPlan {
+        master: "codex".into(),
+        master_tools: true,
+        sub_harnesses: vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: true,
+        }],
+        min_agents: 1,
+        max_agents: 3,
+    };
+    let response = owner
+        .setup_project(
+            set.clone(),
+            spec("Sized team"),
+            ProjectSetup {
+                team: Some(sized.clone()),
+                ..pooled_setup(vec![])
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(owner.project_setup(set).await.unwrap().unwrap().team, sized);
+    let open = ProjectId::new("setup-open").unwrap();
+    let response = owner
+        .setup_project(
+            open.clone(),
+            spec("Open team"),
+            pooled_setup(vec![
+                ResearchKind::MarketResearch,
+                ResearchKind::TechStackResearch,
+                ResearchKind::DesignResearch,
+            ]),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let team = owner.project_setup(open).await.unwrap().unwrap().team;
+    assert!(team.sub_harnesses.is_empty(), "{team:?}");
+    assert_eq!((team.min_agents, team.max_agents), (1, TEAM_AGENTS_MAX));
+    drop(owner);
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn owner_updates_a_project_setup_only_from_the_revision_it_read() {
     let engine = Engine::start().await;
@@ -1067,6 +1122,12 @@ async fn team_plans_take_a_master_only_harness_as_the_master_but_never_as_a_team
         result(back),
         OwnerResult::Applied,
         "Settings switches the master to RCLI"
+    );
+    let rewritten = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        (rewritten.revision, rewritten.team.master.as_str()),
+        (saved.revision + 2, "rcli"),
+        "F06: the switch rewrites the plan's master in the same save"
     );
     let other = ProjectId::new("setup-rcli-row").unwrap();
     let row_refused = owner
@@ -2322,6 +2383,60 @@ async fn a_removed_project_forgets_its_doc_links() {
     engine.stop().await;
 }
 
+/// F34: a removed project takes the memories its agents saved with it, so a project added
+/// again under the same id never reads them; the owner's own note for it and an app-wide
+/// agent memory stay.
+#[tokio::test]
+async fn a_removed_project_forgets_the_memories_its_agents_saved() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(ENGINE_WAIT).unwrap();
+    for (id, project, origin) in [
+        (
+            "agent-a",
+            Some("setup-pooled"),
+            r#"{"kind":"agent","agent":"Master"}"#,
+        ),
+        ("note-a", Some("setup-pooled"), r#"{"kind":"written"}"#),
+        ("agent-g", None, r#"{"kind":"agent","agent":"Master"}"#),
+    ] {
+        db.execute(
+            "INSERT INTO memory_library(id,project,origin,text) VALUES (?1,?2,?3,?1)",
+            rusqlite::params![id, project, origin],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let listed = |engine: &Engine| -> Vec<String> {
+        let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+        db.busy_timeout(ENGINE_WAIT).unwrap();
+        db.prepare("SELECT id FROM memory_library ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(listed(&engine), ["agent-a", "agent-g", "note-a"]);
+
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(listed(&engine), ["agent-g", "note-a"]);
+    engine.stop().await;
+}
+
 /// A removed project takes its roadmap status and its refresh setting with it, so a project
 /// added again under the same id starts unchecked with the default setting.
 #[tokio::test]
@@ -2353,6 +2468,47 @@ async fn a_removed_project_forgets_its_roadmap_status() {
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!((engine.rows(status), engine.rows(setting)), (0, 0));
     engine.stop().await;
+}
+
+#[tokio::test]
+async fn a_removed_projects_run_in_project_terminal_setting_goes_with_it() {
+    use crate::ide::bridge::run_command::{RunMode, mode, set_mode};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let other = ProjectId::new("another-project").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    set_mode(&db, &project, RunMode::Off).unwrap();
+    set_mode(&db, &other, RunMode::TypeOnly).unwrap();
+    assert_eq!(mode(&db, &project).unwrap(), RunMode::Off);
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT COUNT(*) FROM ide_run_settings WHERE project='setup-pooled'"),
+        0,
+        "the Run setting goes with the project"
+    );
+    assert_eq!(
+        mode(&db, &project).unwrap(),
+        RunMode::TypeAndRun,
+        "the project added again starts on Type and run"
+    );
+    assert_eq!(
+        mode(&db, &other).unwrap(),
+        RunMode::TypeOnly,
+        "another project's setting stays"
+    );
 }
 
 #[tokio::test]
@@ -2928,6 +3084,20 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
                 on: true,
             },
         ),
+        (
+            6,
+            crate::team::TeamAction::MasterRounds {
+                project_id: project.clone(),
+                max: Some(3),
+            },
+        ),
+        (
+            7,
+            crate::team::TeamAction::MasterRunTime {
+                project_id: project.clone(),
+                secs: None,
+            },
+        ),
     ] {
         let response = owner.team_action(action.clone(), generation).await.unwrap();
         assert_eq!(result(response), OwnerResult::Applied, "{action:?}");
@@ -2946,12 +3116,21 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
             [],
         )
         .unwrap();
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO team_master_clocks(project,agent,since_ms) VALUES ('setup-pooled',1,1)",
+            [],
+        )
+        .unwrap();
     let tables = [
         "team_status_log",
         "team_caps",
         "team_token_budgets",
         "team_account_spread",
         "team_teammates",
+        "team_master_limits",
+        "team_master_clocks",
     ];
     for table in tables {
         assert_eq!(
@@ -2963,7 +3142,7 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
         );
     }
 
-    let removed = owner.remove_project(project.clone(), 6).await.unwrap();
+    let removed = owner.remove_project(project.clone(), 8).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     for table in tables {
         assert_eq!(

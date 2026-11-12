@@ -1158,3 +1158,37 @@ fn a_turn_the_read_saw_is_filed_once_by_the_scan_before_the_seed() {
         ]
     );
 }
+
+#[test]
+fn an_rcli_turn_s_reported_usage_survives_a_recount_from_session_records() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(&home.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+    old_row(&db, "s1", 400, 0);
+    let rcli = Attribution {
+        kind: RunKind::Master,
+        project: Some(ProjectId::new("alpha").unwrap()),
+        pool: Some(CredentialRef::new("pool").unwrap()),
+        account: Some(CredentialRef::new("ollama").unwrap()),
+        agent: crate::usage::service::master_agent(Some(&ProjectId::new("alpha").unwrap())),
+        harness: "rcli".into(),
+    };
+    let tokens = crate::usage::capture::Tokens {
+        input: 70,
+        output: 9,
+        cache_read: 0,
+        cache_write: 0,
+    };
+    crate::usage::capture::count_reported(&db, &rcli, tokens, "rcli-session", NOW).unwrap();
+    recount_all(&db, &home);
+    decide(&db, true, NOW).unwrap();
+    let kept: (String, i64, i64) = db
+        .query_row(
+            "SELECT harness,SUM(input),SUM(output) FROM usage_tokens WHERE session='rcli-session'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(kept, ("rcli".to_owned(), 70, 9));
+    assert_eq!(input_of(&db, "s1"), 100);
+}

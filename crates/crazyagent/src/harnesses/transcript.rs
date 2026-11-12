@@ -33,6 +33,53 @@ const CLAUDE_ASIDES: [&str; 10] = [
     "<system-reminder>",
     "<user-prompt-submit-hook>",
 ];
+/// The first words of the block Codex writes into its conversation as a user message to give
+/// the model the project's AGENTS.md (codex-rs `core/src/context/user_instructions.rs` at
+/// rust-v0.164.0): nobody typed it (F33).
+const CODEX_INSTRUCTIONS: &str = "# AGENTS.md instructions";
+/// The first words of the summary Codex writes as a user message once it compacts a
+/// conversation (codex-rs `prompts/templates/compact/summary_prefix.md` at rust-v0.164.0).
+const CODEX_SUMMARY: &str = "Another language model started to solve this problem and produced a summary of its thinking process.";
+
+/// Context a harness wrote into its own conversation as a user message that nobody typed:
+/// the project instructions it hands the model, or the summary that stands for the turns it
+/// compacted (F33). It is never a turn's typed words, and the session search names it by its
+/// own role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Injected {
+    Instructions,
+    Summary,
+}
+
+impl Injected {
+    /// The role the session search shows for it. Takes the kind. Returns the role.
+    pub fn role(self) -> &'static str {
+        match self {
+            Self::Instructions => "instructions",
+            Self::Summary => "summary",
+        }
+    }
+}
+
+/// Tells which context a harness injected one user text is, by the first words Codex gives
+/// it. Takes the text. Returns the kind, none for anything else.
+fn codex_injected(text: &str) -> Option<Injected> {
+    let start = text.trim_start();
+    if start.starts_with(CODEX_INSTRUCTIONS) {
+        Some(Injected::Instructions)
+    } else if start.starts_with(CODEX_SUMMARY) {
+        Some(Injected::Summary)
+    } else {
+        None
+    }
+}
+
+/// Whether a Claude Code line is the summary it writes in place of the turns it compacted.
+/// Takes the line. Returns the answer.
+fn claude_summary(value: &Value) -> bool {
+    value["type"] == "user" && value["isCompactSummary"] == true
+}
+
 const CLAUDE_NOT_PROMPTS: [&str; 3] = [
     "isCompactSummary",
     "isVisibleInTranscriptOnly",
@@ -74,10 +121,12 @@ pub struct TranscriptReader {
     start: u64,
     pending: Vec<u8>,
     scanned: usize,
+    skipping: bool,
     in_turn: bool,
     aside: bool,
     dropped: bool,
     consumed: u64,
+    codex_calls: CodexExecCalls,
 }
 
 impl TranscriptReader {
@@ -124,10 +173,12 @@ impl TranscriptReader {
             start: 0,
             pending: Vec::new(),
             scanned: 0,
+            skipping: false,
             in_turn: false,
             aside: false,
             dropped: false,
             consumed: 0,
+            codex_calls: CodexExecCalls::default(),
         }
     }
 
@@ -185,16 +236,34 @@ impl TranscriptReader {
     }
 
     /// Says whether this record reports the commands its harness starts in the background
-    /// and their ends, as a Claude Code transcript does; a Codex rollout reports neither.
+    /// and their ends: a Claude Code transcript and a Codex 0.164 rollout both do (PA-10).
     /// Output: the answer.
     pub fn reports_background(&self) -> bool {
+        matches!(
+            self.source,
+            Transcript::ClaudeSession { .. } | Transcript::CodexRollouts { .. }
+        )
+    }
+
+    /// Says whether the harness starts a turn of its own when a background command ends, as
+    /// Claude Code does with its task notification; Codex only records the end, so a session
+    /// holding a turn for its commands ends that turn itself. Output: the answer.
+    pub fn notifies_background_end(&self) -> bool {
         matches!(self.source, Transcript::ClaudeSession { .. })
     }
 
-    /// Counts the bytes read from the record so far, so a caller can bound a session's output.
-    /// Output: the total since the reader started.
+    /// Counts the bytes read from the record so far, the lines passed over included, so a
+    /// caller can tell the record grew. Output: the total since the reader started.
     pub fn bytes(&self) -> u64 {
         self.consumed
+    }
+
+    /// Counts the bytes of the open record past what this reader has read, so a caller can
+    /// bound a pass that reads the record to its end. Output: the bytes, none before the
+    /// record is open or when its length cannot be read.
+    pub fn unread(&self) -> Option<u64> {
+        let length = self.file.as_ref()?.metadata().ok()?.len();
+        Some(length.saturating_sub(self.start + self.consumed))
     }
 
     /// Says how long ago the harness last wrote its record, by the modification time of the
@@ -216,9 +285,11 @@ impl TranscriptReader {
 
     /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
     /// scanning on from where the last read stopped and draining the used lines once, so many
-    /// short lines cost one pass and a poll with no new bytes scans nothing. Output: the facts
-    /// in order, none while the record does not exist yet, or a plain code when a line passes
-    /// `LINE_BYTES_MAX` or the record cannot be read.
+    /// short lines cost one pass and a poll with no new bytes scans nothing. A line longer
+    /// than `LINE_BYTES_MAX` is passed over to its newline with one note in the engine log,
+    /// never an error, so the reader holds at most `LINE_BYTES_MAX + READ_BYTES_MAX` bytes.
+    /// Output: the facts in order, none while the record does not exist yet, or a plain code
+    /// when the record cannot be read.
     pub fn read(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
         if self.file.is_none() {
             let opened = match &self.source {
@@ -238,11 +309,22 @@ impl TranscriptReader {
         let Some(file) = self.file.as_mut() else {
             return Ok(Vec::new());
         };
+        let room = (LINE_BYTES_MAX + READ_BYTES_MAX).saturating_sub(self.pending.len());
         let count = file
-            .take(READ_BYTES_MAX as u64)
+            .take(READ_BYTES_MAX.min(room) as u64)
             .read_to_end(&mut self.pending)
             .map_err(|_| failure("launch_transcript_unavailable"))?;
         self.consumed += count as u64;
+        if self.skipping {
+            assert_eq!(self.scanned, 0);
+            match self.pending.iter().position(|byte| *byte == b'\n') {
+                Some(end) => {
+                    self.pending.drain(..=end);
+                    self.skipping = false;
+                }
+                None => self.pending.clear(),
+            }
+        }
         let mut events = Vec::new();
         let mut used = 0;
         let mut scanned = self.scanned;
@@ -261,7 +343,10 @@ impl TranscriptReader {
                 continue;
             };
             let facts = match self.source {
-                Transcript::CodexRollouts { .. } => codex_facts(&value),
+                Transcript::CodexRollouts { .. } => {
+                    let exec = self.codex_calls.sees(&value);
+                    codex_facts(&value, exec)
+                }
                 Transcript::ClaudeSession { .. } => self.claude_line(&value),
                 Transcript::Unavailable => Vec::new(),
             };
@@ -280,9 +365,13 @@ impl TranscriptReader {
         }
         self.pending.drain(..used);
         self.scanned = scanned - used;
-        if self.pending.len() > LINE_BYTES_MAX {
-            return Err(failure("launch_transcript_line_too_long"));
+        if self.pending.len() > LINE_BYTES_MAX && self.scanned == self.pending.len() {
+            self.pending.clear();
+            self.scanned = 0;
+            self.skipping = true;
+            eprintln!("launch_transcript_line_skipped over={LINE_BYTES_MAX}");
         }
+        assert!(self.pending.len() <= LINE_BYTES_MAX + READ_BYTES_MAX);
         assert!(self.scanned <= self.pending.len());
         assert!(events.len() >= EVENTS_PER_READ_MAX || self.scanned == self.pending.len());
         Ok(events)
@@ -423,7 +512,9 @@ fn find_rollout(
             file.metadata()
                 .is_ok_and(|metadata| earlier.binary_search(&file_key(&metadata, &path)).is_err())
         })?;
-        let meta = session_meta(&file).filter(|meta| meta["cwd"].as_str() == Some(cwd))?;
+        let meta = session_meta(&file).filter(|meta| {
+            meta["cwd"].as_str() == Some(cwd) && meta["source"].get("subagent").is_none()
+        })?;
         Some((rewound(file)?, conversation_id(&meta["id"]), path))
     })
 }
@@ -537,7 +628,11 @@ fn line_text(text: &str) -> TranscriptEvent {
     TranscriptEvent::Text { text }
 }
 
-fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
+/// The facts of one Codex rollout line. Takes the line and whether it is the output of an
+/// exec tool call ([`CodexExecCalls::sees`]), the only output whose header can name a
+/// command left running. Returns the facts, none for a line that says nothing the session
+/// follows.
+fn codex_facts(value: &Value, exec: bool) -> Vec<TranscriptEvent> {
     let payload = &value["payload"];
     match (value["type"].as_str(), payload["type"].as_str()) {
         (Some("event_msg"), Some("task_started")) => vec![TranscriptEvent::TurnStarted],
@@ -579,8 +674,141 @@ fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
                 .unwrap_or("tool")
                 .to_owned(),
         }],
+        (Some("response_item"), Some("function_call_output")) if exec => {
+            output_texts(&payload["output"])
+                .first()
+                .copied()
+                .and_then(codex_running)
+                .map(|id| TranscriptEvent::BackgroundStarted { id })
+                .into_iter()
+                .collect()
+        }
+        (Some("event_msg"), Some("item_completed"))
+            if payload["item"]["type"] == "CommandExecution"
+                && payload["item"]["status"] != "in_progress" =>
+        {
+            payload["item"]["process_id"]
+                .as_str()
+                .and_then(codex_session_id)
+                .map(|id| TranscriptEvent::BackgroundEnded { id })
+                .into_iter()
+                .collect()
+        }
         _ => Vec::new(),
     }
+}
+
+/// The header line Codex 0.164 writes into an exec tool output while the command it started
+/// still runs, followed by the session id of that command (core tools/context.rs
+/// `response_header`).
+const CODEX_RUNNING: &str = "Process running with session ID ";
+
+/// The line that ends the header of a Codex exec tool output; every line after it is the
+/// command's own output, which the command, the repository or fetched text controls.
+const CODEX_OUTPUT: &str = "Output:";
+
+/// The most lines a Codex 0.164 exec output header has: chunk id, wall time, exit code,
+/// running session, original token count and `Output:`.
+const CODEX_HEADER_LINES_MAX: usize = 6;
+
+/// The Codex 0.164 tools whose output header names a command left running (unified exec).
+const CODEX_EXEC_TOOLS: [&str; 2] = ["exec_command", "write_stdin"];
+
+/// The most exec tool calls a reader waits for the output of at once; past it the oldest
+/// is forgotten, and its output then starts no background command.
+const CODEX_EXEC_CALLS_MAX: usize = 64;
+
+/// The longest Codex tool call id a reader keeps.
+const CODEX_CALL_ID_BYTES_MAX: usize = 128;
+
+/// The exec tool calls of a Codex rollout whose output is still to come, oldest first: only
+/// the header Codex writes on an exec output can name a command left running, so the
+/// output of any other tool, or text in an output's body, never starts one (PA9-F1).
+#[derive(Debug, Default)]
+struct CodexExecCalls {
+    waiting: std::collections::VecDeque<String>,
+}
+
+impl CodexExecCalls {
+    /// Takes one rollout line: remembers an exec_command or write_stdin call by its call
+    /// id, and tells whether the line is the output of a remembered call, which it then
+    /// forgets. Takes the line. Returns true only for such an output.
+    fn sees(&mut self, value: &Value) -> bool {
+        let payload = &value["payload"];
+        let call = payload["call_id"]
+            .as_str()
+            .filter(|call| !call.is_empty() && call.len() <= CODEX_CALL_ID_BYTES_MAX);
+        let Some(call) = call.filter(|_| value["type"] == "response_item") else {
+            return false;
+        };
+        let exec = match payload["type"].as_str() {
+            Some("function_call") => {
+                let tool = payload["name"].as_str().unwrap_or_default();
+                if CODEX_EXEC_TOOLS.contains(&tool) {
+                    self.waiting.push_back(call.to_owned());
+                    if self.waiting.len() > CODEX_EXEC_CALLS_MAX {
+                        self.waiting.pop_front();
+                    }
+                }
+                false
+            }
+            Some("function_call_output") => {
+                match self.waiting.iter().position(|waiting| waiting == call) {
+                    Some(at) => self.waiting.remove(at).is_some(),
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        assert!(self.waiting.len() <= CODEX_EXEC_CALLS_MAX);
+        exec
+    }
+}
+
+/// The session id the header of a Codex exec output names as still running. The header is
+/// the lines before the first `Output:` line, at most `CODEX_HEADER_LINES_MAX`; the lines
+/// after it are never read. Takes the output's first text. Returns the id, none for text
+/// with no header or no running line in it.
+fn codex_running(text: &str) -> Option<String> {
+    let mut running = None;
+    for line in text.lines().take(CODEX_HEADER_LINES_MAX) {
+        if line == CODEX_OUTPUT {
+            return running;
+        }
+        if let Some(id) = line.strip_prefix(CODEX_RUNNING) {
+            running = codex_session_id(id);
+        }
+    }
+    None
+}
+
+/// The most digits a Codex session id is read with.
+const CODEX_SESSION_DIGITS_MAX: usize = 20;
+
+/// The texts of a Codex tool output in the shapes a rollout keeps it: a string, a list of
+/// content parts with text, or an object whose `content` is either. Takes the output.
+/// Returns its texts, none for any other value.
+fn output_texts(output: &Value) -> Vec<&str> {
+    match output {
+        Value::String(text) => vec![text.as_str()],
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect(),
+        Value::Object(_) if !output["content"].is_object() => output_texts(&output["content"]),
+        _ => Vec::new(),
+    }
+}
+
+/// A Codex background command's session id as the engine keeps it: digits only, at most
+/// `CODEX_SESSION_DIGITS_MAX`. Takes the text after the marker. Returns the id, none for
+/// any other text.
+fn codex_session_id(text: &str) -> Option<String> {
+    let id = text.trim();
+    let digits = !id.is_empty()
+        && id.len() <= CODEX_SESSION_DIGITS_MAX
+        && id.bytes().all(|byte| byte.is_ascii_digit());
+    digits.then(|| id.to_owned())
 }
 
 /// The texts of a Claude Code content value: the string itself, or each text block of an
@@ -783,9 +1011,10 @@ const FIELDS_BYTES_MAX: usize = TOOL_TEXT_BYTES_MAX + 4;
 /// `conversation_messages` reads, plus each tool call with its input (Claude Code
 /// `tool_use`, Codex `function_call` and `custom_tool_call`) and each tool's output
 /// (`tool_result`, `function_call_output` and `custom_tool_call_output`), each cut to
-/// `TOOL_TEXT_BYTES_MAX` bytes. Takes the catalog harness id and the line. Returns who said
-/// it ("typed", "agent" or "tool") and the text, or none for any other line, a harness
-/// without a reader or a line that is not JSON.
+/// `TOOL_TEXT_BYTES_MAX` bytes, and the context a harness injected ([`Injected`]). Takes the
+/// catalog harness id and the line. Returns who said it ("typed", "agent", "tool",
+/// "instructions" or "summary") and the text, or none for any other line, a harness without
+/// a reader or a line that is not JSON.
 pub fn record_message(harness: &str, line: &[u8]) -> Option<(&'static str, String)> {
     let value = serde_json::from_slice::<Value>(line).ok()?;
     match harness {
@@ -833,11 +1062,24 @@ fn codex_entry(value: &Value) -> Option<(&'static str, String)> {
             };
             Some(("tool", tool_output(&output)))
         }
+        "message" if payload["role"] == "user" => {
+            let text = codex_text(payload)?;
+            match codex_injected(&text) {
+                Some(kind) => Some((kind.role(), text)),
+                None => {
+                    said(Speaker::Input, text).map(|(speaker, text)| (speaker_name(speaker), text))
+                }
+            }
+        }
         _ => codex_message(value).map(|(speaker, text)| (speaker_name(speaker), text)),
     }
 }
 
 fn claude_entry(value: &Value) -> Option<(&'static str, String)> {
+    if claude_summary(value) {
+        let text = content_texts(&value["message"]["content"]).join("\n");
+        return (!text.trim().is_empty()).then(|| (Injected::Summary.role(), text));
+    }
     let speaker = match value["type"].as_str()? {
         "user" if value["isMeta"] != true => "typed",
         "assistant" if value["isApiErrorMessage"] != true => "agent",
@@ -993,19 +1235,30 @@ fn codex_message(value: &Value) -> Option<(Speaker, String)> {
         "assistant" => Speaker::Agent,
         _ => return None,
     };
-    let text: String = payload["content"]
-        .as_array()?
-        .iter()
-        .filter(|part| part["type"] == "input_text" || part["type"] == "output_text")
-        .filter_map(|part| part["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = codex_text(payload)?;
+    if speaker == Speaker::Input && codex_injected(&text).is_some() {
+        return None;
+    }
     said(speaker, text)
+}
+
+/// The text of one Codex rollout message: its input and output text parts joined by lines.
+/// Takes the message payload. Returns the text, none when it has no content list.
+fn codex_text(payload: &Value) -> Option<String> {
+    Some(
+        payload["content"]
+            .as_array()?
+            .iter()
+            .filter(|part| part["type"] == "input_text" || part["type"] == "output_text")
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn claude_message(value: &Value) -> Option<(Speaker, String)> {
     let speaker = match value["type"].as_str()? {
-        "user" if value["isMeta"] != true => Speaker::Input,
+        "user" if value["isMeta"] != true && !claude_summary(value) => Speaker::Input,
         "assistant" if value["isApiErrorMessage"] != true => Speaker::Agent,
         _ => return None,
     };
@@ -1068,7 +1321,7 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
 /// next. It reads on to the record's end as it was when opened, `TYPED_CHUNK_BYTES` at a
 /// time and never following a link, so a turn that wrote any amount to the record hides no
 /// typed line behind it. Only lines the harness finished are read. A line longer than
-/// `LINE_BYTES_MAX`, which the turn reader refuses too, is passed over unread. A Claude
+/// `LINE_BYTES_MAX`, which the turn reader passes over too, is passed over unread. A Claude
 /// Code line is typed only when it is a prompt that starts a turn (`claude_prompt`), so a
 /// compact summary, a line only the transcript shows or a sub-agent's line is never read
 /// as a turn's words. Reading stops early once `EXCERPT_MESSAGES_MAX` typed texts or more

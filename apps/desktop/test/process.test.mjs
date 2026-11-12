@@ -306,7 +306,7 @@ test("a project's agent settings offer every instructions mode and the transcrip
   assert.match(markup, /role="radio" aria-checked="true"[^>]*>App and project</);
   assert.ok(markup.includes(html(client.INSTRUCTION_MODES[0].note)));
   assert.match(markup, /role="switch"[^>]*aria-checked="true"/);
-  assert.match(markup, /Keep transcripts for headless Claude runs/);
+  assert.match(markup, /Keep transcripts for headless runs/);
   assert.doesNotMatch(markup, /Project files|Project and user files/);
   for (const choice of client.INSTRUCTION_MODES) {
     const shown = agentSettings({ settings: { kind: "ok", value: { settings: { mode: choice.value, transcripts: false }, version: 3 } } });
@@ -340,6 +340,10 @@ test("every way an instruction edit reaches running agents is offered with what 
 test("Delivery is compact rows with dividers, each choice with its chosen option's note as a short visible line, then Keep transcripts with its switch on the right and what it keeps (AL8)", () => {
   const ok = (patch) => ({ settings: { kind: "ok", value: { settings: { ...client.DEFAULT_INSTRUCTION_SETTINGS, ...patch }, version: 0 } } });
   const note = (id, text) => new RegExp(`<span class="small muted pr-del-note" id="${id}">${escaped(html(text))}</span>`);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
+  const offNote = engine.match(/pub const TRANSCRIPTS_OFF: &str =\s*"([^"]+)";/u)?.[1];
+  assert.ok(offNote, "the engine names what Off keeps once (DEC-141 PA-14)");
+  for (const harness of ["Claude Code", "Codex"]) assert.ok(offNote.includes(harness), `Off says what ${harness} keeps`);
   for (const transcripts of [true, false]) {
     const markup = agentSettings(ok({ transcripts }));
     assert.equal((markup.match(/<div class="pr-del-row[ "]/g) ?? []).length, 5, "five rows: instructions, edits, repeated lines, Edit with AI, transcripts");
@@ -347,10 +351,10 @@ test("Delivery is compact rows with dividers, each choice with its chosen option
     assert.ok(at(">Instructions agents get<") >= 0 && at(">Instructions agents get<") < at(">When you edit instructions<"), "instructions first");
     assert.ok(at(">When you edit instructions<") < at(">Lines the project file repeats<"), "edits before repeated lines");
     assert.ok(at(">Lines the project file repeats<") < at("<strong>Keep transcripts</strong>"), "repeated lines before transcripts");
-    assert.match(markup, /<div class="pr-del-row pr-del-toggle"><span class="pr-del-label"><strong>Keep transcripts<\/strong><span class="small muted">For headless Claude runs<\/span><\/span><span class="switch-label"><button id="agent-transcripts"/);
+    assert.match(markup, /<div class="pr-del-row pr-del-toggle"><span class="pr-del-label"><strong>Keep transcripts<\/strong><span class="small muted">For headless runs<\/span><\/span><span class="switch-label"><button id="agent-transcripts"/);
     assert.match(markup, new RegExp(`role="switch"[^>]*aria-checked="${transcripts}"`));
-    assert.match(markup, /<span id="agent-transcripts-label" class="visually-hidden">Keep transcripts for headless Claude runs<\/span>/);
-    assert.match(markup, note("agent-transcripts-note", transcripts ? "Kept in the agent's own home" : "No transcript kept"));
+    assert.match(markup, /<span id="agent-transcripts-label" class="visually-hidden">Keep transcripts for headless runs<\/span>/);
+    assert.match(markup, note("agent-transcripts-note", transcripts ? "Kept in the agent's own home" : offNote));
     assert.match(markup, /role="switch"[^>]*aria-describedby="agent-transcripts-note"/, "the switch is described by what it keeps");
     assert.doesNotMatch(markup, /<p[ >]/, "notes are short lines, not help paragraphs");
     assert.doesNotMatch(markup, / title="/, "no note is left to hover text alone");
@@ -628,7 +632,7 @@ test("finished agents wait behind Show finished, and a clicked row shows the age
 test("the project Process page puts Delivery and How a task runs beside the instructions and who follows them", () => {
   assert.match(agentSettings(), /<h2>Delivery<\/h2>/);
   const steps = words(renderToStaticMarkup(createElement(view.TaskSteps)));
-  assert.match(steps, /How a task runs 1 Master writes the task and picks an agent\. 2 Agent reads instructions, asks the graph, works on its branch\. 3 Reviewer checks the change set\. 4 The master merges it, or it waits for your accept when Ask me before merging is on\. With Ask off, at Full access a master change set that only fixes conflicts can also land by itself\./);
+  assert.match(steps, /How a task runs 1 Master writes the task and picks an agent\. 2 Agent reads instructions, asks the graph, works on its branch\. 3 Reviewer checks the change set\. 4 The master merges it, or, when Master accepts change sets is Only when I click or say accept all, it waits for your Accept or for you to send accept all\. At Itself, at Full access a master change set that only fixes conflicts can also land by itself\./);
   const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
   assert.match(source, /<div className="pr">[\s\S]*<ProjectFollowing projectId=\{scope\.id\}[\s\S]*<aside className="pr-side">\s*<AgentSettings projectId=\{scope\.id\} onSaved=\{reloadSettings\} \/>\s*<TaskSteps \/>/);
   assert.doesNotMatch(source, /<ProjectAdoption|function AdoptionView/);

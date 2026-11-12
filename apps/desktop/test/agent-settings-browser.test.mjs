@@ -22,18 +22,18 @@ const STATUS = {
 };
 const GROUPS = [
   ["Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
-  ["Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
-  ["Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
+  ["Access and merging", ["Agent access", "Under Full access, merging into main", "Master accepts change sets", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
+  ["Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply", "End a turn after done"]],
   ["Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]],
-  ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
+  ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Left running after a stop", "Token budget", "Master run time", "Sub-agent rounds per message"]],
 ];
 const MASTER = [
   ["Master", ["Harness", "Account", "Live terminal"]],
   ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
-  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
+  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents", "Re-ask a sub-agent's empty reply", "End a turn after done"]],
   ["Access", ["Full access"]],
 ];
-const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main"];
+const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main", "rcli sub-agents", "Messages to rcli agents"];
 
 /** Presses Tab until every wanted row had the focus or the presses run out. Inputs: the page's
  * handles and the row labels. Output: the rows the focus reached, in order, once each. */
@@ -75,7 +75,7 @@ test("the master's settings drawer holds its four groups with nothing past the d
     await page.evaluate(fixture);
     const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "drawer", ${JSON.stringify(STATUS)})`);
     const measured = await page.evaluate("Fixture.measure()");
-    const controls = MASTER.flatMap(([, rows]) => rows);
+    const controls = MASTER.flatMap(([, rows]) => rows).filter((row) => !READ_ONLY.includes(row));
     const reached = await tabThrough(page, controls);
     return { mounted, measured, reached, controls };
   });

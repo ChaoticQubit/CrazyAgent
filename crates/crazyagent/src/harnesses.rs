@@ -1,10 +1,16 @@
 pub(crate) mod codex_folder;
+pub mod finding;
 pub mod interactive;
 pub mod launch;
 pub mod leftovers;
 pub mod terminal_session;
 pub mod transcript;
+pub mod update;
 
+#[cfg(test)]
+mod account_fit_tests;
+#[cfg(all(test, unix))]
+mod finding_tests;
 #[cfg(test)]
 mod probe_tests;
 
@@ -28,14 +34,35 @@ const SYSTEM_DIRECTORIES: [&str; 4] = [
 ];
 #[cfg(not(target_os = "linux"))]
 const SYSTEM_DIRECTORIES: [&str; 3] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
-const HOME_DIRECTORIES: [&str; 6] = [
+const HOME_DIRECTORIES: [&str; 10] = [
     ".local/bin",
     ".npm-global/bin",
     ".bun/bin",
     ".cargo/bin",
-    ".volta/bin",
     "bin",
+    ".nvm/current/bin",
+    ".local/share/fnm/aliases/default/bin",
+    "Library/Application Support/fnm/aliases/default/bin",
+    "Library/pnpm",
+    ".local/share/pnpm",
 ];
+/// Version-manager shim folders. Their files start the real program by their own name, so a
+/// launch of the resolved file runs the shim, not the harness: they are named in the places
+/// looked but never used, and the owner chooses the real file instead.
+pub const SHIM_DIRECTORIES: [&str; 3] = [".volta/bin", ".asdf/shims", ".local/share/mise/shims"];
+/// The real programs behind version-manager shims, never used as a harness file.
+pub const SHIM_PROGRAMS: [&str; 3] = ["volta-shim", "mise", "asdf"];
+const NVM_VERSIONS: &str = ".nvm/versions/node";
+const NVM_DEFAULT_ALIAS: &str = ".nvm/alias/default";
+const NVM_ENTRIES_MAX: usize = 64;
+const NVM_VERSIONS_MAX: usize = 8;
+const NVM_ALIAS_BYTES_MAX: u64 = 64;
+const HOME_PLACES_MAX: usize = HOME_DIRECTORIES.len() + NVM_VERSIONS_MAX;
+const NODE_PREFIX_DEPTH_MAX: usize = 32;
+const NODE_PREFIX_BYTES_MAX: usize = 1024;
+const LOCATIONS_MAX: usize = 8;
+/// The most files one harness search hands to the pin checks ([`Search::candidates`]).
+pub const CANDIDATES_MAX: usize = 16;
 
 /// Names a kind of account a harness can run on.
 /// Input: none. Output: the plain wire name shared by the TUI and desktop clients.
@@ -132,6 +159,7 @@ pub struct HarnessEntry {
 pub struct Search {
     directories: Vec<PathBuf>,
     home: Option<PathBuf>,
+    home_places: Vec<PathBuf>,
     registered: Vec<(String, PathBuf)>,
 }
 
@@ -149,31 +177,116 @@ impl Search {
             .take(SEARCH_DIRECTORIES_MAX)
             .collect();
         let home = home.filter(|home| usable_path(home));
+        let home_places = home.as_deref().map(home_places).unwrap_or_default();
         let registered: Vec<(String, PathBuf)> = registered
             .into_iter()
             .filter(|(_, path)| usable_path(path))
             .collect();
         assert!(directories.len() <= SEARCH_DIRECTORIES_MAX);
         assert!(directories.iter().all(|directory| directory.is_absolute()));
+        assert!(home_places.len() <= HOME_PLACES_MAX);
         Self {
             directories,
             home,
+            home_places,
             registered,
         }
     }
 
-    /// Builds a search from this process's PATH and HOME with no registered executables.
-    /// Output: the search the engine uses for harnesses it does not launch itself.
-    pub fn from_environment() -> Self {
-        let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).collect())
+    /// Builds the one search engine start, the catalog, Check again and sign-in all use: the
+    /// PATH folders, then the system folders no other user can change, then the HOME folders
+    /// (see [`home_places`]). Inputs: the PATH value, the system folders and HOME.
+    /// Output: the bounded search.
+    pub fn engine(path: Option<&OsStr>, system: &[PathBuf], home: Option<PathBuf>) -> Self {
+        let mut directories: Vec<PathBuf> = path
+            .map(|path| std::env::split_paths(path).collect())
             .unwrap_or_default();
-        directories.extend(SYSTEM_DIRECTORIES.iter().map(PathBuf::from));
-        Self::new(
-            directories,
+        for folder in system {
+            if !directories.contains(folder)
+                && crate::service::changeable_by_others(folder).is_none()
+            {
+                directories.push(folder.clone());
+            }
+        }
+        Self::new(directories, home, Vec::new())
+    }
+
+    /// Builds the engine search from this process's PATH and HOME and the built-in system
+    /// folders, with no registered executables. Output: the search ([`Search::engine`]).
+    pub fn from_environment() -> Self {
+        let system: Vec<PathBuf> = SYSTEM_DIRECTORIES.iter().map(PathBuf::from).collect();
+        Self::engine(
+            std::env::var_os("PATH").as_deref(),
+            &system,
             std::env::var_os("HOME").map(PathBuf::from),
-            Vec::new(),
         )
+    }
+
+    /// Finds the executable entry of one catalog harness, its links kept, exactly as the
+    /// catalog finds it: shims are passed over ([`is_shim`]). Input: the catalog id.
+    /// Output: the absolute entry, or none for an alias, an unknown id or a harness found
+    /// nowhere this search looks.
+    pub fn find(&self, id: &str) -> Option<PathBuf> {
+        let spec = spec(id).filter(|spec| spec.id == id)?;
+        let found = self.locate(spec)?;
+        assert!(found.is_absolute());
+        Some(found)
+    }
+
+    /// Every executable file this search finds for one harness, in search order, shims
+    /// included, for the pin to check one by one. Input: the catalog id. Output: at most
+    /// [`CANDIDATES_MAX`] absolute files; empty for an alias or unknown id.
+    pub fn candidates(&self, id: &str) -> Vec<PathBuf> {
+        let Some(spec) = spec(id).filter(|spec| spec.id == id) else {
+            return Vec::new();
+        };
+        self.hits(spec, CANDIDATES_MAX, true)
+    }
+
+    /// The folders this search looks in for one harness, in order, then the version-manager
+    /// shim folders it never uses, for the owner's "where we looked" line. Input: the catalog
+    /// id. Output: the folders, bounded; empty for an alias or unknown id.
+    pub fn looked(&self, id: &str) -> Vec<PathBuf> {
+        let Some(spec) = spec(id).filter(|spec| spec.id == id) else {
+            return Vec::new();
+        };
+        let mut folders = self.places(spec);
+        if let Some(home) = &self.home {
+            for shim in SHIM_DIRECTORIES
+                .iter()
+                .map(|relative| below(home, relative))
+            {
+                if !folders.contains(&shim) {
+                    folders.push(shim);
+                }
+            }
+        }
+        assert!(
+            folders.len()
+                <= SEARCH_DIRECTORIES_MAX
+                    + HOME_PLACES_MAX
+                    + LOCATIONS_MAX
+                    + SHIM_DIRECTORIES.len()
+        );
+        folders
+    }
+
+    /// The HOME this search looks under, for showing folders below it as `~`.
+    /// Output: the absolute HOME, or none.
+    pub fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
+    /// The folders searched for one spec, in order: the search folders, the HOME folders and
+    /// the spec's own install folders under HOME. Input: the spec. Output: the folders.
+    fn places(&self, spec: &HarnessSpec) -> Vec<PathBuf> {
+        assert!(spec.locations.len() <= LOCATIONS_MAX);
+        let mut folders: Vec<PathBuf> = self.directories.clone();
+        folders.extend(self.home_places.iter().cloned());
+        if let Some(home) = &self.home {
+            folders.extend(spec.locations.iter().map(|relative| below(home, relative)));
+        }
+        folders
     }
 
     /// Adds an executable the engine was started with, which wins over any search hit.
@@ -186,26 +299,190 @@ impl Search {
     }
 
     fn locate(&self, spec: &HarnessSpec) -> Option<PathBuf> {
+        self.hits(spec, 1, false).pop()
+    }
+
+    /// The executable files one spec names in the folders this search looks in, in search
+    /// order, each once; a registered file alone when one is registered. Inputs: the spec,
+    /// the most to return and whether shims ([`is_shim`]) are kept. Output: at most `limit`.
+    fn hits(&self, spec: &HarnessSpec, limit: usize, shims: bool) -> Vec<PathBuf> {
+        assert!((1..=CANDIDATES_MAX).contains(&limit));
         if let Some((_, path)) = self.registered.iter().find(|(id, _)| id == spec.id) {
-            return executable_file(path).then(|| path.clone());
+            return executable_file(path)
+                .then(|| path.clone())
+                .into_iter()
+                .collect();
         }
-        let mut directories: Vec<PathBuf> = self.directories.clone();
-        if let Some(home) = &self.home {
-            directories.extend(HOME_DIRECTORIES.iter().map(|relative| home.join(relative)));
-            directories.extend(spec.locations.iter().map(|relative| home.join(relative)));
-        }
+        let directories = self.places(spec);
+        let mut found: Vec<PathBuf> = Vec::new();
         for binary in spec.binaries {
             assert!(!binary.contains('/'));
             for directory in &directories {
                 let candidate = directory.join(binary);
-                if executable_file(&candidate) {
-                    assert!(candidate.is_absolute());
-                    return Some(candidate);
+                if found.contains(&candidate)
+                    || !executable_file(&candidate)
+                    || (!shims && is_shim(self.home(), &candidate))
+                {
+                    continue;
+                }
+                assert!(candidate.is_absolute());
+                found.push(candidate);
+                if found.len() == limit {
+                    return found;
                 }
             }
         }
-        None
+        assert!(found.len() <= limit);
+        found
     }
+}
+
+/// Whether a harness file is a version-manager shim, which starts the real program by its own
+/// name and so never runs as the harness: it sits in a shim folder under HOME
+/// ([`SHIM_DIRECTORIES`]), or its real file is a shim program ([`SHIM_PROGRAMS`]).
+/// Inputs: HOME and the file. Output: true for a shim.
+pub fn is_shim(home: Option<&Path>, path: &Path) -> bool {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let program = real
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| SHIM_PROGRAMS.contains(&name));
+    program
+        || home.is_some_and(|home| {
+            SHIM_DIRECTORIES
+                .iter()
+                .map(|relative| below(home, relative))
+                .any(|folder| path.starts_with(&folder) || real.starts_with(&folder))
+        })
+}
+
+/// Whether a folder is one of the version-manager shim folders under HOME, for the "where we
+/// looked" line. Inputs: HOME and the folder. Output: true for a shim folder.
+pub fn is_shim_folder(home: Option<&Path>, folder: &Path) -> bool {
+    home.is_some_and(|home| {
+        SHIM_DIRECTORIES
+            .iter()
+            .any(|relative| below(home, relative) == folder)
+    })
+}
+
+/// The HOME folders a harness search looks in after PATH and the system folders: the usual
+/// user bin folders, nvm's current link, fnm's default alias, pnpm's global bin, then nvm's
+/// installed Node versions with the default alias first and the newest after it. No shell
+/// is run and no shell file is read. Input: an absolute HOME. Output: the folders, bounded.
+fn home_places(home: &Path) -> Vec<PathBuf> {
+    assert!(home.is_absolute());
+    let mut folders: Vec<PathBuf> = HOME_DIRECTORIES
+        .iter()
+        .map(|relative| below(home, relative))
+        .collect();
+    folders.extend(nvm_versions(home));
+    assert!(folders.len() <= HOME_PLACES_MAX);
+    folders
+}
+
+/// The `bin` folders of nvm's installed Node versions: the one the default alias names
+/// first, then the newest. Reads at most [`NVM_ENTRIES_MAX`] folder entries and
+/// [`NVM_ALIAS_BYTES_MAX`] alias bytes. Input: HOME. Output: at most [`NVM_VERSIONS_MAX`].
+fn nvm_versions(home: &Path) -> Vec<PathBuf> {
+    let versions = below(home, NVM_VERSIONS);
+    let Ok(entries) = std::fs::read_dir(&versions) else {
+        return Vec::new();
+    };
+    let mut found: Vec<((u64, u64, u64), String)> = entries
+        .take(NVM_ENTRIES_MAX)
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            Some((node_version(&name)?, name))
+        })
+        .collect();
+    found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    if let Some(alias) = nvm_default(home) {
+        let named = |name: &str| {
+            let bare = name.trim_start_matches('v');
+            bare == alias || bare.starts_with(&format!("{alias}."))
+        };
+        found.sort_by_key(|(_, name)| !named(name));
+    }
+    found.truncate(NVM_VERSIONS_MAX);
+    let folders: Vec<PathBuf> = found
+        .into_iter()
+        .map(|(_, name)| versions.join(name).join("bin"))
+        .collect();
+    assert!(folders.len() <= NVM_VERSIONS_MAX);
+    folders
+}
+
+/// Reads a Node version folder name such as `v22.11.0`. Input: the name.
+/// Output: the major, minor and patch numbers, or none for any other name.
+fn node_version(name: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = name.strip_prefix('v')?.split('.');
+    let version = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(version)
+}
+
+/// The version nvm's default alias names when it is a plain version such as `22` or
+/// `v22.11.0`; a named alias such as `lts/*` is not followed. The alias is read only when it
+/// is a regular file, opened without following a link or waiting on a pipe, at most
+/// [`NVM_ALIAS_BYTES_MAX`] bytes. Input: HOME. Output: the version without its `v`, or none.
+fn nvm_default(home: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    transcript::open_plain(&below(home, NVM_DEFAULT_ALIAS))?
+        .take(NVM_ALIAS_BYTES_MAX)
+        .read_to_string(&mut text)
+        .ok()?;
+    let alias = text.trim().trim_start_matches('v');
+    (!alias.is_empty()
+        && alias
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.'))
+    .then(|| alias.to_owned())
+}
+
+/// Joins a `/`-separated relative folder onto a base one part at a time.
+/// Inputs: the base and the relative folder. Output: the joined path.
+fn below(base: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(base.to_path_buf(), |at, part| at.join(part))
+}
+
+/// The npm prefix a Node script harness sits in, so a sign-in or an agent launch can put the
+/// `node` beside it on PATH: for a real file under `<prefix>/lib/node_modules/`, the prefix
+/// whose `bin` is an absolute folder of at most 1024 bytes with no `:`, holding a `node` file
+/// only the owner and the system can change, and none of them in a `.crazyagent` folder
+/// ([`in_crazyagent_folder`]). Input: the harness's real file. Output: the prefix, or none.
+pub fn node_prefix(program: &Path) -> Option<PathBuf> {
+    let prefix = program
+        .ancestors()
+        .take(NODE_PREFIX_DEPTH_MAX)
+        .find(|folder| folder.ends_with("lib/node_modules"))
+        .and_then(|modules| modules.parent()?.parent())?;
+    let bin = prefix.join("bin");
+    let node = bin.join("node");
+    let usable = bin.is_absolute()
+        && bin
+            .to_str()
+            .is_some_and(|text| !text.contains(':') && text.len() <= NODE_PREFIX_BYTES_MAX)
+        && node.is_file()
+        && !in_crazyagent_folder(program)
+        && std::fs::canonicalize(&node).is_ok_and(|real| !in_crazyagent_folder(&real))
+        && crate::service::changeable_by_others(&node).is_none();
+    usable.then(|| prefix.to_path_buf())
+}
+
+/// Whether a path runs through a `.crazyagent` folder, where every project keeps the
+/// worktrees its agents write, so no harness file or `node` may come from there.
+/// Input: the path. Output: the answer.
+pub fn in_crazyagent_folder(path: &Path) -> bool {
+    path.components()
+        .any(|part| part.as_os_str() == crate::projects_home::CRAZYAGENT_DIRECTORY)
 }
 
 fn usable_path(path: &Path) -> bool {
@@ -411,6 +688,64 @@ pub fn canonical(id: &str) -> &str {
     spec(id).map_or(id, |spec| spec.id)
 }
 
+/// Tells whether a harness can run on one account (DEC-141 PA-4), the one rule every master,
+/// team agent and research job uses. Inputs: a catalog id or alias and the stored connection.
+/// Output: true for a sign-in of that harness itself, or for an HTTP endpoint account whose
+/// wire format it speaks (Codex any OpenAI format, Claude Code Anthropic Messages, RCLI all);
+/// the harness an endpoint account was stored with is ignored.
+pub fn account_fits(harness: &str, connection: &crate::config::ModelConnection) -> bool {
+    use crate::config::{ModelAuthentication, ModelEndpoint};
+    let Some(id) = spec(harness).map(|spec| spec.id) else {
+        return false;
+    };
+    let protocol = connection.protocol.as_str();
+    match (&connection.endpoint, &connection.auth) {
+        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. }) => {
+            protocol == "native"
+                && id != "rcli"
+                && spec(connection.harness.as_str()).is_some_and(|own| own.id == id)
+        }
+        (
+            ModelEndpoint::Http { .. },
+            ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {},
+        ) => match id {
+            "codex" => protocol.starts_with("openai"),
+            "claude-code" => protocol == "anthropic-messages",
+            "rcli" => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The base URL a harness is given for an endpoint account. Claude Code adds `/v1/messages`
+/// to the URL it is given (2.1.322), so an Anthropic URL stored with its `/v1` loses it there;
+/// every other harness takes the URL as stored. Inputs: the catalog id or alias and the stored
+/// URL. Output: the URL to hand over.
+pub fn endpoint_base_url<'a>(harness: &str, url: &'a str) -> &'a str {
+    let url = url.trim_end_matches('/');
+    match spec(harness).map(|spec| spec.id) {
+        Some("claude-code") => url.strip_suffix("/v1").unwrap_or(url),
+        _ => url,
+    }
+}
+
+/// Starts the engine key relay a keyed endpoint account is reached through (DEC-141 PA-4):
+/// the saved key is read from the engine folder into engine memory only, and the harness
+/// gets the relay's loopback URL and placeholder token instead. Inputs: the engine folder
+/// that holds `account-keys`, the provider base URL as the harness takes it and the key
+/// reference. Output: the running relay, `account_key_missing` when no key is saved, or the
+/// key store's or relay's refusal.
+pub(crate) fn key_relay(
+    engine: &Path,
+    base_url: &str,
+    key: &crate::protocol::CredentialRef,
+) -> Result<crate::model_gateway::relay::Relay, crate::engine::EngineError> {
+    let secret = crate::storage::accounts::read_key_file(engine, key)?
+        .ok_or_else(|| crate::engine::EngineError("account_key_missing".into()))?;
+    crate::model_gateway::relay::Relay::start(base_url, secret)
+}
+
 const CONNECTION_NAMES: [(&str, &str); 1] = [("claude", "claude-code")];
 
 const NO_ADAPTER: &str = "installed, but CrazyAgent cannot start it yet";
@@ -452,11 +787,7 @@ static SPECS: [HarnessSpec; 23] = [
         headless: "claude --print with stream-json input and output",
         tools_limited: None,
         model_selection: true,
-        account_kinds: &[
-            AccountKind::Subscription,
-            AccountKind::ApiKey,
-            AccountKind::Local,
-        ],
+        account_kinds: &[AccountKind::Subscription, AccountKind::ApiKey],
         launch: None,
     },
     HarnessSpec {

@@ -196,7 +196,8 @@ async fn stand_in_host_at(
         ..budget()
     };
     let clock = Some(Duration::from_millis(limits.wall_time_ms));
-    CodexHostProcess::spawn_guarded(command, &limits, clock, Some(profile), unconfined)
+    let lease = Some((profile, fixture.project_id.clone()));
+    CodexHostProcess::spawn_guarded(command, &limits, clock, lease, unconfined)
         .await
         .unwrap()
 }
@@ -442,6 +443,44 @@ async fn closing_a_full_access_codex_host_names_what_it_left_running_and_keeps_t
     }
 }
 
+/// L1 r1 security L1: a Codex host turn's leftovers follow its project's Keep: the hold is
+/// listed in that project's owner view as kept, the account goes at once and the orphan is
+/// never signalled.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_codex_host_hold_follows_its_projects_keep_and_is_listed_for_the_owner() {
+    use crate::engine::master_host_fixture::{MasterFixture, ORPHANING_HARNESS, Orphan};
+    use crate::harnesses::leftovers::{self, HoldState, LeftoverMode};
+
+    let mut fixture = MasterFixture::new("codex");
+    let project = fixture.project_id.as_str().to_owned();
+    leftovers::set_mode(&project, LeftoverMode::Keep);
+    let body = format!("{ORPHANING_HARNESS}exec /bin/sleep 30\n");
+    let mut process = stand_in_host_at(&mut fixture, &body, true).await;
+    let orphan = Orphan::wait(&fixture.project);
+    let closed = process.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err(leftovers::LEFT.to_owned())
+    );
+    let listed = leftovers::held_in(&project);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].who, "a Codex host turn");
+    assert_eq!(listed[0].state, HoldState::Kept);
+    assert!(!listed[0].holds_account);
+    assert!(
+        fixture.sign_in("codex-kept-next", 2).is_ok(),
+        "Keep held the account"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        rustix::process::test_kill_process(orphan.0),
+        Ok(()),
+        "Keep signalled the orphan"
+    );
+    drop(orphan);
+}
+
 /// SETSID-L2: a Full access Codex host's process that left its session and lost its parent
 /// before the close, running a program whose environment macOS hides, is still named: the
 /// follow from the start kept it.
@@ -606,9 +645,11 @@ async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_frames_with
         home,
         action,
         CredentialRef::new("group-master-account").unwrap(),
+        fixture.project_id.clone(),
         Some(Duration::from_millis(limits.wall_time_ms)),
         limits,
         "stand-in instructions",
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -649,6 +690,34 @@ async fn stand_in_master(
     crate::engine::master_host_fixture::MasterFixture,
     super::CodexHost,
 ) {
+    let (fixture, host) = stand_in_master_framed(
+        name,
+        body,
+        limits,
+        crate::master_frame_limit::FrameSize::default(),
+        "stand-in instructions",
+    )
+    .await;
+    let host = host.unwrap();
+    assert!(host.diagnostic().fault.is_none());
+    (fixture, host)
+}
+
+/// Starts a Codex master host as `stand_in_master` does, under a master frame size limit
+/// and with the given instructions. Inputs: the name, script, budget, frame size and
+/// instructions. Output: the fixture, which owns the folders, and the host or the code
+/// its start ended with.
+#[cfg(unix)]
+async fn stand_in_master_framed(
+    name: &str,
+    body: &str,
+    limits: ResourceBudget,
+    frames: crate::master_frame_limit::FrameSize,
+    instructions: &str,
+) -> (
+    crate::engine::master_host_fixture::MasterFixture,
+    Result<super::CodexHost, crate::engine::EngineError>,
+) {
     use crate::adapters::{NativeAction, NativeHarness};
     use crate::engine::master_host_fixture::MasterFixture;
     use crate::protocol::{CredentialRef, RequestId, SessionId};
@@ -676,14 +745,108 @@ async fn stand_in_master(
         home,
         action,
         CredentialRef::new("group-master-account").unwrap(),
+        fixture.project_id.clone(),
         Some(Duration::from_millis(limits.wall_time_ms)),
         limits,
-        "stand-in instructions",
+        instructions,
+        frames,
     )
-    .await
-    .unwrap();
-    assert!(host.diagnostic().fault.is_none());
+    .await;
     (fixture, host)
+}
+
+/// A stand-in Codex app-server that answers initialize, the master thread and the turn in
+/// Codex 0.164's shapes, then replies with the byte lengths of the thread start and turn
+/// start lines it read, as `thread=<bytes> turn=<bytes>`, and ends the turn.
+#[cfg(unix)]
+const FRAME_SIZE_APP_SERVER: &str = r#"#!/bin/sh
+IFS= read -r line
+printf '%s\n' "{\"id\":1,\"result\":{\"userAgent\":\"stand-in\",\"codexHome\":\"$CODEX_HOME\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}"
+IFS= read -r line
+IFS= read -r line
+thread=${#line}
+cwd=$(pwd)
+printf '%s\n' "{\"id\":2,\"result\":{\"thread\":{\"id\":\"stand-in-thread\",\"cwd\":\"$cwd\",\"turns\":[],\"status\":{\"type\":\"idle\"}},\"cwd\":\"$cwd\",\"model\":\"stand-in-model\",\"modelProvider\":\"openai\",\"approvalPolicy\":\"on-request\",\"approvalsReviewer\":\"user\",\"sandbox\":{\"type\":\"readOnly\",\"networkAccess\":false}}}"
+IFS= read -r line
+turn=${#line}
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"stand-in-turn","items":[],"status":"inProgress"}}}'
+printf '%s\n' "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"stand-in-thread\",\"turnId\":\"stand-in-turn\",\"itemId\":\"item-1\",\"delta\":\"thread=$thread turn=$turn\"}}"
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"stand-in-thread","turn":{"id":"stand-in-turn","status":"completed","items":[{"id":"item-1"}]}}}'
+exec /bin/sleep 30
+"#;
+
+/// A Codex master host writes frames as large as the owner's master frame size limit
+/// allows (F39): instructions whose escaped thread start passes the 64 KiB engine wire size
+/// stop the start under 64 KiB with `codex_host_protocol_frame_too_large`, and reach the
+/// harness whole under 256 KiB and 1 MiB, as does a turn close to the chosen limit.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_master_starts_its_thread_and_turn_up_to_its_frame_size_limit() {
+    use crate::adapters::codex::{DEVELOPER_INSTRUCTIONS_BYTES_MAX, FRAME_BYTES_MAX};
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::master_frame_limit::FrameSize;
+    use crate::protocol::RequestId;
+
+    let limits = || ResourceBudget {
+        output_bytes: 1_048_576,
+        wall_time_ms: 30_000,
+        ..budget()
+    };
+    let instructions = "\"".repeat(DEVELOPER_INSTRUCTIONS_BYTES_MAX);
+    let (_fixture, refused) = stand_in_master_framed(
+        "frame-refused",
+        FRAME_SIZE_APP_SERVER,
+        limits(),
+        FrameSize::Kib64,
+        &instructions,
+    )
+    .await;
+    assert_eq!(
+        refused.err().map(|error| error.0).as_deref(),
+        Some("codex_host_protocol_frame_too_large")
+    );
+    for limit in [FrameSize::Kib256, FrameSize::Mib1] {
+        let (_fixture, host) = stand_in_master_framed(
+            "frame-taken",
+            FRAME_SIZE_APP_SERVER,
+            limits(),
+            limit,
+            &instructions,
+        )
+        .await;
+        let mut host = host.unwrap();
+        let text = "x".repeat(limit.bytes() - 1024);
+        host.start_turn(RequestId::new("frame-turn").unwrap(), &text)
+            .await
+            .unwrap();
+        let mut said = String::new();
+        let ended = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match host.next_event().await.unwrap().kind {
+                    EventKind::AssistantDelta { text, .. } => said.push_str(&text),
+                    EventKind::TurnFinished { outcome, .. } => break outcome,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(ended, TurnOutcome::Success);
+        let lengths: Vec<usize> = said
+            .split(' ')
+            .map(|part| part.split_once('=').unwrap().1.parse().unwrap())
+            .collect();
+        assert_eq!(lengths.len(), 2, "{said}");
+        assert!(
+            lengths[0] > FRAME_BYTES_MAX && lengths[0] < limit.bytes(),
+            "{said}"
+        );
+        assert!(
+            lengths[1] > limit.bytes() - 1024 && lengths[1] < limit.bytes(),
+            "{said}"
+        );
+        let _ = host.close().await;
+    }
 }
 
 /// A stand-in Codex app-server that answers initialize, the master thread and the turn in
@@ -819,4 +982,167 @@ async fn a_codex_master_turn_that_starts_twenty_native_sub_agents_ends_with_its_
     assert_eq!(ended, TurnOutcome::Success);
     assert!(host.diagnostic().fault.is_none());
     let _ = host.close().await;
+}
+
+/// A stand-in Codex app-server whose turn takes `rounds` model rounds that each start a
+/// command and end with their token count, as Codex 0.164 writes them. With `interrupt` it
+/// then reads one more request and, when it is the turn's interrupt, acknowledges it and
+/// ends the turn interrupted; any other line, or none asked for, ends the turn completed.
+/// Inputs: the rounds and the interrupt switch. Output: the script.
+#[cfg(unix)]
+fn steps_app_server(rounds: u16, interrupt: bool) -> String {
+    let start = r#"#!/bin/sh
+read -r line
+printf '%s\n' "{\"id\":1,\"result\":{\"userAgent\":\"stand-in\",\"codexHome\":\"$CODEX_HOME\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}"
+read -r line
+read -r line
+cwd=$(pwd)
+printf '%s\n' "{\"id\":2,\"result\":{\"thread\":{\"id\":\"stand-in-thread\",\"cwd\":\"$cwd\",\"turns\":[],\"status\":{\"type\":\"idle\"}},\"cwd\":\"$cwd\",\"model\":\"stand-in-model\",\"modelProvider\":\"openai\",\"approvalPolicy\":\"on-request\",\"approvalsReviewer\":\"user\",\"sandbox\":{\"type\":\"readOnly\",\"networkAccess\":false}}}"
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"stand-in-turn","items":[],"status":"inProgress"}}}'
+"#;
+    let rounds = format!(
+        r#"i=0
+while [ "$i" -lt {rounds} ]; do
+  i=$((i+1))
+  printf '%s\n' "{{\"method\":\"item/started\",\"params\":{{\"threadId\":\"stand-in-thread\",\"turnId\":\"stand-in-turn\",\"startedAtMs\":1,\"item\":{{\"type\":\"commandExecution\",\"id\":\"cmd-$i\"}}}}}}"
+  printf '%s\n' '{{"method":"thread/tokenUsage/updated","params":{{"threadId":"stand-in-thread","turnId":"stand-in-turn","tokenUsage":{{}}}}}}'
+done
+"#
+    );
+    let end = if interrupt {
+        r#"read -r line
+case "$line" in
+  *'"turn/interrupt"'*)
+    printf '%s\n' '{"id":4,"result":{}}'
+    printf '%s\n' '{"method":"turn/completed","params":{"threadId":"stand-in-thread","turn":{"id":"stand-in-turn","items":[],"status":"interrupted"}}}'
+    ;;
+  *)
+    printf '%s\n' '{"method":"turn/completed","params":{"threadId":"stand-in-thread","turn":{"id":"stand-in-turn","items":[],"status":"completed"}}}'
+    ;;
+esac
+exec /bin/sleep 30
+"#
+    } else {
+        r#"printf '%s\n' '{"method":"turn/completed","params":{"threadId":"stand-in-thread","turn":{"id":"stand-in-turn","items":[],"status":"completed"}}}'
+exec /bin/sleep 30
+"#
+    };
+    format!("{start}{rounds}{end}")
+}
+
+/// Runs one stand-in Codex master turn under a step limit to its end. Inputs: a name, the
+/// stand-in script and the limit, none for a host never given one. Output: the turn's
+/// outcome, or the error that ended it.
+#[cfg(unix)]
+async fn steps_turn(
+    name: &str,
+    script: &str,
+    limit: Option<crate::master_step_limit::StepLimit>,
+) -> Result<crate::adapters::events::TurnOutcome, crate::engine::EngineError> {
+    use crate::adapters::events::EventKind;
+    use crate::protocol::RequestId;
+
+    let limits = ResourceBudget {
+        output_bytes: 1_048_576,
+        wall_time_ms: 20_000,
+        ..budget()
+    };
+    let (_fixture, mut host) = stand_in_master(name, script, limits).await;
+    if let Some(limit) = limit {
+        host.limit_steps(limit);
+    }
+    host.start_turn(RequestId::new(format!("{name}-turn")).unwrap(), "hello")
+        .await
+        .unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match host.next_event().await {
+                Ok(event) => {
+                    if let EventKind::TurnFinished { outcome, .. } = event.kind {
+                        break Ok(outcome);
+                    }
+                }
+                Err(error) => break Err(error),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let _ = host.close().await;
+    ended
+}
+
+/// The master step limit stops a Codex master (PA-9): at its 50th step the host interrupts
+/// the turn, and the interrupted turn ends with the limit's cause, master_step_limit_50,
+/// the cause a Claude master's error_max_turns ends with. A turn that ends within its limit
+/// keeps its end, and a host with no limit never interrupts.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_master_stops_at_its_step_limit_with_the_limit_cause() {
+    use crate::adapters::events::TurnOutcome;
+    use crate::master_step_limit::{StepLimit, steps_of_cause};
+
+    let stopped = steps_turn(
+        "steps-reached",
+        &steps_app_server(50, true),
+        Some(StepLimit::Steps50),
+    )
+    .await;
+    let cause = stopped.expect_err("the turn ends at its step limit").0;
+    assert_eq!(cause, "master_step_limit_50");
+    assert_eq!(steps_of_cause(&cause), Some(50));
+    let within = steps_turn(
+        "steps-within",
+        &steps_app_server(49, false),
+        Some(StepLimit::Steps50),
+    )
+    .await;
+    assert_eq!(within.unwrap(), TurnOutcome::Success);
+    let unlimited = steps_turn("steps-none", &steps_app_server(60, false), None).await;
+    assert_eq!(unlimited.unwrap(), TurnOutcome::Success);
+    let off = steps_turn(
+        "steps-off",
+        &steps_app_server(60, false),
+        Some(StepLimit::NoLimit),
+    )
+    .await;
+    assert_eq!(off.unwrap(), TurnOutcome::Success);
+}
+
+/// Every master backend maps the master step limit to the same stop (PA-9, DEC-141): a
+/// Claude master gets `--max-turns`, whose error_max_turns the runtime names with the
+/// limit's cause; a Codex master's host counts its steps and ends the turn with that same
+/// cause; an rcli master has no tools, so each turn is one step, which the setting says.
+/// The match names every backend, so a new one fails to build until it maps the limit.
+#[cfg(unix)]
+#[tokio::test]
+async fn every_master_backend_maps_the_master_step_limit_to_one_stop() {
+    use crate::master_session::MasterBackend;
+    use crate::master_step_limit::{StepLimit, steps_of_cause};
+
+    let limit = StepLimit::Steps50;
+    let cause = limit.cause().unwrap();
+    for backend in [
+        MasterBackend::Claude,
+        MasterBackend::Codex,
+        MasterBackend::Rcli,
+    ] {
+        match backend {
+            MasterBackend::Claude => {
+                let mut command = Command::new("claude");
+                crate::engine::claude_host::limit_steps(&mut command, limit);
+                let args: Vec<_> = command.get_args().collect();
+                assert_eq!(args, ["--max-turns", "50"]);
+            }
+            MasterBackend::Codex => {
+                let ended = steps_turn("steps-parity", &steps_app_server(50, true), Some(limit))
+                    .await
+                    .expect_err("a Codex master stops at its step limit");
+                assert_eq!(ended.0, cause);
+            }
+            MasterBackend::Rcli => {}
+        }
+    }
+    assert_eq!(steps_of_cause(&cause), Some(50));
 }

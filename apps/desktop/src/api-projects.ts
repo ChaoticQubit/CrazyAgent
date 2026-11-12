@@ -119,7 +119,8 @@ export type ActivityKind =
   | "work_complete"
   | "work_closed"
   | "phase"
-  | "test";
+  | "test"
+  | "team_action";
 
 export interface ActivityItem {
   id: number;
@@ -282,6 +283,8 @@ const copy: Record<string, string> = {
   team_task_missing: "That task is gone already.",
   team_wake_cap_invalid: "Set the hourly limit between 0 and 500 wakes.",
   team_time_limits_invalid: "Pick a listed time limit; an agent session may not be shorter than a task.",
+  team_rounds_invalid: "Pick a listed number of sub-agent rounds, or Until the goal is done.",
+  team_run_time_invalid: "Pick a listed master run time, or No limit.",
   team_agent_not_found: "That agent is no longer part of this team.",
   team_notification_missing: "There is no such notification to mark as seen.",
   team_engine_not_ready: "The engine is still starting. Try again in a moment.",
@@ -301,7 +304,7 @@ const copy: Record<string, string> = {
   team_master_branch_invalid: "Type a branch name such as main or release/2.0, or leave it empty for the repository default.",
   team_land_on_invalid: "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.",
   team_background_grace_invalid: "Pick a grace time from 10 to 3600 seconds.",
-  coord_native_unsupported: "This harness has no native teammates, so its sub-agents are app-spawned.",
+  coord_native_unsupported: "This harness has no native sub-agents, so its sub-agents are app-spawned.",
   coord_settings_invalid: "Count at most 32 tools, each named once with letters, digits, _, - or *.",
   coord_project_unknown: "This project was not found.",
   team_agent_unknown: "That agent is not running anymore.",

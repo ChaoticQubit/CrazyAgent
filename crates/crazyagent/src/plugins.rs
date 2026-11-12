@@ -613,6 +613,40 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         .map(|(_, sentence)| *sentence)
 }
 
+/// The start of a recorded check problem that the agent boundary refused before the
+/// server ran. The boundary's own plain reason follows it, such as the kept port and the
+/// range Linux hands out by itself (REL220-F3).
+pub const CHECK_REFUSED: &str = "server_check_refused:";
+
+/// The longest boundary reason a recorded check problem carries.
+const CHECK_REASON_BYTES_MAX: usize = 1024;
+
+/// Records a boundary refusal of a server check with the boundary's reason. Input: the plain
+/// reason, never empty. Output: the problem to record, which [`check_problem`] shows.
+pub fn check_refused(reason: &str) -> String {
+    assert!(!reason.is_empty());
+    assert!(reason.len() <= CHECK_REASON_BYTES_MAX);
+    let problem = format!("{CHECK_REFUSED}{reason}");
+    assert!(check_problem(&problem).contains(reason.trim_end_matches('.')));
+    problem
+}
+
+/// Turns a recorded server check problem into the sentence shown to the owner: a boundary
+/// refusal ([`check_refused`]) shows the boundary's own reason, a plugins code its plain
+/// sentence, and anything else reads as a server that can't start. Input: the recorded
+/// problem. Output: the sentence.
+pub fn check_problem(problem: &str) -> String {
+    match problem.strip_prefix(CHECK_REFUSED) {
+        Some(reason) if !reason.is_empty() => format!(
+            "CrazyAgent did not run the check: {}.",
+            reason.trim_end_matches('.')
+        ),
+        _ => plain_problem(problem)
+            .unwrap_or("The server can't start.")
+            .to_owned(),
+    }
+}
+
 /// Returns the static form of a plugins refusal code, for clients that keep codes as
 /// constants. Input: an engine rejection code. Output: the same code, or None if unknown.
 pub fn known_code(code: &str) -> Option<&'static str> {
@@ -730,5 +764,26 @@ mod tests {
         assert!(plain_problem("server_name_invalid").is_some());
         assert!(plain_problem("server_secret_name_invalid").is_some());
         assert!(plain_problem("skill_missing_skill_md").is_some());
+    }
+
+    #[test]
+    fn a_check_the_boundary_refused_shows_the_boundary_reason() {
+        let reason = "port 40000 is kept free for the owner's apps, a local model or a model \
+             proxy, and this Linux hands out ports 32768 to 60999 by itself";
+        assert_eq!(
+            check_problem(&check_refused(reason)),
+            format!("CrazyAgent did not run the check: {reason}.")
+        );
+        assert_eq!(
+            check_problem(&check_refused("an ended reason.")),
+            "CrazyAgent did not run the check: an ended reason."
+        );
+        assert_eq!(
+            check_problem("server_exited"),
+            "The server stopped before answering."
+        );
+        for other in ["server_cant_start", "no_such_code", CHECK_REFUSED, ""] {
+            assert_eq!(check_problem(other), "The server can't start.", "{other:?}");
+        }
     }
 }

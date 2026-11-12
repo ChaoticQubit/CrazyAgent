@@ -25,9 +25,11 @@ mod migrations;
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
-    close_master_for_removal, master_resolve_ready, native_sign_in,
+    close_master_for_removal, master_resolve_ready, member_request, native_sign_in,
     validate_configured_initial_conversation_receipt,
 };
+#[cfg(unix)]
+pub use migrations::backup_failure;
 pub(crate) mod agent_text;
 mod native_auth;
 #[cfg(all(test, unix))]
@@ -244,6 +246,14 @@ pub(crate) enum Job {
     Setup(setup::Command, oneshot::Sender<Result<(), EngineError>>),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
+    /// Keeps the storage thread busy until the test sends on, or drops, the paired sender,
+    /// so every job queued after it is answered only then, however fast the machine is.
+    #[cfg(all(test, unix))]
+    Hold(oneshot::Receiver<()>),
+    /// Puts the handler in place of the storage connection's busy wait and answers once it
+    /// is set, so a test sees the moment a job waits on another connection's lock.
+    #[cfg(all(test, unix))]
+    BusyHandler(fn(i32) -> bool, oneshot::Sender<Result<(), EngineError>>),
 }
 
 pub(crate) struct Storage {
@@ -954,6 +964,14 @@ impl Storage {
                             let _ = reply.send(released);
                             break;
                         }
+                        #[cfg(all(test, unix))]
+                        Job::Hold(release) => {
+                            let _ = release.blocking_recv();
+                        }
+                        #[cfg(all(test, unix))]
+                        Job::BusyHandler(handler, reply) => {
+                            let _ = reply.send(connection.busy_handler(Some(handler)).map_err(error));
+                        }
                     }
                 }
             })
@@ -1081,6 +1099,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::quit_settings::initialize(connection)?;
     crate::master_step_limit::initialize(connection)?;
     crate::master_time_limit::initialize(connection)?;
+    crate::master_frame_limit::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1430,6 +1449,7 @@ fn apply(
             | Command::OwnerAgentQuit { .. }
             | Command::OwnerMasterSteps { .. }
             | Command::OwnerMasterTime { .. }
+            | Command::OwnerMasterFrames { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1619,6 +1639,7 @@ fn execute(
         Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
         Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
         Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
+        Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -2779,6 +2800,7 @@ fn owner_read(
         OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
         OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
         OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,
+        OwnerRead::MasterFrameSettings => crate::master_frame_limit::read(&tx)?,
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },
@@ -3711,24 +3733,29 @@ mod owner_actor_tests {
     }
 
     /// The owner's questions log keeps out of the names the owner schema check reserves, so
-    /// an engine whose committed questions write made the log starts again ready.
-    /// Input: a fresh engine database. Output: none; the second owner start succeeds.
+    /// an engine whose owner start made the log (F12) and whose questions write kept it
+    /// starts again ready. Input: a fresh engine database. Output: none; the second owner
+    /// start succeeds.
     #[test]
     fn an_engine_that_created_the_questions_log_restarts_ready() {
         let (_root, path, _cfg) = fixture();
         let (mut db, _lock) = open_database(&path, false).unwrap();
         let started = owner_start(&mut db).unwrap();
         owner_stop(&mut db, &started.host).unwrap();
-        let objects = |db: &Connection| -> i64 {
-            db.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| r.get(0))
-                .unwrap()
+        let logged = |db: &Connection| -> bool {
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='questions_log')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
-        let before = objects(&db);
+        assert!(logged(&db), "the owner start makes the questions log");
         let tx = db.transaction().unwrap();
         crate::questions::forget_project(&tx, &crate::protocol::ProjectId::new("asked").unwrap())
             .unwrap();
         tx.commit().unwrap();
-        assert!(objects(&db) > before, "the questions log is made and kept");
+        assert!(logged(&db), "a questions write keeps the log");
         let restarted = owner_start(&mut db).unwrap();
         owner_stop(&mut db, &restarted.host).unwrap();
     }

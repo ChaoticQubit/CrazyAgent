@@ -15,12 +15,12 @@ test("Overlapping edits lists every engine choice in the mockup's order, then an
   assert.deepEqual(values("later"), ["warn", "wait", "block", "off", "later"], "a value this app does not know stays selectable");
 });
 
-test("an engine that sends no coordination shows the plan defaults, native only for Claude Code", () => {
+test("an engine that sends no coordination shows the plan defaults, native for Claude Code and Codex", () => {
   const view = coord.coordination({ coordination: undefined });
   assert.deepEqual(view.settings, coord.COORD_DEFAULTS);
   assert.deepEqual(view.harnesses, [
     { harness: "claude-code", mode: "app_spawned", delivery: "auto", native: true },
-    { harness: "codex", mode: "app_spawned", delivery: "auto", native: false },
+    { harness: "codex", mode: "app_spawned", delivery: "auto", native: true },
     { harness: "rcli", mode: "app_spawned", delivery: "auto", native: false },
   ]);
   const sent = { settings: { ...coord.COORD_DEFAULTS, nudges: "first_edit" }, harnesses: [{ harness: "codex", mode: "app_spawned", delivery: "typing_only", native: false }] };
@@ -37,10 +37,34 @@ test("the desktop defaults are the engine's counted tools", () => {
   assert.deepEqual(coord.COORD_DEFAULTS.counted_tools, engine);
 });
 
-test("Native is offered only where the harness kind has native teammates", () => {
-  assert.deepEqual(coord.modeOptions(false).map((option) => option.value), ["app_spawned"]);
-  assert.deepEqual(coord.modeOptions(true).map((option) => option.value), ["native", "app_spawned"], "native agent teams come first, as the mockup lists them");
+test("Native is listed for every harness kind and chosen only where it has native sub-agents", () => {
+  for (const harness of ["claude-code", "codex", "rcli"]) {
+    const native = coord.NATIVE_UNAVAILABLE[harness] === null;
+    const options = coord.modeOptions(harness, native);
+    assert.deepEqual(options.map((option) => option.value), ["native", "app_spawned"], `${harness}: native comes first, as the mockup lists it`);
+    assert.equal(options[0].disabledReason, native ? undefined : coord.NATIVE_UNAVAILABLE[harness], harness);
+    assert.equal(options[1].disabledReason, undefined, `${harness}: CrazyAgent workers are always open`);
+    assert.ok(coord.modeHelper(harness, native).endsWith("."), harness);
+  }
+  assert.match(coord.modeHelper("codex", true), /Codex starts them on the lead's model and offers no other, but still runs a model a sub-agent names itself\./);
+  assert.ok(coord.modeHelper("codex", true).includes(coord.CODEX_NATIVE_SCOPE), "the Codex helper says what the app cannot show");
+  assert.ok(!coord.modeHelper("claude-code", true).includes(coord.CODEX_NATIVE_SCOPE));
+  assert.equal(coord.modeHelper("rcli", false), coord.NATIVE_UNAVAILABLE.rcli);
   assert.deepEqual(coord.DELIVERY_OPTIONS.map((option) => option.value), ["auto", "native_only", "typing_only"]);
+});
+
+test("the desktop says why RCLI has no native sub-agents in the engine's own words", () => {
+  const source = readFileSync(new URL("../../../crates/crazyagent/src/coord/settings.rs", import.meta.url), "utf8");
+  const engine = /pub const RCLI_NATIVE_UNAVAILABLE: &str =\s*"([^"]+)";/u.exec(source)?.[1];
+  assert.ok(engine, "the engine states RCLI's reason");
+  assert.equal(coord.NATIVE_UNAVAILABLE.rcli, engine);
+});
+
+test("the desktop says what the app cannot show of Codex sub-agents in the engine's own words", () => {
+  const source = readFileSync(new URL("../../../crates/crazyagent/src/coord/settings.rs", import.meta.url), "utf8");
+  const engine = /pub const CODEX_NATIVE_SCOPE: &str =\s*"([^"]+)";/u.exec(source)?.[1];
+  assert.ok(engine, "the engine states what Codex sub-agents leave out");
+  assert.equal(coord.CODEX_NATIVE_SCOPE, engine);
 });
 
 test("counted tools are read with the engine's rule: once each, at most 32, wildcards allowed", () => {
@@ -234,4 +258,39 @@ test("a coordination save keeps the value the TUI or another window set since, e
   stored.wrong = { ...coord.COORD_DEFAULTS };
   await assert.rejects(coord.saveCoordSettings("wrong", { nudges: "off" }), /its own project's team read/);
   assert.equal(engine.sent.length, 3, "a save on another project's read sends nothing");
+});
+
+test("a harness kind no sub-agent runs on keeps its rows, each saying why instead of a live control (PA-15, DEC-141)", () => {
+  const team = readFileSync(new URL("../../../crates/crazyagent/src/team.rs", import.meta.url), "utf8");
+  const start = team.indexOf("pub fn launch_harness");
+  const runs = [...team.slice(start, team.indexOf("\n}\n", start)).matchAll(/"([a-z-]+)"/gu)].map((match) => match[1]);
+  const sentence = team.match(/pub const NO_SUB_AGENTS: &str =\s*"([^"]+)";/u);
+  assert.ok(sentence, "the engine names the reason once");
+  const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
+  const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
+  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden }));
+  for (const harness of coord.COORD_HARNESSES) {
+    const live = runs.includes(harness);
+    assert.equal(coord.subAgentsUnavailable(harness), live ? undefined : sentence[1], harness);
+    assert.equal(lead.includes(`id="tg-mode-${harness}-p"`), live, `${harness} sub-agent mode control`);
+    assert.equal(per.includes(`id="tg-delivery-${harness}-p"`), live, `${harness} delivery control`);
+    const name = coord.HARNESS_NAMES[harness];
+    for (const [markup, label] of [[lead, `${name} sub-agents`], [per, `Messages to ${name} agents`]]) {
+      const row = markup.slice(markup.indexOf(`data-setting="${label}"`));
+      assert.ok(markup.includes(`data-setting="${label}"`), `${label} keeps its row`);
+      assert.equal(row.slice(0, row.indexOf("</div>")).includes(sentence[1]), !live, `${label} shows the TUI's words`);
+    }
+  }
+});
+
+test("each Messages to row says what its choices do on that harness, Native only included (PA-11, DEC-141)", () => {
+  const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
+  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden })).replaceAll("&#x27;", "'");
+  assert.deepEqual(Object.keys(coord.DELIVERY_HELPER).sort(), [...coord.COORD_HARNESSES].sort(), "every harness has its sentence");
+  for (const harness of coord.COORD_HARNESSES) assert.ok(per.includes(coord.DELIVERY_HELPER[harness]), `${harness}: ${per}`);
+  assert.match(coord.DELIVERY_HELPER["claude-code"], /Native only uses the relay alone and never types\./);
+  assert.match(coord.DELIVERY_HELPER.codex, /Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle\./);
+  assert.match(coord.DELIVERY_HELPER.rcli, /rcli runs no team agents/);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_team.rs", import.meta.url), "utf8");
+  for (const harness of coord.COORD_HARNESSES) assert.ok(tui.includes(`"${coord.DELIVERY_HELPER[harness]}"`), `the TUI says the ${harness} sentence too`);
 });

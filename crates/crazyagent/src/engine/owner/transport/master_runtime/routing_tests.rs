@@ -21,6 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::watch;
 
@@ -1331,17 +1332,128 @@ async fn a_turn_whose_write_waits_on_another_engine_connection_still_ends_with_i
     case.finish().await;
 }
 
+/// How many times the storage connection's busy handler waited in the preparation row, so
+/// the row sees the preparation waiting on the other connection's write lock.
+static PREPARATION_WAITS: AtomicUsize = AtomicUsize::new(0);
+
+/// The most 1 ms busy waits the preparation row's handler allows for one lock: the 250 ms
+/// the storage connection's own busy wait allows.
+const PREPARATION_WAITS_MAX: i32 = 250;
+
+/// The preparation row's busy handler: counts the wait, waits 1 ms and tries the lock again
+/// up to `PREPARATION_WAITS_MAX` times, as the storage busy timeout does. Input: the earlier
+/// waits for this lock. Output: whether SQLite tries the lock again.
+fn counted_wait(count: i32) -> bool {
+    assert!(count >= 0);
+    PREPARATION_WAITS.fetch_add(1, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(1));
+    count < PREPARATION_WAITS_MAX
+}
+
+/// A preparation that meets another engine connection's write lock, as the research loop's
+/// stale-job update or a team runtime commit holds it, waits the lock out and prepares the
+/// turn (BL-DBLOCK). Preparation reads before it writes, and SQLite refuses a read
+/// transaction's first write at once, with no busy wait, while another connection holds the
+/// lock. The lock is kept until the preparation either waits on it in the storage
+/// connection's busy handler or has returned, so it spans the preparation's first write
+/// however slow the machine is, with no time window to outlast.
+#[tokio::test]
+async fn a_preparation_that_meets_a_short_write_lock_waits_it_out_and_prepares_the_turn() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let (host, project, turn) = (
+        case.runtime().identity(),
+        case.session.project_id.clone(),
+        case.turn.id.clone(),
+    );
+    let routed = case
+        .command(case.route(host.clone(), project.clone(), turn.clone()))
+        .await;
+    assert!(
+        matches!(routed, Ok(MasterRuntimeResult::Turn(_))),
+        "a route reads the turn first, so the preparation's reads run warm"
+    );
+    let storage = case.runtime().engine.storage.sender.clone();
+    let (set, handler) = tokio::sync::oneshot::channel();
+    storage
+        .send(crate::storage::Job::BusyHandler(counted_wait, set))
+        .await
+        .unwrap();
+    handler.await.unwrap().unwrap();
+    let lock = Connection::open_with_flags(
+        case.root.path().join("engine.db"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (release, held) = tokio::sync::oneshot::channel();
+    storage.try_send(crate::storage::Job::Hold(held)).unwrap();
+    let deadline = Instant::now() + TEST_BOUND;
+    while storage.capacity() < storage.max_capacity() {
+        assert!(Instant::now() < deadline, "storage never took the hold");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    PREPARATION_WAITS.store(0, Ordering::SeqCst);
+    let returned = AtomicBool::new(false);
+    let preparing = async {
+        let prepared = case
+            .command(MasterRuntimeCommand::Prepare {
+                host,
+                project_id: project,
+                session_id: case.session.session_id.clone(),
+                turn_id: turn,
+            })
+            .await;
+        returned.store(true, Ordering::SeqCst);
+        prepared
+    };
+    let releasing = async {
+        while storage.capacity() == storage.max_capacity() {
+            assert!(
+                Instant::now() < deadline,
+                "the preparation was never queued"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        release.send(()).unwrap();
+        while PREPARATION_WAITS.load(Ordering::SeqCst) == 0 && !returned.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the preparation neither waited on the lock nor returned"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        lock.execute_batch("COMMIT").unwrap();
+    };
+    let (prepared, ()) = tokio::join!(preparing, releasing);
+    let prepared = match prepared {
+        Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+        Ok(_) => panic!("the preparation returned no prepared turn"),
+        Err(error) => panic!("the turn was not prepared: {}", error.0),
+    };
+    assert!(
+        PREPARATION_WAITS.load(Ordering::SeqCst) > 0,
+        "the preparation met the other connection's lock and waited it out"
+    );
+    assert_eq!(prepared.session.session_id, case.session.session_id);
+    assert_eq!(
+        case.persisted_turn().await.phase,
+        MasterTurnPhase::Prepared,
+        "the prepared turn is stored"
+    );
+    drop(prepared);
+    case.finish().await;
+}
+
 #[tokio::test]
 async fn an_unregistered_rcli_profile_stops_the_turn_with_its_own_cause() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
-    let returned = case.drive().await;
-    assert_eq!(
-        returned
-            .expect_err("an RCLI master without a registered profile cannot start")
-            .0,
-        "rcli_profile_configuration_required"
-    );
+    let returned = case
+        .drive()
+        .await
+        .expect("an RCLI master without a registered key blocks its turn as every master does");
     let stopped = case.persisted_turn().await;
+    assert_eq!(returned.phase, MasterTurnPhase::Blocked);
     assert_eq!(stopped.id, case.turn.id);
     assert_eq!(stopped.phase, MasterTurnPhase::Blocked);
     assert_eq!(stopped.reason, Some(MasterReason::RuntimeUnavailable));
@@ -2549,8 +2661,10 @@ async fn console_claude_master(
             worktree_lease: prepared.worktree_lease.clone(),
         },
         account_ref.clone(),
+        prepared.session.project_id.clone(),
         clock,
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -2825,6 +2939,41 @@ fn store_step_limit(case: &Fixture, limit: StepLimit) {
         crate::master_step_limit::load(&writer).unwrap().limit,
         limit
     );
+}
+
+/// Saves the owner's master frame size limit in a fixture's engine store, as the owner's
+/// Save in Settings does. Inputs: the fixture and the size. Output: none.
+fn store_frame_limit(case: &Fixture, limit: crate::master_frame_limit::FrameSize) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let settings = crate::master_frame_limit::MasterFrameSettings { limit };
+    let saved = crate::master_frame_limit::save(&writer, &settings).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(crate::master_frame_limit::load(&writer).unwrap(), settings);
+}
+
+/// A master turn carries the owner's saved master frame size limit to its host (F39): 64
+/// KiB before any save, and each option once the owner saved it.
+#[tokio::test]
+async fn a_prepared_master_turn_carries_the_saved_frame_size_limit() {
+    use crate::master_frame_limit::FrameSize;
+
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.frames, FrameSize::Kib64);
+    for limit in FrameSize::ALL {
+        let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+        store_frame_limit(&case, limit);
+        case.sign_in("codex-c", true).await;
+        let prepared = case.prepared(&case.turn.id).await;
+        assert_eq!(
+            prepared.frames, limit,
+            "the turn carries the saved frame size"
+        );
+    }
 }
 
 /// The stand-in of `THIRTY_STEP_HARNESS` taking another number of tool steps before DONE.
@@ -3445,6 +3594,8 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
     let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn"), None).unwrap();
     fs::write(prepared.cwd.join("MORE.md"), "More from the master.\n").unwrap();
     let more = crate::landing_turns::record(&db, &workspace, &end("more-turn"), None).unwrap();
+    fs::write(prepared.cwd.join("LAST.md"), "Last from the master.\n").unwrap();
+    let last = crate::landing_turns::record_news(&db, &workspace, &end("last-turn"), None).unwrap();
     drop(db);
     drop(prepared);
     case.finish().await;
@@ -3459,6 +3610,11 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
         Landed::Added(sets[0].id.clone()),
         "a later turn adds to the same set"
     );
+    assert_eq!(
+        last,
+        (Landed::Added(sets[0].id.clone()), false),
+        "edits added to a set already pending for the owner are no news (F31)"
+    );
     assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
     assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
     assert_eq!(persisted.changes.as_deref(), Some(CHANGES_WAITING));
@@ -3468,6 +3624,38 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
     assert_eq!(sets[0].agent.id, session.as_str());
     assert_eq!(sets[0].files, 1);
     assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Succeeded);
+}
+
+/// F31, S2R1-L1: a conversation master's second editing turn that only grows the change set
+/// already pending for the owner is no news. Its turn ends through the master runtime with
+/// no changes note, while the first turn keeps its note and the one set holds both files.
+#[tokio::test]
+async fn a_master_s_second_editing_turn_on_a_pending_set_ends_with_no_changes_note() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    let first = end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
+    drop(prepared);
+    let second = case.submit("Write more notes.").await;
+    let next = case.prepared(&second).await;
+    let more = |cwd: &Path| fs::write(cwd.join("MORE.md"), "More from the master.\n").unwrap();
+    let grown = end_tools_turn(&case, &next, &second, more, landing_reply(&next)).await;
+    drop(next);
+    let sets = case.change_sets().await;
+    let settled = case.settled_turns(2).await;
+    case.finish().await;
+    assert_eq!(first.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(grown.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(
+        grown.changes, None,
+        "a turn that only grew the pending set posts no note (F31)"
+    );
+    assert_eq!(settled[1].id, second);
+    assert_eq!(settled[1].changes, None);
+    assert_eq!(settled[0].changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].files, 2);
 }
 
 #[tokio::test]
@@ -3827,7 +4015,10 @@ async fn the_master_gets_the_resolve_prompt_and_later_turns_show_the_engine_line
             .ends_with("Do not run git commit; CrazyAgent records your changes when you finish."),
         "{text}"
     );
-    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(
+        ended.changes, None,
+        "the turn before it took the updating set back to pending, so the resolve turn only grows it (F31)"
+    );
     assert_eq!(reviewed.len(), 1, "{reviewed:?}");
     assert_eq!(reviewed[0].id, pending.id);
     assert_eq!(reviewed[0].state, crate::landing::ChangeState::Pending);

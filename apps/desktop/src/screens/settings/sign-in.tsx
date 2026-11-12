@@ -2,16 +2,36 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { knownError, listAccounts, nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
 import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
-  nativeAuthAllowed, nativeAuthFailureCode, nativeAuthRunningAccount, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth, validateClaudeAuthCode,
-  type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView,
+  CHECK_SIGN_IN, nativeAuthAllowed, nativeAuthFailureCode, nativeAuthRunningAccount, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth,
+  signInMethodFor, signInWay, signInWayUnavailable, validateClaudeAuthCode,
+  type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView, type SignInWay,
 } from "../../native-auth";
 import { useAppSession } from "../../state";
 import { Button, Icon, Notice, SecretField } from "../../ui";
+import { HarnessFile } from "./harnesses";
 
 type Challenge = NonNullable<NativeAuthView["challenge"]>;
 type Account = NonNullable<NativeAuthView["account"]>;
 export type SubscriptionProvider = "chatgpt" | "claude";
-export type FailureHint = "retry" | "check" | "expired" | "missing";
+export type FailureHint = "retry" | "check" | "expired" | "missing" | "sign_in";
+export const CHECK_LINE = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this Mac is read.";
+export const CHECK_SIGNED_OUT = "This account isn't signed in. Choose Sign in again.";
+
+/** Names the harness that signs a subscription provider in. Input: the provider. Output: the
+ * engine harness name the sign-in ways are keyed by. */
+export function signInHarness(provider: SubscriptionProvider): "codex" | "claude" {
+  return provider === "chatgpt" ? "codex" : "claude";
+}
+
+/** The method a fresh sign-in of this provider starts with: a code where the harness has one,
+ * else the browser. Input: the provider. Output: the method. */
+export function freshSignIn(provider: SubscriptionProvider): NativeAuthMethod {
+  const harness = signInHarness(provider);
+  const way: SignInWay = signInMethodFor(harness, "code") ? "code" : "browser";
+  const method = signInMethodFor(harness, way);
+  if (!method) throw new Error(`no fresh sign-in for ${harness}`);
+  return method;
+}
 
 /** What the sign-in panel shows for one native sign-in state. */
 export type SignInStage =
@@ -56,7 +76,7 @@ export function signInFailure(code: string, provider: SubscriptionProvider, runn
       : plainError(code), hint: "retry" };
   }
   if (code === "native_auth_host_unavailable") {
-    return { text: `${harness} isn't installed on this Mac, so ${name} sign-in isn't available. Install ${harness}, then check again in Settings, Harnesses.`, hint: "missing" };
+    return { text: `CrazyAgent didn't find a ${harness} it can run on this Mac, so ${name} sign-in isn't available. Install ${harness}, then choose Check again, or choose its file.`, hint: "missing" };
   }
   if (code === "native_auth_host_executable_unsafe") {
     return { text: `${harness} on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall ${harness}, then try again.`, hint: "retry" };
@@ -183,7 +203,8 @@ export function signInStage(state: NativeAuthState | undefined, provider: Subscr
   if (state.claude_input?.status === "sending") return { kind: "working", text: "Sending the code..." };
   const flight = state.in_flight?.action;
   if (flight) {
-    const text = flight === "codex_device_code" ? "Getting a sign-in code..." : flight === "read" ? "Checking..."
+    const checking = flight === "read" || flight !== "cancel" && flight !== "logout" && signInWay(flight) === "check";
+    const text = flight === "codex_device_code" ? "Getting a sign-in code..." : checking ? "Checking..."
       : flight === "cancel" ? "Cancelling sign-in..." : flight === "logout" ? "Signing out..." : "Starting sign-in...";
     return { kind: "working", text };
   }
@@ -193,8 +214,10 @@ export function signInStage(state: NativeAuthState | undefined, provider: Subscr
   }
   const operation = state.operation;
   if (!operation) return state.recover ? { kind: "failed", ...signInFailure(CHECK[0]!, provider) } : { kind: "start" };
+  const check = operation.action.kind === "sign_in" && signInWay(operation.action.method) === "check";
+  if (check && operation.phase === "unauthenticated_observed") return { kind: "failed", text: CHECK_SIGNED_OUT, hint: "sign_in" };
   switch (operation.phase) {
-    case "starting": return { kind: "working", text: "Starting sign-in..." };
+    case "starting": return { kind: "working", text: check ? "Checking..." : "Starting sign-in..." };
     case "checking_account": return { kind: "working", text: "Checking your account..." };
     case "cancelling": return { kind: "working", text: "Cancelling sign-in..." };
     case "awaiting_owner": return { kind: "waiting", challenge: state.presentation?.challenge ?? null,
@@ -397,21 +420,31 @@ export function SignInPanel({ provider, method, state, onStart, onCancel, onChec
   </div>;
   if (stage.kind === "signed_in") return <div className="success" role="status"><Icon name="circle-check" size={24} /><p>{stage.line}</p></div>;
   if (stage.kind === "failed") {
-    const retry = stage.hint === "expired" ? "Get a new code" : stage.hint === "check" ? "Check again" : "Try again";
+    const checkMethod = signInMethodFor(signInHarness(provider), "check");
+    const retry = stage.hint === "expired" ? "Get a new code" : stage.hint === "check" ? "Check again" : stage.hint === "sign_in" ? "Sign in again" : "Try again";
+    if (stage.hint === "missing") return <div className="stack-small">
+      <Notice tone="danger" alert>{stage.text}</Notice>
+      <HarnessFile id={provider === "chatgpt" ? "codex" : "claude-code"} name={provider === "chatgpt" ? "Codex" : "Claude Code"} onFound={() => onStart(method)} readyLabel="Try again" />
+      {onUseKey && <span><Button onClick={onUseKey}>Use an API key instead</Button></span>}
+    </div>;
     return <div className="stack-small">
       <Notice tone="danger" alert>{stage.text}</Notice>
       <div className="row">
-        {stage.hint === "missing" ? onUseKey && <Button variant="primary" onClick={onUseKey}>Use an API key instead</Button>
-          : <Button variant="primary" onClick={() => stage.hint === "check" ? onCheck() : onStart(method)}>{retry}</Button>}
+        <Button variant="primary" onClick={() => stage.hint === "check" ? onCheck() : onStart(stage.hint === "sign_in" ? freshSignIn(provider) : method)}>{retry}</Button>
+        {(stage.hint === "retry" || stage.hint === "expired") && checkMethod && signInWay(method) !== "check" && state?.operation && !state.error &&
+          <Button variant="quiet" onClick={() => onStart(checkMethod)}>{CHECK_SIGN_IN}</Button>}
       </div>
     </div>;
   }
   if (stage.kind === "start") {
-    if (method === "codex_existing") return <div className="stack-small">
-      <p>CrazyAgent copies this sign-in into its own private folder for this account. Codex itself is not changed.</p>
-      <span><Button variant="primary" icon="log-in" onClick={() => onStart("codex_existing")}>Use this sign-in</Button></span>
+    if (signInWay(method) === "check") return <div className="stack-small">
+      <p>{CHECK_LINE}</p>
+      <span><Button variant="primary" icon="refresh-cw" onClick={() => onStart(method)}>{CHECK_SIGN_IN}</Button></span>
     </div>;
-    if (provider === "claude") return <span><Button variant="primary" icon="log-in" onClick={() => onStart("claude_official")}>Open Claude sign-in</Button></span>;
+    if (provider === "claude") return <div className="stack-small">
+      <span><Button variant="primary" icon="log-in" onClick={() => onStart("claude_official")}>Open Claude sign-in</Button></span>
+      <p className="small secondary">{signInWayUnavailable("claude", "code")}</p>
+    </div>;
     return <div className="stack-small">
       <span><Button variant="primary" icon="key-round" onClick={() => onStart("codex_device_code")}>Get sign-in code</Button></span>
       <span><Button variant="quiet" onClick={() => onStart("codex_browser")}>Sign in in this browser instead</Button></span>

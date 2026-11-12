@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import type { AccountView } from "../../api";
 import { pollFailure, type AccountLimits, type WindowKind } from "../../api-usage";
 import { Button, Notice, Panel, TextField } from "../../ui";
 import { atText } from "../settings/account-choice";
@@ -113,18 +114,50 @@ export function CheckLimits({ busy, onRefresh }: Pick<LimitsControls, "busy" | "
   return <Button icon="refresh-cw" pending={busy === "refresh"} pendingLabel="Asking..." onClick={onRefresh}>Check limits now</Button>;
 }
 
-/** Account limits: each account's windows and resets under the Check limits now button.
- * Inputs: the limits read, the account namer, now and the page's controls. */
-export function AccountLimitsPanel({ limits, name, nowMs, controls }: {
+const NO_WINDOW_KEY = "API key: no 5-hour or weekly window. The provider limits a key by rate and spend, set at the provider.";
+const NO_WINDOW_URL = "Endpoint: no 5-hour or weekly window. The endpoint sets its own limits.";
+const NO_WINDOW_LOCAL = "Local model: no plan or rate limit.";
+
+/** One account with no 5-hour or weekly window and the sentence it shows in their place. */
+export interface NoWindow {
+  account: string;
+  note: string;
+}
+
+/** Tells what an account with no 5-hour or weekly window has instead, the engine's
+ * usage::no_window in the same words, so every account shows in Account limits (DEC-141
+ * PA-16). Input: the account's sign-in method and provider. Output: the sentence, or null for
+ * a subscription, whose windows the engine reads. */
+export function noWindow(account: Pick<AccountView, "method" | "provider">): string | null {
+  if (account.method === "subscription") return null;
+  if (account.provider === "local") return NO_WINDOW_LOCAL;
+  return account.method === "api_key" ? NO_WINDOW_KEY : NO_WINDOW_URL;
+}
+
+function NoWindowCard({ name, note }: { name: string; note: string }) {
+  return <section className="usage-limits" aria-label={`${name} limits`}>
+    <div className="row usage-window-head"><h3>{name}</h3></div>
+    <span className="muted small">{note}</span>
+  </section>;
+}
+
+/** Account limits: each account's windows and resets under the Check limits now button, then
+ * each key, URL or local account without a read of its own, saying what it has instead.
+ * Inputs: the limits read, the account namer, now, the page's controls and those accounts. */
+export function AccountLimitsPanel({ limits, name, nowMs, controls, noWindow: plain = [] }: {
   limits: AccountLimits[];
   name: (key: string) => string;
   nowMs: number;
   controls: LimitsControls;
+  noWindow?: readonly NoWindow[];
 }) {
+  const read = new Set(limits.map((row) => row.account));
+  const others = plain.filter((row) => !read.has(row.account));
   return <Panel title="Account limits" actions={<CheckLimits busy={controls.busy} onRefresh={controls.onRefresh} />}>
-    {limits.length === 0
+    {limits.length === 0 && others.length === 0
       ? <p className="muted">No limits read yet. Signed-in Claude and ChatGPT accounts show here after their first check.</p>
       : <div className="usage-limit-grid">{limits.map((row) => <LimitsCard key={row.account} limits={row} name={name(row.account)}
-        nowMs={nowMs} busy={controls.busy} onSetReset={controls.onSetReset} />)}</div>}
+        nowMs={nowMs} busy={controls.busy} onSetReset={controls.onSetReset} />)}
+        {others.map((row) => <NoWindowCard key={row.account} name={name(row.account)} note={row.note} />)}</div>}
   </Panel>;
 }

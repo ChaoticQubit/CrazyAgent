@@ -298,6 +298,135 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
     }
 }
 
+/// F19, DEC-107: with "Catch up with main" on, a lead's copy merges the landed main at
+/// `crazyagent/main` and its own workers' branches, still refuses another branch, and its
+/// refusal tells it how to catch up with main; with the setting off the lead's copy refuses
+/// main too and says nothing of it.
+#[test]
+fn a_leads_copy_merges_main_and_its_own_workers_and_names_the_main_merge_when_refusing() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&self.0);
+        }
+    }
+    let git = crate::research::runner::sandboxed_git();
+    for catch_up in [true, false] {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+            &["checkout", "-q", "-b", "landed"],
+            &["commit", "-q", "--allow-empty", "-m", "landed work"],
+            &["update-ref", "refs/crazyagent/main", "landed"],
+            &["checkout", "-q", "-b", "other", "main"],
+            &["commit", "-q", "--allow-empty", "-m", "other work"],
+            &["checkout", "-q", "-b", "task--ann", "main"],
+            &["commit", "-q", "--allow-empty", "-m", "ann work"],
+            &["checkout", "-q", "-b", "task", "main"],
+        ] {
+            let done = git_run(git, repo.path(), home.path(), args);
+            assert!(done.status.success(), "{args:?} {done:?}");
+        }
+        let tmp = make_tmp(home.path()).unwrap();
+        let _removed = Removed(home.path().to_path_buf());
+        lead_git(&tmp, catch_up).unwrap();
+        let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+        let main = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "-q", "--no-edit", "crazyagent/main"],
+        );
+        assert_eq!(main.status.success(), catch_up, "{main:?}");
+        let ann = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "-q", "--no-ff", "--no-edit", "task--ann"],
+        );
+        assert!(
+            ann.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ann.stderr)
+        );
+        let other = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "--no-edit", "other"],
+        );
+        assert!(!other.status.success());
+        let stderr = String::from_utf8_lossy(&other.stderr);
+        assert!(stderr.contains("git merge is refused"), "{stderr}");
+        assert!(
+            stderr.contains("A lead merges only the branches of its own workers"),
+            "{stderr}"
+        );
+        assert_eq!(
+            stderr.contains("git merge crazyagent/main"),
+            catch_up,
+            "{stderr}"
+        );
+    }
+}
+
+/// F19, DEC-107: a worker's merge of its own lead's branch stays refused, with Catch up with
+/// main on or off, and the refusal tells the worker the path that works: its lead's work
+/// reaches its branch through Update on its change set, so it tells its lead (HB CM#335).
+#[test]
+fn a_workers_refused_merge_of_its_leads_branch_names_update_on_its_change_set() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&self.0);
+        }
+    }
+    let git = crate::research::runner::sandboxed_git();
+    for catch_up in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q", "-b", "task"][..],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+            &["checkout", "-q", "-b", "task--ann"],
+            &["commit", "-q", "--allow-empty", "-m", "ann work"],
+            &["checkout", "-q", "task"],
+            &["commit", "-q", "--allow-empty", "-m", "lead work"],
+            &["checkout", "-q", "task--ann"],
+        ] {
+            let done = git_run(git, repo.path(), home.path(), args);
+            assert!(done.status.success(), "{args:?} {done:?}");
+        }
+        let tmp = make_tmp(home.path()).unwrap();
+        let _removed = Removed(home.path().to_path_buf());
+        if catch_up {
+            catch_up_git(&tmp).unwrap();
+        }
+        let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+        let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+        let done = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "--no-edit", "task"],
+        );
+        assert!(!done.status.success(), "the lead's branch was merged");
+        let stderr = String::from_utf8_lossy(&done.stderr);
+        assert!(stderr.contains("git merge is refused"), "{stderr}");
+        assert!(
+            stderr.contains(
+                "Work from the lead branch reaches yours through Update on your change set"
+            ),
+            "{stderr}"
+        );
+        assert!(stderr.contains("tell your lead what you need"), "{stderr}");
+        let after = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+        assert_eq!(after.stdout, before.stdout);
+    }
+}
+
 /// The worker copy merges only the commit the engine keeps at `refs/crazyagent/main`: with
 /// that ref missing, a branch the agent named `crazyagent/main` holding other work is
 /// refused under either name and the agent's branch keeps its commit.
@@ -423,7 +552,9 @@ fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(stderr.contains("git merge is refused"), "{stderr}");
     assert!(
-        stderr.contains("If you need work from another branch, stop and tell your lead"),
+        stderr.contains(
+            "Work from the lead branch reaches yours through Update on your change set: stop and tell your lead what you need"
+        ),
         "{stderr}"
     );
     assert!(!stderr.contains("crazyagent/main"), "{stderr}");

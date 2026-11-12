@@ -191,6 +191,9 @@ pub enum MasterReason {
     RepositoryMissing,
     RepositoryConfigRefused,
     InstructionsTooLarge,
+    ProtocolFault,
+    FrameLimit,
+    WorktreeUncertain,
     Cancelled,
     Unknown,
 }
@@ -272,8 +275,22 @@ impl MasterSessionView {
                 .any(|binding| &binding.config_id == config)
     }
 
-    /// Checks the stored rebindings: bounded, never on an RCLI master, well formed, made
-    /// after the Open in revision order up to the session's version, each a real change.
+    /// Whether settings a turn was prepared under belong to this session, by the rule of
+    /// [`Self::admits_attempt`]. Input: the config, source hash and whether the turn is
+    /// still live. Output: a live turn needs the current binding; a settled one any binding
+    /// the session has had.
+    pub(crate) fn admits_binding(&self, config: &ConfigId, source_hash: &str, live: bool) -> bool {
+        if live {
+            return self.binding() == (config, source_hash);
+        }
+        (&self.config_id, self.source_hash.as_str()) == (config, source_hash)
+            || self.rebound.iter().any(|binding| {
+                (&binding.config_id, binding.source_hash.as_str()) == (config, source_hash)
+            })
+    }
+
+    /// Checks the stored rebindings: bounded, well formed, made after the Open in
+    /// revision order up to the session's version, each a real change.
     /// Output: false when the record cannot have come from `rebind`.
     pub(crate) fn rebinds_valid(&self) -> bool {
         let mut previous = (
@@ -282,9 +299,7 @@ impl MasterSessionView {
             self.owner.engine_epoch.as_str(),
             self.owner.revision_after.value(),
         );
-        if self.rebound.len() > REBINDS_MAX
-            || (self.selection.backend == MasterBackend::Rcli && !self.rebound.is_empty())
-        {
+        if self.rebound.len() > REBINDS_MAX {
             return false;
         }
         for binding in &self.rebound {

@@ -1,29 +1,75 @@
 use super::*;
 
-/// K2b: the bridge runs only for a Codex release it was checked against, read from the
-/// app-server's `userAgent`; another release, a malformed agent or no version fails
-/// closed so the engine types instead.
+/// K2b, F38 (BL-CODEX167): the bridge reads the Codex release from the app-server's
+/// `userAgent`. A release it was checked against runs as checked; a later minor of the same
+/// major runs with a warning instead of failing closed (Codex 0.167.1 today); an earlier
+/// release, another major, a malformed agent or no version still fails closed, so the
+/// engine types instead.
 #[test]
-fn only_a_checked_codex_release_may_use_the_bridge() {
+fn a_newer_codex_release_runs_the_bridge_with_a_warning() {
     assert_eq!(VERSIONS, [(0, 164)]);
     for agent in [
         "codex_cli_rs/0.164.0 (Mac OS 15.6.0; arm64) iTerm.app/3.5.0",
         "crazyagent/0.164.3",
         "codex-tui/0.164.0-alpha.2 (Linux)",
     ] {
-        assert!(supported(agent), "{agent}");
+        assert_eq!(release(agent), Support::Checked, "{agent}");
+    }
+    for (agent, newer) in [
+        ("codex_cli_rs/0.165.0 (Mac OS 15.6.0; arm64)", (0, 165, 0)),
+        (
+            "codex_cli_rs/0.167.1 (Mac OS 26.0.0; arm64) iTerm.app/3.5.0",
+            (0, 167, 1),
+        ),
+        ("codex-tui/0.168.0-alpha.2 (Linux)", (0, 168, 0)),
+    ] {
+        assert_eq!(release(agent), Support::Newer(newer), "{agent}");
     }
     for agent in [
-        "codex_cli_rs/0.165.0 (Mac OS 15.6.0; arm64)",
         "codex_cli_rs/0.163.9",
         "codex_cli_rs/1.164.0",
+        "codex_cli_rs/1.0.0",
         "codex_cli_rs 0.164.0",
         "codex_cli_rs/0.164",
         "0.164.0",
         "",
     ] {
-        assert!(!supported(agent), "{agent}");
+        assert_eq!(release(agent), Support::Refused, "{agent}");
     }
+}
+
+/// F38: a release listed as known-bad stays refused even where the range rule would let it
+/// run, checked or newer, and no checked release at all refuses everything. The shipped
+/// list names none yet; the public rule is the one the bridge uses.
+#[test]
+fn a_known_bad_codex_release_is_refused_whatever_the_range_says() {
+    assert!(REFUSED.is_empty());
+    let checked = [(0, 164)];
+    let refused = [(0, 164, 2), (0, 167, 1)];
+    assert_eq!(judged((0, 164, 1), &checked, &refused), Support::Checked);
+    assert_eq!(judged((0, 164, 2), &checked, &refused), Support::Refused);
+    assert_eq!(
+        judged((0, 167, 0), &checked, &refused),
+        Support::Newer((0, 167, 0))
+    );
+    assert_eq!(judged((0, 167, 1), &checked, &refused), Support::Refused);
+    assert_eq!(judged((0, 163, 9), &checked, &refused), Support::Refused);
+    assert_eq!(judged((1, 0, 0), &checked, &refused), Support::Refused);
+    assert_eq!(judged((0, 167, 1), &[], &[]), Support::Refused);
+    assert_eq!(support((0, 167, 1)), Support::Newer((0, 167, 1)));
+    assert_eq!(support((0, 164, 0)), Support::Checked);
+    assert_eq!(support((0, 163, 0)), Support::Refused);
+}
+
+/// F38: the warning a newer release leaves in the agent's Messages timeline names only the
+/// parsed release numbers and the newest checked one, in plain words; no text from the
+/// agent's own process reaches it.
+#[test]
+fn the_newer_release_warning_names_the_numbers_only() {
+    assert_eq!(
+        newer_notice((0, 167, 1)),
+        "Codex 0.167.1 is newer than the Codex CrazyAgent was checked with (0.164). Messages still go straight to this agent; if it stops getting them, update CrazyAgent."
+    );
 }
 
 /// K2b: an agent's app-server socket sits in the shared daemon folder under the SHA-256 of
@@ -75,6 +121,48 @@ fn a_turn_id_is_kept_only_when_it_is_short_plain_text() {
     }
 }
 
+/// PA1213R2-F2: the engine counts a Codex agent's pinned hooks as trusted only when the
+/// app-server's `hooks/list` lists every pinned key as trusted; a modified, untrusted or
+/// unlisted key, or an answer of another shape, reads as not trusted.
+#[test]
+fn pinned_hooks_count_as_trusted_only_when_codex_lists_each_one_trusted() {
+    let guard = "/h/config.toml:pre_tool_use:0:0".to_owned();
+    let owner = "/h/config.toml:session_start:0:0".to_owned();
+    let listing = |guard_status: &str, owner_status: &str| {
+        serde_json::json!({"data": [
+            {"cwd": "/w", "warnings": [], "errors": [], "hooks": [
+                {"key": guard, "eventName": "preToolUse", "trustStatus": guard_status},
+                {"key": "/w/.codex/hooks.json:pre_tool_use:0:0", "trustStatus": "untrusted"},
+            ]},
+            {"cwd": "/v", "warnings": [], "errors": [], "hooks": [
+                {"key": owner, "eventName": "sessionStart", "trustStatus": owner_status},
+            ]},
+        ]})
+    };
+    let both = [guard.clone(), owner.clone()];
+    assert!(all_trusted(&listing("trusted", "trusted"), &both));
+    assert!(all_trusted(&listing("Trusted", "trusted"), &both));
+    for (guard_status, owner_status) in [
+        ("modified", "trusted"),
+        ("trusted", "untrusted"),
+        ("managed", "trusted"),
+    ] {
+        assert!(
+            !all_trusted(&listing(guard_status, owner_status), &both),
+            "{guard_status} {owner_status}"
+        );
+    }
+    let unlisted = [guard.clone(), "/h/config.toml:stop:0:0".to_owned()];
+    assert!(!all_trusted(&listing("trusted", "trusted"), &unlisted));
+    for odd in [
+        serde_json::json!({}),
+        serde_json::json!({"data": {"hooks": []}}),
+        serde_json::json!({"data": [{"hooks": [{"key": guard, "trustStatus": 1}]}]}),
+    ] {
+        assert!(!all_trusted(&odd, std::slice::from_ref(&guard)), "{odd}");
+    }
+}
+
 /// SECAUDIT codex-bridge-oversized-server-ping-panics-team-runtime: a ping larger than a
 /// control frame may be is refused as a broken bridge, with no panic in the engine.
 #[cfg(target_os = "macos")]
@@ -110,7 +198,13 @@ fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
 /// Takes the length. Returns what `deliver` answered and the payload of the pong the
 /// server read back, none when no pong came.
 #[cfg(target_os = "macos")]
-fn ping_of(length: usize) -> (Result<Option<String>, &'static str>, Option<Vec<u8>>) {
+#[allow(clippy::type_complexity)]
+fn ping_of(
+    length: usize,
+) -> (
+    Result<(Option<String>, Option<(u64, u64, u64)>), &'static str>,
+    Option<Vec<u8>>,
+) {
     use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();

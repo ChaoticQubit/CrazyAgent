@@ -20,6 +20,8 @@ use tokio::sync::oneshot;
 pub mod bootstrap;
 pub(crate) mod claude_host;
 pub mod codex_host;
+#[cfg(target_os = "macos")]
+pub(crate) mod keychain;
 #[cfg(all(test, unix))]
 mod master_host_fixture;
 #[cfg(unix)]
@@ -36,7 +38,7 @@ pub use native_auth_host::{
 };
 
 pub(crate) use bootstrap::NativeProfileCustody;
-pub(crate) use native_auth_host::RegisteredNativeAuthHost;
+pub(crate) use native_auth_host::{RegisteredNativeAuthHost, pinnable};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -489,6 +491,7 @@ pub struct Engine {
     #[cfg(unix)]
     terminal: Mutex<Option<TerminalHost>>,
     harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
+    harness_updates: std::sync::Arc<crate::harnesses::update::Updates>,
     settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
     master_activity: owner::transport::master_activity::Board,
 }
@@ -596,6 +599,7 @@ impl Engine {
                 #[cfg(unix)]
                 terminal: Mutex::default(),
                 harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+                harness_updates: crate::harnesses::update::Updates::new(),
                 settings_files: Some((global.to_path_buf(), project.to_path_buf())),
                 master_activity: Default::default(),
             },
@@ -616,6 +620,7 @@ impl Engine {
             #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
             master_activity: Default::default(),
         })
@@ -634,6 +639,7 @@ impl Engine {
             #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
             master_activity: Default::default(),
         })

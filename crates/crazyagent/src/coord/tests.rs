@@ -1993,12 +1993,31 @@ fn overlap(mine: &str, theirs: &str) -> Vec<String> {
         .collect()
 }
 
+/// F31: overlap is file-level. Two agents claiming different files of one folder never
+/// overlap, so neither hears of the other, while a file inside a folder the other claims and
+/// the same file still do.
+#[cfg(unix)]
+#[test]
+fn two_files_of_one_folder_never_overlap_but_one_file_two_agents_claim_does() {
+    assert!(overlap("docs/design/inbox-ui.md", "docs/design/architecture.md").is_empty());
+    assert!(overlap("src/lexer.rs", "src/parser.rs").is_empty());
+    assert_eq!(
+        overlap("docs/design/inbox-ui.md", "docs/design/"),
+        ["docs/design/inbox-ui.md is inside docs/design/"]
+    );
+    assert_eq!(
+        overlap("docs/design/inbox-ui.md", "docs/design/inbox-ui.md"),
+        ["same file docs/design/inbox-ui.md"]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn an_overlap_names_why_two_claims_meet() {
     for (mine, theirs, reason) in [
         ("src/a.rs", "src/a.rs", Some("same file src/a.rs")),
-        ("src/a.rs", "src/b.rs", Some("same folder src")),
+        ("src/a.rs", "src/b.rs", None),
+        ("docs/research/a.md", "docs/research/b.md", None),
         ("a.rs", "b.rs", None),
         ("src/ui/a.rs", "src/", Some("src/ui/a.rs is inside src/")),
         (
@@ -2662,17 +2681,15 @@ fn coordination_settings_default_validate_and_keep_each_harness_column() {
             Delivery::Auto
         );
     }
-    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
-        assert_eq!(
-            code(settings::set_mode(
-                &connection,
-                &project,
-                harness,
-                SubagentMode::Native
-            )),
-            "coord_native_unsupported"
-        );
-    }
+    assert_eq!(
+        code(settings::set_mode(
+            &connection,
+            &project,
+            HarnessKind::Rcli,
+            SubagentMode::Native
+        )),
+        "coord_native_unsupported"
+    );
     assert_eq!(
         code(settings::set_mode(
             &connection,
@@ -3318,5 +3335,112 @@ fn a_claim_holding_a_line_separator_is_refused_by_name() {
     let normalize = super::claims::normalize;
     for raw in ["a\u{2028}b", "a\u{2029}b"] {
         assert_eq!(code(normalize(raw)), "coord_claim_invalid", "{raw:?}");
+    }
+}
+
+/// DEC-141 PA-12: every harness kind on every account kind gets each team protection or
+/// says why not, in one table both clients show. Claude Code on a sign-in and Codex on any
+/// account get receipts, the owner's hooks and the edit guard alike; Claude Code on an API
+/// key or URL account starts bare and says so; an rcli master has no hooks and says so.
+#[test]
+fn every_harness_kind_gets_each_protection_or_says_why_not() {
+    use super::settings::Protection;
+    for kind in HarnessKind::ALL {
+        for endpoint in [false, true] {
+            for protection in Protection::ALL {
+                let lacks = kind.lacks(endpoint, protection);
+                let case = format!("{kind:?} endpoint={endpoint} {protection:?}");
+                match kind {
+                    HarnessKind::Codex => assert_eq!(lacks, None, "{case}"),
+                    HarnessKind::ClaudeCode => assert_eq!(lacks.is_some(), endpoint, "{case}"),
+                    HarnessKind::Rcli => assert_eq!(
+                        lacks.is_some(),
+                        protection != Protection::Receipts,
+                        "{case}"
+                    ),
+                }
+                if let Some(words) = lacks {
+                    assert!(
+                        words.ends_with('.') && !words.contains('\u{2014}'),
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        HarnessKind::ClaudeCode.lacks(true, Protection::EditGuard),
+        Some(super::settings::BARE_NO_HOOKS)
+    );
+    assert!(super::settings::BARE_NO_HOOKS.contains("API key or URL account"));
+    assert_eq!(
+        super::settings::BARE_NO_RECEIPTS,
+        format!("Receipts are {}.", super::adoption::HOOKLESS_WORDS)
+    );
+}
+
+/// DEC-141 parity for the Native sub-agent mode (PA-7): every harness kind has an answer,
+/// the setting stores Native exactly for a kind that runs native sub-agents, a kind that
+/// cannot gives its own reason, and threads say what the app cannot show of them (r1).
+#[cfg(unix)]
+#[test]
+fn every_harness_kind_answers_the_native_sub_agent_mode() {
+    use super::settings::NativeSubAgents;
+    let connection = db();
+    let project = project();
+    for harness in HarnessKind::ALL {
+        let answer = settings::native_sub_agents(harness);
+        let stored = settings::set_mode(&connection, &project, harness, SubagentMode::Native);
+        let scope = settings::native_scope(harness);
+        match answer {
+            NativeSubAgents::Threads => {
+                let scope = scope.expect("threads say what the app cannot show of them");
+                assert!(scope.starts_with(harness_name(harness)), "{scope}");
+                for shown in ["graph", "counts", "Stop", "team tool calls", "No limit"] {
+                    assert!(scope.contains(shown), "{shown}: {scope}");
+                }
+            }
+            NativeSubAgents::Teams | NativeSubAgents::Unavailable(_) => {
+                assert_eq!(scope, None, "{harness:?}");
+            }
+        }
+        match answer {
+            NativeSubAgents::Teams | NativeSubAgents::Threads => {
+                stored.unwrap();
+                assert!(settings::native_supported(harness), "{harness:?}");
+                assert_eq!(
+                    settings::mode(&connection, &project, harness).unwrap(),
+                    SubagentMode::Native
+                );
+            }
+            NativeSubAgents::Unavailable(reason) => {
+                assert_eq!(code(stored), "coord_native_unsupported", "{harness:?}");
+                assert!(!settings::native_supported(harness), "{harness:?}");
+                assert!(reason.contains(harness_name(harness)), "{reason}");
+                assert!(reason.ends_with('.'), "{reason}");
+            }
+        }
+        settings::set_mode(&connection, &project, harness, SubagentMode::AppSpawned).unwrap();
+    }
+    assert_eq!(
+        settings::native_sub_agents(HarnessKind::ClaudeCode),
+        NativeSubAgents::Teams
+    );
+    assert_eq!(
+        settings::native_sub_agents(HarnessKind::Codex),
+        NativeSubAgents::Threads
+    );
+    assert_eq!(
+        settings::native_sub_agents(HarnessKind::Rcli),
+        NativeSubAgents::Unavailable(settings::RCLI_NATIVE_UNAVAILABLE)
+    );
+}
+
+#[cfg(unix)]
+fn harness_name(harness: HarnessKind) -> &'static str {
+    match harness {
+        HarnessKind::ClaudeCode => "Claude Code",
+        HarnessKind::Codex => "Codex",
+        HarnessKind::Rcli => "RCLI",
     }
 }

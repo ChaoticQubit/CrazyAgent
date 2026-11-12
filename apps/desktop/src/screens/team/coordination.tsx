@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, setTerminalsPerWindow, type Result, type SkillView } from "../../api";
 import { loadTeamStatus } from "../../api-projects";
-import { OVERLAP_CHOICES } from "../../engine-client";
+import { BARE_NO_HOOKS, OVERLAP_CHOICES } from "../../engine-client";
 import type { TerminalDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, IntentReceipt, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
 import { sameJson, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select, isMac } from "../../ui";
@@ -88,11 +88,58 @@ export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
 /** Each coordination harness id with the name the app shows for it. */
 export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
 
-/** The Sub-agent mode choices in the mockup's words; Native agent teams first, and only for a
- * harness kind that has them. Input: whether it has them. Output: the options. */
-export function modeOptions(native: boolean): SelectOption[] {
-  const spawned = { value: "app_spawned", label: "CrazyAgent workers" };
-  return native ? [{ value: "native", label: "Native agent teams" }, spawned] : [spawned];
+const NO_SUB_AGENTS = "Not available: runs only as a master";
+const SUB_AGENT_HARNESSES: readonly CoordHarness[] = ["claude-code", "codex"];
+
+/** Tells why no sub-agent runs on a harness kind: a kind the engine launches no team agent on,
+ * today rcli, keeps its rows, which say so instead of a live control (DEC-141 PA-15). The
+ * engine's team::launch_harness and NO_SUB_AGENTS are the source a test ties this to.
+ * Input: the harness kind. Output: the reason, or undefined for a kind sub-agents run on. */
+export function subAgentsUnavailable(harness: CoordHarness): string | undefined {
+  return SUB_AGENT_HARNESSES.includes(harness) ? undefined : NO_SUB_AGENTS;
+}
+
+function UnavailableRow({ label, reason, helper }: { label: string; reason: string; helper?: string }) {
+  return <SettingRow label={label}>
+    <span className="set-label">{label}</span>
+    <span className="tg-terminal-note">{reason}</span>
+    {helper && <span className="tg-terminal-note">{helper}</span>}
+  </SettingRow>;
+}
+
+/** Why a harness kind has no native sub-agents, in the engine's words (PA-7), or null for a kind
+ * that runs them: Claude Code as agent teams, Codex as sub-agents of the lead's own session. */
+export const NATIVE_UNAVAILABLE: Record<CoordHarness, string | null> = {
+  "claude-code": null,
+  codex: null,
+  rcli: "RCLI runs without tools, so it has no native sub-agents yet; its sub-agents are CrazyAgent workers.",
+};
+
+/** What the app cannot show of Codex's own sub-agents, in the engine's words (PA-7 r1): they show
+ * only in the lead's terminal, the graph, counts and Stop act on the lead, and No limit is 15. */
+export const CODEX_NATIVE_SCOPE = "Codex sub-agents show only in the lead's terminal, where Codex lists each one: the app's graph, counts and Stop act on the lead, their team tool calls count as the lead's, and Codex holds them to Max teammates at once, 15 under No limit because Codex needs a number.";
+
+const NATIVE_LABELS: Record<CoordHarness, string> = { "claude-code": "Native agent teams", codex: "Native Codex sub-agents", rcli: "Native sub-agents" };
+
+const NATIVE_HELPERS: Record<CoordHarness, string> = {
+  "claude-code": "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch.",
+  codex: `Native Codex sub-agents run inside the lead's own session and worktree. Codex starts them on the lead's model and offers no other, but still runs a model a sub-agent names itself. ${CODEX_NATIVE_SCOPE} CrazyAgent workers get their own terminal, worktree and branch.`,
+  rcli: "Native sub-agents run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch.",
+};
+
+/** The Sub-agent mode choices in the mockup's words, native first for every harness kind; a kind
+ * without native sub-agents lists it unavailable with its reason, so nothing is hidden per harness.
+ * Inputs: the harness kind and whether it has them. Output: the options. */
+export function modeOptions(harness: CoordHarness, native: boolean): SelectOption[] {
+  const reason = native ? undefined : NATIVE_UNAVAILABLE[harness] ?? `${HARNESS_NAMES[harness]} has no native sub-agents, so its sub-agents are CrazyAgent workers.`;
+  return [{ value: "native", label: NATIVE_LABELS[harness], ...(reason ? { disabledReason: reason } : {}) }, { value: "app_spawned", label: "CrazyAgent workers" }];
+}
+
+/** The helper line under a harness kind's Sub-agent mode: what native sub-agents are on it, or why
+ * it has none. Inputs: the harness kind and whether it has them. Output: the line. */
+export function modeHelper(harness: CoordHarness, native: boolean): string {
+  const reason = modeOptions(harness, native)[0].disabledReason;
+  return reason ?? NATIVE_HELPERS[harness];
 }
 
 /** The Terminal display choices of every harness, Classic first as the default. */
@@ -131,12 +178,21 @@ export const DELIVERY_OPTIONS: SelectOption[] = [
   { value: "typing_only", label: "Typing only" },
 ];
 
+/** What the Delivery choices do on each harness kind, shown under its Messages to row (PA-11,
+ * DEC-141): Native only never types, and a harness without a channel while its agent works
+ * says how its messages arrive instead. The TUI says the same sentences. */
+export const DELIVERY_HELPER: Record<CoordHarness, string> = {
+  "claude-code": "Auto hands a message to a Claude Code agent through its relay and types it in if the relay has not taken it after 60 seconds. Native only uses the relay alone and never types. Typing only types every message in.",
+  codex: "Auto hands a message to a Codex agent with tools on through its app-server bridge and types it in when the bridge can't take it. Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle. Typing only types every message in.",
+  rcli: "rcli runs no team agents, so no message goes to one here. A master on any harness hears its messages through the engine under every choice.",
+};
+
 /** The coordination settings a team status holds, with the plan defaults for an engine that
  * sends none. Input: the status. Output: the settings and every harness kind's row. */
 export function coordination(status: Pick<TeamStatus, "coordination">): CoordinationView {
   const view = status.coordination;
   const harnesses = COORD_HARNESSES.map((harness) => view?.harnesses.find((row) => row.harness === harness)
-    ?? { harness, mode: "app_spawned" as const, delivery: "auto" as const, native: harness === "claude-code" });
+    ?? { harness, mode: "app_spawned" as const, delivery: "auto" as const, native: NATIVE_UNAVAILABLE[harness] === null });
   return { settings: view?.settings ?? COORD_DEFAULTS, harnesses };
 }
 
@@ -209,9 +265,12 @@ export function DeliverySetting({ projectId, row, status, reload }: { projectId:
   const { note, change } = useChange(reload);
   const [delivery, hold] = useHeld<Delivery>(row.delivery, Object.is, status);
   const label = `Messages to ${HARNESS_NAMES[row.harness]} agents`;
+  const unavailable = subAgentsUnavailable(row.harness);
+  if (unavailable) return <UnavailableRow label={label} reason={unavailable} helper={DELIVERY_HELPER[row.harness]} />;
   return <SettingRow label={label}>
     <Select id={`tg-delivery-${row.harness}-${projectId}`} label={label} value={delivery} options={DELIVERY_OPTIONS}
       onValue={(value) => { if (value === "auto" || value === "native_only" || value === "typing_only") void change(() => setHarnessDelivery(projectId, row.harness, value as Delivery), "message delivery", () => hold(value as Delivery)); }} />
+    <span className="tg-terminal-note">{DELIVERY_HELPER[row.harness]}</span>
     <ChangeNote note={note} />
   </SettingRow>;
 }
@@ -271,17 +330,18 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
   </>;
 }
 
-/** One harness kind's sub-agent mode as a row: Native agent teams only where that kind has them.
+/** One harness kind's sub-agent mode as a row: native sub-agents listed for every kind, chosen only where it has them.
  * Inputs: the project id, the harness kind's row, the team status it came from and a reload.
  * Output: the row. */
 function SubAgentModeSetting({ projectId, row, status, reload }: { projectId: string; row: HarnessCoordination; status: TeamStatus; reload: () => void }) {
   const { note, change } = useChange(reload);
   const [mode, hold] = useHeld<SubagentMode>(row.mode, Object.is, status);
+  const unavailable = subAgentsUnavailable(row.harness);
+  if (unavailable) return <UnavailableRow label={`${HARNESS_NAMES[row.harness]} sub-agents`} reason={unavailable} />;
   return <SettingRow label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
-    <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={mode} options={modeOptions(row.native)}
+    <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={mode} options={modeOptions(row.harness, row.native)}
       onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void change(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode", () => hold(value as SubagentMode)); }}
-      helper={row.native ? "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch."
-        : `${HARNESS_NAMES[row.harness]} has no native agent teams, so its sub-agents are CrazyAgent workers.`} />
+      helper={modeHelper(row.harness, row.native)} />
     <ChangeNote note={note} />
   </SettingRow>;
 }
@@ -304,7 +364,7 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
     <QuestionsSetting projectId={projectId} status={status} reload={reload} />
     <SettingRow label="Overlapping edits" wide>
       <span className="set-label" aria-hidden="true">Overlapping edits</span>
-      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free.</span>
+      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free. Block and Wait hold Claude Code and Codex agents' edits alike. {BARE_NO_HOOKS}</span>
       <Segmented label="Overlapping edits" value={overlaps} options={overlapOptions(overlaps)}
         onValue={(value) => { if (knownOverlap(value)) void change(() => saveCoordSettings(projectId, { overlaps: value }), "overlapping edits", () => holdOverlaps(value)); }} />
     </SettingRow>

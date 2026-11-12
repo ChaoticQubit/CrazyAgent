@@ -159,7 +159,11 @@ pub(super) fn start_work(
                 work: Some(overlap.theirs.work),
                 reply_to: None,
                 body: bound_text(&note, coord::BODY_BYTES_MAX),
-                idempotency_key: None,
+                idempotency_key: Some(format!(
+                    "{}{work}-{}",
+                    coord::delivery::OVERLAP_KEY,
+                    overlap.theirs.agent
+                )),
             },
             now,
         ))?;
@@ -195,6 +199,50 @@ fn wide_claims(answering: &Answering<'_>, claims: &[String]) -> Result<Vec<Strin
         }
     }
     Ok(notes)
+}
+
+/// Reads the whole stored result of one ended task for `inspect_work` with a task (F32),
+/// which a results message names when it cut the result: the master reads any task of its
+/// project, another agent a task it ran or one an agent it leads ran. Takes the database,
+/// what the answers need, the caller, whether it is the master and the task. Returns the
+/// text, or a refusal and true, or a SQLite failure.
+pub(super) fn inspect_task(
+    connection: &Connection,
+    answering: &Answering<'_>,
+    agent: i64,
+    master: bool,
+    task: i64,
+) -> Result<(String, bool), EngineError> {
+    assert!(task > 0);
+    let project = &answering.stored.project_id;
+    let ended: Option<(String, String, Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT harness,status,result,error FROM team_tasks
+             WHERE id=?1 AND project=?2 AND status IN ('done','failed','cancelled')
+             AND (?3 OR agent=?4 OR parent=?4)",
+            params![task, project.as_str(), master, agent],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    let Some((harness, status, result, problem)) = ended else {
+        return Ok((
+            format!("Not shown: task {task} is not an ended task you or an agent you lead ran."),
+            true,
+        ));
+    };
+    let label = crate::team::TaskStatus::parse(&status).map_or("Finished", |status| status.label());
+    let mut text = format!(
+        "Task {task} ({}): {label}\n",
+        bound_text(&harness, AGENT_SHOWN_MAX)
+    );
+    for part in [problem, result].into_iter().flatten() {
+        text.push_str(&crate::team::events::agent_text(part.trim()));
+        text.push('\n');
+    }
+    let text = bound_text(&text, tool::REPLY_TEXT_MAX);
+    assert!(text.len() <= tool::REPLY_TEXT_MAX);
+    Ok((text, false))
 }
 
 /// Reads the caller's place in the team for `inspect_work` (DEC-104): its work, the
@@ -337,8 +385,9 @@ pub(super) fn inspect_work(
 /// agent with a short task, and the message itself reaches it once, with the waiting
 /// messages that task's prompt carries. The wake decision, the message and the wake share
 /// one transaction, so a wake refused, as for an agent the owner stopped or whose worktree
-/// is gone, stores nothing and is answered "Not sent". Delivery to a running agent is the
-/// coordination layer's too. Takes the database, what the answers need, the caller,
+/// is gone, stores nothing and is answered "Not sent". A master's wake is a hand-off of its
+/// live turn, keyed like its spawns, so past the owner's Sub-agent rounds it stores nothing
+/// either. Delivery to a running agent is the coordination layer's too. Takes the database, what the answers need, the caller,
 /// whether it is the master and the call. Returns the sentence.
 pub(super) fn update_work(
     connection: &mut Connection,
@@ -453,7 +502,17 @@ pub(super) fn update_work(
     }
     let shown = target.to_string();
     let (said, refusal) = if master {
-        super::wake_in(
+        let key = crate::team::master_limits::live_key(&tx, project)?;
+        let rounds = crate::team::master_limits::rounds(&tx, project)?;
+        if !rounds.open() && !crate::team::master_limits::joins_round(&tx, project, key)? {
+            return Ok((rounds.refusal(), true));
+        }
+        let before: i64 = tx
+            .query_row("SELECT COALESCE(MAX(id),0) FROM team_tasks", [], |row| {
+                row.get(0)
+            })
+            .map_err(state)?;
+        let woken = super::wake_in(
             &tx,
             answering.access,
             answering.stored,
@@ -461,7 +520,14 @@ pub(super) fn update_work(
             WAKE_TASK,
             true,
             StoppedBy::Master,
-        )?
+        )?;
+        tx.execute(
+            "UPDATE team_tasks SET turn=?2 WHERE project=?1 AND id>?3 AND turn IS NULL
+             AND source='master' AND parent IS NULL",
+            params![project.as_str(), key, before],
+        )
+        .map_err(state)?;
+        woken
     } else {
         super::lead_wake(&tx, answering, agent, &shown, WAKE_TASK)?
     };

@@ -15,7 +15,7 @@ pub use transport::native_auth_channel::claude::ClaudeAuthInput;
 pub use native_auth::{
     NativeAuthAccount, NativeAuthAction, NativeAuthCancel, NativeAuthChallenge, NativeAuthFact,
     NativeAuthLogout, NativeAuthMethod, NativeAuthPhase, NativeAuthQuery, NativeAuthReply,
-    NativeAuthScope, NativeAuthStart, ends_operation,
+    NativeAuthScope, NativeAuthStart, SignInWay, ends_operation,
 };
 
 pub use transport::accounts::{AccountCheck, AccountPage};
@@ -25,6 +25,7 @@ pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::ide::IDE_CODES;
 pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
+pub use transport::overview::OVERVIEW_CODES;
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
     Adoption, AgentInstructions, AppInstructionSettings, ImportCommit, ImportFile, InstructionMode,
@@ -271,6 +272,9 @@ pub enum OwnerMutation {
     },
     SetMasterTimeSettings {
         settings: crate::master_time_limit::MasterTimeSettings,
+    },
+    SetMasterFrameSettings {
+        settings: crate::master_frame_limit::MasterFrameSettings,
     },
     Memory {
         action: crate::memory::library::LibraryAction,
@@ -586,6 +590,9 @@ impl OwnerMutation {
             Self::SetMasterTimeSettings { settings } => Command::OwnerMasterTime {
                 settings: *settings,
             },
+            Self::SetMasterFrameSettings { settings } => Command::OwnerMasterFrames {
+                settings: *settings,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -786,6 +793,7 @@ pub enum OwnerRead {
     QuitSettings,
     MasterStepSettings,
     MasterTimeSettings,
+    MasterFrameSettings,
     ProjectsHome,
     SetupStatus,
     FoundProjects,
@@ -888,6 +896,7 @@ impl OwnerRead {
             | Self::QuitSettings
             | Self::MasterStepSettings
             | Self::MasterTimeSettings
+            | Self::MasterFrameSettings
             | Self::ProjectsHome
             | Self::SetupStatus
             | Self::FoundProjects
@@ -1338,6 +1347,9 @@ pub enum OwnerData {
     },
     MasterTimeSettings {
         settings: crate::master_time_limit::MasterTimeSettings,
+    },
+    MasterFrameSettings {
+        settings: crate::master_frame_limit::MasterFrameSettings,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,

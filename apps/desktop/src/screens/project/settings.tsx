@@ -27,9 +27,14 @@ import { PluginsAndSkills } from "../settings/plugins";
 import { TEAM_SETTINGS_STALE, changeNote, settingsVersion } from "../team/controls";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
+import { loadRunMode, runCopy, setRunMode } from "../../api-ide";
+import { loadOverview, overviewCopy, setOverviewApply, setOverviewRefresh } from "../../api-overview";
+import type { OverviewApply, OverviewRefresh, ProjectOverview } from "../../api-overview";
+import type { RunMode } from "./run-command";
 
 const SECTIONS = [
   { id: "general", label: "General" },
+  { id: "overview", label: "Overview" },
   { id: "pool", label: "Pool" },
   { id: "team", label: "Team" },
   { id: "plugins", label: "Plugins and skills" },
@@ -630,6 +635,103 @@ function MessagesSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+const OVERVIEW_REFRESH: { value: OverviewRefresh; label: string }[] = [
+  { value: "after_landing", label: "After each landed change set and Refresh" },
+  { value: "refresh_only", label: "Refresh only" },
+  { value: "off", label: "Off" },
+];
+const OVERVIEW_APPLY: { value: OverviewApply; label: string }[] = [
+  { value: "always_ask", label: "Always ask me" },
+  { value: "when_unedited", label: "Apply when I have not edited the tab" },
+];
+const RUN_MODES: { value: RunMode; label: string }[] = [
+  { value: "type_and_run", label: "Type and run" },
+  { value: "type_only", label: "Type only" },
+  { value: "off", label: "Off, Copy only" },
+];
+
+/** One Overview setting: its name, every choice with the saved one picked, and what it does.
+ * Inputs: the name, the saved value, the choices, the change handler and the help line.
+ * Output: the row. */
+function OverviewSettingRow<T extends string>({ label, value, options, onValue, help }: { label: string; value: T; options: { value: T; label: string }[]; onValue: (value: T) => void; help: string }) {
+  return <div className="pj-field">
+    <span className="pj-label" aria-hidden="true">{label}</span>
+    <Segmented label={label} value={value} options={options} onValue={onValue} />
+    <p className="pj-help">{help}</p>
+  </div>;
+}
+
+/** The three Overview settings of a project with every choice: when the tabs are written, what
+ * a refresh does with a tab, and what Run in project terminal does. Each read shows on its
+ * own, so a failed one keeps the other; a project outside the CrazyAgent folder is told the
+ * tabs need it there. Nothing is saved while a change is being sent.
+ * Inputs: the overview read, the Run setting read, whether a change is being sent, the note of
+ * a refused change, the three change handlers and the way to the move. Output: the rows. */
+export function OverviewSettingsRows({ overview, runMode, busy, note, onRefresh, onApply, onRunMode, onMove }: {
+  overview: Result<ProjectOverview> | undefined;
+  runMode: Result<RunMode> | undefined;
+  busy: boolean;
+  note: string;
+  onRefresh: (value: OverviewRefresh) => void;
+  onApply: (value: OverviewApply) => void;
+  onRunMode: (value: RunMode) => void;
+  onMove: () => void;
+}) {
+  const idle = <T,>(send: (value: T) => void) => (value: T) => { if (!busy) send(value); };
+  return <>
+    {(overview === undefined || runMode === undefined) && <p className="pj-muted" role="status">Loading...</p>}
+    {overview?.kind === "not_ready" && <NotReady what="the Overview tabs aren't in this build." />}
+    {overview?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the Overview settings. {overviewCopy(overview)}</p>}
+    {overview?.kind === "ok" && <>
+      {overview.value.needs_home && <div className="pj-need"><span>Overview tabs need this project in the CrazyAgent folder. These settings apply once it is there.</span>
+        <button type="button" className="btn" onClick={onMove}>Move into CrazyAgent folder</button></div>}
+      <OverviewSettingRow label="Overview tabs" value={overview.value.refresh} options={OVERVIEW_REFRESH} onValue={idle(onRefresh)}
+        help="When CrazyAgent writes the Quick info, Features, Competitors and Install & use tabs. A refresh costs one agent run on this project's pool. Off writes nothing and disables Refresh. Recommended: After each landed change set and Refresh." />
+      <OverviewSettingRow label="Refreshed tabs" value={overview.value.apply} options={OVERVIEW_APPLY} onValue={idle(onApply)}
+        help="What a refresh does with a tab. Always ask me shows every change as a proposal you accept or reject. The other choice replaces a tab you have not edited and still asks about one you edited. Recommended: Always ask me." />
+    </>}
+    {runMode?.kind === "not_ready" && <NotReady what="Run in project terminal isn't in this build." />}
+    {runMode?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the Run in project terminal setting. {runCopy(runMode)}</p>}
+    {runMode?.kind === "ok" && <OverviewSettingRow label="Run in project terminal" value={runMode.value} options={RUN_MODES} onValue={idle(onRunMode)}
+      help="What Run does with a command line on the Overview, after you confirm it. Type and run types it into this project's IDE terminal and presses Enter. Type only leaves Enter to you. Off, Copy only shows no Run button. Recommended: Type and run." />}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+  </>;
+}
+
+/** Project Settings, Overview: reads the project's Overview settings and its Run setting,
+ * saves a choice as it is made and reads again, so the rows show what the engine stored.
+ * Inputs: the project data and the way to the Remove section, where the move lives.
+ * Output: the section. */
+function OverviewSection({ data, onMove }: { data: ProjectData; onMove: () => void }) {
+  const [overview, setOverview] = useState<Result<ProjectOverview>>();
+  const [runMode, setMode] = useState<Result<RunMode>>();
+  const [round, setRound] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    let live = true;
+    void loadOverview(data.id).then((result) => { if (live) setOverview(result); });
+    void loadRunMode(data.id).then((result) => { if (live) setMode(result); });
+    return () => { live = false; };
+  }, [data.id, round]);
+  async function change<T>(send: () => Promise<Result<T>>, copy: (failure: { code: string; cause?: string }) => string) {
+    if (busy) return;
+    setBusy(true);
+    const result = await send().catch((): Result<T> => ({ kind: "not_ready" }));
+    setBusy(false);
+    setNote(result.kind === "ok" ? "" : result.kind === "error" ? copy(result) : "CrazyAgent's engine isn't ready yet. Nothing was saved; choose again in a moment.");
+    setRound((count) => count + 1);
+  }
+  return <div className="pj-stack">
+    <h2>Overview</h2>
+    <p className="pj-secondary">The Overview tabs describe this project: Quick info, Features, Competitors and Install &amp; use. An agent writes them from the project's files and research.</p>
+    <OverviewSettingsRows overview={overview} runMode={runMode} busy={busy} note={note} onMove={onMove}
+      onRefresh={(value) => void change(() => setOverviewRefresh(data.id, value), overviewCopy)}
+      onApply={(value) => void change(() => setOverviewApply(data.id, value), overviewCopy)}
+      onRunMode={(value) => void change(() => setRunMode(data.id, value), runCopy)} />
+  </div>;
+}
+
 /** Picks the Settings section a route asks for. Links from before skills and MCP servers shared
  * one section still open it. Input: the route's section, if any. Output: a known section. */
 export function settingsSection(wanted: string | null | undefined): SectionId {
@@ -637,7 +739,7 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Plugins and skills, Agent access, Sandbox, Messages and Remove project. A setup
+/** Project Settings tab: General, Overview, Pool, Team, Plugins and skills, Agent access, Sandbox, Messages and Remove project. A setup
  * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -654,6 +756,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
     </nav>
     <div className="pj-settings-body">
       {active === "general" && needsSetup(() => <><GeneralSection data={data} setup={setup!} /><PlanningLine data={data} settings /></>)}
+      {active === "overview" && <OverviewSection data={data} onMove={() => setActive("remove")} />}
       {active === "pool" && <PoolSection data={data} setup={setup} />}
       {active === "team" && needsSetup(() => <TeamSection data={data} setup={setup!} />)}
       {active === "plugins" && <div className="pj-stack">

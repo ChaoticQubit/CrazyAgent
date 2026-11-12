@@ -29,6 +29,7 @@ const INSTRUCTION_VIEWS: { value: InstructionsView; label: string }[] = [
 ];
 
 const FOLD_LINES = 12;
+const TRANSCRIPTS_OFF = "Off: Claude Code keeps no transcript. Codex keeps its own session record, which CrazyAgent reads to count its usage.";
 
 const MODE_SUBTITLES: Record<InstructionMode, string> = {
   both: "App default plus this project's file",
@@ -40,7 +41,7 @@ const TASK_STEPS = [
   "Master writes the task and picks an agent.",
   "Agent reads instructions, asks the graph, works on its branch.",
   "Reviewer checks the change set.",
-  "The master merges it, or it waits for your accept when Ask me before merging is on. With Ask off, at Full access a master change set that only fixes conflicts can also land by itself.",
+  "The master merges it, or, when Master accepts change sets is Only when I click or say accept all, it waits for your Accept or for you to send accept all. At Itself, at Full access a master change set that only fixes conflicts can also land by itself.",
 ];
 
 /** How many lines a text shows, a final line break adding none. Input: the text. Output: the
@@ -345,7 +346,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
 }
 
 /** A project's agent settings as a pure view: which of the app and project instructions its
- * agents get and whether headless Claude runs keep their transcript, each saved on its own
+ * agents get and whether headless runs keep their transcript, each saved on its own
  * change. Settings that could not be read say why and show the defaults, so a change replaces
  * them. A pick stays on screen until a read moves the setting or its save is refused. Inputs: the
  * read, whether a save runs, the last save failure and the save action, which gives the failure,
@@ -404,11 +405,11 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
         : "Off. This project's instructions are never sent to a model for editing."}</span>
     </div>
     <div className="pr-del-row pr-del-toggle">
-      <span className="pr-del-label"><strong>Keep transcripts</strong><span className="small muted">For headless Claude runs</span></span>
-      <Switch id="agent-transcripts" label="Keep transcripts for headless Claude runs" hideLabel checked={current.transcripts}
+      <span className="pr-del-label"><strong>Keep transcripts</strong><span className="small muted">For headless runs</span></span>
+      <Switch id="agent-transcripts" label="Keep transcripts for headless runs" hideLabel checked={current.transcripts}
         describedBy="agent-transcripts-note" disabledReason={busy ? "Saving..." : undefined}
         onChecked={(transcripts) => save({ ...current, transcripts })} />
-      <span className="small muted pr-del-note" id="agent-transcripts-note">{current.transcripts ? "Kept in the agent's own home" : "No transcript kept"}</span>
+      <span className="small muted pr-del-note" id="agent-transcripts-note">{current.transcripts ? "Kept in the agent's own home" : TRANSCRIPTS_OFF}</span>
     </div>
   </Panel>;
 }

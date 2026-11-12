@@ -33,7 +33,8 @@ test("Settings lists Master in the Agents group after Quitting with the four ste
   assert.match(shown, /No limit A turn runs until the master replies or its time is up\./);
   for (const steps of [50, 100, 200]) assert.ok(shown.includes(`${steps} steps A turn stops after ${steps} steps.`), `${steps} steps is listed`);
   assert.match(shown, /Stopped after N steps; reply with 'continue' to go on\./);
-  assert.match(shown, /The limit covers a Claude master with tools on; a Codex master counts no steps\./);
+  assert.match(shown, /The limit covers Claude and Codex masters with tools on\. A master with tools off, and an rcli master, which has no tools, answers each turn in one step, so the limit never stops it\./);
+  assert.doesNotMatch(shown, /counts no steps/);
   assert.doesNotMatch(shown, /cut off/);
   assert.deepEqual(settings.STEP_LIMIT_CHOICES.map((option) => option.choice), LIMITS);
   assert.deepEqual(settings.STEP_LIMIT_DEFAULT, { limit: "no_limit" });
@@ -120,6 +121,59 @@ test("the master time limit names what failed: a read that fails offers a retry,
   assert.match(failed, /Couldn't load the master time limit\. engine_failed/);
   assert.doesNotMatch(timeView({ kind: "loading" }), /<form/);
   const refused = timeView(ok("no_limit"), { picked: "minutes10", problem: "The engine refused the save." });
+  assert.match(text(refused), /The engine refused the save\./);
+  assert.match(refused, /role="alert"/);
+});
+
+const FRAMES = ["kib64", "kib256", "mib1"];
+const frameView = (loaded, extra = {}) => renderToStaticMarkup(createElement(settings.MasterFrameView, {
+  settings: loaded, picked: null, saving: false, problem: "", onPick: forbidden, onSave: forbidden, onRetry: forbidden, ...extra,
+}));
+const frameChecked = (markup) => [...markup.matchAll(/<input type="radio" name="frame-limit"[^>]*>/g)]
+  .filter(([input]) => / checked=""/.test(input)).map(([input]) => input.match(/ value="([a-z0-9_]+)"/)[1]);
+
+test("Settings, Master lists the master frame size limit with its three options, what a stopped turn says and which masters it covers (F39)", () => {
+  const markup = frameView(ok("kib64"));
+  const shown = text(markup);
+  assert.match(shown, /Master frame size limit/);
+  assert.match(shown, /Largest one message to the master/);
+  assert.match(shown, /64 KiB The engine's own message size; enough for most turns\./);
+  assert.match(shown, /256 KiB Room for long instructions and large pasted text\./);
+  assert.match(shown, /1 MiB The largest; for a turn that still stops at 256 KiB\./);
+  assert.match(shown, /One message was larger than the master frame size limit\. Raise it here, or at 1 MiB shorten the message or the instructions, then send again\./);
+  assert.match(shown, /The limit covers Claude and Codex masters; rcli keeps 64 KiB\./);
+  assert.match(markup, /<form[^>]*aria-label="Master frame size limit"/);
+  assert.doesNotMatch(markup, /<h2>Master<\/h2>/, "the tab has one title, above the step limit");
+  assert.deepEqual(settings.FRAME_LIMIT_CHOICES.map((option) => option.choice), FRAMES);
+  assert.deepEqual(settings.FRAME_LIMIT_DEFAULT, { limit: "kib64" });
+});
+
+test("64 KiB is the default frame size: it is checked before any save, unmarked, and Save waits for a change", () => {
+  const markup = frameView(ok("kib64"));
+  assert.deepEqual(frameChecked(markup), ["kib64"]);
+  assert.ok(saveDisabled(markup));
+  assert.ok(!marked(markup), "the default carries no changed mark");
+});
+
+for (const limit of FRAMES) {
+  test(`frame size ${limit}: a stored one is checked with Save resting, and picking it over another enables Save`, () => {
+    const stored = frameView(ok(limit));
+    assert.deepEqual(frameChecked(stored), [limit]);
+    assert.ok(saveDisabled(stored));
+    assert.equal(marked(stored), limit !== "kib64", "only a size away from the default is marked changed");
+    const other = FRAMES.find((choice) => choice !== limit);
+    const picked = frameView(ok(other), { picked: limit });
+    assert.deepEqual(frameChecked(picked), [limit]);
+    assert.ok(!saveDisabled(picked));
+    assert.ok(saveDisabled(frameView(ok(limit), { picked: limit })), "picking the stored size is no change");
+  });
+}
+
+test("the master frame size limit names what failed: a read that fails offers a retry, and a failed save shows its problem", () => {
+  const failed = text(frameView({ kind: "error", message: "engine_failed" }));
+  assert.match(failed, /Couldn't load the master frame size limit\. engine_failed/);
+  assert.doesNotMatch(frameView({ kind: "loading" }), /<form/);
+  const refused = frameView(ok("kib64"), { picked: "kib256", problem: "The engine refused the save." });
   assert.match(text(refused), /The engine refused the save\./);
   assert.match(refused, /role="alert"/);
 });

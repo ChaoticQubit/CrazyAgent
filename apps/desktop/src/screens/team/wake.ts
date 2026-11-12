@@ -25,6 +25,7 @@ const STATES: Record<TeamEvent["state"], string> = {
   muted: "Not sent",
   carried: "In the task result",
   dropped: "Replaced by newer events",
+  settled: "Handled before the master heard",
 };
 
 const LEVELS: Record<WakeRuleLevel, string> = {
@@ -120,12 +121,12 @@ export function freshAlerts(last: number | null, events: Pick<AppTeamEvents, "no
   return { last: newest, fresh };
 }
 
-/** Where the toast for one notification leads: an urgent question opens the project's Agents
- * tab with Questions for you open on the question, and an agent waiting in its terminal opens
- * it on Waiting on you (Q14, Q14b). Input: the notification. Output: the route, or undefined
- * for one that only informs. */
+/** Where the toast for one notification leads: an urgent question opens the project's
+ * Questions tab, where every owner question waits (F12), and an agent waiting in its terminal
+ * opens the Agents tab on Waiting on you (Q14, Q14b). Input: the notification. Output: the
+ * route, or undefined for one that only informs. */
 export function alertRoute(item: Pick<TeamNotification, "kind" | "project_id">): Route | undefined {
-  if (item.kind === "urgent_question") return { name: "project", id: item.project_id, tab: "agents", section: "questions" };
+  if (item.kind === "urgent_question") return { name: "project", id: item.project_id, tab: "questions" };
   if (item.kind === "waiting_on_you") return { name: "project", id: item.project_id, tab: "agents", section: "waiting" };
   return undefined;
 }

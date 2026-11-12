@@ -30,6 +30,10 @@ const POLL: Duration = Duration::from_millis(100);
 const OWN_FACTS_MAX: usize = 4096;
 /// The most background commands of the app one session follows at once.
 const BACKGROUND_MAX: usize = 64;
+/// The most recent ends of commands a session never saw start that it remembers, so a
+/// Codex command that ends in the instant after it yields, read before its start, never
+/// holds a turn (PA-10).
+const ENDED_KEPT: usize = 16;
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
 const GROUP_FRESH: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
@@ -51,9 +55,8 @@ pub struct TerminalSession {
     reader: TranscriptReader,
     queue: VecDeque<LaunchEvent>,
     limits: LaunchLimits,
-    deadline: Instant,
+    deadline: Option<Instant>,
     checked: Instant,
-    events: usize,
     ready: bool,
     first: Option<FirstScreen>,
     folder: Option<FolderStep>,
@@ -68,6 +71,7 @@ pub struct TerminalSession {
     took_none: bool,
     facts: VecDeque<TranscriptEvent>,
     background: BTreeSet<String>,
+    ended: VecDeque<String>,
     exited: bool,
     stopped: bool,
     group_ended: bool,
@@ -340,9 +344,8 @@ impl TerminalSession {
             reader,
             queue: VecDeque::from([ready]),
             limits: request.limits,
-            deadline: Instant::now() + request.limits.run_time,
+            deadline: Some(Instant::now() + request.limits.run_time),
             checked: Instant::now(),
-            events: 0,
             ready: false,
             first: None,
             folder,
@@ -357,6 +360,7 @@ impl TerminalSession {
             took_none: false,
             facts: VecDeque::new(),
             background: BTreeSet::new(),
+            ended: VecDeque::new(),
             exited: false,
             stopped: false,
             group_ended: false,
@@ -415,6 +419,31 @@ impl TerminalSession {
         self.held && self.queue.is_empty()
     }
 
+    /// Ends the turn held for background commands once the last one ended, for a harness
+    /// that starts no turn of its own on that end (Codex, PA-10): an engine-typed turn ends
+    /// with the success it was held with, and a turn the app started by itself gives its
+    /// held end to its facts. Claude Code ends both on the turn its task notification
+    /// starts. Input: the session. Output: none.
+    fn release_held(&mut self) {
+        assert!(self.background.is_empty());
+        if self.held {
+            self.held = false;
+            self.over_hold = false;
+            self.noticed = false;
+            self.turn = false;
+            self.queue
+                .push_back(LaunchEvent::TurnFinished { success: true });
+        }
+        if self.own_held {
+            self.own_held = false;
+            if self.facts.len() < OWN_FACTS_MAX {
+                self.facts
+                    .push_back(TranscriptEvent::TurnFinished { success: true });
+            }
+        }
+        assert!(!self.held && !self.own_held);
+    }
+
     /// Types one prompt into the app as a bracketed paste, then Enter. The first prompt
     /// waits, at most `READY_WAIT`, until the app has drawn its screen, gone quiet and
     /// reads keys itself (see [`Host::input_live`]), so its Enter is not lost.
@@ -471,22 +500,21 @@ impl TerminalSession {
 
     /// Waits up to `wait` for the next event of the turn the engine started. Text, tool
     /// use and turn ends from turns the owner typed into the pane are not reported.
-    /// Output: Some(event), None on timeout, or an error past a limit or once the pane ended.
+    /// No count of events or record bytes ends the pane (owner 11-11). Output: Some(event),
+    /// None on timeout, or an error past the run time or once the pane ended.
     pub fn next_event(&mut self, wait: Duration) -> Result<Option<LaunchEvent>, LaunchError> {
         let until = Instant::now() + wait;
         loop {
             if let Some(event) = self.queue.pop_front() {
-                self.events += 1;
-                if self.events > self.limits.events {
-                    self.halt();
-                    return Err(failure("launch_event_limit"));
-                }
                 return Ok(Some(event));
             }
             if self.exited {
                 return Err(failure("launch_closed"));
             }
-            if Instant::now() >= self.deadline {
+            if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 self.halt();
                 return Err(failure("launch_deadline"));
             }
@@ -494,14 +522,23 @@ impl TerminalSession {
             if !self.queue.is_empty() {
                 continue;
             }
-            let left = until
-                .min(self.deadline)
+            let left = self
+                .deadline
+                .map_or(until, |deadline| until.min(deadline))
                 .saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(None);
             }
             std::thread::sleep(left.min(POLL));
         }
+    }
+
+    /// Lifts the launch's run time from this pane, so only `stop` or the pane's own end ends
+    /// it, as a live master needs: the runtime's Master run time bounds it (F01). Takes the
+    /// session. Returns nothing.
+    pub fn clear_deadline(&mut self) {
+        self.deadline = None;
+        assert!(self.deadline.is_none());
     }
 
     /// Follows every turn in the pane from now on, the ones the owner types included, as a
@@ -553,7 +590,10 @@ impl TerminalSession {
             if self.exited {
                 return Err(failure("launch_closed"));
             }
-            if Instant::now() >= self.deadline {
+            if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 self.halt();
                 return Err(failure("launch_deadline"));
             }
@@ -561,8 +601,9 @@ impl TerminalSession {
             if !self.facts.is_empty() {
                 continue;
             }
-            let left = until
-                .min(self.deadline)
+            let left = self
+                .deadline
+                .map_or(until, |deadline| until.min(deadline))
                 .saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(None);
@@ -756,10 +797,6 @@ impl TerminalSession {
                 return Err(problem);
             }
         };
-        if self.reader.bytes() > self.limits.output_bytes as u64 {
-            self.halt();
-            return Err(failure("launch_output_limit"));
-        }
         if self.reader.bytes() != self.grown.0 {
             self.grown = (self.reader.bytes(), Instant::now());
         }
@@ -783,7 +820,9 @@ impl TerminalSession {
             }
             match fact {
                 TranscriptEvent::BackgroundStarted { id } => {
-                    if self.background.len() < BACKGROUND_MAX {
+                    if let Some(early) = self.ended.iter().position(|ended| *ended == id) {
+                        self.ended.remove(early);
+                    } else if self.background.len() < BACKGROUND_MAX {
                         self.background.insert(id);
                     }
                     continue;
@@ -791,11 +830,20 @@ impl TerminalSession {
                 TranscriptEvent::BackgroundEnded { id } => {
                     let ended = self.background.remove(&id);
                     self.noticed |= self.held && ended;
+                    if !ended {
+                        self.ended.push_back(id);
+                        if self.ended.len() > ENDED_KEPT {
+                            self.ended.pop_front();
+                        }
+                    } else if self.background.is_empty() && !self.reader.notifies_background_end() {
+                        self.release_held();
+                    }
                     continue;
                 }
                 _ => {}
             }
             assert!(self.background.len() <= BACKGROUND_MAX);
+            assert!(self.ended.len() <= ENDED_KEPT);
             if !self.turn {
                 if self.own
                     && self.facts.len() < OWN_FACTS_MAX

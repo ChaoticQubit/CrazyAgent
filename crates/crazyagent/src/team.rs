@@ -17,6 +17,7 @@ pub mod events;
 pub mod graph;
 pub mod history;
 pub mod master;
+pub mod master_limits;
 pub mod names;
 pub mod questions;
 pub mod runtime;
@@ -71,6 +72,10 @@ const _: () = assert!(MASTER_IDLE_STOP_SECS * MASTER_IDLE_HOUR_BOUNDS == 3600);
 pub const MASTER_BRANCH_BYTES_MAX: usize = 255;
 /// The idle stop a team starts with: 10 minutes.
 pub const IDLE_STOP_DEFAULT_SECS: u32 = 600;
+/// How long a sub-agent's task turn may stay quiet after its agent reported the work done
+/// with `finish_work` before the engine ends the turn (F15): the owner picks one of
+/// `IDLE_CHOICES_SECS` or Off. The default is 10 minutes.
+pub const DONE_QUIET_DEFAULT_SECS: u32 = 600;
 
 /// A prompt the owner sent straight to one team sub-agent with an explicit send. It is kept
 /// on the agent's task until the master hears a short note of it on its next turn.
@@ -364,6 +369,21 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
         .filter(|id| matches!(*id, "codex" | "claude-code"))
 }
 
+/// What the Coordination rows of a harness kind no sub-agent runs on say instead of a live
+/// control (DEC-141 PA-15), word for word in the TUI and the desktop (PALOW-L2), short enough
+/// for a TUI row at 80 columns.
+pub const NO_SUB_AGENTS: &str = "Not available: runs only as a master";
+
+/// Tells why no sub-agent runs on a harness kind: a kind no launch adapter starts as a team
+/// agent, today rcli, keeps its Coordination rows, which say so (DEC-141 PA-15).
+/// Input: the harness kind. Output: [`NO_SUB_AGENTS`], or none for a kind sub-agents run on.
+pub fn sub_agents_unavailable(kind: crate::coord::settings::HarnessKind) -> Option<&'static str> {
+    match launch_harness(kind.as_str()) {
+        Some(_) => None,
+        None => Some(NO_SUB_AGENTS),
+    }
+}
+
 /// Maps a team plan master harness to the backend that runs the project's master on it.
 /// Takes the harness identifier or a connection name for it. Returns Codex, Claude or
 /// RCLI, the only harnesses a master runs on, or none for any other harness.
@@ -563,6 +583,8 @@ pub enum BackgroundAtEnd {
     Stop,
 }
 
+pub use crate::harnesses::leftovers::LeftoverMode;
+
 /// The grace times, in seconds, the owner may give background commands at task end.
 pub const BACKGROUND_GRACE_SECS: std::ops::RangeInclusive<u32> = 10..=3600;
 
@@ -726,6 +748,18 @@ pub enum TeamAction {
         project_id: ProjectId,
         choice: BackgroundAtEnd,
     },
+    LeftoversAtEnd {
+        project_id: ProjectId,
+        mode: LeftoverMode,
+    },
+    EndLeftovers {
+        project_id: ProjectId,
+        key: u64,
+    },
+    KeepLeftovers {
+        project_id: ProjectId,
+        key: u64,
+    },
     AskBeforeMerge {
         project_id: ProjectId,
         on: bool,
@@ -737,6 +771,10 @@ pub enum TeamAction {
     ReaskEmptyReply {
         project_id: ProjectId,
         on: bool,
+    },
+    DoneQuiet {
+        project_id: ProjectId,
+        secs: Option<u32>,
     },
     MasterIdleStop {
         project_id: ProjectId,
@@ -791,6 +829,14 @@ pub enum TeamAction {
     MaxTeammates {
         project_id: ProjectId,
         max: Option<u8>,
+    },
+    MasterRounds {
+        project_id: ProjectId,
+        max: Option<u8>,
+    },
+    MasterRunTime {
+        project_id: ProjectId,
+        secs: Option<u32>,
     },
     TokenBudget {
         project_id: ProjectId,
@@ -947,6 +993,10 @@ impl TeamAction {
                     .then_some(())
                     .ok_or_else(|| failure("team_time_limits_invalid"))
             }
+            Self::DoneQuiet { secs, .. } => secs
+                .is_none_or(|secs| IDLE_CHOICES_SECS.contains(&secs))
+                .then_some(())
+                .ok_or_else(|| failure("team_done_quiet_invalid")),
             Self::WakeAgent { agent, .. } | Self::StopAgent { agent, .. } => {
                 if *agent <= 0 {
                     return Err(failure("team_agent_not_found"));
@@ -971,6 +1021,14 @@ impl TeamAction {
                 .is_none_or(|max| CAP_CHOICES.contains(&max))
                 .then_some(())
                 .ok_or_else(|| failure("team_cap_invalid")),
+            Self::MasterRounds { max, .. } => max
+                .is_none_or(|max| master_limits::ROUND_CHOICES.contains(&max))
+                .then_some(())
+                .ok_or_else(|| failure("team_rounds_invalid")),
+            Self::MasterRunTime { secs, .. } => secs
+                .is_none_or(|secs| master_limits::RUN_CHOICES_SECS.contains(&secs))
+                .then_some(())
+                .ok_or_else(|| failure("team_run_time_invalid")),
             Self::TokenBudget { tokens, .. } => tokens
                 .is_none_or(|tokens| BUDGET_CHOICES.contains(&tokens))
                 .then_some(())
@@ -1016,6 +1074,9 @@ impl TeamAction {
             | Self::FinishedAgents { .. }
             | Self::AgentBranches { .. }
             | Self::AskBeforeMerge { .. }
+            | Self::LeftoversAtEnd { .. }
+            | Self::EndLeftovers { .. }
+            | Self::KeepLeftovers { .. }
             | Self::MasterLands { .. }
             | Self::ReaskEmptyReply { .. }
             | Self::MasterIdleStop { .. }
@@ -1049,9 +1110,13 @@ impl TeamAction {
             | Self::MasterBranch { project_id, .. }
             | Self::LandOn { project_id, .. }
             | Self::BackgroundAtEnd { project_id, .. }
+            | Self::LeftoversAtEnd { project_id, .. }
+            | Self::EndLeftovers { project_id, .. }
+            | Self::KeepLeftovers { project_id, .. }
             | Self::AskBeforeMerge { project_id, .. }
             | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
+            | Self::DoneQuiet { project_id, .. }
             | Self::MasterIdleStop { project_id, .. }
             | Self::MasterLiveTerminal { project_id, .. }
             | Self::CatchUpMain { project_id, .. }
@@ -1076,6 +1141,8 @@ impl TeamAction {
             | Self::MessageAgent { project_id, .. }
             | Self::MaxHarnesses { project_id, .. }
             | Self::MaxTeammates { project_id, .. }
+            | Self::MasterRounds { project_id, .. }
+            | Self::MasterRunTime { project_id, .. }
             | Self::TokenBudget { project_id, .. }
             | Self::AnswerQuestion { project_id, .. }
             | Self::SpreadAccounts { project_id, .. }
@@ -1147,14 +1214,17 @@ pub struct TeamAccount {
     pub reach: TeamReach,
 }
 
-/// How a team agent reaches its model: a keyless HTTP endpoint, or a native managed
-/// profile the owner signed in, which the engine lends to one agent turn at a time.
+/// How a team agent reaches its model: an HTTP endpoint, with the stored key it needs if
+/// any (only ever reached through the engine's key relay), or a native managed profile the
+/// owner signed in, which the engine lends to one agent turn at a time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TeamReach {
     Endpoint {
         base_url: String,
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<CredentialRef>,
     },
     Managed {
         profile_ref: CredentialRef,
@@ -1162,28 +1232,27 @@ pub enum TeamReach {
     },
 }
 
-/// Tells how an agent of the launch harness reaches its model through one connection: a
-/// keyless endpoint whose protocol fits, or a native managed profile of that harness.
-/// Takes the connection and the launch harness identifier. Returns the reach, or none
-/// when the harness cannot run on that connection.
+/// Tells how an agent of the launch harness reaches its model through one connection, by
+/// the one account rule every harness shares (DEC-141 PA-4): an endpoint whose wire format
+/// the harness speaks, with its key reference when it has one, or a native managed profile
+/// of that harness. Takes the connection and the launch harness identifier. Returns the
+/// reach, or none when the harness runs no team agents or cannot run on that connection.
 fn reach(connection: &crate::config::ModelConnection, harness: &str) -> Option<TeamReach> {
+    let harness = launch_harness(harness)?;
+    if !crate::harnesses::account_fits(harness, connection) {
+        return None;
+    }
     match (&connection.endpoint, &connection.auth) {
-        (ModelEndpoint::Http { url }, ModelAuthentication::None {}) => {
-            let protocol = connection.protocol.as_str();
-            let fits = match harness {
-                "codex" => protocol.starts_with("openai"),
-                "claude-code" => protocol == "anthropic-messages",
-                _ => false,
-            };
-            fits.then(|| TeamReach::Endpoint {
-                base_url: url.clone(),
-                model: connection.model.id.clone(),
-            })
-        }
+        (ModelEndpoint::Http { url }, auth) => Some(TeamReach::Endpoint {
+            base_url: crate::harnesses::endpoint_base_url(harness, url).to_owned(),
+            model: connection.model.id.clone(),
+            key: match auth {
+                ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref.clone()),
+                _ => None,
+            },
+        }),
         (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref }) => {
-            let fits = crate::harnesses::spec(connection.harness.as_str())
-                .is_some_and(|spec| spec.id == harness);
-            fits.then(|| TeamReach::Managed {
+            Some(TeamReach::Managed {
                 profile_ref: profile_ref.clone(),
                 model: (connection.model.id != NATIVE_DEFAULT_MODEL)
                     .then(|| connection.model.id.clone()),
@@ -1200,8 +1269,9 @@ pub enum Accounts {
     Usable(Vec<TeamAccount>),
 }
 
-/// Lists pool accounts the launch harness can run on for one project: keyless endpoints
-/// whose protocol fits and native managed profiles of that harness, signed in or not.
+/// Lists pool accounts the launch harness can run on for one project: endpoints, keyed or
+/// not, whose wire format it speaks and native managed profiles of that harness, signed in
+/// or not.
 /// Takes the live model access, the project and the launch harness identifier.
 /// Returns NoPool when no pool is assigned, otherwise the fitting members in pool order.
 pub fn eligible_accounts(access: &ModelAccess, project: &ProjectId, harness: &str) -> Accounts {
@@ -1556,6 +1626,23 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 mode TEXT NOT NULL CHECK(mode IN ('wait','grace','stop')),
                 grace_secs INTEGER CHECK((mode = 'grace') = (grace_secs IS NOT NULL))
             );
+            CREATE TABLE IF NOT EXISTS team_leftovers (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('end','keep','ask'))
+            );
+            CREATE TABLE IF NOT EXISTS team_agent_ends (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                at_ms INTEGER NOT NULL,
+                cause TEXT NOT NULL,
+                problem TEXT CHECK(problem IS NULL OR length(problem) <= 300),
+                turn_open INTEGER NOT NULL CHECK(turn_open IN (0,1)),
+                leftovers INTEGER NOT NULL CHECK(leftovers IN (0,1))
+            );
+            CREATE INDEX IF NOT EXISTS team_agent_ends_project ON team_agent_ends(project, id);
             CREATE TABLE IF NOT EXISTS team_merge_ask (
                 project TEXT PRIMARY KEY,
                 ask INTEGER NOT NULL CHECK(ask IN (0,1))
@@ -1567,6 +1654,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_reask_empty (
                 project TEXT PRIMARY KEY,
                 reask INTEGER NOT NULL CHECK(reask IN (0,1))
+            );
+            CREATE TABLE IF NOT EXISTS team_done_quiet (
+                project TEXT PRIMARY KEY,
+                secs INTEGER NOT NULL CHECK(secs BETWEEN 0 AND 86400)
             );
             CREATE TABLE IF NOT EXISTS team_master_idle_stop (
                 project TEXT PRIMARY KEY,
@@ -1701,6 +1792,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     events::initialize(connection)?;
     agent_messages::initialize(connection)?;
     master::initialize(connection)?;
+    master_limits::initialize(connection)?;
     names::initialize(connection)?;
     questions::initialize(connection)?;
     direct::erase_typed_input(connection)
@@ -1878,7 +1970,8 @@ fn any_slot(
 }
 
 /// Admits one task for a sub-agent against the project's team plan and pool.
-/// Takes the transaction, live model access, stored setup, the proposed harness and task, its source and the master reply id.
+/// Takes the transaction, live model access, stored setup, the proposed harness and task, its
+/// source and the master's hand-off key: its reply id, or a live turn's negative key.
 /// Returns the new task id, or a plain refusal code when the plan does not allow it.
 #[allow(clippy::too_many_arguments)]
 pub fn admit(
@@ -2351,7 +2444,25 @@ pub fn execute(
     access: &ModelAccess,
     action: &TeamAction,
 ) -> Result<Outcome, EngineError> {
-    perform(tx, access, action, true)
+    let outcome = perform(tx, access, action, true)?;
+    owner_acted(tx, action, outcome)
+}
+
+/// Renews the project's live master run time once an owner team action applied, an answer
+/// to an agent's question as much as a message or a setting (F01), so a master the owner
+/// just acted for is not stopped as left alone. Takes the transaction, the action and its
+/// outcome. Returns the outcome, or any SQLite failure.
+fn owner_acted(
+    tx: &Transaction<'_>,
+    action: &TeamAction,
+    outcome: Outcome,
+) -> Result<Outcome, EngineError> {
+    if outcome == Outcome::Applied
+        && let Some(project) = action.project()
+    {
+        master_limits::owner_acted(tx, project, now_ms())?;
+    }
+    Ok(outcome)
 }
 
 /// Executes one owner team action whose message an engine surface framed around the
@@ -2364,7 +2475,8 @@ pub(crate) fn execute_framed(
     access: &ModelAccess,
     action: &TeamAction,
 ) -> Result<Outcome, EngineError> {
-    perform(tx, access, action, false)
+    let outcome = perform(tx, access, action, false)?;
+    owner_acted(tx, action, outcome)
 }
 
 /// Executes one owner team action, recording its message as an owner turn only when the
@@ -2436,18 +2548,33 @@ fn perform(
             if task.is_some() && matched == 0 {
                 return Ok(rejected("team_task_missing"));
             }
-            tx.execute(
-                "UPDATE team_tasks SET status='cancelled', finished_ms=?3, error='Cancelled by you'
-                 WHERE project=?1 AND (?2 IS NULL OR id=?2) AND status IN ('queued','needs_pool')",
-                params![project.as_str(), task, now],
-            )
-            .map_err(error)?;
-            tx.execute(
-                "UPDATE team_tasks SET cancel_requested=1
-                 WHERE project=?1 AND (?2 IS NULL OR id=?2) AND status='running'",
-                params![project.as_str(), task],
-            )
-            .map_err(error)?;
+            let by = if task.is_some() {
+                CancelBy::Task
+            } else {
+                CancelBy::All
+            };
+            let waiting = tx
+                .execute(
+                    "UPDATE team_tasks SET status='cancelled', finished_ms=?3, error=?4, cancel_by=?5
+                     WHERE project=?1 AND (?2 IS NULL OR id=?2) AND status IN ('queued','needs_pool')",
+                    params![
+                        project.as_str(),
+                        task,
+                        now,
+                        cancel_reason(Some(by), CancelPath::Waiting),
+                        by.name()
+                    ],
+                )
+                .map_err(error)?;
+            let running = tx
+                .execute(
+                    "UPDATE team_tasks SET cancel_requested=1, cancel_by=?3
+                     WHERE project=?1 AND (?2 IS NULL OR id=?2) AND status='running'",
+                    params![project.as_str(), task, by.name()],
+                )
+                .map_err(error)?;
+            let text = cancel_audit(tx, *task, waiting, running)?;
+            note_owner_action(tx, project, &text, now);
             Ok(Outcome::Applied)
         }
         TeamAction::KeepWarm { on, version, .. } => {
@@ -2584,6 +2711,29 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::LeftoversAtEnd { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_leftovers(project,mode) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+                params![project.as_str(), mode.stored()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::EndLeftovers { key, .. } => Ok(
+            if crate::harnesses::leftovers::end_held(*key, project.as_str()) {
+                Outcome::Applied
+            } else {
+                rejected("leftovers_gone")
+            },
+        ),
+        TeamAction::KeepLeftovers { key, .. } => Ok(
+            if crate::harnesses::leftovers::keep_held(*key, project.as_str()) {
+                Outcome::Applied
+            } else {
+                rejected("leftovers_gone")
+            },
+        ),
         TeamAction::AskBeforeMerge { on, .. } => {
             tx.execute(
                 "INSERT INTO team_merge_ask(project,ask) VALUES (?1,?2)
@@ -2602,6 +2752,15 @@ fn perform(
                 "INSERT INTO team_reask_empty(project,reask) VALUES (?1,?2)
                  ON CONFLICT(project) DO UPDATE SET reask=excluded.reask",
                 params![project.as_str(), on],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::DoneQuiet { secs, .. } => {
+            tx.execute(
+                "INSERT INTO team_done_quiet(project,secs) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET secs=excluded.secs",
+                params![project.as_str(), secs.unwrap_or(0)],
             )
             .map_err(error)?;
             Ok(Outcome::Applied)
@@ -2673,6 +2832,7 @@ fn perform(
         }
         TeamAction::Pause { .. } => {
             pause(tx, project, now)?;
+            note_owner_action(tx, project, OWNER_STOPPED_TEAM, now);
             Ok(Outcome::Applied)
         }
         TeamAction::Resume { .. } => {
@@ -2681,6 +2841,7 @@ fn perform(
                 [project.as_str()],
             )
             .map_err(error)?;
+            note_owner_action(tx, project, OWNER_RESUMED_TEAM, now);
             let baseline = usage_from(tx, project, hour_of(now))?;
             tx.execute(
                 "UPDATE team_token_budgets SET since_ms=?2, baseline=?3, reached_ms=NULL WHERE project=?1",
@@ -2694,6 +2855,8 @@ fn perform(
                 return Ok(rejected(code));
             }
             owner_stop(tx, project, *agent, now)?;
+            let text = format!("You stopped {}", audit_agent(tx, *agent));
+            note_owner_action(tx, project, &text, now);
             Ok(Outcome::Applied)
         }
         TeamAction::MessageAgent { agent, text, .. } => {
@@ -2722,11 +2885,12 @@ fn perform(
                     params![agent, project.as_str(), pane, now],
                 )
                 .map_err(error)?;
-            Ok(if changed == 0 {
-                rejected("team_teammate_not_found")
-            } else {
-                Outcome::Applied
-            })
+            if changed == 0 {
+                return Ok(rejected("team_teammate_not_found"));
+            }
+            let text = format!("You stopped a teammate of {}", audit_agent(tx, *agent));
+            note_owner_action(tx, project, &text, now);
+            Ok(Outcome::Applied)
         }
         TeamAction::SpreadAccounts { on, .. } => {
             if *on {
@@ -2759,6 +2923,14 @@ fn perform(
                 params![project.as_str(), max],
             )
             .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MasterRounds { max, .. } => {
+            master_limits::set_rounds(tx, project, *max)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MasterRunTime { secs, .. } => {
+            master_limits::set_run_time(tx, project, *secs)?;
             Ok(Outcome::Applied)
         }
         TeamAction::TokenBudget { tokens, .. } => {
@@ -2889,6 +3061,149 @@ pub const TEAM_PAUSED: &str = "team_paused";
 
 /// The refusal code for a lead's wake of a sub-agent the master stopped (HB-S5-B).
 pub const MASTER_STOPPED: &str = "team_agent_master_stopped";
+
+/// Which owner request cancelled a task (F17): Cancel on that one task, or Pause all, which
+/// cancels every task of the project. Stored on the task beside its cancel request, so each
+/// later path names the request the owner really made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelBy {
+    Task,
+    All,
+}
+
+impl CancelBy {
+    /// The stored name of the request. Output: `task` or `all`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::All => "all",
+        }
+    }
+
+    /// Reads a stored request name; a request stored before names were kept reads as a
+    /// Cancel of one task. Input: the stored name or None. Output: the request.
+    pub fn named(name: Option<&str>) -> Self {
+        match name {
+            Some("all") => Self::All,
+            _ => Self::Task,
+        }
+    }
+}
+
+/// Where a task was when it ended cancelled (F17): waiting in the queue, stopped while it
+/// ran, cancelled after its agent was stopped and its work held, or stopped while
+/// CrazyAgent was closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelPath {
+    Waiting,
+    Running,
+    Held,
+    Closed,
+}
+
+/// The reason a cancelled task shows, one per path and owner request (F17), so a task is
+/// never marked "Cancelled by you" for something the owner did not do. Takes the owner's
+/// request, None when no owner request stopped it, and the path. Returns the plain line.
+pub fn cancel_reason(by: Option<CancelBy>, path: CancelPath) -> &'static str {
+    match (path, by) {
+        (CancelPath::Waiting, Some(CancelBy::Task) | None) => "Cancelled by you",
+        (CancelPath::Waiting, Some(CancelBy::All)) => "Cancelled when you paused all agents",
+        (CancelPath::Running, Some(CancelBy::Task)) => "Stopped by you while it ran",
+        (CancelPath::Running, Some(CancelBy::All)) => {
+            "Stopped while it ran, when you paused all agents"
+        }
+        (CancelPath::Running, None) => "Stopped when CrazyAgent stopped its agent",
+        (CancelPath::Held, Some(CancelBy::Task) | None) => {
+            "Cancelled by you while its agent was stopped"
+        }
+        (CancelPath::Held, Some(CancelBy::All)) => {
+            "Cancelled while its agent was stopped, when you paused all agents"
+        }
+        (CancelPath::Closed, Some(CancelBy::Task) | None) => {
+            "Cancelled by you; CrazyAgent closed before it stopped"
+        }
+        (CancelPath::Closed, Some(CancelBy::All)) => {
+            "Cancelled when you paused all agents; CrazyAgent closed before it stopped"
+        }
+    }
+}
+
+/// The activity line of the owner's Stop all of a team (F17 audit).
+pub const OWNER_STOPPED_TEAM: &str = "You stopped the team";
+/// The activity line of the owner's start of a stopped team again (F17 audit).
+pub const OWNER_RESUMED_TEAM: &str = "You started the team again";
+/// The most bytes a queued task's wait reason keeps (F11), as its column's check says.
+pub const WAIT_BYTES_MAX: usize = 300;
+
+/// Says why a task still waits (F11), the one text the master, the desktop and the TUI
+/// show: the reason the engine stored, the pool line for a task without a pool, or the
+/// queue line before any dispatch pass looked at it. Takes the task's status and stored
+/// reason. Returns the line, None for a task that no longer waits.
+pub fn wait_line(status: TaskStatus, wait: Option<&str>) -> Option<String> {
+    match (status, wait) {
+        (TaskStatus::NeedsPool, _) => Some(events::WAIT_NEEDS_POOL.to_owned()),
+        (TaskStatus::Queued, Some(wait)) => Some(events::one_line(wait, WAIT_BYTES_MAX)),
+        (TaskStatus::Queued, None) => Some(events::WAIT_UNSEEN.to_owned()),
+        _ => None,
+    }
+}
+
+/// The longest task title an owner action line quotes.
+const AUDIT_TITLE_BYTES_MAX: usize = 80;
+
+/// Writes the activity line of an owner Cancel (F17 audit): the one task by number and
+/// title, or Pause all with how many waiting tasks it cancelled and running ones it stops.
+/// Takes the transaction, the task named or None and the two counts. Returns the line.
+fn cancel_audit(
+    tx: &Transaction<'_>,
+    task: Option<i64>,
+    waiting: usize,
+    running: usize,
+) -> Result<String, EngineError> {
+    let Some(task) = task else {
+        return Ok(format!(
+            "You paused all agents: {waiting} waiting {} cancelled, {running} running {} stopping",
+            if waiting == 1 { "task" } else { "tasks" },
+            if running == 1 { "task" } else { "tasks" }
+        ));
+    };
+    assert!(waiting + running <= 1);
+    let prompt: String = tx
+        .query_row("SELECT prompt FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(error)?
+        .unwrap_or_default();
+    let title = bound_text(
+        prompt.lines().next().unwrap_or_default().trim(),
+        AUDIT_TITLE_BYTES_MAX,
+    );
+    let verb = if running == 1 { "stopped" } else { "cancelled" };
+    Ok(format!("You {verb} task {task}: {title}"))
+}
+
+/// Names a team agent in an owner action line the way the team list names it, or by its
+/// number when its row cannot be read. Takes the transaction and the agent. Returns the name.
+fn audit_agent(tx: &Transaction<'_>, agent: i64) -> String {
+    crate::activity::agent_actor(tx, agent).unwrap_or_else(|_| format!("agent {agent}"))
+}
+
+/// Records one owner team action in the project's activity (F17 audit), as the owner's own
+/// row, so every cancel, stop and pause the owner made can be read back with its time. A
+/// failed write is logged by its plain code and never refuses the action. Takes the
+/// transaction, the project, the line and the time.
+fn note_owner_action(tx: &Transaction<'_>, project: &ProjectId, text: &str, now: i64) {
+    let item = crate::activity::NewActivity {
+        kind: crate::activity::ActivityKind::TeamAction,
+        actor: crate::activity::OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text,
+        change_set: None,
+    };
+    crate::activity::note(tx, project, &item, now);
+}
 
 /// Tells whether the owner stopped a sub-agent that has not started again since (AW-1), so
 /// only the owner's Wake or restart may start it. Takes a connection and the agent. Returns
@@ -3187,6 +3502,10 @@ pub struct TeamTask {
     pub finished_ms: Option<i64>,
     #[serde(default)]
     pub parent: Option<i64>,
+    /// Why the task still waits (F11), only while it is queued: which cap, account or agent
+    /// it waits for. None when it runs, ended, or no reason was stored yet.
+    #[serde(default)]
+    pub wait: Option<String>,
 }
 
 /// One entry of the team conversation between owner, master and engine.
@@ -3233,6 +3552,11 @@ fn reask_default() -> bool {
     true
 }
 
+/// The "End a turn after done" choice a team status read without one shows: 10 minutes.
+fn done_quiet_default() -> Option<u32> {
+    Some(DONE_QUIET_DEFAULT_SECS)
+}
+
 /// The "Live terminal" setting a team status read without one shows: on (DEC-117 Q4).
 /// Output: the default.
 fn live_terminal_default() -> bool {
@@ -3271,6 +3595,10 @@ pub struct TeamStatus {
     #[serde(default)]
     pub background_at_end: BackgroundAtEnd,
     #[serde(default)]
+    pub leftovers: LeftoverMode,
+    #[serde(default)]
+    pub leftover_holds: Vec<crate::harnesses::leftovers::HeldView>,
+    #[serde(default)]
     pub ask_before_merge: bool,
     #[serde(default)]
     pub master_lands: Option<MasterLands>,
@@ -3278,6 +3606,8 @@ pub struct TeamStatus {
     pub access_unreadable: bool,
     #[serde(default = "reask_default")]
     pub reask_empty_reply: bool,
+    #[serde(default = "done_quiet_default")]
+    pub done_quiet_secs: Option<u32>,
     #[serde(default)]
     pub master_idle_stop: MasterIdleStop,
     #[serde(default = "live_terminal_default")]
@@ -3297,6 +3627,16 @@ pub struct TeamStatus {
     pub max_harnesses: Option<u8>,
     #[serde(default)]
     pub max_teammates: Option<u8>,
+    #[serde(default)]
+    pub master_rounds: Option<u8>,
+    #[serde(default)]
+    pub rounds_used: u32,
+    #[serde(default)]
+    pub rounds_kept_going: bool,
+    #[serde(default = "run_secs_default")]
+    pub master_run_secs: Option<u32>,
+    #[serde(default)]
+    pub master_deadline_ms: Option<i64>,
     #[serde(default)]
     pub token_budget: Option<u64>,
     #[serde(default)]
@@ -3331,6 +3671,10 @@ pub struct TeamStatus {
 
 fn depth_default() -> u8 {
     DEPTH_DEFAULT
+}
+
+fn run_secs_default() -> Option<u32> {
+    Some(master_limits::RUN_DEFAULT_SECS)
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -3386,7 +3730,7 @@ pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktre
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
 /// tab, Team view and TUI say it came from the master.
-pub(crate) const TASK_COLUMNS: &str = "id,CASE WHEN EXISTS (SELECT 1 FROM team_conversation_tasks c WHERE c.task=team_tasks.id) THEN 'master' ELSE source END,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms,parent";
+pub(crate) const TASK_COLUMNS: &str = "id,CASE WHEN EXISTS (SELECT 1 FROM team_conversation_tasks c WHERE c.task=team_tasks.id) THEN 'master' ELSE source END,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms,parent,CASE WHEN status='queued' THEN wait END";
 
 pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
     let source: String = row.get(1)?;
@@ -3410,6 +3754,7 @@ pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
         started_ms: row.get(13)?,
         finished_ms: row.get(14)?,
         parent: row.get(15)?,
+        wait: row.get(16)?,
     })
 }
 
@@ -3631,7 +3976,8 @@ pub(crate) const ENDED_TEAMMATE: &str = "a.status IN ('stopped','failed')
 /// Gives team tables made before later columns those columns, older rows taking the
 /// default: `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
 /// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
-/// for a lead's task), `team_agents.hookless` (1 when the agent's launch fires no hooks,
+/// for a lead's task), `team_tasks.cancel_by` (which owner request cancelled it, F17),
+/// `team_tasks.wait` (why it waits to start, F11), `team_agents.hookless` (1 when the agent's launch fires no hooks,
 /// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
 /// first named by, PLC (b)), `team_task_pins.held` (1 when a hold pinned the task, not
 /// its own purpose), `team_owner_stops.stopped_by` (who made the stop; one from before
@@ -3646,6 +3992,16 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
         ("team_agents", "pane", "TEXT"),
         ("team_agents", "mode", "TEXT"),
         ("team_tasks", "mode", "TEXT"),
+        (
+            "team_tasks",
+            "cancel_by",
+            "TEXT CHECK(cancel_by IS NULL OR cancel_by IN ('task','all'))",
+        ),
+        (
+            "team_tasks",
+            "wait",
+            "TEXT CHECK(wait IS NULL OR length(CAST(wait AS BLOB)) <= 300)",
+        ),
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
         ("team_agents", "pane_pid", "INTEGER"),
         ("team_task_pins", "held", "INTEGER NOT NULL DEFAULT 0"),
@@ -3844,8 +4200,77 @@ pub fn background_at_end(
     }
 }
 
-/// Tells whether the owner asked to approve each merge of a finished harness into the
-/// Master's branch, so the master's merge leaves it as a pending Accept instead; off by
+/// The most owner messages one "accept all" check reads, newest first (DEC-147.7).
+const ACCEPT_ALL_READ_MAX: i64 = 32;
+
+/// Tells whether the owner sent "accept all" to the team in the app at or after a time
+/// (DEC-147.7): an owner-authored team message whose whole text, trimmed and in any case, is
+/// those two words with at most a closing full stop or exclamation mark. A master or engine
+/// message never counts. Takes a connection, the project and the time in milliseconds.
+/// Returns the answer, or any SQLite failure.
+pub fn owner_said_accept_all(
+    connection: &Connection,
+    project: &ProjectId,
+    since_ms: i64,
+) -> Result<bool, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT text FROM team_messages WHERE project=?1 AND author=?2 AND created_ms>=?3
+             ORDER BY id DESC LIMIT ?4",
+        )
+        .map_err(error)?;
+    let texts = statement
+        .query_map(
+            params![
+                project.as_str(),
+                MessageAuthor::Owner.name(),
+                since_ms,
+                ACCEPT_ALL_READ_MAX
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(error)?;
+    for text in texts {
+        if says_accept_all(&text.map_err(error)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Tells whether one owner message is "accept all" and nothing else, so "don't accept all"
+/// or a longer sentence never grants a merge. Takes the text. Returns the answer.
+fn says_accept_all(text: &str) -> bool {
+    let text = text.trim().trim_end_matches(['.', '!']).trim_end();
+    let mut words = text.split_whitespace();
+    matches!(
+        (words.next(), words.next(), words.next()),
+        (Some(first), Some(second), None)
+            if first.eq_ignore_ascii_case("accept") && second.eq_ignore_ascii_case("all")
+    )
+}
+
+/// What the project does with processes an agent left running when its stop named them or
+/// could not list them (DEC-147.4): the owner's choice, End them by default.
+/// Takes a connection and the project. Returns the choice, or a store failure.
+pub fn leftover_mode(connection: &Connection, project: &str) -> Result<LeftoverMode, EngineError> {
+    let row: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_leftovers WHERE project=?1",
+            [project],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match row {
+        None => Ok(LeftoverMode::default()),
+        Some(mode) => LeftoverMode::named(&mode).ok_or_else(|| error("team_leftovers_invalid")),
+    }
+}
+
+/// Tells whether the owner's "Master accepts change sets" setting is Only when I click or say
+/// accept all (DEC-147.7), so the master's merge of a finished harness leaves it as a pending
+/// Accept unless the owner said accept all since the set last changed; off, Itself, by
 /// default. Takes a connection and the project. Returns the setting.
 pub fn ask_before_merge(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
     let ask: Option<bool> = connection
@@ -3976,6 +4401,33 @@ pub fn reask_empty_reply(
         .optional()
         .map_err(error)?;
     Ok(reask.unwrap_or_else(reask_default))
+}
+
+/// Reads how long a sub-agent's task turn may stay quiet after its agent reported done
+/// before the engine ends it (F15). Takes a connection and the project. Returns the
+/// seconds, 10 minutes until the owner saves a choice, none for Off, or
+/// `team_done_quiet_invalid` for a stored bound outside 1 s to 24 h.
+pub fn done_quiet(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<u32>, EngineError> {
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT secs FROM team_done_quiet WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match stored {
+        None => Ok(done_quiet_default()),
+        Some(0) => Ok(None),
+        Some(secs) => u32::try_from(secs)
+            .ok()
+            .filter(|secs| (1..=86_400).contains(secs))
+            .map(Some)
+            .ok_or_else(|| failure("team_done_quiet_invalid")),
+    }
 }
 
 /// The owner's "Stop the master when idle after" setting, per project (DEC-117 Q4). With no
@@ -5081,12 +5533,17 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
-    let live_idle_stopped =
-        live_master == Some(false) && live_problem.as_deref().is_some_and(master::idle_stopped);
+    let live_idle_stopped = live_master == Some(false)
+        && live_problem
+            .as_deref()
+            .is_some_and(|line| master::idle_stopped(line) || master_limits::run_stopped(line));
     let limits = time_limits(connection, project)?;
     let nested = nesting(connection, project)?;
     let limited = caps::read(connection, project)?;
     let spend = budget(connection, project)?;
+    let rounds = master_limits::rounds(connection, project)?;
+    let master_run_secs = master_limits::read(connection, project)?.run_secs;
+    let master_deadline_ms = master_limits::run_deadline(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
@@ -5102,10 +5559,13 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         master_branch: master_branch_choice(connection, project)?,
         land_on: land_on(connection, project)?,
         background_at_end: background_at_end(connection, project)?,
+        leftovers: leftover_mode(connection, project.as_str())?,
+        leftover_holds: crate::harnesses::leftovers::held_in(project.as_str()),
         ask_before_merge: ask_before_merge(connection, project)?,
         master_lands,
         access_unreadable,
         reask_empty_reply: reask_empty_reply(connection, project)?,
+        done_quiet_secs: done_quiet(connection, project)?,
         master_idle_stop: MasterIdleStop::effective(
             master_idle_stop(connection, project)?,
             master::live(connection, project)?,
@@ -5120,6 +5580,11 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         paused: paused(connection, project)?,
         max_harnesses: limited.harnesses,
         max_teammates: limited.teammates,
+        master_rounds: rounds.max,
+        rounds_used: rounds.used,
+        rounds_kept_going: rounds.kept_going,
+        master_run_secs,
+        master_deadline_ms,
         token_budget: spend.map(|spend| spend.tokens),
         budget_used: spend.map(|spend| spend.used),
         budget_reached: spend.is_some_and(|spend| spend.reached),

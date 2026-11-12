@@ -204,6 +204,10 @@ pub enum Place {
         id: ProjectId,
         name: String,
     },
+    ProjectMemory {
+        id: ProjectId,
+        name: String,
+    },
     HomeFolder {
         first_run: bool,
     },
@@ -352,7 +356,8 @@ pub trait Screen {
             | Place::Team { id, .. }
             | Place::TeamSettings { id, .. }
             | Place::Master { id, .. }
-            | Place::ProjectProcess { id, .. } => Some(id),
+            | Place::ProjectProcess { id, .. }
+            | Place::ProjectMemory { id, .. } => Some(id),
             Place::Onboarding { project, .. } => project,
             Place::Home
             | Place::Welcome
@@ -399,6 +404,10 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
                 name: name.clone(),
             }))
         }
+        Place::ProjectMemory { id, name } => Box::new(settings_memory::Memory::for_project(
+            id.clone(),
+            name.clone(),
+        )),
         Place::HomeFolder { first_run } => Box::new(home_folder::HomeFolder::new(*first_run, ctx)),
         Place::AddProject => Box::new(add_project::AddProject::new()),
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),

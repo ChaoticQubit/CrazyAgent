@@ -7,11 +7,12 @@ use super::project_time::{clock, duration};
 use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
-    Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode, TaskStart,
-    TerminalDisplay,
+    NativeSubAgents, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
+    TaskStart, TerminalDisplay, native_scope, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
+use crate::harnesses::leftovers::HoldState;
 use crate::project_setup::{
     ProjectSetup, SetupAction, SetupQuery, SetupView, StoredSetup, TeamPlan,
 };
@@ -20,9 +21,9 @@ use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, R
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
-    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle, SwitchApply,
-    SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
-    TeamStatus, TeamTask,
+    CoordinationView, DelegationPath, LeftoverMode, MASTER_BRANCH_BYTES_MAX, MasterLands,
+    ReuseIdle, SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction,
+    TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::{AccountRow, account_label};
@@ -210,6 +211,7 @@ const OVERLAPS: [Overlaps; 4] = [
     Overlaps::Off,
     Overlaps::Wait,
 ];
+const OVERLAPS_HOLD_NOTE: &str = "  except Claude Code on a key or URL";
 const COUNTED_TEXT_BYTES_MAX: usize = COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 2);
 const SKILL_NAMES_TEXT_BYTES_MAX: usize =
     ROLE_SKILLS_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 2);
@@ -734,6 +736,8 @@ impl TeamView {
             KeyCode::Char('p') => self.ask_teammate(),
             KeyCode::Char('v') => self.cap(Cap::Harnesses),
             KeyCode::Char('u') => self.cap(Cap::Teammates),
+            KeyCode::Char('U') => self.master_rounds(),
+            KeyCode::Char('N') => self.master_run_time(),
             KeyCode::Char('T') => self.token_budget(),
             KeyCode::Char('P') => self.spread_accounts(),
             KeyCode::Char('m') => {
@@ -747,11 +751,15 @@ impl TeamView {
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('E') => self.master_lands(),
             KeyCode::Char('R') => self.reask_empty_reply(),
+            KeyCode::Char('D') => self.done_quiet(),
             KeyCode::Char('I') => self.master_idle_stop(),
             KeyCode::Char('V') => self.live_terminal(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('W') => self.terminals_per_window(),
             KeyCode::Char('B') => self.background_at_end(),
+            KeyCode::Char('O') => self.leftovers_setting(),
+            KeyCode::Char('X') => self.settle_hold(true),
+            KeyCode::Char('K') => self.settle_hold(false),
             KeyCode::Char('G') => self.grace_time(),
             KeyCode::Char('c') => {
                 self.open_coord();
@@ -933,6 +941,50 @@ impl TeamView {
             ),
         };
         self.change(&done, action)
+    }
+
+    /// Moves Sub-agent rounds per message to its next choice: Until the goal is done, then each
+    /// of `ROUND_CHOICES`, then Until the goal is done again (F09). Returns the change, or
+    /// Handled while the team loads or saves.
+    fn master_rounds(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let max = next_choice(
+            &crate::team::master_limits::ROUND_CHOICES,
+            status.master_rounds,
+        );
+        let project_id = self.project.clone();
+        self.change(
+            &format!(
+                "Sub-agent rounds per message is now {}.",
+                rounds_choice(max)
+            ),
+            TeamAction::MasterRounds { project_id, max },
+        )
+    }
+
+    /// Moves Master run time to its next choice: each of `RUN_CHOICES_SECS`, then No limit,
+    /// then the first again (F01). Returns the change, or Handled while the team loads or
+    /// saves.
+    fn master_run_time(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let secs = next_choice(
+            &crate::team::master_limits::RUN_CHOICES_SECS,
+            status.master_run_secs,
+        );
+        let project_id = self.project.clone();
+        self.change(
+            &format!(
+                "Master run time is now {}.",
+                crate::team::master_limits::run_words(secs)
+            ),
+            TeamAction::MasterRunTime { project_id, secs },
+        )
     }
 
     /// Turns Spread harnesses across accounts on or off: on, a new or woken agent prefers a
@@ -2007,7 +2059,8 @@ impl TeamView {
         })
     }
 
-    /// Flips "Ask me before merging into the master's branch" between Off and On.
+    /// Flips "Master accepts change sets" between Itself and Only when I click or say accept
+    /// all (DEC-147.7).
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn ask_before_merge(&mut self) -> TeamReply {
         if self.status.is_some() && self.still_saving() {
@@ -2020,9 +2073,9 @@ impl TeamView {
         let on = !status.ask_before_merge;
         self.changing = Some(
             if on {
-                "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+                "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
             } else {
-                "The master now merges a finished harness without asking."
+                "The master now accepts change sets itself."
             }
             .to_owned(),
         );
@@ -2094,6 +2147,35 @@ impl TeamView {
         TeamReply::Change(TeamAction::ReaskEmptyReply {
             project_id: self.project.clone(),
             on,
+        })
+    }
+
+    /// Moves "End a turn after done" to its next choice: 2 min, 10 min, 1 h, Off and back to
+    /// 2 min (F15): how long a task turn may stay quiet after its agent reported done before
+    /// the engine ends it. Output: the change to send, or Handled with a notice while loading
+    /// or saving.
+    fn done_quiet(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let secs = done_quiet_next(status.done_quiet_secs);
+        self.changing = Some(match secs {
+            Some(secs) => format!(
+                "A task turn now ends {} after its agent says done and goes quiet.",
+                crate::team::span_words(secs.into())
+            ),
+            None => "A task turn now ends only when its agent ends it.".to_owned(),
+        });
+        TeamReply::Change(TeamAction::DoneQuiet {
+            project_id: self.project.clone(),
+            secs,
         })
     }
 
@@ -2272,6 +2354,77 @@ impl TeamView {
         self.change(&done, action)
     }
 
+    /// Moves "Left running after a stop", what the engine does with processes an agent leaves
+    /// running after its stop (DEC-147.4), from End them to Keep running to Ask me and back.
+    /// Output: the change to send, or Handled with a notice while loading or saving.
+    fn leftovers_setting(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let (mode, done) = match status.leftovers {
+            LeftoverMode::End => (
+                LeftoverMode::Keep,
+                "Processes an agent leaves running after its stop now keep running, and its account is let go at once.",
+            ),
+            LeftoverMode::Keep => (
+                LeftoverMode::Ask,
+                "Processes an agent leaves running after its stop now keep its account until you press X to end them or K to keep them.",
+            ),
+            LeftoverMode::Ask => (
+                LeftoverMode::End,
+                "Processes an agent leaves running after its stop are now ended after 10 seconds, then its account is let go.",
+            ),
+        };
+        let action = TeamAction::LeftoversAtEnd {
+            project_id: self.project.clone(),
+            mode,
+        };
+        self.change(done, action)
+    }
+
+    /// Ends (X) or keeps (K) the processes of the oldest hold the owner's key still changes:
+    /// End skips a hold already ending, Keep one already kept. Input: whether to end them.
+    /// Output: the change to send, or Handled with a notice when none is listed.
+    fn settle_hold(&mut self, end: bool) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let skip = if end {
+            HoldState::Ending
+        } else {
+            HoldState::Kept
+        };
+        let Some(hold) = status.leftover_holds.iter().find(|hold| hold.state != skip) else {
+            self.notice = Some(Notice::plain(
+                "Nothing an agent left running waits for you.",
+            ));
+            return TeamReply::Handled;
+        };
+        let (done, action) = if end {
+            (
+                format!("Ending what {} left running.", hold.who),
+                TeamAction::EndLeftovers {
+                    project_id: self.project.clone(),
+                    key: hold.key,
+                },
+            )
+        } else {
+            (
+                format!(
+                    "Keeping what {} left running; its account is let go.",
+                    hold.who
+                ),
+                TeamAction::KeepLeftovers {
+                    project_id: self.project.clone(),
+                    key: hold.key,
+                },
+            )
+        };
+        self.change(&done, action)
+    }
+
     /// Opens the coordination editor on its first row. Output: none; a notice while the team
     /// is loading or when the engine sends no coordination settings.
     fn open_coord(&mut self) {
@@ -2383,12 +2536,19 @@ impl TeamView {
     }
 
     /// Moves one coordination row to its next or previous choice and sends the change.
-    /// Native is offered only for a harness kind with native teammates.
+    /// Native is offered only for a harness kind with native sub-agents.
     /// Takes the row, the current settings and the direction. Output: the change, or Handled.
     fn coord_step(&mut self, row: CoordRow, view: &CoordinationView, forward: bool) -> TeamReply {
         let project_id = self.project.clone();
         let harness = |kind: HarnessKind| view.harnesses.iter().find(|row| row.harness == kind);
         let mut settings = view.settings.clone();
+        if let CoordRow::Mode(kind) | CoordRow::Delivery(kind) = row
+            && let Some(reason) = crate::team::sub_agents_unavailable(kind)
+        {
+            let label = harness_row_label(matches!(row, CoordRow::Delivery(_)), kind);
+            self.notice = Some(Notice::plain(format!("{label} - {reason}")));
+            return TeamReply::Handled;
+        }
         let (action, done) = match row {
             CoordRow::Mode(kind) => {
                 let Some(current) = harness(kind) else {
@@ -2396,9 +2556,7 @@ impl TeamView {
                 };
                 let name = harness_name(kind.as_str(), None);
                 if !current.native {
-                    self.notice = Some(Notice::plain(format!(
-                        "{name} has no native teammates, so its sub-agents are app-spawned."
-                    )));
+                    self.notice = Some(Notice::plain(native_unavailable(kind)));
                     return TeamReply::Handled;
                 }
                 let mode = match current.mode {
@@ -2411,7 +2569,15 @@ impl TeamView {
                         harness: kind,
                         mode,
                     },
-                    format!("{name} sub-agents are now {}.", mode_words(mode)),
+                    match (mode, native_scope(kind)) {
+                        (SubagentMode::Native, Some(scope)) => {
+                            format!(
+                                "{name} sub-agents are now {}. {scope}",
+                                mode_words(kind, mode)
+                            )
+                        }
+                        _ => format!("{name} sub-agents are now {}.", mode_words(kind, mode)),
+                    },
                 )
             }
             CoordRow::Delivery(kind) => {
@@ -2426,9 +2592,10 @@ impl TeamView {
                         delivery,
                     },
                     format!(
-                        "Messages to {} agents: {}.",
+                        "Messages to {} agents: {}. {}",
                         harness_name(kind.as_str(), None),
-                        delivery_words(delivery)
+                        delivery_words(delivery),
+                        delivery_scope(kind)
                     ),
                 )
             }
@@ -2698,19 +2865,32 @@ impl TeamView {
         for (index, row) in COORD_ROWS.into_iter().enumerate() {
             let found = |kind: HarnessKind| view.harnesses.iter().find(|row| row.harness == kind);
             let (label, value, note) = match row {
+                CoordRow::Mode(kind) | CoordRow::Delivery(kind)
+                    if crate::team::sub_agents_unavailable(kind).is_some() =>
+                {
+                    (
+                        harness_row_label(matches!(row, CoordRow::Delivery(_)), kind),
+                        crate::team::NO_SUB_AGENTS.to_owned(),
+                        "",
+                    )
+                }
                 CoordRow::Mode(kind) => (
-                    format!("{} sub-agents", harness_name(kind.as_str(), None)),
+                    harness_row_label(false, kind),
                     found(kind)
-                        .map_or("", |row| mode_words(row.mode))
+                        .map_or("", |row| mode_words(kind, row.mode))
                         .to_owned(),
-                    if found(kind).is_some_and(|row| !row.native) {
-                        "  no native teammates"
-                    } else {
-                        ""
+                    match found(kind) {
+                        Some(row) if !row.native => "  no native sub-agents",
+                        Some(row)
+                            if row.mode == SubagentMode::Native && native_scope(kind).is_some() =>
+                        {
+                            "  shown in the lead's terminal only"
+                        }
+                        _ => "",
                     },
                 ),
                 CoordRow::Delivery(kind) => (
-                    format!("Messages to {} agents", harness_name(kind.as_str(), None)),
+                    harness_row_label(true, kind),
                     found(kind)
                         .map_or("", |row| delivery_words(row.delivery))
                         .to_owned(),
@@ -2741,7 +2921,10 @@ impl TeamView {
                 CoordRow::Overlaps => (
                     "Overlapping edits".to_owned(),
                     overlaps_words(view.settings.overlaps).to_owned(),
-                    "",
+                    match view.settings.overlaps {
+                        Overlaps::Block | Overlaps::Wait => OVERLAPS_HOLD_NOTE,
+                        Overlaps::Warn | Overlaps::Off => "",
+                    },
                 ),
                 CoordRow::CatchUpMain => (
                     "Catch up with main".to_owned(),
@@ -2843,9 +3026,10 @@ impl TeamView {
     /// Draws the Team view for the Team screen's settings box and the Team settings screen,
     /// and places the typing cursor.
     /// When the window is too short for the lists, the panel and any footer question, the
-    /// blank rows before the panel and before the tasks go first, then the plan line while
-    /// every harness can run, then the settings summary folds toward its first row, so every
-    /// setting shows while blank rows or the plan line can make room.
+    /// blank rows before the panel and before the tasks go first, then the focused agent's
+    /// Tools and Working copy rows, then the plan line while every harness can run, then the
+    /// settings summary folds toward its first row, so every setting shows while blank rows,
+    /// those panel rows or the plan line can make room.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -2910,6 +3094,7 @@ impl TeamView {
         let agents: Vec<&TeamAgent> = tree.iter().map(|(agent, _)| *agent).collect();
         let tasks = self.tasks();
         let picking = self.master_pick.is_some();
+        let mut detail = false;
         let (panel, caret) = match (&self.draft, &self.branch_edit, self.wake, self.message_row) {
             _ if picking => (self.pick_rows(content, look), None),
             (Some(draft), _, _, _) => {
@@ -2924,7 +3109,10 @@ impl TeamView {
             (None, None, None, Some(row)) => (self.message_setting_rows(row, content, look), None),
             (None, None, None, None) => match &self.coord {
                 Some(edit) => self.coord_rows(edit, content, look),
-                None => (self.panel(content, accounts, look), None),
+                None => {
+                    detail = true;
+                    (self.panel(content, accounts, false, look), None)
+                }
             },
         };
         let footer = self.footer(content, look);
@@ -2932,13 +3120,21 @@ impl TeamView {
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
         let over = (fixed + 2).saturating_sub(room);
         let spacers = over.min(2);
+        let whole = panel.len();
+        let panel = if detail && over > spacers {
+            self.panel(content, accounts, true, look)
+        } else {
+            panel
+        };
+        let briefed = whole - panel.len();
+        let left = (over - spacers).saturating_sub(briefed);
         let plan_can_go = status.harnesses.iter().all(|harness| harness.runnable)
             && status
                 .harnesses
                 .iter()
                 .any(|harness| harness.role == AgentRole::Master);
-        let plan_gives_way = usize::from(plan_can_go && over > spacers);
-        let folded = (over - spacers - plan_gives_way).min(summary_rows.saturating_sub(1));
+        let plan_gives_way = usize::from(plan_can_go && left > 0);
+        let folded = (left - plan_gives_way).min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
             "the summary's first row stays"
@@ -2954,7 +3150,7 @@ impl TeamView {
         if folded > 0 {
             lines.drain(1..=folded);
         }
-        let fixed = fixed - spacers - plan_gives_way - folded;
+        let fixed = fixed - spacers - briefed - plan_gives_way - folded;
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -3075,7 +3271,7 @@ impl TeamView {
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
     /// harness change applies, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
-    /// Token budget, Master's branch, Land on, Ask before merge, New folder limit, Background
+    /// Token budget, Master's branch, Land on, Master accepts change sets, New folder limit, Background
     /// commands), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
@@ -3181,6 +3377,11 @@ impl TeamView {
         });
         let middle = [
             setting("Max teammates", cap_words(status.max_teammates)),
+            setting("Sub-agent rounds", rounds_choice(status.master_rounds)),
+            setting(
+                "Master run time",
+                crate::team::master_limits::run_words(status.master_run_secs),
+            ),
             setting(
                 "Spread accounts",
                 if status.spread_accounts { "On" } else { "Off" }.to_owned(),
@@ -3204,8 +3405,13 @@ impl TeamView {
                     .unwrap_or_else(|| "Master's branch".to_owned()),
             ),
             setting(
-                "Ask before merge",
-                if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
+                "Master accepts change sets",
+                if status.ask_before_merge {
+                    "Only when I click or say accept all"
+                } else {
+                    "Itself"
+                }
+                .to_owned(),
             ),
         ];
         let master_lands = status.master_lands.map(|lands| {
@@ -3229,6 +3435,10 @@ impl TeamView {
                 .to_owned(),
             ),
             setting(
+                "End a turn after done",
+                done_quiet_words(status.done_quiet_secs),
+            ),
+            setting(
                 "New folder limit",
                 format!("{} files", status.new_folder_files_max),
             ),
@@ -3244,6 +3454,7 @@ impl TeamView {
                 "Background commands",
                 background_words(status.background_at_end),
             ),
+            setting("Left running", leftover_words(status.leftovers).to_owned()),
         ];
         let mut rows = Vec::new();
         let mut right = Row::default();
@@ -3271,10 +3482,22 @@ impl TeamView {
             };
         }
         rows.push(spread(content, left, right));
+        for hold in status.leftover_holds.iter().take(LEFTOVER_ROWS_MAX) {
+            rows.push(
+                Row::of("Left running  ", look.warning)
+                    .push(format!("{}: {}", hold.who, hold.names), look.fg)
+                    .push(format!("  {}", hold_words(hold.state)), look.muted)
+                    .pad(content),
+            );
+        }
         rows
     }
 
-    fn panel(&self, content: usize, accounts: &[AccountRow], look: &Look) -> Vec<Row> {
+    /// The panel under the lists for the focused agent or task. When `brief`, for a short
+    /// window, an agent's Tools and Working copy rows give way; a task's panel stays whole.
+    /// Takes the content width, the accounts, whether to be brief and the look. Returns the
+    /// rows.
+    fn panel(&self, content: usize, accounts: &[AccountRow], brief: bool, look: &Look) -> Vec<Row> {
         let entry =
             |label: &str, value: String| Row::of(label, look.muted).pad(14).push(value, look.fg);
         let mut rows = Vec::new();
@@ -3303,7 +3526,9 @@ impl TeamView {
                     "Account",
                     account_name(agent.account.as_deref(), accounts),
                 ));
-                rows.push(entry("Tools", tools_word(agent.tools).into()));
+                if !brief {
+                    rows.push(entry("Tools", tools_word(agent.tools).into()));
+                }
                 if agent.owner_stopped {
                     rows.push(Row::of(
                         "Stopped by you. Wake it from Finished to start it again.",
@@ -3344,7 +3569,9 @@ impl TeamView {
                         if let Some(last) = self.last_task(agent) {
                             rows.push(entry("Last task", title(&last.prompt)));
                         }
-                        if let Some(path) = &agent.worktree {
+                        if let Some(path) = &agent.worktree
+                            && !brief
+                        {
                             rows.push(entry("Working copy", short_path(path)));
                         }
                     }
@@ -3395,6 +3622,14 @@ impl TeamView {
                 }
                 if task.attempts > 1 {
                     rows.push(entry("Tries", task.attempts.to_string()));
+                }
+                if let Some(wait) = crate::team::wait_line(task.status, task.wait.as_deref()) {
+                    rows.extend(
+                        wrap_words(&wait, content)
+                            .into_iter()
+                            .take(PANEL_TEXT_LINES)
+                            .map(|line| Row::of(line, look.muted)),
+                    );
                 }
                 match (&task.result, &task.problem) {
                     (Some(result), _) if task.status == TaskStatus::Done => {
@@ -3581,6 +3816,8 @@ impl TeamView {
             ("b", "Agent branches"),
             ("v", "Max harnesses"),
             ("u", "Max teammates"),
+            ("U", "Sub-agent rounds"),
+            ("N", "Master run time"),
             ("T", "Token budget"),
             ("P", "Spread accounts"),
             ("z", "Stop agent"),
@@ -3595,14 +3832,16 @@ impl TeamView {
             ),
             ("m", "Master's branch"),
             ("L", "Land on"),
-            ("g", "Ask before merge"),
+            ("g", "Master accepts change sets"),
             ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
+            ("D", "End a turn after done"),
             ("I", "Stop the master when idle after"),
             ("V", "Live terminal"),
             ("F", "New folder limit"),
             ("W", "Terminals per window"),
             ("B", "Background commands"),
+            ("O", "Left running after a stop"),
             ("G", "Grace time"),
             ("c", "Coordination"),
             ("e", "Wake rules"),
@@ -3648,6 +3887,27 @@ fn master_runs_live(status: &TeamStatus) -> bool {
         })
 }
 
+/// The "End a turn after done" choice after `secs`: each of `IDLE_CHOICES_SECS` in turn,
+/// then Off, then the first again (F15). Input: the saved choice, none for Off. Output: the
+/// next choice.
+fn done_quiet_next(secs: Option<u32>) -> Option<u32> {
+    let choices = crate::team::IDLE_CHOICES_SECS;
+    match secs.and_then(|secs| choices.iter().position(|choice| *choice == secs)) {
+        Some(at) => choices.get(at + 1).copied(),
+        None if secs.is_none() => Some(choices[0]),
+        None => Some(crate::team::DONE_QUIET_DEFAULT_SECS),
+    }
+}
+
+/// How the Team settings list shows the "End a turn after done" choice. Input: the saved
+/// choice, none for Off. Output: the words.
+fn done_quiet_words(secs: Option<u32>) -> String {
+    secs.map_or_else(
+        || "Off".to_owned(),
+        |secs| crate::team::span_words(secs.into()),
+    )
+}
+
 /// Which cap on running agents a key moves.
 #[derive(Clone, Copy)]
 enum Cap {
@@ -3667,6 +3927,15 @@ fn next_choice<T: Copy + PartialEq>(choices: &[T], current: Option<T>) -> Option
             .and_then(|at| choices.get(at + 1))
             .copied(),
     }
+}
+
+/// Words a Sub-agent rounds per message choice. Takes the choice, None for Until the goal is
+/// done. Returns the words.
+fn rounds_choice(max: Option<u8>) -> String {
+    max.map_or_else(
+        || "Until the goal is done".to_owned(),
+        |max| max.to_string(),
+    )
 }
 
 /// Words a cap on running agents. Takes the cap, None for No limit. Returns the words.
@@ -3700,18 +3969,67 @@ fn cycle<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
     all[next]
 }
 
-fn mode_words(mode: SubagentMode) -> &'static str {
-    match mode {
-        SubagentMode::AppSpawned => "app-spawned",
-        SubagentMode::Native => "native teammates",
+/// The words a per-harness Coordination row goes by, the same as the desktop's: "rcli
+/// sub-agents" for its mode, "Messages to rcli agents" for its message delivery. Inputs:
+/// whether the row is the delivery row and its harness kind. Output: the label.
+fn harness_row_label(delivery: bool, kind: HarnessKind) -> String {
+    let name = harness_name(kind.as_str(), None);
+    match delivery {
+        true => format!("Messages to {name} agents"),
+        false => format!("{name} sub-agents"),
     }
 }
+
+/// The words a coordination row shows for a harness kind's sub-agent mode (PA-7): Native
+/// names what the kind runs, an agent team's teammates or its own harness's sub-agents.
+/// Takes the kind and the mode. Returns the words.
+fn mode_words(kind: HarnessKind, mode: SubagentMode) -> &'static str {
+    match (mode, native_sub_agents(kind)) {
+        (SubagentMode::AppSpawned, _) => "app-spawned",
+        (SubagentMode::Native, NativeSubAgents::Teams) => "native teammates",
+        (SubagentMode::Native, NativeSubAgents::Threads | NativeSubAgents::Unavailable(_)) => {
+            "native sub-agents"
+        }
+    }
+}
+
+/// Why a harness kind's sub-agents stay app-spawned, as the coordination editor says it
+/// when Native is chosen on a kind without native sub-agents (PA-7). Takes the kind.
+/// Returns the kind's own reason, or the general one for a kind this build runs natively.
+fn native_unavailable(kind: HarnessKind) -> &'static str {
+    match native_sub_agents(kind) {
+        NativeSubAgents::Unavailable(reason) => reason,
+        NativeSubAgents::Teams | NativeSubAgents::Threads => NATIVE_UNSUPPORTED,
+    }
+}
+
+/// The general reason a harness kind's sub-agents stay app-spawned (`coord_native_unsupported`).
+const NATIVE_UNSUPPORTED: &str =
+    "This harness has no native sub-agents, so its sub-agents are app-spawned.";
 
 fn delivery_words(delivery: Delivery) -> &'static str {
     match delivery {
         Delivery::Auto => "Auto: native, typing as fallback",
         Delivery::NativeOnly => "Native only",
         Delivery::TypingOnly => "Typing only",
+    }
+}
+
+/// What the Delivery choices do on one harness kind (PA-11, DEC-141): Native only never
+/// types, and a harness with no channel while its agent works says how its messages arrive
+/// instead. The app shows the same sentences under each Messages to row. Takes the kind.
+/// Returns the sentences.
+fn delivery_scope(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::ClaudeCode => {
+            "Auto hands a message to a Claude Code agent through its relay and types it in if the relay has not taken it after 60 seconds. Native only uses the relay alone and never types. Typing only types every message in."
+        }
+        HarnessKind::Codex => {
+            "Auto hands a message to a Codex agent with tools on through its app-server bridge and types it in when the bridge can't take it. Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle. Typing only types every message in."
+        }
+        HarnessKind::Rcli => {
+            "rcli runs no team agents, so no message goes to one here. A master on any harness hears its messages through the engine under every choice."
+        }
     }
 }
 
@@ -3872,9 +4190,33 @@ fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
 }
 
 /// Which agents Background commands at task end acts on, said with every choice in the
-/// TUI and the desktop alike: Wait and a grace time only where the engine sees background
-/// commands, a Claude Code pane, and turn-end stops only where it ends them (rv-code BHT-M1).
-const BACKGROUND_SCOPE: &str = "Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice.";
+/// TUI and the desktop alike: every choice on Claude Code and Codex panes, whose records
+/// report their background commands (PA-10), a turn-end stop for agents run per turn, and
+/// none for rcli, which has no tools (rv-code BHT-M1).
+const BACKGROUND_SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
+
+/// The most holds the Team rows list; the rest stay in the team view.
+const LEFTOVER_ROWS_MAX: usize = 5;
+
+/// The summary words for Left running after a stop (DEC-147.4). Input: the setting. Output:
+/// the words.
+fn leftover_words(mode: LeftoverMode) -> &'static str {
+    match mode {
+        LeftoverMode::End => "End them",
+        LeftoverMode::Keep => "Keep running",
+        LeftoverMode::Ask => "Ask me",
+    }
+}
+
+/// Where one hold stands, as its row says it, with the keys that still change it. Input: the
+/// state. Output: the words.
+fn hold_words(state: HoldState) -> &'static str {
+    match state {
+        HoldState::Held => "waiting for you: X ends, K keeps",
+        HoldState::Ending => "ending: K keeps",
+        HoldState::Kept => "kept running: X ends",
+    }
+}
 
 /// The summary words for Background commands at task end (DEC-111 Q13). Input: the
 /// choice. Output: the words.
@@ -3937,10 +4279,12 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_stop_master" => "The master stops with Stop all.".into(),
         "team_teammate_not_found" => "That teammate has already ended.".into(),
         "team_cap_invalid" => "Pick a listed limit, or No limit.".into(),
-        "team_budget_invalid" => "Pick a listed token budget, or Off.".into(),
-        "coord_native_unsupported" => {
-            "This harness has no native teammates, so its sub-agents are app-spawned.".into()
+        "team_rounds_invalid" => {
+            "Pick a listed number of sub-agent rounds, or Until the goal is done.".into()
         }
+        "team_run_time_invalid" => "Pick a listed master run time, or No limit.".into(),
+        "team_budget_invalid" => "Pick a listed token budget, or Off.".into(),
+        "coord_native_unsupported" => NATIVE_UNSUPPORTED.into(),
         "coord_settings_invalid" => {
             "Count at most 32 tools, each named once with letters, digits, _, - or *.".into()
         }

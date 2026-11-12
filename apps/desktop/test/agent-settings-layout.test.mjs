@@ -14,20 +14,20 @@ const rows = await import("../src/screens/team/setup-rows.tsx").catch(() => ({})
 
 const GROUPS = [
   ["model", "Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
-  ["access", "Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
-  ["tools", "Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
+  ["access", "Access and merging", ["Agent access", "Under Full access, merging into main", "Master accepts change sets", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
+  ["tools", "Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply", "End a turn after done"]],
   ["coord", "Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]],
-  ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
+  ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Left running after a stop", "Token budget", "Master run time", "Sub-agent rounds per message"]],
 ];
 const MASTER_GROUPS = [
   ["Master", ["Harness", "Account", "Live terminal"]],
   ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
-  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
+  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents", "Re-ask a sub-agent's empty reply", "End a turn after done"]],
   ["Access", ["Full access"]],
 ];
 const MERGE = "Under Full access, merging into main";
 const RESTART = "After you accept, the agent's branch restarts from main";
-const ASK = "Ask me before merging into the master's branch";
+const ASK = "Master accepts change sets";
 
 const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#x27;");
 const harness = (name, role, extra = {}) => ({ harness: name, role, agents_max: 2, tools: true, live: 0, delegation: null, delegation_label: null, runnable: true, ...extra });
@@ -128,10 +128,22 @@ test("Overlapping edits lists the engine's choices in the mockup's order and wor
   assert.deepEqual(radios(settingsHtml({ coordination: coordination("hold") }), "Overlapping edits"), { labels: [...words, "hold"], checked: ["hold"] });
 });
 
-test("a harness's sub-agents read as the mockup words them, native agent teams first where the harness has them", async () => {
+test("Overlapping edits and Hooks say which harness and account kind each protection misses, in the engine's words (DEC-141 PA-12)", () => {
+  assert.equal(client.BARE_NO_HOOKS, "Claude Code on an API key or URL account starts without hooks, so it runs none of your hooks and Block and Wait cannot hold its edits.");
+  assert.equal(client.RCLI_NO_HOOKS, "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.");
+  assert.equal(client.CODEX_HOOK_EVENTS_ONLY, "Codex agents run your hooks on the events Codex has.");
+  const coordination = { settings: { questions_to: "lead", overlaps: "block", nudges: "off", counted_tools: [], role_skills: { master: null, lead: null, worker: null }, claude_display: "classic", task_start: "on" }, harnesses: [] };
+  const html = settingsHtml({ coordination }).replaceAll("&#x27;", "'");
+  assert.ok(html.includes(`Block and Wait hold Claude Code and Codex agents' edits alike. ${client.BARE_NO_HOOKS}`), "the Overlapping edits note");
+  const plugins = readFileSync(new URL("../src/screens/settings/plugins.tsx", import.meta.url), "utf8");
+  assert.ok(plugins.includes("about={`Hooks are commands Claude Code and Codex agents run on events such as session start or a tool call. ${CODEX_HOOK_EVENTS_ONLY} ${BARE_NO_HOOKS} ${RCLI_NO_HOOKS} They run inside the agent's sandbox."), "the Hooks section says it");
+});
+
+test("a harness's sub-agents read as the mockup words them, native first for every harness", async () => {
   const coord = await import("../src/screens/team/coordination.tsx");
-  assert.deepEqual(coord.modeOptions(true), [{ value: "native", label: "Native agent teams" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
-  assert.deepEqual(coord.modeOptions(false), [{ value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions("claude-code", true), [{ value: "native", label: "Native agent teams" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions("codex", true), [{ value: "native", label: "Native Codex sub-agents" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions("rcli", false), [{ value: "native", label: "Native sub-agents", disabledReason: coord.NATIVE_UNAVAILABLE.rcli }, { value: "app_spawned", label: "CrazyAgent workers" }]);
   const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
   const sub = /(?:^|\n)\.set-sub \{([^}]*)\}/.exec(css)?.[1] ?? "";
   assert.ok(sub.length > 0, "the sub-heading has its rule");
@@ -202,11 +214,20 @@ test("Model and harness picks the master harness and each sub-agent harness's co
   assert.doesNotMatch(html, /Change in Settings, Team/, "the team is changed in place");
 });
 
+test("Master accepts change sets offers Itself, the default, and Only when I click or say accept all, each shown as the engine keeps it (DEC-147.7)", () => {
+  const itself = radios(settingsHtml(), ASK);
+  assert.deepEqual(itself, { labels: ["Itself", "Only when I click or say accept all"], checked: ["Itself"] });
+  assert.deepEqual(radios(settingsHtml({ ask_before_merge: false }), ASK).checked, ["Itself"]);
+  assert.deepEqual(radios(settingsHtml({ ask_before_merge: true }), ASK).checked, ["Only when I click or say accept all"]);
+  const source = readFileSync(new URL("../src/screens/team/controls.tsx", import.meta.url), "utf8");
+  assert.match(source, /setAskBeforeMerge\(projectId, choice === "on"\)/, "Only when I click or say accept all turns the engine's ask on, Itself turns it off");
+});
+
 test("Access and merging words the merge choice as the mockup does, with its two cards, and the restart line as Always", () => {
   const cards = (html) => [...row(html, MERGE).matchAll(/<label class="radio-card">([\s\S]*?)<\/label>/g)].map((card) => ({ checked: /checked=""/.test(card[1]), text: plain(card[1]) }));
   const merges = settingsHtml({ master_lands: "merges" });
   assert.deepEqual(cards(merges), [
-    { checked: true, text: "Master resolves conflicts and merges into main itself Default A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Ask me before merging is off. Anything else in the set makes all of it wait for your Accept." },
+    { checked: true, text: "Master resolves conflicts and merges into main itself Default A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Master accepts change sets is Itself. Anything else in the set makes all of it wait for your Accept." },
     { checked: false, text: "Master resolves conflicts, then waits for my accept The resolved change set waits in Changes until you accept it." },
   ]);
   assert.deepEqual(cards(settingsHtml({ master_lands: "waits" })).map((card) => card.checked), [false, true]);
@@ -214,7 +235,7 @@ test("Access and merging words the merge choice as the mockup does, with its two
   assert.match(plain(row(settingsHtml(), MERGE)), /Only at Full access\./, "below Full access the engine sends no merge choice");
   assert.deepEqual(cards(settingsHtml()).map((card) => card.text), cards(merges).map((card) => card.text), "below Full access the row shows the same two choices");
   assert.equal([...row(settingsHtml(), MERGE).matchAll(/<input type="radio"[^>]*disabled=""/g)].length, 2, "below Full access both choices are locked");
-  assert.match(plain(row(merges, ASK)), /On stops the master merging by itself: each finished harness's work waits in Changes for your Accept, and so does a master change set that fixes a conflict\./);
+  assert.match(plain(row(merges, ASK)), /Itself is the default: the master merges each finished harness's work\. Only when I click or say accept all stops that: the work, and a master change set that fixes a conflict, waits in Changes until you click Accept or send accept all to the team\./);
   const restart = row(merges, RESTART);
   assert.match(plain(restart), /Always/);
   assert.doesNotMatch(restart, /<(button|select|input|textarea)/, "the restart line has no control while it has no setting");
@@ -262,4 +283,23 @@ test("Overlapping edits and the merge choice take the row's full width with the 
     assert.ok(words >= 0 && choices >= 0, `${label} has its help and its choices`);
     assert.ok(words < choices, `${label}: the help sits above the choices`);
   }
+});
+
+test("Master run time lists every engine choice, then No limit (F01)", () => {
+  assert.deepEqual(controls.runOptions().map((option) => [option.value, option.label]), [
+    ["86400", "1 day"], ["259200", "3 days"], ["604800", "7 days"], ["1209600", "14 days"], ["2592000", "30 days"], ["off", "No limit"],
+  ]);
+  assert.equal(controls.RUN_DEFAULT_SECS, 604_800);
+  for (const secs of controls.RUN_CHOICES_SECS) assert.equal(controls.chosen(String(secs), controls.RUN_CHOICES_SECS), secs);
+  assert.equal(controls.chosen("off", controls.RUN_CHOICES_SECS), null, "No limit saves as null");
+  assert.equal(controls.chosen("3600", controls.RUN_CHOICES_SECS), undefined, "an unlisted time is never sent");
+});
+
+test("Sub-agent rounds per message lists Until the goal is done first, then every engine choice (F09)", () => {
+  assert.deepEqual(controls.roundOptions().map((option) => [option.value, option.label]), [
+    ["off", "Until the goal is done"], ["1", "1 round"], ["2", "2 rounds"], ["3", "3 rounds"], ["5", "5 rounds"], ["10", "10 rounds"], ["20", "20 rounds"],
+  ]);
+  for (const max of controls.ROUND_CHOICES) assert.equal(controls.chosen(String(max), controls.ROUND_CHOICES), max);
+  assert.equal(controls.chosen("off", controls.ROUND_CHOICES), null, "Until the goal is done saves as null");
+  assert.equal(controls.chosen("4", controls.ROUND_CHOICES), undefined);
 });

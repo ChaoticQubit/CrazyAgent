@@ -1200,7 +1200,7 @@ impl NativeOwner {
                     self.ordinary(),
                     OwnerEvent::Access {
                         ready: false,
-                        problem: bounded_problem(&error.0),
+                        problem: access_problem(&error.0),
                         identity: None,
                     },
                 )
@@ -2306,6 +2306,17 @@ fn report_loss(
         .is_ok()
 }
 
+/// The connection problem the TUI shows when it cannot attach: the plain line for a
+/// locator an engine that stopped left behind, with its code (F35), else the bounded code.
+/// Input: the connect failure. Output: the problem text.
+fn access_problem(problem: &str) -> String {
+    let code = bounded_problem(problem);
+    match crate::engine::bootstrap::stale_engine_text(&code) {
+        Some(text) => format!("{text} ({code})"),
+        None => code,
+    }
+}
+
 fn bounded_problem(problem: &str) -> String {
     if !problem.is_empty()
         && problem.len() <= 96
@@ -3082,6 +3093,25 @@ mod creation_recovery_tests {
 mod tests {
     use super::*;
     use crate::engine::{Engine, Server};
+
+    #[test]
+    fn a_tui_that_cannot_attach_to_a_stopped_engine_says_so_plainly() {
+        assert_eq!(
+            access_problem("owner_locator_database_mismatch"),
+            format!(
+                "{} (owner_locator_database_mismatch)",
+                crate::engine::bootstrap::STALE_ENGINE_TEXT
+            )
+        );
+        assert_eq!(
+            access_problem("owner_locator_missing"),
+            "owner_locator_missing"
+        );
+        assert_eq!(
+            access_problem("raw text with /a/path"),
+            "trusted_owner_connection_failed"
+        );
+    }
     use crate::protocol::{Outcome, ProjectId, ProjectSpec};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;

@@ -18,12 +18,12 @@ const REFUSED = { outcome: "rejected", pending: false, rejection: "engine_refuse
 
 const ROWS = [
   "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness",
-  "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches",
+  "Under Full access, merging into main", "Master accepts change sets", "Agent branches",
   "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than",
   "Workflow nudges", "Task-start reminder", "Re-ask a sub-agent's empty reply",
   "Claude Code sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display",
-  "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents",
-  "Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget",
+  "Messages to Claude Code agents", "Messages to Codex agents",
+  "Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget", "Master run time", "Sub-agent rounds per message",
 ];
 
 /** Opens Agent settings or the master's settings over the fake engine with every team save given

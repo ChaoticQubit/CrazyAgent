@@ -144,7 +144,7 @@ pub fn roadmap(
         )
     };
     Ok(
-        read_beneath(folder, Path::new(&planned)).map(|text| LinkedText {
+        read_beneath(folder, Path::new(&planned), LINK_BYTES_MAX).map(|text| LinkedText {
             path: planned,
             text,
         }),
@@ -182,28 +182,40 @@ pub fn research(
 /// path. Output: the text, or none for a path [`set`] refuses, a missing file, a link, a
 /// folder, a FIFO, a hard-linked file, more than [`LINK_BYTES_MAX`] bytes or invalid UTF-8.
 pub fn read_linked(folder: &Path, path: &str) -> Option<String> {
+    read_within(folder, path, LINK_BYTES_MAX)
+}
+
+/// Reads one file below `folder` as text under every rule of [`read_linked`], with its own
+/// size bound in place of [`LINK_BYTES_MAX`], for a file whose writer bounds it, such as a
+/// research report. Inputs: the folder, the stored path and the most bytes to read.
+/// Output: the text, or none for anything [`read_linked`] refuses or a longer file.
+pub(crate) fn read_within(folder: &Path, path: &str, bytes_max: u64) -> Option<String> {
+    assert!(bytes_max > 0);
     if !below_folder(path) {
         return None;
     }
-    read_beneath(folder, Path::new(path))
+    let text = read_beneath(folder, Path::new(path), bytes_max)?;
+    assert!(text.len() as u64 <= bytes_max);
+    Some(text)
 }
 
 /// Reads one regular file below `folder` through [`crate::platform::open_plain_beneath`],
 /// refusing a file with a second hard link, since its other name may lie outside the folder.
-/// Inputs: the folder and the relative path. Output: the text, or none.
-fn read_beneath(folder: &Path, below: &Path) -> Option<String> {
+/// Inputs: the folder, the relative path and the most bytes to read. Output: the text, or
+/// none.
+fn read_beneath(folder: &Path, below: &Path, bytes_max: u64) -> Option<String> {
     let file = crate::platform::open_plain_beneath(folder, below).ok()?;
     let opened = file.metadata().ok()?;
     #[cfg(unix)]
     let single = std::os::unix::fs::MetadataExt::nlink(&opened) == 1;
     #[cfg(not(unix))]
     let single = true;
-    if !opened.is_file() || !single || opened.len() > LINK_BYTES_MAX {
+    if !opened.is_file() || !single || opened.len() > bytes_max {
         return None;
     }
     let mut bytes = Vec::new();
-    file.take(LINK_BYTES_MAX + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > LINK_BYTES_MAX {
+    file.take(bytes_max + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > bytes_max {
         return None;
     }
     String::from_utf8(bytes).ok()

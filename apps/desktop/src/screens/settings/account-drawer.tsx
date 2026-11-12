@@ -4,7 +4,8 @@ import { useAppSession, type ProjectRow } from "../../state";
 import { Button, Drawer, Notice, ProviderMark, StatusBadge, TextField } from "../../ui";
 import { displayText } from "../conversation";
 import { nameError } from "./add-account";
-import { cancelSignIn, signOut, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
+import { CHECK_SIGN_IN, signInMethodFor, type SignInWay } from "../../native-auth";
+import { cancelSignIn, freshSignIn, signInHarness, signOut, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
 /** Joins names for a sentence: "A", "A and B", "A, B and C". Input: the names. Output: the text. */
 export function andList(names: readonly string[]): string {
@@ -87,10 +88,20 @@ export function InUseNotice({ used, projects, pending, onStop }: {
   </span></Notice>;
 }
 
-function SignInAgain({ account, onSignedIn, onStarted }: { account: AccountView; onSignedIn: () => void; onStarted: () => void }) {
+/** The drawer's sign-in panel for one subscription account: a fresh sign-in, or a check of the
+ * sign-in the account already holds, which starts at once. Inputs: the account, the way (code or
+ * browser means fresh) and the started and signed-in callbacks. */
+function SignInAgain({ account, way, onSignedIn, onStarted }: { account: AccountView; way: SignInWay; onSignedIn: () => void; onStarted: () => void }) {
   const provider = account.provider as SubscriptionProvider;
+  const method = way === "check" ? signInMethodFor(signInHarness(provider), "check") ?? freshSignIn(provider) : freshSignIn(provider);
   const signIn = useSignIn(account.id);
   const stage = signInStage(signIn.state, provider);
+  const checked = useRef(false);
+  useEffect(() => {
+    if (way !== "check" || checked.current || stage.kind !== "start") return;
+    checked.current = true;
+    void signIn.start(method);
+  }, [way, stage.kind, signIn, method]);
   const signedIn = stage.kind === "signed_in";
   const reported = useRef(false);
   const attempt = signInRunning(signIn.state) ? signIn.state?.operation?.operation_id : undefined;
@@ -105,13 +116,13 @@ function SignInAgain({ account, onSignedIn, onStarted }: { account: AccountView;
     started.current = attempt;
     onStarted();
   }, [attempt, onStarted]);
-  return <SignInPanel provider={provider} method={provider === "claude" ? "claude_official" : "codex_device_code"} state={signIn.state}
+  return <SignInPanel provider={provider} method={method} state={signIn.state}
     onStart={(method) => void signIn.start(method)} onCancel={() => void signIn.cancel()} onCheck={() => void signIn.check()}
     onClaudeCode={signIn.sendClaudeCode} />;
 }
 
-/** The account details drawer: rename, status with its action (Sign in again, Cancel sign-in,
- * Sign out, Check again), model, pools, support copy and Delete account. Inputs: the account (or
+/** The account details drawer: rename, status with its action (Sign in again, Check this
+ * account's sign-in, Cancel sign-in, Sign out, Check again), model, pools, support copy and Delete account. Inputs: the account (or
  * undefined when closed), pools, whether sign-in opens at once, and handlers for close, for any
  * change that needs the list reloaded and for Delete, which the page confirms. */
 export function AccountDrawer({ account, pools, signIn = false, onClose, onChanged, onDelete }: {
@@ -126,7 +137,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
   const [name, setName] = useState(account?.name ?? "");
   const [nameMessage, setNameMessage] = useState<string>();
   const [renaming, setRenaming] = useState(false);
-  const [signingIn, setSigningIn] = useState(false);
+  const [signingIn, setSigningIn] = useState<SignInWay | false>(false);
   const [checking, setChecking] = useState(false);
   const [checkLine, setCheckLine] = useState<string>();
   const [cancelling, setCancelling] = useState(false);
@@ -137,7 +148,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
   useEffect(() => {
     setName(account?.name ?? "");
     setNameMessage(undefined);
-    setSigningIn(signIn);
+    setSigningIn(signIn ? "code" : false);
     setCheckLine(undefined);
     setInUse(undefined);
     setError(undefined);
@@ -228,12 +239,14 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
       {subscription && account.status === "signing_in" && !signingIn &&
         <span><Button icon="x" pending={cancelling} pendingLabel="Cancelling..." onClick={() => void cancel()}>Cancel sign-in</Button></span>}
       {subscription && account.status !== "signed_in" && account.status !== "signing_in" && !signingIn &&
-        <span><Button variant="primary" icon="log-in" onClick={() => setSigningIn(true)}>Sign in again</Button></span>}
+        <span><Button variant="primary" icon="log-in" onClick={() => setSigningIn("code")}>Sign in again</Button></span>}
+      {subscription && account.status !== "signing_in" && !signingIn &&
+        <span><Button icon="refresh-cw" onClick={() => setSigningIn("check")}>{CHECK_SIGN_IN}</Button></span>}
       {canSignOut(account) && !signingIn && inUse === undefined &&
         <span><Button icon="log-out" pending={signingOut} pendingLabel="Signing out..." onClick={() => void signOutAccount(false)}>Sign out</Button></span>}
       {inUse !== undefined && <InUseNotice used={inUse} projects={session.projects.kind === "ok" ? session.projects.value : undefined}
         pending={signingOut} onStop={() => void signOutAccount(true)} />}
-      {subscription && signingIn && <SignInAgain account={account} onStarted={() => onChanged()} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}
+      {subscription && signingIn && <SignInAgain account={account} way={signingIn} onStarted={() => onChanged()} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}
       {account.method === "url" && <div className="stack-small">
         <span><Button icon="refresh-cw" pending={checking} pendingLabel="Checking..." onClick={() => void check()}>Check again</Button></span>
         {checkLine && <p role="status">{checkLine}</p>}

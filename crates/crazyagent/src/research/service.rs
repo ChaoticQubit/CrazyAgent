@@ -230,16 +230,28 @@ fn picked(resolved: impl Iterator<Item = Option<(PathBuf, AccountPick)>>) -> Pic
     paused.map_or(Picked::Nothing, Picked::Paused)
 }
 
-/// The roadmap status upkeep of the research loop: its own engine connection, the checks
-/// running now, what finished checks left for later removal and the loop passes counted,
-/// so the status store is asked for due checks every `STATUS_EVERY_TICKS` passes.
+/// Which store a started run belongs to: the roadmap status check or the Overview tabs'
+/// writing run. Both are claimed by their store's `tick` and run on the same accounts.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Upkeep {
+    Roadmap,
+    Overview,
+}
+
+/// The roadmap status and Overview tabs upkeep of the research loop: its own engine
+/// connection, the runs going now, what finished status checks left for later removal and
+/// the loop passes counted, so each store is asked for due runs every `STATUS_EVERY_TICKS`
+/// passes.
 #[cfg(unix)]
 struct StatusUpkeep {
     db: Option<rusqlite::Connection>,
     checks: Vec<JoinHandle<Option<crate::roadmap_status::run::RunLeft>>>,
     left: Vec<crate::roadmap_status::run::RunLeft>,
+    overview_runs: crate::project_overview::Started,
     passes: u32,
     failed: bool,
+    overview_failed: bool,
 }
 
 #[cfg(unix)]
@@ -259,12 +271,22 @@ impl StatusUpkeep {
                 crate::protocol::plain_code(&error.0)
             );
         }
+        if let Some(db) = &db
+            && let Err(error) = crate::project_overview::close_orphans(db)
+        {
+            eprintln!(
+                "project_overview_close_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+        }
         Self {
             db,
             checks: Vec::new(),
             left: Vec::new(),
+            overview_runs: crate::project_overview::Started::default(),
             passes: 0,
             failed: false,
+            overview_failed: false,
         }
     }
 
@@ -315,6 +337,7 @@ impl StatusUpkeep {
             resolve,
             db,
             checks: &mut self.checks,
+            upkeep: Upkeep::Roadmap,
         };
         let now = crate::team::now_ms();
         if let Err(error) = crate::roadmap_status::tick(db, &mut starts, now)
@@ -326,7 +349,25 @@ impl StatusUpkeep {
                 crate::protocol::plain_code(&error.0)
             );
         }
-        assert!(self.checks.len() <= CHECKS_MAX + crate::roadmap_status::STARTS_PER_TICK_MAX);
+        starts.upkeep = Upkeep::Overview;
+        let steady = std::time::Instant::now();
+        let ticked =
+            crate::project_overview::tick(db, &mut starts, &mut self.overview_runs, steady, now);
+        if let Err(error) = ticked
+            && !self.overview_failed
+        {
+            self.overview_failed = true;
+            eprintln!(
+                "project_overview_tick_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+        }
+        assert!(
+            self.checks.len()
+                <= CHECKS_MAX
+                    + crate::roadmap_status::STARTS_PER_TICK_MAX
+                    + crate::project_overview::STARTS_PER_TICK_MAX
+        );
     }
 
     /// Waits for every running check; the runner's shutdown stops their agents first.
@@ -337,15 +378,16 @@ impl StatusUpkeep {
     }
 }
 
-/// Starts the checks the status store hands out: on the first account a harness resolves
-/// for the project, later when every fitting account is paused, and with a plain failure
-/// when the pool has none.
+/// Starts the runs a store hands out, for the store `upkeep` names: on the first account a
+/// harness resolves for the project, later when every fitting account is paused, and with
+/// a plain failure when the pool has none.
 #[cfg(unix)]
 struct StatusStarts<'a, F> {
     runner: &'a Arc<ResearchRunner>,
     resolve: &'a F,
     db: &'a rusqlite::Connection,
     checks: &'a mut Vec<JoinHandle<Option<crate::roadmap_status::run::RunLeft>>>,
+    upkeep: Upkeep,
 }
 
 #[cfg(unix)]
@@ -361,23 +403,43 @@ where
         let now = crate::team::now_ms();
         let stored = match picked(resolved) {
             Picked::Account(root, account) => {
-                let (runner, project) = (self.runner.clone(), project.clone());
-                self.checks.push(std::thread::spawn(move || {
-                    crate::roadmap_status::run::check(&runner, &project, claim, &root, &account)
+                let (runner, project, upkeep) = (self.runner.clone(), project.clone(), self.upkeep);
+                self.checks.push(std::thread::spawn(move || match upkeep {
+                    Upkeep::Roadmap => {
+                        crate::roadmap_status::run::check(&runner, &project, claim, &root, &account)
+                    }
+                    Upkeep::Overview => {
+                        crate::project_overview::agent::write(
+                            &runner, &project, claim, &root, &account,
+                        );
+                        None
+                    }
                 }));
                 Ok(true)
             }
-            Picked::Paused(until_ms) => {
-                crate::roadmap_status::requeue(self.db, project, claim, until_ms.max(now))
-            }
-            Picked::Nothing => {
-                let failed = Err(crate::roadmap_status::NO_ACCOUNT);
-                crate::roadmap_status::finish(self.db, project, claim, failed, now)
-            }
+            Picked::Paused(until_ms) => match self.upkeep {
+                Upkeep::Roadmap => {
+                    crate::roadmap_status::requeue(self.db, project, claim, until_ms.max(now))
+                }
+                Upkeep::Overview => {
+                    crate::project_overview::requeue(self.db, project, claim, until_ms.max(now))
+                }
+            },
+            Picked::Nothing => match self.upkeep {
+                Upkeep::Roadmap => {
+                    let failed = Err(crate::roadmap_status::NO_ACCOUNT);
+                    crate::roadmap_status::finish(self.db, project, claim, failed, now)
+                }
+                Upkeep::Overview => {
+                    let words = crate::project_overview::NO_ACCOUNT;
+                    crate::project_overview::fail(self.db, project, claim, words, now)
+                }
+            },
         };
         if let Err(error) = stored {
             eprintln!(
-                "roadmap_status_start_failed cause={}",
+                "upkeep_start_failed store={:?} cause={}",
+                self.upkeep,
                 crate::protocol::plain_code(&error.0)
             );
         }
@@ -391,14 +453,16 @@ where
 /// terminal host every agent in its own pane, and with the engine's agent
 /// register each running job named as a holder of the account it signs in with.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
     project: &Path,
-    codex: &Path,
+    codex: Option<&Path>,
     claude: Option<&Path>,
     terminal: Option<Arc<dyn crate::terminal::Host>>,
     agents: Option<Arc<crate::agents::Agents>>,
+    lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
@@ -425,9 +489,15 @@ pub fn start_for_engine(
     if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
         return Err("engine database must be a private file".into());
     }
-    let mut runner = ResearchRunner::new(&database, &state, codex, ResearchLimits::default())
-        .map_err(|error| error.to_string())?
-        .with_settings(global, project);
+    let mut runner = match codex {
+        Some(codex) => ResearchRunner::new(&database, &state, codex, ResearchLimits::default()),
+        None => ResearchRunner::without_codex(&database, &state, ResearchLimits::default()),
+    }
+    .map_err(|error| error.to_string())?
+    .with_settings(global, project);
+    if let Some(lookup) = lookup {
+        runner = runner.with_harness_lookup(lookup);
+    }
     if let Some(claude) = claude {
         runner = runner
             .with_claude(claude)
@@ -453,14 +523,16 @@ pub fn start_for_engine(
 /// made or checked. Takes the runtime, settings files, harness paths, terminal host and
 /// agent register, all unused. Returns `research_runtime_unavailable`.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
     _runtime: &Path,
     _global: &Path,
     _project: &Path,
-    _codex: &Path,
+    _codex: Option<&Path>,
     _claude: Option<&Path>,
     _terminal: Option<Arc<dyn crate::terminal::Host>>,
     _agents: Option<Arc<crate::agents::Agents>>,
+    _lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<ResearchService, String> {
     Err("research_runtime_unavailable".into())
 }
@@ -500,8 +572,10 @@ mod tests {
                 std::thread::spawn(|| None),
             ],
             left: Vec::new(),
+            overview_runs: crate::project_overview::Started::default(),
             passes: 0,
             failed: false,
+            overview_failed: false,
         };
         for _ in 0..500 {
             if upkeep.checks.iter().all(|check| check.is_finished()) {
@@ -540,6 +614,7 @@ mod tests {
             account: Box::new(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:9".into(),
                 model: "local".into(),
+                key: None,
             }),
         }
     }

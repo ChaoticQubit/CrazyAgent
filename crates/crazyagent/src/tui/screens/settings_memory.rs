@@ -4,16 +4,16 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::memory::library::{
-    AgentWrites, MemoryOrigin, MemoryScope, NOTE_BYTES_MAX, SavedMemory, validate_note,
+    AgentScope, AgentWrites, MemoryOrigin, MemoryScope, NOTE_BYTES_MAX, SavedMemory, validate_note,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob, Suggestion};
 use crate::tui::ctx::{Ctx, Load};
-use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
+use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint, sections_hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::text::{
-    cells, cut, join, list_row, restyle, row, status, styled, thumb, width, with_bar, wrap,
+    cells, cut, indent, join, list_row, restyle, row, status, styled, thumb, width, with_bar, wrap,
 };
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons};
@@ -29,6 +29,9 @@ const MODAL_WIDTH: u16 = 66;
 const COMPOSER_WIDTH: usize = 72;
 const FOLDER_CHARS_MAX: usize = 1024;
 const SUBTITLE: &str = "Long-term memory every agent reads at launch, with who saved it.";
+const PROJECT_SUBTITLE: &str =
+    "Long-term memory this project's agents read at launch, with who saved it.";
+const PROJECT_EMPTY: &str = "When an agent asks to keep something for this project, it waits here for your approval, and y approves it.";
 const EMPTY: &str = "When agents find something worth keeping, the project shows it under \"Save to memory\". One click saves it here, and every project can use it.";
 
 /// A plain sentence for an engine problem code about memory.
@@ -48,6 +51,7 @@ pub fn memory_plain(code: &str) -> &'static str {
         "memory_missing" | "knowledge_entry_missing" => "This memory no longer exists.",
         "memory_already_global" => "This memory is already saved for every project.",
         "memory_not_requested" => "This memory is already approved.",
+        "memory_not_movable" => "Only an app-wide memory an agent saved can be moved.",
         "memory_agent_invalid" => "The agent that saved this memory could not be named.",
         "knowledge_source_revoked" => "Its source was removed, so it can't be saved.",
         "knowledge_version_conflict"
@@ -140,6 +144,23 @@ pub fn scopes(ctx: &Ctx) -> Vec<MemoryScope> {
         .collect()
 }
 
+/// The line under the subtitle of a project's memory: how many memories wait for the
+/// owner's approval and the key that approves one.
+/// Inputs: the waiting count, the width and the context. Output: the line.
+fn waiting_line(asked: usize, limit: usize, ctx: &Ctx) -> Line<'static> {
+    let text = match asked {
+        0 => "Nothing waits for your approval.".to_owned(),
+        1 => "1 memory waits for your approval. y approves the focused one.".to_owned(),
+        _ => format!("{asked} memories wait for your approval. y approves the focused one."),
+    };
+    let role = if asked == 0 {
+        Role::Muted
+    } else {
+        Role::Heading
+    };
+    styled(cut(&text, limit, ctx.glyphs.ellipsis), role, &ctx.theme)
+}
+
 enum Mode {
     List,
     View,
@@ -154,6 +175,9 @@ enum Mode {
         field: Box<TextField>,
         project: usize,
     },
+    Move {
+        project: usize,
+    },
     Suggestion {
         save_focused: bool,
     },
@@ -165,7 +189,8 @@ enum Picked<'a> {
 }
 
 /// Settings, Memory: every saved memory, global and per project, with where it
-/// came from; View shows the whole text and Delete removes it for good.
+/// came from; View shows the whole text and Delete removes it for good. Opened from a
+/// project's Context tab it is that project's memory only, where y approves in place.
 /// Input: keys and saved memories from the engine. Output: the list, the empty
 /// state or the error with the key to try again.
 pub struct Memory {
@@ -175,6 +200,9 @@ pub struct Memory {
     waiting: bool,
     writes: Option<AgentWrites>,
     setting: bool,
+    reach: Option<AgentScope>,
+    scoping: bool,
+    moving: bool,
     approving: bool,
     deleting: bool,
     suggesting: bool,
@@ -187,6 +215,7 @@ pub struct Memory {
     filter: TextField,
     filtering: bool,
     mode: Mode,
+    project: Option<(ProjectId, String)>,
 }
 
 impl Default for Memory {
@@ -206,6 +235,9 @@ impl Memory {
             waiting: false,
             writes: None,
             setting: false,
+            reach: None,
+            scoping: false,
+            moving: false,
             approving: false,
             deleting: false,
             suggesting: false,
@@ -218,6 +250,34 @@ impl Memory {
             filter: TextField::new("Filter", FILTER_CHARS_MAX),
             filtering: false,
             mode: Mode::List,
+            project: None,
+        }
+    }
+
+    /// One project's memory, opened from its Context tab: only that project's memories, read
+    /// afresh each time it shows, with y approving a memory an agent asked for right there and
+    /// s opening Settings, Memory for the app-wide setting and research suggestions.
+    /// Input: the project id and name. Output: the screen; `shown` asks the engine.
+    pub fn for_project(id: ProjectId, name: String) -> Self {
+        let mut screen = Self::new();
+        screen.project = Some((id, name));
+        screen
+    }
+
+    fn wanted(&self, ctx: &Ctx) -> Vec<MemoryScope> {
+        match &self.project {
+            Some((id, _)) => vec![MemoryScope::Project {
+                project_id: id.clone(),
+            }],
+            None => scopes(ctx),
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        if self.project.is_some() {
+            "Project memory"
+        } else {
+            "Memory"
         }
     }
 
@@ -237,15 +297,18 @@ impl Memory {
                 self.load = Load::Loading;
             }
             self.waiting = true;
-            self.scoped = scopes(ctx);
+            self.scoped = self.wanted(ctx);
             send(
                 ctx,
                 SettingsJob::Memories {
                     scopes: self.scoped.clone(),
                 },
             );
-            if !self.setting {
+            if !self.setting && self.project.is_none() {
                 send(ctx, SettingsJob::AgentWrites { set: None });
+            }
+            if !self.scoping && self.project.is_none() {
+                send(ctx, SettingsJob::AgentScope { set: None });
             }
         }
         self.reload_suggestions(ctx);
@@ -267,6 +330,87 @@ impl Memory {
                 set: Some((next, generation)),
             },
         );
+    }
+
+    fn toggle_scope(&mut self, ctx: &mut Ctx) {
+        if self.scoping {
+            return;
+        }
+        let next = match self.reach.unwrap_or_default() {
+            AgentScope::Project => AgentScope::Agent,
+            AgentScope::Agent => AgentScope::Project,
+        };
+        self.scoping = true;
+        let generation = ctx.next_generation();
+        send(
+            ctx,
+            SettingsJob::AgentScope {
+                set: Some((next, generation)),
+            },
+        );
+    }
+
+    fn movable(memory: &SavedMemory) -> bool {
+        memory.scope == MemoryScope::Global
+            && matches!(
+                memory.origin,
+                MemoryOrigin::Agent { .. } | MemoryOrigin::Requested { .. }
+            )
+    }
+
+    fn open_mover(&mut self, ctx: &mut Ctx) {
+        if self.moving
+            || !self
+                .focused(ctx)
+                .is_some_and(|memory| Self::movable(&memory))
+        {
+            return;
+        }
+        if Self::project_choices(ctx).is_empty() {
+            ctx.say(Message::error(
+                "Add a project first.",
+                "A moved memory belongs to one project.",
+            ));
+            return;
+        }
+        self.mode = Mode::Move { project: 0 };
+    }
+
+    fn move_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Mode::Move { project } = &mut self.mode else {
+            return Flow::Ignored;
+        };
+        let choices = Self::project_choices(ctx);
+        if choices.is_empty() {
+            self.mode = Mode::List;
+            return Flow::Handled;
+        }
+        *project = (*project).min(choices.len() - 1);
+        match key {
+            Key::Esc => self.mode = Mode::List,
+            Key::Right | Key::Tab | Key::Down => *project = (*project + 1) % choices.len(),
+            Key::Left | Key::BackTab | Key::Up => {
+                *project = (*project + choices.len() - 1) % choices.len()
+            }
+            Key::Enter => {
+                let target = choices[*project].0.clone();
+                self.mode = Mode::List;
+                if let Some(memory) = self.focused(ctx).filter(Self::movable) {
+                    self.moving = true;
+                    let generation = ctx.next_generation();
+                    send(
+                        ctx,
+                        SettingsJob::MoveMemory {
+                            memory: memory.id,
+                            project: target,
+                            generation,
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+        Flow::Handled
     }
 
     fn approve(&mut self, ctx: &mut Ctx) {
@@ -294,6 +438,11 @@ impl Memory {
             Some(AgentWrites::Save) => "Save directly",
             Some(AgentWrites::Ask) => "Ask me first",
         };
+        let place = match self.reach {
+            None => "Loading",
+            Some(AgentScope::Project) => "This project only",
+            Some(AgentScope::Agent) => "Agent chooses",
+        };
         let mut line = join([
             styled("Agent memory writes  ", Role::Heading, theme),
             Line::raw(format!("{} {chosen} {}", ctx.glyphs.left, ctx.glyphs.right)),
@@ -303,14 +452,36 @@ impl Memory {
         } else {
             line = join([line, styled("  w to change", Role::Muted, theme)]);
         }
-        if line.width() > limit {
-            return Line::raw(cut(
-                &format!("Agent memory writes: {chosen}"),
-                limit,
-                ctx.glyphs.ellipsis,
-            ));
+        line = join([
+            line,
+            styled("   Saved in  ", Role::Heading, theme),
+            Line::raw(format!("{} {place} {}", ctx.glyphs.left, ctx.glyphs.right)),
+        ]);
+        if self.scoping {
+            line = join([line, styled("  Saving", Role::Muted, theme)]);
+        } else {
+            line = join([line, styled("  p to change", Role::Muted, theme)]);
         }
-        line
+        if line.width() <= limit {
+            return line;
+        }
+        let (left, right) = (ctx.glyphs.left, ctx.glyphs.right);
+        let compact = join([
+            styled("Writes ", Role::Heading, theme),
+            Line::raw(format!("{left} {chosen} {right}")),
+            styled("  w", Role::Muted, theme),
+            styled("   Saved in ", Role::Heading, theme),
+            Line::raw(format!("{left} {place} {right}")),
+            styled("  p", Role::Muted, theme),
+        ]);
+        if compact.width() <= limit {
+            return compact;
+        }
+        Line::raw(cut(
+            &format!("Agent memory writes: {chosen}; saved in: {place}"),
+            limit,
+            ctx.glyphs.ellipsis,
+        ))
     }
 
     fn reload_suggestions(&mut self, ctx: &mut Ctx) {
@@ -322,7 +493,7 @@ impl Memory {
                 MemoryScope::Global => None,
             })
             .collect();
-        if projects.is_empty() {
+        if projects.is_empty() || self.project.is_some() {
             self.suggestions.clear();
             return;
         }
@@ -724,7 +895,7 @@ impl Memory {
             Load::Failed(code) => {
                 return (
                     vec![
-                        styled("Memory", Role::Accent, theme),
+                        styled(self.title(), Role::Accent, theme),
                         Line::default(),
                         status(
                             &format!("Failed to load memories. {}", plain(code)),
@@ -738,18 +909,23 @@ impl Memory {
             }
             Load::Ready(()) if self.memories.is_empty() && self.open().next().is_none() => {
                 let mut lines = vec![
-                    styled("Memory", Role::Accent, theme),
+                    styled(self.title(), Role::Accent, theme),
                     Line::default(),
                     Line::raw("No memories yet."),
                 ];
-                lines.extend(wrap(EMPTY, limit).into_iter().map(Line::raw));
+                let empty = if self.project.is_some() {
+                    PROJECT_EMPTY
+                } else {
+                    EMPTY
+                };
+                lines.extend(wrap(empty, limit).into_iter().map(Line::raw));
                 return (lines, None);
             }
             Load::Ready(()) => {}
             _ => {
                 return (
                     vec![
-                        styled("Memory", Role::Accent, theme),
+                        styled(self.title(), Role::Accent, theme),
                         Line::default(),
                         Line::from(vec![
                             Span::styled(ctx.spinner(), theme.running),
@@ -779,16 +955,24 @@ impl Memory {
         }
         let mut lines = vec![row(
             limit,
-            styled("Memory", Role::Accent, theme),
+            styled(self.title(), Role::Accent, theme),
             styled(counts, Role::Muted, theme),
             glyphs,
         )];
+        let subtitle = if self.project.is_some() {
+            PROJECT_SUBTITLE
+        } else {
+            SUBTITLE
+        };
         lines.push(styled(
-            cut(SUBTITLE, limit, glyphs.ellipsis),
+            cut(subtitle, limit, glyphs.ellipsis),
             Role::Muted,
             theme,
         ));
-        lines.push(self.writes_line(limit, ctx));
+        lines.push(match self.project {
+            Some(_) => waiting_line(asked, limit, ctx),
+            None => self.writes_line(limit, ctx),
+        });
         let mut cursor = None;
         if self.filtering {
             let shown = cut(
@@ -957,7 +1141,10 @@ impl Memory {
 
 impl Screen for Memory {
     fn crumbs(&self) -> Vec<String> {
-        vec!["Settings".into(), "Memory".into()]
+        match &self.project {
+            Some((_, name)) => vec![name.clone(), "Project memory".into()],
+            None => vec!["Settings".into(), "Memory".into()],
+        }
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
@@ -983,8 +1170,13 @@ impl Screen for Memory {
                 hint("Esc", "Cancel"),
             ];
         }
+        let app = self.project.is_none();
         if !matches!(self.load, Load::Ready(())) {
-            return vec![sections_hint(ctx.glyphs), hint("Esc", "Home")];
+            return if app {
+                vec![sections_hint(ctx.glyphs), hint("Esc", "Home")]
+            } else {
+                vec![hint("s", "Memory settings"), hint("Esc", "Back")]
+            };
         }
         let mut hints = match self.picked(ctx) {
             Some(Picked::Suggested(item)) if item.kept => vec![hint("Enter", "Use everywhere")],
@@ -997,14 +1189,29 @@ impl Screen for Memory {
             Some(Picked::Saved(_)) => vec![hint("Enter", "View"), hint("d", "Delete")],
             None => Vec::new(),
         };
-        hints.push(hint("a", "Add"));
-        hints.push(hint("w", "Agent memory writes"));
-        hints.push(hint("i", "Import"));
+        if app {
+            if self
+                .focused(ctx)
+                .is_some_and(|memory| Self::movable(&memory))
+            {
+                hints.push(hint("m", "Move to a project"));
+            }
+            hints.push(hint("a", "Add"));
+            hints.push(hint("w", "Agent memory writes"));
+            hints.push(hint("i", "Import"));
+        } else {
+            hints.push(hint("s", "Memory settings"));
+        }
         if !self.memories.is_empty() || self.open().next().is_some() {
             hints.push(hint("/", "Filter"));
         }
-        hints.push(sections_hint(ctx.glyphs));
-        hints.push(hint("Esc", "Home"));
+        if app {
+            hints.push(sections_hint(ctx.glyphs));
+            hints.push(hint("Esc", "Home"));
+            hints.push(hint("p", "Where agents save"));
+        } else {
+            hints.push(hint("Esc", "Back"));
+        }
         hints
     }
 
@@ -1015,6 +1222,7 @@ impl Screen for Memory {
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match self.mode {
             Mode::Delete { .. } => return self.delete_key(key, ctx),
+            Mode::Move { .. } => return self.move_key(key, ctx),
             Mode::Add { .. } => return self.add_key(key, ctx),
             Mode::Import { .. } => return self.import_key(key, ctx),
             Mode::Suggestion { .. } => return self.suggestion_key(key, ctx),
@@ -1045,13 +1253,19 @@ impl Screen for Memory {
             None => (false, false),
         };
         let ready = matches!(self.load, Load::Ready(()));
+        let app = self.project.is_none();
         let page = Self::window(ctx).saturating_sub(1).max(1) as isize;
         match key {
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
-            Key::Char('a') if ready && !self.adding => self.open_composer(),
-            Key::Char('w') if ready => self.toggle_writes(ctx),
+            Key::Char('a') if app && ready && !self.adding => self.open_composer(),
+            Key::Char('w') if app && ready => self.toggle_writes(ctx),
+            Key::Char('p') if app && ready => self.toggle_scope(ctx),
+            Key::Char('m') if app && saved => self.open_mover(ctx),
             Key::Char('y') if saved => self.approve(ctx),
-            Key::Char('i') if ready && !self.importing => self.open_importer(ctx),
+            Key::Char('i') if app && ready && !self.importing => self.open_importer(ctx),
+            Key::Char('s') if !app => {
+                return Flow::Open(Place::Settings(SettingsSection::Memory));
+            }
             Key::Char('/') if !self.memories.is_empty() || self.open().next().is_some() => {
                 self.filtering = true
             }
@@ -1077,31 +1291,41 @@ impl Screen for Memory {
     }
 
     fn step(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
-        step(SettingsSection::Memory, forward, ctx)
+        match self.project {
+            Some(_) => Flow::Ignored,
+            None => step(SettingsSection::Memory, forward, ctx),
+        }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if let Arrival::Projects(Ok(_)) = arrival {
-            if !matches!(self.load, Load::Idle) && scopes(ctx) != self.scoped {
+            if !matches!(self.load, Load::Idle) && self.wanted(ctx) != self.scoped {
                 self.reload(ctx);
             }
             return Flow::Handled;
         }
         match settings_event(arrival) {
-            Some(SettingsEvent::Memories(result)) => {
-                let asked = std::mem::take(&mut self.waiting);
+            Some(SettingsEvent::Memories(scopes, result))
+                if self.waiting && *scopes == self.scoped =>
+            {
+                self.waiting = false;
                 match result {
                     Ok(memories) => {
-                        self.memories = memories.clone();
+                        self.memories = memories
+                            .iter()
+                            .filter(|memory| self.scoped.contains(&memory.scope))
+                            .cloned()
+                            .collect();
                         self.load = Load::Ready(());
                         self.clamp(ctx);
-                        ctx.store.memory = Load::Ready(self.memories.len());
+                        if self.project.is_none() {
+                            ctx.store.memory = Load::Ready(self.memories.len());
+                        }
                     }
                     Err(code) if self.memories.is_empty() => self.load = Load::Failed(code.clone()),
-                    Err(code) if asked => {
+                    Err(code) => {
                         ctx.say(Message::error("Could not refresh memories.", plain(code)))
                     }
-                    Err(_) => {}
                 }
             }
             Some(SettingsEvent::MemoryDeleted(result)) if self.deleting => {
@@ -1131,6 +1355,46 @@ impl Screen for Memory {
                     }
                     Err(code) if asked => ctx.say(Message::error(
                         "Could not change Agent memory writes.",
+                        memory_plain(code),
+                    )),
+                    Err(_) => {}
+                }
+            }
+            Some(SettingsEvent::MemoryMoved(result)) if self.moving => {
+                self.moving = false;
+                match result {
+                    Ok(()) => {
+                        ctx.say(Message::success(
+                            "Memory moved. Only agents in that project get it now.",
+                            "",
+                        ));
+                        self.reload(ctx);
+                    }
+                    Err(code) => ctx.say(Message::error(
+                        "Could not move this memory.",
+                        memory_plain(code),
+                    )),
+                }
+            }
+            Some(SettingsEvent::AgentScope(result)) => {
+                let asked = std::mem::take(&mut self.scoping);
+                match result {
+                    Ok(reach) => {
+                        self.reach = Some(*reach);
+                        if asked {
+                            let lead = match reach {
+                                AgentScope::Project => {
+                                    "Agents now save memories in their own project only."
+                                }
+                                AgentScope::Agent => {
+                                    "Agents now choose where a memory is saved, app-wide included."
+                                }
+                            };
+                            ctx.say(Message::success(lead, ""));
+                        }
+                    }
+                    Err(code) if asked => ctx.say(Message::error(
+                        "Could not change where agents save memories.",
                         memory_plain(code),
                     )),
                     Err(_) => {}
@@ -1241,6 +1505,49 @@ impl Screen for Memory {
         let room = usize::from(MODAL_WIDTH) - 4;
         match self.mode {
             Mode::List | Mode::Add { .. } | Mode::Import { .. } | Mode::Suggestion { .. } => None,
+            Mode::Move { project } => {
+                let choices = Self::project_choices(ctx);
+                let name = choices
+                    .get(project.min(choices.len().saturating_sub(1)))
+                    .map_or_else(
+                        || "A project".to_owned(),
+                        |(_, name)| printable(name.clone()),
+                    );
+                let mut body = vec![
+                    Line::raw("Move this app-wide memory into one project?"),
+                    Line::default(),
+                ];
+                body.push(styled(
+                    cut(&printable(memory.text.clone()), room, ctx.glyphs.ellipsis),
+                    Role::Muted,
+                    theme,
+                ));
+                body.push(Line::default());
+                body.push(Line::raw(cut(
+                    &format!("Project  {} {name} {}", ctx.glyphs.left, ctx.glyphs.right),
+                    room,
+                    ctx.glyphs.ellipsis,
+                )));
+                body.extend(
+                    wrap("Only agents in this project get it from then on.", room)
+                        .into_iter()
+                        .map(Line::raw),
+                );
+                let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
+                Some((
+                    Modal {
+                        width: MODAL_WIDTH,
+                        title: "Move memory".into(),
+                        body,
+                        top: None,
+                    },
+                    vec![
+                        hint(&arrows, "Project"),
+                        hint("Enter", "Move"),
+                        hint("Esc", "Cancel"),
+                    ],
+                ))
+            }
             Mode::View => {
                 let mut body: Vec<Line<'static>> = wrap(&sanitize(&memory.text), room)
                     .into_iter()
@@ -1309,7 +1616,7 @@ impl Screen for Memory {
 
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Projects);
-        if matches!(self.load, Load::Idle) {
+        if matches!(self.load, Load::Idle) || self.project.is_some() {
             self.reload(ctx);
         }
     }
@@ -1317,12 +1624,20 @@ impl Screen for Memory {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let limit = (area.width as usize).saturating_sub(4).max(8);
         let (content, cursor) = self.body(limit, ctx);
-        draw_page(frame, area, SettingsSection::Memory, content, cursor, ctx)
+        match self.project {
+            Some(_) => {
+                draw_lines(frame.buffer_mut(), area, &indent(content, 2));
+                cursor.map(|at| Position::new(area.x + 2 + at.x, area.y + at.y))
+            }
+            None => draw_page(frame, area, SettingsSection::Memory, content, cursor, ctx),
+        }
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
         self.waiting
             || self.setting
+            || self.scoping
+            || self.moving
             || self.approving
             || self.deleting
             || self.adding
@@ -1332,7 +1647,13 @@ impl Screen for Memory {
     }
 
     fn place(&self) -> Option<Place> {
-        Some(Place::Settings(SettingsSection::Memory))
+        Some(match &self.project {
+            Some((id, name)) => Place::ProjectMemory {
+                id: id.clone(),
+                name: name.clone(),
+            },
+            None => Place::Settings(SettingsSection::Memory),
+        })
     }
 }
 

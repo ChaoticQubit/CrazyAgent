@@ -15,6 +15,11 @@ use std::borrow::Cow;
 
 pub(super) mod claude_code;
 
+/// Names the re-check of the sign-in an account already holds in its own CrazyAgent
+/// profile. Shared by every harness and every TUI screen that offers it.
+/// Output: the owner-facing title.
+pub(super) const CHECK_SIGN_IN: &str = "Check this account's sign-in";
+
 const DISPLAY_BYTES_MAX: usize = 65536;
 const FIELD_BYTES_MAX: usize = 4096;
 const USING_SHOWN_MAX: usize = 8;
@@ -518,6 +523,7 @@ impl State {
                 "Read original operation",
                 "Cancel original operation",
                 "Logout",
+                CHECK_SIGN_IN,
                 "Back",
             ]
         } else {
@@ -527,7 +533,7 @@ impl State {
                 "Read original operation",
                 "Cancel original operation",
                 "Logout",
-                "Use the existing Codex sign-in (no new code)",
+                CHECK_SIGN_IN,
                 "Back",
             ]
         }
@@ -565,6 +571,9 @@ impl State {
             (true, 3) | (false, 4) => {
                 self.confirmation = Some(false);
                 Ok(())
+            }
+            (true, 4) if !self.claude_code.accepts_code() => {
+                self.begin(Some(NativeAuthMethod::ClaudeExisting))
             }
             (false, 5) => self.begin(Some(NativeAuthMethod::CodexExisting)),
             _ => self.hide(),
@@ -1140,9 +1149,8 @@ fn action_text(action: NativeAuthAction) -> &'static str {
         NativeAuthAction::SignIn { method } => match method {
             NativeAuthMethod::CodexBrowser => "Codex browser sign-in",
             NativeAuthMethod::CodexDeviceCode => "Codex device-code sign-in",
-            NativeAuthMethod::CodexExisting => "Existing Codex sign-in check",
+            NativeAuthMethod::CodexExisting | NativeAuthMethod::ClaudeExisting => CHECK_SIGN_IN,
             NativeAuthMethod::ClaudeOfficial => "Claude official sign-in",
-            NativeAuthMethod::ClaudeExisting => "Existing Claude sign-in check",
         },
         NativeAuthAction::Logout => "Logout",
     }

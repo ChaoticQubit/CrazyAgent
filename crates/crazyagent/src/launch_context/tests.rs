@@ -209,6 +209,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -258,6 +259,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -319,6 +321,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -373,6 +376,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -420,6 +424,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -546,6 +551,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -586,6 +592,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -659,6 +666,7 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
@@ -701,13 +709,13 @@ fn immutable(path: &Path) -> bool {
 
 /// team-19 r1 M1, CTX-M1 r2 I3: a folder an agent left in its home under the name the
 /// engine once parked skills at, holding a file made immutable, is left as it is by the next
-/// Codex launch, which releases nothing at a name the agent can swap. When `skills` itself
-/// cannot be moved away, here because a Full access agent denied new folders and removals in
-/// its own home with an ACL the engine leaves alone, the Codex launch is refused with an
-/// ordinary error rather than started with the planted system skills.
+/// Codex launch, which releases nothing at a name the agent can swap. A Full access agent that
+/// denied new folders and removals in its own home with an ACL no longer refuses the next
+/// launch (DEC-141 PA-19): the engine releases the home at its fixed path and removes the
+/// planted system skills.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
+fn a_parked_name_is_left_alone_and_a_home_denying_removals_still_loses_planted_skills() {
     let directory = tempfile::tempdir().unwrap();
     let _unpinned = Unpinned(directory.path().to_path_buf());
     let home = directory.path().canonicalize().unwrap().join("codex");
@@ -719,6 +727,7 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -764,13 +773,17 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
     let hold = lock_only(&home, "codex");
 
     assert_eq!(
-        hold.err().map(|problem| problem.0),
-        Some(SKILLS_KEPT.to_owned()),
-        "a launch that keeps the planted system skills is refused"
+        hold.as_ref().err().map(|problem| problem.0.as_str()),
+        None,
+        "a home denying removals refuses the launch"
     );
     assert!(
-        planted.exists(),
-        "the refusal leaves the skills it could not move"
+        !planted.exists(),
+        "the launch leaves the planted system skills"
+    );
+    assert!(
+        immutable(&held),
+        "the launch released the parked name's file"
     );
 }
 
@@ -845,14 +858,26 @@ impl Drop for Unpinned {
     }
 }
 
-/// CTX-M1 residual (rv-secreview r2 I3): an earlier run that pinned Codex's own
-/// `skills/.system` with an ACL denying its removal or a mode without write, or left a folder
-/// without write or an immutable file inside it, never refuses the next Codex launches in that
-/// home: each launch clears what pins the folder, moves it away and removes it, parking nothing.
+/// CTX-M1 residual (rv-secreview r2 I3), V231-ACL: an earlier run that pinned Codex's own
+/// `skills/.system` with an ACL denying its removal or a mode without write, or left inside it
+/// a folder without write, an immutable folder, an immutable file, a file or link whose own ACL
+/// denies its removal, or a folder with no access holding an immutable file, never refuses the
+/// next Codex launches there: each launch clears what pins the folder, moves it away and
+/// removes it, parking nothing (ACL r1 F1: the immutable folder needs the folder flag pass).
 #[cfg(target_os = "macos")]
 #[test]
 fn pinned_codex_system_skills_never_refuse_the_next_launches() {
-    for pin in ["acl", "mode", "inner mode", "inner flag"] {
+    let pins = [
+        "acl",
+        "mode",
+        "inner mode",
+        "inner folder flag",
+        "inner flag",
+        "inner acl",
+        "inner link acl",
+        "closed folder",
+    ];
+    for pin in pins {
         let directory = tempfile::tempdir().unwrap();
         let _unpinned = Unpinned(directory.path().to_path_buf());
         let home = directory.path().canonicalize().unwrap().join("codex");
@@ -864,6 +889,7 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
@@ -878,6 +904,16 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
                 "acl" => chmod(&["+a", "everyone deny delete"], &system),
                 "mode" => chmod(&["0500"], &system),
                 "inner mode" => chmod(&["0500"], &planted),
+                "inner folder flag" => chflags("uchg", &planted),
+                "inner acl" => chmod(&["+a", "everyone deny delete"], &planted.join("SKILL.md")),
+                "inner link acl" => {
+                    let link = planted.join("link");
+                    std::os::unix::fs::symlink("SKILL.md", &link).unwrap();
+                    chmod(&["-h", "+a", "everyone deny delete"], &link)
+                }
+                "closed folder" => {
+                    chflags("uchg", &planted.join("SKILL.md")) && chmod(&["0000"], &planted)
+                }
                 _ => chflags("uchg", &planted.join("SKILL.md")),
             };
             assert!(pinned, "{pin}: launch {launch} pins the planted skills");
@@ -919,6 +955,7 @@ fn listed(folders: &[&Path]) -> String {
         .arg("-ledn")
         .args(folders)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let output = crate::spawn_gate::output(&mut command).unwrap();
     assert!(output.status.success());
@@ -950,6 +987,7 @@ fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -1022,6 +1060,7 @@ fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -1048,13 +1087,13 @@ fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
     }
 }
 
-/// team-19 r1 (rv-secreview L1): a Codex launch through `install` whose earlier skills, Codex's
-/// own system skills or the engine's copies, cannot be moved out of the home, here because a
-/// Full access agent denied removals in its own home with an ACL the engine leaves alone, is
-/// refused with an ordinary error and leaves them where they are.
+/// team-19 r1 (rv-secreview L1), DEC-141 PA-19: a Codex launch through `install` whose earlier
+/// skills, Codex's own system skills or the engine's copies, sit in a home where a Full access
+/// agent denied removals with an ACL, releases the home at its fixed path, moves them out and
+/// starts, as a Claude Code launch in that home does.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_codex_install_that_cannot_move_earlier_skills_out_of_its_home_is_refused() {
+fn a_codex_install_moves_earlier_skills_out_of_a_home_that_denies_removals() {
     for entry in [CODEX_SYSTEM_SKILLS, STATE] {
         let directory = tempfile::tempdir().unwrap();
         let _unpinned = Unpinned(directory.path().to_path_buf());
@@ -1074,6 +1113,7 @@ fn a_codex_install_that_cannot_move_earlier_skills_out_of_its_home_is_refused() 
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
@@ -1084,14 +1124,337 @@ fn a_codex_install_that_cannot_move_earlier_skills_out_of_its_home_is_refused() 
 
         assert_eq!(
             launch.as_ref().err().map(|problem| problem.0.as_str()),
-            Some(SKILLS_KEPT),
-            "{entry}: a launch that keeps earlier skills is refused"
+            None,
+            "{entry}: a home denying removals refuses the launch"
         );
         assert!(
-            planted.exists(),
-            "{entry}: the refusal leaves the skills it could not move"
+            !planted.exists(),
+            "{entry}: the launch leaves earlier skills for Codex to load"
         );
     }
+}
+
+/// DEC-141 PA-19, ACL r1 F2: what an earlier run left pinned in an agent home, an ACL on the
+/// home that denies new folders and removals or one that denies listing it, an ACL on `skills`
+/// that denies its removal, a `skills` folder without write or an immutable file at `skills`,
+/// refuses no launch of any harness. Codex, which loads skills from its home, has those pins
+/// released and starts with an empty `skills` folder, on the same terms as Claude Code and RCLI.
+#[cfg(target_os = "macos")]
+#[test]
+fn skills_left_pinned_in_a_home_refuse_no_launch_of_any_harness() {
+    let pins = [
+        "home acl",
+        "home list acl",
+        "skills acl",
+        "skills mode",
+        "skills file flag",
+    ];
+    for harness in ["claude-code", "codex", "rcli"] {
+        for pin in pins {
+            let directory = tempfile::tempdir().unwrap();
+            let _unpinned = Unpinned(directory.path().to_path_buf());
+            let home = directory.path().canonicalize().unwrap().join("home");
+            fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+            let skills = home.join("skills");
+            if pin == "home acl" || pin == "home list acl" {
+                let planted = skills.join(CODEX_SYSTEM_SKILLS).join("planted");
+                fs::create_dir_all(&planted).unwrap();
+                fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
+                let denied = if pin == "home acl" {
+                    "everyone deny add_subdirectory,delete_child"
+                } else {
+                    "everyone deny list"
+                };
+                assert!(chmod(&["+a", denied], &home), "{harness}, {pin}: pinned");
+            } else if pin == "skills acl" {
+                fs::create_dir_all(skills.join(CODEX_SYSTEM_SKILLS)).unwrap();
+                let denied = &["+a", "everyone deny delete"];
+                assert!(chmod(denied, &skills), "{harness}, {pin}: pinned");
+            } else if pin == "skills mode" {
+                fs::create_dir_all(skills.join(CODEX_SYSTEM_SKILLS)).unwrap();
+                assert!(chmod(&["0500"], &skills), "{harness}, {pin}: pinned");
+            } else {
+                fs::write(&skills, "planted\n").unwrap();
+                assert!(chflags("uchg", &skills), "{harness}, {pin}: pinned");
+            }
+
+            let held = lock_only(&home, harness);
+
+            assert_eq!(
+                held.as_ref().err().map(|problem| problem.0.as_str()),
+                None,
+                "{harness}, {pin}: the launch is refused"
+            );
+            if harness == "codex" {
+                let empty = fs::read_dir(&skills).is_ok_and(|mut entries| entries.next().is_none());
+                assert!(empty, "{harness}, {pin}: skills left for Codex to load");
+            }
+            drop(held);
+        }
+    }
+}
+
+/// DEC-141 PA-19: a `skills` file an agent hard-linked to an owner's file the owner made
+/// immutable and gave an ACL entry is the one pin a Codex launch does not release, since
+/// releasing it would clear the owner's pins; that launch is refused with [`SKILLS_KEPT`] and
+/// the owner's flag and ACL entry stay.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_entry_linked_to_an_owner_s_immutable_file_keeps_its_flag_and_refuses_codex() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner = root.join("owner.txt");
+    fs::write(&owner, "owner\n").unwrap();
+    fs::hard_link(&owner, home.join("skills")).unwrap();
+    assert!(
+        chmod(&["+a", "everyone deny write"], &owner),
+        "the owner adds an ACL entry"
+    );
+    assert!(
+        chflags("uchg", &owner),
+        "the owner makes the file immutable"
+    );
+
+    let held = lock_only(&home, "codex");
+
+    assert_eq!(
+        held.err().map(|problem| problem.0),
+        Some(SKILLS_KEPT.to_owned())
+    );
+    assert!(immutable(&owner), "the launch cleared the owner's flag");
+    assert!(
+        listed(&[&owner]).contains("deny write"),
+        "the launch cleared the owner's ACL"
+    );
+}
+
+/// PALOW-M1: a process an earlier run left that swaps `skills`, a file it pinned, for a hard
+/// link to an owner's file with an immutable flag and an ACL entry, after the launch checked
+/// the entry and before it released it, leaves the owner's file as it was: the release acts on
+/// the descriptor it checked, never on the name, and the Codex launch is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_entry_swapped_for_an_owner_s_file_during_its_release_keeps_the_owner_s_pins() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner = root.join("owner.txt");
+    fs::write(&owner, "owner\n").unwrap();
+    let skills = home.join("skills");
+    fs::write(&skills, "planted\n").unwrap();
+    assert!(chflags("uchg", &skills), "the agent pins its skills file");
+    let (swapped, linked) = (skills.clone(), owner.clone());
+    AFTER_SKILLS_OPEN.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            assert!(chflags("nouchg", &swapped));
+            fs::remove_file(&swapped).unwrap();
+            fs::hard_link(&linked, &swapped).unwrap();
+            assert!(chmod(&["+a", "everyone deny write"], &linked));
+            assert!(chflags("uchg", &linked));
+        }));
+    });
+
+    let held = lock_only(&home, "codex");
+
+    assert!(
+        AFTER_SKILLS_OPEN.with(|step| step.borrow().is_none()),
+        "the release never reached the swap"
+    );
+    assert_eq!(
+        held.err().map(|problem| problem.0),
+        Some(SKILLS_KEPT.to_owned())
+    );
+    assert!(immutable(&owner), "the release cleared the owner's flag");
+    assert!(
+        listed(&[&owner]).contains("deny write"),
+        "the release cleared the owner's ACL"
+    );
+}
+
+/// V231-ACL (DEC-141 PA-19): a Codex `skills` folder whose removal beside the home needs a
+/// release, because a folder in it has no write, leaves an owner's file that folder holds a
+/// hard link to and a file its link names with their ACL entry and mode: the release changes
+/// nothing with a second link and follows no link. The launch starts and nothing stays parked.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_released_skills_folder_leaves_an_owner_s_linked_file_and_a_link_s_target_as_they_were() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let skills = home.join("skills");
+    let kept = skills.join("kept");
+    fs::create_dir_all(&kept).unwrap();
+    let (owner, target) = (root.join("owner.txt"), root.join("target.txt"));
+    for file in [&owner, &target] {
+        fs::write(file, "owner\n").unwrap();
+        assert!(
+            chmod(&["+a", "everyone deny write"], file),
+            "the owner adds an ACL entry"
+        );
+        assert!(chmod(&["0400"], file), "the owner makes the file read only");
+    }
+    fs::hard_link(&owner, kept.join("linked")).unwrap();
+    std::os::unix::fs::symlink(&target, kept.join("link")).unwrap();
+    assert!(
+        chmod(&["0500"], &kept),
+        "the agent takes write off a folder"
+    );
+
+    let held = lock_only(&home, "codex");
+
+    assert_eq!(held.as_ref().err().map(|problem| problem.0.as_str()), None);
+    assert!(fs::read_dir(&skills).is_ok_and(|mut entries| entries.next().is_none()));
+    for (file, name) in [(&owner, "linked file"), (&target, "link's target")] {
+        assert!(
+            listed(&[file]).contains("deny write"),
+            "the release cleared the ACL of the {name}"
+        );
+        let mode = fs::symlink_metadata(file).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o400, "the release changed the mode of the {name}");
+    }
+    let parked = fs::read_dir(&root)
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        .filter(|name| name.starts_with(&format!(".{STATE}-parked-")))
+        .collect::<Vec<_>>();
+    assert!(parked.is_empty(), "the launch parks {parked:?}");
+    drop(held);
+}
+
+/// ACL r1 F2 (DEC-141 PA-19): a Codex `skills` folder without write, which cannot move to a
+/// new parent, gains the owner's write through the descriptor its release opened, never its
+/// name: a process an earlier run left that moves the folder aside and links an owner's read
+/// only file with an ACL entry at `skills` meanwhile leaves the owner's file with its mode and
+/// ACL entry, the moved folder opened up, and the launch with an empty `skills` folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_folder_without_write_is_opened_up_through_its_descriptor_never_its_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner = root.join("owner.txt");
+    fs::write(&owner, "owner\n").unwrap();
+    assert!(
+        chmod(&["+a", "everyone deny write"], &owner),
+        "the owner adds an ACL entry"
+    );
+    assert!(
+        chmod(&["0400"], &owner),
+        "the owner makes the file read only"
+    );
+    let skills = home.join("skills");
+    fs::create_dir_all(skills.join(CODEX_SYSTEM_SKILLS)).unwrap();
+    assert!(
+        chmod(&["0500"], &skills),
+        "the agent takes write off skills"
+    );
+    let moved = home.join("skills.moved");
+    let (swapped, aside, linked) = (skills.clone(), moved.clone(), owner.clone());
+    AFTER_SKILLS_OPEN.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            fs::rename(&swapped, &aside).unwrap();
+            fs::hard_link(&linked, &swapped).unwrap();
+        }));
+    });
+
+    let held = lock_only(&home, "codex");
+
+    assert!(
+        AFTER_SKILLS_OPEN.with(|step| step.borrow().is_none()),
+        "the release never reached the swap"
+    );
+    assert_eq!(held.as_ref().err().map(|problem| problem.0.as_str()), None);
+    assert!(
+        listed(&[&owner]).contains("deny write"),
+        "the release cleared the owner's ACL"
+    );
+    let mode = |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode(&owner), 0o400, "the release changed the owner's mode");
+    assert_eq!(
+        mode(&moved),
+        0o700,
+        "the release left the folder without write"
+    );
+    assert!(fs::read_dir(&skills).is_ok_and(|mut entries| entries.next().is_none()));
+    drop(held);
+}
+
+/// ACL r1 F2 residual (DEC-141 PA-19): a Codex `skills` folder with no access at all opens for
+/// no descriptor and cannot move to a new parent, and is never opened up by its name, which a
+/// process an earlier run left could swap for an owner's file: that Codex launch is refused
+/// with [`SKILLS_KEPT`] and the folder is left as it was, while a Claude Code launch starts.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_folder_with_no_access_refuses_codex_and_is_left_as_it_was() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let skills = home.join("skills");
+    fs::create_dir_all(skills.join(CODEX_SYSTEM_SKILLS)).unwrap();
+    assert!(
+        chmod(&["0000"], &skills),
+        "the agent takes all access off skills"
+    );
+
+    let refused = lock_only(&home, "codex");
+
+    assert_eq!(
+        refused.err().map(|problem| problem.0),
+        Some(SKILLS_KEPT.to_owned())
+    );
+    let mode = fs::symlink_metadata(&skills).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode, 0, "the refused launch changed the folder's mode");
+    let started = lock_only(&home, "claude-code");
+    assert_eq!(
+        started.as_ref().err().map(|problem| problem.0.as_str()),
+        None
+    );
+    drop(started);
+}
+
+/// ACL r1 F2 (DEC-141 PA-19): the one home [`release`] clears by its path, with a `chmod -N`
+/// that would follow a link, is never a link: one given a link to an owner's folder with an
+/// ACL entry stops before any tool runs, and the owner's folder keeps its ACL entry.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_released_by_its_path_is_never_a_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let owner = root.join("owner");
+    fs::DirBuilder::new().mode(0o700).create(&owner).unwrap();
+    assert!(
+        chmod(&["+a", "everyone deny delete"], &owner),
+        "the owner adds an ACL entry"
+    );
+    let link = root.join("codex");
+    std::os::unix::fs::symlink(&owner, &link).unwrap();
+
+    let released = std::panic::catch_unwind(|| release(&link, false));
+
+    let stop = released.expect_err("a link was released by its path");
+    let message = stop
+        .downcast_ref::<&str>()
+        .map(|text| text.to_string())
+        .or_else(|| stop.downcast_ref::<String>().cloned());
+    assert_eq!(
+        message.as_deref(),
+        Some("a home released by its path is never a link")
+    );
+    assert!(
+        listed(&[&owner]).contains("deny delete"),
+        "the release cleared the ACL of the link's target"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -1115,6 +1478,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -1278,6 +1642,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         transcripts: false,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -1472,6 +1837,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -1568,6 +1934,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
@@ -1651,6 +2018,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -1774,6 +2142,7 @@ impl LeftPane {
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
@@ -1968,6 +2337,7 @@ fn the_restart_sentence_reaches_only_a_sub_agent_in_its_own_clone() {
         transcripts: false,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -2016,6 +2386,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -2107,6 +2478,7 @@ fn context_with(
         transcripts: true,
         off_tools,
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -2238,8 +2610,11 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
     drop(installed);
 }
 
+/// Every Claude Code launch gets the message relay plugin; a Codex launch gets no plugin
+/// but its edit guard hook in `config.toml` (PA-12): one `PreToolUse` group on the patch
+/// tool and the shell running the engine's `codex-edit` hook on its mailbox.
 #[test]
-fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_none() {
+fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_the_edit_guard_hook() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let engine = root.join("bin").join("crazyagent");
@@ -2265,13 +2640,115 @@ fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_none() {
     }
 
     let codex = private_home(&root, "codex");
+    let mailbox = root.join("mailbox-codex");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_relay(&engine, &mailbox)
+        .install("codex", &codex, true)
+        .unwrap();
+    assert!(installed.arguments().is_empty());
+    assert!(installed.runs_hooks());
+    assert!(!codex.join(crate::coord::relay::PLUGIN_FOLDER).exists());
+    assert!(
+        mailbox.is_dir(),
+        "the engine serves the mailbox the guard asks through"
+    );
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let hooks = config["hooks"].as_table().unwrap();
+    assert_eq!(hooks.keys().collect::<Vec<_>>(), ["PreToolUse", "state"]);
+    let group = &hooks["PreToolUse"].as_array().unwrap()[0];
+    assert_eq!(group["matcher"].as_str(), Some("apply_patch|Bash"));
+    let handler = &group["hooks"].as_array().unwrap()[0];
+    assert_eq!(handler["type"].as_str(), Some("command"));
+    assert_eq!(
+        handler["command"].as_str().unwrap(),
+        format!(
+            "'{}' coord-hook codex-edit '{}'",
+            engine.display(),
+            mailbox.display()
+        )
+    );
+    assert_eq!(handler["timeout"].as_integer(), Some(15));
+    drop(installed);
+
+    let plain = private_home(&root, "codex-plain");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .install("codex", &plain, true)
+        .unwrap();
+    assert!(!installed.runs_hooks());
+    let config: toml::Table = fs::read_to_string(plain.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(!config.contains_key("hooks"), "no relay, no guard hook");
+    drop(installed);
+}
+
+/// PA1213 security F1: a Codex launch never lifts hook review. Its `config.toml` pins the
+/// trust hash of each hook the engine wrote, under the key Codex 0.167.1 reads
+/// (`<canonical home>/config.toml:<label>:<group>:<handler>`), so a hook an agent adds in
+/// its worktree stays held for review. The hashes match vectors proven live on Codex
+/// 0.167.1 with a stand-in home, and Codex's matcher and timeout normalizing is kept.
+#[test]
+fn a_codex_launch_pins_only_its_own_hooks_and_never_bypasses_hook_trust() {
+    let pinned = |event: &str, matcher: Option<&str>, timeout: Option<u32>| {
+        codex_hook_hash(&codex_hook(event, matcher, "echo hi".to_owned(), timeout).unwrap())
+    };
+    assert_eq!(
+        pinned("PreToolUse", Some("apply_patch|Bash"), Some(15)),
+        "sha256:fb1e14c710eaa3bd057e6917169ae3318e54399b7bc942693b8595fdb7ccabb3"
+    );
+    assert_eq!(
+        pinned("SessionStart", None, None),
+        "sha256:a245b9b8493f2be82aea06c373ef42709b417c1b701a54e5ab76ab728777f4ad"
+    );
+    assert_eq!(
+        pinned("Stop", Some("ignored"), None),
+        "sha256:f2aa169c7a1cf9b7cc9b61ce5ecec0315e0f7d13ac35935b1aa74440f9a839f8"
+    );
+    assert!(codex_hook("Notification", None, "echo hi".to_owned(), None).is_none());
+    let end = codex_hook("SessionEnd", None, "echo hi".to_owned(), Some(30)).unwrap();
+    assert_eq!(end.timeout, 3);
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let engine = root.join("bin").join("crazyagent");
+    let codex = private_home(&root, "codex");
     let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
         .with_relay(&engine, &root.join("mailbox-codex"))
         .install("codex", &codex, true)
         .unwrap();
-    assert!(installed.arguments().is_empty());
-    assert!(!installed.runs_hooks());
-    assert!(!codex.join(crate::coord::relay::PLUGIN_FOLDER).exists());
+    let text = fs::read_to_string(codex.join("config.toml")).unwrap();
+    assert!(!text.contains("bypass"), "{text}");
+    let config: toml::Table = text.parse().unwrap();
+    let hooks = config["hooks"].as_table().unwrap();
+    let group = &hooks["PreToolUse"].as_array().unwrap()[0];
+    let handler = &group["hooks"].as_array().unwrap()[0];
+    let written = CodexHook {
+        event: "PreToolUse",
+        label: "pre_tool_use",
+        matcher: group["matcher"].as_str().map(str::to_owned),
+        command: handler["command"].as_str().unwrap().to_owned(),
+        timeout: u32::try_from(handler["timeout"].as_integer().unwrap()).unwrap(),
+    };
+    let key = format!(
+        "{}:pre_tool_use:0:0",
+        codex.canonicalize().unwrap().join("config.toml").display()
+    );
+    let state = hooks["state"].as_table().unwrap();
+    assert_eq!(state.keys().collect::<Vec<_>>(), [&key]);
+    assert_eq!(
+        state[&key]["trusted_hash"].as_str(),
+        Some(codex_hook_hash(&written).as_str())
+    );
+    assert_eq!(
+        codex_pinned_keys(&codex),
+        Some(vec![key]),
+        "the engine reads back the keys it asks Codex about (PA1213R2-F2)"
+    );
+    assert_eq!(codex_pinned_keys(&root.join("no-home")), None);
     drop(installed);
 }
 
@@ -2313,6 +2790,77 @@ fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
     assert!(installed.native().is_none());
     assert!(!off.join(STATE).join(TEAMMATE_INSTRUCTIONS).exists());
     drop(installed);
+}
+
+/// PA-7: a Codex lead in the Native mode gets Codex 0.164's multi-agent v2 on in its
+/// `config.toml`, its sub-agents capped at Max teammates, started with the lead's own
+/// instructions plus the sub-agent section, offered no model or effort on spawn and given no
+/// default that would reset the effort (r1); tools off, App-spawned or Claude Code get none.
+#[test]
+fn a_native_codex_lead_turns_codex_sub_agents_on_with_their_own_instructions_and_cap() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let lead = private_home(&root, "codex-lead");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_native_sub_agents(4)
+        .install("codex", &lead, true)
+        .unwrap();
+    assert!(installed.native_threads());
+    assert!(installed.native().is_none());
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(lead.join("config.toml")).unwrap()).unwrap();
+    let v2 = &config["features"]["multi_agent_v2"];
+    assert_eq!(v2["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        v2["expose_spawn_agent_model_overrides"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(config["agents"]["max_threads"].as_integer(), Some(4));
+    for unset in [
+        "default_subagent_model",
+        "default_subagent_reasoning_effort",
+    ] {
+        assert!(config["agents"].get(unset).is_none(), "{unset}");
+    }
+    let own = config["developer_instructions"].as_str().unwrap();
+    let sub = v2["subagent_developer_instructions"].as_str().unwrap();
+    assert!(sub.starts_with(own), "{sub}");
+    let section = &sub[own.len()..];
+    assert!(section.contains("## You are a sub-agent"), "{section}");
+    for tool in [
+        crate::team::tool::START_WORK_TOOL,
+        crate::team::tool::UPDATE_WORK_TOOL,
+        crate::team::tool::TRANSFER_WORK_TOOL,
+        crate::team::tool::FINISH_WORK_TOOL,
+        crate::team::tool::SPAWN_TOOL,
+        crate::team::tool::STOP_TOOL,
+        crate::team::tool::MERGE_TOOL,
+    ] {
+        assert!(section.contains(tool), "{tool}: {section}");
+    }
+    drop(installed);
+
+    for (name, harness, tools, native) in [
+        ("codex-off", "codex", false, Some(4)),
+        ("codex-spawned", "codex", true, None),
+        ("claude-lead", "claude-code", true, Some(4)),
+    ] {
+        let home = private_home(&root, name);
+        let mut context = context_with(&root, LaunchPlugins::default(), Vec::new());
+        if let Some(cap) = native {
+            context = context.with_native_sub_agents(cap);
+        }
+        let installed = context.install(harness, &home, tools).unwrap();
+        assert!(!installed.native_threads(), "{name}");
+        let config = fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+        assert!(!config.contains("multi_agent_v2"), "{name}: {config}");
+        assert!(!config.contains("max_threads"), "{name}: {config}");
+        assert!(
+            !config.contains("expose_spawn_agent_model_overrides"),
+            "{name}: {config}"
+        );
+        drop(installed);
+    }
 }
 
 /// Cuts the "Tools to use" section out of one launch's instructions, up to the next
@@ -2816,6 +3364,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -2887,10 +3436,68 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
     assert!(!off.join(STATE).join("plugin").exists());
     drop(installed);
 
+    let mut both = context;
+    if let Some(process) = both.process.as_mut() {
+        process.hooks.push(hook("Notification", None, None));
+    }
     let codex = home("codex");
-    let installed = context.install("codex", &codex, true).unwrap();
-    assert!(!installed.runs_hooks(), "Codex launches get no hooks");
+    let installed = both.install("codex", &codex, true).unwrap();
+    assert!(
+        installed.runs_hooks(),
+        "Codex runs the owner's hooks on its own events (PA-12)"
+    );
     assert!(!codex.join(STATE).join("plugin").exists());
+    let copy = codex.join(STATE).join(HOOK_PLUGINS).join("hk-caveman");
+    assert_eq!(
+        fs::read_to_string(copy.join("hooks").join("start.sh")).unwrap(),
+        script
+    );
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let events = config["hooks"].as_table().unwrap();
+    assert_eq!(
+        events.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["PreToolUse", "SessionStart", "state"],
+        "Notification is a Claude Code event Codex has not"
+    );
+    let search = &events["PreToolUse"].as_array().unwrap()[0];
+    assert_eq!(search["matcher"].as_str(), Some("Grep|Glob"));
+    assert_eq!(
+        search["hooks"].as_array().unwrap()[0]["timeout"].as_integer(),
+        Some(5)
+    );
+    let start = &events["SessionStart"].as_array().unwrap()[0];
+    assert!(start.get("matcher").is_none());
+    let command = start["hooks"].as_array().unwrap()[0]["command"]
+        .as_str()
+        .unwrap();
+    let ran = crate::spawn_gate::output(
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(ran.status.success(), "{ran:?}");
+    assert_eq!(
+        String::from_utf8(ran.stdout).unwrap(),
+        format!("root={}\n", copy.display()),
+        "a Codex hook runs from its own copy with the plugin root set to it"
+    );
+    drop(installed);
+
+    let codex_off = home("codex-off");
+    let installed = both.install("codex", &codex_off, false).unwrap();
+    assert!(
+        !installed.runs_hooks(),
+        "tools off gives Codex no hooks either"
+    );
     drop(installed);
 }
 
@@ -2976,6 +3583,7 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -3720,4 +4328,191 @@ fn the_team_tools_section_asks_for_log_activity_only_while_it_is_on() {
     assert!(on.len() <= TOOLS_SECTION_BYTES_MAX);
     let off = team_tools_section(&["log_activity".to_owned()], true, false);
     assert!(!off.contains("log_activity"), "{off}");
+}
+
+/// Answers one model request the way the Responses API streams a short reply, and keeps the
+/// request's body: a stand-in for a model server, so a real Codex runs with no account. A
+/// request other than a POST gets 404. Inputs: the connection and the kept bodies.
+#[cfg(target_os = "macos")]
+fn answer_as_responses(stream: std::net::TcpStream, bodies: &std::sync::Mutex<Vec<String>>) {
+    use std::io::{BufRead, Read, Write};
+    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+    let mut first = String::new();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        if first.is_empty() {
+            first = line.clone();
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut stream = stream;
+    if !first.starts_with("POST ") {
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    let mut body = vec![0; length.min(8 * 1024 * 1024)];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    bodies
+        .lock()
+        .unwrap()
+        .push(String::from_utf8_lossy(&body).into_owned());
+    let message = serde_json::json!({"type": "message", "role": "assistant", "id": "m1",
+        "content": [{"type": "output_text", "text": "ok"}]});
+    let events = [
+        serde_json::json!({"type": "response.created", "response": {"id": "r1"}}),
+        serde_json::json!({"type": "response.output_item.done", "output_index": 0, "item": message}),
+        serde_json::json!({"type": "response.completed", "response": {"id": "r1", "usage": {
+            "input_tokens": 1, "input_tokens_details": null, "output_tokens": 1,
+            "output_tokens_details": null, "total_tokens": 2}}}),
+    ];
+    let data: String = events
+        .iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        data.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(data.as_bytes());
+}
+
+/// DEC-141 PA-18: a real Codex resumed with `codex exec resume <id>` after the owner changed
+/// the instructions is given the new AGENTS.md text the engine's launch wrote and told it
+/// replaces the old. Only this exec form is driven; the TUI `resume <id>` the engine runs in a
+/// pane, plain or behind the app-server bridge, needs a terminal and is not (PALOW-L1). The
+/// model is a stand-in server, so no account is used.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "live qualification: needs codex in /opt/homebrew/bin"]
+fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
+    let binary = fs::canonicalize("/opt/homebrew/bin/codex")
+        .unwrap_or_else(|_| panic!("BLOCKED: codex is not installed in /opt/homebrew/bin"));
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let data = root.join("data");
+    let work = root.join("work");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = bodies.clone();
+    std::thread::spawn(move || {
+        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+            answer_as_responses(stream, &sink);
+        }
+    });
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: Some(Box::new(Process {
+            project: crate::agent_home::AgentProject {
+                data: data.clone(),
+                id: ProjectId::new("resume").unwrap(),
+                folder: None,
+                mode: crate::instruction_files::Mode::Both,
+                repeated: crate::agent_home::Repeated::LeaveOut,
+            },
+            hooks: Vec::new(),
+            agent: String::new(),
+        })),
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        native_threads: None,
+        relay: None,
+        model_proxy: None,
+        terminal_display: TerminalDisplay::Classic,
+        catch_up_main: true,
+    };
+    let base_url = format!("model_providers.stand.base_url=\"http://127.0.0.1:{port}/v1\"");
+    let codex = |turn: &[&str]| -> String {
+        let mut command = std::process::Command::new(&binary);
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("CODEX_HOME", &home)
+            .env("TMPDIR", &home)
+            .args([
+                "exec",
+                "-c",
+                "model_provider=\"stand\"",
+                "-c",
+                "model=\"stand-model\"",
+            ])
+            .args([
+                "-c",
+                "model_providers.stand.name=\"stand\"",
+                "-c",
+                base_url.as_str(),
+            ])
+            .args(["-c", "model_providers.stand.wire_api=\"responses\""])
+            .args(["--skip-git-repo-check", "-C"])
+            .arg(&work)
+            .args(turn)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = crate::spawn_gate::output(&mut command).unwrap();
+        let shown = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{shown}");
+        shown
+    };
+
+    crate::agent_home::save_app(&data, "OWNER-ALPHA-41\n").unwrap();
+    let first = context.install("codex", &home, false).unwrap();
+    let shown = codex(&["first message"]);
+    drop(first);
+    let session = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("session id: "))
+        .unwrap_or_else(|| panic!("no session id: {shown}"))
+        .trim()
+        .to_owned();
+    crate::agent_home::save_app(&data, "OWNER-BETA-42\n").unwrap();
+    let second = context.install("codex", &home, false).unwrap();
+    codex(&["resume", &session, "second message"]);
+    drop(second);
+
+    let bodies = bodies.lock().unwrap();
+    assert!(bodies.len() >= 2, "a request per turn: {}", bodies.len());
+    let (opened, resumed) = (&bodies[0], &bodies[bodies.len() - 1]);
+    assert!(opened.contains("OWNER-ALPHA-41") && !opened.contains("OWNER-BETA-42"));
+    assert!(
+        resumed.contains("OWNER-BETA-42"),
+        "the resumed turn is not given the new text"
+    );
+    assert!(
+        resumed.contains(
+            "These AGENTS.md instructions replace all previously provided AGENTS.md instructions."
+        ),
+        "the resumed turn is not told the new text replaces the old"
+    );
 }

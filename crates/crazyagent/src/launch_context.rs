@@ -11,6 +11,7 @@ use rusqlite::{Connection, Transaction};
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs::{self, File};
 #[cfg(unix)]
@@ -170,6 +171,7 @@ pub struct AgentContext {
     transcripts: bool,
     off_tools: Vec<(String, Vec<String>)>,
     native_team: Option<(PathBuf, PathBuf)>,
+    native_threads: Option<u8>,
     relay: Option<(PathBuf, PathBuf)>,
     model_proxy: Option<u16>,
     terminal_display: TerminalDisplay,
@@ -200,6 +202,7 @@ pub struct Installed {
     relay: bool,
     denied: Vec<String>,
     native: Option<NativeTeam>,
+    native_threads: bool,
     model_proxy: Option<u16>,
     terminal_display: TerminalDisplay,
     _lock: File,
@@ -266,6 +269,7 @@ pub fn for_project(
         transcripts,
         off_tools,
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -346,6 +350,20 @@ fn teammate_section(worktree: &Path) -> Result<String, LaunchError> {
     Ok(format!(
         "\n## You are a teammate\n\nYou are a teammate in the Claude Code agent team of a CrazyAgent lead, which works in `{folder}`. Your own worktree has no project graph: run graphify with `--graph {folder}/graphify-out/graph.json`.\n"
     ))
+}
+
+/// The part only a native Codex lead's sub-agents read after the lead's own instructions
+/// (PA-7): they share the lead's worktree, task and team tools, whose calls the engine
+/// answers as the lead's, so they leave the work and lead tools and their own sub-agents to
+/// the lead. Input: nothing. Output: the section.
+fn codex_sub_agent_section() -> String {
+    use crate::team::tool::{
+        FINISH_WORK_TOOL, MERGE_TOOL, SPAWN_TOOL, START_WORK_TOOL, STOP_TOOL, TRANSFER_WORK_TOOL,
+        UPDATE_WORK_TOOL,
+    };
+    format!(
+        "\n## You are a sub-agent\n\nYou are a Codex sub-agent your CrazyAgent lead started. You work in your lead's worktree on its task: change only the files your lead gave you. The CrazyAgent team tools answer as your lead, so never call {START_WORK_TOOL}, {UPDATE_WORK_TOOL}, {TRANSFER_WORK_TOOL}, {FINISH_WORK_TOOL}, {SPAWN_TOOL}, {STOP_TOOL} or {MERGE_TOOL}, and start no sub-agents of your own. When you are done, tell your lead what you changed.\n"
+    )
 }
 
 /// Where a native-team lead's launch writes the command Claude Code runs for each teammate
@@ -706,6 +724,17 @@ impl AgentContext {
         self
     }
 
+    /// Lets a Codex lead with tools on run Codex's own sub-agents (DEC-141 PA-7, native mode):
+    /// multi-agent v2 on, at most `cap` sub-agents open at once, each started with the lead's
+    /// instructions plus the sub-agent section. Claude Code gets its team through
+    /// `with_native_team`; other harnesses and tools-off launches ignore it. Input: the cap,
+    /// 1 or more. Output: the context.
+    pub fn with_native_sub_agents(mut self, cap: u8) -> Self {
+        assert!(cap > 0);
+        self.native_threads = Some(cap);
+        self
+    }
+
     /// Sends a team agent's model traffic through its model proxy (S4b): its launch gets
     /// `HTTPS_PROXY` and `HTTP_PROXY` naming the proxy on 127.0.0.1 and an empty `NO_PROXY`,
     /// and its pane record keeps the port for a later engine. Input: the proxy's port.
@@ -727,8 +756,9 @@ impl AgentContext {
 
     /// Gives a team agent's Claude Code launch the message relay plugin (DEC-104 K2a), which
     /// delivers its team messages and reports its activity through its mailbox, and which its
-    /// native teammates get from it. Other harnesses ignore it. Input: the absolute engine
-    /// executable the relay runs and the agent's absolute mailbox. Output: the context.
+    /// native teammates get from it; a Codex launch gets the same mailbox's edit guard hook
+    /// (PA-12). Input: the absolute engine executable the relay runs and the agent's absolute
+    /// mailbox. Output: the context.
     pub fn with_relay(mut self, engine: &Path, mailbox: &Path) -> Self {
         self.relay = Some((engine.to_path_buf(), mailbox.to_path_buf()));
         self
@@ -995,6 +1025,7 @@ impl AgentContext {
             relay: false,
             denied: Vec::new(),
             native: None,
+            native_threads: false,
             model_proxy: self.model_proxy,
             terminal_display: self.terminal_display,
             _lock: lock,
@@ -1067,8 +1098,43 @@ impl AgentContext {
                         + SKILLS_INDEX_BYTES_MAX
                         + SECTION_SLACK
             );
+            let mut config_hooks = Vec::new();
+            if let Some((engine, mailbox)) = &self.relay {
+                let command = crate::coord::relay::codex_edit_hook(mailbox, engine)
+                    .map_err(|problem| LaunchError(problem.0, None))?;
+                config_hooks.extend(codex_hook(
+                    "PreToolUse",
+                    Some(crate::coord::relay::CODEX_EDIT_MATCHER),
+                    command,
+                    Some(crate::coord::hook::Event::CodexEdit.timeout_seconds()),
+                ));
+                installed.relay = true;
+            }
+            let owner = codex_hooks(&state, hooks)?;
+            installed.hooks = !owner.is_empty();
+            config_hooks.extend(owner);
+            let source = std::fs::canonicalize(home)
+                .map_err(|_| failure("launch_context_hook_unavailable"))?
+                .join("config.toml");
+            let native = self.native_threads.filter(|_| tools);
+            let sub_agents = native.map(|cap| {
+                let mut sub = developer.clone();
+                sub.push_str(&codex_sub_agent_section());
+                (cap, sub)
+            });
+            installed.native_threads = sub_agents.is_some();
             remove(&config);
-            write_secret(&config, codex_config(&developer, servers, &self.off_tools)?)?;
+            write_secret(
+                &config,
+                codex_config(
+                    &developer,
+                    servers,
+                    &self.off_tools,
+                    &config_hooks,
+                    &source.to_string_lossy(),
+                    sub_agents.as_ref(),
+                )?,
+            )?;
         } else {
             installed.denied = denied_tools(servers, &self.off_tools);
             let mcp = state.join("mcp.json");
@@ -1152,11 +1218,12 @@ impl AgentContext {
             files.home == home && files.removals().iter().all(|path| path.starts_with(home))
         }));
         assert!(installed.arguments.len() <= 8);
-        assert!(!installed.hooks || (id == "claude-code" && !hooks.is_empty()));
-        assert!(!installed.relay || id == "claude-code");
+        assert!(!installed.hooks || !hooks.is_empty());
+        assert!(!installed.relay || self.relay.is_some());
         assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
         assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
         assert!(installed.native.is_none() || (id == "claude-code" && tools));
+        assert!(!installed.native_threads || (id == "codex" && tools));
         assert!(installed.model_proxy.is_none() || tools);
         Ok(installed)
     }
@@ -1191,13 +1258,14 @@ impl Installed {
     }
 
     /// Tells whether a headless Claude run of this launch keeps its transcript, as the
-    /// project's "Keep transcripts for headless Claude runs" setting says.
+    /// project's "Keep transcripts for headless runs" setting says.
     pub fn keeps_transcript(&self) -> bool {
         self.transcripts
     }
 
-    /// Tells whether this launch's plugins hold hooks, the ones the owner turned on or the
-    /// message relay's, so Claude Code must run with hooks allowed.
+    /// Tells whether this launch holds hooks, the ones the owner turned on or the message
+    /// relay's, so Claude Code must run with hooks allowed; a Codex launch pins each of its
+    /// hooks' trust hashes in its own `config.toml` instead (PA1213 security F1).
     pub fn runs_hooks(&self) -> bool {
         self.hooks || self.relay
     }
@@ -1217,6 +1285,12 @@ impl Installed {
     /// Names what this native-team lead's teammates get, none for any other launch.
     pub fn native(&self) -> Option<&NativeTeam> {
         self.native.as_ref()
+    }
+
+    /// Tells whether this Codex launch is a native lead whose Codex runs its own sub-agents
+    /// (PA-7), so its launch keeps multi-agent v2 on and its child threads running.
+    pub fn native_threads(&self) -> bool {
+        self.native_threads
     }
 
     /// Names the loopback port of the model proxy this launch's variables point at, none
@@ -1251,6 +1325,7 @@ impl Installed {
             relay: false,
             denied: Vec::new(),
             native: None,
+            native_threads: false,
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
             _lock: lock,
@@ -1680,14 +1755,39 @@ fn denied_tools(servers: &[LaunchServer], off_tools: &[(String, Vec<String>)]) -
     denied
 }
 
+/// Writes a Codex agent's `config.toml`: instructions, no project docs, MCP servers less
+/// switched-off tools, the engine's hooks pinned under their `source` key (PA-12); a native
+/// lead (PA-7) gets multi-agent v2 with `max_threads`, its sub-agents' instructions and no
+/// model or effort offered on spawn. Inputs: those parts. Output: the text, or
+/// `launch_context_server_name_taken`.
 fn codex_config(
     instructions: &str,
     servers: &[LaunchServer],
     off_tools: &[(String, Vec<String>)],
+    hooks: &[CodexHook],
+    source: &str,
+    sub_agents: Option<&(u8, String)>,
 ) -> Result<String, LaunchError> {
     let mut document = toml_edit::DocumentMut::new();
     document["developer_instructions"] = toml_edit::value(instructions);
     document["project_doc_max_bytes"] = toml_edit::value(0);
+    if !hooks.is_empty() {
+        document["hooks"] = toml_edit::Item::Table(codex_hook_table(hooks, source));
+    }
+    if let Some((cap, sub)) = sub_agents {
+        assert!(*cap > 0 && sub.starts_with(instructions));
+        let mut v2 = toml_edit::Table::new();
+        v2["enabled"] = toml_edit::value(true);
+        v2["subagent_developer_instructions"] = toml_edit::value(sub.as_str());
+        v2["expose_spawn_agent_model_overrides"] = toml_edit::value(false);
+        let mut features = toml_edit::Table::new();
+        features.set_implicit(true);
+        features.insert("multi_agent_v2", toml_edit::Item::Table(v2));
+        document["features"] = toml_edit::Item::Table(features);
+        let mut agents = toml_edit::Table::new();
+        agents["max_threads"] = toml_edit::value(i64::from(*cap));
+        document["agents"] = toml_edit::Item::Table(agents);
+    }
     if !servers.is_empty() {
         let mut table = toml_edit::Table::new();
         table.set_implicit(true);
@@ -1729,6 +1829,249 @@ fn codex_config(
         document["mcp_servers"] = toml_edit::Item::Table(table);
     }
     Ok(document.to_string())
+}
+
+/// One hook a Codex launch writes into its `config.toml`: the event, its trust-key label,
+/// the tool matcher, the shell command and the timeout in seconds, both as Codex reads them
+/// back, so the pinned trust hash matches (PA-12, PA1213 security F1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexHook {
+    event: &'static str,
+    label: &'static str,
+    matcher: Option<String>,
+    command: String,
+    timeout: u32,
+}
+
+/// Codex's hook events, each with the label Codex keys its hook trust state by (Codex
+/// 0.167.1 `hook_event_key_label`). An owner hook keeps its Claude Code event name on Codex
+/// only when Codex has that event.
+const CODEX_HOOK_EVENTS: [(&str, &str); 12] = [
+    ("PreToolUse", "pre_tool_use"),
+    ("PermissionRequest", "permission_request"),
+    ("PostToolUse", "post_tool_use"),
+    ("PreCompact", "pre_compact"),
+    ("PostCompact", "post_compact"),
+    ("SessionStart", "session_start"),
+    ("SessionEnd", "session_end"),
+    ("UserPromptSubmit", "user_prompt_submit"),
+    ("SubagentStart", "subagent_start"),
+    ("SubagentStop", "subagent_stop"),
+    ("Stop", "stop"),
+    ("Interrupt", "interrupt"),
+];
+/// Codex's default hook timeout, and the bounds it holds session-end and interrupt hooks
+/// to (Codex 0.167.1 `normalize_command_hook`).
+const CODEX_HOOK_TIMEOUT_DEFAULT: u32 = 600;
+const CODEX_END_TIMEOUT_DEFAULT: u32 = 1;
+const CODEX_END_TIMEOUT_MAX: u32 = 3;
+
+/// One Codex hook as Codex normalizes it: a matcher only on events that read one, the
+/// timeout defaulted and bounded as Codex does. Takes the Claude Code event name, matcher,
+/// command and timeout. Returns the hook, or None for an event Codex does not have.
+fn codex_hook(
+    event: &str,
+    matcher: Option<&str>,
+    command: String,
+    timeout: Option<u32>,
+) -> Option<CodexHook> {
+    let &(event, label) = CODEX_HOOK_EVENTS.iter().find(|(name, _)| *name == event)?;
+    let matcher = match event {
+        "UserPromptSubmit" | "Stop" | "Interrupt" => None,
+        _ => matcher.map(str::to_owned),
+    };
+    let timeout = match event {
+        "SessionEnd" | "Interrupt" => timeout
+            .unwrap_or(CODEX_END_TIMEOUT_DEFAULT)
+            .clamp(1, CODEX_END_TIMEOUT_MAX),
+        _ => timeout.unwrap_or(CODEX_HOOK_TIMEOUT_DEFAULT).max(1),
+    };
+    Some(CodexHook {
+        event,
+        label,
+        matcher,
+        command,
+        timeout,
+    })
+}
+
+/// The hash Codex trusts one hook by (Codex 0.167.1 `hook_hash`, `version_for_toml`): SHA-256
+/// of the compact JSON, keys sorted, of its event label, matcher and one normalized command
+/// handler. Proven live on Codex 0.167.1 with a stand-in home. Takes the hook. Returns
+/// `sha256:<hex>`.
+fn codex_hook_hash(hook: &CodexHook) -> String {
+    let mut handler = serde_json::Map::new();
+    handler.insert("async".to_owned(), false.into());
+    handler.insert("command".to_owned(), hook.command.as_str().into());
+    handler.insert("timeout".to_owned(), hook.timeout.into());
+    handler.insert("type".to_owned(), "command".into());
+    let mut identity = serde_json::Map::new();
+    identity.insert("event_name".to_owned(), hook.label.into());
+    identity.insert(
+        "hooks".to_owned(),
+        serde_json::Value::Array(vec![serde_json::Value::Object(handler)]),
+    );
+    if let Some(matcher) = &hook.matcher {
+        identity.insert("matcher".to_owned(), matcher.as_str().into());
+    }
+    let mut text = Vec::new();
+    serde_json::to_writer(&mut text, &serde_json::Value::Object(identity))
+        .expect("a JSON value always writes to memory");
+    format!("sha256:{:x}", Sha256::digest(&text))
+}
+
+/// The `[hooks]` table of a Codex `config.toml`: per event, one `[[hooks.<event>]]` group
+/// with its matcher and one command handler, in launch order, and `[hooks.state]` pinning
+/// each one's trust hash under the key Codex reads, so Codex runs exactly these hooks with
+/// no trust bypass and still holds any hook an agent adds for review (PA1213 security F1).
+/// Takes the hooks and the canonical `config.toml` path. Returns the table.
+fn codex_hook_table(hooks: &[CodexHook], source: &str) -> toml_edit::Table {
+    let mut table = toml_edit::Table::new();
+    table.set_implicit(true);
+    let mut state = toml_edit::Table::new();
+    state.set_implicit(true);
+    for hook in hooks {
+        let mut handler = toml_edit::Table::new();
+        handler["type"] = toml_edit::value("command");
+        handler["command"] = toml_edit::value(hook.command.as_str());
+        handler["timeout"] = toml_edit::value(i64::from(hook.timeout));
+        let mut handlers = toml_edit::ArrayOfTables::new();
+        handlers.push(handler);
+        let mut group = toml_edit::Table::new();
+        if let Some(matcher) = &hook.matcher {
+            group["matcher"] = toml_edit::value(matcher.as_str());
+        }
+        group.insert("hooks", toml_edit::Item::ArrayOfTables(handlers));
+        let toml_edit::Item::ArrayOfTables(groups) =
+            table
+                .entry(hook.event)
+                .or_insert(toml_edit::Item::ArrayOfTables(
+                    toml_edit::ArrayOfTables::new(),
+                ))
+        else {
+            unreachable!("each event holds a list of groups");
+        };
+        let key = format!("{source}:{}:{}:0", hook.label, groups.len());
+        groups.push(group);
+        let mut pinned = toml_edit::Table::new();
+        pinned["trusted_hash"] = toml_edit::value(codex_hook_hash(hook));
+        state.insert(&key, toml_edit::Item::Table(pinned));
+    }
+    assert_eq!(state.len(), hooks.len());
+    table.insert("state", toml_edit::Item::Table(state));
+    table
+}
+
+/// The most bytes of a Codex home's `config.toml` `codex_pinned_keys` reads.
+const CODEX_CONFIG_BYTES_MAX: u64 = 256 * 1024;
+
+/// The hook trust keys a Codex launch pinned under `[hooks.state]` in its home's
+/// `config.toml`, so the engine can ask Codex whether it trusts each one (PA1213R2-F2).
+/// Takes the agent's `CODEX_HOME`. Returns the keys, empty when the launch pinned none, or
+/// None for a config that cannot be read whole within `CODEX_CONFIG_BYTES_MAX` or parsed.
+pub fn codex_pinned_keys(home: &Path) -> Option<Vec<String>> {
+    let file = File::open(home.join("config.toml")).ok()?;
+    let mut text = String::new();
+    std::io::Read::read_to_string(
+        &mut std::io::Read::take(file, CODEX_CONFIG_BYTES_MAX + 1),
+        &mut text,
+    )
+    .ok()?;
+    if text.len() as u64 > CODEX_CONFIG_BYTES_MAX {
+        return None;
+    }
+    let config = text.parse::<toml_edit::DocumentMut>().ok()?;
+    Some(
+        config
+            .get("hooks")
+            .and_then(|hooks| hooks.get("state"))
+            .and_then(toml_edit::Item::as_table_like)
+            .map(|state| state.iter().map(|(key, _)| key.to_owned()).collect())
+            .unwrap_or_default(),
+    )
+}
+
+/// The owner's hooks a Codex launch runs (PA-12): those on an event Codex has, each copied
+/// with its plugin folder under the launch state and run with `CLAUDE_PLUGIN_ROOT` set to
+/// that copy, as Claude Code runs them; a hook on any other event is left out, which the
+/// Hooks setting says. Takes the launch state folder and the owner's hooks. Returns the
+/// Codex hooks, none when the folder cannot sit inside a quoted shell word.
+fn codex_hooks(state: &Path, hooks: &[EffectiveHook]) -> Result<Vec<CodexHook>, LaunchError> {
+    let kept: Vec<&EffectiveHook> = hooks
+        .iter()
+        .filter(|hook| {
+            CODEX_HOOK_EVENTS
+                .iter()
+                .any(|(name, _)| *name == hook.event)
+        })
+        .collect();
+    let copies = state.join(HOOK_PLUGINS);
+    if kept.is_empty() || !quotable(&copies) {
+        return Ok(Vec::new());
+    }
+    directory(&copies, true)?;
+    let mut tally = hook_folder::Tally::default();
+    let mut copied: Vec<&Path> = Vec::new();
+    let mut out = Vec::with_capacity(kept.len());
+    for hook in kept {
+        let id = copy_hook(hook, &copies, &mut tally, &mut copied)?;
+        let root = copies.join(id);
+        out.extend(codex_hook(
+            &hook.event,
+            hook.matcher.as_deref(),
+            hook_command(&root.to_string_lossy(), &hook.command),
+            hook.timeout,
+        ));
+    }
+    assert!(!out.is_empty() && out.len() <= hooks.len());
+    Ok(out)
+}
+
+/// Whether a folder can sit inside a double-quoted shell word: valid UTF-8 with no control
+/// character, quote, `$`, backtick or backslash. Takes the folder. Returns the answer.
+fn quotable(folder: &Path) -> bool {
+    folder.to_str().is_some_and(|text| {
+        !text
+            .chars()
+            .any(|character| character.is_control() || "\"$`\\".contains(character))
+    })
+}
+
+/// Copies one owner hook's stored plugin folder once into the launch's hook copies. Takes
+/// the hook, the copies folder, the size tally and the folders already copied. Returns the
+/// folder's name, or `launch_context_hook_unavailable` or `launch_context_too_large`.
+fn copy_hook<'a>(
+    hook: &'a EffectiveHook,
+    copies: &Path,
+    tally: &mut hook_folder::Tally,
+    copied: &mut Vec<&'a Path>,
+) -> Result<&'a str, LaunchError> {
+    let id = hook
+        .folder
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| crate::protocol::single_component(name))
+        .ok_or_else(|| failure("launch_context_hook_unavailable"))?;
+    if !copied.contains(&hook.folder.as_path()) {
+        hook_folder::copy_stored(&hook.folder, &copies.join(id), tally).map_err(
+            |code| match code {
+                "hooks_too_large" => failure("launch_context_too_large"),
+                _ => failure("launch_context_hook_unavailable"),
+            },
+        )?;
+        copied.push(&hook.folder);
+    }
+    Ok(id)
+}
+
+/// The shell command one owner hook runs: its plugin root set and exported as
+/// `CLAUDE_PLUGIN_ROOT`, then its own command with `${CLAUDE_PLUGIN_ROOT}` read from that
+/// root. Takes the root as shell text and the hook's command. Returns the command.
+fn hook_command(root: &str, command: &str) -> String {
+    format!(
+        "{HOOK_ROOT}=\"{root}\"; export CLAUDE_PLUGIN_ROOT=\"${HOOK_ROOT}\"; {}",
+        command.replace(PLUGIN_ROOT, &format!("${{{HOOK_ROOT}}}"))
+    )
 }
 
 fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
@@ -1804,6 +2147,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         relay: false,
         denied: Vec::new(),
         native: None,
+        native_threads: false,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         _lock: lock,
@@ -1825,17 +2169,27 @@ static PARKED_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// makes an empty `skills` folder of the engine's again. Whatever `skills` is, even a link, is
 /// moved by descriptor into a fresh folder beside the home ([`park`]) and released and removed
 /// only there ([`clear`]), so no tool ever runs on a path an agent can swap (team-19 r1 M1).
-/// A `skills` folder that does not move has only its own pins cleared, by its fixed path, and
-/// is moved once more. A `skills` of another user is left alone. Input: the validated agent
-/// home. Output: Ok, or [`SKILLS_KEPT`] when `skills` stays in the home, comes back, or is
-/// no longer a folder once the engine made it.
+/// A `skills` that does not move has the home's own pins cleared by its fixed path and its
+/// own through one descriptor ([`release_skills`]), and is moved once more, so a pin an
+/// earlier run left refuses no Codex launch a Claude Code launch would make (DEC-141 PA-19).
+/// A file with a second link keeps its pins: it may be the owner's file an agent linked in. A
+/// `skills` of another user is left alone. A home the engine cannot open, such as one whose
+/// ACL denies listing, is released by its fixed path and opened once more, and refused when it
+/// still does not open, so its `skills` never stays for Codex to load (ACL r1 F2). Input: the
+/// validated agent home. Output: Ok, or [`SKILLS_KEPT`] when the home stays closed or `skills`
+/// stays in the home, comes back, or is no longer a folder once the engine made it.
 #[cfg(unix)]
 fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     use rustix::fs::{AtFlags, FileType};
     assert!(home.is_absolute());
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let Ok(parent) = rustix::fs::open(home, folder, Mode::empty()) else {
-        return Ok(());
+    let parent = match rustix::fs::open(home, folder, Mode::empty()) {
+        Ok(parent) => parent,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(_) => {
+            release(home, false);
+            rustix::fs::open(home, folder, Mode::empty()).map_err(|_| failure(SKILLS_KEPT))?
+        }
     };
     let stat = match rustix::fs::statat(&parent, "skills", AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => return Ok(()),
@@ -1850,8 +2204,9 @@ fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     };
     let move_out = || rustix::fs::renameat(&parent, "skills", &place, "skills").is_ok();
     let mut moved = move_out();
-    if !moved && FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
-        release(&home.join("skills"), false);
+    if !moved {
+        release(home, false);
+        release_skills(&parent);
         moved = move_out();
     }
     clear(&parked);
@@ -1865,6 +2220,76 @@ fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     }
     Ok(())
 }
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// A step a launch test runs in [`release_skills`] once `skills` is open and checked and
+    /// before anything on it changes, standing in for a process an earlier run left that swaps
+    /// the entry meanwhile. Runs once; None runs nothing.
+    pub(super) static AFTER_SKILLS_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Clears the immutable and append-only flags and every ACL entry of a home's `skills` through
+/// one descriptor, never its path (PALOW-M1): opened from the home's handle without following
+/// a link and changed only when that open entry is this user's folder or a file with one link,
+/// so an owner's file an agent links in at that name, before or after the check, keeps its
+/// pins. Flags go through `/dev/fd/<n>`, the ACL through `/bin/chmod -N` on the descriptor
+/// given as its standard input, and a folder gains the owner's read, write and search through
+/// `fchmod`, since moving a folder to a new parent needs write on it (ACL r1 F2). A folder that
+/// does not open, with no read or an ACL denying listing, is left as it is. Input: the home's
+/// open folder.
+#[cfg(target_os = "macos")]
+fn release_skills(parent: &std::os::fd::OwnedFd) {
+    use nix::sys::stat::FileFlag;
+    use rustix::fs::FileType;
+    use std::os::fd::AsRawFd;
+    let open = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let Ok(entry) = rustix::fs::openat(parent, "skills", open, Mode::empty()) else {
+        return;
+    };
+    let Ok(found) = rustix::fs::fstat(&entry) else {
+        return;
+    };
+    let kind = FileType::from_raw_mode(found.st_mode);
+    assert_ne!(
+        kind,
+        FileType::Symlink,
+        "an entry opened without following a link is never one"
+    );
+    let single = kind == FileType::Directory || found.st_nlink == 1;
+    if !single || found.st_uid != rustix::process::geteuid().as_raw() {
+        return;
+    }
+    #[cfg(test)]
+    if let Some(step) = AFTER_SKILLS_OPEN.with(|step| step.borrow_mut().take()) {
+        step();
+    }
+    let pinning = FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND;
+    let flags = FileFlag::from_bits_retain(found.st_flags);
+    if flags.intersects(pinning) {
+        let handle = PathBuf::from(format!("/dev/fd/{}", entry.as_raw_fd()));
+        let _ = nix::unistd::chflags(&handle, flags.difference(pinning));
+    }
+    let Ok(input) = entry.try_clone() else {
+        return;
+    };
+    let _ = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .args(["-N", "/dev/stdin"])
+            .stdin(std::process::Stdio::from(input))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
+    if kind == FileType::Directory {
+        let _ = rustix::fs::fchmod(&entry, Mode::from_raw_mode(found.st_mode) | Mode::RWXU);
+    }
+}
+
+/// Leaves `skills` as it is off macOS, where the engine releases nothing an agent set; a
+/// pinned one keeps its Codex launches refused with [`SKILLS_KEPT`]. Input: unused.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn release_skills(_parent: &std::os::fd::OwnedFd) {}
 
 /// Makes a fresh owner-only folder beside the agent home, in the agent's engine folder that
 /// no sandboxed agent can write, to move the home's `skills` into, under a name no earlier
@@ -1931,48 +2356,117 @@ fn clear(parked: &Path) {
     }
 }
 
-/// Clears the immutable and append only flags, then every ACL entry, then adds the owner's
-/// read, write and folder search, on one path or on everything under it, with the system's
-/// `find`, `chflags` and `chmod`, never following a link and keeping every other flag and mode
-/// bit. In a tree, a file with a second link keeps its flags: it may be the owner's file an
-/// agent linked in (rv-code L1), whose ACL and mode the agent could change itself. A failure
-/// leaves the path as it was; the caller checks what is still there. Inputs: the absolute
-/// path and whether to walk the tree under it.
+/// The `find -P` expressions [`release`] runs in order on a tree. First, folders one at a
+/// time, so a folder with no search or a list-denying ACL opens before `find` reads it. Then
+/// one-link entries that are not folders: their flags, the ACL of each that is not a link by
+/// path, and the ACL of each link on the link itself. A file with a second link is never matched.
+#[cfg(target_os = "macos")]
+const RELEASED_TREE: [&[&str]; 4] = [
+    &[
+        "-type",
+        "d",
+        "(",
+        "-exec",
+        "/usr/bin/chflags",
+        "-h",
+        "nouchg,nouappnd",
+        "{}",
+        ";",
+        "-o",
+        "-true",
+        ")",
+        "(",
+        "-exec",
+        "/bin/chmod",
+        "-N",
+        "{}",
+        ";",
+        "-o",
+        "-true",
+        ")",
+        "-exec",
+        "/bin/chmod",
+        "-h",
+        "u+rwx",
+        "{}",
+        ";",
+    ],
+    &[
+        "!",
+        "-type",
+        "d",
+        "-links",
+        "1",
+        "-exec",
+        "/usr/bin/chflags",
+        "-h",
+        "nouchg,nouappnd",
+        "{}",
+        "+",
+    ],
+    &[
+        "!",
+        "-type",
+        "d",
+        "!",
+        "-type",
+        "l",
+        "-links",
+        "1",
+        "-exec",
+        "/bin/chmod",
+        "-N",
+        "{}",
+        "+",
+    ],
+    &[
+        "-type",
+        "l",
+        "-links",
+        "1",
+        "-exec",
+        "/bin/chmod",
+        "-h",
+        "-N",
+        "{}",
+        "+",
+    ],
+];
+
+/// Clears the immutable and append only flags and every ACL entry of one folder and adds the
+/// owner's read, write and search, or releases a tree with [`RELEASED_TREE`], never following
+/// a link and never changing a file with a second link, which may be the owner's file an agent
+/// linked in (V231-ACL). The one folder is a validated home, never a link, whose ACL is cleared
+/// by path because `chmod -h -N` opens it and fails when it denies listing (ACL r1 F2). A
+/// failure leaves the path as it was; the caller checks what is still there. Inputs: the
+/// absolute path and whether to walk the tree under it.
 #[cfg(target_os = "macos")]
 fn release(path: &Path, tree: bool) {
     use std::process::{Command, Stdio};
     assert!(path.is_absolute());
-    let mut flags = Command::new(if tree {
-        "/usr/bin/find"
+    assert!(
+        tree || !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()),
+        "a home released by its path is never a link"
+    );
+    let commands: Vec<Command> = if tree {
+        RELEASED_TREE
+            .iter()
+            .map(|expression| {
+                let mut command = Command::new("/usr/bin/find");
+                command.arg("-P").arg(path).args(*expression);
+                command
+            })
+            .collect()
     } else {
-        "/usr/bin/chflags"
-    });
-    if tree {
-        flags.arg("-P").arg(path).args([
-            "(",
-            "-type",
-            "d",
-            "-o",
-            "-links",
-            "1",
-            ")",
-            "-exec",
-            "/usr/bin/chflags",
-            "-h",
-            "nouchg,nouappnd",
-            "{}",
-            "+",
-        ]);
-    } else {
+        let mut flags = Command::new("/usr/bin/chflags");
         flags.args(["-h", "nouchg,nouappnd"]).arg(path);
-    }
-    let walk: &[&str] = if tree { &["-R", "-P"] } else { &["-h"] };
-    let modes = ["-N", "u+rwX"].map(|change| {
-        let mut command = Command::new("/bin/chmod");
-        command.args(walk).arg(change).arg(path);
-        command
-    });
-    for mut command in std::iter::once(flags).chain(modes) {
+        let mut acl = Command::new("/bin/chmod");
+        acl.arg("-N").arg(path);
+        let mut mode = Command::new("/bin/chmod");
+        mode.args(["-h", "u+rwX"]).arg(path);
+        vec![flags, acl, mode]
+    };
+    for mut command in commands {
         let _ = crate::spawn_gate::status(
             command
                 .stdin(Stdio::null())
@@ -2069,12 +2563,7 @@ fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {
 /// path a shell double quote cannot hold gets no hooks. Inputs: the generated plugin
 /// folder and the hooks. Output: whether hooks were written, or a launch refusal.
 fn write_hooks(plugin: &Path, hooks: &[EffectiveHook]) -> Result<bool, LaunchError> {
-    let quotable = plugin.to_str().is_some_and(|text| {
-        !text
-            .chars()
-            .any(|character| character.is_control() || "\"$`\\".contains(character))
-    });
-    if hooks.is_empty() || !quotable {
+    if hooks.is_empty() || !quotable(plugin) {
         return Ok(false);
     }
     let copies = plugin.join(HOOK_PLUGINS);
@@ -2083,26 +2572,8 @@ fn write_hooks(plugin: &Path, hooks: &[EffectiveHook]) -> Result<bool, LaunchErr
     let mut copied: Vec<&Path> = Vec::new();
     let mut events = serde_json::Map::new();
     for hook in hooks {
-        let id = hook
-            .folder
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| crate::protocol::single_component(name))
-            .ok_or_else(|| failure("launch_context_hook_unavailable"))?;
-        if !copied.contains(&hook.folder.as_path()) {
-            hook_folder::copy_stored(&hook.folder, &copies.join(id), &mut tally).map_err(
-                |code| match code {
-                    "hooks_too_large" => failure("launch_context_too_large"),
-                    _ => failure("launch_context_hook_unavailable"),
-                },
-            )?;
-            copied.push(&hook.folder);
-        }
-        let command = format!(
-            "{HOOK_ROOT}=\"{PLUGIN_ROOT}/{HOOK_PLUGINS}/{id}\"; export CLAUDE_PLUGIN_ROOT=\"${HOOK_ROOT}\"; {}",
-            hook.command
-                .replace(PLUGIN_ROOT, &format!("${{{HOOK_ROOT}}}"))
-        );
+        let id = copy_hook(hook, &copies, &mut tally, &mut copied)?;
+        let command = hook_command(&format!("{PLUGIN_ROOT}/{HOOK_PLUGINS}/{id}"), &hook.command);
         let mut entry = serde_json::json!({"type": "command", "command": command});
         if let Some(timeout) = hook.timeout {
             entry["timeout"] = timeout.into();

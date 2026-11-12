@@ -320,6 +320,61 @@ fn a_tick_keeps_why_a_codex_agent_s_bridge_was_refused() {
     assert_eq!(deliveries.bridge_refused.get(&agent), Some(&refused));
 }
 
+/// F38: a Codex bridge that runs on a release newer than the checked ones leaves one
+/// engine notice in that agent's Messages timeline, naming the release numbers, once per
+/// release: later deliveries, a bridge refusal in between and an engine restart, which
+/// keeps no memory here, leave no second one; another agent and another release get their own.
+#[test]
+fn a_newer_codex_release_is_named_once_in_the_agents_messages() {
+    let fixture = Fixture::new();
+    let first = fixture.agent("sub", "codex", "working", None);
+    let second = fixture.agent("sub", "codex", "working", None);
+    let mut refused = BTreeMap::new();
+    let notices = |agent: i64| -> Vec<String> {
+        let mut statement = fixture
+            .db
+            .prepare("SELECT text FROM team_agent_messages WHERE agent=?1 ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([agent], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let warned = |agent, release| warn_newer(&fixture.db, &project(), agent, release, 5).unwrap();
+    assert!(warned(first, (0, 167, 1)));
+    assert!(!warned(first, (0, 167, 1)));
+    assert!(!warned(first, (0, 167, 1)));
+    assert_eq!(notices(first), vec![codex::newer_notice((0, 167, 1))]);
+    assert!(warned(second, (0, 167, 1)));
+    assert_eq!(notices(second).len(), 1);
+    assert!(note_refusal(
+        &mut refused,
+        first,
+        Some("codex_bridge_not_running")
+    ));
+    assert!(!note_refusal(&mut refused, first, None));
+    assert!(!warned(first, (0, 167, 1)), "a refusal in between");
+    assert_eq!(notices(first).len(), 1);
+    assert!(warned(first, (0, 168, 0)), "another release");
+    assert_eq!(
+        notices(first),
+        vec![
+            codex::newer_notice((0, 167, 1)),
+            codex::newer_notice((0, 168, 0))
+        ]
+    );
+    assert!(!warned(first, (0, 168, 0)));
+    assert!(!warned(first, (0, 167, 1)));
+    assert_eq!(notices(first).len(), 2);
+    assert_eq!(notices(second).len(), 1);
+    assert!(
+        notices(first)
+            .iter()
+            .all(|text| !text.contains("codex_cli_rs"))
+    );
+}
+
 /// K2b: messages delivered or typed to an agent whose session stopped or failed go back
 /// to Sent on the next tick, so its next session gets them; a live agent's stay.
 #[test]
@@ -493,6 +548,97 @@ fn the_master_gets_one_engine_message_and_waits_while_it_is_pending() {
     assert_eq!(deliveries.retry.get(&master), Some(&(5 + RETRY_MS)));
 }
 
+/// F31: the engine's overlap notes alone start no master turn: they stay Sent while nothing
+/// else waits, and go with the next message worth a turn, in one engine message.
+#[test]
+fn overlap_notes_alone_wait_for_the_master_s_next_turn() {
+    let fixture = Fixture::new();
+    let master = fixture.agent("master", "claude-code", "idle", None);
+    let lead = fixture.agent("sub", "claude-code", "idle", None);
+    let overlap = fixture.send_keyed(
+        Party::Engine,
+        master,
+        MessageKind::Note,
+        "Grace started work #9 claiming docs/a.md, which overlaps your claim docs/ on work #4.",
+        Some(&format!("{OVERLAP_KEY}9-{master}")),
+        1,
+    );
+    let asleep = BTreeSet::new();
+    let none = reach(None, None, &fixture.base, &asleep);
+    let mut deliveries = Deliveries::default();
+    deliveries.tick(&fixture.db, &project(), 2, &none).unwrap();
+    assert!(
+        fixture.team_messages().is_empty(),
+        "an overlap note alone starts no turn"
+    );
+    assert_eq!(fixture.receipt(overlap), "sent");
+    assert_eq!(deliveries.retry.get(&master), None, "nothing to retry soon");
+
+    let review = fixture.send(Party::Agent(lead), master, MessageKind::Prompt, "Review", 3);
+    deliveries.tick(&fixture.db, &project(), 4, &none).unwrap();
+    let told = fixture.team_messages();
+    assert_eq!(told.len(), 1, "one engine message: {told:?}");
+    assert!(
+        told[0].1.contains(&format!("[crazyagent msg {overlap}]")),
+        "{told:?}"
+    );
+    assert!(
+        told[0].1.contains(&format!("[crazyagent msg {review}]")),
+        "{told:?}"
+    );
+    assert_eq!(fixture.receipt(overlap), "delivered");
+    assert_eq!(fixture.receipt(review), "delivered");
+}
+
+/// F31: the master's waiting messages and the team events due then go out as one engine
+/// message, so one notice takes one master turn, and the events are marked delivered with it.
+#[test]
+fn the_master_s_messages_and_due_team_events_go_out_as_one_engine_message() {
+    let fixture = Fixture::new();
+    let master = fixture.agent("master", "claude-code", "idle", None);
+    let lead = fixture.agent("sub", "claude-code", "idle", None);
+    let worker = fixture.agent("sub", "codex", "idle", None);
+    crate::team::events::record(
+        &fixture.db,
+        &project(),
+        worker,
+        Some(5),
+        crate::team::events::EventKind::Finished,
+        "Built the page.",
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    let note = fixture.send(Party::Agent(lead), master, MessageKind::Prompt, "Review", 2);
+    let asleep = BTreeSet::new();
+    let none = reach(None, None, &fixture.base, &asleep);
+    let mut deliveries = Deliveries::default();
+    deliveries.tick(&fixture.db, &project(), 3, &none).unwrap();
+    let told = fixture.team_messages();
+    assert_eq!(told.len(), 1, "{told:?}");
+    let from = crate::team::events::label(&fixture.db, lead).unwrap();
+    let label = crate::team::events::label(&fixture.db, worker).unwrap();
+    assert_eq!(
+        told[0].1,
+        format!(
+            "[crazyagent msg {note}] from {from}: work for you, answer with update_work: Review\n[team] {label} finished: Built the page. [task 5]"
+        )
+    );
+    assert!(
+        !crate::team::events::deliver_by_message(&fixture.db, &project(), true, 4).unwrap(),
+        "the events already went with the engine message"
+    );
+    let state: String = fixture
+        .db
+        .query_row(
+            "SELECT state FROM team_events WHERE agent=?1",
+            [worker],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "delivered");
+}
+
 /// Audit A: the master's engine message and the Delivered marks commit together, so a
 /// failed mark leaves no engine message and the coordination messages Sent, and the next
 /// tick hands them over once.
@@ -510,7 +656,7 @@ fn a_failed_delivered_mark_rolls_back_the_masters_engine_message() {
         )
         .unwrap();
     let waiting = crate::coord::pending(&fixture.db, master, PENDING_MAX).unwrap();
-    assert!(to_master(&fixture.db, &project(), &waiting, 2).is_err());
+    assert!(to_master(&fixture.db, &project(), master, &waiting, 2).is_err());
     assert!(fixture.team_messages().is_empty());
     assert_eq!(fixture.receipt(note), "sent");
     assert!(
@@ -522,7 +668,7 @@ fn a_failed_delivered_mark_rolls_back_the_masters_engine_message() {
         .db
         .execute_batch("DROP TRIGGER no_receipts;")
         .unwrap();
-    assert!(to_master(&fixture.db, &project(), &waiting, 3).unwrap());
+    assert!(to_master(&fixture.db, &project(), master, &waiting, 3).unwrap());
     assert_eq!(fixture.team_messages().len(), 1);
     assert_eq!(fixture.receipt(note), "delivered");
 }
@@ -1340,7 +1486,7 @@ fn no_channel_names_only_a_tools_off_codex_sub_agent_in_a_kept_session_under_nat
     );
     assert_eq!(
         NO_CHANNEL,
-        "Can't receive messages: Native only needs tools on for Codex."
+        "Messages come as a task of their own once it is idle: Native only never types into a tools-off Codex agent."
     );
 }
 

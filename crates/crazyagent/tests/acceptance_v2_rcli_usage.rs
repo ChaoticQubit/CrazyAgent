@@ -149,6 +149,7 @@ fn rcli_bundle() -> PathBuf {
 fn scanning_harness() -> (&'static str, PathBuf) {
     let found = crazyagent::paths::resolve_harnesses(
         Harnesses::default(),
+        &crazyagent::harnesses::Search::from_environment(),
         std::env::var_os("PATH").as_deref(),
         None,
     );

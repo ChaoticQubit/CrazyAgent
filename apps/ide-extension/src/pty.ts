@@ -117,18 +117,21 @@ export function stopped(code: string): string {
  * A VS Code pseudoterminal for the owner's shell that the engine runs under the project's
  * agent sandbox. `open` starts it over one `ide.terminal` connection; output, typing and
  * resizes travel as engine terminal frames, typing in chunks of at most `INPUT_BYTES_MAX`
- * bytes, and typing before the connection opens is dropped. The terminal closes when the
- * shell ends; when the engine refuses or stops it, the reason stays on screen. `close`
- * detaches, which ends the shell.
+ * bytes, and typing before the connection opens is dropped. `ready` resolves true once the
+ * engine attached the terminal, so typing reaches its shell, and false when the terminal
+ * stopped or closed first. The terminal closes when the shell ends; when the engine refuses or
+ * stops it, the reason stays on screen. `close` detaches, which ends the shell.
  */
 export class SandboxedPty {
   readonly #wrote = new Signal<string>();
   readonly #closed = new Signal<void>();
   readonly onDidWrite = this.#wrote.event;
   readonly onDidClose = this.#closed.event;
+  readonly ready: Promise<boolean>;
   readonly #open: Open;
   readonly #level: Level;
   readonly #text = new TextDecoder("utf-8");
+  #settle: (attached: boolean) => void = () => undefined;
   #socket: Socket | undefined;
   #size: Size = SIZE_DEFAULT;
   #attached = false;
@@ -137,6 +140,9 @@ export class SandboxedPty {
   constructor(open: Open, level: Level) {
     this.#open = open;
     this.#level = level;
+    this.ready = new Promise((resolve) => {
+      this.#settle = resolve;
+    });
   }
 
   open(initial: Size | undefined): void {
@@ -191,6 +197,7 @@ export class SandboxedPty {
   close(): void {
     if (this.#ended) return;
     this.#ended = true;
+    this.#settle(false);
     this.#send({ kind: "detach" });
     this.#socket?.end();
   }
@@ -200,6 +207,7 @@ export class SandboxedPty {
     if (this.#ended) return;
     if (!this.#attached && frame.kind === "ok") {
       this.#attached = true;
+      this.#settle(true);
     } else if (!this.#attached && frame.kind === "rejected") {
       this.#stop(String(frame.code));
     } else if (this.#attached && frame.kind === "output" && Array.isArray(frame.bytes)) {
@@ -216,6 +224,7 @@ export class SandboxedPty {
   #stop(reason: string): void {
     if (this.#ended) return;
     this.#ended = true;
+    this.#settle(false);
     this.#socket?.destroy();
     const rest = this.#text.decode();
     if (rest.length > 0) this.#wrote.fire(rest);
