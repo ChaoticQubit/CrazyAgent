@@ -1173,6 +1173,26 @@ fn a_docs_folder_too_large_to_read_whole_says_so_instead_of_dropping_docs_silent
     assert_eq!(wire.get("docs_folder_cut"), None);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn names_that_are_not_text_count_toward_the_docs_scan_bound() {
+    use std::os::unix::ffi::OsStrExt;
+    let case = context_case();
+    write_below(&case.folder, "docs/a.md", "# A\n");
+    let folder = case.folder.join("docs/raw");
+    std::fs::create_dir_all(&folder).unwrap();
+    for index in 0..4100u32 {
+        let mut name = vec![0xff];
+        name.extend_from_slice(index.to_string().as_bytes());
+        std::fs::write(folder.join(std::ffi::OsStr::from_bytes(&name)), "").unwrap();
+    }
+    let context = list_context_with_links(&case.stored, &[]).unwrap();
+    assert!(
+        context.docs_folder_cut,
+        "a name that is not text is still an entry read"
+    );
+}
+
 #[test]
 fn docs_that_would_overflow_the_owner_reply_are_counted_not_sent() {
     let case = context_case();

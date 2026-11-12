@@ -4404,6 +4404,58 @@ fn the_context_tab_names_the_docs_the_engine_left_out_as_the_desktop_does_never_
 }
 
 #[test]
+fn the_context_tree_scrolls_to_keep_the_cursor_in_view_and_the_left_out_count_stays_shown() {
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let look = Look::plain();
+    for width in [80, 120] {
+        let mut screen = loaded(&project);
+        screen.open(Tab::Context);
+        screen.context = Some(ProjectContext {
+            project_id: project.clone(),
+            folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+            items: (0..60)
+                .map(|index| ContextItem {
+                    path: format!("repo/docs/doc-{index:03}.md"),
+                    kind: ContextKind::Document,
+                    bytes: 8,
+                    linked: true,
+                })
+                .collect(),
+            unlisted_docs: 6,
+            docs_folder_cut: false,
+        });
+        let words = |screen: &mut ProjectScreen| {
+            text(&project_screen(screen, width, 24, &look).rows)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let first = words(&mut screen);
+        assert!(first.contains("> doc-000.md"), "{width}: {first}");
+        for _ in 0..59 {
+            assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+        }
+        let last = words(&mut screen);
+        assert!(
+            last.contains("> doc-059.md"),
+            "the cursor stays in view at {width}: {last}"
+        );
+        assert!(
+            !last.contains("doc-000.md"),
+            "the tree scrolled at {width}: {last}"
+        );
+        assert!(last.contains(PROJECT_MEMORY_HINT), "{width}: {last}");
+        assert!(
+            first.contains("6 more docs not listed") && last.contains("6 more docs not listed"),
+            "the count stays shown at {width}: {last}"
+        );
+    }
+}
+
+const PROJECT_MEMORY_HINT: &str = "p opens Project memory.";
+
+#[test]
 fn a_file_linked_from_the_repo_says_so_opens_from_the_project_folder_and_is_not_deleted() {
     use super::project::OpenRequest;
     use crate::project_setup::{ContextItem, ProjectContext};
