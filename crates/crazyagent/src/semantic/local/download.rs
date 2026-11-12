@@ -230,6 +230,20 @@ impl Downloads {
     }
 }
 
+/// The variable a desktop end-to-end run sets to the folder its test model source lives in;
+/// only an engine built with the `e2e-model-source` feature reads it.
+#[cfg(any(test, feature = "e2e-model-source"))]
+pub const SOURCE_ENV: &str = "CRAZYAGENT_E2E_MODEL_SOURCE";
+
+/// A test model source: a folder holding a stand-in `curl` and both pinned files. The pins
+/// keep their names and URLs and take the files' own sizes and sha256, so a download from
+/// it never reaches the network. Input: the folder. Output: its curl and the pins, or why
+/// it cannot serve.
+#[cfg(any(test, feature = "e2e-model-source"))]
+pub(crate) fn source_pins(folder: &Path) -> Result<(PathBuf, [Pinned; 2]), String> {
+    Err(format!("{} is not read yet", folder.display()))
+}
+
 fn for_root(root: &Path) -> Downloads {
     let mut by_root = BY_ROOT.lock().unwrap_or_else(PoisonError::into_inner);
     let downloads = by_root

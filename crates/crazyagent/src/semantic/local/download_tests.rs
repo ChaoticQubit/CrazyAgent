@@ -387,3 +387,87 @@ fn files_at_their_pinned_sizes_read_ready_and_delete_removes_them() {
     assert_eq!(downloads.phase(), Phase::NotDownloaded);
     downloads.delete().unwrap();
 }
+
+/// Writes a test model source: a stand-in curl that serves the file its URL names from its
+/// own folder, and both fixture files. Input: the folder. Output: none.
+fn write_source(folder: &Path) {
+    stand_in(
+        folder,
+        "here=$(/usr/bin/dirname \"$0\")\nurl=$(/usr/bin/sed -n 's/^url = \"\\(.*\\)\"$/\\1/p')\nexec /bin/cat \"$here/${url##*/}\"",
+    );
+    write_file(
+        folder,
+        "tokenizer.json",
+        fixture_tokenizer_json().as_bytes(),
+    );
+    write_file(folder, "model.safetensors", &fixture_model_bytes());
+}
+
+/// A test model source keeps the pinned names and URLs and takes its own files' sizes and
+/// sha256, with the stand-in curl beside them.
+#[test]
+fn a_test_model_source_keeps_the_pinned_names_and_urls_and_takes_its_files_sizes_and_sha256() {
+    let source = tempfile::tempdir().unwrap();
+    let place = source.path().canonicalize().unwrap();
+    write_source(&place);
+    let (curl, pins) = source_pins(&place).unwrap();
+    assert_eq!(curl, place.join("curl"));
+    let files = [fixture_tokenizer_json().into_bytes(), fixture_model_bytes()];
+    for ((pin, pinned), bytes) in pins.iter().zip(PINNED).zip(files) {
+        assert_eq!(pin.name, pinned.name);
+        assert_eq!(pin.url, pinned.url);
+        assert_eq!(pin.bytes, bytes.len() as u64);
+        assert_eq!(pin.sha256, sha256_hex(&bytes));
+    }
+}
+
+/// A download from a test model source runs its stand-in curl on the real pinned URLs and
+/// lands both of its files: ready, and never the network.
+#[test]
+fn a_download_from_a_test_model_source_lands_its_files_through_its_own_curl() {
+    let source = tempfile::tempdir().unwrap();
+    let place = source.path().canonicalize().unwrap();
+    write_source(&place);
+    let (curl, pins) = source_pins(&place).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let total = pins[0].bytes + pins[1].bytes;
+    let downloads = Downloads::with_curl(root.path().to_path_buf(), curl, pins);
+    downloads.start(total).unwrap();
+    let phase = wait_for(&downloads, |phase| {
+        !matches!(phase, Phase::Downloading { .. })
+    });
+    assert_eq!(phase, Phase::Ready);
+    let models = folder(root.path());
+    assert_eq!(
+        std::fs::read(models.join("model.safetensors")).unwrap(),
+        fixture_model_bytes()
+    );
+    assert_eq!(
+        std::fs::read_to_string(models.join("tokenizer.json")).unwrap(),
+        fixture_tokenizer_json()
+    );
+}
+
+/// A test model source must be an absolute folder with its curl and two files that are not
+/// empty; anything else is refused, naming what is wrong.
+#[test]
+fn a_test_model_source_without_its_curl_or_a_file_or_an_absolute_path_is_refused() {
+    let source = tempfile::tempdir().unwrap();
+    let place = source.path().canonicalize().unwrap();
+    write_source(&place);
+    assert!(source_pins(&place).is_ok());
+    assert!(source_pins(Path::new("relative/source")).is_err());
+    let empty = tempfile::tempdir().unwrap();
+    let empty = empty.path().canonicalize().unwrap();
+    write_source(&empty);
+    write_file(&empty, "model.safetensors", b"");
+    assert!(
+        source_pins(&empty)
+            .unwrap_err()
+            .contains("model.safetensors")
+    );
+    std::fs::remove_file(place.join("tokenizer.json")).unwrap();
+    assert!(source_pins(&place).unwrap_err().contains("tokenizer.json"));
+    std::fs::remove_file(place.join("curl")).unwrap();
+    assert!(source_pins(&place).unwrap_err().contains("curl"));
+}
