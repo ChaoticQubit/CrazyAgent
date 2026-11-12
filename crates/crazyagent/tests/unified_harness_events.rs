@@ -302,7 +302,8 @@ fn retryable_turn_error_preserves_native_retry_fact_and_does_not_complete_turn()
         observed.kind,
         EventKind::TurnError {
             message: "observed retry".into(),
-            will_retry: true
+            will_retry: true,
+            model_refused: false,
         }
     );
     assert_eq!(protocol.state(), State::Active);

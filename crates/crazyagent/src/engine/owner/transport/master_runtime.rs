@@ -1,3 +1,4 @@
+use super::master_host_launch::MASTER_MODEL_REFUSED;
 use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::adapters::codex::{AuthAccount, AuthControl};
 use crate::adapters::events::{EventKind, ObservedEvent, Provenance, TurnOutcome};
@@ -896,6 +897,11 @@ impl OwnerRuntimeHandle {
         let observed = self
             .collect_master_turn(prepared, turn_id, &text, &mut active, mailbox.as_deref())
             .await;
+        if let (Err(error), Some(model)) = (&observed, &model)
+            && error.0 == MASTER_MODEL_REFUSED
+        {
+            self.record_master_refusal(prepared, model.clone()).await;
+        }
         if !matches!(&observed, Ok(MasterRuntimeObservation::Response { .. })) {
             let _ = active.host.cancel().await;
         }
@@ -1289,6 +1295,11 @@ impl OwnerRuntimeHandle {
                 EventKind::AssistantError { code } => {
                     return Err(failure(assistant_failure(&code)));
                 }
+                EventKind::TurnError {
+                    will_retry: false,
+                    model_refused: true,
+                    ..
+                } => return Err(failure(MASTER_MODEL_REFUSED)),
                 EventKind::RequestFailed { .. }
                 | EventKind::TurnError {
                     will_retry: false, ..
@@ -1407,7 +1418,8 @@ fn validate_event(
 }
 
 /// Names the failure a harness error ends a master turn with: a provider's rejected sign-in,
-/// or a sign-in the harness found missing itself, which is no word from the provider.
+/// a sign-in the harness found missing itself, which is no word from the provider, or a
+/// master model the provider does not run for the account (DEC-150 M-10).
 /// Input: the error code the harness reported. Output: the code the turn's reason reads.
 fn assistant_failure(code: &str) -> &'static str {
     match code {
@@ -1415,6 +1427,7 @@ fn assistant_failure(code: &str) -> &'static str {
         "not_signed_in" => "master_sign_in_missing",
         "rate_limit" => "gateway_rate_limited",
         "billing_error" => "gateway_quota_exhausted",
+        crate::harnesses::launch::CLAUDE_MODEL_REFUSED => MASTER_MODEL_REFUSED,
         _ => "codex_host_turn_failed",
     }
 }
@@ -1521,6 +1534,7 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "master_project_scope_conflict"
         | "master_bootstrap_scope_conflict" => MasterReason::ConnectionChanged,
         "master_bootstrap_uncertain" => MasterReason::WorktreeUncertain,
+        MASTER_MODEL_REFUSED => MasterReason::ModelRefused,
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }

@@ -107,6 +107,7 @@ pub enum EventKind {
     TurnError {
         message: String,
         will_retry: bool,
+        model_refused: bool,
     },
     ApprovalRequired {
         id: NativeRequestId,
