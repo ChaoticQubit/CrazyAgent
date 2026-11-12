@@ -13,7 +13,7 @@ use crate::tui::screens::settings_accounts::{plain, send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
 use crate::tui::seam::Arrival;
 use crate::tui::text::{
-    cells, indent, join, list_row, restyle, row, status, styled, thumb, with_bar, wrap,
+    cells, indent, join, list_row, restyle, row, status, styled, thumb, width, with_bar, wrap,
 };
 use crate::tui::theme::Role;
 use crate::tui::widgets::TextField;
@@ -42,6 +42,25 @@ const EFFECT: &str = "Changes apply the next time a master or agent starts with 
 const PROJECT_EFFECT: &str = "A value set here wins over the app value for this project only.";
 const BACK: &str = "All harnesses";
 const GROUPS: [&str; 3] = ["Settings", "Set by CrazyAgent", "Read-only"];
+
+/// The fewest settings a page keeps in view before it leaves out its purpose and effect
+/// lines and puts the version beside the title.
+const WINDOW_MIN: usize = 6;
+
+/// The first row a window shows so the chosen row stays in it, moving the last first row as
+/// little as it can. Inputs: the last first row, the chosen row, the window and the row
+/// count. Output: the first row.
+fn follow(offset: usize, selected: usize, window: usize, count: usize) -> usize {
+    assert!((1..=count).contains(&window) && selected < count);
+    let offset = offset.min(count - window);
+    if selected < offset {
+        selected
+    } else if selected >= offset + window {
+        selected + 1 - window
+    } else {
+        offset
+    }
+}
 
 /// Which group a setting sits in on the page, by its access: the ones the owner can change,
 /// the ones CrazyAgent sets itself, then the read-only ones. Input: the access. Output: the
@@ -516,6 +535,31 @@ impl HarnessPage {
         }
     }
 
+    /// How many settings fit under a header of the given lines, and the first one shown:
+    /// the rows left after the header, the table head, the gap and the detail, less one
+    /// title line for each group the shown rows start, never fewer than one row. Inputs: the
+    /// read, the chosen row, the body height and the header's lines. Output: the number of
+    /// rows and the first row shown.
+    fn window(
+        &self,
+        read: &HarnessRead,
+        selected: usize,
+        height: usize,
+        header: usize,
+    ) -> (usize, usize) {
+        let count = read.settings.len();
+        assert!(selected < count, "the chosen row is a setting");
+        let room = height.saturating_sub(header + 2 + DETAIL_ROWS);
+        let first = room.max(1).min(count);
+        let offset = follow(self.offset, selected, first, count);
+        let titles = 1 + read.settings[offset..offset + first]
+            .windows(2)
+            .filter(|pair| group(&pair[0].access) != group(&pair[1].access))
+            .count();
+        let window = room.saturating_sub(titles).max(1).min(count);
+        (window, follow(self.offset, selected, window, count))
+    }
+
     fn widths(limit: usize, wide: bool) -> [usize; 3] {
         let (first, second) = if wide { (32, 32) } else { (24, 22) };
         [
@@ -636,36 +680,45 @@ impl HarnessPage {
             }
             State::Ready(read) => read,
         };
-        lines.push(Line::default());
         let (version, warns) = version_line(read);
-        lines.extend(wrapped(
-            &version,
-            if warns { Role::Warning } else { Role::Muted },
-        ));
+        let role = if warns { Role::Warning } else { Role::Muted };
+        let version_lines = wrapped(&version, role);
         let effect = match &self.scope {
             Scope::App => EFFECT.to_owned(),
             Scope::Project { .. } => format!("{EFFECT} {PROJECT_EFFECT}"),
         };
-        lines.extend(wrapped(&effect, Role::Muted));
-        lines.push(Line::default());
+        let effect_lines = wrapped(&effect, Role::Muted);
         let count = read.settings.len();
+        let full = lines.len() + 1 + version_lines.len() + effect_lines.len() + 1;
+        let fits = count == 0
+            || self
+                .window(read, self.selected.min(count - 1), height, full)
+                .0
+                >= count.min(WINDOW_MIN);
+        if fits {
+            lines.push(Line::default());
+            lines.extend(version_lines);
+            lines.extend(effect_lines);
+        } else if 2 + width(&version) <= limit.saturating_sub(width(&name)) {
+            lines = vec![row(
+                limit,
+                styled(name.clone(), Role::Heading, theme),
+                styled(version, role),
+                glyphs,
+            )];
+        } else {
+            lines.truncate(1);
+            lines.extend(version_lines);
+        }
+        lines.push(Line::default());
         if count == 0 {
             lines.push(Line::raw(format!(
                 "CrazyAgent lists no settings for {name} yet."
             )));
             return (lines, None);
         }
-        let groups = (0..GROUPS.len())
-            .filter(|at| {
-                read.settings
-                    .iter()
-                    .any(|setting| group(&setting.access) == *at)
-            })
-            .count();
-        let window = height
-            .saturating_sub(lines.len() + 2 + DETAIL_ROWS + groups)
-            .max(1)
-            .min(count);
+        let selected = self.selected.min(count - 1);
+        let (window, offset) = self.window(read, selected, height, lines.len());
         let row_limit = if count > window { limit - 1 } else { limit };
         let widths = Self::widths(row_limit, ctx.wide());
         lines.push(join([
@@ -683,14 +736,7 @@ impl HarnessPage {
                 theme.muted,
             ),
         ]));
-        let selected = self.selected.min(count - 1);
-        let mut offset = self.offset.min(count - window);
-        if selected < offset {
-            offset = selected;
-        } else if selected >= offset + window {
-            offset = selected + 1 - window;
-        }
-        let mut rows: Vec<Line<'static>> = Vec::with_capacity(window + groups);
+        let mut rows: Vec<Line<'static>> = Vec::with_capacity(window + GROUPS.len());
         let mut last_group = None;
         for (index, setting) in read.settings.iter().enumerate().skip(offset).take(window) {
             let at = group(&setting.access);
