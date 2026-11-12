@@ -346,6 +346,42 @@ async fn removing_a_project_keeps_its_usage_under_removed_projects() {
     engine.stop().await;
 }
 
+/// DEC-105 D7 (rv-v3code J2): removing a project runs the search index forget inside the
+/// removal transaction, so the project's chunks, watermarks and pass mark go, its memories'
+/// chunks too, and nothing of it stays in the full-text table.
+#[tokio::test]
+async fn removing_a_project_forgets_its_search_index_rows() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, _) = project(&mut owner).await;
+    write_db(
+        &engine,
+        "INSERT INTO search_chunks(project,source,key,ordinal,text,at_ms) VALUES
+           ('setup-pooled','session','team',0,'okapi removed',1),
+           ('setup-pooled','memory','m-removed',0,'okapi removed memory',1);
+         INSERT INTO search_sources(project,key,checked_ms) VALUES ('setup-pooled','team',1);
+         INSERT INTO search_projects(project,caught_up_ms) VALUES ('setup-pooled',1);",
+    );
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    for table in ["search_chunks", "search_sources", "search_projects"] {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} keeps nothing of the removed project"
+        );
+    }
+    assert_eq!(
+        engine
+            .rows("SELECT count(*) FROM search_chunks_fts WHERE search_chunks_fts MATCH 'removed'"),
+        0
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// The removal preview names the project and its folder once, changes nothing, and offers
 /// Delete everything inside the home on the platform that offers it (DEC-118).
 #[tokio::test]
