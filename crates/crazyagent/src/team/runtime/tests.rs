@@ -11760,13 +11760,13 @@ fn a_live_master_s_reminder_is_left_out_when_only_the_owner_message_and_its_edit
     );
 }
 
-/// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
-/// background commands stop when its turn ends: its rollout reports no such commands, so
-/// the engine neither holds its turn for them nor stops them, and the line would be untrue
-/// (rv-audit S3 F2). Its task still reaches it and ends.
+/// Under Stop, a Codex sub-agent whose app keeps running between tasks is told that its
+/// background commands stop when its turn ends, as a Claude Code pane is: its rollout reports
+/// each command it leaves running and that command's end, so the engine holds its turn for
+/// them and stops them at the turn's end (DEC-141 PA-10). Its task still reaches it and ends.
 #[cfg(target_os = "macos")]
 #[test]
-fn under_stop_a_kept_codex_agent_is_not_told_its_background_commands_stop() {
+fn under_stop_a_kept_codex_agent_is_told_its_background_commands_stop() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
     choose_background(&fixture, crate::team::BackgroundAtEnd::Stop);
@@ -11780,7 +11780,7 @@ fn under_stop_a_kept_codex_agent_is_not_told_its_background_commands_stop() {
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     assert!(text.contains("Write page.md"), "{text}");
-    assert!(!text.contains(BACKGROUND_STOPS_LINE), "{text}");
+    assert!(text.contains(BACKGROUND_STOPS_LINE), "{text}");
 }
 
 /// Under Stop, an agent whose harness starts for each turn on a signed-in account is told
