@@ -563,7 +563,7 @@ fn the_task_panel_says_which_model_the_master_picked_and_why() {
     view.key(press(KeyCode::Down));
     let rows = frame(&view, 120, 36);
     assert!(
-        !rows.iter().any(|row| row.contains("Model: ")),
+        !rows.iter().any(|row| row.contains("Why: ")),
         "a task with no pick runs the default and says nothing: {}",
         rows.join("\n")
     );
