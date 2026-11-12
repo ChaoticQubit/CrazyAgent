@@ -391,6 +391,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   master_step_settings: "changing the master step limit",
   master_time_settings: "changing the master time limit",
   master_frame_settings: "changing the master frame size limit",
+  learning_mark: "saving your Learn CrazyAgent progress",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
