@@ -1136,8 +1136,8 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(!known_tools(&names(&["status"])));
     assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
     assert!(known_tools(&names(&QUESTION_TOOLS)));
-    assert!(known_tools(&names(&[STOP_TOOL; 15])));
-    assert!(!known_tools(&names(&[STOP_TOOL; 16])));
+    assert!(known_tools(&names(&[STOP_TOOL; 16])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 17])));
 }
 /// The words a tool name, description or schema field of the owner's Messages timeline read
 /// or its settings write would carry, lowercased.
@@ -1390,4 +1390,27 @@ fn an_ask_call_names_single_or_text_and_a_kind_that_does_not_fit_is_refused() {
         schema["inputSchema"]["properties"]["kind"]["enum"],
         json!(["single", "multi", "text"])
     );
+}
+
+/// DEC-147 S3.6: `discard` names a harness and gives a reason on one plain line; anything
+/// else is refused before the engine acts.
+#[test]
+fn a_discard_call_needs_a_harness_name_and_a_one_line_reason() {
+    assert!(matches!(
+        live_call(DISCARD_TOOL, Some(&json!({"agent": "@docs", "reason": " Not needed "}))),
+        Some(Ok(Call::Discard { agent, reason })) if agent == "@docs" && reason == "Not needed"
+    ));
+    let refused =
+        |arguments: Value| matches!(live_call(DISCARD_TOOL, Some(&arguments)), Some(Err(_)));
+    assert!(refused(json!({"agent": "@docs"})));
+    assert!(refused(json!({"agent": "@docs", "reason": "  "})));
+    assert!(refused(json!({"agent": "@docs", "reason": "two\nlines"})));
+    assert!(refused(
+        json!({"agent": "@docs", "reason": "x".repeat(DISCARD_REASON_BYTES_MAX + 1)})
+    ));
+    assert!(refused(json!({"reason": "Not needed"})));
+    assert!(refused(
+        json!({"agent": "@docs", "reason": "Not needed\u{200b}"})
+    ));
+    assert!(TEAM_TOOLS.contains(&DISCARD_TOOL) && !LEAD_TOOLS.contains(&DISCARD_TOOL));
 }

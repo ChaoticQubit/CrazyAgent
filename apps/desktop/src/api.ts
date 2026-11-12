@@ -1390,7 +1390,7 @@ export function setBackgroundAtEnd(id: string, choice: BackgroundAtEnd): Promise
   return call<IntentReceipt>("desktop_team_background", { id, choice, generation: nextGeneration() });
 }
 
-/** Turns the project's "Ask me before merging into the master's branch" setting on or off;
+/** Turns the project's "Master accepts change sets" setting on or off;
  * on, the master's merge of a finished harness waits for the owner's Accept in Changes.
  * Inputs: the project id and the switch. Output: the engine receipt, not ready, or a plain
  * error. */

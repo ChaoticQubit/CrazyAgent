@@ -582,6 +582,7 @@ impl OwnerRuntimeHandle {
         });
         let lease = prepared.lease.clone();
         let settings = self.engine.settings_files();
+        let summary = turn.reply.as_ref().map(|reply| reply.text.clone());
         let landed = tokio::task::spawn_blocking(move || {
             let root = root.ok_or_else(|| failure("changes_unavailable"))?;
             let db = crate::landing::open(&root)?;
@@ -593,6 +594,14 @@ impl OwnerRuntimeHandle {
                 git_dir: crate::worktrees::lease_git_dir(&db, &lease)?,
             };
             let landed = crate::landing_turns::record(&db, &workspace, &end, settings.as_ref())?;
+            if let (crate::landing_turns::Landed::Added(id), Some(summary)) = (&landed, &summary)
+                && let Err(problem) = crate::landing::record_summary(&db, &workspace, id, summary)
+            {
+                eprintln!(
+                    "landing_summary_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
             let merged = match &landed {
                 crate::landing_turns::Landed::Added(id) => master_landed_note(&db, id),
                 _ => None,

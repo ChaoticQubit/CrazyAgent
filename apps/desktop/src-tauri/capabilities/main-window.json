@@ -242,6 +242,8 @@
     "allow-desktop-change-diff",
     "allow-desktop-accept-change",
     "allow-desktop-change-branches",
+    "allow-desktop-change-owner-dirty",
+    "allow-desktop-commit-owner-files",
     "allow-desktop-discard-change",
     "allow-desktop-restore-change",
     "allow-desktop-undo-change",

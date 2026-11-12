@@ -35,7 +35,7 @@ use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
 use crazyagent::ide::extensions::{Approved, AskView};
-use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
+use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, OwnerDirty, TargetBranches};
 use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::memory::ReviewDecision;
@@ -3699,6 +3699,34 @@ async fn desktop_change_branches(
 }
 
 #[tauri::command]
+async fn desktop_change_owner_dirty(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    target: Option<String>,
+) -> Result<OwnerDirty, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.change_owner_dirty(id, target)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_commit_owner_files(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    files: Vec<String>,
+    message: String,
+    target: Option<String>,
+) -> Result<(String, String), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .commit_owner_files(id, files, message, target)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_discard_change(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4725,6 +4753,8 @@ native_commands! {
     desktop_change_diff,
     desktop_accept_change,
     desktop_change_branches,
+    desktop_change_owner_dirty,
+    desktop_commit_owner_files,
     desktop_discard_change,
     desktop_restore_change,
     desktop_undo_change,

@@ -48,9 +48,15 @@ pub const SESSION_TOOL: &str = "session";
 /// The tool an agent logs a new phase of its work or a finished test run with, to the
 /// project activity the owner reads on Overview (OS-5).
 pub const ACTIVITY_TOOL: &str = "log_activity";
+/// The tool the master discards a finished harness's waiting change set with, restorable by
+/// the owner from Changes for seven days, noted for the owner and logged (DEC-147 S3.6).
+/// Master only: a sub-agent's server leaves it out and the engine refuses it.
+pub const DISCARD_TOOL: &str = "discard";
+/// The most bytes of the reason a `discard` call gives.
+pub const DISCARD_REASON_BYTES_MAX: usize = 400;
 /// The team tools a live master and a sub-agent with tools get (DEC-104), in the order of
 /// `coord::tool_switches::BUILTIN_TOOLS`, which the owner switches each one by.
-pub const TEAM_TOOLS: [&str; 13] = [
+pub const TEAM_TOOLS: [&str; 14] = [
     START_WORK_TOOL,
     INSPECT_WORK_TOOL,
     UPDATE_WORK_TOOL,
@@ -64,6 +70,7 @@ pub const TEAM_TOOLS: [&str; 13] = [
     SESSIONS_TOOL,
     SESSION_TOOL,
     ACTIVITY_TOOL,
+    DISCARD_TOOL,
 ];
 /// The team tools a master without its live terminal gets beside `delegate`, answered by the
 /// engine through its mailbox like a live master's.
@@ -111,6 +118,7 @@ const TRANSFER_INVALID: &str = "Not changed: give the work number, the version i
 const FINISH_INVALID: &str = "Not finished: give the work number, the version inspect_work shows, an outcome (review_ready, complete or closed) and evidence of plain text up to 4000 bytes.";
 const AGENT_INVALID: &str =
     "Not done: name the agent by its persona name, its @role handle or its number.";
+const DISCARD_INVALID: &str = "Not discarded: name the harness by its persona name, its @role handle or its number, and give the reason in plain words on one line of up to 400 bytes.";
 const SESSIONS_INVALID: &str =
     "Not searched: give plain words up to 256 bytes, or nothing to list the conversations.";
 const SESSION_INVALID: &str =
@@ -241,6 +249,10 @@ pub enum Call {
         text: String,
         kind: LogKind,
     },
+    Discard {
+        agent: String,
+        reason: String,
+    },
     Ask {
         question: String,
         kind: QuestionKind,
@@ -273,6 +285,7 @@ impl Call {
             Self::Remember { .. } => REMEMBER_TOOL,
             Self::Recall { .. } => RECALL_TOOL,
             Self::LogActivity { .. } => ACTIVITY_TOOL,
+            Self::Discard { .. } => DISCARD_TOOL,
             Self::Ask { .. } => ASK_TOOL,
             Self::RecordAnswer { .. } => RECORD_TOOL,
         };
@@ -626,6 +639,13 @@ fn spec(name: &str) -> Value {
             "Merge a finished agent's work locally, never pushed: the master merges a lead's task branch into the Master's branch, and a lead merges one of its own sub-agents' work into its own branch. The owner's settings may keep it for the owner's Accept in Changes instead; then this says so.",
             json!({"type": "object", "properties": {"agent": agent}, "required": ["agent"], "additionalProperties": false}),
         ),
+        DISCARD_TOOL => (
+            "Discard a finished harness's waiting change set when its work should not land, with the reason. Master only. The owner is told and can restore it from Changes for 7 days; the harness's branch goes back to the owner's branch.",
+            json!({"type": "object", "properties": {
+                "agent": agent,
+                "reason": {"type": "string", "description": "Why the work should not land, in plain words on one line of up to 400 bytes."},
+            }, "required": ["agent", "reason"], "additionalProperties": false}),
+        ),
         ACTIVITY_TOOL => (
             "Log to the project activity the owner reads on Overview: a new phase of the work or a finished test run, with the goal it serves and one line saying what happened.",
             json!({"type": "object", "properties": {
@@ -901,6 +921,21 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(AGENT_INVALID),
         },
+        DISCARD_TOOL => match (argument("agent"), argument("reason")) {
+            (Some(agent), Some(reason))
+                if agent_name_valid(agent)
+                    && !reason.trim().is_empty()
+                    && reason.len() <= DISCARD_REASON_BYTES_MAX
+                    && !reason.chars().any(char::is_control)
+                    && !crate::memory::hidden_text(reason) =>
+            {
+                Ok(Call::Discard {
+                    agent: agent.trim().to_owned(),
+                    reason: reason.trim().to_owned(),
+                })
+            }
+            _ => Err(DISCARD_INVALID),
+        },
         SESSIONS_TOOL => match argument("query").unwrap_or_default() {
             query
                 if query.len() <= super::history::QUERY_BYTES_MAX
@@ -1100,6 +1135,7 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             mode,
         } => json!({"task": task, "harness": harness, "role": role, "mode": mode}),
         Call::Stop { agent } | Call::Merge { agent } => json!({"agent": agent}),
+        Call::Discard { agent, reason } => json!({"agent": agent, "reason": reason}),
         Call::Sessions { query } => json!({"query": query}),
         Call::Session { id, offset } => json!({"id": id, "offset": offset}),
         Call::Remember { text, scope } => json!({"text": text, "scope": scope.as_str()}),

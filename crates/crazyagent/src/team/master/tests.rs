@@ -3269,8 +3269,159 @@ fn an_open_change_set_line_stays_one_line_whatever_its_names_hold() {
     );
 }
 
-/// With "Ask me before merging" on, the master's merge lands nothing: the change set stays
-/// in Changes and the owner gets one notification. Off, it lands on the Master's branch as
+/// DEC-147 S3.6: the master discards a finished harness's waiting change set with a reason.
+/// Nothing lands, the set reads discarded and stays restorable, the owner reads the reason in
+/// the team conversation and the activity names the master; a second call finds nothing
+/// to discard, and a sub-agent is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_discards_a_finished_harness_set_with_its_reason_for_the_owner() {
+    let mut fixture = Fixture::new();
+    let (repo, _remote) = project_repo(&fixture);
+    let start = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    let (agent, id) = finished_harness(&fixture, &repo, "docs-writer", "docs", "one\ntwo\n");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let call = json!({"agent": "@docs-writer", "reason": "The owner chose the other wording."});
+    assert_eq!(
+        as_master(&mut fixture, tool::DISCARD_TOOL, call.clone()),
+        (
+            format!(
+                "Discarded {label}'s change set from its branch crazyagent/docs. The owner was told and can restore it from Changes for 7 days."
+            ),
+            false
+        )
+    );
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
+    assert_eq!(
+        set_state(&fixture, &id),
+        crate::landing::ChangeState::Discarded
+    );
+    let notes = bodies(
+        &fixture,
+        "SELECT text FROM team_messages WHERE project=(SELECT project FROM team_agents WHERE id=?1) AND author='engine' ORDER BY id",
+        agent,
+    );
+    assert_eq!(
+        notes.last().unwrap(),
+        &format!(
+            "The master discarded {label}'s change set from its branch crazyagent/docs: The owner chose the other wording. You can restore it from Changes for 7 days."
+        )
+    );
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    assert!(
+        crate::activity::list(&db, &project, 20)
+            .unwrap()
+            .iter()
+            .any(|item| item.kind == crate::activity::ActivityKind::Discarded
+                && item.actor == crate::activity::MASTER_ACTOR),
+        "the activity names the master"
+    );
+    let (again, refused) = as_master(&mut fixture, tool::DISCARD_TOOL, call.clone());
+    assert!(refused);
+    assert!(again.starts_with("Nothing to discard: "), "{again}");
+
+    let sub = named_sub(&fixture, "api-fix", "working");
+    assert_eq!(
+        as_sub(&mut fixture, sub, tool::DISCARD_TOOL, call),
+        (
+            "Not discarded: only the master discards a change set. Tell your lead or the master why the work should not land.".to_owned(),
+            true
+        )
+    );
+}
+
+/// DEC-147.7: at Only when I click or say accept all, the master's merge lands a finished
+/// harness's set once the owner sent exactly "accept all" to the team after the set last
+/// changed. The same words from the master, a longer owner sentence or an owner message
+/// older than the set leave it waiting in Changes; the note says why it landed.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_merges_after_the_owner_says_accept_all_and_not_before() {
+    let mut fixture = Fixture::new();
+    let (repo, _remote) = project_repo(&fixture);
+    let start = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    let (agent, id) = finished_harness(&fixture, &repo, "docs-writer", "docs", "one\ntwo\n");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    fixture
+        .connection
+        .execute("INSERT INTO team_merge_ask VALUES (?1,1)", [PROJECT])
+        .unwrap();
+    let changed = {
+        let db = crate::landing::open(&fixture.base).unwrap();
+        crate::landing::list(&db, &ProjectId::new(PROJECT).unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|set| set.id == id)
+            .unwrap()
+            .updated_ms
+    };
+    let changed = i64::try_from(changed).unwrap();
+    let say = |fixture: &Fixture, author: &str, text: &str, at: i64| {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 SELECT project,?2,?3,'pending',?4 FROM team_agents WHERE id=?1",
+                rusqlite::params![agent, author, text, at],
+            )
+            .unwrap();
+    };
+    let merge = |fixture: &mut Fixture| {
+        as_master(fixture, tool::MERGE_TOOL, json!({"agent": "@docs-writer"}))
+    };
+    say(&fixture, "owner", "accept all", changed - 1);
+    say(&fixture, "master", "accept all", changed + 1);
+    say(&fixture, "engine", "Accept all.", changed + 1);
+    say(&fixture, "owner", "don't accept all", changed + 1);
+    say(&fixture, "owner", "accept all of them later", changed + 1);
+    say(
+        &fixture,
+        "owner",
+        "The owner answered your question 3 (\"Merge now?\"):\naccept all",
+        changed + 1,
+    );
+    let (waiting, refused) = merge(&mut fixture);
+    assert!(waiting.starts_with("Waiting for the owner:"), "{waiting}");
+    assert!(!refused);
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
+    assert_eq!(
+        set_state(&fixture, &id),
+        crate::landing::ChangeState::Pending
+    );
+
+    say(&fixture, "owner", "  Accept ALL! ", changed + 2);
+    let (merged, refused) = merge(&mut fixture);
+    let tip = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    assert_ne!(tip, start);
+    assert_eq!(
+        (merged.as_str(), refused),
+        (
+            format!(
+                "Merged {label}'s work from its branch crazyagent/docs into main as {}. Nothing was pushed; the owner was told.",
+                &tip[..12]
+            )
+            .as_str(),
+            false
+        )
+    );
+    let notes = bodies(
+        &fixture,
+        "SELECT text FROM team_messages WHERE project=(SELECT project FROM team_agents WHERE id=?1) AND author='engine' ORDER BY id",
+        agent,
+    );
+    assert_eq!(
+        notes.last().unwrap(),
+        &format!(
+            "The master merged {label}'s work from its branch crazyagent/docs into main as {} because you said accept all. Nothing was pushed.",
+            &tip[..12]
+        )
+    );
+}
+
+/// With "Master accepts change sets" at Only when I click or say accept all, the master's merge
+/// lands nothing: the change set stays in Changes and the owner gets one notification. At
+/// Itself, the default, it lands on the Master's branch as
 /// one commit under the owner's own git identity, pushes nothing, notes it for the owner
 /// and leaves nothing more to merge (DEC-100 S3).
 #[cfg(target_os = "macos")]
@@ -3292,7 +3443,7 @@ fn the_master_merges_a_finished_harness_locally_unless_the_owner_asks_first() {
         merge(&mut fixture),
         (
             format!(
-                "Waiting for the owner: the owner's setting asks before merging into main. {label}'s change set waits in Changes. The owner got a notification."
+                "Waiting for the owner: the owner's setting lets the master merge into main only after the owner clicks Accept or sends accept all to the team. {label}'s change set waits in Changes. The owner got a notification."
             ),
             false
         )
@@ -3307,7 +3458,7 @@ fn the_master_merges_a_finished_harness_locally_unless_the_owner_asks_first() {
     assert_eq!(
         alerts(&fixture),
         vec![format!(
-            "{label} finished its branch crazyagent/docs. Its change set waits in Changes for your Accept into main."
+            "{label} finished its branch crazyagent/docs. Its change set waits in Changes for your Accept into main, or send accept all to the team."
         )]
     );
     assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);

@@ -3035,6 +3035,36 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.change_branches(id)?; call.await }.await;
             routed(result)
         }
+        "desktop_change_owner_dirty" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                target: Option<String>,
+            }
+            let Args { id, target } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.change_owner_dirty(id, target)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_commit_owner_files" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                files: Vec<String>,
+                message: String,
+                target: Option<String>,
+            }
+            let Args { id, files, message, target } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .commit_owner_files(id, files, message, target)?; call.await }.await;
+            routed(result)
+        }
         "desktop_discard_change" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
