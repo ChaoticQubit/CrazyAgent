@@ -36,10 +36,14 @@ const ABSOLUTE: &str = "Type the full path of a .yaml file, starting with /.";
 pub(in crate::tui) fn sentence(code: &str) -> String {
     let known = match code {
         "app_plugin_outcome_unknown" => {
-            "CrazyAgent couldn't confirm what happened. Read the list again before you try again."
+            "CrazyAgent couldn't confirm what happened. Check the list before you try again."
         }
-        "app_plugin_request_bounds" => "A manifest can be at most 16 KB.",
-        "app_plugin_request_invalid" => "The engine didn't accept this plugin request.",
+        "app_plugin_request_bounds" => {
+            "This plugin request was too large to send. A manifest can be at most 16 KB."
+        }
+        "app_plugin_request_invalid" => {
+            "The engine didn't accept this plugin request. Reload the page and try again."
+        }
         "app_plugins_unavailable" => "App plugins aren't available in this engine yet.",
         "app_plugin_not_found" => "That plugin is gone. The list now shows the current ones.",
         "app_plugin_name_taken" => {
@@ -53,10 +57,15 @@ pub(in crate::tui) fn sentence(code: &str) -> String {
             "This plugin's file changed or is new. Review it before it runs."
         }
         "app_plugin_refused" => "CrazyAgent refused this manifest. Its reason is shown with it.",
-        "app_plugin_folder_unsafe" => {
-            "Your plugins folder isn't private to you, so CrazyAgent won't read it."
+        "app_plugin_name_invalid" => {
+            "A plugin name is lowercase letters, digits and dashes, starting with a letter, at most 40 characters."
         }
-        "app_plugin_folder_unavailable" => "CrazyAgent couldn't open your plugins folder.",
+        "app_plugin_folder_unsafe" => {
+            "Your plugins folder isn't private to you, so CrazyAgent won't read it. Make it yours alone and try again."
+        }
+        "app_plugin_folder_unavailable" => {
+            "CrazyAgent couldn't open your plugins folder. Try again."
+        }
         "app_plugin_file_unsafe" => {
             "That plugin file isn't a plain file private to you, so CrazyAgent won't read it."
         }
@@ -69,26 +78,30 @@ pub(in crate::tui) fn sentence(code: &str) -> String {
             "That key can't be used: it is empty, too long or has spaces or control characters."
         }
         "app_plugin_key_store_unavailable" => {
-            "CrazyAgent couldn't save the key. Nothing was saved."
+            "CrazyAgent couldn't save the key. Nothing was saved; try again."
         }
-        "app_plugin_file_unreadable" => {
-            "CrazyAgent couldn't read that file. Type the path of a manifest you can open."
-        }
-        "app_plugin_file_not_text" => "That file isn't text. A manifest is a UTF-8 .yaml file.",
         "owner_entropy_unavailable" => {
-            "This computer couldn't make a random value for the request. Nothing changed."
+            "This computer couldn't make a random value for the request. Nothing changed; try again."
         }
-        "search_choice_unavailable" => "That plugin can't rank search right now.",
+        "search_choice_unavailable" => {
+            "That plugin can't rank search right now. The page now shows why; pick another one."
+        }
         "search_confirm_required" => {
-            "This plugin sends search text to a host you haven't confirmed. Choose it again to confirm."
+            "This plugin sends search text to a host you haven't confirmed. Choose it again to see the host and confirm."
         }
         "search_model_confirm" => {
-            "The download size changed since you confirmed it. Read the page again and confirm."
+            "The download size changed since you confirmed it. Read the page again and confirm the new size."
         }
-        "search_model_downloading" => "The built-in model is still downloading.",
+        "search_model_downloading" => {
+            "The built-in model is still downloading. Wait for it to finish or cancel the download."
+        }
         "search_model_store_unavailable" => {
-            "CrazyAgent couldn't use the folder the built-in model lives in. Nothing changed."
+            "CrazyAgent couldn't use the folder the built-in model lives in. Nothing was changed; try again."
         }
+        "app_plugin_file_unreadable" => {
+            "CrazyAgent couldn't read that file. Pick a manifest file you can open."
+        }
+        "app_plugin_file_not_text" => "That file isn't text. A manifest is a UTF-8 .yaml file.",
         _ => return coded("CrazyAgent couldn't do that.", code),
     };
     known.to_owned()

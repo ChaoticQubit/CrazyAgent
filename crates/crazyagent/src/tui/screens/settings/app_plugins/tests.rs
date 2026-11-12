@@ -775,7 +775,7 @@ fn a10_a12_a_typed_key_is_masked_sent_once_and_never_drawn() {
     );
     assert!(shows(
         &mut shell,
-        "CrazyAgent couldn't save the key. Nothing was saved."
+        "CrazyAgent couldn't save the key. Nothing was saved; try again."
     ));
     assert!(
         !render(&mut shell, 100, 40)
