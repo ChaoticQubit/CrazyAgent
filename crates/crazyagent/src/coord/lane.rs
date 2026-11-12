@@ -763,54 +763,51 @@ impl Entry {
 }
 
 /// Runs the command with the lane command's own input and output, passing on a terminate,
-/// hang-up or interrupt sent to the lane command, so a stop that reaches only the lane
-/// command still stops its command and the lane slot is held exactly as long as it runs.
+/// hang-up or interrupt sent to the lane command, listened for before the command starts,
+/// so a stop that reaches only the lane command still stops its command and the lane slot
+/// is held exactly as long as it runs.
 /// Takes the request and where the lane command's own lines go. Returns the command's exit
 /// code, 128 plus the signal that ended it, or `NOT_STARTED`.
 #[cfg(unix)]
 fn command(request: &Request, out: &mut dyn Write) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     use tokio::signal::unix::{Signal, SignalKind, signal};
-    let child = std::process::Command::new(&request.program)
-        .args(&request.arguments)
-        .spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(problem) => {
-            let _ = writeln!(
-                out,
-                "crazyagent lane: the command could not start: {problem}"
-            );
-            return NOT_STARTED;
+    async fn next(stream: &mut Option<Signal>) {
+        match stream {
+            Some(stream) => {
+                if stream.recv().await.is_none() {
+                    std::future::pending::<()>().await;
+                }
+            }
+            None => std::future::pending::<()>().await,
         }
+    }
+    let spawn = || {
+        std::process::Command::new(&request.program)
+            .args(&request.arguments)
+            .spawn()
     };
-    let pid = i32::try_from(child.id())
-        .ok()
-        .and_then(rustix::process::Pid::from_raw);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build();
-    let status = match runtime {
-        Err(_) => child.wait(),
-        Ok(runtime) => runtime.block_on(async move {
-            async fn next(stream: &mut Option<Signal>) {
-                match stream {
-                    Some(stream) => {
-                        if stream.recv().await.is_none() {
-                            std::future::pending::<()>().await;
-                        }
-                    }
-                    None => std::future::pending::<()>().await,
-                }
-            }
+    let status: Result<std::io::Result<std::process::ExitStatus>, std::io::Error> = match runtime {
+        Err(_) => spawn().map(|mut child| child.wait()),
+        Ok(runtime) => runtime.block_on(async {
             let mut terminate = signal(SignalKind::terminate()).ok();
             let mut hangup = signal(SignalKind::hangup()).ok();
             let mut interrupt = signal(SignalKind::interrupt()).ok();
+            let mut child = match spawn() {
+                Ok(child) => child,
+                Err(problem) => return Err(problem),
+            };
+            let pid = i32::try_from(child.id())
+                .ok()
+                .and_then(rustix::process::Pid::from_raw);
             let mut waiter = tokio::task::spawn_blocking(move || child.wait());
             loop {
                 let passed = tokio::select! {
                     done = &mut waiter => {
-                        return done.unwrap_or_else(|problem| Err(std::io::Error::other(problem)));
+                        return Ok(done.unwrap_or_else(|problem| Err(std::io::Error::other(problem))));
                     }
                     () = next(&mut terminate) => rustix::process::Signal::TERM,
                     () = next(&mut hangup) => rustix::process::Signal::HUP,
@@ -823,10 +820,17 @@ fn command(request: &Request, out: &mut dyn Write) -> i32 {
         }),
     };
     match status {
-        Ok(status) => status
+        Err(problem) => {
+            let _ = writeln!(
+                out,
+                "crazyagent lane: the command could not start: {problem}"
+            );
+            NOT_STARTED
+        }
+        Ok(Ok(status)) => status
             .code()
             .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
-        Err(problem) => {
+        Ok(Err(problem)) => {
             let _ = writeln!(
                 out,
                 "crazyagent lane: the command's end could not be read: {problem}"
