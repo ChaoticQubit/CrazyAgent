@@ -306,6 +306,7 @@ pub struct ResearchRunner {
     terminal: Option<Arc<dyn Host>>,
     agents: Option<Arc<Agents>>,
     settings: Option<(PathBuf, PathBuf)>,
+    reproving: Option<Arc<AtomicBool>>,
 }
 
 /// Where one launch of a claimed research job runs: the canonical project folder, its
@@ -456,6 +457,7 @@ impl ResearchRunner {
             terminal: None,
             agents: None,
             settings: None,
+            reproving: None,
         })
     }
 
@@ -494,6 +496,22 @@ impl ResearchRunner {
     pub fn with_agents(mut self, agents: Arc<Agents>) -> Self {
         self.agents = Some(agents);
         self
+    }
+
+    /// Shares the engine's flag that is set while its engine-start re-proof of earlier
+    /// sign-ins still runs (DEC-108), so work that finds no signed-in account then waits
+    /// for the re-proof instead of reporting none. Takes the flag. Returns the runner.
+    pub fn with_reproof(mut self, reproving: Arc<AtomicBool>) -> Self {
+        self.reproving = Some(reproving);
+        self
+    }
+
+    /// Whether the engine-start re-proof of earlier sign-ins still runs; false without the
+    /// engine's flag. Output: the flag's value.
+    pub fn reproving(&self) -> bool {
+        self.reproving
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 
     /// Lets the runner run Claude Code jobs with the absolute `claude`

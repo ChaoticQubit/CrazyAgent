@@ -25,6 +25,16 @@ const ENGINE_TICK: Duration = Duration::from_secs(1);
 const STATUS_EVERY_TICKS: u32 = 5;
 #[cfg(unix)]
 const CHECKS_MAX: usize = 8;
+/// How soon a status run that found no account tries again while the engine still
+/// re-proves earlier sign-ins (DEC-108): the re-proof settles them within its own bound.
+#[cfg(unix)]
+const SETTLING_RETRY_MS: i64 = 10 * 1000;
+#[cfg(unix)]
+const _: () = assert!(
+    SETTLING_RETRY_MS > 0
+        && SETTLING_RETRY_MS < crate::roadmap_status::RETRY_MS
+        && SETTLING_RETRY_MS < crate::project_overview::agent::RETRY_MS
+);
 /// The most finished status runs whose folders wait for the usage upkeep at once; past it
 /// the oldest is removed at once.
 #[cfg(unix)]
@@ -338,6 +348,7 @@ impl StatusUpkeep {
             db,
             checks: &mut self.checks,
             upkeep: Upkeep::Roadmap,
+            settling: runner.reproving(),
         };
         let now = crate::team::now_ms();
         if let Err(error) = crate::roadmap_status::tick(db, &mut starts, now)
@@ -379,8 +390,10 @@ impl StatusUpkeep {
 }
 
 /// Starts the runs a store hands out, for the store `upkeep` names: on the first account a
-/// harness resolves for the project, later when every fitting account is paused, and with
-/// a plain failure when the pool has none.
+/// harness resolves for the project, later when every fitting account is paused, and when
+/// the pool has none, soon again with no line while the engine still re-proves earlier
+/// sign-ins (`settling`), else later again under one plain line that stays until a run
+/// gets an account.
 #[cfg(unix)]
 struct StatusStarts<'a, F> {
     runner: &'a Arc<ResearchRunner>,
@@ -388,6 +401,7 @@ struct StatusStarts<'a, F> {
     db: &'a rusqlite::Connection,
     checks: &'a mut Vec<JoinHandle<Option<crate::roadmap_status::run::RunLeft>>>,
     upkeep: Upkeep,
+    settling: bool,
 }
 
 #[cfg(unix)]
@@ -425,14 +439,29 @@ where
                     crate::project_overview::requeue(self.db, project, claim, until_ms.max(now))
                 }
             },
+            Picked::Nothing if self.settling => {
+                let due_ms = now.saturating_add(SETTLING_RETRY_MS);
+                match self.upkeep {
+                    Upkeep::Roadmap => {
+                        crate::roadmap_status::requeue(self.db, project, claim, due_ms)
+                    }
+                    Upkeep::Overview => {
+                        crate::project_overview::requeue(self.db, project, claim, due_ms)
+                    }
+                }
+            }
             Picked::Nothing => match self.upkeep {
                 Upkeep::Roadmap => {
-                    let failed = Err(crate::roadmap_status::NO_ACCOUNT);
-                    crate::roadmap_status::finish(self.db, project, claim, failed, now)
+                    let due_ms = now.saturating_add(crate::roadmap_status::RETRY_MS);
+                    let words = crate::roadmap_status::NO_ACCOUNT;
+                    crate::roadmap_status::wait_for_account(self.db, project, claim, words, due_ms)
                 }
                 Upkeep::Overview => {
+                    let due_ms = now.saturating_add(crate::project_overview::agent::RETRY_MS);
                     let words = crate::project_overview::NO_ACCOUNT;
-                    crate::project_overview::fail(self.db, project, claim, words, now)
+                    crate::project_overview::wait_for_account(
+                        self.db, project, claim, words, due_ms,
+                    )
                 }
             },
         };
@@ -463,6 +492,7 @@ pub fn start_for_engine(
     terminal: Option<Arc<dyn crate::terminal::Host>>,
     agents: Option<Arc<crate::agents::Agents>>,
     lookup: Option<crate::paths::HarnessLookup>,
+    reproving: Option<Arc<AtomicBool>>,
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
@@ -511,6 +541,9 @@ pub fn start_for_engine(
     if let Some(agents) = agents {
         runner = runner.with_agents(agents);
     }
+    if let Some(reproving) = reproving {
+        runner = runner.with_reproof(reproving);
+    }
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
     Ok(ResearchService::start(
         Arc::new(runner),
@@ -533,6 +566,7 @@ pub fn start_for_engine(
     _terminal: Option<Arc<dyn crate::terminal::Host>>,
     _agents: Option<Arc<crate::agents::Agents>>,
     _lookup: Option<crate::paths::HarnessLookup>,
+    _reproving: Option<Arc<AtomicBool>>,
 ) -> Result<ResearchService, String> {
     Err("research_runtime_unavailable".into())
 }
@@ -717,6 +751,7 @@ mod tests {
             db: &db,
             checks: &mut checks,
             upkeep: Upkeep::Overview,
+            settling: false,
         };
         let now = crate::team::now_ms();
         let mut noted = crate::project_overview::Started::default();
@@ -748,6 +783,7 @@ mod tests {
             db: &db,
             checks: &mut checks,
             upkeep: Upkeep::Roadmap,
+            settling: false,
         };
         let now = crate::team::now_ms();
         let started = crate::roadmap_status::tick(&db, &mut starts, now).unwrap();
@@ -761,5 +797,60 @@ mod tests {
             "the check waits for an account instead of ending for good"
         );
         assert!(due_ms > now, "the next try is a while away");
+    }
+
+    #[test]
+    fn a_status_run_with_no_account_waits_without_a_line_while_the_engine_re_proves_sign_ins() {
+        let (temp, runner, db) = engine_without_accounts();
+        let engine = temp.path().canonicalize().unwrap().join("engine");
+        let flag = Arc::new(AtomicBool::new(true));
+        let flagged = ResearchRunner::without_codex(
+            &engine.join("engine.db"),
+            &engine.join("research"),
+            ResearchLimits::default(),
+        )
+        .unwrap()
+        .with_reproof(flag.clone());
+        assert!(flagged.reproving() && !runner.reproving());
+        let project = ProjectId::new("alpha").unwrap();
+        crate::project_overview::refresh(&db, &project).unwrap();
+        crate::roadmap_status::refresh(&db, &project).unwrap();
+        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let mut checks = Vec::new();
+        let mut starts = StatusStarts {
+            runner: &runner,
+            resolve: &resolve,
+            db: &db,
+            checks: &mut checks,
+            upkeep: Upkeep::Roadmap,
+            settling: flagged.reproving(),
+        };
+        let now = crate::team::now_ms();
+        assert_eq!(
+            crate::roadmap_status::tick(&db, &mut starts, now).unwrap(),
+            1
+        );
+        starts.upkeep = Upkeep::Overview;
+        let mut noted = crate::project_overview::Started::default();
+        let steady = std::time::Instant::now();
+        let started =
+            crate::project_overview::tick(&db, &mut starts, &mut noted, steady, now).unwrap();
+        assert_eq!(started, 1);
+        assert!(checks.is_empty(), "no agent starts without an account");
+        for (table, line) in [
+            ("roadmap_status", "problem"),
+            ("project_overview", "failure"),
+        ] {
+            let (stale, due_ms, running, shown) = waiting_row(&db, table, line);
+            assert_eq!(
+                shown, None,
+                "{table} shows no line while sign-ins are re-proved"
+            );
+            assert_eq!(running, None);
+            assert!(stale && due_ms > now, "{table} tries again soon");
+            assert!(due_ms <= now.saturating_add(SETTLING_RETRY_MS) + 1000);
+        }
+        flag.store(false, Ordering::SeqCst);
+        assert!(!flagged.reproving(), "the wait ends with the re-proof");
     }
 }
