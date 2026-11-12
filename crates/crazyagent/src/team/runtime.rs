@@ -4860,9 +4860,16 @@ impl TeamRuntime {
     }
 
     /// Hands the tasks a tools-off live master wrote as reply lines to the team, each
-    /// through `admit` like any master task; refused ones are listed in one team note.
-    /// Takes the project and the turn's reply text. Returns any SQLite failure.
-    fn admit_reply_lines(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
+    /// through `admit` like any master task and keyed by the turn, so they are one round of
+    /// the owner's goal and their results come back together; past the round limit none
+    /// is handed over and the owner reads why. Refused ones are listed in one team note.
+    /// Takes the project, the turn's reply text and its number. Returns any SQLite failure.
+    fn admit_reply_lines(
+        &mut self,
+        project: &ProjectId,
+        text: &str,
+        turn: i64,
+    ) -> Result<(), EngineError> {
         let proposed = parse_delegations(text);
         if proposed.is_empty() {
             return Ok(());
@@ -4875,6 +4882,19 @@ impl TeamRuntime {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        let key = super::master_limits::live_turn_key(turn);
+        let rounds = super::master_limits::rounds(&tx, project)?;
+        if !rounds.open() && !super::master_limits::joins_round(&tx, project, key)? {
+            let _ = append_message(
+                &tx,
+                project,
+                MessageAuthor::Engine,
+                &rounds.limit_note(),
+                MessageState::Note,
+                now,
+            )?;
+            return tx.commit().map_err(error);
+        }
         let mut refused = Vec::new();
         for delegation in &proposed {
             if let Err(code) = admit(
@@ -4884,7 +4904,7 @@ impl TeamRuntime {
                 delegation.harness.as_deref(),
                 &delegation.prompt,
                 TaskSource::Master,
-                None,
+                Some(key),
                 now,
             )? {
                 refused.push(format!(
@@ -5083,7 +5103,7 @@ impl TeamRuntime {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
-        let round = super::master_limits::rounds(&tx, project)?.next_line();
+        let round = super::master_limits::rounds(&tx, project)?.results_line();
         let (text, held) = results_message(&ready, &round);
         if append_message(
             &tx,
@@ -8835,7 +8855,7 @@ impl TeamRuntime {
                 }
                 self.count_turn(id, &project, master)?;
                 if !team_tool {
-                    self.admit_reply_lines(&project, &text)?;
+                    self.admit_reply_lines(&project, &text, turn)?;
                 }
                 self.land_turn(
                     id,
@@ -9451,6 +9471,11 @@ impl TeamRuntime {
                 now,
             )?;
         }
+        let before: i64 = tx
+            .query_row("SELECT COALESCE(MAX(id),0) FROM team_tasks", [], |row| {
+                row.get(0)
+            })
+            .map_err(error)?;
         let mut woken = Vec::with_capacity(wakes.len());
         for wake in &wakes {
             let (said, _) = super::master::wake_in(
@@ -9474,6 +9499,12 @@ impl TeamRuntime {
                 now,
             )?;
         }
+        tx.execute(
+            "UPDATE team_tasks SET turn=?2 WHERE project=?1 AND id>?3 AND turn IS NULL
+             AND source='master' AND parent IS NULL",
+            params![project.as_str(), reply, before],
+        )
+        .map_err(error)?;
         tx.commit().map_err(error)
     }
 }

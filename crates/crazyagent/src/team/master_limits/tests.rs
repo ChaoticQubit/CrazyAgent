@@ -168,40 +168,99 @@ fn the_owner_actions_refuse_unlisted_choices_and_take_every_listed_one() {
     }
 }
 
+/// Writes the master's reply that handed work over and returns its id, the hand-off key of
+/// that reply. Inputs: the database and the time. Output: the message id.
+fn reply(connection: &Connection, created_ms: i64) -> i64 {
+    message(connection, "master", "On it.", "reply", created_ms);
+    connection.last_insert_rowid()
+}
+
+/// Writes one task of the team. Inputs: the database, its source, its hand-off key, its
+/// parent task and the time. Output: none.
+fn task(
+    connection: &Connection,
+    source: &str,
+    turn: Option<i64>,
+    parent: Option<i64>,
+    created_ms: i64,
+) {
+    connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms,parent)
+             VALUES (?1,?2,?3,'codex',0,'Build it','queued',?4,?5)",
+            params![PROJECT, source, turn, created_ms, parent],
+        )
+        .unwrap();
+}
+
+/// Hands one task over under a key the way a master does. Inputs: the database, the key
+/// and the time. Output: none.
+fn handed(connection: &Connection, key: i64, created_ms: i64) {
+    task(connection, "master", Some(key), None, created_ms);
+}
+
 #[test]
-fn a_round_is_an_engine_message_after_the_owners_last_goal_message() {
+fn a_round_is_one_master_turn_that_handed_work_over_since_the_owners_last_goal_message() {
     let connection = database();
     let project = project();
     set_rounds(&connection, &project, Some(2)).unwrap();
-    message(&connection, "engine", "old results", "answered", START);
-    message(
-        &connection,
-        "owner",
-        "build the page",
-        "answered",
-        START + 1,
-    );
+    let old = reply(&connection, START);
+    handed(&connection, old, START);
+    message(&connection, "owner", "build the page", "answered", START);
     assert_eq!(rounds(&connection, &project).unwrap().used, 0);
-    message(&connection, "engine", "results one", "answered", START + 2);
-    message(&connection, "engine", "a note", "note", START + 3);
-    message(&connection, "master", "a reply", "reply", START + 4);
+    let first = reply(&connection, START);
+    handed(&connection, first, START);
+    handed(&connection, first, START);
+    task(&connection, "master", None, None, START);
+    task(&connection, "master", Some(first + 1), Some(1), START);
+    task(&connection, "owner", Some(first + 2), None, START);
+    message(&connection, "engine", "results one", "pending", START + 1);
     let one = rounds(&connection, &project).unwrap();
     assert_eq!((one.used, one.max, one.kept_going), (1, Some(2), false));
     assert!(one.open());
-    message(&connection, "engine", "results two", "pending", START + 5);
+    assert!(joins_round(&connection, &project, first).unwrap());
+    assert!(!joins_round(&connection, &project, old).unwrap());
+    let live = live_turn_key(4);
+    for _ in 0..3 {
+        handed(&connection, live, START + 2);
+    }
     let two = rounds(&connection, &project).unwrap();
-    assert_eq!(two.used, 2);
+    assert_eq!(
+        two.used, 2,
+        "three hand-offs of one live turn are one round"
+    );
     assert!(!two.open());
+    assert!(joins_round(&connection, &project, live).unwrap());
+    assert!(!joins_round(&connection, &project, live_turn_key(5)).unwrap());
     message(
         &connection,
         "owner",
         "now the footer",
         "answered",
-        START + 6,
+        START + 3,
     );
     let fresh = rounds(&connection, &project).unwrap();
     assert_eq!((fresh.used, fresh.kept_going), (0, false));
     assert!(fresh.open());
+    assert!(!joins_round(&connection, &project, first).unwrap());
+    assert!(!joins_round(&connection, &project, live).unwrap());
+}
+
+#[test]
+fn a_live_turn_key_is_the_turn_that_ends_next_negated() {
+    let connection = database();
+    let project = project();
+    assert_eq!(live_key(&connection, &project).unwrap(), -1);
+    typed(&connection, START);
+    assert_eq!(live_key(&connection, &project).unwrap(), -1);
+    connection
+        .execute(
+            "UPDATE team_live_masters SET turns=4 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    assert_eq!(live_key(&connection, &project).unwrap(), live_turn_key(5));
+    assert_eq!(live_turn_key(5), -5);
 }
 
 #[test]
@@ -210,7 +269,8 @@ fn keep_going_lifts_the_limit_once_for_the_rest_of_the_goal_only() {
     let project = project();
     set_rounds(&connection, &project, Some(1)).unwrap();
     message(&connection, "owner", "fix the login", "answered", START);
-    message(&connection, "engine", "results one", "answered", START + 1);
+    let first = reply(&connection, START + 1);
+    handed(&connection, first, START + 1);
     assert!(!rounds(&connection, &project).unwrap().open());
     message(
         &connection,
@@ -223,7 +283,8 @@ fn keep_going_lifts_the_limit_once_for_the_rest_of_the_goal_only() {
     assert_eq!((kept.used, kept.kept_going), (1, true));
     assert!(kept.open());
     for at in 3..8 {
-        message(&connection, "engine", "results", "answered", START + at);
+        let key = reply(&connection, START + at);
+        handed(&connection, key, START + at);
     }
     let later = rounds(&connection, &project).unwrap();
     assert_eq!((later.used, later.kept_going), (6, true));
@@ -237,7 +298,8 @@ fn keep_going_lifts_the_limit_once_for_the_rest_of_the_goal_only() {
     );
     let next = rounds(&connection, &project).unwrap();
     assert_eq!((next.used, next.kept_going), (0, false));
-    message(&connection, "engine", "results", "answered", START + 9);
+    let key = reply(&connection, START + 9);
+    handed(&connection, key, START + 9);
     assert!(!rounds(&connection, &project).unwrap().open());
     message(&connection, "owner", "keep going.", "answered", START + 10);
     assert!(rounds(&connection, &project).unwrap().open());
@@ -249,7 +311,8 @@ fn words_around_keep_going_start_a_new_goal_instead() {
     let project = project();
     set_rounds(&connection, &project, Some(1)).unwrap();
     message(&connection, "owner", "fix the login", "answered", START);
-    message(&connection, "engine", "results", "answered", START + 1);
+    let first = reply(&connection, START + 1);
+    handed(&connection, first, START + 1);
     message(
         &connection,
         "owner",
@@ -268,16 +331,16 @@ fn the_owners_key_in_the_live_terminal_starts_a_new_goal() {
     let project = project();
     set_rounds(&connection, &project, Some(2)).unwrap();
     message(&connection, "owner", "fix the login", "answered", START);
-    message(&connection, "engine", "results", "answered", START + 1);
+    handed(&connection, live_turn_key(1), START + 1);
     message(&connection, "owner", "keep going", "answered", START + 2);
-    message(&connection, "engine", "results", "answered", START + 3);
+    handed(&connection, live_turn_key(2), START + 3);
     let before = rounds(&connection, &project).unwrap();
     assert_eq!((before.used, before.kept_going), (2, true));
     typed(&connection, START + 4);
     let after = rounds(&connection, &project).unwrap();
     assert_eq!((after.used, after.kept_going), (0, false));
-    message(&connection, "engine", "results", "answered", START + 5);
-    message(&connection, "engine", "results", "answered", START + 6);
+    handed(&connection, live_turn_key(3), START + 5);
+    handed(&connection, live_turn_key(4), START + 6);
     assert!(!rounds(&connection, &project).unwrap().open());
 }
 
@@ -342,27 +405,27 @@ fn a_restarted_or_adopted_pane_starts_a_fresh_clock_and_an_ended_one_has_none() 
 #[test]
 fn the_round_line_names_the_round_and_the_limit() {
     let open = Rounds {
-        used: 0,
+        used: 1,
         max: None,
         kept_going: false,
     };
     assert_eq!(
-        open.next_line(),
-        "\nSub-agent round 1 for the owner's current goal. No round limit."
+        open.results_line(),
+        "\nSub-agent rounds for the owner's current goal: 1. No round limit."
     );
     let first = Rounds {
-        used: 0,
+        used: 1,
         max: Some(3),
         kept_going: false,
     };
     assert_eq!(
-        first.next_line(),
-        "\nSub-agent round 1 of 3 for the owner's current goal."
+        first.results_line(),
+        "\nSub-agent rounds for the owner's current goal: 1 of 3."
     );
-    let last = Rounds { used: 2, ..first };
+    let last = Rounds { used: 3, ..first };
     assert_eq!(
-        last.next_line(),
-        "\nSub-agent round 3, the limit of 3 for the owner's current goal: hand over no new work until the owner writes."
+        last.results_line(),
+        "\nSub-agent rounds for the owner's current goal: 3 of 3, the limit: hand over no new work until the owner writes."
     );
     let kept = Rounds {
         used: 7,
@@ -370,15 +433,15 @@ fn the_round_line_names_the_round_and_the_limit() {
         kept_going: true,
     };
     assert_eq!(
-        kept.next_line(),
-        "\nSub-agent round 8 for the owner's current goal. The owner said keep going, so no round limit."
+        kept.results_line(),
+        "\nSub-agent rounds for the owner's current goal: 7. The owner said keep going, so no round limit."
     );
     let huge = Rounds {
         used: u32::MAX,
         max: Some(20),
         kept_going: false,
     };
-    assert!(huge.next_line().len() <= ROUND_LINE_BYTES_MAX);
+    assert!(huge.results_line().len() <= ROUND_LINE_BYTES_MAX);
 }
 
 #[test]
@@ -395,7 +458,7 @@ fn the_limit_note_tells_the_owner_how_to_go_on() {
     let five = Rounds {
         used: 5,
         max: Some(5),
-        kept_going: false,
+        kept_going: true,
     };
     assert!(
         five.limit_note()

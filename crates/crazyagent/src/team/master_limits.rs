@@ -45,9 +45,10 @@ impl Default for MasterLimits {
     }
 }
 
-/// The sub-agent rounds of the owner's current goal: how many results messages reached the
-/// master since the goal started, the owner's limit, none for Until the goal is done, and
-/// whether the owner said keep going after the goal started.
+/// The sub-agent rounds of the owner's current goal: how many master turns handed work to
+/// sub-agents since the goal started, all hand-offs of one turn being one round, the owner's
+/// limit, none for Until the goal is done, and whether the owner said keep going after the
+/// goal started.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rounds {
     pub used: u32,
@@ -62,23 +63,23 @@ impl Rounds {
         self.kept_going || self.max.is_none_or(|max| self.used < u32::from(max))
     }
 
-    /// The line the next results message to the master ends with, naming its round of the
-    /// owner's goal and the limit. Output: one line starting with a newline, at most
+    /// The line a results message to the master ends with: the rounds the owner's current
+    /// goal used so far and the limit. Output: one line starting with a newline, at most
     /// `ROUND_LINE_BYTES_MAX` bytes.
-    pub fn next_line(self) -> String {
-        let round = self.used.saturating_add(1);
+    pub fn results_line(self) -> String {
+        let used = self.used;
         let line = match (self.max, self.kept_going) {
             (None, _) => {
-                format!("\nSub-agent round {round} for the owner's current goal. No round limit.")
+                format!("\nSub-agent rounds for the owner's current goal: {used}. No round limit.")
             }
             (Some(_), true) => format!(
-                "\nSub-agent round {round} for the owner's current goal. The owner said keep going, so no round limit."
+                "\nSub-agent rounds for the owner's current goal: {used}. The owner said keep going, so no round limit."
             ),
-            (Some(max), false) if round < u32::from(max) => {
-                format!("\nSub-agent round {round} of {max} for the owner's current goal.")
+            (Some(max), false) if used < u32::from(max) => {
+                format!("\nSub-agent rounds for the owner's current goal: {used} of {max}.")
             }
             (Some(max), false) => format!(
-                "\nSub-agent round {round}, the limit of {max} for the owner's current goal: hand over no new work until the owner writes."
+                "\nSub-agent rounds for the owner's current goal: {used} of {max}, the limit: hand over no new work until the owner writes."
             ),
         };
         assert!(line.len() <= ROUND_LINE_BYTES_MAX);
@@ -260,32 +261,34 @@ pub(crate) fn set_run_time(
 
 /// Counts the sub-agent rounds of the owner's current goal. The goal starts at the owner's
 /// last team message that is not keep going, or at the owner's last key in the live
-/// master's terminal when that is later; a round is an engine message to the master after
-/// that start. Takes a connection and the project. Returns the rounds with the owner's
-/// limit, or any SQLite failure.
+/// master's terminal when that is later; a round is one master turn that handed work over
+/// after that start, read as the distinct turn keys of the master's top-level tasks: a
+/// reply's key is its message id, ordered against the goal message, and a live turn's is
+/// below zero and timed. Takes a connection and the project. Returns the rounds with the
+/// owner's limit, or any SQLite failure.
 pub fn rounds(connection: &Connection, project: &ProjectId) -> Result<Rounds, EngineError> {
     let max = read(connection, project)?.rounds;
-    let goal: i64 = connection
-        .query_row(
-            "SELECT COALESCE(MAX(id),0) FROM team_messages WHERE project=?1 AND author='owner'
-             AND lower(trim(text,?2))<>?3",
-            params![project.as_str(), KEEP_GOING_TRIM, KEEP_GOING],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    let typed = typed_ms(connection, project)?;
+    let (goal, typed, start) = goal_start(connection, project)?;
     let (used, kept_going): (i64, bool) = connection
         .query_row(
             "SELECT
-                 (SELECT COUNT(*) FROM team_messages WHERE project=?1 AND author='engine'
-                  AND state<>'note' AND id>?2 AND created_ms>?3),
+                 (SELECT COUNT(DISTINCT turn) FROM team_tasks WHERE project=?1 AND source='master'
+                  AND parent IS NULL AND ((turn>0 AND turn>?2 AND created_ms>?3)
+                                          OR (turn<0 AND created_ms>=?4))),
                  EXISTS(SELECT 1 FROM team_messages WHERE project=?1 AND author='owner'
-                  AND id>?2 AND created_ms>?3 AND lower(trim(text,?4))=?5)",
-            params![project.as_str(), goal, typed, KEEP_GOING_TRIM, KEEP_GOING],
+                  AND id>?2 AND created_ms>?3 AND lower(trim(text,?5))=?6)",
+            params![
+                project.as_str(),
+                goal,
+                typed,
+                start,
+                KEEP_GOING_TRIM,
+                KEEP_GOING
+            ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(error)?;
-    assert!(used >= 0 && goal >= 0);
+    assert!(used >= 0);
     Ok(Rounds {
         used: u32::try_from(used).unwrap_or(u32::MAX),
         max,
@@ -294,6 +297,75 @@ pub fn rounds(connection: &Connection, project: &ProjectId) -> Result<Rounds, En
 }
 
 /// Starts the clock of a project's live master at its pane's start, on a fresh launch and on
+/// Whether a hand-off key already holds a round of the owner's current goal, so more work
+/// handed over in that same master turn joins it instead of starting another. Takes a
+/// connection, the project and the key. Returns the answer, or any SQLite failure.
+pub(crate) fn joins_round(
+    connection: &Connection,
+    project: &ProjectId,
+    key: i64,
+) -> Result<bool, EngineError> {
+    assert!(key != 0);
+    let (goal, typed, start) = goal_start(connection, project)?;
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_tasks WHERE project=?1 AND source='master'
+             AND parent IS NULL AND turn=?5 AND ((turn>0 AND turn>?2 AND created_ms>?3)
+                                                 OR (turn<0 AND created_ms>=?4)))",
+            params![project.as_str(), goal, typed, start, key],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// The hand-off key of a live master's turn: its turn number negated, so it never equals
+/// the reply message id that keys a master reply's hand-off. Input: the turn number, from
+/// one up, as `master::turn_ended` counts them. Output: the key, below zero.
+pub(crate) fn live_turn_key(turn: i64) -> i64 {
+    assert!(turn > 0);
+    -turn
+}
+
+/// The hand-off key of a project's live master's open turn: the turn that ends next, one
+/// past the turns ended so far. Takes a connection and the project. Returns the key, below
+/// zero, or any SQLite failure.
+pub(crate) fn live_key(connection: &Connection, project: &ProjectId) -> Result<i64, EngineError> {
+    let ended: i64 = connection
+        .query_row(
+            "SELECT turns FROM team_live_masters WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?
+        .unwrap_or(0);
+    assert!(ended >= 0);
+    Ok(live_turn_key(ended.saturating_add(1)))
+}
+
+/// Where the owner's current goal starts: the id of the owner's last team message that is
+/// not keep going, zero for none, the owner's last key in the live master's terminal and
+/// the later of the two times. Takes a connection and the project. Returns the three, or
+/// any SQLite failure.
+fn goal_start(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<(i64, i64, i64), EngineError> {
+    let (goal, sent): (i64, i64) = connection
+        .query_row(
+            "SELECT id,created_ms FROM team_messages WHERE project=?1 AND author='owner'
+             AND lower(trim(text,?2))<>?3 ORDER BY id DESC LIMIT 1",
+            params![project.as_str(), KEEP_GOING_TRIM, KEEP_GOING],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?
+        .unwrap_or((0, 0));
+    let typed = typed_ms(connection, project)?;
+    assert!(goal >= 0 && typed >= 0);
+    Ok((goal, typed, sent.max(typed)))
+}
+
 /// an adopt alike, so no restart carries an earlier start. Takes a connection, the project,
 /// the master's agent id and the time in milliseconds. Returns any SQLite failure.
 pub(crate) fn clock_started(

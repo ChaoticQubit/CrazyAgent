@@ -1440,8 +1440,8 @@ fn every_result_of_a_large_fan_out_reaches_the_master_across_whole_messages() {
         assert!(text.len() <= RESULTS_MESSAGE_BYTES_MAX, "{}", text.len());
         assert!(text.contains(RESULTS_TRAILER));
         assert!(
-            text.ends_with(" for the owner's current goal. No round limit."),
-            "each results message names its round (F09): {text}"
+            text.ends_with("\nSub-agent rounds for the owner's current goal: 0. No round limit."),
+            "each results message names the rounds used (F09): {text}"
         );
         let (typed, _) = live_input("", "engine", text);
         assert!(
@@ -29972,9 +29972,9 @@ fn handed_over(fixture: &Fixture) -> i64 {
 }
 
 /// Runs one owner goal under a Sub-agent rounds choice: the master hands one task over in
-/// each reply and a results message reaches it after each round, so it hands over exactly
-/// the chosen number of rounds, and its next hand-off is refused with one note that names
-/// the limit and keep going. Input: the choice. Output: none.
+/// each reply, each reply a round, and a results message reaches it after each round, so
+/// it hands over exactly the chosen number of rounds, and its next hand-off is refused with
+/// one note that names the limit and keep going. Input: the choice. Output: none.
 #[cfg(target_os = "macos")]
 fn rounds_row(max: Option<u8>) {
     let fixture = Fixture::new(1);
@@ -29994,10 +29994,11 @@ fn rounds_row(max: Option<u8>) {
         )
         .unwrap();
         let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
-        assert_eq!((rounds.used, rounds.max), (round, max));
         if max.is_none_or(|max| round < u32::from(max)) {
+            assert_eq!((rounds.used, rounds.max), (round + 1, max));
             assert_eq!(handed_over(&fixture), i64::from(round) + 1, "round {round}");
         } else {
+            assert_eq!((rounds.used, rounds.max), (round, max));
             assert_eq!(handed_over(&fixture), i64::from(round), "round {round}");
             assert_eq!(noted(&fixture, &rounds.limit_note()), 1);
             assert!(!rounds.open());
@@ -30007,14 +30008,14 @@ fn rounds_row(max: Option<u8>) {
             MessageAuthor::Engine,
             &format!(
                 "Results from your sub-agents:\n\nTask {round}: Done{}",
-                rounds.next_line()
+                rounds.results_line()
             ),
             MessageState::Pending,
         );
     }
     let status = fixture.status();
     assert_eq!(status.master_rounds, max);
-    assert_eq!(status.rounds_used, replies);
+    assert_eq!(status.rounds_used, max.map_or(replies, u32::from));
 }
 
 /// Until the goal is done, the default, never stops the master's hand-offs (F09).
@@ -30106,7 +30107,7 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     assert!(rounds.kept_going && rounds.open());
     assert!(
         rounds
-            .next_line()
+            .results_line()
             .contains("The owner said keep going, so no round limit.")
     );
     team.finish_message(
@@ -30179,24 +30180,108 @@ fn a_results_message_ends_with_the_round_of_the_owners_goal() {
     let ready: Vec<ReadyTask> =
         vec![(7, "codex".into(), "done".into(), Some("Built".into()), None)];
     let rounds = crate::team::master_limits::Rounds {
-        used: 1,
+        used: 2,
         max: Some(3),
         kept_going: false,
     };
-    let (text, held) = results_message(&ready, &rounds.next_line());
+    let (text, held) = results_message(&ready, &rounds.results_line());
     assert_eq!(held, 1);
     assert!(
         text.ends_with(&format!(
-            "{RESULTS_TRAILER}\nSub-agent round 2 of 3 for the owner's current goal."
+            "{RESULTS_TRAILER}\nSub-agent rounds for the owner's current goal: 2 of 3."
         )),
         "{text}"
     );
-    let last = crate::team::master_limits::Rounds { used: 2, ..rounds };
-    let (text, _) = results_message(&ready, &last.next_line());
+    let last = crate::team::master_limits::Rounds { used: 3, ..rounds };
+    let (text, _) = results_message(&ready, &last.results_line());
     assert!(
         text.ends_with("hand over no new work until the owner writes."),
         "{text}"
     );
+}
+
+/// Runs one owner goal in which the live master handed three tasks over in one turn, as
+/// three Spawn calls key them: they are one round under the Sub-agent rounds choice, two
+/// finished results wait for the third, and all three reach the master in one results
+/// message whose round line counts that one round (S1R1-M1). Input: the choice. Output:
+/// none.
+#[cfg(target_os = "macos")]
+fn fan_out_row(max: u8) {
+    let fixture = Fixture::new(1);
+    choose_rounds(&fixture, Some(max));
+    let project = fixture.setup.project_id.clone();
+    owner_says(&fixture, "Build the page");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_messages SET state='answered' WHERE project=?1 AND author='owner'",
+            [PROJECT],
+        )
+        .unwrap();
+    let key = crate::team::master_limits::live_turn_key(1);
+    for (prompt, status) in [
+        ("Frontend", "done"),
+        ("Backend", "done"),
+        ("Tests", "running"),
+    ] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,result,created_ms)
+                 VALUES (?1,'master',?2,'codex',0,?3,?4,'Built',?5)",
+                params![PROJECT, key, prompt, status, now_ms()],
+            )
+            .unwrap();
+    }
+    let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
+    assert_eq!((rounds.used, rounds.max), (1, Some(max)));
+    assert_eq!(rounds.open(), max > 1);
+    let mut team = fixture.runtime();
+    team.deliver(&fixture.setup).unwrap();
+    assert!(
+        engine_messages(&fixture.connection, "pending").is_empty(),
+        "two finished tasks wait for the third"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_tasks SET status='done', finished_ms=?2 WHERE project=?1 AND prompt='Tests'",
+            params![PROJECT, now_ms()],
+        )
+        .unwrap();
+    team.deliver(&fixture.setup).unwrap();
+    let texts = engine_messages(&fixture.connection, "pending");
+    assert_eq!(texts.len(), 1, "one results message for the turn");
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND delivered=1"
+        ),
+        3
+    );
+    assert!(texts[0].ends_with(&rounds.results_line()), "{}", texts[0]);
+    assert_eq!(
+        crate::team::master_limits::rounds(&fixture.connection, &project)
+            .unwrap()
+            .used,
+        1
+    );
+}
+
+/// Under 1 sub-agent round, a live master's three Spawns of one turn are that one round
+/// and come back together (S1R1-M1).
+#[cfg(target_os = "macos")]
+#[test]
+fn three_spawns_of_one_live_turn_are_the_one_round_of_a_one_round_goal() {
+    fan_out_row(1);
+}
+
+/// Under 3 sub-agent rounds, a live master's three Spawns of one turn use one round of
+/// three (S1R1-M1).
+#[cfg(target_os = "macos")]
+#[test]
+fn three_spawns_of_one_live_turn_use_one_round_of_three() {
+    fan_out_row(3);
 }
 
 /// Moves the live master's start, the owner's messages and the owner's last key in its

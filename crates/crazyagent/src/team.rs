@@ -1916,7 +1916,8 @@ fn any_slot(
 }
 
 /// Admits one task for a sub-agent against the project's team plan and pool.
-/// Takes the transaction, live model access, stored setup, the proposed harness and task, its source and the master reply id.
+/// Takes the transaction, live model access, stored setup, the proposed harness and task, its
+/// source and the master's hand-off key: its reply id, or a live turn's negative key.
 /// Returns the new task id, or a plain refusal code when the plan does not allow it.
 #[allow(clippy::too_many_arguments)]
 pub fn admit(

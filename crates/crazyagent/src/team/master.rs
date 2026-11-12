@@ -2077,8 +2077,9 @@ fn delegate(
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(state)?;
+    let key = super::master_limits::live_key(&tx, project)?;
     let rounds = super::master_limits::rounds(&tx, project)?;
-    if !rounds.open() {
+    if !rounds.open() && !super::master_limits::joins_round(&tx, project, key)? {
         return Ok((rounds.refusal(), true));
     }
     let admitted = super::admit(
@@ -2088,7 +2089,7 @@ fn delegate(
         harness,
         task,
         TaskSource::Master,
-        None,
+        Some(key),
         now_ms(),
     )?;
     let id = match admitted {

@@ -6230,9 +6230,11 @@ fn inspect_work_quotes_every_line_of_a_message_whichever_break_opens_it() {
     );
 }
 
-/// The owner's Sub-agent rounds per message bind the master's own team calls too: past the
-/// limit its spawn is refused in words that name keep going and hands nothing over, and
-/// the owner's keep going lets it hand work over again (F09).
+/// The owner's Sub-agent rounds per message bind the master's own team calls too: every
+/// spawn of one live turn joins that turn's round, so three spawns under 1 round are all
+/// handed over under one key; a spawn of the next turn is refused in words that name keep
+/// going and hands nothing over, and the owner's keep going lets it hand work over again
+/// (F09, S1R1-M1).
 #[test]
 fn a_masters_spawn_past_the_round_limit_waits_for_the_owners_keep_going() {
     let mut fixture = Fixture::new();
@@ -6240,38 +6242,62 @@ fn a_masters_spawn_past_the_round_limit_waits_for_the_owners_keep_going() {
     std::fs::create_dir(&mailbox).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
     crate::team::master_limits::set_rounds(&fixture.connection, &project, Some(1)).unwrap();
+    super::set_live(&fixture.connection, &project, true).unwrap();
     typed_turn(&fixture.connection, "Build the page");
-    chat(
-        &fixture.connection,
-        crate::team::MessageAuthor::Engine,
-        "Results from your sub-agents:\n\nTask 1 (codex): Done",
-    );
-    let spawn = || {
+    let spawn = |id: u32, task: &str| {
         tool_call(
-            1,
+            id,
             tool::SPAWN_TOOL,
-            json!({"task": "Write page.md", "harness": "codex"}),
+            json!({"task": task, "harness": "codex"}),
         )
     };
-    let refused = serve_while(&mut fixture, &mailbox, vec![spawn()]);
+    let fan_out = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            spawn(1, "Write the frontend"),
+            spawn(2, "Write the backend"),
+            spawn(3, "Write the tests"),
+        ],
+    );
+    assert_eq!(fan_out.len(), 3);
+    for answer in &fan_out {
+        assert!(!text(answer).1, "{fan_out:#?}");
+    }
+    let keys = |connection: &Connection| -> Vec<Option<i64>> {
+        let mut statement = connection
+            .prepare("SELECT turn FROM team_tasks WHERE project=?1 AND source='master' ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([PROJECT], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let first = crate::team::master_limits::live_turn_key(1);
+    assert_eq!(keys(&fixture.connection), vec![Some(first); 3]);
+    let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
+    assert_eq!(rounds.used, 1, "one turn's spawns are one round");
+    super::turn_ended(
+        &fixture.connection,
+        &project,
+        MASTER,
+        None,
+        now_ms(),
+        "success",
+    )
+    .unwrap();
+    let refused = serve_while(&mut fixture, &mailbox, vec![spawn(4, "Write page.md")]);
     let closed = crate::team::master_limits::Rounds {
         used: 1,
         max: Some(1),
         kept_going: false,
     };
     assert_eq!(text(&refused[0]), (closed.refusal().as_str(), true));
-    let tasks = |connection: &Connection| -> i64 {
-        connection
-            .query_row(
-                "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND source='master'",
-                [PROJECT],
-                |row| row.get(0),
-            )
-            .unwrap()
-    };
-    assert_eq!(tasks(&fixture.connection), 0);
+    assert_eq!(keys(&fixture.connection).len(), 3);
     typed_turn(&fixture.connection, "keep going");
-    let handed = serve_while(&mut fixture, &mailbox, vec![spawn()]);
+    let handed = serve_while(&mut fixture, &mailbox, vec![spawn(5, "Write page.md")]);
     assert!(!text(&handed[0]).1, "{handed:#?}");
-    assert_eq!(tasks(&fixture.connection), 1);
+    let second = crate::team::master_limits::live_turn_key(2);
+    assert_eq!(keys(&fixture.connection)[3], Some(second));
 }
