@@ -45,6 +45,7 @@ use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
+use crazyagent::notifications::{NoticeAction, NoticePage, NoticeQuery, NoticeSettings};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::plugins::{
@@ -3050,6 +3051,39 @@ async fn desktop_set_learning_mark(
 }
 
 #[tauri::command]
+async fn desktop_notifications(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    query: NoticeQuery,
+) -> Result<NoticePage, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.notifications(query).await
+}
+
+#[tauri::command]
+async fn desktop_notification_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<NoticeSettings, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.notification_settings().await
+}
+
+#[tauri::command]
+async fn desktop_notification_action(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    action: NoticeAction,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .notification_action(action, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_master_step_settings(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5155,6 +5189,9 @@ native_commands! {
     desktop_set_quit_settings,
     desktop_learning_progress,
     desktop_set_learning_mark,
+    desktop_notifications,
+    desktop_notification_settings,
+    desktop_notification_action,
     desktop_master_step_settings,
     desktop_set_master_step_settings,
     desktop_master_time_settings,
