@@ -662,7 +662,7 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
         claude_record(expires)
     );
     drop(copy);
-    assert!(entries(&agent).is_empty());
+    assert_eq!(entries(&agent), ["Library"]);
     drop(guard);
 
     let soon = (now() + 30) * 1000;
@@ -675,6 +675,75 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
         "native_profile_renewal_failed"
     );
     assert!(entries(&agent).is_empty());
+}
+
+/// The keychain service Claude Code files an agent's sign-in under in that agent's home,
+/// derived from the secure storage folder the engine names, which is the agent home.
+#[cfg(target_os = "macos")]
+fn agent_service(agent: &Path) -> String {
+    format!(
+        "Claude Code-credentials-{}",
+        &digest(agent.to_str().unwrap().as_bytes())[..8]
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_claude_handoff_gives_the_agent_home_its_own_keychain_and_clears_a_stale_record() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 8 * 3600) * 1000;
+    let (_keychain, _service) = claude_keychain(&home, &claude_record(expires));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let path = agent.join("Library/Keychains/login.keychain-db");
+    assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+    let stale = TestKeychain::adopt(&agent, path.clone());
+    let text = path.to_str().unwrap();
+    assert!(stale.setting("default-keychain").contains(text));
+    assert!(stale.setting("list-keychains").contains(text));
+    let service = agent_service(&agent);
+    stale.add(CLAUDE_ACCOUNT, &service, "stale");
+    assert!(stale.holds(&service));
+
+    drop(copy);
+    assert!(
+        !stale.holds(&service),
+        "a dropped copy left its keychain record"
+    );
+    assert_eq!(entries(&agent), ["Library"]);
+
+    stale.add(CLAUDE_ACCOUNT, &service, "stale");
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    assert!(
+        !stale.holds(&service),
+        "a new copy left the stale record ahead of it"
+    );
+    assert!(agent.join(".credentials.json").is_file());
+    assert!(stale.setting("default-keychain").contains(text));
+    drop(copy);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_codex_handoff_leaves_the_agent_home_without_a_keychain() {
+    let mut case = UseCase::new();
+    private_file(
+        &case.home().join("auth.json"),
+        &codex_auth(now() + 3 * 86_400),
+    );
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    assert_eq!(entries(&agent), ["auth.json"]);
+    drop(copy);
 }
 
 #[cfg(target_os = "macos")]

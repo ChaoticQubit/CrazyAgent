@@ -20,6 +20,8 @@ use tokio::sync::oneshot;
 pub mod bootstrap;
 pub(crate) mod claude_host;
 pub mod codex_host;
+#[cfg(target_os = "macos")]
+pub(crate) mod keychain;
 #[cfg(all(test, unix))]
 mod master_host_fixture;
 #[cfg(unix)]

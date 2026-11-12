@@ -120,6 +120,12 @@ impl TestKeychain {
             "security {:?} names no keychain; a test may only use its own",
             args.first()
         );
+        assert!(
+            args.first() == Some(&"create-keychain")
+                || std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| metadata.is_file()),
+            "security {:?} names a keychain file that does not exist, and macOS would ask the owner to create one",
+            args.first()
+        );
         let output = self.run(args, input);
         assert!(
             output.status.success(),
@@ -145,6 +151,29 @@ impl TestKeychain {
         let path = self.text().to_owned();
         let found = self.security(&["find-generic-password", "-s", service, "-w", &path], None);
         found.trim_end().to_owned()
+    }
+
+    /// Whether this keychain holds an item filed under `service`, read by naming the keychain
+    /// and never printing the item. Input: the service. Output: true or false.
+    pub(crate) fn holds(&self, service: &str) -> bool {
+        assert!(
+            std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| metadata.is_file()),
+            "no keychain file to read"
+        );
+        let path = self.text().to_owned();
+        self.run(&["find-generic-password", "-s", service, &path], None)
+            .status
+            .success()
+    }
+
+    /// One of the home's own keychain settings as `security` reports it, the default or
+    /// the search list, read with `HOME` set to this keychain's home. Input: `default-keychain`
+    /// or `list-keychains`. Output: the report text.
+    pub(crate) fn setting(&self, which: &str) -> String {
+        assert!(matches!(which, "default-keychain" | "list-keychains"));
+        let output = self.run(&[which, "-d", "user"], None);
+        assert!(output.status.success(), "security {which} failed");
+        String::from_utf8(output.stdout).unwrap()
     }
 
     /// Lets the credential store open `namespace` in lib tests through this keychain's
