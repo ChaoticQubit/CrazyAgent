@@ -31,6 +31,44 @@ const PHASES = {
   installed: [...INSTALLING, { kind: "install_done", engineStarted: false }],
   failed: [{ kind: "check_started" }, { kind: "check_failed", code: "update_download_failed" }],
 };
+const TICKET_ROWS = [
+  ["close", ["agents", "evidence", "owner"], "evidence"],
+  ["create", ["direct", "triage", "owner_only"], "triage"],
+  ["agent_edit", ["any", "status_and_criteria", "none"], "status_and_criteria"],
+  ["cycle_days", [7, 14, 21, 28], 14],
+  ["rollover", ["auto", "ask", "off"], "auto"],
+  ["import", ["auto_once", "on_request"], "auto_once"],
+  ["manual_evidence", ["owner", "agents"], "owner"],
+  ["ci_evidence", ["engine", "owner", "agents"], "engine"],
+];
+
+/** The app's ticket settings page as the engine reads it, every key on its proposed default
+ * unless the scene sets one. Input: the scene. Output: the page. */
+function ticketPage(scene) {
+  return { project_id: null, version: 3, keys: TICKET_ROWS.map(([key, options, proposed]) => {
+    const here = scene.ticketsHere?.[key] ?? null;
+    return { key, options, proposed, custom: key === "cycle_days" ? { min: 1, max: 90 } : null, here, below: proposed, effective: here ?? proposed };
+  }) };
+}
+const CHECK_ROWS = [
+  ["gate", ["off", "warn", "require"], "warn"],
+  ["parallel", [1, 2, 3, 4], 1],
+  ["keep_failed_snapshots", [0, 1, 2, 3, 4, 5], 2],
+  ["agent_requests", [0, 2, 6, 12], 6],
+  ["inventory", ["last_known", "run_base", "off"], "last_known"],
+  ["skip_markers", ["flag", "refuse", "off"], "flag"],
+  ["protected_change", ["refuse", "flag"], "refuse"],
+  ["removed_tests", ["off", "flag", "refuse"], "flag"],
+];
+
+/** The app's checks settings view as the engine sends it, every key on its proposal unless
+ * the scene saves one. Input: the scene. Output: the reply. */
+function checksReply(scene) {
+  const values = scene.checksHere ?? {};
+  const below = Object.fromEntries(CHECK_ROWS.map(([key, , proposed]) => [key, proposed]));
+  const effective = Object.fromEntries(CHECK_ROWS.map(([key, , proposed]) => [key, values[key] ?? proposed]));
+  return { kind: "settings", settings: { project: null, values, version: 5, below, effective, choices: CHECK_ROWS.map(([key, options, proposed]) => ({ key, options, proposed, custom: null })) } };
+}
 let root = null;
 
 /** Lets the engine's answers and the renders they cause land. Input: the wait in
@@ -72,6 +110,9 @@ function answer(scene, command, args) {
     case "desktop_engine_versions": return { engine: "0.2.0", app: "0.2.0", message: scene.engine === "differs" ? "The engine is on another version." : null };
     case "desktop_set_update_channel": throw FAILURE;
     case "desktop_link_cli": throw FAILURE;
+    case "desktop_ticket_settings": return read(scene.tickets, command, ticketPage(scene));
+    case "desktop_save_ticket_settings": throw FAILURE;
+    case "desktop_checks": if (args.op === "settings_show") return read(scene.checks, command, checksReply(scene)); throw FAILURE;
     default: throw `Command ${command} not found`;
   }
 }

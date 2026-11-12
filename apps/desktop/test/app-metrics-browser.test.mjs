@@ -277,3 +277,116 @@ for (const theme of ["light", "dark"]) {
     });
   });
 }
+
+const CARD = {
+  settings: { window: "rolling", baseline: "first_days", daily_question: "off" }, version: 3,
+  window: { start_ms: NOW - 14 * DAY, end_ms: NOW }, baseline: { start_ms: NOW - 14 * DAY, end_ms: NOW - 11 * DAY }, measured: { start_ms: NOW - 11 * DAY, end_ms: NOW },
+  real: 3, clean: 2,
+  tasks: [{ ticket: "CA-12", title: "Sort the inbox by sender", closed_ms: NOW - 2 * DAY, change_sets: ["cs-4"], clean: true, flaws: [] }],
+  coordination: { baseline: { messages: 6, answers: 1, interventions: 1, tasks: 2 }, measured: { messages: 2, answers: 1, interventions: 0, tasks: 1 } },
+  acts: [], chosen_days: 4, answered_days: 5, days: [],
+  targets: { tasks: 10, clean_of_ten: 8, coordination_cut_percent: 25, chosen_of_ten: 7 },
+  met: { tasks: false, clean: false, coordination: true, chosen: false },
+};
+const SCORED = { ...ANSWERS, desktop_scorecard: CARD, desktop_scorecard_set: { kind: "saved", version: 4 } };
+const SCORECARD = `[...document.querySelectorAll("#mount .panel-head h2")].find((head) => head.textContent === "Go/no-go scorecard")?.closest(".panel") ?? null`;
+
+const scorecardLayout = `(() => {
+  const card = ${SCORECARD};
+  if (card === null) return null;
+  const metrics = document.querySelector("#mount .mx-page");
+  const tiles = [...card.querySelectorAll(".mx-tiles .mx-tile")].map((tile) => {
+    const box = tile.getBoundingClientRect();
+    return { key: tile.querySelector(".mx-tile-key")?.textContent ?? "", top: Math.round(box.top), width: box.width };
+  });
+  return {
+    headings: [...document.querySelectorAll("#mount .panel-head h2")].map((head) => head.textContent),
+    below: metrics !== null && !metrics.contains(card) && card.getBoundingClientRect().top >= metrics.getBoundingClientRect().bottom,
+    tiles,
+  };
+})()`;
+
+test("the go/no-go scorecard ends the app Metrics page, below every usage panel, with its four numbers side by side", async () => {
+  await withPage(async (page) => {
+    await open(page, "light", 1440, SCORED);
+    const seen = await page.evaluate(scorecardLayout);
+    assert.ok(seen, "the scorecard is on the Metrics page");
+    assert.deepEqual(seen.headings.slice(-3), ["Go/no-go scorecard", "Real tasks behind the numbers", "Coordination"], JSON.stringify(seen.headings));
+    assert.equal(seen.below, true, "the scorecard sits under the usage panels");
+    assert.deepEqual(seen.tiles.map((tile) => tile.key), ["Real tasks", "Clean", "Coordination per task", "Chose CrazyAgent"]);
+    assert.equal(new Set(seen.tiles.map((tile) => tile.top)).size, 1, `one row of numbers at 1440 px: ${JSON.stringify(seen.tiles)}`);
+    for (const tile of seen.tiles) assert.ok(tile.width >= 150, JSON.stringify(tile));
+    assert.deepEqual(await page.evaluate(`Fixture.sentTo("desktop_scorecard").map((sent) => typeof sent.offsetMinutes)`), ["number"]);
+  });
+});
+
+test("the scorecard stays on the page when the usage read is not in this build, and when a project is picked", async () => {
+  await withPage(async (page) => {
+    const { desktop_usage_report: _report, ...unread } = SCORED;
+    await open(page, "light", 1440, unread);
+    const words = await page.evaluate(`document.getElementById("mount").textContent`);
+    assert.ok(words.includes("Metrics isn't ready yet"), words);
+    assert.ok(words.indexOf("Go/no-go scorecard") > words.indexOf("Metrics isn't ready yet"), words);
+  });
+  await withPage(async (page) => {
+    await open(page, "light", 1440, SCORED);
+    await page.evaluate(`Fixture.pick("mx-project", "alpha")`);
+    assert.equal(await page.evaluate(`(${SCORECARD}) !== null`), true, "the scorecard scores the engine, so a picked project keeps it");
+  });
+});
+
+test("a scorecard the engine can't serve reads as not ready under the usage panels", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    const words = await page.evaluate(`document.getElementById("mount").textContent`);
+    assert.ok(words.includes("The scorecard isn't ready yet"), words);
+    assert.ok(words.indexOf("The scorecard isn't ready yet") > words.indexOf("Counting rules adapted from CodeBurn"), words);
+  });
+});
+
+test("the daily question switch saves the whole settings at the version the page read, with a real mouse", async () => {
+  await withPage(async (page) => {
+    await open(page, "light", 1440, SCORED);
+    await clickOn(page, "#scorecard-daily-question");
+    assert.deepEqual(await page.evaluate(`Fixture.sentTo("desktop_scorecard_set")`), [{ settings: { ...CARD.settings, daily_question: "on" }, version: 3 }]);
+    assert.deepEqual(await page.evaluate("Fixture.shownToasts()"), ["Scorecard settings saved."]);
+    assert.equal(await page.evaluate(`Fixture.sentTo("desktop_scorecard").length`), 2, "the card reads again after the save");
+  });
+});
+
+test("the scorecard does not overflow the window at 760 px", async () => {
+  await withPage(async (page) => {
+    await open(page, "light", 760, SCORED);
+    assert.equal(await page.evaluate(`(${SCORECARD}) !== null`), true);
+    assert.equal(await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
+  });
+});
+
+const scorecardContrast = `(() => {
+  ${ratioHelpers}
+  const card = ${SCORECARD};
+  const behind = (element) => {
+    for (let at = element; at; at = at.parentElement) {
+      const color = getComputedStyle(at).backgroundColor;
+      if (color !== "transparent" && !/^rgba\\(.*,\\s*0\\)$/.test(color)) return color;
+    }
+    return getComputedStyle(document.body).backgroundColor;
+  };
+  const against = (selector) => {
+    const element = card.querySelector(selector);
+    return element === null ? null : ratio(luminance(getComputedStyle(element).color), luminance(behind(element)));
+  };
+  return Object.fromEntries([".secondary", ".mx-tile-key", ".mx-tile-detail", ".badge.tone-ok", ".badge.tone-warn"].map((selector) => [selector, against(selector)]));
+})()`;
+
+for (const theme of ["light", "dark"]) {
+  test(`the scorecard's words, targets and target badges read at 4.5 to 1 in ${theme}`, async () => {
+    await withPage(async (page) => {
+      await open(page, theme, 1440, SCORED);
+      const ratios = await page.evaluate(scorecardContrast);
+      for (const [selector, value] of Object.entries(ratios)) {
+        assert.ok(value !== null && value >= 4.5, `${selector}: ${value} in ${theme}`);
+      }
+    });
+  });
+}
