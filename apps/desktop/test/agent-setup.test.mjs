@@ -89,3 +89,69 @@ test("an account added to a pool from Add account is set up for agents the way t
   assert.deepEqual(await run([], ["s"]), { line: undefined, noted: [] });
   assert.deepEqual(await run(["s"], ["s", "k"]), { line: "Work key isn't ready for agents yet. CrazyAgent's engine isn't running.", noted: ["engine_unreachable"] });
 });
+
+/** A bridge stand-in that keeps one selected account, as the desktop bridge does: inspecting
+ * picks the account and gives its ticket, and a set-up with any other ticket is refused as
+ * stale_model_access. Output: the commands seen in order and the invoke to install. */
+function singleSelectionBridge() {
+  const seen = [];
+  let selection = 0;
+  const invoke = async (command, args) => {
+    if (command === "desktop_inspect_model_access") {
+      selection += 1;
+      const ticket = String(selection);
+      seen.push(`inspect ${args.id}`);
+      await new Promise((done) => setTimeout(done, 5));
+      return { ticket };
+    }
+    if (command === "desktop_configure_account_profile") {
+      seen.push(`configure ${args.ticket}`);
+      if (args.ticket !== String(selection)) throw Object.assign(new Error("stale"), { code: "stale_model_access" });
+      return { ticket: args.ticket, generation: "1", reply: { request_id: "r", database_instance: "d", engine_epoch: "e", outcome: { configured_only: { receipt: {}, historical_replay: false } } }, pending: false };
+    }
+    throw new Error(`unexpected command ${command}`);
+  };
+  return { seen, invoke };
+}
+
+test("DESIGN-5B-F2: set-up runs started together from the pool editor and Add account take the bridge's one selection in turn, and both accounts read ready", async () => {
+  const { readyAdded } = await import("../src/screens/settings/pools.tsx");
+  const bridge = singleSelectionBridge();
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: bridge.invoke } };
+  try {
+    const accounts = [account("a", "api_key", { name: "Editor key" }), account("b", "api_key", { name: "Added key" })];
+    const note = (result) => result;
+    const lines = await Promise.all([readyAdded([], ["a"], accounts, note), readyAdded([], ["b"], accounts, note)]);
+    assert.deepEqual(lines, [undefined, undefined], "a good account never reads not ready because another run moved the selection");
+    assert.deepEqual(bridge.seen, ["inspect a", "configure 1", "inspect b", "configure 2"], "one run holds the selection until its set-up ends");
+  } finally {
+    globalThis.window = before;
+  }
+});
+
+test("DESIGN-5B-F2: the app holds a pool's Get ready run outside the Pools view, so a view mounted mid-run reads it and a save's run waits its turn", async () => {
+  const { readyAdded, readyEach, readyRunning, subscribeReadyRun } = await import("../src/screens/settings/pools.tsx");
+  const bridge = singleSelectionBridge();
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: bridge.invoke } };
+  const heard = [];
+  const stop = subscribeReadyRun(() => heard.push(readyRunning()));
+  try {
+    assert.equal(readyRunning(), null, "no run is held before Get ready");
+    const note = (result) => result;
+    const getReady = readyEach([{ id: "a", name: "Editor key" }], note, "pool-1");
+    const saved = readyAdded([], ["b"], [account("b", "api_key", { name: "Added key" })], note);
+    await new Promise((done) => setTimeout(done, 1));
+    assert.equal(readyRunning(), "pool-1", "a Pools view mounted now shows the pool's Get ready as pending");
+    assert.deepEqual(await getReady, []);
+    assert.equal(await saved, undefined);
+    assert.equal(readyRunning(), null, "the hold ends with the last run");
+    assert.equal(heard[0], "pool-1");
+    assert.equal(heard.at(-1), null);
+    assert.deepEqual(bridge.seen, ["inspect a", "configure 1", "inspect b", "configure 2"]);
+  } finally {
+    stop();
+    globalThis.window = before;
+  }
+});
