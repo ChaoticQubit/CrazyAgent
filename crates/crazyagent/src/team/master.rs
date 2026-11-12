@@ -28,6 +28,7 @@ const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
+const DISCARD_LEAD_REFUSED: &str = "Not discarded: only the master discards a change set. Tell your lead or the master why the work should not land.";
 const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run your sub-agents natively. Start them with your own harness instead: an agent team in Claude Code, sub-agents in Codex.";
 const MASTER_LABEL: &str = "Master";
 const RECALL_LEFT_OUT: &str =
@@ -1305,6 +1306,9 @@ fn answer(
         }
         Call::Stop { agent } => return work::stop(connection, answering, master, true, &agent),
         Call::Merge { agent } => return merge::merge(connection, answering, &agent),
+        Call::Discard { agent, reason } => {
+            return merge::discard(connection, answering, &agent, &reason);
+        }
         call @ (Call::Sessions { .. } | Call::Session { .. }) => {
             super::history::answer(connection, project, answering.agents, call)
                 .expect("a past-conversation call has an answer")
@@ -1367,6 +1371,7 @@ pub(super) fn answer_sub(
         )?,
         Call::Stop { agent: name } => work::stop(connection, answering, agent, false, &name)?,
         Call::Merge { agent: name } => work::lead_merge(connection, answering, agent, &name)?,
+        Call::Discard { .. } => (DISCARD_LEAD_REFUSED.to_owned(), true),
         call @ (Call::Ask { .. } | Call::RecordAnswer { .. }) => {
             tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }

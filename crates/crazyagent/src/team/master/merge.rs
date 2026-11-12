@@ -28,87 +28,14 @@ pub(super) fn merge(
     agent: &str,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
-    let shown = bound_text(agent, SHOWN_MAX);
-    let found = match crate::team::events::resolve(connection, project, agent)? {
-        Some(id) => Some(id),
-        None => crate::team::names::resolve_finished(connection, project, agent)?,
-    };
-    let Some(id) = found else {
-        return Ok((
-            format!(
-                "Not merged: no harness of this project is called {shown}. Call inspect_work() for their names."
-            ),
-            true,
-        ));
-    };
-    let row: Option<(String, Option<i64>, String)> = connection
-        .query_row(
-            "SELECT role,parent,status FROM team_agents WHERE id=?1 AND project=?2",
-            params![id, project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()
-        .map_err(state)?;
-    let label = crate::team::events::label(connection, id)?;
-    match row
-        .as_ref()
-        .map(|(role, parent, status)| (role.as_str(), *parent, status.as_str()))
-    {
-        Some(("sub", None, "starting" | "working")) => {
-            return Ok((
-                format!("Not merged: {label} is still working. Merge it once it reports done."),
-                true,
-            ));
-        }
-        Some(("sub", None, _)) => {}
-        _ => {
-            return Ok((
-                format!("Not merged: {label} is not a harness you started."),
-                true,
-            ));
-        }
-    }
-    let worktree: Option<(String, String)> = connection
-        .query_row(
-            "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
-            params![id, project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(state)?;
-    let opened = crate::landing::open(answering.landing).and_then(|db| {
-        let sets = crate::landing::list(&db, project)?;
-        let branch = match &worktree {
-            Some((worktree, git_dir)) => {
-                crate::landing::agent_branch(&db, Path::new(worktree), Path::new(git_dir))?
-            }
-            None => None,
-        };
-        Ok((db, sets, branch))
-    });
-    let (db, sets, task) = match opened {
-        Ok(opened) => opened,
-        Err(problem) => {
-            return Ok((
-                format!(
-                    "Not merged: the change sets could not be read ({}).",
-                    bound_text(&problem.0, 120)
-                ),
-                true,
-            ));
-        }
-    };
-    let task = task.map_or_else(
-        || "its branch".to_owned(),
-        |task| format!("its branch {task}"),
-    );
-    let Some(set) = waiting(sets, id) else {
-        return Ok((
-            format!(
-                "Nothing to merge: {label} has no change set waiting. Its work becomes one when its turn ends; call inspect_work() to see what waits."
-            ),
-            true,
-        ));
+    let Found {
+        db,
+        label,
+        task,
+        set,
+    } = match found(connection, answering, agent, &MERGE_WORDS)? {
+        Ok(found) => found,
+        Err(refused) => return Ok((refused, true)),
     };
     match set.state {
         ChangeState::Conflict => {
@@ -244,6 +171,187 @@ pub(super) fn merge(
                 true,
             )
         }
+    })
+}
+
+/// The words a refusal of the master's merge or discard starts with, and the one asking to
+/// try again, so both tools read the same.
+struct Words {
+    not: &'static str,
+    again: &'static str,
+    nothing: &'static str,
+}
+
+const MERGE_WORDS: Words = Words {
+    not: "Not merged",
+    again: "Merge",
+    nothing: "Nothing to merge",
+};
+
+const DISCARD_WORDS: Words = Words {
+    not: "Not discarded",
+    again: "Discard",
+    nothing: "Nothing to discard",
+};
+
+/// A finished harness's waiting change set, with the landing store it was read from, the
+/// harness's label and its task branch in words.
+struct Found {
+    db: Connection,
+    label: String,
+    task: String,
+    set: ChangeSetView,
+}
+
+/// Finds the change set a finished harness the master started has waiting, for the master's
+/// merge and discard: the harness by name, live or finished, not still working, and its
+/// pending, conflicting or updating set. Takes the engine database, what the answers need,
+/// the harness's name and the tool's words. Returns the set, the sentence the master reads
+/// when there is none, or a SQLite failure.
+fn found(
+    connection: &Connection,
+    answering: &Answering<'_>,
+    agent: &str,
+    words: &Words,
+) -> Result<Result<Found, String>, EngineError> {
+    let project = &answering.stored.project_id;
+    let shown = bound_text(agent, SHOWN_MAX);
+    let not = words.not;
+    let found = match crate::team::events::resolve(connection, project, agent)? {
+        Some(id) => Some(id),
+        None => crate::team::names::resolve_finished(connection, project, agent)?,
+    };
+    let Some(id) = found else {
+        return Ok(Err(format!(
+            "{not}: no harness of this project is called {shown}. Call inspect_work() for their names."
+        )));
+    };
+    let row: Option<(String, Option<i64>, String)> = connection
+        .query_row(
+            "SELECT role,parent,status FROM team_agents WHERE id=?1 AND project=?2",
+            params![id, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    let label = crate::team::events::label(connection, id)?;
+    match row
+        .as_ref()
+        .map(|(role, parent, status)| (role.as_str(), *parent, status.as_str()))
+    {
+        Some(("sub", None, "starting" | "working")) => {
+            return Ok(Err(format!(
+                "{not}: {label} is still working. {} it once it reports done.",
+                words.again
+            )));
+        }
+        Some(("sub", None, _)) => {}
+        _ => {
+            return Ok(Err(format!("{not}: {label} is not a harness you started.")));
+        }
+    }
+    let worktree: Option<(String, String)> = connection
+        .query_row(
+            "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+            params![id, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    let opened = crate::landing::open(answering.landing).and_then(|db| {
+        let sets = crate::landing::list(&db, project)?;
+        let branch = match &worktree {
+            Some((worktree, git_dir)) => {
+                crate::landing::agent_branch(&db, Path::new(worktree), Path::new(git_dir))?
+            }
+            None => None,
+        };
+        Ok((db, sets, branch))
+    });
+    let (db, sets, task) = match opened {
+        Ok(opened) => opened,
+        Err(problem) => {
+            return Ok(Err(format!(
+                "{not}: the change sets could not be read ({}).",
+                bound_text(&problem.0, 120)
+            )));
+        }
+    };
+    let task = task.map_or_else(
+        || "its branch".to_owned(),
+        |task| format!("its branch {task}"),
+    );
+    let Some(set) = waiting(sets, id) else {
+        return Ok(Err(format!(
+            "{}: {label} has no change set waiting. Its work becomes one when its turn ends; call inspect_work() to see what waits.",
+            words.nothing
+        )));
+    };
+    Ok(Ok(Found {
+        db,
+        label,
+        task,
+        set,
+    }))
+}
+
+/// Discards the change set a finished harness the master started has waiting, for the live
+/// master's `discard` tool (DEC-147 S3.6): the set stays restorable for seven days from
+/// Changes, the harness's worktree goes back to the owner's branch, the project activity
+/// records the master as the one who discarded it, and the team conversation tells the
+/// owner, with the master's reason. Takes the engine database, what the answers need, the
+/// harness's name and the reason. Returns the sentence the master reads and whether it is a
+/// refusal, or a SQLite failure.
+pub(super) fn discard(
+    connection: &mut Connection,
+    answering: &Answering<'_>,
+    agent: &str,
+    reason: &str,
+) -> Result<(String, bool), EngineError> {
+    let project = &answering.stored.project_id;
+    let Found {
+        db,
+        label,
+        task,
+        set,
+    } = match found(connection, answering, agent, &DISCARD_WORDS)? {
+        Ok(found) => found,
+        Err(refused) => return Ok((refused, true)),
+    };
+    let reason = bound_text(reason.trim(), crate::team::tool::DISCARD_REASON_BYTES_MAX);
+    assert!(!reason.is_empty());
+    let now = u64::try_from(now_ms()).unwrap_or(0);
+    let discarded =
+        crate::landing::discard_as(&db, &set.id, &set.head, now, crate::activity::MASTER_ACTOR);
+    Ok(match discarded {
+        Ok(_) => {
+            let text = format!(
+                "The master discarded {label}'s change set from {task}: {reason}. You can restore it from Changes for 7 days."
+            );
+            note(connection, project, &text)?;
+            (
+                format!(
+                    "Discarded {label}'s change set from {task}. The owner was told and can restore it from Changes for 7 days."
+                ),
+                false,
+            )
+        }
+        Err(problem) => (
+            format!(
+                "Not discarded: {}",
+                match problem.0.as_str() {
+                    "changes_stale" =>
+                        "the change set moved meanwhile. Call inspect_work(), then discard again."
+                            .to_owned(),
+                    crate::landing::WORKER_OPEN => crate::landing::WORKER_OPEN_TEXT.to_owned(),
+                    other => format!(
+                        "the change set could not be discarded ({}).",
+                        bound_text(other, 120)
+                    ),
+                }
+            ),
+            true,
+        ),
     })
 }
 

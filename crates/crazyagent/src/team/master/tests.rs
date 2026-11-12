@@ -3269,6 +3269,68 @@ fn an_open_change_set_line_stays_one_line_whatever_its_names_hold() {
     );
 }
 
+/// DEC-147 S3.6: the master discards a finished harness's waiting change set with a reason.
+/// Nothing lands, the set reads discarded and stays restorable, the owner reads the reason in
+/// the team conversation and the activity names the master; a second call finds nothing
+/// to discard, and a sub-agent is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_discards_a_finished_harness_set_with_its_reason_for_the_owner() {
+    let mut fixture = Fixture::new();
+    let (repo, _remote) = project_repo(&fixture);
+    let start = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    let (agent, id) = finished_harness(&fixture, &repo, "docs-writer", "docs", "one\ntwo\n");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let call = json!({"agent": "@docs-writer", "reason": "The owner chose the other wording"});
+    assert_eq!(
+        as_master(&mut fixture, tool::DISCARD_TOOL, call.clone()),
+        (
+            format!(
+                "Discarded {label}'s change set from its branch crazyagent/docs. The owner was told and can restore it from Changes for 7 days."
+            ),
+            false
+        )
+    );
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
+    assert_eq!(
+        set_state(&fixture, &id),
+        crate::landing::ChangeState::Discarded
+    );
+    let notes = bodies(
+        &fixture,
+        "SELECT text FROM team_messages WHERE project=(SELECT project FROM team_agents WHERE id=?1) AND author='engine' ORDER BY id",
+        agent,
+    );
+    assert_eq!(
+        notes.last().unwrap(),
+        &format!(
+            "The master discarded {label}'s change set from its branch crazyagent/docs: The owner chose the other wording. You can restore it from Changes for 7 days."
+        )
+    );
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    assert!(
+        crate::activity::list(&db, &project, 20)
+            .unwrap()
+            .iter()
+            .any(|item| item.kind == crate::activity::ActivityKind::Discarded
+                && item.actor == crate::activity::MASTER_ACTOR),
+        "the activity names the master"
+    );
+    let (again, refused) = as_master(&mut fixture, tool::DISCARD_TOOL, call.clone());
+    assert!(refused);
+    assert!(again.starts_with("Nothing to discard: "), "{again}");
+
+    let sub = named_sub(&fixture, "api-fix", "working");
+    assert_eq!(
+        as_sub(&mut fixture, sub, tool::DISCARD_TOOL, call),
+        (
+            "Not discarded: only the master discards a change set. Tell your lead or the master why the work should not land.".to_owned(),
+            true
+        )
+    );
+}
+
 /// DEC-147.7: at Only when I click or say accept all, the master's merge lands a finished
 /// harness's set once the owner sent exactly "accept all" to the team after the set last
 /// changed. The same words from the master, a longer owner sentence or an owner message

@@ -8363,7 +8363,8 @@ impl TeamRuntime {
     /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched
     /// off or deleted for the project, for a sub-agent the owner's Sub-agent depth setting
     /// keeps from leading, `LEAD_TOOLS`, which the engine refuses it anyway, and for every
-    /// sub-agent `record_answer`, since only the master records an owner chat answer. Takes
+    /// sub-agent `record_answer`, since only the master records an owner chat answer, and
+    /// `discard`, since only the master discards a change set (DEC-147 S3.6). Takes
     /// the project, the agent and its role. Returns the names, or a SQLite failure.
     fn off_tools(
         &self,
@@ -8384,6 +8385,7 @@ impl TeamRuntime {
         }
         if role != AgentRole::Master {
             off.push(tool::RECORD_TOOL.to_owned());
+            off.push(tool::DISCARD_TOOL.to_owned());
         }
         assert!(tool::known_tools(&off));
         Ok(off)
