@@ -1,8 +1,11 @@
+use crate::app_plugins::manifest::{Manifest, Runs};
 use crate::app_plugins::{Problem, RunsView};
+use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 pub mod local;
 pub mod settings;
@@ -112,13 +115,114 @@ pub struct Hybrid {
     pub note: Option<&'static str>,
 }
 
-/// Embeds the project's chunks that have no vector for the chosen plugin yet, on the
-/// indexer thread outside any transaction. Inputs: the indexer's connection, the engine
-/// root and the project. Output: how many chunks were embedded; this stub embeds none
-/// until the w-v3-plugins vectors land.
+/// The most texts one call to the built-in local runtime embeds.
+const LOCAL_BATCH: usize = 64;
+/// How long a local runtime whose open failed waits before the next open, since every open
+/// re-hashes the downloaded files.
+const LOCAL_RETRY_MS: i64 = 10 * 60 * 1000;
+
+/// The local runtime opened for one engine root, or the time its last open or embed failed.
+type LocalSlot = Option<(PathBuf, Result<Arc<local::LocalModel>, i64>)>;
+static LOCAL: Mutex<LocalSlot> = Mutex::new(None);
+
+/// The plugin as the vectors see it: its key, dimensions and batch, the built-in runtime's
+/// from [`local::DIMS`]. Input: the loaded manifest. Output: the plugin.
+fn plugin_of(manifest: &Manifest) -> vectors::Plugin {
+    match &manifest.runs {
+        Runs::Local { .. } => {
+            vectors::Plugin::new(&manifest.name, &manifest.sha256, local::DIMS, LOCAL_BATCH)
+        }
+        Runs::Http(http) => vectors::Plugin::new(
+            &manifest.name,
+            &manifest.sha256,
+            usize::from(http.dimensions),
+            usize::from(http.batch),
+        ),
+    }
+}
+
+/// The local runtime already open for `root`, never opening it, so a search on the tick
+/// never waits on the re-hash. Input: the engine root. Output: the model, or none.
+fn opened_local(root: &Path) -> Option<Arc<local::LocalModel>> {
+    let slot = LOCAL.lock().unwrap_or_else(PoisonError::into_inner);
+    match slot.as_ref() {
+        Some((at, Ok(model))) if at == root => Some(Arc::clone(model)),
+        _ => None,
+    }
+}
+
+/// Whether both pinned files of the local runtime are on disk at their pinned sizes, read
+/// from metadata only. Input: the engine root. Output: the answer.
+fn local_present(root: &Path) -> bool {
+    let place = local::folder(root);
+    local::PINNED.iter().all(|pin| {
+        std::fs::symlink_metadata(place.join(pin.name))
+            .is_ok_and(|found| found.is_file() && found.len() == pin.bytes)
+    })
+}
+
+/// Opens `root`'s local runtime on the indexer thread, outside the lock, and at most once
+/// per [`LOCAL_RETRY_MS`] after a failure. Inputs: the engine root and the time. Output:
+/// the model, or none while it is missing or failing.
+fn open_local(root: &Path, now_ms: i64) -> Option<Arc<local::LocalModel>> {
+    {
+        let slot = LOCAL.lock().unwrap_or_else(PoisonError::into_inner);
+        match slot.as_ref() {
+            Some((at, Ok(model))) if at == root => return Some(Arc::clone(model)),
+            Some((at, Err(failed))) if at == root && now_ms - failed < LOCAL_RETRY_MS => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    if !local_present(root) {
+        return None;
+    }
+    let opened = local::LocalModel::open(root)
+        .map(Arc::new)
+        .map_err(|_| now_ms);
+    let model = opened.as_ref().ok().cloned();
+    *LOCAL.lock().unwrap_or_else(PoisonError::into_inner) = Some((root.to_owned(), opened));
+    model
+}
+
+/// Marks `root`'s local runtime failed after an embed error, so it is opened again later.
+/// Inputs: the engine root and the time. Output: none.
+fn local_failed(root: &Path, now_ms: i64) {
+    *LOCAL.lock().unwrap_or_else(PoisonError::into_inner) = Some((root.to_owned(), Err(now_ms)));
+}
+
+/// Embeds the project's chunks that have no vector for the chosen plugin yet, then the
+/// app-wide memories, on the indexer thread outside any transaction and within
+/// [`vectors::BOUNDS`]. No chosen plugin embeds nothing and keeps every vector (leader QB).
+/// Inputs: the indexer's connection, the engine root and the project. Output: how many
+/// chunks were embedded.
 pub fn embed_pending(connection: &mut Connection, root: &Path, project: &ProjectId) -> usize {
-    let _ = (connection, root, project);
-    0
+    let Some(loaded) = settings::chosen(connection, root) else {
+        return 0;
+    };
+    let plugin = plugin_of(&loaded.manifest);
+    match &loaded.manifest.runs {
+        Runs::Local { .. } => {
+            let Some(model) = open_local(root, now_ms()) else {
+                return 0;
+            };
+            let mut broke = false;
+            let mut embed = |texts: &[&str]| {
+                model.embed(texts).map_err(|code| {
+                    broke = true;
+                    EngineError(code.to_owned())
+                })
+            };
+            let embedded =
+                vectors::embed_round(connection, project, &plugin, &vectors::BOUNDS, &mut embed);
+            if broke {
+                local_failed(root, now_ms());
+            }
+            embedded
+        }
+        Runs::Http(_) => 0,
+    }
 }
 
 /// Fuses the full-text order with the chosen plugin's vector order, on the tick and with

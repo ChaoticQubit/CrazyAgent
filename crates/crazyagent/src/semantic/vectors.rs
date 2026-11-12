@@ -2,7 +2,7 @@ use super::{Hybrid, Progress};
 use crate::app_plugins::manifest;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use crate::search_index::Source;
+use crate::search_index::{CHUNK_BYTES_MAX, Source};
 use rusqlite::{Connection, OptionalExtension, params};
 
 #[cfg(test)]
@@ -40,8 +40,8 @@ const TABLES: &str = "CREATE TABLE IF NOT EXISTS search_vectors (
     vector BLOB NOT NULL CHECK (length(vector) BETWEEN 256 AND 4096 AND length(vector) % 4 = 0),
     PRIMARY KEY (chunk, plugin_key)
 );
-CREATE INDEX IF NOT EXISTS search_vectors_scan ON search_vectors(plugin_key, project, source, at_ms);
-CREATE INDEX IF NOT EXISTS search_vectors_room ON search_vectors(plugin_key, project, at_ms);
+CREATE INDEX IF NOT EXISTS search_vectors_scan ON search_vectors(plugin_key, project, source, at_ms, chunk);
+CREATE INDEX IF NOT EXISTS search_vectors_room ON search_vectors(plugin_key, project, at_ms, chunk);
 CREATE TABLE IF NOT EXISTS search_vector_pending (
     chunk INTEGER PRIMARY KEY,
     project TEXT,
@@ -185,9 +185,7 @@ fn triggers_found(connection: &Connection) -> Result<usize, EngineError> {
 /// are this key's alone, so the round may embed.
 fn settle(connection: &mut Connection, key: &str) -> Result<bool, EngineError> {
     assert!(!key.is_empty() && key.len() <= KEY_BYTES_MAX);
-    let tx = connection
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(storage)?;
+    let tx = immediate(connection)?;
     let state: Option<String> = tx
         .query_row(
             "SELECT plugin_key FROM search_vector_state WHERE id=1",
@@ -276,49 +274,469 @@ pub(crate) fn embed_round(
     bounds: &Bounds,
     embed: &mut Embed<'_>,
 ) -> usize {
-    let _ = (connection, project, plugin, bounds, embed);
-    unimplemented!("v3 hybrid part 2")
+    assert!((1..=ROUND_CHUNKS_MAX).contains(&bounds.round_chunks));
+    if !matches!(settle(connection, &plugin.key), Ok(true)) {
+        return 0;
+    }
+    let Ok(plan) = plan(connection, project, plugin, bounds) else {
+        return 0;
+    };
+    assert!(plan.items.len() <= bounds.round_chunks);
+    if !plan.drops.is_empty() && drop_older(connection, &plan.drops).is_err() {
+        return 0;
+    }
+    let mut embedded = 0;
+    for batch in plan.items.chunks(plugin.batch) {
+        let texts: Vec<&str> = batch.iter().map(|item| item.text.as_str()).collect();
+        let Some(vectors) = embed(texts.as_slice())
+            .ok()
+            .and_then(|vectors| checked(vectors, texts.len(), plugin.dimensions))
+        else {
+            break;
+        };
+        match store(connection, plugin, batch, &vectors) {
+            Ok(stored) => embedded += stored,
+            Err(_) => break,
+        }
+    }
+    assert!(embedded <= plan.items.len());
+    embedded
 }
 
-/// Masks, trims and cuts an untrusted query before it is hashed, stored, embedded or sent.
-/// Input: the query. Output: the text, or none when nothing is left.
+/// One queued chunk a round sends: its id, its text as read, and the older vector of its
+/// bucket it replaces when the bucket is full.
+struct Item {
+    chunk: i64,
+    text: String,
+    evict: Option<i64>,
+}
+
+/// What one round does: the chunks to send, newest first with the project's before the
+/// app-wide memories, and for each bucket out of room the newest queued chunk from which
+/// every older one ranks by words only: its bucket, time and id.
+#[derive(Default)]
+struct Plan {
+    items: Vec<Item>,
+    drops: Vec<(Option<String>, i64, i64)>,
+}
+
+/// Plans a round over the project's bucket, then the app-wide memories' bucket, each with
+/// its own cap: a queued chunk takes free room, else replaces the oldest kept vector when
+/// that is older, else it and every older queued chunk of the bucket are dropped. Inputs:
+/// the connection, the project, the plugin and the bounds. Output: the plan.
+fn plan(
+    connection: &Connection,
+    project: &ProjectId,
+    plugin: &Plugin,
+    bounds: &Bounds,
+) -> Result<Plan, EngineError> {
+    let mut plan = Plan::default();
+    let buckets = [
+        (Some(project.as_str()), bounds.project_bytes),
+        (None, bounds.memory_bytes),
+    ];
+    for (bucket, bytes) in buckets {
+        let left = bounds.round_chunks - plan.items.len();
+        if left == 0 {
+            break;
+        }
+        let candidates = queued(connection, bucket, left)?;
+        if candidates.is_empty() {
+            continue;
+        }
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM search_vectors WHERE plugin_key = ?1 AND project IS ?2",
+                params![plugin.key, bucket],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        let mut room = (bytes / plugin.vector_bytes()).saturating_sub(count as u64);
+        let mut oldest = kept_oldest(connection, &plugin.key, bucket, candidates.len())?
+            .into_iter()
+            .peekable();
+        for (chunk, at_ms, text) in candidates {
+            if room > 0 {
+                room -= 1;
+                plan.items.push(Item {
+                    chunk,
+                    text,
+                    evict: None,
+                });
+            } else if let Some((old, _)) =
+                oldest.next_if(|&(old, old_at)| (old_at, old) < (at_ms, chunk))
+            {
+                plan.items.push(Item {
+                    chunk,
+                    text,
+                    evict: Some(old),
+                });
+            } else {
+                plan.drops.push((bucket.map(str::to_owned), at_ms, chunk));
+                break;
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// The newest queued chunks of a bucket with their text. Inputs: the connection, the
+/// bucket's project (none for app-wide memories) and the most to read. Output: each chunk's
+/// id, time and text, newest first.
+fn queued(
+    connection: &Connection,
+    bucket: Option<&str>,
+    most: usize,
+) -> Result<Vec<(i64, i64, String)>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT p.chunk, p.at_ms, c.text FROM search_vector_pending p
+             JOIN search_chunks c ON c.id = p.chunk
+             WHERE p.project IS ?1 AND p.dropped = 0
+             ORDER BY p.at_ms DESC, p.chunk DESC LIMIT ?2",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![bucket, most as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(storage)?;
+    let found = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
+    assert!(found.len() <= most);
+    Ok(found)
+}
+
+/// The oldest kept vectors of a bucket. Inputs: the connection, the plugin key, the
+/// bucket's project and the most to read. Output: each chunk's id and time, oldest first.
+fn kept_oldest(
+    connection: &Connection,
+    key: &str,
+    bucket: Option<&str>,
+    most: usize,
+) -> Result<Vec<(i64, i64)>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT chunk, at_ms FROM search_vectors WHERE plugin_key = ?1 AND project IS ?2
+             ORDER BY at_ms ASC, chunk ASC LIMIT ?3",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![key, bucket, most as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(storage)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(storage)
+}
+
+/// Marks each dropped chunk and every older queued chunk of its bucket as ranked by words
+/// only, so no later round sends them. Inputs: the connection and the drops. Output: done.
+fn drop_older(
+    connection: &mut Connection,
+    drops: &[(Option<String>, i64, i64)],
+) -> Result<(), EngineError> {
+    assert!(drops.len() <= 2);
+    let tx = immediate(connection)?;
+    for (bucket, at_ms, chunk) in drops {
+        tx.execute(
+            "UPDATE search_vector_pending SET dropped = 1
+             WHERE project IS ?1 AND dropped = 0 AND (at_ms < ?2 OR (at_ms = ?2 AND chunk <= ?3))",
+            params![bucket, at_ms, chunk],
+        )
+        .map_err(storage)?;
+    }
+    tx.commit().map_err(storage)
+}
+
+/// Stores one sent batch: a vector only for a chunk still holding the text that was sent,
+/// its queue row removed, and the older vector it replaces evicted and marked dropped.
+/// Inputs: the connection, the plugin, the batch and its checked vectors. Output: how many
+/// vectors were stored.
+fn store(
+    connection: &mut Connection,
+    plugin: &Plugin,
+    batch: &[Item],
+    vectors: &[Vec<f32>],
+) -> Result<usize, EngineError> {
+    assert_eq!(batch.len(), vectors.len());
+    let tx = immediate(connection)?;
+    let mut stored = 0;
+    for (item, vector) in batch.iter().zip(vectors) {
+        let added = tx
+            .execute(
+                "INSERT INTO search_vectors(chunk, plugin_key, project, source, at_ms, vector)
+                 SELECT id, ?2, project, source, at_ms, ?3 FROM search_chunks
+                 WHERE id = ?1 AND text = ?4
+                 ON CONFLICT(chunk, plugin_key) DO UPDATE SET vector = excluded.vector,
+                     project = excluded.project, source = excluded.source, at_ms = excluded.at_ms",
+                params![item.chunk, plugin.key, encode(vector), item.text],
+            )
+            .map_err(storage)?;
+        assert!(added <= 1);
+        if added == 0 {
+            continue;
+        }
+        tx.execute(
+            "DELETE FROM search_vector_pending WHERE chunk = ?1",
+            [item.chunk],
+        )
+        .map_err(storage)?;
+        if let Some(old) = item.evict {
+            evict(&tx, &plugin.key, old)?;
+        }
+        stored += 1;
+    }
+    tx.commit().map_err(storage)?;
+    Ok(stored)
+}
+
+/// Deletes one kept vector to make room and queues its chunk as dropped, so ranking says
+/// older parts rank by words only. Inputs: the transaction, the plugin key and the chunk.
+/// Output: done.
+fn evict(tx: &rusqlite::Transaction<'_>, key: &str, chunk: i64) -> Result<(), EngineError> {
+    let gone = tx
+        .execute(
+            "DELETE FROM search_vectors WHERE chunk = ?1 AND plugin_key = ?2",
+            params![chunk, key],
+        )
+        .map_err(storage)?;
+    if gone == 1 {
+        tx.execute(
+            "DELETE FROM search_vector_pending WHERE chunk = ?1",
+            [chunk],
+        )
+        .map_err(storage)?;
+        tx.execute(
+            "INSERT INTO search_vector_pending(chunk, project, source, at_ms, dropped)
+             SELECT id, project, source, at_ms, 1 FROM search_chunks WHERE id = ?1",
+            [chunk],
+        )
+        .map_err(storage)?;
+    }
+    Ok(())
+}
+
+/// Starts a write transaction that takes the write lock at once. Input: the connection.
+/// Output: the transaction.
+fn immediate(connection: &mut Connection) -> Result<rusqlite::Transaction<'_>, EngineError> {
+    connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(storage)
+}
+
+/// Checks a reply: one vector per text, each of the plugin's dimensions and finite, then
+/// L2 normalizes each so ranking can use the dot product. Inputs: the vectors, the text
+/// count and the dimensions. Output: the vectors, or none when any is refused.
+fn checked(vectors: Vec<Vec<f32>>, count: usize, dimensions: usize) -> Option<Vec<Vec<f32>>> {
+    if vectors.len() != count {
+        return None;
+    }
+    vectors
+        .into_iter()
+        .map(|vector| normalized(vector, dimensions))
+        .collect()
+}
+
+/// One vector of the right length with every value finite, scaled to length one unless it
+/// is all zeros. Inputs: the vector and the dimensions. Output: the vector, or none.
+fn normalized(mut vector: Vec<f32>, dimensions: usize) -> Option<Vec<f32>> {
+    if vector.len() != dimensions || !vector.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if !norm.is_finite() {
+        return None;
+    }
+    if norm > 0.0 {
+        vector.iter_mut().for_each(|value| *value /= norm);
+    }
+    Some(vector)
+}
+
+/// The stored bytes of a vector: each value as f32 little endian. Input: the vector.
+/// Output: the bytes.
+fn encode(vector: &[f32]) -> Vec<u8> {
+    let bytes: Vec<u8> = vector
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    assert_eq!(bytes.len(), vector.len() * 4);
+    bytes
+}
+
+/// Reads stored bytes back as a vector of the plugin's dimensions. Inputs: the bytes and
+/// the dimensions. Output: the vector, or none for another length or a value not finite.
+fn decode(bytes: &[u8], dimensions: usize) -> Option<Vec<f32>> {
+    if bytes.len() != dimensions * 4 {
+        return None;
+    }
+    let vector: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]]))
+        .collect();
+    vector
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(vector)
+}
+
+/// Masks, trims and cuts an untrusted query before it is hashed, stored, embedded or sent,
+/// masked before the cut so no secret is split past the masking. Input: the query. Output:
+/// the text, or none when nothing is left.
 pub(crate) fn query_text(query: &str) -> Option<String> {
-    let _ = query;
-    unimplemented!("v3 hybrid part 2")
+    let masked = crate::project_setup::redact(query);
+    let trimmed = masked.trim();
+    let mut end = trimmed.len().min(CHUNK_BYTES_MAX);
+    while !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    let text = trimmed[..end].trim_end();
+    assert!(text.len() <= CHUNK_BYTES_MAX);
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
-/// Records a query an HTTP plugin must embed on the indexer thread. Inputs: the connection,
-/// the plugin key, the masked query and the time. Output: done, or the failure.
+/// Records a query an HTTP plugin must embed on the indexer thread, keeping at most
+/// [`QUERY_ROWS_MAX`] per plugin key, newest asked first. Inputs: the connection, the plugin
+/// key, the masked query and the time. Output: done, or the failure.
 pub(crate) fn ask_query(
     connection: &Connection,
     key: &str,
     query: &str,
     now_ms: i64,
 ) -> Result<(), EngineError> {
-    let _ = (connection, key, query, now_ms);
-    unimplemented!("v3 hybrid part 2")
+    assert!(!key.is_empty() && key.len() <= KEY_BYTES_MAX);
+    assert!(!query.is_empty() && query.len() <= CHUNK_BYTES_MAX);
+    connection
+        .execute(
+            "INSERT INTO search_query_vectors(plugin_key, query_sha, query, asked_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(plugin_key, query_sha)
+             DO UPDATE SET asked_ms = max(asked_ms, excluded.asked_ms)",
+            params![key, super::sha256_hex(query.as_bytes()), query, now_ms],
+        )
+        .map_err(storage)?;
+    connection
+        .execute(
+            "DELETE FROM search_query_vectors WHERE rowid IN
+             (SELECT rowid FROM search_query_vectors WHERE plugin_key = ?1
+              ORDER BY asked_ms DESC, rowid DESC LIMIT -1 OFFSET ?2)",
+            params![key, QUERY_ROWS_MAX as i64],
+        )
+        .map_err(storage)?;
+    Ok(())
 }
 
-/// Embeds the queries waiting for the plugin, newest first, at most [`QUERY_ROUND_MAX`].
+/// Embeds the queries waiting for the plugin, newest first, at most [`QUERY_ROUND_MAX`];
+/// on a failed or refused reply the round's unanswered queries are dropped, never resent.
 /// Inputs: the connection, the plugin and the embed call. Output: how many were embedded.
 pub(crate) fn embed_queries(
     connection: &mut Connection,
     plugin: &Plugin,
     embed: &mut Embed<'_>,
 ) -> usize {
-    let _ = (connection, plugin, embed);
-    unimplemented!("v3 hybrid part 2")
+    let Ok(waiting) = waiting_queries(connection, &plugin.key) else {
+        return 0;
+    };
+    let mut embedded = 0;
+    for (index, batch) in waiting.chunks(plugin.batch).enumerate() {
+        let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
+        let Some(vectors) = embed(texts.as_slice())
+            .ok()
+            .and_then(|vectors| checked(vectors, texts.len(), plugin.dimensions))
+        else {
+            let _ = forget_queries(connection, &plugin.key, &waiting[index * plugin.batch..]);
+            break;
+        };
+        match answer_queries(connection, &plugin.key, batch, &vectors) {
+            Ok(answered) => embedded += answered,
+            Err(_) => break,
+        }
+    }
+    assert!(embedded <= waiting.len());
+    embedded
+}
+
+/// The queries waiting for a plugin key, newest asked first, at most [`QUERY_ROUND_MAX`].
+/// Inputs: the connection and the key. Output: each query's SHA-256 and text.
+fn waiting_queries(
+    connection: &Connection,
+    key: &str,
+) -> Result<Vec<(String, String)>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT query_sha, query FROM search_query_vectors
+             WHERE plugin_key = ?1 AND vector IS NULL
+             ORDER BY asked_ms DESC, rowid DESC LIMIT ?2",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![key, QUERY_ROUND_MAX as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(storage)?;
+    let found = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
+    assert!(found.len() <= QUERY_ROUND_MAX);
+    Ok(found)
+}
+
+/// Stores the vectors of answered queries and clears their text. Inputs: the connection,
+/// the key, the queries and their checked vectors. Output: how many were stored.
+fn answer_queries(
+    connection: &mut Connection,
+    key: &str,
+    batch: &[(String, String)],
+    vectors: &[Vec<f32>],
+) -> Result<usize, EngineError> {
+    assert_eq!(batch.len(), vectors.len());
+    let tx = immediate(connection)?;
+    let mut answered = 0;
+    for ((sha, _), vector) in batch.iter().zip(vectors) {
+        answered += tx
+            .execute(
+                "UPDATE search_query_vectors SET vector = ?3, query = NULL
+                 WHERE plugin_key = ?1 AND query_sha = ?2 AND vector IS NULL",
+                params![key, sha, encode(vector)],
+            )
+            .map_err(storage)?;
+    }
+    tx.commit().map_err(storage)?;
+    Ok(answered)
+}
+
+/// Drops queries whose send failed. Inputs: the connection, the key and the queries.
+/// Output: done.
+fn forget_queries(
+    connection: &mut Connection,
+    key: &str,
+    queries: &[(String, String)],
+) -> Result<(), EngineError> {
+    let tx = immediate(connection)?;
+    for (sha, _) in queries {
+        tx.execute(
+            "DELETE FROM search_query_vectors
+             WHERE plugin_key = ?1 AND query_sha = ?2 AND vector IS NULL",
+            params![key, sha],
+        )
+        .map_err(storage)?;
+    }
+    tx.commit().map_err(storage)
 }
 
 /// The stored vector of a masked query, once the indexer embedded it. Inputs: the
-/// connection, the plugin and the query. Output: the vector, or none.
+/// connection, the plugin and the masked query. Output: the vector, or none.
 pub(crate) fn cached_query(
     connection: &Connection,
     plugin: &Plugin,
     query: &str,
 ) -> Option<Vec<f32>> {
-    let _ = (connection, plugin, query);
-    unimplemented!("v3 hybrid part 2")
+    let bytes: Vec<u8> = connection
+        .query_row(
+            "SELECT vector FROM search_query_vectors
+             WHERE plugin_key = ?1 AND query_sha = ?2 AND vector IS NOT NULL",
+            params![plugin.key, super::sha256_hex(query.as_bytes())],
+            |row| row.get(0),
+        )
+        .ok()?;
+    decode(&bytes, plugin.dimensions)
 }
 
 /// Fuses the full-text order with the nearest vectors of a project's source. Inputs: the
