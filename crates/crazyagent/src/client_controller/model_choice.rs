@@ -1,5 +1,6 @@
 use super::*;
 use crate::engine::owner::ModelAdded;
+use crate::model_choice::rules::{Rule, RuleWritten, Rules};
 use crate::model_choice::{Models, Slot, Written};
 use crate::protocol::ProjectId;
 use serde_json::Value;
@@ -76,6 +77,24 @@ impl OwnerController {
     ) -> Result<(bool, Models), EngineError> {
         self.model_choice_client()?
             .model_choice_remove(harness, model)
+            .await
+    }
+
+    /// Reads the owner's two model rules with their versions (DEC-150 Q2). Output: the
+    /// rules, or a `MODEL_CHOICE_PROTOCOL_CODES` refusal.
+    pub async fn model_choice_rules(&self) -> Result<Rules, EngineError> {
+        self.model_choice_client()?.model_choice_rules().await
+    }
+
+    /// Sets one model rule, naming the version the owner read. Inputs: the rule with its
+    /// value and the version. Output: the saved or stale rules, or a refusal.
+    pub async fn model_choice_set_rule(
+        &self,
+        rule: Rule,
+        version: u64,
+    ) -> Result<RuleWritten, EngineError> {
+        self.model_choice_client()?
+            .model_choice_set_rule(rule, version)
             .await
     }
 }

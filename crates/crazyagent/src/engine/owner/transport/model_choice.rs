@@ -1,5 +1,6 @@
 use super::*;
 use crate::harness_settings::Scope;
+use crate::model_choice::rules::{self, Rule, RuleWritten, Rules};
 use crate::model_choice::store::{self, Begun};
 use crate::model_choice::{MODEL_BYTES_MAX, Models, Row, Slot, VALUE_JSON_MAX, Written};
 use crate::protocol::encode_frame;
@@ -69,6 +70,11 @@ enum Action {
         harness: String,
         model: String,
     },
+    Rules {},
+    SetRule {
+        rule: Rule,
+        version: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -106,6 +112,9 @@ enum Reply {
     Refused { code: String, row: Row },
     Added { added: Added, models: Models },
     Removed { removed: bool, models: Models },
+    Rules { rules: Rules },
+    RuleSaved { rules: Rules },
+    RuleStale { rules: Rules },
     Rejected { code: String },
 }
 
@@ -218,6 +227,34 @@ impl OwnerClient {
         };
         match self.model_choice_exchange(action).await? {
             Reply::Removed { removed, models } => Ok((removed, models)),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the owner's two model rules (DEC-150 Q2): how a master's model pick is
+    /// treated and what a start does when no pool account can run its model, each with
+    /// its version. Output: the rules, or a `MODEL_CHOICE_PROTOCOL_CODES` refusal.
+    pub async fn model_choice_rules(&self) -> Result<Rules, EngineError> {
+        match self.model_choice_exchange(Action::Rules {}).await? {
+            Reply::Rules { rules } => Ok(rules),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Sets one model rule, naming the version the owner read; it applies from the next
+    /// pick or start. Inputs: the rule with its value and the version. Output: the saved
+    /// or stale rules, or a refusal.
+    pub async fn model_choice_set_rule(
+        &self,
+        rule: Rule,
+        version: u64,
+    ) -> Result<RuleWritten, EngineError> {
+        match self
+            .model_choice_exchange(Action::SetRule { rule, version })
+            .await?
+        {
+            Reply::RuleSaved { rules } => Ok(RuleWritten::Saved { rules }),
+            Reply::RuleStale { rules } => Ok(RuleWritten::Stale { rules }),
             _ => Err(unknown()),
         }
     }
@@ -405,6 +442,13 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
                 models: app(&harness)?,
             })
         }
+        Action::Rules {} => Ok(Reply::Rules {
+            rules: rules::rules(&db)?,
+        }),
+        Action::SetRule { rule, version } => Ok(match rules::set_rule(&db, rule, version)? {
+            RuleWritten::Saved { rules } => Reply::RuleSaved { rules },
+            RuleWritten::Stale { rules } => Reply::RuleStale { rules },
+        }),
     }
 }
 
