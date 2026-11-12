@@ -3928,10 +3928,11 @@ impl TeamRuntime {
         let planned = self.master_restarts.remove(project);
         let left = self.master_moves.remove(project);
         assert!(left.is_none() || planned, "a move is a planned restart");
-        if on
-            && crate::harnesses::interactive::support(&harness)
-                != crate::harnesses::interactive::Support::Terminal
-        {
+        let terminal = launch_harness(&harness).is_some_and(|launch| {
+            crate::harnesses::interactive::support(launch)
+                == crate::harnesses::interactive::Support::Terminal
+        });
+        if on && !terminal {
             super::master::set_live(&self.connection, project, false)?;
             self.live_starts.remove(project);
             return self.note(project, &live_gone(&harness));
@@ -4723,10 +4724,9 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Reads a sub-agent worktree's `HeadMark` without opening a file it could have swapped:
-    /// lstat of its git folder's HEAD and of its own branch's loose ref in the shared git
-    /// folder (F15). Takes the agent and its project. Returns the mark, none for an agent with
-    /// no worktree row or a HEAD that cannot be read, or any SQLite failure.
+    /// Reads a sub-agent worktree's `HeadMark` from its worktree row, as `head_mark` reads
+    /// it (F15). Takes the agent and its project. Returns the mark, none for an agent with no
+    /// worktree row or a HEAD that cannot be read, or any SQLite failure.
     fn head_mark(&self, id: i64, project: &ProjectId) -> Result<Option<HeadMark>, EngineError> {
         let row: Option<(String, String, String)> = self
             .connection
@@ -11701,6 +11701,7 @@ fn watch_task(watch: &mut AfterDone, task: i64) {
 /// packed. HEAD is read only as a plain file, never through a link or from a pipe, and a
 /// branch the engine did not name is not looked up. Takes the repository, the worktree and
 /// its git folder. Returns the mark, or none when HEAD cannot be read.
+#[cfg(unix)]
 fn head_mark(repository: &Path, worktree: &Path, git_dir: &Path) -> Option<HeadMark> {
     use std::os::unix::fs::MetadataExt;
     let mark = |path: &Path| {
@@ -11727,6 +11728,13 @@ fn head_mark(repository: &Path, worktree: &Path, git_dir: &Path) -> Option<HeadM
         .and_then(|branch| mark(&common.join("refs/heads").join(branch)))
         .unwrap_or((0, 0, 0));
     Some([head, branch])
+}
+
+/// Reads no `HeadMark` where team agents do not run, so no commit look lands anything there.
+/// Takes the repository, the worktree and its git folder. Returns none.
+#[cfg(not(unix))]
+fn head_mark(_repository: &Path, _worktree: &Path, _git_dir: &Path) -> Option<HeadMark> {
+    None
 }
 
 /// The team note when a saved master harness with no live terminal, such as RCLI, takes

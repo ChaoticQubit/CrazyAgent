@@ -3039,6 +3039,7 @@ pub fn wait_line(status: TaskStatus, wait: Option<&str>) -> Option<String> {
         _ => None,
     }
 }
+
 /// The longest task title an owner action line quotes.
 const AUDIT_TITLE_BYTES_MAX: usize = 80;
 
