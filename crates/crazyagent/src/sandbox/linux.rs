@@ -1,6 +1,6 @@
 use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
 use super::{
-    KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF,
+    APP_PLUGIN_PORTS_MAX, KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF,
     LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, OWNER_PORTS,
     ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
     clean_absolute, invalid,
@@ -40,9 +40,12 @@ const OPEN_SOCKETS: &str = "--open-sockets";
 const KEEP_FREE: &str = "--keep-free";
 const PROBE: &str = "--probe";
 /// The most ports one agent is kept off: the owner's fixed ports, the kept local model
-/// ports and every model proxy port.
-const KEEP_FREE_MAX: usize =
-    OWNER_PORTS.len() + KEPT_PORTS_MAX + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize + 1;
+/// ports, the app plugin loopback ports and every model proxy port.
+const KEEP_FREE_MAX: usize = OWNER_PORTS.len()
+    + KEPT_PORTS_MAX
+    + APP_PLUGIN_PORTS_MAX
+    + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize
+    + 1;
 /// The socket family of SMC, whose listener holds a TCP port and takes plain TCP clients.
 const AF_SMC: u64 = 43;
 const PICKED_PORTS_FILE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
@@ -934,13 +937,14 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
     }
 }
 
-/// The TCP ports no agent listens on: the owner's fixed ports, the kept local model ports
-/// and every model proxy port, as the macOS boundary keeps them. Input: the policy. Output:
-/// those ports, rising and each once.
+/// The TCP ports no agent listens on: the owner's fixed ports, the kept local model ports,
+/// the app plugin loopback ports and every model proxy port, as the macOS boundary keeps
+/// them. Input: the policy. Output: those ports, rising and each once.
 fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
     let mut ports: Vec<u16> = OWNER_PORTS
         .iter()
         .chain(&sandbox.kept_ports)
+        .chain(&sandbox.plugin_ports)
         .copied()
         .chain(PROXY_PORTS)
         .collect();

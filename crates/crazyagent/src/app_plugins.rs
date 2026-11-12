@@ -287,6 +287,10 @@ const PLAIN: &[(&str, &str)] = &[
         "use a full URL with no user name, password or # part.",
     ),
     (
+        "app_plugin_port_invalid",
+        "the URL's port must be 1 to 65535.",
+    ),
+    (
         "app_plugin_url_not_https",
         "the URL must use https; plain http is allowed only to 127.0.0.1, ::1 or localhost.",
     ),
@@ -406,6 +410,10 @@ const PLAIN: &[(&str, &str)] = &[
     (
         "app_plugin_refused",
         "this plugin's file is refused; fix it first.",
+    ),
+    (
+        "app_plugin_past_cap",
+        "only the first 64 plugin files by name are read; remove one to use this plugin.",
     ),
     ("app_plugin_off", "this plugin is turned off."),
     (

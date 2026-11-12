@@ -433,6 +433,9 @@ fn http_spec(value: &Value) -> Result<HttpSpec, Problem> {
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         return Err(problem("app_plugin_url_invalid", "http.url"));
     }
+    if url.port() == Some(0) {
+        return Err(problem("app_plugin_port_invalid", "http.url"));
+    }
     let host = url
         .host_str()
         .ok_or_else(|| problem("app_plugin_url_invalid", "http.url"))?
