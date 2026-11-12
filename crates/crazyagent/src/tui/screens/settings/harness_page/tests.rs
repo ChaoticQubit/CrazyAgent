@@ -193,6 +193,28 @@ fn screen(shell: &mut Shell) -> String {
     render(shell, 80, 24).join("\n")
 }
 
+/// The most rows a test walks to find a setting: the fixture catalog's rows and then some.
+const ROWS_WALKED_MAX: usize = 16;
+
+/// Chooses the setting with the given label the way the owner does: Home, then Down until
+/// the marked row is it, so a test does not depend on the page's group order. Inputs: the
+/// shell and the label. Output: none; panics when no row has the label.
+fn to_row(shell: &mut Shell, label: &str) {
+    let marked = format!("> {label} ");
+    shell.key(Key::Home);
+    for _ in 0..ROWS_WALKED_MAX {
+        let shown = screen(shell);
+        if shown
+            .lines()
+            .any(|line| line.trim_start().starts_with(&marked))
+        {
+            return;
+        }
+        shell.key(Key::Down);
+    }
+    panic!("no row is {label}:\n{}", screen(shell));
+}
+
 /// Asks to quit and reads whether the shell warns about the typed value, then stays.
 /// Input: the shell. Output: true when the warning showed.
 fn asks_before_quit(shell: &mut Shell) -> bool {
@@ -409,7 +431,7 @@ fn locked_and_read_only_rows_send_nothing_and_say_why() {
     assert!(!shown.contains("x Reset"), "{shown}");
 
     let mut shell = project_page(80, 24);
-    press(&mut shell, &[Key::Down, Key::Down, Key::Down]);
+    to_row(&mut shell, "Status label");
     let shown = screen(&mut shell);
     assert!(
         shown.contains("> Status label              Empty                   ⊘ Read-only"),
@@ -449,6 +471,7 @@ fn an_unqualified_version_shows_every_setting_read_only() {
     let read_only = shown.matches("⊘ Read-only").count();
     let locked = shown.matches("⊘ Locked").count();
     assert_eq!((read_only, locked), (3, 3), "{shown}");
+    to_row(&mut shell, "Hide agent reasoning");
     shell.key(Key::Char(' '));
     assert_eq!(requests(&mut shell), vec![]);
     assert_eq!(
@@ -458,7 +481,7 @@ fn an_unqualified_version_shows_every_setting_read_only() {
 
     let mut shell = app_page(None);
     assert!(screen(&mut shell).contains("CrazyAgent couldn't read the installed Codex version"));
-    shell.key(Key::Down);
+    to_row(&mut shell, "Reasoning effort");
     shell.key(Key::Enter);
     assert_eq!(requests(&mut shell), vec![]);
     assert_eq!(
