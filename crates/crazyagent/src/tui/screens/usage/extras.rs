@@ -7,8 +7,29 @@ pub const PART_GAP: &str = " \u{b7} ";
 /// next expiry has passed, which the engine also reads as not reported until read again.
 /// Inputs: the contract and now. Output: the resets, or none.
 fn live(extras: &LimitExtras, now_ms: i64) -> Option<&Resets> {
-    let _ = (extras, now_ms);
-    None
+    let resets = extras.resets.as_ref()?;
+    assert!(resets.count <= crate::usage::extras::RESETS_MAX);
+    match resets.next_expiry_ms {
+        Some(at) if at <= now_ms => None,
+        _ => Some(resets),
+    }
+}
+
+fn kind_words(kind: ResetKind) -> &'static str {
+    match kind {
+        ResetKind::FiveHour => "5-hour",
+        ResetKind::Weekly => "weekly",
+        ResetKind::Model => "model",
+        ResetKind::AllLimits => "all limits",
+    }
+}
+
+fn counted(count: u32) -> String {
+    if count == 1 {
+        "1 free reset".into()
+    } else {
+        format!("{count} free resets")
+    }
 }
 
 /// An account's free resets in words, the same as the desktop's: "No free resets", "2 free
@@ -16,42 +37,58 @@ fn live(extras: &LimitExtras, now_ms: i64) -> Option<&Resets> {
 /// "Free resets: not reported by <harness>". Inputs: the contract, now and the local offset in
 /// seconds. Output: the words, never a bare 0.
 pub fn resets_text(extras: &LimitExtras, now_ms: i64, offset: i64) -> String {
-    let _ = (extras, now_ms, offset, live(extras, now_ms));
-    String::new()
+    let Some(resets) = live(extras, now_ms) else {
+        return format!("Free resets: {}", extras.not_reported);
+    };
+    let label = if extras.may_break { " (may break)" } else { "" };
+    if resets.count == 0 {
+        return format!("No free resets{label}");
+    }
+    let kinds = if resets.kinds.is_empty() {
+        String::new()
+    } else {
+        let words: Vec<&str> = resets.kinds.iter().copied().map(kind_words).collect();
+        format!(" ({})", words.join(", "))
+    };
+    let next = resets.next_expiry_ms.map_or(String::new(), |at| {
+        format!(
+            ", next expires {}",
+            crate::tui::clock::expiry(at, now_ms, offset)
+        )
+    });
+    format!("{}{kinds}{next}{label}", counted(resets.count))
 }
 
 /// An account's credits in the provider's words, or not reported by its harness. Input: the
 /// contract. Output: the words.
 pub fn credits_text(extras: &LimitExtras) -> String {
-    let _ = extras;
-    String::new()
+    format!(
+        "Credits: {}",
+        extras.credits.as_deref().unwrap_or(&extras.not_reported)
+    )
 }
 
 /// The one line under an account's limits, the same on Pools, Metrics and the TUI: free
 /// resets, credits and where to spend, with two not reported fields said once. Inputs: the
 /// contract, now and the local offset in seconds. Output: the line.
 pub fn extras_line(extras: &LimitExtras, now_ms: i64, offset: i64) -> String {
-    let _ = (extras, now_ms, offset);
-    String::new()
+    let mut parts = if live(extras, now_ms).is_none() && extras.credits.is_none() {
+        vec![format!("Free resets and credits: {}", extras.not_reported)]
+    } else {
+        vec![resets_text(extras, now_ms, offset), credits_text(extras)]
+    };
+    if let Spend::Elsewhere { place } = &extras.spend {
+        parts.push(format!("Spend at {place}"));
+    }
+    assert!(!parts.is_empty() && parts.len() <= 3);
+    parts.join(PART_GAP)
 }
 
 /// The notice for a new free reset, the same as the desktop's. Inputs: the account's name and
 /// its count now, at least one. Output: the sentence.
 pub fn new_reset_line(name: &str, count: u32) -> String {
-    let _ = (name, count);
-    String::new()
-}
-
-#[allow(dead_code)]
-fn kind_words(kind: ResetKind) -> &'static str {
-    let _ = kind;
-    ""
-}
-
-#[allow(dead_code)]
-fn spend_place(spend: &Spend) -> Option<&str> {
-    let _ = spend;
-    None
+    assert!(count >= 1, "a new free reset leaves at least one");
+    format!("{name} has a new free reset. {} now.", counted(count))
 }
 
 #[cfg(test)]
