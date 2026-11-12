@@ -552,7 +552,9 @@ fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(stderr.contains("git merge is refused"), "{stderr}");
     assert!(
-        stderr.contains("If you need work from another branch, stop and tell your lead"),
+        stderr.contains(
+            "Work from the lead branch reaches yours through Update on your change set: stop and tell your lead what you need"
+        ),
         "{stderr}"
     );
     assert!(!stderr.contains("crazyagent/main"), "{stderr}");

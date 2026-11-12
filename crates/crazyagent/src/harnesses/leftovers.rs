@@ -840,8 +840,9 @@ impl Lineage {
     }
 
     /// Names the first `NAMED_MAX` known processes by what they run now, from one
-    /// [`PS_NAMES`] listing of only those ids. A listing that fails or is malformed keeps the
-    /// names they had. Input: the lineage. Output: none.
+    /// [`PS_NAMES`] listing of only those ids, through the lineage's pending listing, so none
+    /// starts while a held-up one is in flight. A listing that fails, is malformed or cannot
+    /// start keeps the names they had. Input: the lineage. Output: none.
     #[cfg(unix)]
     fn name(&mut self) {
         let asked: Vec<i32> = self
@@ -862,7 +863,7 @@ impl Lineage {
                 .collect::<Vec<_>>()
                 .join(","),
         );
-        let Ok(output) = read_bounded(argv, &mut None, None) else {
+        let Ok(output) = read_bounded(argv, &mut self.pending, None) else {
             return;
         };
         let Some(named) = names(&String::from_utf8_lossy(&output), &asked) else {
@@ -2040,6 +2041,46 @@ pub(crate) mod tests {
             }
             other => panic!("a settle behind a held-up listing was reported {other:?}"),
         }
+    }
+
+    /// v2.3.2 gate row 30: naming starts no listing while the lineage's held-up listing is in
+    /// flight, so a stop under a stalled exec waits out one listing, not a second one for the
+    /// names. The engine's own id is one `ps` names, so the same lineage with no listing in
+    /// flight takes its real name.
+    #[test]
+    fn naming_starts_no_listing_while_a_held_up_listing_is_still_in_flight() {
+        let (_listing, held_up) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+        let own = i32::try_from(std::process::id()).unwrap();
+        let mut lineage = Lineage {
+            leader: own,
+            known: vec![Process {
+                pid: own,
+                started: "Wed Oct 28 03:10:00 2026".into(),
+                program: "placeholder".into(),
+            }],
+            table: PS_TABLE,
+            unchecked: true,
+            scanned: true,
+            pending: Some(held_up),
+            sandboxed: false,
+            token: None,
+            leader_started: None,
+            applied: Instant::now(),
+            missed: false,
+        };
+        lineage.name();
+        assert_eq!(
+            lineage.known[0].program, "placeholder",
+            "a naming listing started behind a held-up one"
+        );
+        assert!(lineage.pending.is_some());
+
+        lineage.pending = None;
+        lineage.name();
+        assert!(
+            !lineage.known[0].program.is_empty() && lineage.known[0].program != "placeholder",
+            "the engine's own id was not named with no listing in flight: {lineage:?}"
+        );
     }
 
     #[test]

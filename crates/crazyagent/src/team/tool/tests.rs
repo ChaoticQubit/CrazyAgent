@@ -1468,8 +1468,9 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(known_tools(&names(&QUESTION_TOOLS)));
     assert!(known_tools(&names(&[WAKE_TOOL])));
     assert!(!known_tools(&names(&["Wake"])));
-    assert!(known_tools(&names(&[STOP_TOOL; 19])));
-    assert!(!known_tools(&names(&[STOP_TOOL; 20])));
+    let count = TEAM_TOOLS.len() + QUESTION_TOOLS.len() + 1;
+    assert!(known_tools(&names(&vec![STOP_TOOL; count])));
+    assert!(!known_tools(&names(&vec![STOP_TOOL; count + 1])));
 }
 /// The words a tool name, description or schema field of the owner's Messages timeline read
 /// or its settings write would carry, lowercased.

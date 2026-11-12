@@ -791,14 +791,14 @@ test("the Team panel names each agent, its account and current task, and lists t
   ], "the master has no Stop; each live sub-agent has its own");
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
     ["task-10", "From the master", "Sub-agent 2", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
-    ["task-11", "From you", "Codex", "Queued", "Write the README", "", "", { task: 11, label: "Cancel" }],
+    ["task-11", "From you", "Codex", "Queued", "Write the README", "Waits for its turn in the queue", "", { task: 11, label: "Cancel" }],
   ]);
   const all = research.teamPanel(status, accounts, label, "all", 61_000);
   assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Sub-agent 4", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "", rename: null,
     depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [], messageNote: null }, "a failed sub-agent has nothing left to stop");
   assert.deepEqual(all.tasks.map((row) => [row.key, row.to, row.word, row.summary, row.elapsed, row.stop]), [
     ["task-10", "Sub-agent 2", "Running", "", "1 min", { task: 10, label: "Stop" }],
-    ["task-11", "Codex", "Queued", "", "", { task: 11, label: "Cancel" }],
+    ["task-11", "Codex", "Queued", "Waits for its turn in the queue", "", { task: 11, label: "Cancel" }],
     ["task-12", "Sub-agent 3", "Done", "Login screen built, 4 tests pass.", "2 min", null],
     ["task-13", "Codex", "Failed", "No account in this project's pool can run codex", "", null],
   ]);

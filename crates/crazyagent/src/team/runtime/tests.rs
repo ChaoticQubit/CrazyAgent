@@ -12950,8 +12950,6 @@ fn a_tools_on_master_s_turn_for_an_owner_answer_carries_no_task_start_reminder()
 #[cfg(target_os = "macos")]
 #[test]
 fn an_overlap_note_rides_with_the_master_s_next_owner_message_turn() {
-    const NOTE: &str =
-        "Grace started work #9 claiming docs/a.md, which overlaps your claim docs/ on work #4.";
     let fixture = Fixture::new(1);
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
@@ -12961,6 +12959,17 @@ fn an_overlap_note_rides_with_the_master_s_next_owner_message_turn() {
         master_replies(f) == 1
     });
     let master = masters(&fixture.connection)[0];
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO coord_work(project,title,owner_agent,state,version,created,updated) VALUES (?1,'Write the docs',?2,'active',1,1,1)",
+            params![PROJECT, master],
+        )
+        .unwrap();
+    let work = fixture.connection.last_insert_rowid();
+    let note_text = format!(
+        "Grace started work #9 claiming docs/a.md, which overlaps your claim docs/ on work #{work}."
+    );
     let note = crate::coord::send(
         &fixture.connection,
         crate::coord::NewMessage {
@@ -12969,9 +12978,9 @@ fn an_overlap_note_rides_with_the_master_s_next_owner_message_turn() {
             to: crate::coord::Party::Agent(master),
             kind: crate::coord::MessageKind::Note,
             question: None,
-            work: Some(4),
+            work: Some(work),
             reply_to: None,
-            body: NOTE.into(),
+            body: note_text.clone(),
             idempotency_key: Some(format!("{}9-{master}", crate::coord::delivery::OVERLAP_KEY)),
         },
         now_ms(),
@@ -12997,14 +13006,16 @@ fn an_overlap_note_rides_with_the_master_s_next_owner_message_turn() {
         .status()
         .messages
         .iter()
-        .filter(|message| message.author == MessageAuthor::Engine && message.text.contains(NOTE))
+        .filter(|message| {
+            message.author == MessageAuthor::Engine && message.text.contains(&note_text)
+        })
         .count();
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     let second = &text[first.len()..];
     assert!(second.contains("Plan the title"), "{second}");
     assert!(
-        second.contains(NOTE),
+        second.contains(&note_text),
         "the note rides with the turn: {second}"
     );
     assert_eq!(delivered, "delivered");

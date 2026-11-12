@@ -3819,6 +3819,10 @@ async fn served(
     ))))
 }
 
+/// The team screen's q box lists the team questions the one owner questions list cannot
+/// take (F12): this project already has 64 questions waiting, so the agent's question is
+/// not linked and stays in the team inbox. An answer there reaches the asker as the owner's
+/// reply, and Enter opens a waiting agent's terminal.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_opens_a_waiting_terminal()
@@ -3889,6 +3893,19 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
             .unwrap();
         engine.last_insert_rowid()
     };
+    for earlier in 0..crate::questions::PENDING_PER_PROJECT_MAX {
+        engine
+            .execute(
+                "INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms)
+                 VALUES (?1,'terminal','terminal',?2,'[]','pending',0,?3)",
+                rusqlite::params![
+                    project().as_str(),
+                    format!("Earlier question {earlier}?"),
+                    now
+                ],
+            )
+            .unwrap();
+    }
     let (asker, waiter) = (agent("working"), agent("working"));
     let question = crate::coord::send(
         &engine,

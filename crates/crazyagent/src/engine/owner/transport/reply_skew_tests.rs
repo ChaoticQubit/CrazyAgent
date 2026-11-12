@@ -487,7 +487,10 @@ fn every_exchange_names_its_reads_and_only_its_reads() {
         ("account_profile", &["Capabilities"]),
         ("accounts", &["Catalog", "List", "LocalModels"]),
         ("agents", &["List", "Using", "Holders"]),
-        ("changes", &["List", "Diff", "Branches", "Waiting"]),
+        (
+            "changes",
+            &["List", "Diff", "Branches", "Waiting", "OwnerDirty"],
+        ),
         ("cleanup", &["Finished", "Removal"]),
         ("github", &["Status", "Repos"]),
         ("ide_extensions", &["Asks"]),

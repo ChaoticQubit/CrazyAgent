@@ -161,12 +161,12 @@ test("an applied save's hold ends at the first read that started after the save 
 });
 
 test("every other hold on a loaded read gives that read, so a later read ends it too (UI1-R2 r1 L2)", () => {
-  const reads = [["settings/updates.tsx", "Object.is, settings"], ["process.tsx", "sameJson, settings"], ["settings/memory.tsx", "Object.is, writesRead"], ["project/settings.tsx", "Object.is, status"]];
-  for (const [file, read] of reads) {
+  const reads = [["settings/updates.tsx", "Object.is, settings", 1], ["process.tsx", "sameJson, settings", 1], ["settings/memory.tsx", "Object.is, writesRead", 2], ["project/settings.tsx", "Object.is, status", 1]];
+  for (const [file, read, holds] of reads) {
     const source = readFileSync(new URL(`../src/screens/${file}`, import.meta.url), "utf8");
     const calls = [...source.matchAll(/useHeld(?:<[^>]+>)?\(([^;]*?)\);/gu)].map((match) => match[1]);
-    assert.equal(calls.length, 1, file);
-    assert.ok(calls[0].endsWith(`, ${read}`), `${file} gives its hold the read: ${calls[0]}`);
+    assert.equal(calls.length, holds, file);
+    for (const call of calls) assert.ok(call.endsWith(`, ${read}`), `${file} gives its hold the read: ${call}`);
   }
 });
 

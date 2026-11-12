@@ -1875,6 +1875,7 @@ fn a_message_to_a_finished_worker_wakes_it_once_and_reaches_its_first_prompt_onc
 fn a_live_masters_wakes_of_one_turn_are_one_round_and_the_next_turns_wake_waits_for_keep_going() {
     let mut fixture = Fixture::new();
     master_row(&fixture);
+    store_setup(&fixture);
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
@@ -3931,7 +3932,8 @@ fn a_deleted_land_on_branch_is_named_by_every_reader_and_nothing_lands_elsewhere
 
 /// The master's merge refuses, in plain words and landing nothing, an unknown name, a
 /// harness still working, a worker a lead started, an owner checkout with uncommitted
-/// changes and work that conflicts with the Master's branch (DEC-100 S3).
+/// changes to a file the work changes (F21 lands past the rest) and work that conflicts
+/// with the Master's branch (DEC-100 S3).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_master_merge_refuses_what_it_must_not_land() {
@@ -3971,7 +3973,7 @@ fn the_master_merge_refuses_what_it_must_not_land() {
         )
     );
 
-    std::fs::write(repo.join("notes.txt"), "owner's edit\n").unwrap();
+    std::fs::write(repo.join("README"), "owner's edit\n").unwrap();
     assert_eq!(
         merge(&mut fixture, "@docs-writer"),
         (
@@ -3981,10 +3983,10 @@ fn the_master_merge_refuses_what_it_must_not_land() {
     );
     assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
     assert_eq!(
-        std::fs::read_to_string(repo.join("notes.txt")).unwrap(),
+        std::fs::read_to_string(repo.join("README")).unwrap(),
         "owner's edit\n"
     );
-    git_at(&fixture, &repo, &["checkout", "-q", "--", "notes.txt"]);
+    git_at(&fixture, &repo, &["checkout", "-q", "--", "README"]);
 
     std::fs::write(repo.join("README"), "one\nowner\n").unwrap();
     git_at(&fixture, &repo, &["commit", "-q", "-am", "Owner's README"]);
@@ -6628,6 +6630,7 @@ fn inspect_work_quotes_every_line_of_a_message_whichever_break_opens_it() {
 #[test]
 fn a_masters_spawn_past_the_round_limit_waits_for_the_owners_keep_going() {
     let mut fixture = Fixture::new();
+    store_setup(&fixture);
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
