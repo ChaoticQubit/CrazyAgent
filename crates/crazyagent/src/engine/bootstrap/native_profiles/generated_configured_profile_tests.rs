@@ -250,3 +250,47 @@ fn a_slotless_home_that_is_not_the_engine_s_old_config_for_the_account_stays_ref
     assert_eq!(refused.0, "native_profile_custody_unsafe");
     assert_eq!(std::fs::read(&config).unwrap(), before);
 }
+
+/// KY-M1 option A order: master start repairs a pre-fix keyed home and registers it under
+/// the session's target profile first; the engine's key setup then sets the account up
+/// under its own reference on the same home, the key file is written, and the target
+/// profile the master turn holds still opens for execution.
+#[test]
+fn a_repaired_keyed_home_held_by_the_master_sets_up_again_and_the_master_keeps_its_profile() {
+    let mut case = ConfiguredCase::new(true, false);
+    let keyed = keyed_under_builtin(&case);
+    let config = legacy_home(&case, &keyed, &keyed.model.id);
+    case.custody
+        .repair_legacy_configured_home(&case.host, &keyed, &case.profile)
+        .unwrap();
+    let home = config.parent().unwrap().parent().unwrap().to_path_buf();
+    let target = reference("synthetic-master-target");
+    let master = case
+        .custody
+        .register_configured_rcli_profile(&case.host, &keyed, &target, &home)
+        .unwrap();
+    let account = case
+        .custody
+        .prepare_configured_rcli_profile(
+            &case.host,
+            &keyed,
+            &case.profile,
+            Some(&synthetic_secret()),
+        )
+        .unwrap();
+    assert_eq!(account.profile_config_sha256, master.profile_config_sha256);
+    private_file(&config.with_file_name("keys.json"), b"{}");
+    let binding = NativeProfileBinding {
+        connection: keyed.clone(),
+        ..case.binding(&master)
+    };
+    case.custody
+        .acquire_configured_rcli_use(
+            &case.host,
+            &binding,
+            &target,
+            &RequestId::new("ky-m1-master-turn").unwrap(),
+            master.profile_generation,
+        )
+        .unwrap();
+}
