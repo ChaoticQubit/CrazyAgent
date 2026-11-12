@@ -291,7 +291,11 @@ impl Search {
         if let Some(home) = &self.home {
             folders.extend(spec.locations.iter().map(|relative| below(home, relative)));
         }
-        if let Some(engine) = self.engine.as_ref().filter(|engine| !folders.contains(engine)) {
+        if let Some(engine) = self
+            .engine
+            .as_ref()
+            .filter(|engine| !folders.contains(engine))
+        {
             folders.push(engine.clone());
         }
         folders
@@ -313,8 +317,7 @@ impl Search {
     /// Output: the search.
     pub fn with_engine(mut self, engine_root: &Path) -> Self {
         let folder = crate::setup::harness_prefix(engine_root).join("bin");
-        let kept =
-            usable_path(&folder) && crate::service::changeable_by_others(&folder).is_none();
+        let kept = usable_path(&folder) && crate::service::changeable_by_others(&folder).is_none();
         self.engine = kept.then_some(folder);
         assert!(self.engine.iter().all(|engine| engine.is_absolute()));
         self
