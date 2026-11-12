@@ -6212,6 +6212,7 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
             tool::WITHDRAW_TOOL,
+            tool::REQUEST_ACCESS_TOOL,
             tool::WAKE_TOOL,
             tool::REMEMBER_TOOL,
             tool::RECALL_TOOL
@@ -6305,6 +6306,7 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
             tool::WITHDRAW_TOOL,
+            tool::REQUEST_ACCESS_TOOL,
             tool::WAKE_TOOL,
             tool::REMEMBER_TOOL
         ]
