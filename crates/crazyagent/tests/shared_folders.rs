@@ -282,6 +282,46 @@ fn none_keeps_every_untracked_local_path_closed() {
     assert!(String::from_utf8_lossy(&listed.stdout).contains("program"));
 }
 
+/// L4 r1 L1: under None and Chosen folders a folder or file the owner makes at the top of
+/// the project folder after launch stays closed, while tracked files, the picked folder and
+/// the agent's own folder still read.
+#[test]
+fn a_top_level_entry_made_after_launch_stays_closed_under_none_and_chosen() {
+    for scope in [SharedScope::None, SharedScope::Chosen] {
+        let case = case();
+        let sandbox = sandbox(&case, &with(scope, SharedAccess::ReadOnly));
+        write(
+            &case.repository.join("later").join("data.txt"),
+            "LATER_4471\n",
+        );
+        write(&case.repository.join("later.txt"), "LATER_4471\n");
+        for closed in ["later/data.txt", "later.txt"] {
+            let output = run(
+                &case,
+                &sandbox,
+                &format!("cat {}", quoted(&case.repository.join(closed))),
+            );
+            assert!(!output.status.success(), "{scope:?} {closed}");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("LATER_4471"));
+        }
+        assert!(reads(
+            &case,
+            &sandbox,
+            &case.repository.join("src").join("main.rs")
+        ));
+        assert!(reads(&case, &sandbox, &case.own.join(".env")));
+        assert_eq!(
+            reads(
+                &case,
+                &sandbox,
+                &case.repository.join("program").join("data.csv")
+            ),
+            scope == SharedScope::Chosen,
+            "{scope:?}"
+        );
+    }
+}
+
 /// Chosen folders: only the picked folder reads.
 #[test]
 fn chosen_folders_reads_only_the_picked_folders() {

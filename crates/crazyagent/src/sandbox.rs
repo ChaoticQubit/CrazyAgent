@@ -128,6 +128,9 @@ pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
 /// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
 /// git-ignored project paths (MAP-2). A project with more builds no graph.
 pub const KEPT_OUT_MAX: usize = 1024;
+/// The most top-level names a Chosen folders or None launch keeps open in the project
+/// folder: every present entry, the engine's names and the picked ones.
+pub const OPEN_TOPS_MAX: usize = 512;
 /// The opening of the Seatbelt rule for paths kept out: contents, folder listings and
 /// attribute values are denied with every write, run, link and clone, while names, sizes
 /// and dates stay readable, so a tool that only stats such a path does not fail.
@@ -839,6 +842,7 @@ pub struct ProjectSandbox {
     project_secrets: Option<PathBuf>,
     secrets_revealed: Vec<PathBuf>,
     shared_writes: Vec<PathBuf>,
+    open_tops: Option<Vec<String>>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -921,6 +925,7 @@ impl ProjectSandbox {
             project_secrets: None,
             secrets_revealed: Vec::new(),
             shared_writes: Vec::new(),
+            open_tops: None,
         })
     }
 
@@ -1567,6 +1572,25 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Keeps every top-level entry of the project folder [`Self::keep_project_secrets`] named
+    /// closed the way [`Self::keep_out`] does, but the names in `open`, so a folder or file
+    /// the owner makes there after launch stays closed too (L4 r1 L1); the agent's own
+    /// writable roots below it stay open, never the folder itself. Input: at most
+    /// [`OPEN_TOPS_MAX`] names, each [`plain_top`]. Output: the narrowed sandbox, or `Invalid`
+    /// without that project folder, for a second call or for a name out of shape.
+    pub fn open_only_tops(mut self, open: &[String]) -> Result<Self, SandboxError> {
+        if self.project_secrets.is_none() || self.open_tops.is_some() {
+            return Err(invalid(
+                "the open top-level names need the project folder, once",
+            ));
+        }
+        if open.len() > OPEN_TOPS_MAX || !open.iter().all(|name| plain_top(name)) {
+            return Err(invalid("an open top-level name must be one plain name"));
+        }
+        self.open_tops = Some(open.to_vec());
+        Ok(self)
+    }
+
     /// Lets the agent write one shared top-level folder of the project folder that git does
     /// not track (DEC-147.9 Read-write) as one more writable root, pinned in place; the secret
     /// names inside it stay closed, and every older deny still wins. Never a hidden folder, an
@@ -1606,6 +1630,39 @@ impl ProjectSandbox {
         assert!(self.writes(folder));
         assert!(self.shared_writes.len() <= shared_folders::SHARED_WRITES_MAX);
         Ok(self)
+    }
+
+    /// The Seatbelt rule of [`Self::open_only_tops`]: every path below the project folder is
+    /// kept out but the open top-level names and the agent's own writable roots there.
+    /// Output: the rule, empty when no names were set.
+    fn closed_tops_rule(&self) -> String {
+        let (Some(root), Some(open)) = (self.project_secrets.as_ref(), self.open_tops.as_ref())
+        else {
+            return String::new();
+        };
+        assert!(clean_absolute(root));
+        let pattern = seatbelt_pattern(root);
+        let mut text = format!("{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{pattern}/\")");
+        if !open.is_empty() {
+            let names = open
+                .iter()
+                .map(|name| regex_escape(name))
+                .collect::<Vec<_>>()
+                .join("|");
+            text.push_str(&format!(
+                "\n    (require-not (regex #\"^{pattern}/({names})(/.*)?$\"))"
+            ));
+        }
+        for own in self.writable_roots().filter(|own| {
+            own.starts_with(root) && own.as_path() != root.as_path() && clean_absolute(own)
+        }) {
+            text.push_str(&format!(
+                "\n    (require-not (subpath \"{}\"))",
+                own.display()
+            ));
+        }
+        text.push_str("))\n");
+        text
     }
 
     /// The Seatbelt rules of [`Self::keep_project_secrets`]: the deny of secret names in the
@@ -2190,6 +2247,7 @@ impl ProjectSandbox {
             }
             text.push_str(")\n");
         }
+        text.push_str(&self.closed_tops_rule());
         for file in self.revealed.iter().filter(|file| clean_absolute(file)) {
             text.push_str(&format!(
                 "(allow file-read* (literal \"{}\"))\n",
@@ -2798,7 +2856,8 @@ impl InstalledSandbox {
     /// install refusal, or `Unavailable` where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() {
+        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
+        {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -3156,6 +3215,19 @@ pub(crate) fn fold_case(pattern: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Whether `name` can be one top-level name [`ProjectSandbox::open_only_tops`] keeps open:
+/// one path part, never `.` or `..`, at most 255 bytes, with no control character, quote or
+/// backslash, so it sits in a Seatbelt pattern as written. Takes the name. Returns the answer.
+pub(crate) fn plain_top(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '"' | '\\' | '\''))
 }
 
 fn regex_escape(text: &str) -> String {

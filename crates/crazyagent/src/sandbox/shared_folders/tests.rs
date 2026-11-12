@@ -353,6 +353,97 @@ fn chosen_folders_keeps_out_only_the_untracked_paths_of_folders_not_picked() {
     assert!(plan.writes.is_empty(), "Read-only writes nothing: {plan:?}");
 }
 
+/// L4 r1 L1: Chosen folders and None keep open only the engine's names, the picked ones,
+/// a picked one not made yet included, and the present ones git tracks something in; All
+/// sets no such list.
+#[cfg(unix)]
+#[test]
+fn chosen_and_none_keep_open_only_the_engine_picked_and_tracked_top_level_names() {
+    let (_temp, root) = project();
+    let none = SharedFolders {
+        scope: SharedScope::None,
+        ..SharedFolders::default()
+    };
+    let open = plan(&root, &none).unwrap().open_tops.unwrap();
+    for name in [".git", ".crazyagent", "graphify-out", "src", ".gitignore"] {
+        assert!(open.iter().any(|open| open == name), "{name}: {open:?}");
+    }
+    for name in ["program", "build", "notes.txt"] {
+        assert!(!open.iter().any(|open| open == name), "{name}: {open:?}");
+    }
+    let open = plan(&root, &chosen(&["program", "later"]))
+        .unwrap()
+        .open_tops
+        .unwrap();
+    assert!(open.iter().any(|name| name == "program"), "{open:?}");
+    assert!(open.iter().any(|name| name == "later"), "{open:?}");
+    assert!(!open.iter().any(|name| name == "build"), "{open:?}");
+    let all = SharedFolders {
+        access: SharedAccess::ReadWrite,
+        ..SharedFolders::default()
+    };
+    assert_eq!(plan(&root, &all).unwrap().open_tops, None);
+}
+
+/// The closed tops rule comes after the keep-outs, keeps the agent's own folder below the
+/// project folder open, and the sandbox refuses open names out of shape or without the
+/// project folder.
+#[test]
+fn the_closed_tops_rule_keeps_the_own_folder_open_and_refuses_names_out_of_shape() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let own = project
+        .join(".crazyagent")
+        .join("worktrees")
+        .join("agent-1");
+    let home = base.join("home");
+    let tmp = base.join("tmp");
+    for folder in [&own, &home, &tmp] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let fresh = || {
+        ProjectSandbox::new(
+            &own,
+            &home,
+            &tmp,
+            super::super::SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_read(&project)
+        .unwrap()
+    };
+    assert!(fresh().open_only_tops(&["src".into()]).is_err());
+    for bad in ["a/b", "..", "", "x\"y", "back\\slash"] {
+        let refused = fresh()
+            .keep_project_secrets(&project, &[])
+            .unwrap()
+            .open_only_tops(&[bad.to_owned()]);
+        assert!(refused.is_err(), "{bad:?}");
+    }
+    let profile = fresh()
+        .keep_project_secrets(&project, &[])
+        .unwrap()
+        .keep_out(&project.join("notes.txt"))
+        .unwrap()
+        .open_only_tops(&[".crazyagent".into(), "src".into()])
+        .unwrap()
+        .profile();
+    let rule = format!(
+        "(require-not (regex #\"^{}/(\\.crazyagent|src)(/.*)?$\"))\n    (require-not (subpath \"{}\"))))",
+        crate::sandbox::seatbelt_pattern(&project),
+        own.display()
+    );
+    let closed = profile.find(&rule).expect(&profile);
+    let kept = profile
+        .find(&format!(
+            "(subpath \"{}\")",
+            project.join("notes.txt").display()
+        ))
+        .unwrap();
+    assert!(kept < closed, "{profile}");
+}
+
 /// Read-write opens only shared top-level folders git does not track at all: a folder with
 /// tracked files, a link and a folder not picked stay closed to writes.
 #[cfg(unix)]

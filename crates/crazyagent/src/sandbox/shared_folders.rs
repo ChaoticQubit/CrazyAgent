@@ -1,4 +1,4 @@
-use super::ProjectSandbox;
+use super::{OPEN_TOPS_MAX, ProjectSandbox};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -214,21 +214,23 @@ impl SharedFolders {
 }
 
 /// What one launch's sandbox gets from a shared folders choice: the untracked project paths
-/// it keeps out, the untracked top-level folders it may write and the shared-back secrets it
-/// may read.
+/// it keeps out, the untracked top-level folders it may write, the shared-back secrets it
+/// may read and, for Chosen folders or None, the only top-level names it keeps open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
     pub kept_out: Vec<PathBuf>,
     pub writes: Vec<PathBuf>,
     pub revealed: Vec<PathBuf>,
+    pub open_tops: Option<Vec<String>>,
 }
 
 /// Works out what a launch's sandbox gets from `shared` in the project folder `root`: the
 /// shared-back secrets always, and, unless the choice is All with Read-only, every untracked
 /// path git lists (outside `.git` and `.crazyagent`) whose top-level folder is not shared to
 /// keep out, and under Read-write every shared top-level folder git does not track at all to
-/// write. Takes the project folder, canonical, and the choice. Returns the plan, or
-/// [`UNLISTED`] when git cannot list the paths and [`TOO_MANY`] past the bounds.
+/// write. Chosen folders and None also keep open only [`open_tops`], so an entry made after
+/// launch stays closed. Takes the project folder, canonical, and the choice. Returns the
+/// plan, or [`UNLISTED`] when git cannot list the paths and [`TOO_MANY`] past the bounds.
 pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
     assert!(shared.validate().is_ok());
     let revealed: Vec<PathBuf> = shared
@@ -245,6 +247,10 @@ pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
             ..Plan::default()
         });
     }
+    let present = match shared.scope {
+        SharedScope::All => None,
+        SharedScope::Chosen | SharedScope::None => Some(top_names(root)?),
+    };
     let listed = untracked(root).ok_or(UNLISTED)?;
     let engine = engine_names(root);
     let mut kept_out = Vec::new();
@@ -274,11 +280,75 @@ pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
         return Err(TOO_MANY);
     }
     assert!(writes.iter().all(|folder| folder.parent() == Some(root)));
+    let open_tops = present.map(|present| open_tops(root, shared, &present, &listed));
+    assert!(
+        open_tops
+            .as_ref()
+            .is_none_or(|open| open.len() <= OPEN_TOPS_MAX)
+    );
     Ok(Plan {
         kept_out,
         writes,
         revealed,
+        open_tops,
     })
+}
+
+/// The names of the entries directly in the project folder `root` now, read before git
+/// lists its untracked paths, so an entry made in between stays closed. Takes the folder.
+/// Returns the names, a name that is not UTF-8 left out and so closed, or [`UNLISTED`] when
+/// the folder cannot be read and [`TOO_MANY`] past [`LOCAL_PATHS_MAX`] entries.
+fn top_names(root: &Path) -> Result<Vec<String>, &'static str> {
+    let mut names = Vec::new();
+    for (seen, entry) in std::fs::read_dir(root).map_err(|_| UNLISTED)?.enumerate() {
+        if seen == LOCAL_PATHS_MAX {
+            return Err(TOO_MANY);
+        }
+        let entry = entry.map_err(|_| UNLISTED)?;
+        if let Ok(name) = entry.file_name().into_string() {
+            names.push(name);
+        }
+    }
+    assert!(names.len() <= LOCAL_PATHS_MAX);
+    Ok(names)
+}
+
+/// The top-level names a Chosen folders or None launch keeps open in the project folder
+/// `root` (L4 r1 L1): the engine's, the picked ones and each present one git tracks
+/// something in. Every other entry stays closed, one made after launch included; an
+/// untracked file made later inside a tracked folder still reads. Takes the folder, the
+/// choice, the present names and git's untracked paths. Returns the names, sorted, each
+/// [`crate::sandbox::plain_top`].
+fn open_tops(
+    root: &Path,
+    shared: &SharedFolders,
+    present: &[String],
+    listed: &[String],
+) -> Vec<String> {
+    let whole: Vec<&str> = listed
+        .iter()
+        .map(|path| path.trim_end_matches('/'))
+        .filter(|path| !path.contains('/'))
+        .collect();
+    let picked = shared
+        .chosen
+        .iter()
+        .filter(|_| shared.scope == SharedScope::Chosen);
+    let mut open: Vec<String> = engine_names(root)
+        .into_iter()
+        .map(str::to_owned)
+        .chain(
+            present
+                .iter()
+                .filter(|name| shared.shares(name) || !whole.contains(&name.as_str()))
+                .cloned(),
+        )
+        .chain(picked.cloned())
+        .filter(|name| crate::sandbox::plain_top(name))
+        .collect();
+    open.sort();
+    open.dedup();
+    open
 }
 
 /// Gives one confined launch's sandbox the shared folders choice for the project folder
@@ -302,6 +372,9 @@ pub fn apply(
         .map_err(|_| REFUSED)?;
     for path in &plan.kept_out {
         sandbox = sandbox.keep_out(path).map_err(|_| REFUSED)?;
+    }
+    if let Some(open) = &plan.open_tops {
+        sandbox = sandbox.open_only_tops(open).map_err(|_| REFUSED)?;
     }
     for folder in &plan.writes {
         sandbox = sandbox.allow_shared_write(folder).map_err(|_| REFUSED)?;
