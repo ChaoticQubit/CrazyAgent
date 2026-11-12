@@ -65,6 +65,13 @@ const LEAD_MERGES: &str = "Merge them into your task branch with merge(agent) on
 const OWNER_ACCEPTS: &str = "The owner accepts them in Changes; you do not merge them.";
 const _: () = assert!(RESULTS_MESSAGE_BYTES_MAX + 8 <= super::master::INPUT_TEXT_MAX);
 const _: () = assert!(RESULT_IN_MESSAGE_BYTES_MAX * 2 + 256 < RESULTS_MESSAGE_BYTES_MAX);
+const _: () = assert!(
+    RESULT_IN_MESSAGE_BYTES_MAX * 2
+        + 256
+        + RESULTS_TRAILER.len()
+        + super::master_limits::ROUND_LINE_BYTES_MAX
+        < RESULTS_MESSAGE_BYTES_MAX
+);
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
