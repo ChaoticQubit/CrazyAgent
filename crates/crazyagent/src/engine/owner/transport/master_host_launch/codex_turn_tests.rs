@@ -322,7 +322,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     );
     assert_eq!(std::fs::metadata(&mailbox).unwrap().mode() & 0o7777, 0o700);
     let expected: toml::Table = toml::from_str(&format!(
-        "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}, {:?}, \"recall\"]\n",
+        "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}, {:?}, \"recall\", \"wake\"]\n",
         engine.to_str().unwrap(),
         record.to_str().unwrap(),
         mailbox.to_str().unwrap()
@@ -355,7 +355,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             .position(|arg| arg.starts_with("mcp_servers="))
             .unwrap();
         args[server] = format!(
-            "mcp_servers={{crazyagent-team={{command={:?},args=[\"team-mcp\",{:?},{:?},\"recall\"]}},owner={{command=\"/usr/bin/true\"}}}}",
+            "mcp_servers={{crazyagent-team={{command={:?},args=[\"team-mcp\",{:?},{:?},\"recall\",\"wake\"]}},owner={{command=\"/usr/bin/true\"}}}}",
             engine.to_str().unwrap(),
             record.to_str().unwrap(),
             mailbox.to_str().unwrap()
