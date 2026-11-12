@@ -256,6 +256,17 @@ pub enum Place {
     },
 }
 
+/// One item a screen picks when a notification opens it (DEC-136a): a logged question on
+/// the Questions tab, a change set on the Changes tab, or an agent in the Team screen's
+/// Questions box. The screen picks it on its first read and keeps its usual first pick
+/// when the item is no longer listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spot {
+    Question(u64),
+    ChangeSet(crate::landing::ChangeSetId),
+    Agent(i64),
+}
+
 /// What the shell does after a screen handled a key or an arrival.
 /// Input: returned by screens. Output: the shell changes the stack, or applies
 /// its default for an ignored key (Esc goes back).
@@ -263,6 +274,7 @@ pub enum Flow {
     Handled,
     Ignored,
     Open(Place),
+    OpenAt(Place, Spot),
     Replace(Box<dyn Screen>),
     Back,
     Go(Place),
@@ -274,6 +286,7 @@ impl std::fmt::Debug for Flow {
             Self::Handled => formatter.write_str("Handled"),
             Self::Ignored => formatter.write_str("Ignored"),
             Self::Open(place) => write!(formatter, "Open({place:?})"),
+            Self::OpenAt(place, spot) => write!(formatter, "OpenAt({place:?}, {spot:?})"),
             Self::Replace(screen) => write!(formatter, "Replace({:?})", screen.crumbs()),
             Self::Back => formatter.write_str("Back"),
             Self::Go(place) => write!(formatter, "Go({place:?})"),
@@ -347,6 +360,11 @@ pub trait Screen {
     fn asking(&self) -> bool {
         false
     }
+
+    /// Picks one item a notification opened this screen on, once the screen reads its
+    /// list. Inputs: the item and the context. Output: none; a screen without such items
+    /// ignores it.
+    fn open_at(&mut self, _spot: &Spot, _ctx: &mut Ctx) {}
 
     /// Handles one key the shell did not take as a global key.
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow;

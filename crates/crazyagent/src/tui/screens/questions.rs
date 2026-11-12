@@ -61,6 +61,7 @@ pub(in crate::tui) struct ProjectQuestions {
     sent: Option<QuestionsQuery>,
     stale: bool,
     read_ms: i64,
+    wanted: Option<u64>,
 }
 
 impl ProjectQuestions {
@@ -84,7 +85,15 @@ impl ProjectQuestions {
             sent: None,
             stale: true,
             read_ms: 0,
+            wanted: None,
         }
+    }
+
+    /// Picks one question on the first list read from now, as when a notification opens
+    /// the tab on it; a question that list does not name leaves the usual first pick.
+    /// Input: the question id. Output: none.
+    pub(in crate::tui) fn want(&mut self, id: u64) {
+        self.wanted = Some(id);
     }
 
     /// Asks for a fresh list on the next `next_query`, as when the owner opens the tab.
@@ -143,7 +152,10 @@ impl ProjectQuestions {
         self.sent = None;
         match (&event.query, &event.result) {
             (QuestionsQuery::List { .. }, Ok(QuestionsReply::Page(page))) => {
-                let chosen = self.items.get(self.cursor).map(|question| question.id);
+                let chosen = self
+                    .wanted
+                    .take()
+                    .or_else(|| self.items.get(self.cursor).map(|question| question.id));
                 self.items = page.items.clone();
                 self.loaded = true;
                 if let Some(at) =

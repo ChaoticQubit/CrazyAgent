@@ -1,4 +1,4 @@
-use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
+use super::{Flow, Place, ProjectTab, Screen, SettingsSection, Spot};
 use crate::notifications::{
     FoldChange, Notice, NoticeAction, NoticeFilter, NoticeFold, NoticeKind, NoticeQuery,
     NoticeTarget, PAGE_MAX,
@@ -233,8 +233,9 @@ impl Notifications {
             send(action, ctx);
         }
         match place_of(&row.target, ctx) {
-            Ok(Place::Home) => Flow::Go(Place::Home),
-            Ok(place) => Flow::Open(place),
+            Ok((Place::Home, _)) => Flow::Go(Place::Home),
+            Ok((place, Some(spot))) => Flow::OpenAt(place, spot),
+            Ok((place, None)) => Flow::Open(place),
             Err(text) => {
                 ctx.say(Message::warning(text, ""));
                 Flow::Handled
@@ -362,10 +363,12 @@ fn project_name(id: &ProjectId, ctx: &Ctx) -> String {
         .map_or_else(|| id.as_str().to_owned(), |card| card.name.clone())
 }
 
-/// The TUI page that fixes or shows one item's target. Inputs: the target and the
-/// context, whose project list names the project. Output: the place, or the sentence the
-/// message line shows when the TUI has no such page or the project is not listed.
-fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<Place, &'static str> {
+/// The TUI page that fixes or shows one item's target and the item to pick there: the
+/// notified question or change set, or an agent's question or wait in its Team screen's
+/// Questions box. Inputs: the target and the context, whose project list names the
+/// project. Output: the place and the item, or the sentence the message line shows when
+/// the TUI has no such page or the project is not listed.
+fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<(Place, Option<Spot>), &'static str> {
     let project = |id: &ProjectId| -> Result<(ProjectId, String), &'static str> {
         let cards = ctx.store.projects.ready().ok_or(LOADING)?;
         cards
@@ -377,7 +380,28 @@ fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<Place, &'static str> {
     let tab = |id: &ProjectId, tab: ProjectTab| {
         project(id).map(|(id, name)| Place::Project { id, name, tab })
     };
-    match target {
+    let spot = match target {
+        NoticeTarget::Questions {
+            question: Some(question),
+            ..
+        } => u64::try_from(*question).ok().map(Spot::Question),
+        NoticeTarget::Questions {
+            question: None,
+            agent: Some(agent),
+            ..
+        } => Some(Spot::Agent(*agent)),
+        NoticeTarget::ChangeSet {
+            change_set: Some(change_set),
+            ..
+        } => Some(Spot::ChangeSet(change_set.clone())),
+        _ => None,
+    };
+    let place = match target {
+        NoticeTarget::Questions {
+            project_id,
+            question: None,
+            agent: Some(_),
+        } => project(project_id).map(|(id, name)| Place::Team { id, name }),
         NoticeTarget::Questions { project_id, .. } => tab(project_id, ProjectTab::Questions),
         NoticeTarget::ProjectPool { project_id } => tab(project_id, ProjectTab::Settings),
         NoticeTarget::ChangeSet { project_id, .. } => tab(project_id, ProjectTab::Changes),
@@ -393,7 +417,9 @@ fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<Place, &'static str> {
         NoticeTarget::Harnesses => Ok(Place::Settings(SettingsSection::Harnesses)),
         NoticeTarget::Home => Ok(Place::Home),
         NoticeTarget::Updates => Err(UPDATES),
-    }
+    }?;
+    assert!(spot.is_none() || matches!(place, Place::Project { .. } | Place::Team { .. }));
+    Ok((place, spot))
 }
 
 impl Screen for Notifications {

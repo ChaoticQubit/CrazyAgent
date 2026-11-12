@@ -1677,6 +1677,14 @@ impl Screen for ProjectPage {
         self.screen.asking()
     }
 
+    fn open_at(&mut self, spot: &super::Spot, _ctx: &mut Ctx) {
+        match spot {
+            super::Spot::Question(id) => self.screen.questions.want(*id),
+            super::Spot::ChangeSet(id) => self.screen.changes.want(id.clone()),
+            super::Spot::Agent(_) => {}
+        }
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let before = self.screen.tab;
         if self.moved.is_some() {

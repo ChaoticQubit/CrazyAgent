@@ -416,6 +416,14 @@ impl Shell {
                     self.push(screen);
                 }
             }
+            Flow::OpenAt(place, spot) => {
+                self.apply(Flow::Open(place));
+                let ctx = &mut self.ctx;
+                self.stack
+                    .last_mut()
+                    .expect("the stack is never empty")
+                    .open_at(&spot, ctx);
+            }
             Flow::Replace(screen) => {
                 self.stack.pop();
                 self.push(screen);
