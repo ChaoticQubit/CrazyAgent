@@ -109,10 +109,12 @@ fn every_kind_records_and_lists_newest_first_with_its_goal() {
         .iter()
         .cloned()
         .partition(|item| LOGGED_KINDS.contains(&item.kind) || WORK_KINDS.contains(&item.kind));
+    let mut three = vec![paced[0].clone(), others[0].clone(), others[1].clone()];
+    three.sort_by_key(|item| std::cmp::Reverse((item.at_ms, item.id)));
     assert_eq!(
         list(&db, &project(), 3).unwrap(),
-        [paced[0].clone(), others[0].clone(), others[1].clone()],
-        "a limit of 3 gives the agents' rows one place (T11-R2-L1)"
+        three,
+        "a limit of 3 gives the agents' rows one place (T11-R2-L1), newest first"
     );
     assert_eq!(
         list(&db, &project(), 0).unwrap_err().0,

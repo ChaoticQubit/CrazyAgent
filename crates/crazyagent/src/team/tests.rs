@@ -7025,10 +7025,16 @@ fn opening_the_runtime_makes_the_usage_tables_its_turn_ends_write() {
     assert_eq!(tables, ["usage_tokens", "usage_turns"]);
 }
 
-/// A team database with one project of a one-slot codex plan, the activity tables and the
-/// owner's pool. Returns the folder, the connection, the setup and the pool.
+/// A team database with one project of a one-slot codex plan, the engine's projects table,
+/// the activity tables and the owner's pool. Returns the folder, the connection, the setup
+/// and the pool.
 fn audited_team(project: &str) -> (tempfile::TempDir, Connection, StoredSetup, ModelAccess) {
     let (directory, connection) = database();
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .unwrap();
     crate::activity::initialize(&connection).unwrap();
     let setup = stored(
         project,
