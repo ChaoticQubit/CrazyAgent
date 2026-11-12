@@ -272,7 +272,7 @@ test("a configured master stopped by a harness protocol fault, the frame size li
   assert.equal(research.turnLine(turn("protocol_fault", "codex_host_protocol_stale_message")),
     "The master stopped: it sent a message out of order. Send again to start a fresh turn. (codex_host_protocol_stale_message)");
   assert.equal(research.turnLine(turn("frame_limit", "codex_host_protocol_frame_too_large")),
-    "The master stopped: one message was larger than the master frame size limit. Raise it in Settings, Master, then send again. (codex_host_protocol_frame_too_large)");
+    "The master stopped: one message was larger than the master frame size limit. Raise it in Settings, Master, or at 1 MiB shorten the message or the instructions, then send again. (codex_host_protocol_frame_too_large)");
   assert.equal(research.turnLine(turn("worktree_uncertain", "master_bootstrap_uncertain")),
     "The master stopped: its copy of the project could not be checked. End the conversation, then send again. (master_bootstrap_uncertain)");
 });

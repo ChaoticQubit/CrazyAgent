@@ -140,7 +140,7 @@ test("Settings, Master lists the master frame size limit with its three options,
   assert.match(shown, /64 KiB The engine's own message size; enough for most turns\./);
   assert.match(shown, /256 KiB Room for long instructions and large pasted text\./);
   assert.match(shown, /1 MiB The largest; for a turn that still stops at 256 KiB\./);
-  assert.match(shown, /One message was larger than the master frame size limit\. Raise it here, then send again\./);
+  assert.match(shown, /One message was larger than the master frame size limit\. Raise it here, or at 1 MiB shorten the message or the instructions, then send again\./);
   assert.match(shown, /The limit covers Claude and Codex masters; rcli keeps 64 KiB\./);
   assert.match(markup, /<form[^>]*aria-label="Master frame size limit"/);
   assert.doesNotMatch(markup, /<h2>Master<\/h2>/, "the tab has one title, above the step limit");

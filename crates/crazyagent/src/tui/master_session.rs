@@ -3437,7 +3437,7 @@ mod turn_line_tests {
             (
                 MasterReason::FrameLimit,
                 "codex_host_protocol_frame_too_large",
-                "Turn 1: Blocked | One message was larger than the master frame size limit: raise it in Settings, then send again (codex_host_protocol_frame_too_large)",
+                "Turn 1: Blocked | One message was larger than the master frame size limit: raise it in Settings, or at 1 MiB shorten the message or the instructions, then send again (codex_host_protocol_frame_too_large)",
             ),
             (
                 MasterReason::WorktreeUncertain,

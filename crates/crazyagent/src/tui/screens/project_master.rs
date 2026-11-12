@@ -1005,7 +1005,7 @@ mod tests {
             ),
             (
                 MasterReason::FrameLimit,
-                "Codex stopped: one message was larger than the master frame size limit. Raise it in Settings, then send again. (frame_limit) Press r to try again.",
+                "Codex stopped: one message was larger than the master frame size limit. Raise it in Settings, or at 1 MiB shorten the message or the instructions, then send again. (frame_limit) Press r to try again.",
             ),
             (
                 MasterReason::WorktreeUncertain,

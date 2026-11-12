@@ -1660,6 +1660,10 @@ fn settings_show_a_64_kib_master_frame_by_default_with_the_three_options() {
         shown.contains("One message was larger than the master frame size limit."),
         "{shown}"
     );
+    assert!(
+        shown.contains("or at 1 MiB shorten the message or the instructions"),
+        "{shown}"
+    );
     assert!(rows.last().unwrap().contains("z Master frame size"));
     shell.key(Key::Char('z'));
     let rows = render(&mut shell, 200, 80);
