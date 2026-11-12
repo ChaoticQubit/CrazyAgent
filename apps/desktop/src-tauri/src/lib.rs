@@ -202,7 +202,18 @@ async fn start_engine(
     }
     crazyagent::service::wait_ready(layout, crazyagent::service::READY_TIMEOUT, None, since)
         .await
-        .map_err(|_| engine_failure("engine_start_failed"))
+        .map_err(|_| engine_failure(start_failure(layout)))
+}
+
+/// The code of an engine start that did not answer: `engine_backup_failed` when the engine's
+/// record says its upgrade backup failed (F36), else `engine_start_failed`. Input: the
+/// layout. Output: the code.
+fn start_failure(layout: &crazyagent::paths::Layout) -> &'static str {
+    if crazyagent::service::backup_failure(layout).is_some() {
+        "engine_backup_failed"
+    } else {
+        "engine_start_failed"
+    }
 }
 
 /// Makes sure the default engine runs before the bridge connects: when none answers it
@@ -731,6 +742,35 @@ async fn desktop_set_agent_memory_writes(
     lock(&state)
         .await?
         .set_agent_memory_writes(writes, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_move_memory(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    project: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .move_memory(&id, &project, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_set_agent_memory_scope(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    scope: crazyagent::memory::library::AgentScope,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_agent_memory_scope(scope, generation)
         .await
 }
 
@@ -4693,6 +4733,8 @@ native_commands! {
     desktop_delete_memory,
     desktop_approve_memory,
     desktop_set_agent_memory_writes,
+    desktop_set_agent_memory_scope,
+    desktop_move_memory,
     desktop_forget_memory,
     desktop_remember_research,
     desktop_save_selection_to_memory,

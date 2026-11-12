@@ -2322,6 +2322,60 @@ async fn a_removed_project_forgets_its_doc_links() {
     engine.stop().await;
 }
 
+/// F34: a removed project takes the memories its agents saved with it, so a project added
+/// again under the same id never reads them; the owner's own note for it and an app-wide
+/// agent memory stay.
+#[tokio::test]
+async fn a_removed_project_forgets_the_memories_its_agents_saved() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(ENGINE_WAIT).unwrap();
+    for (id, project, origin) in [
+        (
+            "agent-a",
+            Some("setup-pooled"),
+            r#"{"kind":"agent","agent":"Master"}"#,
+        ),
+        ("note-a", Some("setup-pooled"), r#"{"kind":"written"}"#),
+        ("agent-g", None, r#"{"kind":"agent","agent":"Master"}"#),
+    ] {
+        db.execute(
+            "INSERT INTO memory_library(id,project,origin,text) VALUES (?1,?2,?3,?1)",
+            rusqlite::params![id, project, origin],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let listed = |engine: &Engine| -> Vec<String> {
+        let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+        db.busy_timeout(ENGINE_WAIT).unwrap();
+        db.prepare("SELECT id FROM memory_library ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(listed(&engine), ["agent-a", "agent-g", "note-a"]);
+
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(listed(&engine), ["agent-g", "note-a"]);
+    engine.stop().await;
+}
+
 /// A removed project takes its roadmap status and its refresh setting with it, so a project
 /// added again under the same id starts unchecked with the default setting.
 #[tokio::test]

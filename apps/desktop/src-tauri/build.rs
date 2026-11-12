@@ -136,6 +136,8 @@ fn main() {
         "desktop_delete_memory",
         "desktop_approve_memory",
         "desktop_set_agent_memory_writes",
+        "desktop_set_agent_memory_scope",
+        "desktop_move_memory",
         "desktop_forget_memory",
         "desktop_remember_research",
         "desktop_save_selection_to_memory",

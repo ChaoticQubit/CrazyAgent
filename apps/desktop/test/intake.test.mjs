@@ -376,8 +376,8 @@ test("pack states read in plain words and only on or off entries count as instal
   assert.deepEqual(intake.packStateView({ state: "off" }), { word: "Off", tone: "neutral", line: null });
   assert.deepEqual(intake.packStateView({ state: "failed", reason: "Checksum didn't match." }), { word: "Failed", tone: "danger", line: "Checksum didn't match." });
   const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
-  assert.deepEqual(intake.packStateView({ state: "on" }, refused), { word: "On", tone: "ok", line: `Hooks not added: ${refused}` });
-  assert.deepEqual(intake.packStateView({ state: "off" }, refused), { word: "Off", tone: "neutral", line: `Hooks not added: ${refused}` });
+  assert.deepEqual(intake.packStateView({ state: "on" }, refused), { word: "On", tone: "warn", line: `Hooks not added: ${refused}` });
+  assert.deepEqual(intake.packStateView({ state: "off" }, refused), { word: "Off", tone: "warn", line: `Hooks not added: ${refused}` });
   assert.deepEqual(intake.packStateView({ state: "on" }, null), { word: "On", tone: "ok", line: null });
   assert.deepEqual(pack.filter(intake.installed).map((item) => item.id), ["headroom"]);
   assert.equal(intake.installed(entry("x", "skill", "workflow", true, { state: "off" })), true);

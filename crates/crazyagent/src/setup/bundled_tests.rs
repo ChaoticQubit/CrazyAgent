@@ -437,3 +437,37 @@ fn an_entrys_hooks_come_from_the_shipped_folder_else_a_real_cached_checkout_neve
         Some(setup.path().join("bundled-hooks/hooks/graphify"))
     );
 }
+
+/// F37: pack hooks once failed as hook_plugin_name_invalid because a folder without a
+/// manifest was named after its folder (fixed by 63a6586d9). Every hook folder this build
+/// ships belongs to a default-pack entry and reads with a valid plugin name equal to that
+/// entry's id, so a folder shipped later without a valid manifest fails here, not at setup.
+#[test]
+fn every_shipped_hook_folder_reads_with_a_valid_plugin_name_for_its_entry() {
+    let setup = private();
+    let unpacked = extract_hooks(setup.path()).unwrap();
+    let ids: std::collections::BTreeSet<&str> = HOOK_FILES
+        .iter()
+        .map(|(path, _)| path.split('/').nth(1).unwrap())
+        .collect();
+    assert!(!ids.is_empty());
+    let manifest = default_pack().unwrap();
+    for id in ids {
+        assert!(
+            manifest.entries.iter().any(|entry| entry.id == id),
+            "{id} is not a default-pack entry"
+        );
+        assert_eq!(
+            hook_folder(setup.path(), id),
+            Some(unpacked.join("hooks").join(id))
+        );
+        let read = crate::plugins::hook_folder::read(&unpacked.join("hooks").join(id))
+            .unwrap_or_else(|code| panic!("{id}: {code}"));
+        assert!(
+            crate::plugins::hook_folder::valid_plugin_name(&read.plugin),
+            "{id}"
+        );
+        assert_eq!(read.plugin, id);
+        assert!(!read.hooks.is_empty(), "{id}");
+    }
+}
