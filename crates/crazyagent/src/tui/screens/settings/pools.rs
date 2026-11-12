@@ -14,6 +14,7 @@ use crate::tui::seam::{Arrival, PoolChange, Request};
 use crate::tui::text::{cells, join, list_row, restyle, row, styled, thumb, with_bar, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::buttons;
+use crate::usage::extras::LimitExtras;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
@@ -22,6 +23,9 @@ const ROWS_START: usize = 10;
 const TABS_HEIGHT: usize = 2;
 const HEAD_HEIGHT: usize = 4;
 const MODAL_TEXT: usize = 50;
+/// How often an open Pools screen asks the engine for the detail rows again, as the desktop's
+/// Pools reread does, so the engine's lease on them never lapses while Pools stays open.
+const DETAIL_ASK_EVERY_MS: i64 = 60_000;
 
 /// Settings, Pools: every pool with its size, readiness and the projects using
 /// it.
@@ -36,6 +40,8 @@ pub struct Pools {
     saving: Vec<u64>,
     ranking: Option<Result<Vec<PoolRanking>, String>>,
     choice: Option<ChoiceEditor>,
+    extras: std::collections::HashMap<String, LimitExtras>,
+    detail_asked_ms: Option<i64>,
 }
 
 struct Confirm {
@@ -66,7 +72,18 @@ impl Pools {
             saving: Vec::new(),
             ranking: None,
             choice: None,
+            extras: std::collections::HashMap::new(),
+            detail_asked_ms: None,
         }
+    }
+
+    /// Asks the engine for every account's extras with the detail rows, which it reads only
+    /// while Pools is open (DEC-154). Inputs: the context and now.
+    fn ask_detail(&mut self, ctx: &mut Ctx, now_ms: i64) {
+        ctx.request(Request::Settings(Box::new(SettingsJob::Extras {
+            detail: true,
+        })));
+        self.detail_asked_ms = Some(now_ms);
     }
 
     fn chosen_pool<'a>(&self, ctx: &'a Ctx) -> Option<&'a PoolSummary> {
@@ -371,7 +388,20 @@ impl Screen for Pools {
                 ctx.request(Request::Settings(Box::new(SettingsJob::Ranking)));
             }
             Some(SettingsEvent::Ranking(result)) => self.ranking = Some(result.clone()),
+            Some(SettingsEvent::Extras(Ok(rows))) => {
+                self.extras = rows
+                    .iter()
+                    .map(|row| (row.account.as_str().to_owned(), row.extras.clone()))
+                    .collect();
+            }
             _ => {}
+        }
+        let now = crate::tui::clock::now_ms();
+        if self
+            .detail_asked_ms
+            .is_some_and(|at| now - at > DETAIL_ASK_EVERY_MS)
+        {
+            self.ask_detail(ctx, now);
         }
         match arrival {
             Arrival::Pools(Ok(pools)) => self.follow(pools.len()),
@@ -399,7 +429,7 @@ impl Screen for Pools {
         if let (Some(editor), Some(schedule), Some(pool)) =
             (&self.choice, &self.schedule, self.chosen_pool(ctx))
         {
-            return Some(editor.modal(schedule, pool, self.ranking.as_ref(), ctx));
+            return Some(editor.modal(schedule, pool, self.ranking.as_ref(), &self.extras, ctx));
         }
         let confirm = self.confirm.as_ref()?;
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
@@ -452,6 +482,7 @@ impl Screen for Pools {
         ctx.request(Request::Projects);
         ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
         ctx.request(Request::Settings(Box::new(SettingsJob::Ranking)));
+        self.ask_detail(ctx, crate::tui::clock::now_ms());
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
