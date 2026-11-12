@@ -249,21 +249,31 @@ pub(crate) fn agent_model(db: &Connection, agent: i64) -> Result<Option<String>,
     .map_err(super::error)
 }
 
+/// Who runs on the default model after a fallback (DEC-150): a task's agent, an agent
+/// that starts again with no task, or the master.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fallen {
+    Task(i64),
+    Agent,
+    Master,
+}
+
 /// Tells the owner and the master once that no pool account could run a model chosen for
-/// a harness's agents or master, so a task or the master runs on the default (DEC-150):
-/// one owner notification and one engine message to the master, then nothing more for
-/// that project, harness and model until it runs again (`ran`). Takes the transaction, the
-/// project, the harness, the model, the task, none for the master, and the time. Returns
-/// whether this call told them, or a SQLite failure.
+/// a harness's agents or master, so a start runs on the default (DEC-150): one owner
+/// notification and one engine message to the master, then nothing more for that project,
+/// harness and model until it runs again (`ran`). Takes the transaction, the project, the
+/// harness, the model, who falls back and the time. Returns whether this call told them.
 pub(crate) fn fell_back(
     tx: &Transaction<'_>,
     project: &ProjectId,
     harness: &str,
     model: &str,
-    task: Option<i64>,
+    who: Fallen,
     now: i64,
 ) -> Result<bool, EngineError> {
-    assert!(task.is_none_or(|task| task > 0));
+    if let Fallen::Task(task) = who {
+        assert!(task > 0);
+    }
     tx.execute_batch(RUN_SCHEMA).map_err(super::error)?;
     let inserted = tx
         .execute(
@@ -277,9 +287,13 @@ pub(crate) fn fell_back(
         return Ok(false);
     }
     let harness = super::bound_text(harness, 64);
-    let (whom, who) = match task {
-        Some(task) => (format!("{harness} agents"), format!("task {task}")),
-        None => (format!("the {harness} master"), "the master".to_owned()),
+    let (whom, who) = match who {
+        Fallen::Task(task) => (format!("{harness} agents"), format!("task {task}")),
+        Fallen::Agent => (
+            format!("{harness} agents"),
+            "an agent starting again".to_owned(),
+        ),
+        Fallen::Master => (format!("the {harness} master"), "the master".to_owned()),
     };
     let text = format!(
         "No account in this project's pool can run {model} for {whom} now, so {who} runs on the default model. You are told again only after {model} runs once more."

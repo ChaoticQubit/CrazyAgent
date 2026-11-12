@@ -29615,6 +29615,254 @@ fn a_stop_fallback_fails_a_task_no_pool_account_can_run_instead_of_starting_it()
     assert_eq!(agents, 0);
 }
 
+/// Under the Stop fallback rule a task whose model only a resting account can run waits
+/// for that account instead of failing, though another pool account is free on its own
+/// model (DEC-150 H1): Stop is for a model no pool account can run, not for a rate limit.
+#[test]
+fn a_stop_fallback_waits_while_the_accounts_that_can_run_the_model_rest() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let mut access = fixture.access.clone();
+    let mut other = access.connections[0].clone();
+    other.id = reference("local-b");
+    other.model.id = "other-model".into();
+    access.connections.push(other);
+    access.pools[0].members.push(reference("local-b"));
+    codex_model(&fixture, "qwen2.5:0.5b", crate::model_choice::Slot::Agent);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    let resting = BTreeSet::from([reference(ENDPOINT)]);
+    team.dispatch(&fixture.setup, &access, &resting).unwrap();
+    let (status, error, wait): (String, Option<String>, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error,wait FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "queued", "{error:?}");
+    assert!(
+        wait.as_deref()
+            .is_some_and(|wait| wait.contains("rate limit")),
+        "{wait:?}"
+    );
+    let agents: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agents, 0, "no agent on the other account's own model");
+}
+
+/// An agent whose harness refused its model (DEC-150 F8) records the refusal for its
+/// project, account and model, so the pool no longer counts that account as one that can
+/// run the model, and stops, so its next start picks again; the master starts again too.
+/// An agent on its account's own model records nothing.
+#[test]
+fn a_model_refusal_is_recorded_for_the_account_and_stops_the_agent_that_got_it() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = fixture.setup.project_id.clone();
+    let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mut worker = between_turns(&project, AgentRole::Sub, false, false);
+    worker.model = Some("gpt-a".to_owned());
+    team.workers.insert(sub, worker);
+    let own = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers
+        .insert(own, between_turns(&project, AgentRole::Sub, false, false));
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Working);
+    let mut worker = between_turns(&project, AgentRole::Master, false, false);
+    worker.model = Some("gpt-m".to_owned());
+    team.workers.insert(master, worker);
+
+    team.apply(sub, Report::ModelRefused).unwrap();
+    team.apply(own, Report::ModelRefused).unwrap();
+    team.apply(master, Report::ModelRefused).unwrap();
+
+    let now = now_ms();
+    let refused = |model: &str| {
+        super::super::model_pick::refused(
+            &fixture.connection,
+            &project,
+            &reference(ENDPOINT),
+            model,
+            now,
+        )
+        .unwrap()
+    };
+    assert!(refused("gpt-a"));
+    assert!(refused("gpt-m"));
+    assert!(team.workers[&sub].stopping);
+    assert_eq!(team.workers[&sub].stop_why, "engine_stop:model_refused");
+    assert!(
+        !team.workers[&own].stopping,
+        "an account's own model is not refused"
+    );
+    assert!(team.workers[&master].stopping);
+    assert!(team.master_restarts.contains(&project));
+}
+
+/// With idle agents kept for reuse, a task whose model no idle agent of its harness runs
+/// does not wait behind them forever (DEC-150 F3): when the harness slot is full, dispatch
+/// stops one idle agent on another model, so the task can start on its own model.
+#[test]
+fn a_task_for_a_model_no_idle_agent_runs_frees_a_full_slot_of_one_on_another_model() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    reuse_idle_on(&fixture);
+    codex_model(&fixture, "qwen2.5:0.5b", crate::model_choice::Slot::Agent);
+    let idle = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    team.workers.insert(
+        idle,
+        between_turns(&fixture.setup.project_id, AgentRole::Sub, false, false),
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    assert!(
+        team.workers[&idle].stopping,
+        "the idle agent on another model stops"
+    );
+    assert_eq!(team.workers[&idle].stop_why, "engine_stop:idle");
+    let status: String = fixture
+        .connection
+        .query_row("SELECT status FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "queued");
+}
+
+/// Keep warm starts its agents on the owner's agent default, so a task for that model
+/// takes one (DEC-150 F3), and starts none while an agent of the project still stops, so
+/// an agent dispatch stopped to free its slot is not replaced before the task starts.
+#[cfg(target_os = "macos")]
+#[test]
+fn keep_warm_starts_agents_on_the_agent_default_and_none_while_one_stops() {
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.min_agents = 2;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    let host = fixture.host();
+    let mut team = limited_runtime(
+        &fixture,
+        &host,
+        "#!/bin/sh\nexec /bin/sleep 300\n",
+        TeamLimits::default(),
+    );
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
+    codex_model(&fixture, "qwen2.5:0.5b", crate::model_choice::Slot::Agent);
+    let paused = BTreeSet::new();
+    let stopping = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&fixture.setup.project_id, AgentRole::Sub, false, false);
+    worker.stopping = true;
+    team.workers.insert(stopping, worker);
+    team.keep_warm(&fixture.setup, &fixture.access, &paused)
+        .unwrap();
+    assert_eq!(team.workers.len(), 1, "no warm agent while one stops");
+    team.workers.remove(&stopping);
+    team.keep_warm(&fixture.setup, &fixture.access, &paused)
+        .unwrap();
+    let warm: Vec<i64> = team.workers.keys().copied().collect();
+    assert_eq!(warm.len(), 1, "{warm:?}");
+    assert!(team.workers[&warm[0]].warm);
+    assert_eq!(
+        super::super::model_pick::agent_model(&fixture.connection, warm[0]).unwrap(),
+        Some("qwen2.5:0.5b".to_owned())
+    );
+    assert_eq!(
+        team.workers[&warm[0]].model.as_deref(),
+        Some("qwen2.5:0.5b")
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// The owner's Wake of a sub-agent started on a model no pool account can run now picks
+/// its account as a new start does (DEC-150 F4): under the Stop fallback rule it stays
+/// stopped and the team note names the model, instead of waking on the endpoint's own.
+#[test]
+fn an_owner_wake_of_an_agent_on_a_model_no_pool_account_runs_keeps_the_stop_rule() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    codex_model(&fixture, "gpt-a", crate::model_choice::Slot::Agent);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+            params![sub, PROJECT, format!("worktrees/agent-{sub}")],
+        )
+        .unwrap();
+    super::super::model_pick::record_agent(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        sub,
+        Some("gpt-a"),
+    )
+    .unwrap();
+    team.start_again(sub, None, &fixture.access).unwrap();
+    let status: String = fixture
+        .connection
+        .query_row("SELECT status FROM team_agents WHERE id=?1", [sub], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "stopped");
+    let notes: Vec<String> = fixture
+        .status()
+        .messages
+        .into_iter()
+        .filter(|message| message.state == MessageState::Note)
+        .map(|message| message.text)
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("The agent could not restart") && note.contains("gpt-a")),
+        "{notes:?}"
+    );
+    assert_eq!(
+        super::super::model_pick::agent_model(&fixture.connection, sub).unwrap(),
+        Some("gpt-a".to_owned()),
+        "the record keeps the owner's model"
+    );
+}
+
 /// A projects home move recorded before its folders move holds the project: a task
 /// delegated meanwhile stays queued with no agent and no worktree, and starts once the
 /// move is finished.

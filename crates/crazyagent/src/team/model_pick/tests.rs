@@ -157,7 +157,15 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
     let (_tmp, mut db) = engine();
     let told = |db: &mut Connection, task: i64| {
         let tx = db.transaction().unwrap();
-        let told = fell_back(&tx, &project(), "codex", "gpt-a", Some(task), 1_000 + task).unwrap();
+        let told = fell_back(
+            &tx,
+            &project(),
+            "codex",
+            "gpt-a",
+            Fallen::Task(task),
+            1_000 + task,
+        )
+        .unwrap();
         tx.commit().unwrap();
         told
     };
@@ -165,14 +173,22 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
     assert!(!told(&mut db, 2));
     let other = {
         let tx = db.transaction().unwrap();
-        let told = fell_back(&tx, &project(), "codex", "gpt-b", Some(3), 1_003).unwrap();
+        let told = fell_back(&tx, &project(), "codex", "gpt-b", Fallen::Task(3), 1_003).unwrap();
         tx.commit().unwrap();
         told
     };
     assert!(other);
     let master = {
         let tx = db.transaction().unwrap();
-        let told = fell_back(&tx, &project(), "claude-code", "opus", None, 1_004).unwrap();
+        let told = fell_back(
+            &tx,
+            &project(),
+            "claude-code",
+            "opus",
+            Fallen::Master,
+            1_004,
+        )
+        .unwrap();
         tx.commit().unwrap();
         told
     };
@@ -214,7 +230,7 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
 fn a_master_fallback_names_the_master_instead_of_a_task() {
     let (_tmp, mut db) = engine();
     let tx = db.transaction().unwrap();
-    assert!(fell_back(&tx, &project(), "codex", "gpt-a", None, 1_000).unwrap());
+    assert!(fell_back(&tx, &project(), "codex", "gpt-a", Fallen::Master, 1_000).unwrap());
     tx.commit().unwrap();
     let text: String = db
         .query_row(
@@ -226,6 +242,25 @@ fn a_master_fallback_names_the_master_instead_of_a_task() {
     assert_eq!(
         text,
         "No account in this project's pool can run gpt-a for the codex master now, so the master runs on the default model. You are told again only after gpt-a runs once more."
+    );
+}
+
+#[test]
+fn an_agent_starting_again_with_no_task_is_named_neither_a_task_nor_the_master() {
+    let (_tmp, mut db) = engine();
+    let tx = db.transaction().unwrap();
+    assert!(fell_back(&tx, &project(), "codex", "gpt-a", Fallen::Agent, 1_000).unwrap());
+    tx.commit().unwrap();
+    let text: String = db
+        .query_row(
+            "SELECT text FROM team_notifications WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        text,
+        "No account in this project's pool can run gpt-a for codex agents now, so an agent starting again runs on the default model. You are told again only after gpt-a runs once more."
     );
 }
 
@@ -346,4 +381,34 @@ fn a_pin_or_record_the_owner_since_took_off_the_list_starts_on_the_default() {
     assert_eq!(starts(&db), (None, None));
     assert_eq!(pinned(&db, id).unwrap(), Some(pick("gpt-a")));
     assert_eq!(agent_model(&db, 4).unwrap(), on("gpt-a"));
+}
+
+#[test]
+fn a_model_refusal_holds_for_its_project_connection_and_model_until_it_expires() {
+    let (_tmp, db) = engine();
+    let a = CredentialRef::new("account-a").unwrap();
+    let b = CredentialRef::new("account-b").unwrap();
+    let other = ProjectId::new("other").unwrap();
+    assert!(!refused(&db, &project(), &a, "gpt-a", 1_000).unwrap());
+    refuse(&db, &project(), &a, "gpt-a", 1_000).unwrap();
+    assert!(refused(&db, &project(), &a, "gpt-a", 1_001).unwrap());
+    assert!(!refused(&db, &project(), &a, "gpt-b", 1_001).unwrap());
+    assert!(!refused(&db, &project(), &b, "gpt-a", 1_001).unwrap());
+    assert!(!refused(&db, &other, &a, "gpt-a", 1_001).unwrap());
+    assert!(!refused(&db, &project(), &a, "gpt-a", 1_000 + MODEL_REFUSAL_MS).unwrap());
+    let extra = 4;
+    for n in 0..(REFUSALS_MAX + extra) {
+        refuse(&db, &project(), &a, &format!("m-{n}"), 2_000 + n as i64).unwrap();
+    }
+    let kept: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM team_model_refusals WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, REFUSALS_MAX as i64);
+    let last = format!("m-{}", REFUSALS_MAX + extra - 1);
+    assert!(refused(&db, &project(), &a, &last, 3_000).unwrap());
+    assert!(!refused(&db, &project(), &a, "m-0", 3_000).unwrap());
 }

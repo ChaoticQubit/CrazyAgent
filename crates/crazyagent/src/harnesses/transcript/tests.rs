@@ -1748,3 +1748,59 @@ fn injected_instructions_and_summaries_are_never_typed_and_keep_their_own_roles(
         vec![(Speaker::Input, "Fix the login page".to_owned())]
     );
 }
+
+/// A model the harness says does not exist, or the account may not use, is told apart from
+/// any other turn error (DEC-150 F8), by the code each harness writes and never by text:
+/// Claude Code's API error line with `model_not_found`, and a Codex rollout error whose
+/// `codex_error_info` is `model_not_found`. Any other code is a plain turn error.
+#[test]
+fn a_model_refusal_is_told_from_its_harness_code_alone() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"Plan the page"}}"#,
+            "\n",
+            r#"{"type":"assistant","isApiErrorMessage":true,"error":"model_not_found","message":{"content":[{"type":"text","text":"There's an issue with the selected model (claude-x). It may not exist or you may not have access to it."}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"Again"}}"#,
+            "\n",
+            r#"{"type":"assistant","isApiErrorMessage":true,"error":"invalid_request","message":{"content":[{"type":"text","text":"model_not_found"}]}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::ModelRefused,
+            TranscriptEvent::TurnError {
+                rate_limited: false
+            },
+            TranscriptEvent::TurnFinished { success: false },
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::TurnError {
+                rate_limited: false
+            },
+            TranscriptEvent::TurnFinished { success: false },
+        ]
+    );
+    let refused = serde_json::json!({"type":"event_msg","payload":{"type":"error","message":"The model gpt-x does not exist","codex_error_info":"model_not_found"}});
+    assert_eq!(
+        codex_facts(&refused, false),
+        vec![
+            TranscriptEvent::ModelRefused,
+            TranscriptEvent::TurnError {
+                rate_limited: false
+            },
+        ]
+    );
+    let other = serde_json::json!({"type":"event_msg","payload":{"type":"error","message":"model_not_found","codex_error_info":"bad_request"}});
+    assert_eq!(
+        codex_facts(&other, false),
+        vec![TranscriptEvent::TurnError {
+            rate_limited: false
+        }]
+    );
+}
