@@ -241,8 +241,8 @@ export interface TeamAlerts {
  * the app icon badge at the unseen notifications plus the pending questions, and asks for
  * attention when a notification is new; a Normal question only counts toward the badge. Each
  * read also drives the macOS banner watch over the notification store. Inputs: whether the
- * engine runs and the toast action. Output: what each project's sidebar flag counts and how many agents each has at work, none when a read fails or the
- * engine stops. */
+ * engine runs and the toast action. Output: what each project's sidebar flag counts and how
+ * many agents each has at work, none when a read fails or the engine stops. */
 export function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): TeamAlerts {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
   const [working, setWorking] = useState<ReadonlyMap<string, number>>(NONE_WORKING);
