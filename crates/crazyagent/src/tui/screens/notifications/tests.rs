@@ -425,10 +425,20 @@ fn space_marks_rows_and_r_u_d_act_on_every_item_of_the_marked_folds() {
         let mut shell = fresh();
         assert!(screen(&mut shell).contains("2 selected"));
         shell.key(Key::Char(key));
-        assert_eq!(changes(&mut shell), vec![action], "{key}");
+        let asked = sent(&mut shell);
+        assert_eq!(asked.len(), 1, "{key}");
+        assert!(
+            matches!(&asked[0], NoticesQuery::Act { action: sent, .. } if *sent == action),
+            "{key}: {asked:?}"
+        );
+        assert!(
+            screen(&mut shell).contains("2 selected"),
+            "{key} keeps the marks until the change stands"
+        );
+        shell.arrive(reply(asked[0].clone(), Ok(NoticesReply::Done)));
         assert!(
             !screen(&mut shell).contains("selected"),
-            "{key} clears marks"
+            "{key} clears marks once the change stands"
         );
     }
 
@@ -504,6 +514,47 @@ fn a_change_that_took_effect_reads_the_list_again_and_a_refused_one_says_so() {
     assert_eq!(sent(&mut shell), vec![list(NoticeFilter::All, None, None)]);
     shell.arrive(reply(act, Err("notification_ids_invalid".into())));
     assert!(screen(&mut shell).contains("The notifications were not changed."));
+}
+
+#[test]
+fn a_refused_change_keeps_the_marks_and_another_screens_change_leaves_them() {
+    let mut shell = loaded(vec![question(1), question(2)]);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Char('d'));
+    let act = sent(&mut shell).remove(0);
+    shell.arrive(reply(act, Err("notification_folds_invalid".into())));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("The notifications were not changed."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("1 selected"),
+        "a refused change keeps the picks: {shown}"
+    );
+    shell.key(Key::Char('d'));
+    let again = sent(&mut shell).remove(0);
+    let picked = NoticeAction::Folds {
+        folds: vec![fold(1, NoticeFilter::All)],
+        change: FoldChange::Delete,
+    };
+    assert!(
+        matches!(&again, NoticesQuery::Act { action, .. } if *action == picked),
+        "the same picks go again: {again:?}"
+    );
+
+    let foreign = NoticesQuery::Act {
+        action: NoticeAction::ReadAll { project_id: None },
+        generation: u64::MAX,
+    };
+    shell.arrive(reply(foreign, Ok(NoticesReply::Done)));
+    assert_eq!(sent(&mut shell), vec![list(NoticeFilter::All, None, None)]);
+    assert!(
+        screen(&mut shell).contains("1 selected"),
+        "a change this list did not send leaves its picks"
+    );
+    shell.arrive(reply(again, Ok(NoticesReply::Done)));
+    assert!(!screen(&mut shell).contains("selected"));
 }
 
 #[test]
