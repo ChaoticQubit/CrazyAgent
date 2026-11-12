@@ -260,6 +260,7 @@ struct Plan {
     entry: PathBuf,
     working_dir: PathBuf,
     model: Option<String>,
+    chosen: Option<String>,
     tools: bool,
     sandbox_profile: PathBuf,
     access: AgentAccess,
@@ -568,6 +569,9 @@ enum Report {
     Held {
         held: bool,
     },
+    /// The agent's harness refused the model it runs as one that does not exist or the
+    /// account may not use (DEC-150 F8); sent ahead of the turn's end.
+    ModelRefused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3579,10 +3583,10 @@ impl TeamRuntime {
     }
 
     /// The accounts of a project's pool that can run a harness on a model, busy, resting or
-    /// signed out ones included (DEC-150 H1): the one test of whether any can, shared by the
-    /// pick and the owner's Stop fallback rule. Takes the live access, the project, the
-    /// harness and the model, none for any account's own. Returns them, or the plain reason
-    /// none can.
+    /// signed out ones included, and none whose harness refused it (DEC-150 H1, F8): the one
+    /// test of whether any can, shared by the pick and the Stop fallback rule. Takes the
+    /// live access, the project, the harness and the model, none for any account's own.
+    /// Returns them, or the plain reason none can.
     fn able(
         &self,
         access: &ModelAccess,
@@ -3606,6 +3610,24 @@ impl TeamRuntime {
             ));
         }
         fitting.retain(|account| super::model_pick::can_run(&account.reach, model));
+        if let Some(model) = model {
+            let now = now_ms();
+            let mut kept = Vec::with_capacity(fitting.len());
+            for account in fitting {
+                let refused = super::model_pick::refused(
+                    &self.connection,
+                    project,
+                    &account.connection,
+                    model,
+                    now,
+                )
+                .map_err(|_| "Could not read the models this pool's accounts refused".to_owned())?;
+                if !refused {
+                    kept.push(account);
+                }
+            }
+            fitting = kept;
+        }
         if fitting.is_empty() {
             return Err(format!(
                 "No account in this project's pool can run {harness} on {}",
@@ -7706,6 +7728,16 @@ impl TeamRuntime {
             text: launch.task_start(),
             reminded: BTreeSet::new(),
         };
+        let model = match &launch {
+            Launch::Fresh(plan, _) => plan.chosen.clone(),
+            Launch::Adopt(_) => super::model_pick::start_model(
+                &self.connection,
+                &seat.project,
+                id,
+                &seat.harness,
+                seat.role == AgentRole::Master,
+            )?,
+        };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
             .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, wrap, by))
@@ -7722,13 +7754,6 @@ impl TeamRuntime {
             .optional()
             .map_err(error)?
             .flatten();
-        let model = super::model_pick::start_model(
-            &self.connection,
-            &seat.project,
-            id,
-            &seat.harness,
-            seat.role == AgentRole::Master,
-        )?;
         self.hooks_checked.remove(&id);
         self.workers.insert(
             id,
@@ -8906,6 +8931,44 @@ impl TeamRuntime {
         ))
     }
 
+    /// The model an agent launches on, none for its account's own (DEC-150 F8): the one its
+    /// start reads (`model_pick::start_model`) while the account can run it and its harness
+    /// has not refused it there, so a start the fallback rule moved never relaunches a model
+    /// its account cannot run. Takes the setup, the agent, its role and launch harness and
+    /// the account. Returns the model, or a store or SQLite failure.
+    fn chosen_model(
+        &self,
+        stored: &StoredSetup,
+        id: i64,
+        role: AgentRole,
+        harness: &str,
+        account: &TeamAccount,
+    ) -> Result<Option<String>, EngineError> {
+        let project = &stored.project_id;
+        let wanted = super::model_pick::start_model(
+            &self.connection,
+            project,
+            id,
+            harness,
+            role == AgentRole::Master,
+        )?;
+        let Some(model) = wanted else {
+            return Ok(None);
+        };
+        if !super::model_pick::can_run(&account.reach, Some(&model))
+            || super::model_pick::refused(
+                &self.connection,
+                project,
+                &account.connection,
+                &model,
+                now_ms(),
+            )?
+        {
+            return Ok(None);
+        }
+        Ok(Some(model))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare(
         &self,
@@ -8972,6 +9035,9 @@ impl TeamRuntime {
             .map(|relay| Secret::new(relay.token().to_owned()))
             .transpose()
             .map_err(|e| with_code(key_relay_sentence(&e.0), Some(&e.0)))?;
+        let chosen = self
+            .chosen_model(stored, id, role, launch, account)
+            .map_err(|e| with_code("the agent's model could not be read", Some(&e.0)))?;
         let (home, remote, model) = match &account.reach {
             TeamReach::Endpoint {
                 base_url, model, ..
@@ -8986,21 +9052,11 @@ impl TeamRuntime {
                 })?;
                 (own_home, remote, Some(model.clone()))
             }
-            TeamReach::Managed { model, .. } => {
-                let chosen = super::model_pick::start_model(
-                    &self.connection,
-                    &stored.project_id,
-                    id,
-                    launch,
-                    role == AgentRole::Master,
-                )
-                .map_err(|e| with_code("the agent's model could not be read", Some(&e.0)))?;
-                (
-                    own_home,
-                    SandboxRemote::AnyHost(443),
-                    chosen.or_else(|| model.clone()),
-                )
-            }
+            TeamReach::Managed { model, .. } => (
+                own_home,
+                SandboxRemote::AnyHost(443),
+                chosen.clone().or_else(|| model.clone()),
+            ),
         };
         let endpoint = matches!(account.reach, TeamReach::Endpoint { .. });
         let hookless =
@@ -9398,6 +9454,7 @@ impl TeamRuntime {
             executable: program,
             working_dir,
             model,
+            chosen,
             tools,
             sandbox_profile: profile,
             access: policy.access,
@@ -9895,6 +9952,10 @@ impl TeamRuntime {
                     .get_mut(&id)
                     .expect("worker exists")
                     .left_running = true;
+                Ok(false)
+            }
+            Report::ModelRefused => {
+                self.model_refused(id)?;
                 Ok(false)
             }
             Report::ResumeRefused => {
@@ -10541,6 +10602,30 @@ impl TeamRuntime {
     /// Rests `connection` for `project` only after one of its agents' turns ended on a rate
     /// limit read from what the agent's harness wrote (SECAUDIT-RATELIMIT-FORGE), and asks for
     /// a usage poll that can hold it everywhere. Takes the project and the account.
+    /// Records that an agent's harness refused its model (DEC-150 F8) for its project,
+    /// account and model, so no start counts that account as able to run it until the
+    /// refusal expires, and stops the agent so its next start picks again; a master starts
+    /// again at once. Nothing is recorded for an account's own model. Takes the agent.
+    fn model_refused(&mut self, id: i64) -> Result<(), EngineError> {
+        let worker = &self.workers[&id];
+        let Some(model) = worker.model.clone() else {
+            return Ok(());
+        };
+        let (project, connection) = (worker.project.clone(), worker.connection.clone());
+        let master = worker.role == AgentRole::Master;
+        super::model_pick::refuse(&self.connection, &project, &connection, &model, now_ms())?;
+        let worker = self.workers.get_mut(&id).expect("worker exists");
+        if worker.stopping {
+            return Ok(());
+        }
+        worker.stop_for("engine_stop:model_refused");
+        let _ = worker.orders.send(Order::Stop);
+        if master {
+            self.master_restarts.insert(project);
+        }
+        Ok(())
+    }
+
     fn pause(
         &mut self,
         project: &ProjectId,
@@ -11412,6 +11497,9 @@ fn live_serve(
                 push_trimmed(&mut text, &said, LIVE_REPLY_BYTES_MAX);
             }
             Ok(Some(TranscriptEvent::TurnError { rate_limited })) => limited |= rate_limited,
+            Ok(Some(TranscriptEvent::ModelRefused)) => {
+                let _ = reports.send(Report::ModelRefused);
+            }
             Ok(Some(TranscriptEvent::Interrupted)) => interrupted = true,
             Ok(Some(TranscriptEvent::TurnFinished { success })) => {
                 let end = match (limited, interrupted, success) {
@@ -11821,6 +11909,9 @@ fn report_own(session: &mut AgentSession, reports: &Sender<Report>, own: &mut Ow
                 push_trimmed(&mut own.text, &text, LIVE_REPLY_BYTES_MAX);
             }
             TranscriptEvent::TurnError { rate_limited } => own.limited |= rate_limited,
+            TranscriptEvent::ModelRefused => {
+                let _ = reports.send(Report::ModelRefused);
+            }
             TranscriptEvent::Interrupted => own.interrupted = true,
             TranscriptEvent::TurnFinished { success } if own.running => {
                 own.running = false;
@@ -13338,6 +13429,9 @@ fn turn(
                 push_trimmed(&mut text, &part, TURN_TEXT_BYTES_MAX);
             }
             Ok(Some(LaunchEvent::TurnError { rate_limited })) => limited |= rate_limited,
+            Ok(Some(LaunchEvent::ModelRefused)) => {
+                let _ = reports.send(Report::ModelRefused);
+            }
             Ok(Some(LaunchEvent::Usage { tokens })) => {
                 let _ = reports.send(Report::Usage { tokens });
             }

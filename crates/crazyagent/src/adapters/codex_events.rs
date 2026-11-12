@@ -164,6 +164,7 @@ impl CodexEventBridge {
                 turn_id,
                 message,
                 will_retry,
+                ..
             } => {
                 observed.native_turn_id = Some(turn_id);
                 EventKind::TurnError {
