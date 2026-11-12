@@ -982,6 +982,11 @@ impl ResearchRunner {
             for folder in &hidden {
                 sandbox = sandbox.hide(folder)?;
             }
+            if !unconfined {
+                sandbox =
+                    crate::sandbox::shared_folders::apply(sandbox, &root, &policy.shared_folders)
+                        .map_err(|code| RunError::Invalid(code.into()))?;
+            }
             sandbox.install(&profile)?;
             Ok(sandbox)
         })??;
