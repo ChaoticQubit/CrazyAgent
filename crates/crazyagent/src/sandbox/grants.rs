@@ -73,7 +73,7 @@ const KEY_WORDS: [&str; 10] = [
     "secretive",
     "keepass",
 ];
-const CONTROL_WORDS: [&str; 13] = [
+const CONTROL_WORDS: [&str; 16] = [
     "tmux",
     "emacs",
     "nvim",
@@ -87,10 +87,14 @@ const CONTROL_WORDS: [&str; 13] = [
     "cursor",
     "windsurf",
     "hammerspoon",
+    "kakoune",
+    "dtach",
+    "abduco",
 ];
 const CONTROL_NAMES: [&str; 4] = ["vim", "screen", "screens", "uscreens"];
 const CONTROL_FOLDER_NAMES: [&str; 1] = ["code"];
-const CONTROL_PORTS: [u16; 4] = [2375, 2376, 9222, 9229];
+const CONTROL_PORTS: [u16; 7] = [2345, 2375, 2376, 5005, 5678, 9222, 9229];
+const SSH_MUX_HASH_HEX: usize = 40;
 const KEY_STARTS: [&str; 2] = ["gpg", "ssh"];
 const KEY_NAME_WORDS: [&str; 3] = ["agent", "gpg", "ssh"];
 
@@ -171,7 +175,7 @@ pub fn refusal_text(code: &str) -> &'static str {
             "That socket belongs to CrazyAgent itself, so it is never allowed."
         }
         "grant_socket_agent" => {
-            "That socket controls a terminal or an editor (tmux, screen, Zellij, kitty, WezTerm, Alacritty, iTerm2, Emacs, Neovim, VS Code, Cursor and the like) or hands out your SSH keys, which can run anything as you, so it is never allowed."
+            "That socket controls a terminal, an editor or an SSH connection (tmux, screen, dtach, Zellij, kitty, WezTerm, Alacritty, iTerm2, Emacs, Neovim, Kakoune, VS Code, Cursor and the like) or hands out your SSH keys, which can run anything as you, so it is never allowed."
         }
         "grant_socket_host" => {
             "That socket controls containers or virtual machines (Docker, containerd, Podman, Colima, Lima, OrbStack and the like), which can reach your whole computer, so it is never allowed."
@@ -186,7 +190,7 @@ pub fn refusal_text(code: &str) -> &'static str {
             "There is no socket at that path now. Start the program that makes it, then allow it again."
         }
         "grant_port_reserved" => {
-            "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), or controls Docker, a browser or a Node debugger, so it is never allowed."
+            "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), or controls Docker, a browser or a debugger (Node, Java, Python or Go), so it is never allowed."
         }
         "grant_port_dynamic" => {
             "Ports from 49152 up are lent by the system to CrazyAgent's IDE and other apps for a while, so they are never allowed. Pick a fixed port below 49152."
@@ -276,8 +280,8 @@ pub fn held_now(grants: &[AccessGrant], kept: &[u16], data_root: &Path) -> Vec<A
 }
 
 /// The class of host-escape or key socket a path names, judged by its folder and file
-/// names, lowercased: a container or VM host, a terminal or editor that runs commands as
-/// the owner, or a key or password agent. Input: the canonical path. Output:
+/// names, lowercased: a container or VM host, a terminal, editor or SSH connection that
+/// runs commands as the owner, or a key or password agent. Input: the canonical path. Output:
 /// `grant_socket_host`, `grant_socket_agent`, `grant_socket_keys` or none.
 fn escape_class(real: &Path) -> Option<&'static str> {
     let words: Vec<String> = real
@@ -293,16 +297,26 @@ fn escape_class(real: &Path) -> Option<&'static str> {
         .checked_sub(2)
         .and_then(|at| words.get(at..=at))
         .unwrap_or_default();
-    if marked(&words, &CONTROL_NAMES, &CONTROL_WORDS) || marked(folder, &CONTROL_FOLDER_NAMES, &[])
-    {
+    let name = words.last().map(String::as_str).unwrap_or_default();
+    let control = marked(&words, &CONTROL_NAMES, &CONTROL_WORDS)
+        || marked(folder, &CONTROL_FOLDER_NAMES, &[])
+        || hashed(name);
+    if control {
         return Some("grant_socket_agent");
     }
-    let name = words.last().map(String::as_str).unwrap_or_default();
     let keys = words.iter().any(|word| {
         KEY_WORDS.iter().any(|mark| word.contains(mark))
             || KEY_STARTS.iter().any(|start| word.starts_with(start))
     }) || KEY_NAME_WORDS.iter().any(|mark| name.contains(mark));
     keys.then_some("grant_socket_keys")
+}
+
+/// Whether a socket's file name holds a run of at least `SSH_MUX_HASH_HEX` hex digits, the
+/// `%C` hash ssh names a ControlMaster socket by. Input: the file name. Output: true when
+/// it does.
+fn hashed(name: &str) -> bool {
+    name.split(|c: char| !c.is_ascii_hexdigit())
+        .any(|run| run.len() >= SSH_MUX_HASH_HEX)
 }
 
 /// Whether any lowercased path part is one of the names, alone or followed by `-`, `_` or
@@ -723,10 +737,10 @@ pub fn allows(picks: &[u8]) -> bool {
 pub fn meaning(grant: &AccessGrant) -> &'static str {
     match grant {
         AccessGrant::Socket { .. } => {
-            "Agents may connect to this socket and talk to the program behind it with your rights, but never replace or remove it."
+            "Agents may connect to this socket and talk to the program behind it with your rights, but never replace or remove it. If that program can run commands or change files (a database, a debugger, an editor, a terminal or a remote shell), agents can then do anything you can, outside their sandbox."
         }
         AccessGrant::Port { .. } => {
-            "Agents may connect to this port on this computer, even when their network is limited."
+            "Agents may connect to this port on this computer, even when their network is limited, and talk to the program behind it with your rights. If that program can run commands or change files (a database, a debugger, an editor, a terminal or a remote shell), agents can then do anything you can, outside their sandbox."
         }
         AccessGrant::TempFolder => {
             "Agents use your own temp folder as theirs: they can read and change other apps' temp files there, but no socket in it."
