@@ -169,3 +169,52 @@ fn a_conflicting_accept_keeps_conflict_and_a_stale_one_changes_nothing() {
     assert_eq!(refused(stale), "changes_stale");
     assert_eq!(case.view(&id).landing_result, LandingResult::Conflict);
 }
+
+/// F24: a removed project's open change set is left alone by every poll, so a trial project
+/// the owner removed stops failing on its sets, and once the project is back a poll judges
+/// the set again and closes it as landed outside the app.
+#[test]
+fn a_poll_leaves_the_sets_of_a_removed_project_alone() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.db
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+             INSERT INTO projects(id, body) VALUES ('another', '{}');",
+        )
+        .unwrap();
+    case.owner(&[
+        "merge",
+        "--no-ff",
+        "-q",
+        "-m",
+        "Merge the agent work",
+        &head,
+    ]);
+    observe(&case.db, None).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    case.db
+        .execute(
+            "INSERT INTO projects(id, body) VALUES (?1, '{}')",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    observe(&case.db, None).unwrap();
+    case.landed_outside(&id, &head);
+}
+
+/// F24: the same log line is written once per engine run, however often a poll meets it.
+#[test]
+fn a_line_logged_once_is_kept_once() {
+    let line = format!(
+        "landing_lead_gone project=polish-{} lead=1 worker=2",
+        NOW_MS
+    );
+    log_once(&line);
+    log_once(&line);
+    let kept = LOGGED_ONCE.lock().unwrap();
+    assert_eq!(kept.iter().filter(|kept| **kept == line).count(), 1);
+    assert!(kept.len() <= LOGGED_ONCE_MAX);
+}

@@ -556,6 +556,29 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Tells whether the engine still has a project, so a pass over open change sets leaves a
+/// removed project's sets alone instead of failing on them at every poll (F24); true where
+/// the store keeps no project table, as a store opened on its own. Inputs: the store and the
+/// project. Output: the answer.
+pub(super) fn project_kept(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    let tabled: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if !tabled {
+        return Ok(true);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+        [project.as_str()],
+        |row| row.get(0),
+    )
+    .map_err(storage)
+}
+
 /// Stores the subject an agent's summary gives a change set (F22), touching no other
 /// column, so a landing step running beside it keeps what it wrote. Inputs: the store, the
 /// change set and the subject, empty to clear it. Output: Ok once stored.

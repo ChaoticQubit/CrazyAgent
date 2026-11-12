@@ -6879,11 +6879,13 @@ fn update_merges_a_clone_lead_s_newest_tip_into_its_worker_s_set() {
     assert_eq!(view.base, later);
 }
 
-/// A lead's worker whose lead's worktree is no longer recorded keeps its stored change and
-/// is never measured against the owner's branch, and Update refuses it instead of merging
-/// the owner's branch into a worker that lands on its lead's.
+/// F24 (DM 95adacff): a lead's worker whose lead's worktree is no longer recorded has no
+/// lead to land it, so it lands on the project's Land on branch like an owner's set: it is
+/// measured against the owner's branch, the lead's work that branch lacks is part of it as
+/// while Lands is Owner, the owner's list shows it and the owner's Accept lands it, where
+/// before every poll failed on the lead's tip and nothing settled it.
 #[test]
-fn a_lead_worker_whose_lead_s_worktree_is_gone_keeps_its_change_and_update_refuses() {
+fn a_lead_worker_whose_lead_s_worktree_is_gone_lands_on_the_owner_s_branch() {
     let mut case = Case::new();
     worker_of_lead(&mut case, 30);
     case.db
@@ -6894,13 +6896,23 @@ fn a_lead_worker_whose_lead_s_worktree_is_gone_keeps_its_change_and_update_refus
     let (recorded, observed, paths) = measured(&case, &id);
     assert_eq!(
         (recorded, observed),
-        ((1, 1, 0), (1, 1, 0)),
-        "the set was measured against the owner's branch"
+        ((31, 31, 0), (31, 31, 0)),
+        "the set was not measured against the owner's branch"
     );
-    assert_eq!(paths, ["worker.txt"]);
-    let before = case.view(&id);
-    assert_eq!(refused(update(&case.db, &id)), "changes_workspace_invalid");
-    assert_eq!(case.view(&id), before);
+    assert!(paths.iter().any(|path| path == "worker.txt"));
+    assert!(paths.iter().any(|path| path == "lead/file-0.txt"));
+    assert!(
+        owner_list(&case.db, &case.workspace.project)
+            .unwrap()
+            .iter()
+            .any(|set| set.id == id),
+        "the owner's list hides the set no lead will land"
+    );
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
 }
 
 /// A Changes poll reads one lead's branch once for all of its workers' sets: six worker

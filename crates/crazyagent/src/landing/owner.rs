@@ -2104,11 +2104,11 @@ pub(super) fn measured_base(
 
 /// The tip a change set is measured against, the branch it lands on (DEC-107): its lead's
 /// branch for a lead's worker while the owner's Lands setting is Lead, else the project's
-/// Land on branch (DEC-111 Q1). A lead tip that cannot be read, also for a lead whose worktree is
-/// gone, is logged by its plain code and gives None, never the owner's branch, which that
-/// worker does not land on. Inputs: the store, the owner repository opened for object
-/// work, its root and the change set's project and agent. Output: the tip, None while it
-/// cannot be read.
+/// Land on branch (DEC-111 Q1), also for a worker whose lead's worktree is no longer
+/// recorded (F24). A lead tip that cannot be read is logged once per engine run by its plain
+/// code and gives None, never the owner's branch, which that worker does not land on.
+/// Inputs: the store, the owner repository opened for object work, its root and the change
+/// set's project and agent. Output: the tip, None while it cannot be read.
 pub(super) fn landing_tip(
     db: &Connection,
     owner: &Repo,
@@ -2120,10 +2120,10 @@ pub(super) fn landing_tip(
         Ok(Some(tip)) => Some(tip),
         Ok(None) => land_on_tip(db, owner, repository, project),
         Err(error) => {
-            eprintln!(
+            super::log_once(&format!(
                 "landing_lead_tip_failed cause={}",
                 crate::protocol::plain_code(&error.0)
-            );
+            ));
             None
         }
     }
@@ -2466,10 +2466,10 @@ enum Against {
 /// the store and the open change sets. Output: what each set is judged against, in order.
 fn against(db: &Connection, records: &[Record]) -> Vec<Against> {
     let unread = |error: EngineError| {
-        eprintln!(
+        super::log_once(&format!(
             "landing_lead_tip_failed cause={}",
             crate::protocol::plain_code(&error.0)
-        );
+        ));
     };
     let mut leads: BTreeMap<(String, i64), Option<String>> = BTreeMap::new();
     let mut found = Vec::with_capacity(records.len());
@@ -2500,7 +2500,8 @@ fn against(db: &Connection, records: &[Record]) -> Vec<Against> {
 /// of every project, one repository at a time under its hold, reading each owner tip once,
 /// each lead's tip once before the hold, and checking every open head with one git run,
 /// after landing lead workers' sets their lead's landed set holds (DEC-107).
-/// A change set that cannot be judged now is logged by its plain code and left as it was.
+/// A change set that cannot be judged now is logged by its plain code and left as it was,
+/// and the sets of a project the engine no longer has are left alone, logged once (F24).
 /// Inputs: the store and the project, None for every project. Output: Ok once each was
 /// judged or left.
 pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<(), EngineError> {
@@ -2513,6 +2514,13 @@ pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<()
             .push(record);
     }
     for ((repository, project), records) in by_repository {
+        if !store::project_kept(db, &project).unwrap_or(true) {
+            super::log_once(&format!(
+                "landing_observe_skipped project={} cause=project_removed",
+                project.as_str()
+            ));
+            continue;
+        }
         let tips = against(db, &records);
         let ids: Vec<ChangeSetId> = records.iter().map(|record| record.id.clone()).collect();
         let heads: Vec<&str> = records.iter().map(|record| record.head.as_str()).collect();
