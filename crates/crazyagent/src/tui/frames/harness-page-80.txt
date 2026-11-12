@@ -2,15 +2,15 @@
 ────────────────────────────────────────────────────────────────────────────────
   Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
 ─────────────────────━━━━━━━━━──────────────────────────────────────────────────
-  Codex settings                                       Codex 0.51.0, qualified  
-  Every project gets these unless the project changes them. A change applies    
-  the next time Codex starts.                                                   
+  Codex          Codex 0.51.0 is qualified. You can change the settings below.  
                                                                                 
     Setting                   Value                   From                      
+  Settings (3)                                                                  
     Hide agent reasoning      Off                     Default                   
     Reasoning effort          high                    App                       
-    Project doc limit         0                       ⊘ Locked                  
     Status label              Empty                   Default                   
+  Set by CrazyAgent (3)                                                         
+    Project doc limit         0                       ⊘ Locked                  
   > Sandbox                   Not set                 ⊘ Locked                  
     Approvals                 never                   ⊘ Locked                  
                                                                                 
@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
                                                                                 
- m Models  ↑↓ Move  r Read again  Esc Back                               ? Help 
+ m Models  ↑↓ Move  r Read again  Esc All harnesses                      ? Help 

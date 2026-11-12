@@ -58,7 +58,9 @@ fn following<T: Copy + PartialEq>(all: &[T], current: T) -> T {
 fn refusal(code: &str) -> &'static str {
     match code {
         "scorecard_unavailable" => "The scorecard isn't available in this engine yet.",
-        "scorecard_settings_invalid" => "That start day isn't a calendar day.",
+        "scorecard_settings_invalid" => {
+            "That start day isn't a calendar day. Pick a day like 2026-11-03."
+        }
         "scorecard_outcome_unknown" => {
             "CrazyAgent couldn't confirm what happened. Press r to read again."
         }
@@ -111,9 +113,9 @@ fn days_text(span: Days, offset_minutes: i32) -> String {
 
 fn flaw_text(flaw: Flaw) -> &'static str {
     match flaw {
-        Flaw::Discarded => "a change set was discarded",
-        Flaw::OwnerEdited => "you edited it before accepting",
-        Flaw::FirstBatchNotPassed => "its first check batch didn't pass",
+        Flaw::Discarded => "A change set was discarded",
+        Flaw::OwnerEdited => "You edited it before accepting",
+        Flaw::FirstBatchNotPassed => "Its first check batch didn't pass",
     }
 }
 
@@ -131,14 +133,17 @@ fn act_text(kind: Kind) -> &'static str {
     }
 }
 
-fn score(label: String, met: bool, theme: &Theme) -> Line<'static> {
+/// One of the four numbers as the desktop's tile reads it: its label and value, its target,
+/// and whether the target is met. Inputs: the label with its value, the target, whether it
+/// is met and the theme. Output: the line.
+fn score(label: String, target: String, met: bool, theme: &Theme) -> Line<'static> {
     let (mark, role) = if met {
         ("Target met", Role::Success)
     } else {
         ("Not met yet", Role::Warning)
     };
     Line::from(vec![
-        Span::raw(format!("{label}  ")),
+        Span::raw(format!("{label}  {target}  ")),
         Span::styled(mark, theme.style(role)),
     ])
 }
@@ -151,27 +156,30 @@ fn scores(card: &Scorecard, theme: &Theme) -> Vec<Line<'static>> {
         .map_or(String::new(), |cut| format!(", {}", cut_text(cut)));
     let asked = card.settings.daily_question == DailyQuestion::On || card.answered_days > 0;
     let chosen = if asked {
-        format!("target {} of 10 answered days", targets.chosen_of_ten)
+        format!("Target {} of 10 answered days", targets.chosen_of_ten)
     } else {
-        "the daily question is off".into()
+        "The daily question is off".into()
     };
     let lines = vec![
         score(
-            format!("Real tasks {}, target {}", card.real, targets.tasks),
+            format!("Real tasks {}", card.real),
+            format!("Target {} done tickets you accepted", targets.tasks),
             met.tasks,
             theme,
         ),
         score(
+            format!("Clean {} of {}", card.clean, card.real),
             format!(
-                "Clean {} of {}, target {} of 10",
-                card.clean, card.real, targets.clean_of_ten
+                "Target {} of 10, from {} tasks",
+                targets.clean_of_ten, targets.tasks
             ),
             met.clean,
             theme,
         ),
         score(
+            format!("Coordination per task {measured}"),
             format!(
-                "Coordination {measured} per task, baseline {baseline}{against}; target {}% less",
+                "Baseline {baseline}{against}. Target {}% less",
                 targets.coordination_cut_percent
             ),
             met.coordination,
@@ -179,9 +187,10 @@ fn scores(card: &Scorecard, theme: &Theme) -> Vec<Line<'static>> {
         ),
         score(
             format!(
-                "Chose CrazyAgent {} of {} days, {chosen}",
+                "Chose CrazyAgent {} of {} days",
                 card.chosen_days, card.answered_days
             ),
+            chosen,
             met.chosen,
             theme,
         ),
@@ -192,37 +201,51 @@ fn scores(card: &Scorecard, theme: &Theme) -> Vec<Line<'static>> {
 
 fn settings_lines(settings: &Settings, theme: &Theme) -> Vec<Line<'static>> {
     let window = match &settings.window {
-        Window::Rolling => "the last 14 days (w)".to_owned(),
-        Window::FromDay(day) => format!("14 days from {day} (w, - and + move it)"),
+        Window::Rolling => "Last 14 days (w)".to_owned(),
+        Window::FromDay(day) => format!("14 days from a start day, {day} (w, - and + move it)"),
     };
     let baseline = match settings.baseline {
-        Baseline::FirstDays => "its first 3 days (b)",
-        Baseline::PreviousWindow => "the 14 days before (b)",
+        Baseline::FirstDays => "Its first 3 days (b)",
+        Baseline::PreviousWindow => "The 14 days before (b)",
     };
     let daily = match settings.daily_question {
-        DailyQuestion::Off => "off (d)",
-        DailyQuestion::On => "on, once a day (d)",
+        DailyQuestion::Off => "Off (d)",
+        DailyQuestion::On => "On (d)",
     };
     vec![
         styled("Settings", Role::Heading, theme),
         Line::raw(format!("  Window: {window}")),
         Line::raw(format!("  Baseline: {baseline}")),
-        Line::raw(format!("  Daily question: {daily}")),
+        Line::raw(format!(
+            "  Ask me once a day whether I chose CrazyAgent for my work: {daily}"
+        )),
     ]
 }
 
-fn task_lines(card: &Scorecard, offset_minutes: i32, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = vec![styled("Real tasks", Role::Heading, theme)];
+fn task_lines(
+    card: &Scorecard,
+    limit: usize,
+    offset_minutes: i32,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![styled(
+        "Real tasks behind the numbers",
+        Role::Heading,
+        theme,
+    )];
     if card.tasks.is_empty() {
-        lines.push(styled(
-            "  None in this window yet. A done ticket counts once you accept its change set.",
-            Role::Muted,
-            theme,
-        ));
+        lines.extend(
+            wrap(
+                "No real tasks in this window yet. A ticket counts once it is done and you accepted its change set.",
+                limit.saturating_sub(2).max(1),
+            )
+            .into_iter()
+            .map(|part| styled(format!("  {part}"), Role::Muted, theme)),
+        );
     }
     for task in card.tasks.iter().take(ROWS_SHOWN) {
         let clean = if task.clean {
-            "clean".to_owned()
+            "Yes".to_owned()
         } else {
             task.flaws
                 .iter()
@@ -314,7 +337,9 @@ pub fn card_lines(
     let window = days_text(card.window, offset_minutes);
     let mut lines = vec![styled(TITLE, Role::Accent, theme)];
     for text in wrap(
-        &format!("Whether CrazyAgent earns its place over {window}."),
+        &format!(
+            "Whether CrazyAgent earns its place over {window}: real tasks, clean ones, how much you coordinated per task and the days you chose it."
+        ),
         limit,
     ) {
         lines.push(styled(text, Role::Muted, theme));
@@ -323,7 +348,7 @@ pub fn card_lines(
     lines.push(Line::default());
     lines.extend(settings_lines(&card.settings, theme));
     lines.push(Line::default());
-    lines.extend(task_lines(card, offset_minutes, theme));
+    lines.extend(task_lines(card, limit, offset_minutes, theme));
     lines.extend(coordination_lines(card, offset_minutes, theme));
     lines.extend(record_lines(card, projects, now_ms, offset, theme));
     lines

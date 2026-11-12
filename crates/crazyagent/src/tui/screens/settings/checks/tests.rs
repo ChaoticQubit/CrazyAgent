@@ -8,7 +8,13 @@ use crate::tui::shell::{Shell, targets};
 use serde_json::json;
 
 fn jobs(shell: &mut Shell) -> Vec<ChecksJob> {
-    std::iter::from_fn(|| shell.ctx.next_request())
+    ctx_jobs(&mut shell.ctx)
+}
+
+/// The check jobs a page sent through its context, in order. Takes the context. Returns
+/// the jobs.
+fn ctx_jobs(ctx: &mut Ctx) -> Vec<ChecksJob> {
+    std::iter::from_fn(|| ctx.next_request())
         .filter_map(|request| match request {
             Request::Settings(job) => match *job {
                 SettingsJob::Checks(job) => Some(*job),
@@ -212,10 +218,7 @@ fn a_project_override_shows_over_the_app_value_and_u_resets_it() {
         .unwrap();
     let mut shell = page(&mut engine, project());
     assert!(shows(&mut shell, "Accept gate", "App value (Warn)"));
-    assert!(says(
-        &mut shell,
-        "Only Fieldnotes Mobile follows the values set here"
-    ));
+    assert!(says(&mut shell, "for this project only."));
 
     shell.key(Key::Enter);
     shell.key(Key::Right);
@@ -515,7 +518,7 @@ fn a_project_without_profiles_says_how_one_arrives() {
     let mut engine = Engine::new();
     let mut shell = page(&mut engine, project());
     assert!(says(&mut shell, "Check profiles"));
-    assert!(says(&mut shell, "No profile yet."));
+    assert!(says(&mut shell, "No check profile yet."));
     let mut app = page(&mut engine, Scope::App);
     assert!(!says(&mut app, "Check profiles"));
 }
@@ -648,4 +651,189 @@ fn listed_states(engine: &Engine) -> Vec<ProfileState> {
         .iter()
         .map(|profile| profile.state)
         .collect()
+}
+
+/// The help bar as an 80x24 window draws it, every row of it. Takes the shell. Returns the
+/// bar rows joined by newlines.
+fn bar_at_80(shell: &mut Shell) -> String {
+    crate::tui::screens::settings_accounts::tests::bar_rows(&render(shell, 80, 24)).join("\n")
+}
+
+#[test]
+fn every_check_settings_key_stays_in_the_hint_bar_at_80_columns() {
+    let mut engine = Engine::new();
+    engine
+        .save_settings(
+            Some(&fieldnotes()),
+            &ChecksChoice {
+                gate: Some(crate::checks::settings::GateMode::Warn),
+                ..ChecksChoice::default()
+            },
+            0,
+        )
+        .unwrap();
+    let mut own = page(&mut engine, project());
+    let bar = bar_at_80(&mut own);
+    for key in [
+        "Enter Change",
+        "u Use the app value",
+        "a App values",
+        "Move",
+        "r Read again",
+        "Esc Back",
+        "? Help",
+    ] {
+        assert!(bar.contains(key), "{key}:\n{bar}");
+    }
+    let mut app = page(&mut engine, Scope::App);
+    let bar = bar_at_80(&mut app);
+    for key in ["Enter Change", "Move", "r Read again", "Esc Back", "? Help"] {
+        assert!(bar.contains(key), "{key}:\n{bar}");
+    }
+}
+
+#[test]
+fn check_settings_use_the_desktop_words() {
+    let mut engine = Engine::new();
+    let mut app = page(&mut engine, Scope::App);
+    let rows = render(&mut app, 120, 40);
+    let at = |text: &str| {
+        rows.iter()
+            .position(|row| row.contains(text))
+            .unwrap_or_else(|| panic!("{text}:\n{}", rows.join("\n")))
+    };
+    let title = rows
+        .iter()
+        .position(|row| row.trim() == "Checks")
+        .unwrap_or_else(|| panic!("a Checks title row:\n{}", rows.join("\n")));
+    let purpose = at("The check settings every project starts from");
+    let rules = at("Check rules");
+    let effect = at("Changes apply to check runs queued after you save and to the next Accept.");
+    let table = at("Accept gate");
+    assert!(title < purpose && purpose < rules && rules < effect && effect < table);
+    assert!(!says(&mut app, "for this project only."));
+    assert!(!says(&mut app, "Check settings"));
+
+    let mut own = page(&mut engine, project());
+    assert!(says(&mut own, "Check rules"));
+    assert!(says(
+        &mut own,
+        "Changes apply to check runs queued after you save and to the next Accept."
+    ));
+    assert!(says(&mut own, "for this project only."));
+    assert!(says(&mut own, "Check profiles"));
+    assert!(says(
+        &mut own,
+        "A check runs only under a profile you approved. Agents can propose one; nothing runs until you approve it here."
+    ));
+    assert!(says(&mut own, "No check profile yet."));
+    assert!(!says(
+        &mut own,
+        "The check settings every project starts from"
+    ));
+}
+
+#[test]
+fn the_last_check_setting_s_options_stay_in_view_at_80x24() {
+    let mut engine = Engine::new();
+    let mut shell = Shell::with(ctx(80, 24), Box::new(CheckSettingsPage::new(project())));
+    serve(&mut shell, &mut engine);
+    for _ in 0..7 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 24).join("\n");
+    for words in [
+        "Removed tests",
+        "A test a run no longer reports is not looked",
+        "A test a run no longer reports is recorded",
+        "A test a run no longer reports blocks Accept",
+    ] {
+        assert!(rows.contains(words), "{words}:\n{rows}");
+    }
+}
+
+#[test]
+fn a_chosen_check_profile_stays_in_view_at_80x24() {
+    let mut engine = Engine::new();
+    wide_profile(&engine);
+    let mut shell = Shell::with(ctx(80, 24), Box::new(CheckSettingsPage::new(project())));
+    serve(&mut shell, &mut engine);
+    for _ in 0..8 {
+        shell.key(Key::Down);
+    }
+    let rows = render(&mut shell, 80, 24).join("\n");
+    assert!(
+        rows.contains("3 checks and 1 holdout"),
+        "the chosen profile row:\n{rows}"
+    );
+    assert!(rows.contains("p Approve"), "{rows}");
+}
+
+/// A check settings page outside any shell, read from the engine as a shell would serve it,
+/// so a test can ask the page itself which lines it keeps in view. Inputs: the engine and the
+/// scope. Output: the page and its context.
+fn served_page(engine: &mut Engine, scope: Scope) -> (CheckSettingsPage, Ctx) {
+    let mut ctx = ctx(80, 24);
+    let mut page = CheckSettingsPage::new(scope);
+    page.shown(&mut ctx);
+    for _ in 0..8 {
+        let sent = ctx_jobs(&mut ctx);
+        if sent.is_empty() {
+            return (page, ctx);
+        }
+        for job in sent {
+            let event = answer(job, engine);
+            page.arrive(
+                &Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(event)))),
+                &mut ctx,
+            );
+        }
+    }
+    panic!("the page kept asking");
+}
+
+fn line_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+#[test]
+fn the_focused_part_runs_from_the_chosen_setting_through_its_last_option() {
+    let mut engine = Engine::new();
+    wide_profile(&engine);
+    let (mut page, mut ctx) = served_page(&mut engine, project());
+    let all = choices();
+    let last = all.len() - 1;
+    for _ in 0..last {
+        page.key(&Key::Down, &mut ctx);
+    }
+    page.key(&Key::Enter, &mut ctx);
+    let (lines, (first, end)) = page.body(76, &ctx);
+    assert!(
+        line_text(&lines[first]).contains("Removed tests"),
+        "{}",
+        line_text(&lines[first])
+    );
+    assert_eq!(
+        end,
+        first + 1 + all[last].options.len(),
+        "the row, a blank, every option"
+    );
+    assert!(
+        line_text(&lines[end]).contains("A test a run no longer reports"),
+        "{}",
+        line_text(&lines[end])
+    );
+    page.key(&Key::Esc, &mut ctx);
+    page.key(&Key::Down, &mut ctx);
+    let (lines, (first, end)) = page.body(76, &ctx);
+    assert_eq!(first, end, "a chosen profile is its row alone");
+    assert!(
+        line_text(&lines[first]).contains("3 checks and 1 holdout"),
+        "{}",
+        line_text(&lines[first])
+    );
 }

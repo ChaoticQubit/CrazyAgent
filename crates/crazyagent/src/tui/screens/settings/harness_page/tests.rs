@@ -109,6 +109,7 @@ fn read_with(
         name: page.name,
         installed: page.installed,
         qualified: page.qualified,
+        qualified_versions: page.qualified_versions,
         keys: page.keys,
         settings,
     }
@@ -192,6 +193,28 @@ fn screen(shell: &mut Shell) -> String {
     render(shell, 80, 24).join("\n")
 }
 
+/// The most rows a test walks to find a setting: the fixture catalog's rows and then some.
+const ROWS_WALKED_MAX: usize = 16;
+
+/// Chooses the setting with the given label the way the owner does: Home, then Down until
+/// the marked row is it, so a test does not depend on the page's group order. Inputs: the
+/// shell and the label. Output: none; panics when no row has the label.
+fn to_row(shell: &mut Shell, label: &str) {
+    let marked = format!("> {label} ");
+    shell.key(Key::Home);
+    for _ in 0..ROWS_WALKED_MAX {
+        let shown = screen(shell);
+        if shown
+            .lines()
+            .any(|line| line.trim_start().starts_with(&marked))
+        {
+            return;
+        }
+        shell.key(Key::Down);
+    }
+    panic!("no row is {label}:\n{}", screen(shell));
+}
+
 /// Asks to quit and reads whether the shell warns about the typed value, then stays.
 /// Input: the shell. Output: true when the warning showed.
 fn asks_before_quit(shell: &mut Shell) -> bool {
@@ -245,6 +268,35 @@ fn the_harness_page_renders_locked_lines_at_80_columns() {
     let mut shell = app_page(QUALIFIED);
     press(&mut shell, &[Key::Down, Key::Down, Key::Down, Key::Down]);
     assert_eq!(render(&mut shell, 80, 24), fixture("harness-page-80", &[]));
+}
+
+#[test]
+fn the_app_page_keeps_every_codex_setting_in_view_at_80x24() {
+    let mut shell = app_page(QUALIFIED);
+    let shown = render(&mut shell, 80, 24).join("\n");
+    for label in [
+        "Hide agent reasoning",
+        "Reasoning effort",
+        "Status label",
+        "Project doc limit",
+        "Sandbox",
+        "Approvals",
+    ] {
+        assert!(
+            shown.lines().any(|line| line
+                .trim_start()
+                .trim_start_matches("> ")
+                .starts_with(label)),
+            "{label} is off the page:\n{shown}"
+        );
+    }
+    assert!(
+        shown.contains("Codex 0.51.0 is qualified."),
+        "the version stays on the page:\n{shown}"
+    );
+    for title in ["Settings (3)", "Set by CrazyAgent (3)"] {
+        assert!(shown.contains(title), "{title}:\n{shown}");
+    }
 }
 
 #[test]
@@ -402,13 +454,13 @@ fn locked_and_read_only_rows_send_nothing_and_say_why() {
     }
     let shown = screen(&mut shell);
     assert!(
-        shown.contains(" ↑↓ Move  r Read again  Esc Back"),
+        shown.contains(" ↑↓ Move  r Read again  Esc All harnesses"),
         "{shown}"
     );
     assert!(!shown.contains("x Reset"), "{shown}");
 
     let mut shell = project_page(80, 24);
-    press(&mut shell, &[Key::Down, Key::Down, Key::Down]);
+    to_row(&mut shell, "Status label");
     let shown = screen(&mut shell);
     assert!(
         shown.contains("> Status label              Empty                   ⊘ Read-only"),
@@ -437,14 +489,18 @@ fn an_unqualified_version_shows_every_setting_read_only() {
     );
     let mut shell = opened(Scope::App, 120, 36, answer);
     let shown = render(&mut shell, 120, 36).join("\n");
-    assert!(shown.contains("Codex 0.49.0, not qualified"), "{shown}");
     assert!(
-        shown.contains("This version is not qualified yet"),
+        shown.contains("Codex 0.49.0 isn't qualified yet, so every setting is read-only"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Qualified versions: 0.50.0, 0.51.0."),
         "{shown}"
     );
     let read_only = shown.matches("⊘ Read-only").count();
     let locked = shown.matches("⊘ Locked").count();
     assert_eq!((read_only, locked), (3, 3), "{shown}");
+    to_row(&mut shell, "Hide agent reasoning");
     shell.key(Key::Char(' '));
     assert_eq!(requests(&mut shell), vec![]);
     assert_eq!(
@@ -453,8 +509,8 @@ fn an_unqualified_version_shows_every_setting_read_only() {
     );
 
     let mut shell = app_page(None);
-    assert!(screen(&mut shell).contains("Version unknown"));
-    shell.key(Key::Down);
+    assert!(screen(&mut shell).contains("CrazyAgent couldn't read the installed Codex version"));
+    to_row(&mut shell, "Reasoning effort");
     shell.key(Key::Enter);
     assert_eq!(requests(&mut shell), vec![]);
     assert_eq!(
@@ -508,7 +564,8 @@ fn numbers_and_text_are_checked_before_they_are_sent() {
     );
 
     let mut shell = app_page(QUALIFIED);
-    press(&mut shell, &[Key::Down, Key::Down, Key::Down, Key::Enter]);
+    to_row(&mut shell, "Status label");
+    shell.key(Key::Enter);
     typed(&mut shell, &"é".repeat(17));
     shell.key(Key::Enter);
     assert_eq!(requests(&mut shell), vec![]);
@@ -620,7 +677,7 @@ fn a_failed_read_offers_to_try_again() {
         "{shown}"
     );
     assert!(shown.contains("Press r to try again."), "{shown}");
-    assert!(shown.contains("r Try again  Esc Back"), "{shown}");
+    assert!(shown.contains("r Try again  Esc All harnesses"), "{shown}");
     shell.key(Key::Char('r'));
     let again = requests(&mut shell);
     assert_eq!(again, vec![read_query(None)]);
@@ -745,6 +802,7 @@ fn a_key_left_to_the_harness_default_reads_harness_default() {
         name: page.name,
         installed: page.installed,
         qualified: page.qualified,
+        qualified_versions: page.qualified_versions,
         keys: page.keys,
         settings,
     };
@@ -757,4 +815,99 @@ fn a_key_left_to_the_harness_default_reads_harness_default() {
     assert!(effort.contains("Harness default"), "{shown}");
     assert!(!effort.contains("Not set"), "{shown}");
     assert!(shown.contains("Sandbox"), "{shown}");
+}
+
+/// The help bar as an 80x24 window draws it, every row of it. Takes the shell. Returns the
+/// bar rows joined by newlines.
+fn bar_at_80(shell: &mut Shell) -> String {
+    crate::tui::screens::settings_accounts::tests::bar_rows(&render(shell, 80, 24)).join("\n")
+}
+
+#[test]
+fn every_harness_page_key_stays_in_the_hint_bar_at_80_columns() {
+    for mut shell in [app_page(QUALIFIED), project_page(80, 24)] {
+        let bar = bar_at_80(&mut shell);
+        assert!(
+            ["Space Turn on or off", "Enter Choose", "Enter Change"]
+                .iter()
+                .any(|change| bar.contains(change)),
+            "the selected row's change key:\n{bar}"
+        );
+        for key in ["Move", "r Read again", "Esc All harnesses", "? Help"] {
+            assert!(bar.contains(key), "{key}:\n{bar}");
+        }
+    }
+}
+
+#[test]
+fn the_harness_page_reads_in_the_desktop_words() {
+    let answer = read(QUALIFIED, &Layer::App, &[], &[]);
+    let count = |pick: fn(&Access) -> bool| {
+        answer
+            .settings
+            .iter()
+            .filter(|setting| pick(&setting.access))
+            .count()
+    };
+    let editable = count(|access| matches!(access, Access::Editable));
+    let locked = count(|access| matches!(access, Access::Locked { .. }));
+    let read_only = count(|access| matches!(access, Access::ReadOnly { .. }));
+    assert!(editable > 0 && locked > 0, "the fixture has both groups");
+    let mut shell = opened(Scope::App, 120, 40, answer);
+    let shown = render(&mut shell, 120, 40).join("\n");
+    for words in [
+        "What every master and agent using this harness starts with, in every project.",
+        "Codex 0.51.0 is qualified. You can change the settings below.",
+        "Changes apply the next time a master or agent starts with this harness. Running ones keep their settings.",
+    ] {
+        assert!(shown.contains(words), "{words}:\n{shown}");
+    }
+    for (title, size) in [
+        ("Settings", editable),
+        ("Set by CrazyAgent", locked),
+        ("Read-only", read_only),
+    ] {
+        let heading = format!("{title} ({size})");
+        assert_eq!(shown.contains(&heading), size > 0, "{heading}:\n{shown}");
+    }
+    assert!(
+        !shown.contains("Codex settings"),
+        "the title is the harness's name:\n{shown}"
+    );
+
+    let mut project = project_page(120, 36);
+    let shown = render(&mut project, 120, 36).join("\n");
+    assert!(
+        shown.contains("wins over the app value for this project only."),
+        "{shown}"
+    );
+}
+
+#[test]
+fn the_settings_of_one_group_sit_together_under_its_title() {
+    let mut shell = opened(Scope::App, 120, 40, read(QUALIFIED, &Layer::App, &[], &[]));
+    let rows = render(&mut shell, 120, 40);
+    let at = |title: &str| {
+        rows.iter()
+            .position(|row| row.trim_start().starts_with(title))
+            .unwrap_or_else(|| panic!("{title}:\n{}", rows.join("\n")))
+    };
+    let (settings, locked) = (at("Settings ("), at("Set by CrazyAgent ("));
+    assert!(settings < locked, "{}", rows.join("\n"));
+    assert!(
+        rows[locked + 1..]
+            .iter()
+            .take_while(|row| row.contains("⊘ Locked"))
+            .count()
+            > 0,
+        "the locked rows follow their title:\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        rows[settings..locked]
+            .iter()
+            .all(|row| !row.contains("⊘ Locked")),
+        "the Settings group holds no locked row:\n{}",
+        rows.join("\n")
+    );
 }

@@ -12,6 +12,7 @@ use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::process::Scope;
+use crate::tui::screens::settings::top_for;
 use crate::tui::screens::settings_accounts::{send, settings_event};
 use crate::tui::screens::tests::sentence;
 use crate::tui::screens::{Flow, Place, Screen};
@@ -36,6 +37,19 @@ const STATE_CELLS: usize = 10;
 const MODAL_WIDTH: u16 = 58;
 const FIELD_INDENT: usize = 4;
 const FIELD_CELLS: usize = 11;
+
+/// The page's words, the desktop's (Settings, Checks and Project Settings, Checks on
+/// feat/v3-screens): the title, the app page's purpose, the Check rules section with when a
+/// change applies and the project's line, and the profiles' notice and empty line. The app
+/// purpose names the Tests tab, where a TUI project sets its own values.
+const TITLE: &str = "Checks";
+const PURPOSE: &str = "The check settings every project starts from, until a project sets its own from its Tests tab.";
+const RULES: &str = "Check rules";
+const EFFECT: &str = "Changes apply to check runs queued after you save and to the next Accept.";
+const PROJECT_EFFECT: &str = "A value set here wins over the app value for this project only.";
+const PROFILES: &str = "Check profiles";
+const PROFILES_NOTICE: &str = "A check runs only under a profile you approved. Agents can propose one; nothing runs until you approve it here.";
+const NO_PROFILE: &str = "No check profile yet. An agent can propose one for you to approve, or you propose one with crazyagent checks.";
 
 #[derive(Debug, PartialEq)]
 enum State {
@@ -471,33 +485,34 @@ impl CheckSettingsPage {
         self.selected = self.selected.min(self.rows().saturating_sub(1));
     }
 
-    /// The page's lines. Inputs: the content width and the context. Output: the lines.
-    fn body(&self, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    /// The page's lines and the focused part: the chosen setting with its options or meaning,
+    /// or the chosen profile row. Inputs: the content width and the context. Output: the
+    /// lines and the focused part's first and last line.
+    fn body(&self, limit: usize, ctx: &Ctx) -> (Vec<Line<'static>>, (usize, usize)) {
         let theme = &ctx.theme;
         let glyphs = ctx.glyphs;
-        let (title, intro) = match &self.scope {
-            Scope::App => (
-                "Check settings".to_owned(),
-                "Every project follows these unless it sets its own.".to_owned(),
-            ),
-            Scope::Project { name, .. } => (
-                format!("Check settings for {name}"),
-                format!(
-                    "Only {name} follows the values set here; the rest follow Settings / Checks."
-                ),
-            ),
-        };
-        let mut lines = vec![styled(title, Role::Accent, theme)];
-        lines.extend(
-            wrap(&intro, limit)
+        let muted = |text: &str| {
+            wrap(text, limit)
                 .into_iter()
-                .map(|part| styled(part, Role::Muted, theme)),
-        );
+                .map(|part| styled(part, Role::Muted, theme))
+                .collect::<Vec<_>>()
+        };
+        let mut lines = vec![styled(TITLE, Role::Heading, theme)];
+        let effect = match &self.scope {
+            Scope::App => {
+                lines.extend(muted(PURPOSE));
+                EFFECT.to_owned()
+            }
+            Scope::Project { .. } => format!("{EFFECT} {PROJECT_EFFECT}"),
+        };
+        lines.push(Line::default());
+        lines.push(styled(RULES, Role::Heading, theme));
+        lines.extend(muted(&effect));
         lines.push(Line::default());
         let view = match &self.state {
             State::Loading => {
                 lines.push(ctx.loading("Reading the check settings"));
-                return lines;
+                return (lines, (0, 0));
             }
             State::Failed(problem) => {
                 lines.extend(
@@ -509,7 +524,7 @@ impl CheckSettingsPage {
                     .map(|part| styled(part, Role::Error, theme)),
                 );
                 lines.push(styled("Press r to try again.", Role::Muted, theme));
-                return lines;
+                return (lines, (0, 0));
             }
             State::Ready(view) => view,
         };
@@ -530,8 +545,12 @@ impl CheckSettingsPage {
             ),
         ]));
         let keys = choices();
+        let mut focus = (0, 0);
         for (index, choice) in keys.iter().enumerate() {
             let shown = self.value_text(view, choice, index);
+            if index == self.selected {
+                focus = (lines.len(), lines.len());
+            }
             lines.push(list_row(
                 cells(
                     &widths,
@@ -565,36 +584,54 @@ impl CheckSettingsPage {
                     );
                 }
             }
+            focus.1 = lines.len() - 1;
         }
         if matches!(self.scope, Scope::Project { .. }) {
             lines.push(Line::default());
-            lines.extend(self.profile_lines(keys.len(), limit, ctx));
+            let (profile, chosen) = self.profile_lines(keys.len(), limit, ctx);
+            if let Some(at) = chosen {
+                focus = (lines.len() + at, lines.len() + at);
+            }
+            lines.extend(profile);
         }
-        lines
+        assert!(focus.0 <= focus.1, "the focused part starts before it ends");
+        assert!(focus.1 < lines.len(), "the focused part is on the page");
+        (lines, focus)
     }
 
-    fn profile_lines(&self, first: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    /// The Check profiles section: its heading, the notice, then each profile as a row or
+    /// the line for none. Inputs: the row index of the first profile, the content width and
+    /// the context. Output: the lines and which of them is the chosen profile's row.
+    fn profile_lines(
+        &self,
+        first: usize,
+        limit: usize,
+        ctx: &Ctx,
+    ) -> (Vec<Line<'static>>, Option<usize>) {
         let theme = &ctx.theme;
-        let mut lines = vec![styled("Check profiles", Role::Accent, theme)];
+        let mut lines = vec![styled(PROFILES, Role::Heading, theme)];
+        lines.extend(
+            wrap(PROFILES_NOTICE, limit)
+                .into_iter()
+                .map(|part| styled(part, Role::Muted, theme)),
+        );
         if let Some(problem) = &self.profiles_problem {
             lines.extend(
                 wrap(&format!("Could not read the profiles. {problem}"), limit)
                     .into_iter()
                     .map(|part| styled(part, Role::Error, theme)),
             );
-            return lines;
+            return (lines, None);
         }
         if self.profiles.is_empty() {
             lines.extend(
-                wrap(
-                    "No profile yet. A master or agent proposes one, or you propose one with crazyagent checks; it asks you before it runs anything.",
-                    limit,
-                )
-                .into_iter()
-                .map(|part| styled(part, Role::Muted, theme)),
+                wrap(NO_PROFILE, limit)
+                    .into_iter()
+                    .map(|part| styled(part, Role::Muted, theme)),
             );
-            return lines;
+            return (lines, None);
         }
+        let mut chosen = None;
         for (offset, profile) in self.profiles.iter().enumerate() {
             let line = row(
                 limit.saturating_sub(2),
@@ -602,6 +639,9 @@ impl CheckSettingsPage {
                 Line::default(),
                 ctx.glyphs,
             );
+            if first + offset == self.selected {
+                chosen = Some(lines.len());
+            }
             lines.push(list_row(
                 line,
                 limit,
@@ -611,7 +651,7 @@ impl CheckSettingsPage {
                 ctx.glyphs,
             ));
         }
-        lines
+        (lines, chosen)
     }
 
     fn value_text(
@@ -644,6 +684,10 @@ impl CheckSettingsPage {
 }
 
 impl Screen for CheckSettingsPage {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         match &self.scope {
             Scope::App => vec!["Settings".into(), "Checks".into()],
@@ -757,8 +801,8 @@ impl Screen for CheckSettingsPage {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let limit = usize::from(area.width).saturating_sub(4).max(8);
-        let content = match &self.review {
-            Some(review) => review_lines(&review.profile, limit, ctx),
+        let (content, focus) = match &self.review {
+            Some(review) => (review_lines(&review.profile, limit, ctx), (0, 0)),
             None => self.body(limit, ctx),
         };
         let rows = usize::from(area.height);
@@ -772,7 +816,7 @@ impl Screen for CheckSettingsPage {
                 review.seen = review.seen || review.read >= content.len();
                 review.scroll
             }
-            None => 0,
+            None => top_for(focus.0, focus.1, rows),
         };
         let shown = content.into_iter().skip(first).collect();
         draw_lines(frame.buffer_mut(), area, &indent(shown, 2));

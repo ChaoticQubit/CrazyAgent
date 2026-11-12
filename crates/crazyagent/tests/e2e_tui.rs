@@ -2739,3 +2739,286 @@ mod models {
         tui.finish();
     }
 }
+
+/// Starts an engine with a saved profile and projects folder, and the TUI on it at Home.
+/// Input: the scratch prefix. Output: the engine, the TUI and the projects folder's parent,
+/// which the caller keeps until the test ends.
+fn tui_at_home(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
+    let engine = Engine::start(prefix);
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            owner.controller.detach();
+        });
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| screen.contains("New project"));
+    (engine, pty, disk)
+}
+
+/// Opens a place through Go to: Ctrl-K, the query, then Enter once Go to lists the place
+/// first. Inputs: the TUI past first run, the query and the place's Go to label. Output:
+/// none; panics when Go to never opens or never lists the place first.
+fn go_to(pty: &Pty, query: &str, label: &str) {
+    pty.keys(&["C-k"]);
+    pty.until("Ctrl-K opens Go to", |screen| {
+        screen.contains("Enter Go") && screen.contains("Esc Close")
+    });
+    pty.text(query);
+    let first = format!("> {label}");
+    pty.until("Go to lists the place first", |screen| {
+        screen.contains(&first)
+    });
+    pty.keys(&["Enter"]);
+    pty.until("Go to closes", |screen| !screen.contains("Esc Close"));
+}
+
+/// DEC-155 step 3: Settings, Checks opens from Go to on a real engine and reads as the
+/// desktop's: its purpose, the Check rules section with when a change applies, and its keys.
+#[test]
+fn settings_checks_opens_from_go_to_with_the_desktop_words() {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-checks-");
+    go_to(&pty, "Settings / Checks", "Settings / Checks");
+    let screen = pty.until("Settings, Checks reads its rules", |screen| {
+        screen.contains("Accept gate")
+    });
+    for words in [
+        "The check settings every project starts from",
+        "Check rules",
+        "Changes apply to check runs queued after you save and to the next Accept.",
+        "Enter Change",
+        "Esc Back",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    assert!(!screen.contains("Not ready yet"), "{screen}");
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-155 step 3: Settings, Tickets opens from Go to on a real engine and reads as the
+/// desktop's: its purpose, the Ticket rules section with when a change applies, and its keys.
+#[test]
+fn settings_tickets_opens_from_go_to_with_the_desktop_words() {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-tickets-");
+    go_to(&pty, "Settings / Tickets", "Settings / Tickets");
+    let screen = pty.until("Settings, Tickets reads its rules", |screen| {
+        screen.contains("Who closes tickets")
+    });
+    for words in [
+        "The ticket settings every project with tickets starts from",
+        "Ticket rules",
+        "Changes apply to the next ticket action. Tickets already closed stay closed.",
+        "Enter Change",
+        "Esc Back",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    assert!(
+        !screen.contains("Could not read the ticket settings"),
+        "{screen}"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-155 step 3: the go/no-go scorecard is reached from Usage on a real engine and reads
+/// in the desktop's words. A scratch engine has no tickets, so it shows the honest zeros,
+/// the empty task line and the daily question off.
+#[test]
+fn the_scorecard_opens_from_usage_with_the_desktop_words() {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-scorecard-");
+    go_to(&pty, "Usage", "Usage");
+    pty.until("Usage shows its scorecard key", |screen| {
+        screen.contains("g Scorecard")
+    });
+    pty.keys(&["g"]);
+    let screen = pty.until("the scorecard reads its numbers", |screen| {
+        screen.contains("Go/no-go scorecard") && screen.contains("Target 10 done tickets")
+    });
+    for words in [
+        "Whether CrazyAgent earns its place over",
+        "Real tasks 0  Target 10 done tickets you accepted",
+        "The daily question is off",
+        "Real tasks behind the numbers",
+        "No real tasks in this window yet.",
+        "w Window",
+        "g Usage",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    assert!(!screen.contains("Could not read the scorecard"), "{screen}");
+    drop(pty);
+    engine.stop();
+}
+
+/// The most PgDn presses a harness page takes to reach its locked settings: a page of up to
+/// 160 rows at 10 rows a press.
+const HARNESS_PAGES_MAX: usize = 16;
+
+/// The harness row the Settings, Harnesses list marks, if any. Input: the screen. Output: the
+/// marked row's text after its marker.
+fn marked_row(screen: &str) -> Option<&str> {
+    screen
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("> "))
+}
+
+/// DEC-155 step 3: Codex's settings page opens from Settings, Harnesses on a real engine and
+/// reads as the desktop's: the harness as its title with its purpose, the version line, when
+/// a change applies, its settings under the desktop's group titles, and Esc back to All
+/// harnesses. Codex must be installed on this machine; a machine without it fails as a
+/// missing prerequisite.
+#[test]
+fn a_harness_settings_page_opens_from_settings_harnesses_with_the_desktop_words() {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-harness-page-");
+    go_to(&pty, "Settings / Harnesses", "Settings / Harnesses");
+    pty.until("Settings, Harnesses lists Codex", |screen| {
+        screen.contains("Codex") && marked_row(screen).is_some()
+    });
+    for step in 0..=STEPS_MAX {
+        let screen = pty.screen();
+        let marked = marked_row(&screen).map(str::to_owned);
+        if marked.as_deref().is_some_and(|row| row.contains("Codex")) {
+            break;
+        }
+        assert!(
+            step < STEPS_MAX,
+            "no Codex row in Settings, Harnesses:\n{screen}"
+        );
+        pty.keys(&["Down"]);
+        pty.until("the list marks the next harness", |now| {
+            marked_row(now).map(str::to_owned) != marked
+        });
+    }
+    let screen = pty.screen();
+    assert!(
+        screen.contains("Enter Settings"),
+        "prerequisite: Codex is installed on this machine:\n{screen}"
+    );
+    pty.keys(&["Enter"]);
+    let screen = pty.until("Codex's settings page reads its version", |screen| {
+        screen.contains("Changes apply the next time a master or agent starts with this harness.")
+    });
+    let qualified = screen.contains("is qualified. You can change the settings below.");
+    let first_group = if qualified {
+        "Settings ("
+    } else {
+        "Read-only ("
+    };
+    for words in [
+        "What every master and agent using this harness starts with, in every project.",
+        "Running ones keep their settings.",
+        first_group,
+        "Esc All harnesses",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    let mut locked = !qualified || screen.contains("Set by CrazyAgent (");
+    for _ in 0..HARNESS_PAGES_MAX {
+        if locked {
+            break;
+        }
+        let before = pty.screen();
+        pty.keys(&["PageDown"]);
+        let now = pty.until("PgDn moves down the settings", |now| now != before);
+        locked = now.contains("Set by CrazyAgent (");
+    }
+    assert!(
+        locked,
+        "PgDn reaches the Set by CrazyAgent group of a qualified Codex:\n{}",
+        pty.screen()
+    );
+    assert!(
+        screen.contains("is qualified. You can change the settings below.")
+            || screen.contains("so every setting is read-only"),
+        "the version line:\n{screen}"
+    );
+    pty.keys(&["Escape"]);
+    pty.until("Esc goes back to All harnesses", |screen| {
+        marked_row(screen).is_some_and(|row| row.contains("Codex"))
+    });
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-155 step 3: on a real engine a project's own V3 pages are reached from its tabs on the
+/// 2.4.0 shell: s on the Tests tab opens the project's check settings in the desktop's words
+/// and Esc comes back, and w on the Settings tab opens the Repository trust box.
+#[test]
+fn a_project_s_check_settings_and_repository_trust_open_from_its_tabs() {
+    let engine = Engine::start("ca-e2e-project-v3-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project("e2e-v3-tabs", PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+    let mut engine = engine;
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    setup_checked(&pty);
+    tab_until_enter(&pty, "Open");
+    pick_card(&pty, PROJECT);
+    pty.keys(&["Enter"]);
+    pty.until("the project screen opens with its tabs", |screen| {
+        screen.contains("Tabs") && in_project(screen, PROJECT)
+    });
+
+    to_tab(&pty, PROJECT, "Tests", &SHIFT_RIGHT);
+    pty.until("the Tests tab offers its settings", |screen| {
+        screen.contains("s Settings")
+    });
+    pty.keys(&["s"]);
+    let screen = pty.until("s opens the project's check settings", |screen| {
+        screen.contains("Check rules") && screen.contains("Check profiles")
+    });
+    for words in [
+        "wins over the app value for this project only.",
+        "A check runs only under a profile you approved.",
+        "a App values",
+        "Esc Back",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    assert!(
+        !screen.contains("The check settings every project starts from"),
+        "the app purpose stays on the app page:\n{screen}"
+    );
+    pty.keys(&["Escape"]);
+    pty.until("Esc goes back to the Tests tab", |screen| {
+        tab_shown(screen, PROJECT).as_deref() == Some("Tests")
+    });
+
+    to_tab(&pty, PROJECT, "Settings", &SHIFT_RIGHT);
+    pty.until("the Settings tab names Repository trust", |screen| {
+        screen.contains("w Repository trust")
+    });
+    pty.keys(&["w"]);
+    pty.until("w opens the Repository trust box", |screen| {
+        screen.contains("How far you trust this repository's code and files.")
+            && screen.contains("Level ")
+    });
+    drop(pty);
+    engine.stop();
+}
