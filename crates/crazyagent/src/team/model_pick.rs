@@ -331,7 +331,7 @@ pub(crate) enum Fallen {
 
 /// Tells the owner and the master once that no pool account could run a model chosen for
 /// a harness's agents or master, so a start runs on the default (DEC-150): one owner
-/// notification and one engine message to the master, then nothing more for that project,
+/// Pool failover notification (DEC-136a) and one engine message to the master, then nothing more for that project,
 /// harness and model until it runs again (`ran`). Takes the transaction, the project, the
 /// harness, the model, who falls back and the time. Returns whether this call told them.
 pub(crate) fn fell_back(
@@ -369,13 +369,29 @@ pub(crate) fn fell_back(
     let text = format!(
         "No account in this project's pool can run {model} for {whom} now, so {who} runs on the default model. You are told again only after {model} runs once more."
     );
-    super::events::notify(
+    let prefix = format!("model_fallback:{}:{harness}:{now}:", project.as_str());
+    let room = crate::notifications::SUBJECT_BYTES_MAX.saturating_sub(prefix.len());
+    let cut = model
+        .char_indices()
+        .map(|(at, one)| at + one.len_utf8())
+        .take_while(|end| *end <= room)
+        .last()
+        .unwrap_or(0);
+    let subject = format!("{prefix}{}", &model[..cut]);
+    assert!(subject.len() <= crate::notifications::SUBJECT_BYTES_MAX);
+    crate::notifications::note(
         tx,
-        project,
-        super::events::NotificationKind::ModelFallback,
-        &text,
+        &crate::notifications::InfoNotice {
+            kind: crate::notifications::NoticeKind::PoolFailover,
+            project_id: Some(project),
+            subject: &subject,
+            text: &text,
+            target: crate::notifications::NoticeTarget::Conversation {
+                project_id: project.clone(),
+            },
+        },
         now,
-    )?;
+    );
     let _ = super::append_message(
         tx,
         project,
