@@ -1764,7 +1764,7 @@ fn a_lead_s_own_mode_decides_its_app_spawns_whatever_the_setting_says_later() {
     .unwrap();
     assert_eq!(
         spawn(&mut fixture, native),
-        ("Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.".to_owned(), true)
+        ("Not started: you were started to run your sub-agents natively. Start them with your own harness instead: an agent team in Claude Code, sub-agents in Codex.".to_owned(), true)
     );
     set_mode(
         &fixture.connection,
@@ -1783,7 +1783,7 @@ fn a_lead_s_own_mode_decides_its_app_spawns_whatever_the_setting_says_later() {
     );
     assert_eq!(
         spawn(&mut fixture, native),
-        ("Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.".to_owned(), true)
+        ("Not started: you were started to run your sub-agents natively. Start them with your own harness instead: an agent team in Claude Code, sub-agents in Codex.".to_owned(), true)
     );
     assert!(task_modes(&fixture).is_empty());
 }

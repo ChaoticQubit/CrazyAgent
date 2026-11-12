@@ -1209,11 +1209,16 @@ fn preparation(
         .attempt
         .as_ref()
         .ok_or_else(|| error("master_attempt_missing"))?;
+    let bound = record.auth.binding();
+    let live = matches!(
+        turn.phase,
+        MasterTurnPhase::Prepared | MasterTurnPhase::Delivering | MasterTurnPhase::Running
+    );
     if record.attempt_id != attempt.request.id
-        || record.auth.binding().connection != attempt.connection
+        || bound.connection != attempt.connection
         || matches!(record.auth, MasterBootstrapAuth::RcliConfigured(_))
-            && (record.auth.binding().config_id != session.config_id
-                || record.auth.binding().source_hash != session.source_hash)
+            && (bound.config_id != attempt.config_id
+                || !session.admits_binding(&bound.config_id, &bound.source_hash, live))
         || record.lease.project_id != session.project_id
         || record.lease.task_id != session.bootstrap_task_id
         || record.lease.owner_session != session.session_id
@@ -5540,23 +5545,40 @@ endpoint = { kind = "http", url = "http://127.0.0.1:11435/v1" }
 model = { id = "local-model", author = "local-author" }
 auth = { method = "none" }"#;
 
-    /// The second RCLI key of the pooled fixture, as the settings hold it.
-    fn spare_connection() -> ModelConnection {
+    /// One keyless RCLI key of the fixture's settings, as they hold it. Inputs: its id,
+    /// account and endpoint. Output: the connection.
+    fn rcli_key(id: &str, account: &str, url: &str) -> ModelConnection {
         ModelConnection {
-            id: reference("spare-connection"),
+            id: reference(id),
             provider: reference("local-provider"),
             harness: reference("rcli"),
             protocol: reference("openai-chat"),
-            account_ref: reference("spare-account"),
-            endpoint: ModelEndpoint::Http {
-                url: "http://127.0.0.1:11435/v1".into(),
-            },
+            account_ref: reference(account),
+            endpoint: ModelEndpoint::Http { url: url.into() },
             model: crate::config::ModelReference {
                 id: "local-model".into(),
                 author: reference("local-author"),
             },
             auth: ModelAuthentication::None {},
         }
+    }
+
+    /// The first RCLI key of the fixture's pool, as CONFIG holds it.
+    fn local_connection() -> ModelConnection {
+        rcli_key(
+            "local-connection",
+            "local-account",
+            "http://127.0.0.1:11434/v1",
+        )
+    }
+
+    /// The second RCLI key of the pooled fixture, as the settings hold it.
+    fn spare_connection() -> ModelConnection {
+        rcli_key(
+            "spare-connection",
+            "spare-account",
+            "http://127.0.0.1:11435/v1",
+        )
     }
 
     /// The profile the second RCLI key runs master turns under: its own configured one.
@@ -5692,6 +5714,23 @@ auth = { method = "none" }"#;
             Self::build_with(CONFIG, with_repository, onboarded, message).await
         }
 
+        /// A master whose settings already hold what every model access edit writes into
+        /// them (config.rs approve_assigned_accounts): its pool's RCLI key has its own
+        /// profile among the allowed destinations, as in the native rebind fixtures, so an
+        /// edit outside the pool leaves the master's scope as it was (PA-6, DEC-092).
+        async fn kept() -> Self {
+            let local = crate::config::configured_profile_ref(&local_connection()).unwrap();
+            let config = CONFIG.replace(
+                r#"allowed_destinations = ["local-profile"]"#,
+                &format!(
+                    r#"allowed_destinations = ["local-profile", "{}"]"#,
+                    local.as_str()
+                ),
+            );
+            assert!(config.contains(local.as_str()));
+            Self::build_with(&config, true, false, PROMPT).await
+        }
+
         /// A master whose pool holds a second RCLI key on its own account and endpoint,
         /// allowed as a master target under its own configured profile (PA-6).
         async fn pooled() -> Self {
@@ -5719,7 +5758,18 @@ auth = { method = "none" }"#;
                     "[[model_access.pools]]",
                     &format!("{SPARE}\n[[model_access.pools]]"),
                 );
-            assert!(config.contains("spare-connection\", ") && config.contains(SPARE));
+            for replaced in [
+                format!(
+                    r#"allowed_destinations = ["local-profile", "{}"]"#,
+                    spare_profile().as_str()
+                ),
+                r#"approved_accounts = ["local-account", "spare-account"]"#.to_owned(),
+                "[model_access]\naccounts = [\"local-account\", \"spare-account\"]".to_owned(),
+                r#"members = ["local-connection", "spare-connection"]"#.to_owned(),
+                format!("{SPARE}\n[[model_access.pools]]"),
+            ] {
+                assert!(config.contains(&replaced), "{replaced}");
+            }
             Self::build_with(&config, true, false, PROMPT).await
         }
 
@@ -6275,6 +6325,45 @@ auth = { method = "none" }"#;
         }
     }
 
+    /// Settles the fixture's first turn, has the owner add an account outside the master's
+    /// pool and sends again, which rebinds the session (PA-6, DEC-092). Input: a registered
+    /// fixture. Output: the config id before the edit and the next turn's prepare command.
+    async fn rebind_after_outside_edit(case: &Fixture) -> (ConfigId, MasterRuntimeCommand) {
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("the registered key must prepare the first turn");
+        };
+        fail_first(case, &first, MasterReason::RuntimeUnavailable).await;
+        let basis = owner_read(
+            &case.storage,
+            &case.started,
+            OwnerRead::ModelAccessPage {
+                collection: ModelAccessCollection::Pools,
+                cursor: None,
+                limit: 1,
+            },
+        )
+        .await;
+        let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+            panic!("actual model source basis missing");
+        };
+        owner_apply(
+            &case.storage,
+            &case.started,
+            "add-outside-account",
+            OwnerMutation::ModelAccess {
+                expected_config_id: basis.config_id.clone(),
+                expected_source_hash: source_hash,
+                edit: crate::config::ModelAccessEdit::AddAccount {
+                    account_ref: reference("outside-account"),
+                },
+            },
+        )
+        .await;
+        let prepare = next_turn(case, "after-settings-change").await;
+        (basis.config_id, prepare)
+    }
+
     /// Ends the fixture's first turn with a failure the runtime reported. Inputs: the
     /// fixture, the prepared turn and the reason. Output: none; the turn is Failed.
     async fn fail_first(case: &Fixture, prepared: &PreparedMasterTurn, reason: MasterReason) {
@@ -6355,45 +6444,14 @@ auth = { method = "none" }"#;
     /// and the turn runs on its registration moved there from custody's unchanged profile.
     #[tokio::test]
     async fn an_rcli_master_keeps_its_conversation_after_a_settings_change_outside_it() {
-        let case = Fixture::new(true).await;
+        let case = Fixture::kept().await;
         let registered = case.register().await;
-        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
-        else {
-            panic!("the registered key must prepare the first turn");
-        };
-        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
-        let basis = owner_read(
-            &case.storage,
-            &case.started,
-            OwnerRead::ModelAccessPage {
-                collection: ModelAccessCollection::Pools,
-                cursor: None,
-                limit: 1,
-            },
-        )
-        .await;
-        let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
-            panic!("actual model source basis missing");
-        };
-        owner_apply(
-            &case.storage,
-            &case.started,
-            "add-outside-account",
-            OwnerMutation::ModelAccess {
-                expected_config_id: basis.config_id.clone(),
-                expected_source_hash: source_hash,
-                edit: crate::config::ModelAccessEdit::AddAccount {
-                    account_ref: reference("outside-account"),
-                },
-            },
-        )
-        .await;
-        let prepare = next_turn(&case, "after-settings-change").await;
+        let (before, prepare) = rebind_after_outside_edit(&case).await;
         let (session, _) = case.view().await;
         assert_eq!(session.session_id, case.session.session_id);
         assert_eq!(session.rebound.len(), 1);
         assert!(session.rebinds_valid());
-        assert_ne!(session.binding().0, &basis.config_id);
+        assert_ne!(session.binding().0, &before);
         let MasterRuntimeResult::Prepared(second) = case.runtime(prepare).await.unwrap() else {
             panic!("the rebound RCLI master must prepare its next turn");
         };
@@ -6411,6 +6469,60 @@ auth = { method = "none" }"#;
         assert_ne!(record.proof.registration_id, registered.registration_id);
         assert_eq!(&record.proof.config_id, session.binding().0);
         assert_eq!(record.proof.custody_id, registered.custody_id);
+        drop(tx);
+        case.close().await;
+    }
+
+    /// PA-6: a rebound RCLI master reads each turn under a binding it held and no other: a
+    /// live turn needs the current binding, a settled one may keep the Open binding, and a
+    /// pair the session never held is refused, also by the turn's preparation check.
+    #[tokio::test]
+    async fn a_rebound_rcli_master_admits_each_turn_only_under_a_binding_it_held() {
+        let case = Fixture::kept().await;
+        case.register().await;
+        let (before, prepare) = rebind_after_outside_edit(&case).await;
+        let MasterRuntimeResult::Prepared(_) = case.runtime(prepare).await.unwrap() else {
+            panic!("the rebound RCLI master must prepare its next turn");
+        };
+        let (session, turns) = case.view().await;
+        let open = (&case.session.config_id, case.session.source_hash.as_str());
+        let now = session.binding();
+        assert_eq!(open.0, &before);
+        assert_ne!(now, open);
+        assert!(session.admits_binding(now.0, now.1, true));
+        assert!(session.admits_binding(now.0, now.1, false));
+        assert!(
+            session.admits_binding(open.0, open.1, false),
+            "a settled turn keeps the Open binding"
+        );
+        assert!(
+            !session.admits_binding(open.0, open.1, true),
+            "a live turn needs the current binding"
+        );
+        assert!(!session.admits_binding(now.0, open.1, false));
+        assert!(!session.admits_binding(open.0, now.1, false));
+        let settled = turns
+            .iter()
+            .find(|turn| turn.phase == MasterTurnPhase::Failed)
+            .expect("the first turn settled before the edit");
+        let live = turns
+            .iter()
+            .find(|turn| turn.phase == MasterTurnPhase::Prepared)
+            .expect("the turn after the rebind is prepared");
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        assert!(preparation(&tx, &session, settled).is_ok());
+        assert!(preparation(&tx, &session, live).is_ok());
+        let mut unbound = session.clone();
+        unbound.rebound.clear();
+        assert_eq!(
+            preparation(&tx, &unbound, live)
+                .err()
+                .map(|failure| failure.0)
+                .as_deref(),
+            Some("master_preparation_record"),
+            "a live turn prepared on a binding the session does not hold now is refused"
+        );
         drop(tx);
         case.close().await;
     }
