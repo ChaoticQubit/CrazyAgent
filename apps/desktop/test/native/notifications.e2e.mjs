@@ -303,6 +303,35 @@ test("Notifications: the Done retention takes whole days from 1 to 365, saves 7 
   await me.capture("notifications-retention");
 }));
 
+const DELIVERY_WORDS = { on: "On", bell_only: "Bell only", off: "Off" };
+const PICKED = `[...document.querySelectorAll('${FORM} fieldset[data-kind]')].map((field) => [field.dataset.kind, field.querySelector("input[type=radio]:checked")?.value ?? null])`;
+
+/** Every kind's delivery as the engine stores it. Input: the bridge. Output: [kind,
+ * delivery] pairs in engine order. */
+async function deliveries(bridge) {
+  const settings = await value(bridge, "desktop_notification_settings");
+  return settings.kinds.map((item) => [item.kind, item.delivery]);
+}
+
+test("Notifications: a mixed pick for all 20 kinds saves as one, and every kind reads back after a reload and an engine restart", { timeout: 900000 }, (t) => onEngine(t, "ca-notice-all-kinds-", async ({ bridge, me, page, open, reload, restart }) => {
+  await settingsPage(me, open);
+  const offered = await page.evaluate(`[...document.querySelectorAll('${FORM} fieldset[data-kind]')].map((field) => [field.dataset.kind, [...field.querySelectorAll("input[type=radio]")].map((input) => input.value)])`);
+  assert.equal(offered.length, 20, "the form lists every kind");
+  assert.deepEqual(offered.map(([kind]) => kind), (await deliveries(bridge)).map(([kind]) => kind), "the form lists the engine's kinds in its order");
+  assert.equal(offered.filter(([, choices]) => choices.length === 2).length, 5, "the five Action kinds offer On and Bell only");
+  const picked = offered.map(([kind, choices], at) => [kind, choices[(at + 1) % choices.length]]);
+  assert.deepEqual(new Set(picked.map(([, delivery]) => delivery)), new Set(["on", "bell_only", "off"]), "the pick mixes every choice");
+  for (const [kind, delivery] of picked) await me.click(DELIVERY_WORDS[delivery], KIND(kind));
+  assert.deepEqual(await page.evaluate(PICKED), picked, "the form shows every pick before saving");
+  await me.click("Save changes", SAVE);
+  await until("every kind in the engine", picked, () => deliveries(bridge));
+  await reload(TITLE);
+  await until("every kind after a reload", picked, () => page.evaluate(PICKED));
+  await restart();
+  await until("every kind after an engine restart", picked, () => deliveries(bridge));
+  await me.capture("notifications-all-kinds");
+}));
+
 test("Notifications: macOS notifications Off sends no banner for any item, and stays after a reload and an engine restart", { timeout: 600000 }, (t) => onEngine(t, "ca-notice-banners-off-", async ({ bridge, me, page, open, reload, restart }) => {
   await settingsPage(me, open);
   await me.click("Off", BANNERS);

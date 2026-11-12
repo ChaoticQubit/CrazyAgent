@@ -141,9 +141,19 @@ test("only the plugin's refusal earns the System Settings toast", () => {
   const refused = (code) => ({ kind: "error", code, message: "" });
   assert.equal(notify.failureLine(refused("notifications_failed")), notify.FAILED_LINE);
   assert.equal(notify.failureLine(refused("notification_ids_invalid")), null);
-  assert.equal(notify.failureLine(refused("notifications_full")), null, "a run that showed its most");
+  assert.equal(notify.failureLine(refused("notifications_full")), notify.FULL_LINE, "a run that showed its most says so");
   assert.equal(notify.failureLine({ kind: "ok", value: undefined }), null);
   assert.equal(notify.failureLine({ kind: "not_ready" }), null);
+});
+
+test("a run that reached its most macOS notifications says so once and sends no more, while the bell keeps every item", () => {
+  assert.equal(notify.failureLine({ kind: "error", code: "notifications_full", message: "" }), notify.FULL_LINE);
+  assert.equal(notify.FULL_LINE, "macOS notifications are paused until CrazyAgent restarts. The bell still has every item.");
+  const source = readFileSync(new URL("../src/notify.ts", import.meta.url), "utf8");
+  const watch = source.slice(source.indexOf("export function noticeWatch("));
+  assert.match(watch, /const told = new Set<string>\(\);/);
+  assert.match(watch, /if \(line && !told\.has\(line\)\) \{\n\s+told\.add\(line\);\n\s+showToast\(line\);/, "each line is told once a run");
+  assert.match(watch, /if \(line === FULL_LINE\) break;/, "no more sends once the run is full");
 });
 
 test("Settings says plainly how to allow notifications on macOS, and that other systems have none", () => {
