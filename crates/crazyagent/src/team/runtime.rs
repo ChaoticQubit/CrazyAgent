@@ -3696,6 +3696,35 @@ impl TeamRuntime {
         }
     }
 
+    /// Tells whether a new agent for a task would get an account now, as
+    /// `account_with_model` decides, without telling a fallback or recording a run
+    /// (DEC-150 r2 P1): dispatch frees a slot by stopping an idle agent only then, so a task
+    /// that waits for a resting account stops nothing keep warm would start again. Takes
+    /// the live access, the project, the harness, the paused accounts and the model wanted,
+    /// none for any account's own. Returns the answer, or a store failure.
+    fn places_now(
+        &self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        harness: &str,
+        paused: &BTreeSet<CredentialRef>,
+        wanted: Option<&str>,
+    ) -> Result<bool, EngineError> {
+        if let Ok(found) = self.account_for(access, project, harness, paused, wanted) {
+            return Ok(found.is_some());
+        }
+        let Some(model) = wanted else {
+            return Ok(false);
+        };
+        if self.stops(access, project, harness, model)?.is_some() {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.account_for(access, project, harness, paused, None),
+            Ok(Some(_))
+        ))
+    }
+
     /// Tells, under the owner's Stop fallback rule, whether a start whose model found no
     /// free account stops (DEC-150 H1): only when no pool account can run the model at all
     /// (`able`); while one that can is busy, resting or at a limit, the start waits for it.
@@ -6595,12 +6624,14 @@ impl TeamRuntime {
                     };
                     if let Some(reason) = self.room_wait(project, &room) {
                         self.wait(task, &reason)?;
-                        let counted = |w: &Worker| {
-                            (!slot_full || w.harness == harness)
-                                && (!cap_full || w.parent == parent)
-                                && (!reuse || w.model != wanted)
-                        };
-                        self.stop_idle_for(project, &harness, counted, &reserved)?;
+                        if self.places_now(access, project, &harness, paused, wanted.as_deref())? {
+                            let counted = |w: &Worker| {
+                                (!slot_full || w.harness == harness)
+                                    && (!cap_full || w.parent == parent)
+                                    && (!reuse || w.model != wanted)
+                            };
+                            self.stop_idle_for(project, &harness, counted, &reserved)?;
+                        }
                         continue;
                     }
                     let Some((account, run)) = self.account_or_wait(
