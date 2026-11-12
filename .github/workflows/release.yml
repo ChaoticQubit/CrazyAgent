@@ -367,7 +367,7 @@ jobs:
           set -euo pipefail
           tmux=()
           if [ "$PLATFORM" != windows ]; then tmux=(--tmux "$TMUX_SIDECAR"); fi
-          node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "${CARGO_TARGET_DIR:-target}/$TARGET/release" --rcli "$RCLI_HOST" "${tmux[@]}" --tauri-dir apps/desktop/src-tauri
+          node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "${CARGO_TARGET_DIR:-target}/$TARGET/release" --rcli "$RCLI_HOST" ${tmux[@]+"${tmux[@]}"} --tauri-dir apps/desktop/src-tauri
       - name: Prepare Windows signing tools
         if: matrix.os == 'windows'
         run: |
@@ -497,7 +497,8 @@ jobs:
           if [ "$stale" = 1 ] && [ "${#search[@]}" -gt 0 ]; then security list-keychains -d user -s "${search[@]}"; fi
           keychain_unlock
           rm -f "$keychain"
-          if security list-keychains -d user | grep -qF "$keychain"; then echo "::error::the job keychain is still in the search list"; exit 1; fi
+          listed="$(security list-keychains -d user)"
+          if grep -qF "$keychain" <<< "$listed"; then echo "::error::the job keychain is still in the search list"; exit 1; fi
           if [ -e "$keychain" ] || [ -e "$RUNNER_TEMP/apple" ]; then echo "::error::signing material is still on disk"; exit 1; fi
           echo "signing keychain and Apple keys removed"
       - name: Check the bundled tmux signature
@@ -512,7 +513,8 @@ jobs:
           test "$(lipo -archs "$tmux")" = "$arch"
           if [ "$SIGNING_STATUS" = signed ]; then
             codesign --verify --strict --verbose=2 "$tmux"
-            codesign --display --verbose=2 "$tmux" 2>&1 | grep -E -q 'flags=.*runtime' || { echo "::error::the bundled tmux is not signed with the hardened runtime"; exit 1; }
+            display="$(codesign --display --verbose=2 "$tmux" 2>&1)"
+            grep -E -q 'flags=.*runtime' <<< "$display" || { echo "::error::the bundled tmux is not signed with the hardened runtime"; exit 1; }
           fi
       - name: Package release assets
         env:
