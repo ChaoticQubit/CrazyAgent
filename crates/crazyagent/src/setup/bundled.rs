@@ -262,12 +262,6 @@ pub const HOOK_FILES: &[(&str, &[u8])] = &[
     ),
 ];
 
-/// The default pack's ticket rule, `rules/tickets.md` under `assets/pack`: how a lead plans
-/// and hands off work as tickets and how a working agent takes and proves one. A live
-/// master's and a sub-agent's launch gives it after their team tools, so it is compiled in
-/// and never unpacked.
-pub const TICKET_RULES: &str = include_str!("../../assets/pack/rules/tickets.md");
-
 /// The setup subfolder the shipped hook folders are unpacked into, apart from the bundled
 /// skills, so unpacking them never replaces skills a running setup reads.
 const HOOKS_FOLDER: &str = "bundled-hooks";

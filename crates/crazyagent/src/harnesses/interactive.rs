@@ -1,9 +1,10 @@
+#[cfg(unix)]
+use super::launch::CLAUDE_NATIVE_TEAM_TOOLS;
 use super::launch::{
-    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_ENGINE_KEYS, CLAUDE_MCP_CONNECT_LIMIT,
-    CLAUDE_NATIVE_TEAM_TOOLS, CLAUDE_NO_MCP, CODEX_ENGINE_KEYS, CODEX_NO_USER_INPUT,
-    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
-    TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure, harness_id,
-    key_file_text, validate,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_ENGINE_KEYS, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP,
+    CODEX_ENGINE_KEYS, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest,
+    SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
+    codex_configuration, failure, harness_id, key_file_text, validate,
 };
 use crate::harness_settings::{Apply, apply};
 use crate::launch_context::{Installed, NativeTeam};

@@ -254,7 +254,7 @@ pub fn rules(connection: &Connection, project: &ProjectId) -> Result<Option<Stri
 /// Writes the ticket section for one key and close setting. Inputs: the key and the
 /// setting. Output: the section, at most `RULES_BYTES_MAX` bytes.
 fn section(key: &ProjectKey, close: ClosePolicy) -> String {
-    let rules = crate::setup::bundled::TICKET_RULES;
+    let rules = crate::setup::pack::TICKET_RULES;
     assert!(rules.ends_with('\n'));
     let sentence = match close {
         ClosePolicy::Agents => {

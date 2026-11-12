@@ -11036,7 +11036,7 @@ fn ticket_rules_told(team: &TeamRuntime, id: i64, role: AgentRole) -> (String, u
         .unwrap()
         .instructions()
         .to_owned();
-    let rules = crate::setup::bundled::TICKET_RULES;
+    let rules = crate::setup::pack::TICKET_RULES;
     let count = told.matches(rules).count();
     (told, count)
 }

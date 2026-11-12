@@ -3,6 +3,8 @@ use super::settings::{self, CiEvidence, ManualEvidence};
 use crate::protocol::ProjectId;
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use trackwright_core::coverage;
 use trackwright_core::host::{
@@ -577,10 +579,11 @@ fn real_folder(path: &Path, code: &'static str, named: &str) -> Result<(), Refus
 /// already there is left for `real_folder` to check. Inputs: the folder and the refusal
 /// code. Output: Ok, or the refusal.
 fn exports_folder(path: &Path, code: &'static str) -> Result<(), Refusal> {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    match builder.create(path) {
+    let created = std::fs::DirBuilder::new().mode(0o700).create(path);
+    #[cfg(not(unix))]
+    let created = std::fs::DirBuilder::new().create(path);
+    match created {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(_) => Err(Refusal::new(
