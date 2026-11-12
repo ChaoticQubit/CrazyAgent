@@ -5502,7 +5502,7 @@ mod overview_tabs {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_requested_memory_is_approved_from_the_project_context_tab_on_a_real_engine() {
-    use crate::memory::library::{MemoryOrigin, MemoryScope, agent_remember};
+    use crate::memory::library::{AgentSaved, MemoryOrigin, MemoryScope, agent_remember};
     let mut engine = Engine::start().await;
     let notes = engine.project("notes-cli", "Notes CLI", 2).await;
     {
@@ -5516,7 +5516,10 @@ async fn a_requested_memory_is_approved_from_the_project_context_tab_on_a_real_e
         .unwrap();
         assert_eq!(
             agent_remember(&mut db, &notes, "Ada (@lead-a)", false, "Ship on Fridays.").unwrap(),
-            Ok(true),
+            Ok(AgentSaved {
+                waiting: true,
+                narrowed: false
+            }),
             "under Ask me first the agent's memory waits for the owner"
         );
     }

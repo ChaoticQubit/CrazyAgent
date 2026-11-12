@@ -27425,7 +27425,7 @@ done
 
 /// The task a re-ask test hands to its sub-agent.
 #[cfg(target_os = "macos")]
-const QUIET_TASK: &str = "Write pear.md";
+const PEAR_TASK: &str = "Write pear.md";
 
 /// What a re-ask test reads once its task is finished: the task's status and result, how
 /// many times the re-ask reached its agent, that agent's turns and the turns the usage store
@@ -27436,7 +27436,7 @@ fn quiet_task(fixture: &Fixture) -> (String, Option<String>, usize, i64, i64) {
         .connection
         .query_row(
             "SELECT status,result,agent FROM team_tasks WHERE prompt=?1",
-            [QUIET_TASK],
+            [PEAR_TASK],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
@@ -27483,10 +27483,10 @@ fn reask_run(script: &str, choice: Option<bool>) -> (String, Option<String>, usi
             on,
         });
     }
-    actions.push(hand_off(&fixture, QUIET_TASK));
+    actions.push(hand_off(&fixture, PEAR_TASK));
     owner(&fixture, &actions);
     fixture.until(&mut team, "the task finishes", |f| {
-        task_of(f, QUIET_TASK).0 == "done"
+        task_of(f, PEAR_TASK).0 == "done"
     });
     idle_ticks(&mut team);
     let read = quiet_task(&fixture);
@@ -27521,16 +27521,16 @@ fn a_runtime_whose_usage_tables_cannot_be_made_still_opens_and_serves_a_turn() {
     );
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, QUIET_ONCE_CODEX, TeamLimits::default());
-    owner(&fixture, &[hand_off(&fixture, QUIET_TASK)]);
+    owner(&fixture, &[hand_off(&fixture, PEAR_TASK)]);
     fixture.until(&mut team, "the task finishes", |f| {
-        task_of(f, QUIET_TASK).0 == "done"
+        task_of(f, PEAR_TASK).0 == "done"
     });
     idle_ticks(&mut team);
     let (status, result, turns): (String, Option<String>, i64) = fixture
         .connection
         .query_row(
             "SELECT t.status,t.result,a.turns FROM team_tasks t JOIN team_agents a ON a.id=t.agent WHERE t.prompt=?1",
-            [QUIET_TASK],
+            [PEAR_TASK],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
