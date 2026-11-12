@@ -99,7 +99,8 @@ fn state(problem: impl std::fmt::Display) -> EngineError {
 
 /// Creates the live master tables: the per-project live switch with its turn and owner
 /// typing state, the owner's pending Try again, the turns a live master ended and the
-/// harness conversation each master session continues. `names` keeps the role a delegation asked for.
+/// harness conversation each master session continues. `names` keeps the role a delegation
+/// asked for.
 /// Takes the engine database. Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
