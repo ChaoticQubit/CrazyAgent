@@ -475,7 +475,8 @@ fn engine_options_with_claude(args: &[OsString]) -> Result<EngineOptions, String
     Ok((writable, codex.map(Path::to_path_buf), claude, rcli))
 }
 
-/// One engine start, read from the positional form or from the defaults.
+/// One engine start, read from the positional form or from the defaults, with the harness
+/// search the engine keeps for Check again, Choose file and a sign-in retry.
 struct EngineStart {
     root: PathBuf,
     global: PathBuf,
@@ -484,6 +485,7 @@ struct EngineStart {
     writable: bool,
     harnesses: crazyagent::paths::Harnesses,
     found_on_path: [bool; 3],
+    search: crazyagent::harnesses::Search,
 }
 
 const DEFAULT_ENGINE_USAGE: &str = "usage: crazyagent engine [--home DIR] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]";
@@ -494,8 +496,9 @@ fn uses_defaults(args: &[OsString]) -> bool {
 }
 
 /// Reads the default engine form: no positional arguments, an optional `--home` and the
-/// harness flags. Input: the command arguments. Output: the start with its layout prepared
-/// and every harness resolved for this start only, or a usage error.
+/// harness flags. Each harness is its flag, else the file the owner chose, else the first file
+/// the shared search finds that passes the chosen-file checks (`finding::pick`). Input: the
+/// command arguments. Output: the start with its layout prepared and harnesses resolved.
 fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     let mut home = None;
     let mut explicit = crazyagent::paths::Harnesses::default();
@@ -536,11 +539,35 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
         explicit.claude.is_none(),
         explicit.rcli.is_none(),
     ];
-    let harnesses = crazyagent::paths::resolve_harnesses(
-        explicit,
-        std::env::var_os("PATH").as_deref(),
-        executable.parent(),
-    );
+    let search = crazyagent::harnesses::Search::from_environment();
+    let chosen = crazyagent::harnesses::finding::at_start(layout.root(), search.home());
+    let path = std::env::var_os("PATH");
+    let space = crazyagent::harnesses::finding::AgentSpace::open(layout.root());
+    let found = |id: &str| {
+        let space = match &space {
+            Ok(space) => space,
+            Err(error) => {
+                eprintln!("no found {id} file is used ({})", error.0);
+                return None;
+            }
+        };
+        match crazyagent::harnesses::finding::pick(id, &search, path.as_deref(), space) {
+            Some(Ok(entry)) => Some(entry),
+            Some(Err((_, error))) => {
+                eprintln!("the found {id} file is not used ({})", error.0);
+                None
+            }
+            None => None,
+        }
+    };
+    let harnesses = crazyagent::paths::Harnesses {
+        codex: explicit.codex.or(chosen.codex).or_else(|| found("codex")),
+        claude: explicit
+            .claude
+            .or(chosen.claude)
+            .or_else(|| found("claude-code")),
+        rcli: crazyagent::paths::rcli_entry(explicit.rcli, path.as_deref(), executable.parent()),
+    };
     Ok(EngineStart {
         root: layout.root().to_path_buf(),
         global: layout.global_settings(),
@@ -549,9 +576,14 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
         writable: true,
         harnesses,
         found_on_path,
+        search,
     })
 }
 
+/// Reads the positional engine form, where every harness is a flag. Its later search looks
+/// only in the PATH and HOME folders it was started with, never the system folders, so a
+/// test engine sees only the harnesses its caller placed. Input: the command arguments.
+/// Output: the start, or a usage error.
 fn positional_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     let (writable, codex, claude, rcli) = engine_options_with_claude(args)?;
     assert!((5..=12).contains(&args.len()));
@@ -568,6 +600,11 @@ fn positional_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
             rcli,
         },
         found_on_path: [false; 3],
+        search: crazyagent::harnesses::Search::engine(
+            std::env::var_os("PATH").as_deref(),
+            &[],
+            std::env::var_os("HOME").map(PathBuf::from),
+        ),
     })
 }
 
@@ -585,9 +622,9 @@ type Register = fn(
 ) -> Result<(), crazyagent::engine::EngineError>;
 
 /// Registers the harness executables of one start. An explicit flag that cannot be
-/// registered stops the engine; one found on PATH is dropped with a note on stderr, so
-/// setup reports it as missing. Inputs: the service, the harnesses and which came from
-/// PATH. Output: Ok with the harnesses left registered, or the explicit failure.
+/// registered stops the engine; a chosen or found one is dropped with a note on stderr
+/// naming the refusal, and Check again reports it. Inputs: the service, the harnesses and
+/// which were not flags. Output: Ok with the harnesses left registered, or the failure.
 fn register_harnesses(
     service: &mut crazyagent::engine::bootstrap::EngineService,
     harnesses: &mut crazyagent::paths::Harnesses,
@@ -645,6 +682,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         writable,
         mut harnesses,
         found_on_path,
+        search,
     } = start;
     let runtime_dir = root.as_path();
     let socket_name = socket_name.as_str();
@@ -697,6 +735,11 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         .map_err(|e| e.to_string())
                 })
                 .and_then(|()| register_harnesses(&mut service, &mut harnesses, found_on_path))
+                .and_then(|()| {
+                    service
+                        .set_harness_search(search)
+                        .map_err(|e| e.to_string())
+                })
                 .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
                 .and_then(|()| {
                     if !writable {

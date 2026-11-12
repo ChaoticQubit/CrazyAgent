@@ -100,6 +100,27 @@ fn run_in(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) 
     crazyagent::spawn_gate::output(&mut command).unwrap()
 }
 
+fn path_of(command: &std::process::Command) -> String {
+    command
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn node_harness(prefix: &Path) -> PathBuf {
+    let node = prefix.join("bin").join("node");
+    write(&node, "#!/bin/sh\necho \"node beside codex ran $1\"\n");
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+    let script = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+    write(&script, "#!/usr/bin/env node\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
 fn quoted(path: &Path) -> String {
     let text = path.to_str().unwrap();
     assert!(!text.contains('\''));
@@ -1011,6 +1032,177 @@ fn a_native_lead_s_own_temp_folder_starts_empty_and_private_and_never_follows_a_
     assert!(private(&own));
     fs::set_permissions(&shared, fs::Permissions::from_mode(0o700)).unwrap();
     toolchains::remove_tmp(&case.home).unwrap();
+}
+
+#[test]
+fn a_node_script_harness_runs_with_the_node_beside_it_inside_the_sandbox() {
+    let case = case();
+    let prefix = case
+        .tools
+        .join("nvm")
+        .join("versions")
+        .join("node")
+        .join("v22.11.0");
+    let script = node_harness(&prefix);
+    let node = prefix.join("bin").join("node");
+    let bin = prefix.join("bin");
+    let bin = bin.to_str().unwrap();
+    let plain = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_node_for(&node)
+    .unwrap();
+    let profile = case.profiles.join("plain.sb");
+    plain.install(&profile).unwrap();
+    assert!(!path_of(&plain.command(&profile, Path::new("/bin/sh"))).contains(bin));
+
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(script.parent().unwrap())
+    .unwrap()
+    .allow_exec(&script)
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let profile = case.profiles.join("node.sb");
+    sandbox.install(&profile).unwrap();
+    let mut harness = std::process::Command::new(&script);
+    harness.current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    let path = path_of(&wrapped);
+    let folders: Vec<&str> = path.split(':').collect();
+    let node_at = folders.iter().position(|folder| *folder == bin).unwrap();
+    assert!(
+        node_at
+            < folders
+                .iter()
+                .position(|folder| *folder == "/usr/bin")
+                .unwrap(),
+        "{path}"
+    );
+    assert_eq!(
+        path_of(&sandbox.command(&profile, Path::new("/bin/sh")))
+            .split(':')
+            .next(),
+        Some(bin)
+    );
+    let output = wrapped.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("node beside codex ran {}", script.display())
+    );
+}
+
+#[test]
+fn a_node_harness_reads_its_node_and_package_but_no_npm_credential_or_other_package() {
+    let case = case();
+    let prefix = case.tools.join("nvm/versions/node/v22.11.0");
+    let script = node_harness(&prefix);
+    let node = prefix.join("bin/node");
+    let package = prefix.join("lib/node_modules/@openai/codex");
+    let vendor = package.join("vendor/codex.txt");
+    write(&vendor, "VENDOR-READABLE\n");
+    let planted = [
+        prefix.join("etc/npmrc"),
+        prefix.join(".npmrc"),
+        package.join(".npmrc"),
+        package.join("node_modules/dep/.npmrc"),
+        prefix.join("lib/node_modules/other/token.txt"),
+    ];
+    for (index, path) in planted.iter().enumerate() {
+        write(path, &format!("FIXTURE-NODE-SECRET-{index}\n"));
+    }
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(script.parent().unwrap())
+    .unwrap()
+    .allow_exec(&script)
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    assert!(!sandbox.read_roots().contains(&prefix));
+    assert_eq!(sandbox.tool_roots(), [prefix.join("bin"), package.clone()]);
+    let mut probe = format!(
+        "cat {} >/dev/null && echo node-read\ncat {}\n",
+        quoted(&node),
+        quoted(&vendor)
+    );
+    for path in &planted {
+        probe.push_str(&format!(
+            "cat {} 2>/dev/null || echo refused\n",
+            quoted(path)
+        ));
+    }
+    let profile = case.profiles.join("node-secrets.sb");
+    let output = run(&sandbox, &profile, &probe);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("node-read"), "{stdout}");
+    assert!(stdout.contains("VENDOR-READABLE"), "{stdout}");
+    assert_eq!(stdout.matches("refused").count(), planted.len(), "{stdout}");
+    assert!(!stdout.contains("FIXTURE-NODE-SECRET"), "{stdout}");
+    let mut harness = std::process::Command::new(&script);
+    harness.current_dir(&case.project);
+    let output = sandbox.wrap(&profile, &harness).unwrap().output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("node beside codex ran {}", script.display())
+    );
+}
+
+#[test]
+fn a_node_prefix_in_the_project_an_agent_worktree_or_the_agent_home_gives_no_path_entry() {
+    let case = case();
+    for prefix in [
+        case.project
+            .join(".crazyagent/worktrees/agent-2/nvm/versions/node/v22.11.0"),
+        case.project.join("tools/nvm/versions/node/v22.11.0"),
+        case.home.join("nvm/versions/node/v22.11.0"),
+    ] {
+        let script = node_harness(&prefix);
+        let sandbox = ProjectSandbox::new(
+            &case.project,
+            &case.home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_node_for(&script)
+        .unwrap();
+        let profile = case.profiles.join("agent-node.sb");
+        sandbox.install(&profile).unwrap();
+        let bin = prefix.join("bin");
+        assert!(
+            !path_of(&sandbox.command(&profile, Path::new("/bin/sh")))
+                .contains(bin.to_str().unwrap()),
+            "{}",
+            prefix.display()
+        );
+        assert!(sandbox.tool_roots().is_empty(), "{}", prefix.display());
+    }
 }
 
 #[test]

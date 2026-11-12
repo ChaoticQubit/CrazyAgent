@@ -283,6 +283,30 @@ fn native_auth_registered_entry_keeps_a_pinned_file_whose_metadata_alone_changed
 }
 
 #[test]
+fn native_auth_host_pins_a_root_owned_file_and_still_refuses_group_or_world_write() {
+    use std::os::unix::fs::MetadataExt;
+    let system = Path::new("/usr/bin/true");
+    let metadata = std::fs::metadata(system).unwrap();
+    assert_eq!(metadata.uid(), 0);
+    assert_eq!(metadata.mode() & 0o022, 0);
+    let pinned = RegisteredNativeAuthHost::capture(system).unwrap();
+    assert_eq!(pinned.verified_path().unwrap(), system);
+    let root = tempfile::tempdir().unwrap();
+    for mode in [0o720, 0o702, 0o600] {
+        let path = executable(root.path(), &format!("codex-{mode:o}"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(
+            RegisteredNativeAuthHost::capture(&path)
+                .map(|_| ())
+                .unwrap_err()
+                .0,
+            "native_auth_host_executable_unsafe",
+            "{mode:o}"
+        );
+    }
+}
+
+#[test]
 fn native_auth_registered_entry_refuses_a_pinned_file_whose_metadata_turned_unsafe() {
     let root = tempfile::tempdir().unwrap();
     let real = executable(root.path(), "claude-2.1.322");

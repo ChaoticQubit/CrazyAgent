@@ -51,7 +51,7 @@ fn auth_command(
         .env("HOME", home)
         .env("CLAUDE_CONFIG_DIR", home)
         .env("TMPDIR", home)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", super::sign_in_path(executable))
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .current_dir(home)
