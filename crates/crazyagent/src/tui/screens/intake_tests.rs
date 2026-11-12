@@ -1172,6 +1172,9 @@ async fn first_run_setup_continues_without_installing_and_home_lists_what_is_mis
     assert!(help.contains("c Continue without installing"), "{rows:#?}");
 
     shell.key(Key::Char('c'));
+    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::Home));
     settle_setup(&mut shell, &mut connection).await;
     let rows = render(&mut shell, 80, 24);
