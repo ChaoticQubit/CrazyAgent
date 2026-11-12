@@ -15341,6 +15341,40 @@ fn merge_commit_landing_keeps_the_agent_head_as_its_second_parent() {
     );
 }
 
+/// Under Merge commit the same agent's next change set lands too, with no conflict: its
+/// worktree sits on the merge commit after the first accept, so the second accept is again
+/// a merge commit over the first, keeping the agent's new commit (DEC-147.6).
+#[test]
+fn merge_commit_landing_lands_the_same_agent_s_next_set_with_no_conflict() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&first).unwrap() else {
+        panic!("the first set did not land");
+    };
+    case.edit("README", "one\ntwo\nthree\nfour\nfive\n");
+    let head = case.agent_commit("Add the fifth line");
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_ne!(second, first);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&second).unwrap() else {
+        panic!("the next set did not land");
+    };
+    assert_eq!(parents_of(&case, &commit), vec![landed, head]);
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\nfive\n"
+    );
+}
+
 /// Under Merge commit an agent commit whose message holds a control character is refused
 /// before anything lands, so nothing an agent wrote can garble the owner's git log, and
 /// the branch stays where it was (DEC-147.6 security bound).
