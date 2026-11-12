@@ -103,6 +103,8 @@ fn main() {
         "desktop_close_project_walls",
         "desktop_update_project_setup",
         "desktop_remove_project",
+        "desktop_project_demo",
+        "desktop_create_demo",
         "desktop_move_project_home",
         "desktop_cancel_research",
         "desktop_retry_research",

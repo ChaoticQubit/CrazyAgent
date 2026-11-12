@@ -1579,6 +1579,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .remove_project(&id, generation, delete_name) .await }.await;
             routed(result)
         }
+        "desktop_project_demo" => {
+            let result: Result<_, BridgeError> = async { read(state).await?.project_demo().await }.await;
+            routed(result)
+        }
+        "desktop_create_demo" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                pool: String,
+                generation: u64,
+            }
+            let Args { pool, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.create_demo(pool, generation).await }.await;
+            routed(result)
+        }
         "desktop_project_removal" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

@@ -1,0 +1,17 @@
+.demo-page { display: grid; gap: var(--space-4); max-width: 720px; }
+.demo-pools { display: grid; gap: var(--space-2); margin: 0; padding: 0; border: 0; min-width: 0; }
+.demo-pools legend { padding: 0; margin-bottom: var(--space-2); font-weight: 600; }
+.demo-actions { display: flex; justify-content: flex-end; }
+.demo-exists, .demo-no-pool { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin: 0; }
+.demo-entry p { margin: 0 0 var(--space-3); }
+.demo-guide { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); }
+.demo-guide-head { display: flex; align-items: center; gap: var(--space-2); }
+.demo-guide-head h2 { margin: 0; font-size: 14px; flex: 1; }
+.demo-guide ol { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.demo-guide li { display: grid; gap: var(--space-1); min-width: 0; }
+.demo-guide li p { margin: 0; overflow-wrap: anywhere; }
+.demo-guide li[data-done="true"] .row { color: var(--ok); }
+.demo-guide li[aria-current="step"] { padding-left: var(--space-2); border-left: 2px solid var(--accent); }
+.demo-goal { display: grid; gap: var(--space-1); padding: var(--space-2) var(--space-3); background: var(--surface-2); border-radius: var(--radius-control); }
+.demo-goal .label { color: var(--text-3); font-size: 12px; }
+.demo-goal button { justify-self: start; }

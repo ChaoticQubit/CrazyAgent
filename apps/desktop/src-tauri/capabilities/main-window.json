@@ -105,6 +105,8 @@
     "allow-desktop-terminals-per-window",
     "allow-desktop-update-project-setup",
     "allow-desktop-remove-project",
+    "allow-desktop-project-demo",
+    "allow-desktop-create-demo",
     "allow-desktop-move-project-home",
     "allow-desktop-cancel-research",
     "allow-desktop-retry-research",
