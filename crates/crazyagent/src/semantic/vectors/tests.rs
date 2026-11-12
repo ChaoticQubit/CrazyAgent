@@ -503,6 +503,59 @@ fn rank_scores_at_most_the_newest_scan_bytes_and_says_older_parts_rank_by_words(
 }
 
 #[test]
+fn rank_says_older_parts_rank_by_words_when_the_cap_left_chunks_out() {
+    let mut db = db();
+    let acme = plugin('a');
+    let old = chunk(&db, Some("alpha"), Source::Session, "axis4 old", 10);
+    let new = chunk(&db, Some("alpha"), Source::Session, "axis4 new", 20);
+    let bounds = Bounds {
+        project_bytes: ONE,
+        ..wide()
+    };
+    assert_eq!(round(&mut db, "alpha", &acme, &bounds).0, 1);
+    assert_eq!(stored(&db, &acme.key), [new]);
+    let ranked = rank(
+        &db,
+        &project("alpha"),
+        Source::Session,
+        &acme,
+        &unit(4),
+        &[old],
+        &wide(),
+    );
+    assert_eq!(
+        ranked.note,
+        Some(NOTE_NEWEST),
+        "a chunk the cap left out is never a silent drop"
+    );
+    assert_eq!(ranked.ids, [old, new], "full text order wins the tie");
+}
+
+#[test]
+fn a_scan_bound_filled_exactly_is_not_a_cut() {
+    let mut db = db();
+    let acme = plugin('a');
+    let one = chunk(&db, Some("alpha"), Source::Session, "axis6 one", 10);
+    let two = chunk(&db, Some("alpha"), Source::Session, "axis6 two", 20);
+    round(&mut db, "alpha", &acme, &wide());
+    let bounds = Bounds {
+        scan_bytes: 2 * ONE,
+        ..wide()
+    };
+    let ranked = rank(
+        &db,
+        &project("alpha"),
+        Source::Session,
+        &acme,
+        &unit(6),
+        &[],
+        &bounds,
+    );
+    assert_eq!(ranked.note, None);
+    assert_eq!(ranked.ids, [two, one], "equal scores rank newer first");
+}
+
+#[test]
 fn rank_says_when_none_or_only_part_of_the_history_has_vectors() {
     let mut db = db();
     let acme = plugin('a');
