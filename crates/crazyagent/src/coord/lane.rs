@@ -276,7 +276,7 @@ pub fn grant(queue: &[Queued], lane: HeavyLane, resources: &[SharedResource]) ->
             .uses
             .iter()
             .map(String::as_str)
-            .filter(|name| used.get(name).copied().unwrap_or(0) >= slots(*name))
+            .filter(|name| used.get(name).copied().unwrap_or(0) >= slots(name))
             .collect();
         let free = !lane_full
             && !lane_blocked
@@ -901,9 +901,9 @@ fn command(request: &Request, out: &mut dyn Write) -> i32 {
         }
     }
     let spawn = || {
-        std::process::Command::new(&request.program)
-            .args(&request.arguments)
-            .spawn()
+        crate::spawn_gate::spawn(
+            std::process::Command::new(&request.program).args(&request.arguments),
+        )
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1023,10 +1023,9 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
         }
     };
     let _ = writeln!(out, "{NO_LANE}");
-    match std::process::Command::new(&request.program)
-        .args(&request.arguments)
-        .status()
-    {
+    match crate::spawn_gate::status(
+        std::process::Command::new(&request.program).args(&request.arguments),
+    ) {
         Ok(status) => status.code().unwrap_or(LANE_FAILED),
         Err(problem) => {
             let _ = writeln!(
