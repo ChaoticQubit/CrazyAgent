@@ -1807,3 +1807,68 @@ fn the_scorecard_opens_from_usage_with_the_desktop_words() {
     drop(pty);
     engine.stop();
 }
+
+/// The harness row the Settings, Harnesses list marks, if any. Input: the screen. Output: the
+/// marked row's text after its marker.
+fn marked_row(screen: &str) -> Option<&str> {
+    screen
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("> "))
+}
+
+/// DEC-155 step 3: Codex's settings page opens from Settings, Harnesses on a real engine and
+/// reads as the desktop's: the harness as its title with its purpose, the version line, when
+/// a change applies, its settings under the desktop's group titles, and Esc back to All
+/// harnesses. Codex must be installed on this machine; a machine without it fails as a
+/// missing prerequisite.
+#[test]
+fn a_harness_settings_page_opens_from_settings_harnesses_with_the_desktop_words() {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-harness-page-");
+    go_to(&pty, "Settings / Harnesses", "Settings / Harnesses");
+    pty.until("Settings, Harnesses lists Codex", |screen| {
+        screen.contains("Codex") && marked_row(screen).is_some()
+    });
+    for step in 0..=STEPS_MAX {
+        let screen = pty.screen();
+        let marked = marked_row(&screen).map(str::to_owned);
+        if marked.as_deref().is_some_and(|row| row.contains("Codex")) {
+            break;
+        }
+        assert!(
+            step < STEPS_MAX,
+            "no Codex row in Settings, Harnesses:\n{screen}"
+        );
+        pty.keys(&["Down"]);
+        pty.until("the list marks the next harness", |now| {
+            marked_row(now).map(str::to_owned) != marked
+        });
+    }
+    let screen = pty.screen();
+    assert!(
+        screen.contains("Enter Settings"),
+        "prerequisite: Codex is installed on this machine:\n{screen}"
+    );
+    pty.keys(&["Enter"]);
+    let screen = pty.until("Codex's settings page reads its version", |screen| {
+        screen.contains("Changes apply the next time a master or agent starts with this harness.")
+    });
+    for words in [
+        "What every master and agent using this harness starts with, in every project.",
+        "Running ones keep their settings.",
+        "Set by CrazyAgent (",
+        "Esc All harnesses",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    assert!(
+        screen.contains("is qualified. You can change the settings below.")
+            || screen.contains("so every setting is read-only"),
+        "the version line:\n{screen}"
+    );
+    pty.keys(&["Escape"]);
+    pty.until("Esc goes back to All harnesses", |screen| {
+        marked_row(screen).is_some_and(|row| row.contains("Codex"))
+    });
+    drop(pty);
+    engine.stop();
+}

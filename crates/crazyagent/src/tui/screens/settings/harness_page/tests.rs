@@ -109,6 +109,7 @@ fn read_with(
         name: page.name,
         installed: page.installed,
         qualified: page.qualified,
+        qualified_versions: page.qualified_versions,
         keys: page.keys,
         settings,
     }
@@ -748,6 +749,7 @@ fn a_key_left_to_the_harness_default_reads_harness_default() {
         name: page.name,
         installed: page.installed,
         qualified: page.qualified,
+        qualified_versions: page.qualified_versions,
         keys: page.keys,
         settings,
     };

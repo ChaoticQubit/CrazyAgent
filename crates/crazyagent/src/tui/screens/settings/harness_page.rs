@@ -34,6 +34,55 @@ const PAGE_STEP: isize = 10;
 /// sets one.
 const HARNESS_DEFAULT: &str = "Harness default";
 
+/// The page's words, the desktop's (a harness's page in Settings, Harnesses on
+/// feat/v3-screens): the app page's purpose, when a change applies and the project's line,
+/// the way back, and the three group titles in page order.
+const PURPOSE: &str = "What every master and agent using this harness starts with, in every project. A project can set its own in Project Settings, Harnesses.";
+const EFFECT: &str = "Changes apply the next time a master or agent starts with this harness. Running ones keep their settings.";
+const PROJECT_EFFECT: &str = "A value set here wins over the app value for this project only.";
+const BACK: &str = "All harnesses";
+const GROUPS: [&str; 3] = ["Settings", "Set by CrazyAgent", "Read-only"];
+
+/// Which group a setting sits in on the page, by its access: the ones the owner can change,
+/// the ones CrazyAgent sets itself, then the read-only ones. Input: the access. Output: the
+/// group's index in GROUPS.
+fn group(access: &Access) -> usize {
+    match access {
+        Access::Editable => 0,
+        Access::Locked { .. } => 1,
+        Access::ReadOnly { .. } => 2,
+    }
+}
+
+/// The page's version line, the desktop's: qualified with the settings open, or why every
+/// setting is read-only with the versions that are qualified. Input: the read. Output: the
+/// sentence and whether it warns.
+fn version_line(read: &HarnessRead) -> (String, bool) {
+    let name = &read.name;
+    let qualified = match read.qualified_versions.join(", ") {
+        versions if versions.is_empty() => "none yet".to_owned(),
+        versions => versions,
+    };
+    match (&read.installed, read.qualified) {
+        (Some(version), true) => (
+            format!("{name} {version} is qualified. You can change the settings below."),
+            false,
+        ),
+        (installed, _) => {
+            let found = match installed {
+                None => format!("CrazyAgent couldn't read the installed {name} version"),
+                Some(version) => format!("{name} {version} isn't qualified yet"),
+            };
+            (
+                format!(
+                    "{found}, so every setting is read-only and agents start with CrazyAgent's defaults. Qualified versions: {qualified}."
+                ),
+                true,
+            )
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum State {
     Loading,
@@ -424,7 +473,9 @@ impl HarnessPage {
         match (&event.query, &event.result) {
             (HarnessSettingsQuery::Read { .. }, Ok(HarnessSettingsReply::Read(read))) => {
                 let count = read.settings.len();
-                self.state = State::Ready(read.clone());
+                let mut read = read.clone();
+                read.settings.sort_by_key(|setting| group(&setting.access));
+                self.state = State::Ready(read);
                 self.selected = self.selected.min(count.saturating_sub(1));
                 self.edit = None;
             }
@@ -554,43 +605,16 @@ impl HarnessPage {
         let theme = &ctx.theme;
         let glyphs = ctx.glyphs;
         let name = self.name.clone();
-        let title = match &self.scope {
-            Scope::App => format!("{name} settings"),
-            Scope::Project { name: project, .. } => format!("{name} settings for {project}"),
-        };
-        let version = match &self.state {
-            State::Ready(read) => match (&read.installed, read.qualified) {
-                (Some(version), true) => {
-                    styled(format!("{name} {version}, qualified"), Role::Muted, theme)
-                }
-                (Some(version), false) => styled(
-                    format!("{name} {version}, not qualified"),
-                    Role::Warning,
-                    theme,
-                ),
-                (None, _) => styled("Version unknown", Role::Warning, theme),
-            },
-            _ => Line::default(),
-        };
-        let mut lines = vec![row(
-            limit,
-            styled(title, Role::Accent, theme),
-            version,
-            glyphs,
-        )];
-        let intro = match &self.scope {
-            Scope::App => format!(
-                "Every project gets these unless the project changes them. A change applies the next time {name} starts."
-            ),
-            Scope::Project { name: project, .. } => format!(
-                "Only {project} gets the values set here; App and Default rows follow Settings > Harnesses. A change applies the next time {name} starts."
-            ),
-        };
-        lines.extend(
-            wrap(&intro, limit)
+        let wrapped = |text: &str, role: Role| {
+            wrap(text, limit)
                 .into_iter()
-                .map(|part| styled(part, Role::Muted, theme)),
-        );
+                .map(|part| styled(part, role, theme))
+                .collect::<Vec<_>>()
+        };
+        let mut lines = vec![styled(name.clone(), Role::Heading, theme)];
+        if matches!(self.scope, Scope::App) {
+            lines.extend(wrapped(PURPOSE, Role::Muted));
+        }
         let read = match &self.state {
             State::Loading => {
                 lines.push(Line::default());
@@ -612,18 +636,17 @@ impl HarnessPage {
             }
             State::Ready(read) => read,
         };
-        if !read.qualified {
-            lines.extend(
-                wrap(
-                    &format!(
-                        "This version is not qualified yet: every setting is read-only and {name} starts with CrazyAgent's locked values only."
-                    ),
-                    limit,
-                )
-                .into_iter()
-                .map(|part| styled(part, Role::Warning, theme)),
-            );
-        }
+        lines.push(Line::default());
+        let (version, warns) = version_line(read);
+        lines.extend(wrapped(
+            &version,
+            if warns { Role::Warning } else { Role::Muted },
+        ));
+        let effect = match &self.scope {
+            Scope::App => EFFECT.to_owned(),
+            Scope::Project { .. } => format!("{EFFECT} {PROJECT_EFFECT}"),
+        };
+        lines.extend(wrapped(&effect, Role::Muted));
         lines.push(Line::default());
         let count = read.settings.len();
         if count == 0 {
@@ -632,8 +655,15 @@ impl HarnessPage {
             )));
             return (lines, None);
         }
+        let groups = (0..GROUPS.len())
+            .filter(|at| {
+                read.settings
+                    .iter()
+                    .any(|setting| group(&setting.access) == *at)
+            })
+            .count();
         let window = height
-            .saturating_sub(lines.len() + 2 + DETAIL_ROWS)
+            .saturating_sub(lines.len() + 2 + DETAIL_ROWS + groups)
             .max(1)
             .min(count);
         let row_limit = if count > window { limit - 1 } else { limit };
@@ -660,13 +690,24 @@ impl HarnessPage {
         } else if selected >= offset + window {
             offset = selected + 1 - window;
         }
-        let rows: Vec<Line<'static>> = read
-            .settings
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(window)
-            .map(|(index, setting)| {
+        let mut rows: Vec<Line<'static>> = Vec::with_capacity(window + groups);
+        let mut last_group = None;
+        for (index, setting) in read.settings.iter().enumerate().skip(offset).take(window) {
+            let at = group(&setting.access);
+            if last_group != Some(at) {
+                let size = read
+                    .settings
+                    .iter()
+                    .filter(|other| group(&other.access) == at)
+                    .count();
+                rows.push(styled(
+                    format!("{} ({size})", GROUPS[at]),
+                    Role::Heading,
+                    theme,
+                ));
+                last_group = Some(at);
+            }
+            rows.push({
                 let key = read.key(&setting.key);
                 let label = key.map_or_else(|| setting.key.clone(), |key| key.label.clone());
                 let value = match (&self.edit, key) {
@@ -690,8 +731,8 @@ impl HarnessPage {
                     theme,
                     glyphs,
                 )
-            })
-            .collect();
+            });
+        }
         if count > window {
             let (top, size) = thumb(window, offset, count);
             lines.extend(with_bar(rows, limit, top, size, theme, glyphs));
@@ -709,6 +750,10 @@ impl HarnessPage {
 }
 
 impl Screen for HarnessPage {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         match &self.scope {
             Scope::App => vec!["Settings".into(), "Harnesses".into(), self.name.clone()],
@@ -731,8 +776,8 @@ impl Screen for HarnessPage {
             None => {}
         }
         match self.state {
-            State::Loading => return vec![hint("Esc", "Back")],
-            State::Failed(_) => return vec![hint("r", "Try again"), hint("Esc", "Back")],
+            State::Loading => return vec![hint("Esc", BACK)],
+            State::Failed(_) => return vec![hint("r", "Try again"), hint("Esc", BACK)],
             State::Ready(_) => {}
         }
         let mut hints = Vec::new();
@@ -753,7 +798,7 @@ impl Screen for HarnessPage {
             "Move",
         ));
         hints.push(hint("r", "Read again"));
-        hints.push(hint("Esc", "Back"));
+        hints.push(hint("Esc", BACK));
         hints
     }
 

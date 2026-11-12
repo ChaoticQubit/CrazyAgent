@@ -31,12 +31,14 @@ pub(in crate::tui) enum HarnessSettingsQuery {
 }
 
 /// Every catalog key and every value of one harness at one scope, joined from all pages:
-/// the harness's name, the installed version and whether the catalog is qualified for it.
+/// the harness's name, the installed version, whether the catalog is qualified for it and
+/// the versions it is qualified for.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::tui) struct HarnessRead {
     pub name: String,
     pub installed: Option<String>,
     pub qualified: bool,
+    pub qualified_versions: Vec<String>,
     pub keys: Vec<Key>,
     pub settings: Vec<Setting>,
 }
@@ -150,6 +152,7 @@ async fn read(
         name: String::new(),
         installed: None,
         qualified: false,
+        qualified_versions: Vec::new(),
         keys: Vec::new(),
         settings: Vec::new(),
     };
@@ -164,6 +167,7 @@ async fn read(
         joined.name = page.name;
         joined.installed = page.installed;
         joined.qualified = page.qualified;
+        joined.qualified_versions = page.qualified_versions;
         joined.keys.extend(page.keys);
         match advance(after, page.next)? {
             Some(next) => after = Some(next),
