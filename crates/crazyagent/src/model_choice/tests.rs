@@ -640,3 +640,84 @@ fn a_model_catalog_out_of_contract_is_refused() {
         assert!(parse_catalog(bad.as_bytes()).is_none(), "{bad}");
     }
 }
+
+fn set_rule(db: &Connection, rule: rules::Rule) -> rules::Rules {
+    let current = rules::rules(db).unwrap();
+    let version = match rule {
+        rules::Rule::Pick(_) => current.pick_version,
+        rules::Rule::Fallback(_) => current.fallback_version,
+    };
+    match rules::set_rule(db, rule, version).unwrap() {
+        rules::RuleWritten::Saved { rules } => rules,
+        other => panic!("not saved: {other:?}"),
+    }
+}
+
+#[test]
+fn the_pick_and_fallback_rules_start_on_the_owner_s_picks_and_save_with_a_version() {
+    use rules::{FallbackRule, PickRule, Rule, RuleWritten};
+    let (_tmp, db) = engine();
+    let first = rules::rules(&db).unwrap();
+    assert_eq!(
+        (first.pick, first.fallback),
+        (PickRule::Strict, FallbackRule::Notice)
+    );
+    let saved = set_rule(&db, Rule::Pick(PickRule::Hint));
+    assert_eq!(
+        (saved.pick, saved.fallback),
+        (PickRule::Hint, FallbackRule::Notice)
+    );
+    assert!(saved.pick_version > first.pick_version);
+    assert_eq!(saved.fallback_version, first.fallback_version);
+    let stale = rules::set_rule(&db, Rule::Pick(PickRule::Default), first.pick_version).unwrap();
+    assert_eq!(
+        stale,
+        RuleWritten::Stale {
+            rules: saved.clone()
+        }
+    );
+    let saved = set_rule(&db, Rule::Fallback(FallbackRule::Stop));
+    assert_eq!(
+        (saved.pick, saved.fallback),
+        (PickRule::Hint, FallbackRule::Stop)
+    );
+    assert_eq!(rules::rules(&db).unwrap(), saved);
+    let wire = serde_json::to_value(Rule::Fallback(FallbackRule::Silent)).unwrap();
+    assert_eq!(wire, json!({"rule": "fallback", "value": "silent"}));
+}
+
+#[test]
+fn a_hint_rule_runs_any_usable_pick_and_a_default_rule_overrules_every_pick() {
+    use rules::{PickRule, Rule};
+    let (_tmp, db) = engine();
+    let ids = ["gpt-a", "gpt-b", "gpt-c"];
+    let project = ProjectId::new(PROJECT).unwrap();
+    saved(
+        set(
+            &db,
+            "codex",
+            &ids,
+            &Scope::App,
+            Slot::Allowed,
+            json!(["gpt-a"]),
+        )
+        .unwrap(),
+    );
+    saved(set(&db, "codex", &ids, &Scope::App, Slot::Agent, json!("gpt-c")).unwrap());
+    let pick =
+        |picked: Option<&str>| store::pick(&db, "codex", &catalog(&ids), &project, picked).unwrap();
+    assert!(matches!(pick(Some("gpt-b")), Pick::Refused { .. }));
+    assert_eq!(pick(Some("gpt-a")), Pick::Run(Some("gpt-a".into())));
+    set_rule(&db, Rule::Pick(PickRule::Hint));
+    assert_eq!(pick(Some("gpt-b")), Pick::Run(Some("gpt-b".into())));
+    assert!(matches!(pick(Some("gpt-z")), Pick::Refused { .. }));
+    assert_eq!(pick(None), Pick::Run(Some("gpt-c".into())));
+    set_rule(&db, Rule::Pick(PickRule::Default));
+    assert_eq!(pick(Some("gpt-a")), Pick::Overruled(Some("gpt-c".into())));
+    assert_eq!(pick(Some("gpt-c")), Pick::Run(Some("gpt-c".into())));
+    assert_eq!(pick(None), Pick::Run(Some("gpt-c".into())));
+    assert_eq!(
+        store::pick(&db, "rcli", &[], &project, Some("gpt-a")).unwrap(),
+        Pick::Unsupported
+    );
+}

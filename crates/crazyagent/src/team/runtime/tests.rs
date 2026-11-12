@@ -14505,3 +14505,133 @@ fn a_master_model_no_pool_account_runs_falls_back_with_one_notice() {
     assert_eq!(master(&mut team), reference(ENDPOINT));
     assert_eq!(notices().len(), 1);
 }
+
+/// Sets one of the owner's model rules at its current version. Takes the fixture and the
+/// rule.
+fn model_rule(fixture: &Fixture, rule: crate::model_choice::rules::Rule) {
+    use crate::model_choice::rules::{self, Rule, RuleWritten};
+    let current = rules::rules(&fixture.connection).unwrap();
+    let version = match rule {
+        Rule::Pick(_) => current.pick_version,
+        Rule::Fallback(_) => current.fallback_version,
+    };
+    let written = rules::set_rule(&fixture.connection, rule, version).unwrap();
+    assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+}
+
+/// Adds one verified owner model for Codex and sets it in one app slot. Takes the fixture,
+/// the model and the slot.
+fn codex_model(fixture: &Fixture, model: &str, slot: crate::model_choice::Slot) {
+    use crate::model_choice::store::{self, Begun};
+    let catalog = crate::model_choice::catalog("codex");
+    let scope = crate::harness_settings::Scope::App;
+    if store::custom_begin(&fixture.connection, "codex", &catalog, model).unwrap() == Begun::Pending
+    {
+        store::custom_checked(&fixture.connection, "codex", model, true).unwrap();
+    }
+    let version = store::values(&fixture.connection, "codex", &catalog, &scope)
+        .unwrap()
+        .rows
+        .iter()
+        .find(|row| row.slot == slot)
+        .unwrap()
+        .version;
+    let written = store::set(
+        &fixture.connection,
+        "codex",
+        &catalog,
+        &scope,
+        slot,
+        &serde_json::json!(model),
+        version,
+    )
+    .unwrap();
+    assert!(
+        matches!(written, crate::model_choice::Written::Saved { .. }),
+        "{written:?}"
+    );
+}
+
+/// The owner's fallback rule decides what a master start does when no pool account can
+/// run the master model: Silent starts it on an account's own model with no notice, Stop
+/// starts nothing and gives the reason (DEC-150 Q2).
+#[test]
+fn the_fallback_rule_starts_the_master_silently_or_stops_it_with_the_reason() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let paused = BTreeSet::new();
+    let project = fixture.setup.project_id.clone();
+    codex_model(&fixture, "gpt-a", crate::model_choice::Slot::Master);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Silent));
+    let Ok(Some(account)) = team
+        .master_account(&fixture.access, &project, "codex", &paused)
+        .unwrap()
+    else {
+        panic!("a silent fallback starts the master on the endpoint");
+    };
+    assert_eq!(account.connection, reference(ENDPOINT));
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    let Err(reason) = team
+        .master_account(&fixture.access, &project, "codex", &paused)
+        .unwrap()
+    else {
+        panic!("a stop fallback starts no master");
+    };
+    assert!(reason.contains("gpt-a"), "{reason}");
+    let told: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM team_notifications WHERE project=?1 AND kind='model_fallback')
+                  + (SELECT COUNT(*) FROM team_messages WHERE project=?1 AND text LIKE '%(model_fallback)')",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(told, 0);
+}
+
+/// With the Stop fallback rule a task whose model no pool account can run fails with the
+/// reason instead of starting an agent on another model (DEC-150 Q2).
+#[test]
+fn a_stop_fallback_fails_a_task_no_pool_account_can_run_instead_of_starting_it() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    codex_model(&fixture, "gpt-a", crate::model_choice::Slot::Agent);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let (status, error): (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "failed");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("gpt-a")),
+        "{error:?}"
+    );
+    let agents: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agents, 0);
+}

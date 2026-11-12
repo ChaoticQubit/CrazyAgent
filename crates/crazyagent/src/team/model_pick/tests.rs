@@ -266,3 +266,37 @@ fn a_master_starts_on_the_owner_s_master_model_and_an_agent_on_its_record() {
     );
     assert_eq!(start_model(&db, &project(), 1, "rcli", true).unwrap(), None);
 }
+
+#[test]
+fn a_hint_rule_pins_an_unticked_pick_and_a_default_rule_runs_the_default_and_says_so() {
+    use crate::model_choice::rules::{self, PickRule, Rule, RuleWritten};
+    let (_tmp, mut db) = engine();
+    owner_models(&db, &["gpt-a", "gpt-b", "gpt-c"], &["gpt-a"], Some("gpt-b"));
+    let rule = |db: &Connection, rule: PickRule| {
+        let version = rules::rules(db).unwrap().pick_version;
+        let written = rules::set_rule(db, Rule::Pick(rule), version).unwrap();
+        assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+    };
+    let pin_one = |db: &mut Connection, prompt: &str, model: &str| {
+        let id = task(db, prompt);
+        let tx = db.transaction().unwrap();
+        let said = pin(&tx, &project(), id, "codex", Some(&pick(model))).unwrap();
+        tx.commit().unwrap();
+        (id, said)
+    };
+    rule(&db, PickRule::Hint);
+    let (hinted, said) = pin_one(&mut db, "Hinted", "gpt-c");
+    assert_eq!(said, Ok(" on gpt-c".to_owned()));
+    assert_eq!(pinned(&db, hinted).unwrap(), Some(pick("gpt-c")));
+    rule(&db, PickRule::Default);
+    let (overruled, said) = pin_one(&mut db, "Overruled", "gpt-a");
+    assert_eq!(
+        said,
+        Ok(" on the default model gpt-b: the owner runs every agent on the default".to_owned())
+    );
+    assert_eq!(pinned(&db, overruled).unwrap(), None);
+    assert_eq!(
+        wanted(&db, overruled, &project(), "codex").unwrap(),
+        Some("gpt-b".to_owned())
+    );
+}
