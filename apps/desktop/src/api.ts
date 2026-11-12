@@ -228,6 +228,18 @@ export function classifyFailure(error: unknown): Failure {
 
 /** Calls one Tauri command, retrying only the bridge's pre-action "busy" refusal.
  * Inputs: the command and its arguments. Output: the value, not ready, or a plain error. */
+let selection: Promise<unknown> = Promise.resolve();
+
+/** Runs one read-then-use of the bridge's model-access selection after every earlier one has
+ * ended: the bridge keeps one selected record, ticket and paging cursor from an inspect or a
+ * page read to the edit, set-up or next page that uses it, so two such pairs at once would move
+ * it under each other. A pair must not start another. Input: the pair. Output: its result. */
+export function oneSelection<T>(pair: () => Promise<T>): Promise<T> {
+  const run = selection.then(() => pair());
+  selection = run.catch(() => undefined);
+  return run;
+}
+
 export async function call<T>(command: string, args?: InvokeArgs): Promise<Result<T>> {
   try {
     return { kind: "ok", value: await bridgeCall<T>(command, args) };
@@ -686,9 +698,11 @@ export function profileNotNeeded(code: string): boolean {
  * sent: the engine uses the key it already holds. Input: account id. Output: ok when the
  * engine configured it or it needs no profile, otherwise a plain error. */
 export async function readyForAgents(id: string): Promise<Result<void>> {
-  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
-  if (detail.kind !== "ok") return detail;
-  const configured = await call<AccountProfileView>("desktop_configure_account_profile", { ticket: detail.value.ticket, secret: null, generation: nextGeneration() });
+  const configured = await oneSelection(async (): Promise<Result<AccountProfileView>> => {
+    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
+    if (detail.kind !== "ok") return detail;
+    return call<AccountProfileView>("desktop_configure_account_profile", { ticket: detail.value.ticket, secret: null, generation: nextGeneration() });
+  });
   if (configured.kind === "error" && profileNotNeeded(configured.code)) return { kind: "ok", value: undefined };
   if (configured.kind !== "ok") return configured;
   if (configured.value.pending || configured.value.reply.outcome === "not_recorded") {
@@ -890,10 +904,12 @@ export function mergePool(now: PoolBase, opened: PoolBase, saved: PoolBase): Res
 export async function createPool(id: string, name: string, members: string[]): Promise<Result<void>> {
   const input = poolInput(name, members);
   if (input.kind !== "ok") return input;
-  const page = await call<ModelAccessPage>("desktop_model_access_page", { collection: "pools", next: false });
-  if (page.kind !== "ok") return page;
   const edit: ModelAccessEdit = { kind: "create_pool", pool: { id, name: input.value.name, members: input.value.members, projects: [], roles: [], fallback_allowed: false } as AccountPool };
-  return change("desktop_edit_model_access", { ticket: page.value.ticket, edit, generation: nextGeneration() });
+  return oneSelection(async (): Promise<Result<void>> => {
+    const page = await call<ModelAccessPage>("desktop_model_access_page", { collection: "pools", next: false });
+    if (page.kind !== "ok") return page;
+    return change("desktop_edit_model_access", { ticket: page.value.ticket, edit, generation: nextGeneration() });
+  });
 }
 
 /** Saves the owner's changes to a pool while keeping its project assignments and any change made
@@ -902,22 +918,26 @@ export async function createPool(id: string, name: string, members: string[]): P
 export async function savePool(id: string, name: string, members: string[], opened: PoolBase): Promise<Result<void>> {
   const input = poolInput(name, members);
   if (input.kind !== "ok") return input;
-  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
-  if (detail.kind !== "ok") return detail;
-  if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
-  const now = detail.value.record.pool;
-  const merged = mergePool({ name: now.name ?? "", members: now.members }, opened, input.value);
-  if (merged.kind !== "ok") return merged;
-  const edit: ModelAccessEdit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
-  return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit, generation: nextGeneration() });
+  return oneSelection(async (): Promise<Result<void>> => {
+    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
+    if (detail.kind !== "ok") return detail;
+    if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
+    const now = detail.value.record.pool;
+    const merged = mergePool({ name: now.name ?? "", members: now.members }, opened, input.value);
+    if (merged.kind !== "ok") return merged;
+    const edit: ModelAccessEdit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
+    return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit, generation: nextGeneration() });
+  });
 }
 
 /** Deletes a pool and takes it off every project that uses it, in one engine change.
  * Input: pool id. Output: ok once deleted; those projects then have no pool. */
 export async function deletePool(id: string): Promise<Result<void>> {
-  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
-  if (detail.kind !== "ok") return detail;
-  return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit: { kind: "remove_pool", id }, generation: nextGeneration() });
+  return oneSelection(async (): Promise<Result<void>> => {
+    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
+    if (detail.kind !== "ok") return detail;
+    return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit: { kind: "remove_pool", id }, generation: nextGeneration() });
+  });
 }
 
 export type HarnessAccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
