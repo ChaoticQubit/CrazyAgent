@@ -618,3 +618,45 @@ async fn an_nvm_codex_is_pinned_by_the_shared_search() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn look_again_searches_only_where_engine_start_said_and_an_engine_without_a_search_reads_nothing()
+ {
+    registry_case(|host, root| async move {
+        let bin = root.join("started-with");
+        std::fs::create_dir(&bin).unwrap();
+        let codex = physical_file(&bin, "codex", b"held-search-codex");
+        assert_eq!(host.held_search().unwrap(), None);
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Missing { looked: Vec::new() }
+        );
+        assert!(host.registered_codex_executable().is_err());
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        host.set_harness_search(on(&path)).unwrap();
+        assert_eq!(
+            host.set_harness_search(nowhere()).unwrap_err().0,
+            "native_auth_host_registration_frozen"
+        );
+        assert_eq!(host.held_search().unwrap(), Some(on(&path)));
+        host.authority.native_auth_host.lock().unwrap().frozen = true;
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Registered {
+                path: codex.clone()
+            }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            codex
+        );
+        assert!(matches!(
+            host.look_again("claude-code").unwrap(),
+            Found::Missing { looked } if looked == vec![bin.display().to_string()]
+        ));
+    })
+    .await;
+}

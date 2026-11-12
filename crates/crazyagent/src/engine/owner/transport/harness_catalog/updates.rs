@@ -263,13 +263,14 @@ async fn blocking(
 }
 
 /// Pins the sign-in and master host of a harness the engine's own job just installed or
-/// updated with success, when the engine started without it. The engine search looks as at
+/// updated with success, when the engine started without it. It looks with the search set at
 /// engine start and a refusal is logged by its code alone. Inputs: the owner runtime and the
 /// harness id.
 fn pin(owner: &OwnerRuntimeHandle, id: &str) {
-    let path = std::env::var_os("PATH");
-    let search = Search::from_environment();
-    if let Err(error) = owner.register_installed_harness(id, &search, path.as_deref()) {
+    let pinned = owner
+        .harness_search()
+        .and_then(|search| owner.register_installed_harness(id, &search, None));
+    if let Err(error) = pinned {
         eprintln!("{id} got no sign-in host after its install ({})", error.0);
     }
 }

@@ -463,9 +463,6 @@ test("Install from the app Don't offer Install: no Install button anywhere, and 
     assert.equal(await refused(bridge, "desktop_harness_install", "aider"), "harness_install_off");
   }));
 
-const SYSTEM_CODEX = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].some((folder) => existsSync(join(folder, "codex")))
-  ? "a Codex in a system folder of this Mac is found at engine start, so the engine cannot start without one" : false;
-
 /** Writes a fake Codex 0.0.1 that answers its version, as an install made after the engine
  * started would. Input: the path. Output: the path. */
 function lateCodex(path) {
@@ -474,10 +471,10 @@ function lateCodex(path) {
   return path;
 }
 
-test("Codex installed after the engine started: the Not installed row lists where CrazyAgent looked, and Check again pins it with no engine restart", { timeout: 600000, skip: SYSTEM_CODEX }, (t) =>
+test("Codex installed after the engine started: the Not installed row lists where CrazyAgent looked, and Check again pins it with no engine restart", { timeout: 600000 }, (t) =>
   onEngine(t, "ca-harness-late-", async ({ bridge, me, open, rowShows, fakes }) => {
     await open();
-    await me.waitFor("where CrazyAgent looked for codex", (text) => text.includes("CrazyAgent looked for codex in these folders and didn't find it:") && text.includes("~/.local/bin") && text.includes("/opt/homebrew/bin"));
+    await me.waitFor("where CrazyAgent looked for codex", (text) => text.includes("CrazyAgent looked for codex in these folders and didn't find it:") && text.includes("~/.local/bin") && text.includes("/usr/bin"));
     assert.equal((await value(bridge, "desktop_harness_find", { id: "codex" })).kind, "missing", "the engine still has no Codex");
     await me.capture("codex-looked");
     const late = lateCodex(join(fakes.root, "home", ".local", "bin", "codex"));
@@ -488,7 +485,7 @@ test("Codex installed after the engine started: the Not installed row lists wher
     assert.equal(catalog.find((entry) => entry.id === "codex")?.executable, late, "the catalog and sign-in name the same Codex");
   }, { codexAtStart: false }));
 
-test("Choose the codex file: a file that isn't a program is refused with the reason, and a chosen program is pinned and shown with no engine restart", { timeout: 600000, skip: SYSTEM_CODEX }, (t) => {
+test("Choose the codex file: a file that isn't a program is refused with the reason, and a chosen program is pinned and shown with no engine restart", { timeout: 600000 }, (t) => {
   const picks = [];
   return onEngine(t, "harness-choose-", async ({ bridge, me, open, rowShows, fakes }) => {
     const folder = join(fakes.root, "tools");

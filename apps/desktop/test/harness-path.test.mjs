@@ -43,6 +43,13 @@ test("a harness found nowhere lists where CrazyAgent looked, says shims are skip
   assert.doesNotMatch(html, /Forget the chosen file/);
 });
 
+test("an engine that searched nowhere shows no empty folder list, and still offers both actions", () => {
+  const html = block({ found: { kind: "missing", looked: [] } });
+  assert.doesNotMatch(html, /CrazyAgent looked for codex|<ul/);
+  assert.match(html, /aria-label="Check again for Codex"/);
+  assert.match(html, />Choose the codex file<\/button>/);
+});
+
 test("the looked list never shows more than the engine's bound", () => {
   const looked = Array.from({ length: api.LOOKED_MAX + 20 }, (_, index) => `/folder-${index}`);
   const html = block({ found: { kind: "missing", looked } });

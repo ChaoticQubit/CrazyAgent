@@ -475,7 +475,8 @@ fn engine_options_with_claude(args: &[OsString]) -> Result<EngineOptions, String
     Ok((writable, codex.map(Path::to_path_buf), claude, rcli))
 }
 
-/// One engine start, read from the positional form or from the defaults.
+/// One engine start, read from the positional form or from the defaults, with the harness
+/// search the engine keeps for Check again, Choose file and a sign-in retry.
 struct EngineStart {
     root: PathBuf,
     global: PathBuf,
@@ -484,6 +485,7 @@ struct EngineStart {
     writable: bool,
     harnesses: crazyagent::paths::Harnesses,
     found_on_path: [bool; 3],
+    search: crazyagent::harnesses::Search,
 }
 
 const DEFAULT_ENGINE_USAGE: &str = "usage: crazyagent engine [--home DIR] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]";
@@ -558,9 +560,14 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
         writable: true,
         harnesses,
         found_on_path,
+        search,
     })
 }
 
+/// Reads the positional engine form, where every harness is a flag. Its later search looks
+/// only in the PATH and HOME folders it was started with, never the system folders, so a
+/// test engine sees only the harnesses its caller placed. Input: the command arguments.
+/// Output: the start, or a usage error.
 fn positional_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     let (writable, codex, claude, rcli) = engine_options_with_claude(args)?;
     assert!((5..=12).contains(&args.len()));
@@ -577,6 +584,11 @@ fn positional_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
             rcli,
         },
         found_on_path: [false; 3],
+        search: crazyagent::harnesses::Search::engine(
+            std::env::var_os("PATH").as_deref(),
+            &[],
+            std::env::var_os("HOME").map(PathBuf::from),
+        ),
     })
 }
 
@@ -654,6 +666,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         writable,
         mut harnesses,
         found_on_path,
+        search,
     } = start;
     let runtime_dir = root.as_path();
     let socket_name = socket_name.as_str();
@@ -706,6 +719,11 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         .map_err(|e| e.to_string())
                 })
                 .and_then(|()| register_harnesses(&mut service, &mut harnesses, found_on_path))
+                .and_then(|()| {
+                    service
+                        .set_harness_search(search)
+                        .map_err(|e| e.to_string())
+                })
                 .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
                 .and_then(|()| {
                     if !writable {

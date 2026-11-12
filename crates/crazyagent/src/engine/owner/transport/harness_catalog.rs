@@ -180,7 +180,9 @@ pub(super) async fn serve(
     if matches!(action, Action::Check) {
         look_again(engine, authority, packet, admission, &runtime).await?;
     }
-    let mut search = Search::from_environment();
+    let mut search = runtime
+        .held_search()?
+        .unwrap_or_else(Search::from_environment);
     for (id, executable) in [
         ("codex", runtime.registered_codex_executable()),
         ("claude-code", runtime.registered_claude_executable()),

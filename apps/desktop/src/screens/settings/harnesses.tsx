@@ -156,8 +156,10 @@ export function HarnessFileView({ id, name, found, pending, problem, onLook, onC
   const inUse = found !== null && (found.kind === "registered" || found.kind === "ready") ? found.path : null;
   return <div className="stack-small" data-harness-file={id}>
     {found?.kind === "missing" && <>
-      <p>{`CrazyAgent looked for ${file} in these folders and didn't find it:`}</p>
-      <ul className="mono small">{found.looked.slice(0, LOOKED_MAX).map((folder) => <li key={folder}>{folder}</li>)}</ul>
+      {found.looked.length > 0 && <>
+        <p>{`CrazyAgent looked for ${file} in these folders and didn't find it:`}</p>
+        <ul className="mono small">{found.looked.slice(0, LOOKED_MAX).map((folder) => <li key={folder}>{folder}</li>)}</ul>
+      </>}
       <p className="small secondary">{`If ${name} is installed somewhere else, choose its ${file} file. Volta, asdf and mise folders hold shims that start another program, so CrazyAgent doesn't use them.`}</p>
     </>}
     {found?.kind === "refused" && <p role="alert">{`CrazyAgent found ${homePath(found.path)} but won't use it. ${pathCopy(found.code)}`}</p>}
