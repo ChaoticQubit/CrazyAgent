@@ -402,20 +402,32 @@ export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, on
   </div>;
 }
 
-/** One harness's settings page in Settings, Harnesses: a way back to the list, the harness with
- * its status and where it was found, then its app-wide settings. Inputs: the catalog read and
- * the harness id from the route. Output: the screen. */
+/** One harness's settings page in Settings, Harnesses: the harness as the title with All
+ * harnesses at the right in every state, then where it was found with its status and its
+ * app-wide settings. Inputs: the catalog read and the harness id from the route. Output: the
+ * screen. */
 export function HarnessScreenView({ catalog, id }: { catalog: Loaded<HarnessEntry[]>; id: string }) {
-  const back = <a className="btn quiet" href={formatRoute({ name: "settings", tab: "harnesses" })}><Icon name="arrow-left" size={15} />All harnesses</a>;
-  if (catalog.kind === "loading") return <div className="stack">{back}<Skeleton shape="row" count={6} /></div>;
-  if (catalog.kind === "not_ready") return <div className="stack">{back}<NotReady what="The harness list" /></div>;
-  if (catalog.kind === "error") return <div className="stack">{back}<p className="secondary" role="alert">Couldn't read the harness list. Go back and choose Check again.</p></div>;
-  const entry = catalog.value.find((item) => item.id === id);
-  if (entry === undefined) return <div className="stack">{back}<p className="secondary">CrazyAgent doesn't know the harness {displayText(id)}.</p></div>;
+  const entry = catalog.kind === "ok" ? catalog.value.find((item) => item.id === id) : undefined;
+  const top = <div className="settings-top">
+    <div>
+      <h2>{entry ? entry.name : displayText(id)}</h2>
+      <p>What every master and agent using this harness starts with, in every project. A project can set its own in Project Settings, Harnesses.</p>
+    </div>
+    <a className="btn quiet" href={formatRoute({ name: "settings", tab: "harnesses" })}><Icon name="arrow-left" size={15} />All harnesses</a>
+  </div>;
+  if (catalog.kind === "loading") return <div className="stack">{top}<Skeleton shape="row" count={6} /></div>;
+  if (catalog.kind === "not_ready") return <div className="stack">{top}<NotReady what="The harness list" /></div>;
+  if (catalog.kind === "error") return <div className="stack">{top}<p className="secondary" role="alert">Couldn't read the harness list. Go back and choose Check again.</p></div>;
+  if (entry === undefined) return <div className="stack">{top}<p className="secondary">CrazyAgent doesn't know the harness {displayText(id)}.</p></div>;
   return <div className="stack">
-    {back}
-    <div className="hs-head"><ProviderMark provider={entry.id} name={entry.name} large /><h2>{entry.name}</h2><StatusBadge word={statusWord(entry)} /></div>
-    <HarnessDetails entry={entry} />
+    {top}
+    <div className="pj set-groups">
+      <SettingSection title="On this Mac" actions={<StatusBadge word={statusWord(entry)} />}>
+        <SettingLine label="Found at"><span className="mono">{entry.executable ? homePath(entry.executable) : "Not found on this Mac"}</span></SettingLine>
+        <SettingLine label="Runs in the background with"><span className="mono">{entry.headless}</span></SettingLine>
+        <SettingLine label="Model">{entry.model_selection ? "You can choose the model" : "Chosen inside the harness"}</SettingLine>
+      </SettingSection>
+    </div>
     <HarnessPage harness={entry.id} projectId={null} />
   </div>;
 }

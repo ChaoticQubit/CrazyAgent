@@ -1360,6 +1360,7 @@ fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsStr
                 network: AgentNetwork::Open,
                 hooks: false,
                 agent_files: Default::default(),
+                trusted: true,
             },
             kept_ports: &[],
         },
@@ -1550,6 +1551,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
                 network: AgentNetwork::Open,
                 hooks: false,
                 agent_files: Default::default(),
+                trusted: true,
             },
             kept_ports: &[],
         },
@@ -2181,6 +2183,7 @@ fn a_saved_network_change_only_matters_at_own_branch() {
         network,
         hooks: false,
         agent_files: Default::default(),
+        trusted: true,
     };
     let own = at(AgentAccess::OwnBranch, AgentNetwork::Open);
     let sandboxed = at(AgentAccess::Sandboxed, AgentNetwork::Open);
@@ -2202,6 +2205,7 @@ fn a_saved_agent_folders_change_only_matters_below_full_access() {
         network: AgentNetwork::Open,
         hooks: false,
         agent_files,
+        trusted: true,
     };
     for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
         for running in IdeAgentFiles::ALL {
@@ -2218,6 +2222,33 @@ fn a_saved_agent_folders_change_only_matters_below_full_access() {
         at(AgentAccess::Full, IdeAgentFiles::AllowAll)
             .holds(at(AgentAccess::Full, IdeAgentFiles::ReadOnly))
     );
+}
+
+/// CU-1: a server launched with VS Code workspace trust on no longer holds once the owner
+/// lowers the repository to Untrusted below Full access, nor one launched in Restricted Mode
+/// once the owner raises it, so the trust save restarts the project's IDE; at Full access,
+/// where workspace trust is never given, the level never restarts it.
+#[test]
+fn a_saved_trust_change_only_matters_below_full_access() {
+    let at = |access, trusted| IdePolicy {
+        access,
+        network: AgentNetwork::Open,
+        hooks: false,
+        agent_files: Default::default(),
+        trusted,
+    };
+    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        for running in [true, false] {
+            for saved in [true, false] {
+                assert_eq!(
+                    at(access, running).holds(at(access, saved)),
+                    running == saved,
+                    "{access:?} {running} {saved}"
+                );
+            }
+        }
+    }
+    assert!(at(AgentAccess::Full, true).holds(at(AgentAccess::Full, false)));
 }
 
 /// DEC-124: the agent folders choice the owner saved reaches the profile each launch
@@ -2593,6 +2624,61 @@ fn only_a_full_access_launch_has_workspace_trust_on() {
             .get_args()
             .any(|arg| arg == "--disable-workspace-trust")
     );
+}
+
+/// V3C-L1: below Full access an untrusted repository's IDE opens in VS Code Restricted Mode
+/// and its git shim never runs the project's hooks, even with the owner's hooks switch on,
+/// while the same policy on a reviewed repository gets workspace trust and its hooks.
+#[test]
+fn an_untrusted_repository_ide_opens_in_restricted_mode_with_its_hooks_off() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let shim = |folder: &Path, hooks: Option<&Path>| {
+        let text = fs::read_to_string(
+            settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM),
+        )
+        .unwrap();
+        let wanted = crate::ide::git::shim_text(
+            hooks,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX),
+            )),
+        )
+        .unwrap();
+        text == wanted
+    };
+    for (name, trust) in [
+        ("reviewed", crate::trust::Trust::Reviewed),
+        ("untrusted", crate::trust::Trust::Untrusted),
+    ] {
+        let id = project(name);
+        set_policy(data.path(), &id, AgentAccess::Sandboxed, true);
+        crate::trust::save(
+            &crate::landing::open(data.path()).unwrap(),
+            id.as_str(),
+            trust,
+            crate::trust::Origin::Owner,
+        )
+        .unwrap();
+        let trusted = trust == crate::trust::Trust::Reviewed;
+        let (built, folder) = built_server(&servers, &id, &root);
+        assert_eq!(
+            built
+                .get_args()
+                .any(|arg| arg == "--disable-workspace-trust"),
+            trusted,
+            "{name}"
+        );
+        assert!(
+            shim(&folder, trusted.then_some(root.as_path())),
+            "{name}: the git shim does not match the hooks rule"
+        );
+    }
 }
 
 /// Only a Full access server gets a lineage token, the one its command carries; a confined

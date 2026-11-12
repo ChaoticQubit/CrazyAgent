@@ -21,6 +21,7 @@ use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView, ToolVie
 use crate::protocol::CredentialRef;
 use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
+use crate::usage::spend::SpendSettings;
 
 const POOL_JOINS_MAX: usize = 64;
 const SUGGESTION_PROJECTS_MAX: usize = 50;
@@ -69,7 +70,15 @@ pub(in crate::tui) enum SettingsJob {
         settings: crate::scorecard::Settings,
         version: u64,
     },
+    Extras {
+        detail: bool,
+    },
     SetMoney(MoneySettings),
+    SetSpend(SpendSettings),
+    Spend {
+        account: CredentialRef,
+        confirmed: bool,
+    },
     DecideRecount(bool),
     SignIn(SignInJob),
     JoinPools {
@@ -244,7 +253,10 @@ impl std::fmt::Debug for SettingsJob {
             Self::RefreshUsage => "RefreshUsage",
             Self::Scorecard { .. } => "Scorecard",
             Self::ScorecardSet { .. } => "ScorecardSet",
+            Self::Extras { .. } => "Extras",
             Self::SetMoney(_) => "SetMoney",
+            Self::SetSpend(_) => "SetSpend",
+            Self::Spend { .. } => "Spend",
             Self::DecideRecount(_) => "DecideRecount",
             Self::SignIn(_) => "SignIn",
             Self::JoinPools { .. } => "JoinPools",
@@ -375,7 +387,10 @@ pub(in crate::tui) enum SettingsEvent {
     UsageRefreshed(Result<(), String>),
     Scorecard(Result<Box<crate::scorecard::Scorecard>, String>),
     ScorecardSaved(Result<crate::engine::owner::ScorecardSaved, String>),
+    Extras(Result<Vec<crate::engine::owner::AccountExtras>, String>),
     MoneySet(Result<(), String>),
+    SpendSet(Result<(), String>),
+    Spent(Result<(), String>),
     RecountDecided(Result<(), String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
@@ -443,7 +458,10 @@ impl SettingsEvent {
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
             SettingsJob::Scorecard { .. } => Self::Scorecard(Err(problem)),
             SettingsJob::ScorecardSet { .. } => Self::ScorecardSaved(Err(problem)),
+            SettingsJob::Extras { .. } => Self::Extras(Err(problem)),
             SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
+            SettingsJob::SetSpend(_) => Self::SpendSet(Err(problem)),
+            SettingsJob::Spend { .. } => Self::Spent(Err(problem)),
             SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
@@ -706,10 +724,37 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
+            SettingsJob::Extras { detail } => {
+                SettingsEvent::Extras(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .usage_extras(detail)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::SetMoney(settings) => {
                 SettingsEvent::MoneySet(match self.settings_controller() {
                     Ok(controller) => controller
                         .usage_set_money(settings)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::SetSpend(settings) => {
+                SettingsEvent::SpendSet(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .usage_set_spend(settings)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::Spend { account, confirmed } => {
+                SettingsEvent::Spent(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .usage_spend(account, confirmed)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),

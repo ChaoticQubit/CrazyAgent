@@ -47,6 +47,7 @@ fn ctx(width: u16, height: u16) -> Ctx {
     );
     ctx.width = width;
     ctx.height = height;
+    ctx.store.learning = Load::NotReady;
     ctx
 }
 

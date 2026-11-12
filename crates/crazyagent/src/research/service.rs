@@ -867,19 +867,29 @@ mod tests {
         assert!(!runner.reproving(), "the wait ends with the re-proof");
     }
 
-    #[test]
-    fn a_status_run_with_no_account_waits_without_a_line_while_an_account_check_of_this_engine_runs()
-     {
-        let (temp, runner, db) = engine_without_accounts(None);
+    fn fence_of_an_account_check(db: &rusqlite::Connection, phase: &str) {
         db.execute_batch(
             "CREATE TABLE owner_meta(singleton INTEGER PRIMARY KEY, schema_version INTEGER,
                runtime_state TEXT, db_instance TEXT, engine_epoch TEXT);
              INSERT INTO owner_meta VALUES(1,1,'active','instance','epoch-now');
-             CREATE TABLE native_auth_fences(profile_key TEXT PRIMARY KEY, db_instance TEXT,
-               engine_epoch TEXT);
-             INSERT INTO native_auth_fences VALUES('profile','instance','epoch-now');",
+             CREATE TABLE native_auth_operations(id TEXT PRIMARY KEY, phase TEXT);
+             CREATE TABLE native_auth_fences(profile_key TEXT PRIMARY KEY, operation_id TEXT,
+               db_instance TEXT, engine_epoch TEXT);
+             INSERT INTO native_auth_fences VALUES('profile','check','instance','epoch-now');",
         )
         .unwrap();
+        db.execute(
+            "INSERT INTO native_auth_operations VALUES('check',?1)",
+            [phase],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_status_run_with_no_account_waits_without_a_line_while_an_account_check_of_this_engine_runs()
+     {
+        let (temp, runner, db) = engine_without_accounts(None);
+        fence_of_an_account_check(&db, "checking_account");
         let project = ProjectId::new("alpha").unwrap();
         let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
         let engine = temp.path().canonicalize().unwrap().join("engine");
@@ -921,6 +931,30 @@ mod tests {
         assert_eq!(
             overview.as_deref(),
             Some(crate::project_overview::NO_ACCOUNT)
+        );
+        assert_eq!(roadmap.as_deref(), Some(crate::roadmap_status::NO_ACCOUNT));
+    }
+
+    #[test]
+    fn a_status_run_with_no_account_shows_its_line_when_the_account_check_of_this_engine_was_left_uncertain()
+     {
+        let (temp, runner, db) = engine_without_accounts(None);
+        fence_of_an_account_check(&db, "uncertain");
+        let project = ProjectId::new("alpha").unwrap();
+        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let engine = temp.path().canonicalize().unwrap().join("engine");
+        let mut upkeep = StatusUpkeep::open(&engine.join("engine.db"));
+        crate::project_overview::refresh(&db, &project).unwrap();
+        crate::roadmap_status::refresh(&db, &project).unwrap();
+        for _ in 0..STATUS_EVERY_TICKS {
+            upkeep.tick(&runner, &resolve);
+        }
+        let (_, _, _, overview) = waiting_row(&db, "project_overview", "failure");
+        let (_, _, _, roadmap) = waiting_row(&db, "roadmap_status", "problem");
+        assert_eq!(
+            overview.as_deref(),
+            Some(crate::project_overview::NO_ACCOUNT),
+            "a fence kept only for the next engine start is no running check"
         );
         assert_eq!(roadmap.as_deref(), Some(crate::roadmap_status::NO_ACCOUNT));
     }

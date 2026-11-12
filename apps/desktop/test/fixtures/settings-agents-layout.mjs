@@ -61,6 +61,18 @@ export async function settle(ms) {
   await act(async () => { await new Promise((done) => setTimeout(done, ms)); });
 }
 
+const REASON = "CrazyAgent runs agents in its sandbox and sets this itself.";
+const key = (extra) => ({ help: "", type: "bool", options: [], default: false, min: null, max: null, max_bytes: null, here: null, here_valid: true, listed: true,
+  value: false, source: "default", version: 0, access: { kind: "editable" }, ...extra });
+const HARNESS_PAGES = {
+  ok: { harness: "codex", name: "Codex", installed: "0.50.0", qualified: true, qualified_versions: ["0.50.0"], project_id: null, keys: [
+    key({ key: "hide_agent_reasoning", label: "Hide reasoning", help: "Hides the model's reasoning in the transcript." }),
+    key({ key: "sandbox_mode", label: "Sandbox mode", help: "How far commands may reach.", type: "enum", options: ["read-only", "workspace-write", "danger-full-access"],
+      default: "workspace-write", value: "danger-full-access", source: "engine", access: { kind: "locked", reason: REASON } }),
+    key({ key: "tui.notifications", label: "Notifications", type: "string", value: "on", source: "not_applied", access: { kind: "read_only", reason: "Shown in the terminal only." } }),
+  ] },
+};
+
 function failing(command, state, list) {
   if (state === "error") throw FAILURE;
   if (state === "missing") throw `Command ${command} not found`;
@@ -81,6 +93,7 @@ function answer(scene, command, args) {
   if (scene.absent === command) throw `Command ${command} not found`;
   if (scene.hold === command) return new Promise(() => {});
   if (command === "desktop_harness_catalog") return failing(command, scene.harnesses ?? "ok", HARNESSES);
+  if (command === "desktop_harness_settings") return failing(command, scene.harnessPage ?? "ok", HARNESS_PAGES);
   if (command === "desktop_setup_status") return failing(command, scene.setup ?? "ok", SETUP);
   if (command === "desktop_plugin_skills") return SKILLS;
   if (command === "desktop_memories") return savedPage(scene, args);
@@ -95,8 +108,9 @@ function answer(scene, command, args) {
 }
 
 /** Mounts the real Settings page on one tab against a fake engine. Inputs: the tab, the scene,
- * naming the harnesses, setup and memories reads, a command to refuse, leave out or never
- * answer and whether projects exist, and the theme. Output: nothing. */
+ * naming the harnesses, setup, memories and harness settings reads, the harness whose page is
+ * open, a command to refuse, leave out or never answer and whether projects exist, and the
+ * theme. Output: nothing. */
 export async function mount(tab, scene = {}, theme = "light") {
   sent = [];
   told = [];
@@ -117,7 +131,7 @@ export async function mount(tab, scene = {}, theme = "light") {
   root = createRoot(document.getElementById("mount"));
   const session = { noteResult: (result) => result, showToast: (words) => { told.push(words); }, projects: { kind: "ok", value: scene.projects === "none" ? [] : PROJECTS } };
   await act(async () => {
-    root.render(createElement(SessionContext.Provider, { value: session }, createElement(Settings, { tab })));
+    root.render(createElement(SessionContext.Provider, { value: session }, createElement(Settings, { tab, harness: scene.harness })));
   });
   await settle(60);
 }
