@@ -19,7 +19,7 @@ const OPTIONS = [
   { name: "voyage", title: "Voyage embeddings", runs: HTTPS, usable: false, reason: "Set its key in App plugins first.", sends: SENDS },
 ];
 const view = (patch = {}) => ({
-  version: 4, choice: { kind: "plugin", name: "local" }, options: OPTIONS, model: { state: "ready", size_bytes: SIZE }, progress: { embedded: 120, total: 480 }, ...patch,
+  version: 4, choice: { kind: "plugin", name: "local" }, options: OPTIONS, note: null, model: { state: "ready", size_bytes: SIZE }, progress: { embedded: 120, total: 480 }, ...patch,
 });
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const actions = new Proxy({}, { get: () => forbidden });
@@ -117,7 +117,8 @@ test("Search: each action is a direct bridge call that names the host the confir
     assert.match(file, new RegExp(`call<SearchView>\\("${command}"\\)`, "u"));
   }
   const page = readFileSync(new URL("../src/screens/settings/search.tsx", import.meta.url), "utf8");
-  assert.match(page, /saveSearch\(\{ kind: "plugin", name: option\.name \}, hostOf\(option\.runs\.url\), /u, "the confirmed host is the one the dialog named");
+  assert.match(page, /const host = hostOf\(option\.runs\.url\);/u, "the confirmed host is the one the dialog named");
+  assert.match(page, /saveSearch\(\{ kind: "plugin", name: option\.name \}, host, version\)/u);
 });
 
 test("Search (PUD-M2): the download start carries confirm_bytes, the size its confirm named", () => {
@@ -148,4 +149,18 @@ test("Search (PUD-M1): the page reads again while the model downloads or a usabl
   const page = readFileSync(new URL("../src/screens/settings/search.tsx", import.meta.url), "utf8");
   assert.match(page, /const polling = search\.kind === "ok" && searchPolling\(search\.value\);/u);
   assert.match(page, /useEffect\(\(\) => \{\n    if \(!polling\) return;\n    const timer = window\.setInterval\(reload, SEARCH_POLL_MS\);\n    return \(\) => window\.clearInterval\(timer\);\n  \}, \[polling\]\);/u);
+});
+
+test("Search (74e0d0a36): the note after a removed plugin shows above the choices, and a gone or refused chosen plugin stays listed, checked and off with its reason", () => {
+  const NOTE = "Your chosen plugin was removed, so search uses full text.";
+  const noted = text(render({ search: { kind: "ok", value: view({ choice: { kind: "full_text" }, note: NOTE }) } }));
+  assert.ok(noted.includes(NOTE), "the engine's note is shown");
+  assert.ok(noted.indexOf(NOTE) < noted.indexOf("Full text only"), "above the choices");
+  assert.ok(!text(render()).includes(NOTE));
+  const gone = { name: "harbor", title: "Harbor embeddings", runs: null, usable: false, reason: "This plugin is gone from your plugins folder.", sends: [] };
+  assert.equal(api.httpOption(gone), false, "a plugin with no runs is never an HTTP send");
+  const markup = render({ search: { kind: "ok", value: view({ choice: { kind: "plugin", name: "harbor" }, options: [...OPTIONS, gone] }) } });
+  assert.deepEqual(radios(markup).find((radio) => radio.value === "plugin:harbor"), { value: "plugin:harbor", checked: true, disabled: true });
+  assert.ok(text(markup).includes("This plugin is gone from your plugins folder."));
+  assert.ok(!text(markup).includes("Reaches undefined"));
 });
