@@ -676,10 +676,9 @@ fn decode(bytes: &[u8], dimensions: usize) -> Option<Vec<f32>> {
     if bytes.len() != dimensions * 4 {
         return None;
     }
-    let vector: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]]))
-        .collect();
+    let (fours, rest) = bytes.as_chunks::<4>();
+    assert!(rest.is_empty());
+    let vector: Vec<f32> = fours.iter().map(|four| f32::from_le_bytes(*four)).collect();
     vector
         .iter()
         .all(|value| value.is_finite())
@@ -738,6 +737,7 @@ pub(crate) fn ask_query(
 /// Embeds the queries waiting for the plugin, newest first, at most [`QUERY_ROUND_MAX`];
 /// on a failed or refused reply the round's unanswered queries are dropped, never resent.
 /// Inputs: the connection, the plugin and the embed call. Output: how many were embedded.
+#[cfg(test)]
 pub(crate) fn embed_queries(
     connection: &mut Connection,
     plugin: &Plugin,

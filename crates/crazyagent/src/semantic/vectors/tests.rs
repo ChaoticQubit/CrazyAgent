@@ -356,7 +356,8 @@ fn vectors_of_the_wrong_length_or_not_finite_are_refused_and_the_round_stops() {
     let mut db = db();
     let acme = plugin('a');
     chunk(&db, Some("alpha"), Source::Session, "one", 10);
-    let replies: [Box<dyn Fn(usize) -> Result<Vec<Vec<f32>>, EngineError>>; 4] = [
+    type Reply = Box<dyn Fn(usize) -> Result<Vec<Vec<f32>>, EngineError>>;
+    let replies: [Reply; 4] = [
         Box::new(|count| Ok(vec![vec![0.5; D - 1]; count])),
         Box::new(|count| Ok(vec![vec![f32::NAN; D]; count])),
         Box::new(|_| Ok(Vec::new())),
@@ -440,7 +441,7 @@ fn an_http_query_is_asked_once_embedded_by_the_indexer_then_read_back_with_its_t
     assert_eq!(rows, 1);
     let mut seen = Vec::new();
     assert_eq!(embed_queries(&mut db, &acme, &mut by_axis(&mut seen)), 1);
-    assert_eq!(seen, [query.clone()]);
+    assert_eq!(seen, std::slice::from_ref(&query));
     assert_eq!(cached_query(&db, &acme, &query), Some(unit(7)));
     let text: Option<String> = db
         .query_row("SELECT query FROM search_query_vectors", [], |row| {
