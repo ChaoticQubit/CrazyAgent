@@ -72,6 +72,7 @@ pub(super) struct CodexHostProcess {
     close_time: Duration,
     pid: u32,
     pending_input: Option<PendingInput>,
+    frame_max: usize,
 }
 
 struct PendingInput {
@@ -149,6 +150,7 @@ impl CodexHostProcess {
             close_time,
             pid: 0,
             pending_input: None,
+            frame_max: FRAME_BYTES_MAX,
         };
         process.await_start().await?;
         assert!(process.pid() > 1);
@@ -205,8 +207,17 @@ impl CodexHostProcess {
         }
     }
 
+    /// Bounds each frame this process takes for the harness by the owner's master frame size
+    /// limit (F39) in place of the engine wire frame. Input: the bound in bytes, from
+    /// `FRAME_BYTES_MAX` to `master_frame_limit::BYTES_MAX`. Output: none.
+    pub(super) fn limit_input(&mut self, bytes: usize) {
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&bytes));
+        assert!(self.pending_input.is_none());
+        self.frame_max = bytes;
+    }
+
     pub(super) async fn send(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
-        if bytes.is_empty() || bytes.len() > FRAME_BYTES_MAX + 1 {
+        if bytes.is_empty() || bytes.len() > self.frame_max + 1 {
             return Err(EngineError("codex_host_input_limit".into()));
         }
         if self.shared.close_stdin.load(Ordering::Acquire) {

@@ -556,6 +556,20 @@ fn choice_prompts_of_claude_code_and_codex_are_questions_and_plain_lists_are_not
 }
 
 #[test]
+fn a_typed_message_quoted_with_a_numbered_list_is_no_question_on_the_agent_screen() {
+    let typed = "\u{276f} [crazyagent msg 530] from the master: Your Claude fix is ready\r\n  > ready, quizzes of 6, 5 and 6 items) is enough. Do only this, and quickly:\r\n  > 1. Merge your worker @jobs-retry into your branch\r\n  > 2. Run uv run pytest -q -m \"not integration\"\r\n  > 3. Report the root causes in 5 lines, then end your turn\r\n\r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n\u{276f} \r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n  ? for shortcuts";
+    assert_eq!(question(typed.as_bytes()), None);
+    assert_eq!(choice(typed.as_bytes()), None);
+    let two_cursors = "Pick one?\r\n\u{276f} 1. Yes\r\n\u{276f} 2. No";
+    assert_eq!(question(two_cursors.as_bytes()), None);
+    let one_cursor = "Pick one?\r\n> 1. Yes\r\n  2. No";
+    assert_eq!(
+        question(one_cursor.as_bytes()).as_deref(),
+        Some("Pick one? | 1. Yes | 2. No")
+    );
+}
+
+#[test]
 fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
     let fixture = Fixture::new();
     let host = fixture.host();
@@ -1313,6 +1327,49 @@ fn a_work_question_alert_counts_as_unseen_but_not_as_a_pending_question() {
             unseen: 2,
             questions: 1,
         }]
+    );
+}
+
+/// F12: a work question linked into the questions log is counted there as pending, so its
+/// team alert, Normal or High, counts as a question notification and the project's flag
+/// counts the question once.
+#[test]
+fn a_linked_work_question_alert_counts_as_a_question_notification() {
+    let fixture = Fixture::new();
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    let mut alerts = Vec::new();
+    for (message, kind) in [
+        (9, NotificationKind::Question),
+        (10, NotificationKind::UrgentQuestion),
+        (11, NotificationKind::Question),
+    ] {
+        let text = format!("Ada asks you: question {message}?");
+        let alert = notify(&tx, &project(), kind, &text, message).unwrap();
+        tx.execute(
+            "INSERT INTO team_owner_alerts(source,ref,since,project,agent,notification) VALUES ('question',?3,2,?1,7,?2)",
+            params![PROJECT, alert, message],
+        )
+        .unwrap();
+        alerts.push(alert);
+    }
+    for message in [9, 10] {
+        tx.execute(
+            "INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms,kind,coord_message)
+             VALUES (?1,'agent:7','agent','Which port?','[]','pending',0,2,'text',?2)",
+            params![PROJECT, message],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    assert_eq!(alerts.len(), 3);
+    assert_eq!(
+        app(&fixture.connection).unwrap().projects,
+        [ProjectUnseen {
+            project_id: project(),
+            unseen: 3,
+            questions: 2,
+        }],
+        "the two linked alerts are question notifications, the unlinked one is not"
     );
 }
 

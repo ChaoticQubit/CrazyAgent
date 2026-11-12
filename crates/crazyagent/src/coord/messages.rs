@@ -138,6 +138,25 @@ pub fn reply(
     Ok(id)
 }
 
+/// Ends a question put to the owner that nobody answers any more (F12): the master withdrew
+/// it, or the owner's answer reached its asker another way. It becomes Expired from any
+/// open receipt, Read included, which `may_become` never allows for a message an agent
+/// read; an owner question has no reader that could still answer it. Takes the database,
+/// the message and the time in ms. Returns whether it ended; an answered, ended or other
+/// message is left alone.
+pub fn withdraw(db: &Connection, message: MessageId, now: i64) -> Result<bool, EngineError> {
+    let changed = db
+        .execute(
+            "UPDATE coord_messages SET receipt='expired', receipt_at=?2, turn=NULL
+             WHERE id=?1 AND kind='question' AND to_kind='owner'
+               AND receipt IN ('sent','delivered','typed','read')",
+            params![message, now],
+        )
+        .map_err(state)?;
+    assert!(changed <= 1);
+    Ok(changed == 1)
+}
+
 /// Lists the messages waiting for delivery to one agent, oldest first: receipt Sent.
 /// Takes the database, the agent and the most to return, capped at `PENDING_MAX`.
 /// Returns the messages.

@@ -240,7 +240,8 @@ async fn delete_everything_removes_the_projects_master_lands_and_catch_up_choice
         &engine,
         "INSERT INTO team_master_lands(project,mode) VALUES ('setup-pooled','waits'),('other','waits');
          INSERT INTO team_catch_up_main(project,mode) VALUES ('setup-pooled','off'),('other','off');
-         INSERT INTO team_reuse_idle(project,mode) VALUES ('setup-pooled','on'),('other','on');",
+         INSERT INTO team_reuse_idle(project,mode) VALUES ('setup-pooled','on'),('other','on');
+         INSERT INTO team_landing_mode(project,mode) VALUES ('setup-pooled','merge'),('other','merge');",
     );
     std::fs::remove_dir_all(&folder).unwrap();
     let response = owner
@@ -248,7 +249,12 @@ async fn delete_everything_removes_the_projects_master_lands_and_catch_up_choice
         .await
         .unwrap();
     assert_eq!(result(response), OwnerResult::Applied);
-    for table in ["team_master_lands", "team_catch_up_main", "team_reuse_idle"] {
+    for table in [
+        "team_master_lands",
+        "team_catch_up_main",
+        "team_reuse_idle",
+        "team_landing_mode",
+    ] {
         assert_eq!(
             engine.rows(&format!(
                 "SELECT count(*) FROM {table} WHERE project='setup-pooled'"

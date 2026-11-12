@@ -1,6 +1,8 @@
 use super::*;
 use crate::client_controller::OwnerController;
-use crate::coord::settings::{CoordSettings, RoleSkills, TaskStart, TerminalDisplay};
+use crate::coord::settings::{
+    CoordSettings, HeavyLane, RoleSkills, SharedResource, TaskStart, TerminalDisplay,
+};
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
@@ -167,6 +169,7 @@ fn team() -> TeamStatus {
         master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
+        landing_mode: crate::team::LandingMode::Squash,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -2575,7 +2578,7 @@ fn m_edits_the_masters_branch_and_an_empty_name_goes_back_to_the_default() {
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
     assert!(!view.typing());
     assert!(view.branch_edit.is_none());
-    assert!(view.help().contains(&("g", "Ask before merge")));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
 }
 
 #[test]
@@ -2689,8 +2692,8 @@ fn g_turns_ask_before_merge_on_and_off() {
         Some(Notice::plain("The team is still loading."))
     );
     let mut view = loaded();
-    assert!(view.help().contains(&("g", "Ask before merge")));
-    assert!(shows(&view, "Ask before merge  Off"));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
+    assert!(shows(&view, "Master accepts change sets  Itself"));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2703,13 +2706,16 @@ fn g_turns_ask_before_merge_on_and_off() {
     assert_eq!(
         view.notice,
         Some(Notice::plain(
-            "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+            "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
         ))
     );
     let mut asking = team();
     asking.ask_before_merge = true;
     reread(&mut view, asking, NOW + 10);
-    assert!(shows(&view, "Ask before merge  On"));
+    assert!(shows(
+        &view,
+        "Master accepts change sets  Only when I click or say accept all"
+    ));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2721,9 +2727,7 @@ fn g_turns_ask_before_merge_on_and_off() {
     applied(&mut view, reply);
     assert_eq!(
         view.notice,
-        Some(Notice::plain(
-            "The master now merges a finished harness without asking."
-        ))
+        Some(Notice::plain("The master now accepts change sets itself."))
     );
 }
 
@@ -3048,6 +3052,58 @@ fn reuse_idle_agents_shows_off_by_default_and_space_flips_it() {
             })
         );
         stored.reuse_idle = mode;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(row(&view).contains(words), "{}", row(&view));
+    }
+}
+
+/// The Coordination screen's last row shows the stored Landing choice, Squash by default,
+/// and Space flips it to Merge commit and back: each press sends the setting's own change
+/// and the row shows the choice (DEC-147.6).
+#[test]
+fn landing_shows_squash_by_default_and_space_flips_it_to_merge_commit() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut stored = team();
+    stored.coordination = Some(crate::team::coordination(&connection, &project()).unwrap());
+    stored.landing_mode = crate::team::landing_mode(&connection, &project()).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    for _ in 0..17 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 17);
+    let row = |view: &TeamView| find(&frame(view, 120, 40), "Landing").to_owned();
+    assert!(row(&view).contains("Squash"), "{}", row(&view));
+    let mut at = NOW;
+    for (mode, words, done) in [
+        (
+            crate::team::LandingMode::Merge,
+            "Merge commit",
+            "Landing is Merge commit: accepted changes land as a merge commit that keeps every agent commit in your history.",
+        ),
+        (
+            crate::team::LandingMode::Squash,
+            "Squash",
+            "Landing is Squash: each accepted change set lands as one commit.",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::LandingMode {
+                project_id: project(),
+                mode,
+            })
+        );
+        stored.landing_mode = mode;
         at += 60_000;
         assert_eq!(
             settled(&mut view, reply, &stored, at),
@@ -4467,7 +4523,7 @@ fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
         ("p", "Stop teammate"),
         ("z", "Stop agent"),
         ("m", "Master's branch"),
-        ("g", "Ask before merge"),
+        ("g", "Master accepts change sets"),
         ("T", "Token budget"),
     ] {
         assert!(help.contains(&pair), "{pair:?} is missing: {help:?}");
@@ -4613,5 +4669,146 @@ fn every_harness_kind_says_what_its_delivery_choices_do() {
             HarnessKind::Rcli => "rcli runs no team agents, so no message goes to one here.",
         };
         assert!(said.contains(native), "{kind:?}: {said}");
+    }
+}
+
+/// Opens the coordination editor of a project with no saved settings, read from a real
+/// engine database, with the given heavy lane, and moves to one row. Takes the row and the
+/// lane. Returns the view, its stored team read and the coordination view it was built from.
+fn coordination_row(
+    at: usize,
+    lane: crate::coord::lane::LaneView,
+) -> (TeamView, TeamStatus, crate::team::CoordinationView) {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let mut coordination = crate::team::coordination(&connection, &project()).unwrap();
+    coordination.lane = lane;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut stored = team();
+    stored.coordination = Some(coordination.clone());
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    for _ in 0..at {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, at);
+    (view, stored, coordination)
+}
+
+/// F28: the Heavy lane row shows 1 at a time by default with the lane's running and waiting
+/// counts, and Space walks every option, 2, 3 and 4 at a time, No limit and back to 1: each
+/// press sends the whole settings with the next option, the engine's answer names it and the
+/// row shows the stored one.
+#[test]
+fn the_heavy_lane_row_shows_one_at_a_time_and_space_walks_every_option() {
+    let at = COORD_ROWS
+        .iter()
+        .position(|row| *row == CoordRow::HeavyLane)
+        .unwrap();
+    let (mut view, mut stored, coordination) = coordination_row(at, Default::default());
+    let lane = |view: &TeamView| find(&frame(view, 120, 60), "Heavy lane").to_owned();
+    assert!(lane(&view).contains("1 at a time"), "{}", lane(&view));
+    assert!(
+        lane(&view).contains("0 running, 0 waiting"),
+        "{}",
+        lane(&view)
+    );
+    let mut now = NOW;
+    let mut expected = coordination.settings.clone();
+    for next in [
+        HeavyLane::Two,
+        HeavyLane::Three,
+        HeavyLane::Four,
+        HeavyLane::NoLimit,
+        HeavyLane::One,
+    ] {
+        expected.heavy_lane = next;
+        let reply = view.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::CoordSettings {
+                project_id: project(),
+                settings: expected.clone(),
+            })
+        );
+        stored.coordination.as_mut().unwrap().settings = expected.clone();
+        now += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, now),
+            Some(Notice::plain(format!(
+                "Heavy lane: {}.",
+                next.words().to_lowercase()
+            )))
+        );
+        assert!(lane(&view).contains(next.words()), "{}", lane(&view));
+    }
+}
+
+/// F28: the Heavy lane row counts the commands the engine's lane view holds.
+#[test]
+fn the_heavy_lane_row_counts_running_and_waiting_commands() {
+    use crate::coord::lane::LaneEntry;
+    let at = COORD_ROWS
+        .iter()
+        .position(|row| *row == CoordRow::HeavyLane)
+        .unwrap();
+    let entry = |agent: i64| LaneEntry {
+        agent,
+        label: "make".into(),
+        uses: vec![],
+        since_ms: NOW,
+    };
+    let lane = crate::coord::lane::LaneView {
+        running: vec![entry(1)],
+        waiting: vec![entry(2), entry(3)],
+    };
+    let (view, _, _) = coordination_row(at, lane);
+    let row = find(&frame(&view, 120, 60), "Heavy lane").to_owned();
+    assert!(row.contains("1 running, 2 waiting"), "{row}");
+}
+
+/// F28: the Shared resources row shows None by default; Enter opens its input, a typed
+/// list of name and name:slots entries is sent as the whole settings with those resources,
+/// one slot where none is typed, and slots that are not a number or a name the engine
+/// refuses send nothing.
+#[test]
+fn the_shared_resources_row_takes_names_and_slots() {
+    let at = COORD_ROWS
+        .iter()
+        .position(|row| *row == CoordRow::Resources)
+        .unwrap();
+    let (mut view, _, coordination) = coordination_row(at, Default::default());
+    assert!(find(&frame(&view, 120, 60), "Shared resources").contains("None"));
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    typed(&mut view, "ollama:1, postgres:2 redis");
+    let mut expected = coordination.settings.clone();
+    expected.shared_resources = vec![
+        SharedResource {
+            name: "ollama".into(),
+            slots: 1,
+        },
+        SharedResource {
+            name: "postgres".into(),
+            slots: 2,
+        },
+        SharedResource {
+            name: "redis".into(),
+            slots: 1,
+        },
+    ];
+    assert_eq!(
+        view.key(press(KeyCode::Enter)),
+        TeamReply::Change(TeamAction::CoordSettings {
+            project_id: project(),
+            settings: expected,
+        })
+    );
+    for bad in ["ollama:two", "Ollama", "ollama:0", "ollama:9"] {
+        let (mut view, _, _) = coordination_row(at, Default::default());
+        assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+        typed(&mut view, bad);
+        assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled, "{bad}");
     }
 }

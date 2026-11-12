@@ -224,6 +224,10 @@ pub enum Command {
         settings: crate::master_time_limit::MasterTimeSettings,
     },
     #[serde(skip_deserializing)]
+    OwnerMasterFrames {
+        settings: crate::master_frame_limit::MasterFrameSettings,
+    },
+    #[serde(skip_deserializing)]
     OwnerMemory {
         action: crate::memory::library::LibraryAction,
     },

@@ -442,3 +442,284 @@ fn each_inbox_question_names_whom_its_asker_meant_it_for() {
         ]
     );
 }
+
+impl Engine {
+    /// Registers the project the way onboarding does, so its owner questions can be logged
+    /// in the questions log. Output: nothing.
+    fn register(&self) {
+        let folder = self._dir.path().join("project");
+        std::fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        crate::ide::workspace::tests::add_project(&self.connection, self.project.as_str(), &folder);
+    }
+
+    /// The project's logged questions linked to a team message: id, asker, question,
+    /// context, status and closer, oldest first.
+    fn linked(&self) -> Vec<crate::questions::Question> {
+        let page = crate::questions::page(&self.connection, &self.project, None).unwrap();
+        let ids: Vec<i64> = self
+            .connection
+            .prepare("SELECT id FROM questions_log WHERE coord_message IS NOT NULL ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let mut found: Vec<_> = page
+            .items
+            .into_iter()
+            .filter(|question| ids.contains(&(question.id as i64)))
+            .collect();
+        found.sort_by_key(|question| question.id);
+        found
+    }
+
+    fn receipt(&self, message: i64) -> String {
+        self.connection
+            .query_row(
+                "SELECT receipt FROM coord_messages WHERE id=?1",
+                [message],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The owner's team replies to one message, oldest first.
+    fn replies(&self, message: i64) -> Vec<String> {
+        self.connection
+            .prepare("SELECT body FROM coord_messages WHERE reply_to=?1 AND kind='reply' AND from_kind='owner' ORDER BY id")
+            .unwrap()
+            .query_map([message], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn alert_settled(&self, message: i64) -> bool {
+        self.connection
+            .query_row(
+                "SELECT settled IS NOT NULL FROM team_owner_alerts WHERE source='question' AND ref=?1",
+                [message],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+}
+
+/// F12: a question an agent put to the owner through the team is logged once in the
+/// questions log under its asker, with its assumption as context; the team inbox stops
+/// listing it, and its only notification is the team alert's.
+#[test]
+fn a_team_question_to_the_owner_is_logged_once_where_every_question_waits() {
+    let mut engine = Engine::new();
+    engine.register();
+    let asker = engine.agent("working");
+    let message = engine.ask(
+        asker,
+        Severity::High,
+        "Ship on Friday?\nAssumption: we ship Monday.",
+    );
+    engine.tick(NOW);
+    engine.tick(NOW + 1);
+    let linked = engine.linked();
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].asker, format!("agent:{asker}"));
+    assert_eq!(linked[0].question, "Ship on Friday?");
+    assert_eq!(linked[0].kind, crate::questions::QuestionKind::Text);
+    assert!(
+        linked[0]
+            .context
+            .as_deref()
+            .is_some_and(|context| context.contains("we ship Monday.")),
+        "{:?}",
+        linked[0].context
+    );
+    assert!(
+        engine.inbox().questions.is_empty(),
+        "the owner sees it once"
+    );
+    assert_eq!(kinds(&engine.notifications()), ["urgent_question"]);
+    assert_eq!(engine.receipt(message), "sent");
+    let master = engine.agent_in(&engine.project.clone(), "master", "working");
+    let own = crate::coord::send(
+        &engine.connection,
+        NewMessage {
+            project: engine.project.clone(),
+            from: Party::Agent(master),
+            to: Party::Owner,
+            kind: MessageKind::Question,
+            question: Some((QuestionFor::Me, Severity::Normal)),
+            work: None,
+            reply_to: None,
+            body: "Which region?".into(),
+            idempotency_key: None,
+        },
+        NOW,
+    )
+    .unwrap();
+    engine.tick(NOW + 2);
+    let linked = engine.linked();
+    assert_eq!(linked.len(), 2);
+    assert_eq!(
+        linked[1].asker,
+        format!("master:{master}"),
+        "the master's own, by role"
+    );
+    assert_eq!(engine.receipt(own), "sent");
+}
+
+/// F12, CM#1143: a team question that was already open and alerted before this engine
+/// (no project row then) is logged on a later tick.
+#[test]
+fn an_open_team_question_from_before_is_logged_on_a_later_tick() {
+    let mut engine = Engine::new();
+    let asker = engine.agent("working");
+    engine.ask(asker, Severity::High, "Old question?");
+    engine.tick(NOW);
+    assert!(engine.linked().is_empty());
+    engine.register();
+    engine.tick(NOW + 1);
+    assert_eq!(engine.linked().len(), 1);
+}
+
+/// F12: the owner's answer in the Questions view reaches the asker once, as one team reply
+/// from the owner, and the next tick lifts the pause and settles the alert; no chat message
+/// and no typed note repeat it.
+#[test]
+fn an_answer_in_the_questions_view_replies_once_through_the_team() {
+    let mut engine = Engine::new();
+    engine.register();
+    let asker = engine.agent("working");
+    let message = engine.ask(asker, Severity::High, "Ship on Friday?");
+    engine.tick(NOW);
+    assert_eq!(
+        engine.waiting(asker).map(|(kind, _)| kind),
+        Some(Waiting::Question)
+    );
+    let id = engine.linked()[0].id;
+    let answer = crate::questions::Answer {
+        picks: Vec::new(),
+        comment: Some("Friday is fine.".into()),
+    };
+    assert_eq!(
+        crate::questions::answer(&engine.connection, id, 0, &answer).unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    assert_eq!(engine.replies(message), ["Friday is fine."]);
+    assert_eq!(engine.receipt(message), "replied");
+    engine.tick(NOW + 1);
+    assert!(engine.alert_settled(message));
+    assert_eq!(engine.waiting(asker), None);
+    assert!(
+        crate::questions::agent_notes(&engine.connection, &engine.project, asker)
+            .unwrap()
+            .is_empty()
+    );
+    let chat: i64 = engine
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_messages WHERE project=?1",
+            [engine.project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(chat, 0);
+    assert_eq!(engine.replies(message).len(), 1);
+}
+
+/// F12: an answer given in the team inbox settles the linked question on the next tick with
+/// the owner's words and tells nobody again.
+#[test]
+fn an_answer_in_the_team_inbox_settles_the_linked_question() {
+    let mut engine = Engine::new();
+    engine.register();
+    let asker = engine.agent("working");
+    let message = engine.ask(asker, Severity::Normal, "Which region?");
+    engine.tick(NOW);
+    assert_eq!(engine.answer(message, "EU", NOW + 1), Outcome::Applied);
+    engine.tick(NOW + 2);
+    let linked = engine.linked();
+    assert_eq!(linked[0].status, crate::questions::QuestionStatus::Answered);
+    assert_eq!(linked[0].answer.as_deref(), Some("EU"));
+    assert_eq!(engine.replies(message), ["EU"]);
+    assert!(
+        crate::questions::agent_notes(&engine.connection, &engine.project, asker)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// F12: dismissing a linked question tells its asker once through the team, and a master
+/// withdrawing one ends its team message from any open receipt, Read included, so the
+/// alert settles and the asker hears it once as a typed note.
+#[test]
+fn dismissed_and_withdrawn_team_questions_close_both_sides() {
+    let mut engine = Engine::new();
+    engine.register();
+    let asker = engine.agent("working");
+    let master = engine.agent_in(&engine.project.clone(), "master", "working");
+    let dismissed = engine.ask(asker, Severity::Normal, "Rename the repo?");
+    let withdrawn = engine.ask(asker, Severity::Normal, "Which region?");
+    engine.tick(NOW);
+    crate::coord::mark(&engine.connection, withdrawn, Receipt::Read, NOW + 1).unwrap();
+    let linked = engine.linked();
+    assert_eq!(
+        crate::questions::dismiss(&engine.connection, linked[0].id, 0).unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    assert_eq!(
+        crate::questions::withdraw(
+            &engine.connection,
+            &engine.project,
+            &crate::questions::Asker::Master(master),
+            linked[1].id,
+            0
+        )
+        .unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    assert_eq!(engine.replies(dismissed).len(), 1);
+    assert_eq!(engine.receipt(dismissed), "replied");
+    assert!(engine.replies(withdrawn).is_empty());
+    assert_eq!(engine.receipt(withdrawn), "expired");
+    engine.tick(NOW + 2);
+    assert!(engine.alert_settled(dismissed));
+    assert!(engine.alert_settled(withdrawn));
+    let notes = crate::questions::agent_notes(&engine.connection, &engine.project, asker).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].text.starts_with("The master withdrew"),
+        "{}",
+        notes[0].text
+    );
+    let closed = engine.linked();
+    assert_eq!(
+        closed[1].closed_by,
+        Some(crate::questions::ClosedBy::Master)
+    );
+}
+
+/// F12: an owner answer to a linked team question whose team message ended before the tick
+/// noticed is not lost: it reaches the asker once the way an unlinked answer does.
+#[test]
+fn an_answer_after_the_team_message_ended_still_reaches_the_asker_once() {
+    let mut engine = Engine::new();
+    engine.register();
+    let asker = engine.agent("working");
+    let asked = engine.ask(asker, Severity::Normal, "Rename the repo?");
+    engine.tick(NOW);
+    let linked = engine.linked();
+    assert_eq!(linked.len(), 1);
+    assert!(crate::coord::withdraw(&engine.connection, asked, NOW + 1).unwrap());
+    assert_eq!(
+        crate::questions::dismiss(&engine.connection, linked[0].id, 0).unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    assert!(engine.replies(asked).is_empty());
+    let notes = crate::questions::agent_notes(&engine.connection, &engine.project, asker).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].text.starts_with("The owner dismissed"),
+        "{}",
+        notes[0].text
+    );
+}

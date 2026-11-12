@@ -27,6 +27,7 @@ const QUESTION: &str = "question";
 const WAITING: &str = "waiting";
 const OWNER: &str = "owner";
 const AGENT: &str = "agent";
+const REASK_DUE: &str = "FROM questions_log WHERE reask=1 AND status='pending'";
 const OPEN: [Receipt; 4] = [
     Receipt::Sent,
     Receipt::Delivered,
@@ -104,7 +105,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             );
             CREATE INDEX IF NOT EXISTS team_owner_alerts_paused ON team_owner_alerts(agent, paused);",
         )
-        .map_err(error)
+        .map_err(error)?;
+    crate::questions::initialize(connection)
 }
 
 /// Reads one project's Questions inbox for the owner, bounded to one owner reply: texts are
@@ -115,7 +117,8 @@ pub fn inbox(connection: &Connection, project: &ProjectId) -> Result<Inbox, Engi
     let open = open_receipts();
     let filter = format!(
         "FROM coord_messages WHERE project=?1 AND kind='{}' AND to_kind='{OWNER}'
-           AND from_kind='{AGENT}' AND from_agent IS NOT NULL AND receipt IN ({open})",
+           AND from_kind='{AGENT}' AND from_agent IS NOT NULL AND receipt IN ({open})
+           AND NOT EXISTS (SELECT 1 FROM questions_log q WHERE q.coord_message=coord_messages.id)",
         MessageKind::Question.as_str()
     );
     let total: i64 = connection
@@ -236,11 +239,15 @@ pub fn tick(connection: &mut Connection, now: i64) -> Result<(), EngineError> {
     let due: bool = connection
         .query_row(
             &format!(
-                "SELECT EXISTS (SELECT 1 {}) OR EXISTS (SELECT 1 {}) OR EXISTS (SELECT 1 {}) OR EXISTS (SELECT 1 {})",
+                "SELECT EXISTS (SELECT 1 {}) OR EXISTS (SELECT 1 {}) OR EXISTS (SELECT 1 {}) OR EXISTS (SELECT 1 {})
+                 OR EXISTS (SELECT 1 {}) OR EXISTS (SELECT 1 {}) OR EXISTS (SELECT 1 {})",
                 new_questions(),
                 new_waits(),
                 ended_questions(),
-                ended_waits()
+                ended_waits(),
+                unlinked_questions(),
+                ended_links(),
+                REASK_DUE
             ),
             [],
             |row| row.get(0),
@@ -253,9 +260,100 @@ pub fn tick(connection: &mut Connection, now: i64) -> Result<(), EngineError> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(error)?;
     alert_questions(&tx, now)?;
+    let mut changed = link_questions(&tx)?;
     alert_waits(&tx, now)?;
     settle(&tx, now)?;
-    tx.commit().map_err(error)
+    changed.extend(settle_links(&tx)?);
+    crate::questions::send_reask_notes(&tx)?;
+    tx.commit().map_err(error)?;
+    changed.sort_unstable_by(|one, other| one.as_str().cmp(other.as_str()));
+    changed.dedup();
+    for project in &changed {
+        crate::questions::refresh_page(&*connection, project);
+    }
+    Ok(())
+}
+
+/// Links each open question an agent put to the owner through the team into the questions
+/// log (F12), at most `ALERTS_PER_TICK_MAX` a tick: only one whose alert is on record and
+/// open, so its end always reaches `settle_links`, in a project with room. The asker is
+/// the master or a sub-agent by its role. Takes the tick's transaction. Returns the
+/// projects whose questions page changed.
+fn link_questions(tx: &Transaction<'_>) -> Result<Vec<ProjectId>, EngineError> {
+    let rows: Vec<(i64, String, i64, String)> = tx
+        .prepare(&format!(
+            "SELECT m.id, m.project, m.from_agent, m.body {} ORDER BY m.id LIMIT {ALERTS_PER_TICK_MAX}",
+            unlinked_questions()
+        ))
+        .map_err(error)?
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= ALERTS_PER_TICK_MAX);
+    let mut changed = Vec::with_capacity(rows.len());
+    for (message, project, agent, body) in rows {
+        let project = ProjectId::new(project).map_err(|_| failure("coord_project_invalid"))?;
+        let role: Option<String> = tx
+            .query_row(
+                "SELECT role FROM team_agents WHERE id=?1 AND project=?2",
+                params![agent, project.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        let master = matches!(
+            role.as_deref().and_then(AgentRole::parse),
+            Some(AgentRole::Master)
+        );
+        let asker = if master {
+            crate::questions::Asker::Master(agent)
+        } else {
+            crate::questions::Asker::Agent(agent)
+        };
+        if crate::questions::link_coord(tx, &project, &asker, &body, message)?.is_some() {
+            changed.push(project);
+        }
+    }
+    Ok(changed)
+}
+
+/// Settles each pending linked question whose team message ended or is gone (F12), at most
+/// `ALERTS_PER_TICK_MAX` a tick: answered with the owner's latest team reply to it, else
+/// dismissed. Takes the tick's transaction. Returns the projects whose page changed.
+fn settle_links(tx: &Transaction<'_>) -> Result<Vec<ProjectId>, EngineError> {
+    let messages: Vec<i64> = tx
+        .prepare(&format!(
+            "SELECT q.coord_message {} ORDER BY q.id LIMIT {ALERTS_PER_TICK_MAX}",
+            ended_links()
+        ))
+        .map_err(error)?
+        .query_map([], |row| row.get(0))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(messages.len() <= ALERTS_PER_TICK_MAX);
+    let mut changed = Vec::with_capacity(messages.len());
+    for message in messages {
+        let reply: Option<String> = tx
+            .query_row(
+                &format!(
+                    "SELECT body FROM coord_messages WHERE reply_to=?1 AND kind='{}' AND from_kind='{OWNER}'
+                     ORDER BY id DESC LIMIT 1",
+                    MessageKind::Reply.as_str()
+                ),
+                [message],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        if let Some(project) = crate::questions::settle_linked(tx, message, reply.as_deref())? {
+            changed.push(project);
+        }
+    }
+    Ok(changed)
 }
 
 /// Splits a question's body into the question and what the asker assumes until the owner
@@ -313,6 +411,27 @@ fn ended_questions() -> String {
     format!(
         "FROM team_owner_alerts a WHERE a.source='{QUESTION}' AND a.settled IS NULL
            AND NOT EXISTS (SELECT 1 FROM coord_messages m WHERE m.id=a.ref AND m.receipt IN ({}))",
+        open_receipts()
+    )
+}
+
+fn unlinked_questions() -> String {
+    format!(
+        "FROM coord_messages m WHERE m.kind='{}' AND m.to_kind='{OWNER}' AND m.from_kind='{AGENT}'
+           AND m.from_agent IS NOT NULL AND m.receipt IN ({})
+           AND EXISTS (SELECT 1 FROM team_owner_alerts a WHERE a.source='{QUESTION}' AND a.ref=m.id AND a.settled IS NULL)
+           AND NOT EXISTS (SELECT 1 FROM questions_log q WHERE q.coord_message=m.id)
+           AND (SELECT COUNT(*) FROM questions_log q WHERE q.project=m.project AND q.status='pending') < {}",
+        MessageKind::Question.as_str(),
+        open_receipts(),
+        crate::questions::PENDING_PER_PROJECT_MAX
+    )
+}
+
+fn ended_links() -> String {
+    format!(
+        "FROM questions_log q WHERE q.status='pending' AND q.coord_message IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM coord_messages m WHERE m.id=q.coord_message AND m.receipt IN ({}))",
         open_receipts()
     )
 }

@@ -516,6 +516,7 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
         connection.account_ref.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -574,6 +575,20 @@ async fn stand_in_master_under(
     unconfined: bool,
     clock: Option<Duration>,
 ) -> ClaudeHost {
+    let frames = crate::master_frame_limit::FrameSize::default();
+    stand_in_master_framed(fixture, body, unconfined, clock, frames).await
+}
+
+/// Starts a stand-in Claude Code master host running `body` under a wall clock and a
+/// master frame size limit. Takes the fixture, the script body, the access, the clock and
+/// the frame size. Returns the host.
+async fn stand_in_master_framed(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    body: &str,
+    unconfined: bool,
+    clock: Option<Duration>,
+    frames: crate::master_frame_limit::FrameSize,
+) -> ClaudeHost {
     let profile = fixture.lease("claude-group-turn", 1).unwrap();
     let home = profile.profile_path().unwrap();
     let harness = fixture.stand_in("claude", body);
@@ -599,6 +614,7 @@ async fn stand_in_master_under(
         fixture.connection.account_ref.clone(),
         clock,
         ResourceBudget::unit(),
+        frames,
     )
     .await
     .unwrap()
@@ -951,7 +967,8 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
                 drop.to_str().unwrap(),
                 drop.with_file_name(crate::team::tool::MAILBOX_FOLDER)
                     .to_str()
-                    .unwrap()
+                    .unwrap(),
+                "wake"
             ],
         }}})
     );
@@ -1091,7 +1108,7 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
         changed
     };
     let widened = serde_json::json!({"mcpServers": {
-        "crazyagent-team": {"type": "stdio", "command": engine, "args": ["team-mcp", drop, drop.with_file_name(crate::team::tool::MAILBOX_FOLDER)]},
+        "crazyagent-team": {"type": "stdio", "command": engine, "args": ["team-mcp", drop, drop.with_file_name(crate::team::tool::MAILBOX_FOLDER), "wake"]},
         "extra": {"type": "stdio", "command": "/bin/sh", "args": []},
     }})
     .to_string();
@@ -1241,6 +1258,7 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
         fixture.connection.account_ref.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -1332,6 +1350,7 @@ async fn held_turn(
         fixture.connection.account_ref.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -1663,6 +1682,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
         fixture.connection.account_ref.clone(),
         Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -1895,6 +1915,7 @@ async fn a_claude_master_turn_reads_a_tool_result_past_a_mebibyte_within_its_all
             output_bytes: 64 * 1024 * 1024,
             ..ResourceBudget::unit()
         },
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -1982,4 +2003,58 @@ async fn a_claude_master_with_no_clock_outlasts_the_quiet_turn_a_clock_ends() {
         took >= Duration::from_secs(5),
         "the turn ran whole: {took:?}"
     );
+}
+
+/// A stand-in Claude Code that reads a turn and replies with the byte length of the turn
+/// line it read.
+const FRAME_SIZE_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-said","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"%s"}]}}\n' "${#turn}"
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A Claude master host takes a turn as large as the owner's master frame size limit
+/// allows (F39): a prompt close to the chosen limit reaches the harness whole, past the
+/// 64 KiB engine wire size under 256 KiB and 1 MiB, and a prompt past the limit is
+/// refused with `claude_host_input_limit` before anything is written.
+#[tokio::test]
+async fn a_claude_master_takes_a_turn_up_to_its_frame_size_limit() {
+    use crate::adapters::events::EventKind;
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::master_frame_limit::FrameSize;
+
+    for limit in FrameSize::ALL {
+        let mut fixture = MasterFixture::new("claude");
+        let clock = Some(Duration::from_secs(60));
+        let mut claude =
+            stand_in_master_framed(&mut fixture, FRAME_SIZE_HARNESS, false, clock, limit).await;
+        let over = "x".repeat(limit.bytes() + 1);
+        let refused = claude
+            .start_turn(RequestId::new("claude-frame-over").unwrap(), &over)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "claude_host_input_limit");
+        let text = "x".repeat(limit.bytes() - 1024);
+        claude
+            .start_turn(RequestId::new("claude-frame-turn").unwrap(), &text)
+            .await
+            .unwrap();
+        let mut said = Vec::new();
+        loop {
+            match claude.next_event().await.unwrap().kind {
+                EventKind::AssistantText { text, .. } => said.push(text),
+                EventKind::TurnFinished { .. } => break,
+                _ => {}
+            }
+        }
+        let line: usize = said.concat().parse().unwrap();
+        assert!(
+            line > limit.bytes() - 1024 && line < limit.bytes(),
+            "{line}"
+        );
+        let _ = claude.close().await;
+    }
 }

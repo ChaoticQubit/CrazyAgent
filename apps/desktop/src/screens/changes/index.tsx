@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
+import { acceptChange, changesRefusal, commitOwnerFiles, discardChange, loadChangeDiff, loadOwnerDirty, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
 import type { ChangeDiff, ChangeSet, TargetBranches } from "../../api-changes";
 import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, movedOn, outcomeNote, regeneratedNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, committedFirstNote, conflictNote, diffText, fileLine, fileMarks, landingNote, lastPageSeen, movedNote, movedOn, outcomeNote, regeneratedNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
 import { useChangeList } from "./poll";
 import "./changes.css";
 
-type Asking = { kind: "accept" | "discard"; set: ChangeSet } | null;
+type CommitFirst = { kind: "commit"; set: ChangeSet; files: string[]; untracked: string[]; message: string; target: string | null };
+type Asking = { kind: "accept" | "discard"; set: ChangeSet } | CommitFirst | null;
 
 /** Shows diff text as plain text in a preformatted block: markup stays text and control
  * characters show as escapes. On the last page it calls `onEnd` once the end of the text
@@ -77,6 +78,37 @@ export function AcceptDialog({ set, pending, onCancel, onAccept }: {
   </Dialog>;
 }
 
+/** The "commit these files first" dialog (F21): lists the tracked files whose uncommitted
+ * changes are in the Accept's way, to commit only those, as staged where staged, before the
+ * Accept runs again, and apart from them the untracked files to move or delete, never
+ * committed. Inputs: both lists, whether it runs, and the handlers. Output: the dialog. */
+export function CommitFirstDialog({ files, untracked, pending, onCancel, onCommit }: {
+  files: string[];
+  untracked: string[];
+  pending: boolean;
+  onCancel: () => void;
+  onCommit: (message: string) => void;
+}) {
+  const [text, setText] = useState("Save my changes before accepting");
+  const id = useId();
+  const message = commitMessage(text);
+  const committing = files.length > 0;
+  return <Dialog open title={committing ? "Commit your files first?" : "Move these files first"} onClose={onCancel} busy={pending}
+    footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
+      {committing && <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onCommit(message); }}>Commit these files first</Button>}</>}>
+    {committing && <>
+      <p>These files in your project folder have changes that are not committed, and they are in the way of these changes. Commit only these files, then the changes are accepted. A file you staged is committed as you staged it. Nothing else in your folder is committed.</p>
+      <ul className="pj-rows" aria-label="Files in the way">{files.map((file) => <li key={file}>{displayText(file)}</li>)}</ul>
+      <TextArea id={id} label="Commit message for your files" value={text} onValue={setText} rows={3}
+        error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to commit." : undefined} />
+    </>}
+    {untracked.length > 0 && <>
+      <p>These files are not tracked by Git and sit where these changes add files. CrazyAgent never commits them. Move or delete them, then accept again.</p>
+      <ul className="pj-rows" aria-label="Untracked files in the way">{untracked.map((file) => <li key={file}>{displayText(file)}</li>)}</ul>
+    </>}
+  </Dialog>;
+}
+
 function refusalOf(failure: Failure): string {
   return failure.kind === "error" ? changesRefusal({ code: failure.code, cause: failure.cause }) : "";
 }
@@ -112,7 +144,7 @@ export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, lo
   }
   const allowed = actions(set, now);
   const settled = reviewed(carried);
-  const notes = [movedNote(carried), conflictNote(set), regeneratedNote(set), checkedNote(set), outcomeNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
+  const notes = [movedNote(carried), conflictNote(set), regeneratedNote(set), checkedNote(set), outcomeNote(set), landingNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
   const head = carried.head;
   const diff = read?.id === set.id && read.head === head && read.page === page ? read.result : undefined;
   useEffect(() => {
@@ -201,7 +233,28 @@ export function ChangesTab({ data }: { data: ProjectData }) {
 
   async function accept(set: ChangeSet, message: string, target: string | null) {
     setBusy(true);
-    await settle(set, await acceptChange(set.id, set.head, message, target), acceptNote);
+    const result = await acceptChange(set.id, set.head, message, target);
+    if (result.kind === "error" && result.code === "changes_owner_dirty") {
+      const dirty = await loadOwnerDirty(set.id, target);
+      if (dirty.kind === "ok" && dirty.value.files.length + dirty.value.untracked.length > 0) {
+        setBusy(false);
+        setNote(null);
+        setAsking({ kind: "commit", set, files: dirty.value.files, untracked: dirty.value.untracked, message, target });
+        return;
+      }
+    }
+    await settle(set, result, acceptNote);
+  }
+
+  async function commitFirst(asked: CommitFirst, commit: string) {
+    setBusy(true);
+    const made = await commitOwnerFiles(asked.set.id, asked.files, commit, asked.target);
+    if (made.kind !== "ok") {
+      await settle(asked.set, made, () => null);
+      return;
+    }
+    data.notify(committedFirstNote(made.value[0], made.value[1]));
+    await accept(asked.set, asked.message, asked.target);
   }
 
   async function discard(set: ChangeSet) {
@@ -235,6 +288,8 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     </div>}
     {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
       onCancel={() => setAsking(null)} onAccept={(message, target) => void accept(asking.set, message, target)} />}
+    {asking?.kind === "commit" && <CommitFirstDialog key={`${asking.set.id}:${asking.set.head}`} files={asking.files} untracked={asking.untracked} pending={busy}
+      onCancel={() => setAsking(null)} onCommit={(commit) => void commitFirst(asking, commit)} />}
     <ConfirmDialog open={asking?.kind === "discard"} pending={busy} title="Discard these changes?" confirmLabel="Discard" cancelLabel="Keep reviewing"
       onCancel={() => setAsking(null)} onConfirm={() => { if (asking) void discard(asking.set); }}>
       The agent's working copy goes back to your branch. You can restore these changes for 7 days.

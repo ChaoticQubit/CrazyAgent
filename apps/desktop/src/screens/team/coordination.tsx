@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, setTerminalsPerWindow, type Result, type SkillView } from "../../api";
 import { loadTeamStatus } from "../../api-projects";
 import { BARE_NO_HOOKS, OVERLAP_CHOICES } from "../../engine-client";
-import type { TerminalDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, IntentReceipt, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
+import type { TerminalDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, HeavyLane, IntentReceipt, LaneEntry, LaneView, Nudges, Overlaps, QuestionsTo, SharedResource, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
 import { sameJson, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select, isMac } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -30,7 +30,23 @@ export const COORD_DEFAULTS: CoordSettings = {
   role_skills: { master: null, lead: null, worker: null },
   terminal_display: "classic",
   task_start: "on",
+  heavy_lane: "one",
+  shared_resources: [],
 };
+
+export const SHARED_RESOURCES_MAX = 16;
+export const RESOURCE_SLOTS_MAX = 8;
+const RESOURCE_NAME = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+const RESOURCE_TEXT_MAX = SHARED_RESOURCES_MAX * 40;
+
+/** The Heavy lane choices in order, 1 at a time first as the default, in the TUI's words. */
+export const HEAVY_LANE_OPTIONS: { value: HeavyLane; label: string }[] = [
+  { value: "one", label: "1 at a time" },
+  { value: "two", label: "2 at a time" },
+  { value: "three", label: "3 at a time" },
+  { value: "four", label: "4 at a time" },
+  { value: "no_limit", label: "No limit" },
+];
 
 const ROLES: { role: SkillRole; label: string; about: string }[] = [
   { role: "master", label: "Master", about: "The project's master agent." },
@@ -193,7 +209,40 @@ export function coordination(status: Pick<TeamStatus, "coordination">): Coordina
   const view = status.coordination;
   const harnesses = COORD_HARNESSES.map((harness) => view?.harnesses.find((row) => row.harness === harness)
     ?? { harness, mode: "app_spawned" as const, delivery: "auto" as const, native: NATIVE_UNAVAILABLE[harness] === null });
-  return { settings: view?.settings ?? COORD_DEFAULTS, harnesses };
+  return { settings: view ? { ...COORD_DEFAULTS, ...view.settings } : COORD_DEFAULTS, harnesses, lane: view?.lane ?? { running: [], waiting: [] } };
+}
+
+/** Reads the shared resources the owner typed with the engine's rule (F28): `name` or
+ * `name:slots` entries split on commas, spaces or lines, one slot when none is given, up to
+ * 16 names of lowercase letters, digits, ., _ or -, each serving 1 to 8 commands, none twice.
+ * Input: the text. Output: the resources in order, or the reason. */
+export function sharedResourcesInput(text: string): { kind: "ok"; resources: SharedResource[] } | { kind: "invalid"; reason: string } {
+  if (text.length > RESOURCE_TEXT_MAX) return { kind: "invalid", reason: `Name at most ${SHARED_RESOURCES_MAX} shared resources.` };
+  const entries = text.split(/[\s,]+/u).filter(Boolean);
+  if (entries.length > SHARED_RESOURCES_MAX) return { kind: "invalid", reason: `Name at most ${SHARED_RESOURCES_MAX} shared resources.` };
+  const resources: SharedResource[] = [];
+  for (const entry of entries) {
+    const [name, slotsText, extra] = entry.split(":");
+    const slots = slotsText === undefined ? 1 : /^[0-9]{1,2}$/u.test(slotsText) ? Number(slotsText) : NaN;
+    if (extra !== undefined || !RESOURCE_NAME.test(name)) return { kind: "invalid", reason: `"${entry}" isn't a resource name. Use lowercase letters, digits, ., _ or - only, up to 32.` };
+    if (!(slots >= 1 && slots <= RESOURCE_SLOTS_MAX)) return { kind: "invalid", reason: `${name} can serve 1 to ${RESOURCE_SLOTS_MAX} commands at once.` };
+    if (resources.some((resource) => resource.name === name)) return { kind: "invalid", reason: `${name} is named twice.` };
+    resources.push({ name, slots });
+  }
+  assert(resources.length <= SHARED_RESOURCES_MAX, "shared resources stay within the engine's bound");
+  return { kind: "ok", resources };
+}
+
+/** Writes shared resources as their input shows them: `name:slots` entries joined by ", ".
+ * Input: the resources. Output: the text. */
+export function sharedResourcesText(resources: SharedResource[]): string {
+  return resources.map((resource) => `${resource.name}:${resource.slots}`).join(", ");
+}
+
+/** The lane counts the Heavy lane row and the Team view show. Input: the lane. Output: the
+ * words, such as "1 running, 2 waiting". */
+export function laneCounts(lane: LaneView): string {
+  return `${lane.running.length} running, ${lane.waiting.length} waiting`;
 }
 
 /** Reads the counted-tools list the owner typed, one name per line or comma separated, with the
@@ -377,6 +426,75 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
     </SettingRow>
     <ChangeNote note={note} />
   </>;
+}
+
+/** The Heavy lane and Shared resources rows (F28): how many heavy commands the project's
+ * agents run at once, with the lane's counts now, and the named things they share with how
+ * many commands each serves. Every option is selectable; the plan defaults show for an older
+ * engine. Inputs: the project id, the latest team status and a reload. Output: the rows. */
+export function HeavyLaneControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const view = coordination(status);
+  const { busy, note, change } = useChange(reload);
+  const [lane, holdLane] = useHeld<HeavyLane>(view.settings.heavy_lane, Object.is, status);
+  const [typed, setTyped] = useState<string | null>(null);
+  const text = typed ?? sharedResourcesText(view.settings.shared_resources);
+  const check = sharedResourcesInput(text);
+
+  async function saveResources() {
+    if (check.kind !== "ok") return;
+    await change(() => saveCoordSettings(projectId, { shared_resources: check.resources }), "the shared resources");
+    setTyped(null);
+  }
+
+  return <>
+    <SettingRow label="Heavy lane">
+      <span className="set-label" aria-hidden="true">Heavy lane</span>
+      <Segmented label="Heavy lane" value={lane} options={HEAVY_LANE_OPTIONS}
+        onValue={(value: HeavyLane) => { if (HEAVY_LANE_OPTIONS.some((option) => option.value === value)) void change(() => saveCoordSettings(projectId, { heavy_lane: value }), "the heavy lane", () => holdLane(value)); }} />
+      <span className="tg-terminal-note">How many heavy commands, such as full test suites and builds, this project's agents run at once. The rest wait their turn in order. Now: {laneCounts(view.lane ?? { running: [], waiting: [] })}. Agents are told to run heavy commands through the lane; short commands run as usual.</span>
+    </SettingRow>
+    <SettingRow label="Shared resources" wide>
+      <form className="pj-row" aria-label="Shared resources" onSubmit={(event) => { event.preventDefault(); void saveResources(); }}>
+        <label htmlFor={`tg-resources-${projectId}`}>Shared resources</label>
+        <input id={`tg-resources-${projectId}`} className="pj-input" value={text} maxLength={RESOURCE_TEXT_MAX} placeholder="None. Such as ollama:1, postgres:2"
+          onChange={(event) => setTyped(event.target.value)} aria-describedby={`tg-resources-help-${projectId}`} />
+        <Button type="submit" size="small" disabled={busy || typed === null || check.kind !== "ok"} pending={busy && typed !== null} pendingLabel="Saving...">Save</Button>
+        <span className="tg-terminal-note" id={`tg-resources-help-${projectId}`}>{typed !== null && check.kind === "invalid" ? check.reason
+          : "Things heavy commands share, such as a local model or a database, each with how many commands may use it at once (name:slots, 1 slot when none is given). A command that names one waits until it is free, whatever the lane size."}</span>
+      </form>
+    </SettingRow>
+    <ChangeNote note={note} />
+  </>;
+}
+
+/** How long ago a lane entry started or began to wait, in whole minutes. Inputs: the entry's
+ * time and now. Output: the words. */
+function laneSince(since: number, now: number): string {
+  const minutes = Math.floor(Math.max(0, now - since) / 60_000);
+  return minutes < 1 ? "under a minute" : minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
+/** The project's heavy lane in the Team view (F28): the lane size and each running and
+ * waiting command with its agent, label, shared resources and time; nothing while the lane is
+ * empty. Inputs: the team status and now. Output: the panel, or null. */
+export function HeavyLaneQueue({ status, now }: { status: TeamStatus; now: number }) {
+  const view = coordination(status);
+  const lane = view.lane ?? { running: [], waiting: [] };
+  if (lane.running.length + lane.waiting.length === 0) return null;
+  const size = HEAVY_LANE_OPTIONS.find((option) => option.value === view.settings.heavy_lane)?.label ?? displayText(view.settings.heavy_lane);
+  const agent = (id: number) => status.agents.find((row) => row.id === id)?.label ?? `Agent ${id}`;
+  const row = (entry: LaneEntry, word: string, at: number) => <li key={`${word}-${entry.agent}-${at}`} className="pj-small">
+    <strong>{displayText(agent(entry.agent))}</strong> {displayText(entry.label)}
+    {entry.uses.length > 0 && <span className="pj-muted"> uses {displayText(entry.uses.join(", "))}</span>}
+    <span className="pj-muted"> {word} for {laneSince(entry.since_ms, now)}</span>
+  </li>;
+  return <section className="pj-stack-s" aria-label="Heavy lane">
+    <p className="pj-small"><strong>Heavy lane</strong> <span className="pj-muted">{size}: {laneCounts(lane)}</span></p>
+    <ol className="pj-rows" aria-label="Heavy commands">
+      {lane.running.map((entry, at) => row(entry, "running", at))}
+      {lane.waiting.map((entry, at) => row(entry, "waiting", at))}
+    </ol>
+  </section>;
 }
 
 /** The Terminal display row: one choice for every agent terminal of the project, whatever

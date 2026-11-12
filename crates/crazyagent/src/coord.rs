@@ -30,6 +30,7 @@ pub mod adoption;
 mod claims;
 pub mod delivery;
 pub mod hook;
+pub mod lane;
 mod messages;
 mod presence;
 pub mod relay;
@@ -44,7 +45,7 @@ pub use claims::{
     overlapping, overlaps_of, path_scopes, release_claims, release_set, release_unheld,
     restore_set, stopped_with_unheld, wait_cycle_notices, wake_waiters,
 };
-pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread, unseen};
+pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread, unseen, withdraw};
 #[cfg(all(test, unix))]
 pub(crate) use presence::{TOOL_HOURS_MAX, TOOLS_PER_HOUR_MAX};
 pub(crate) use presence::{add_tool_hour, count_tool};

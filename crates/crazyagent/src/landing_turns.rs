@@ -22,8 +22,8 @@ pub enum Landed {
 /// not the owner (OS-8); a catch-up that leaves it, or cannot run, leaves it to the owner
 /// as before, the cause logged by its plain code. Inputs: the change set store, the
 /// workspace, the turn end and the owner's settings files, whose model ports a lockfile
-/// regeneration keeps. Output: Nothing when no set is pending, Added or Waiting, or the
-/// refusal.
+/// regeneration keeps. Output: Nothing when no set is pending, its sub-agent then moved
+/// onto the landed tip when it can (DEC-147.6), Added or Waiting, or the refusal.
 pub fn record(
     db: &Connection,
     workspace: &Workspace,
@@ -33,6 +33,7 @@ pub fn record(
     let before =
         landing::open_change_set(db, &workspace.worktree)?.map(|set| (set.head, set.state));
     let Some(id) = landing::record_turn_end(db, workspace, end)? else {
+        landing::move_after_turn(db, workspace);
         return Ok(Landed::Nothing);
     };
     match catch_up(db, &id, settings) {

@@ -2,6 +2,7 @@ use super::settings::{applied, problem};
 use super::*;
 use crate::cleanup_settings::CleanupSettings;
 use crate::github::GitHubStatus;
+use crate::master_frame_limit::MasterFrameSettings;
 use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
 use crate::projects_home::ProjectsHome;
@@ -11,7 +12,8 @@ use crate::setup::SetupStatus;
 
 /// One request from the setup page: setup status and runs, default-pack changes,
 /// the projects home folder, the GitHub account, the sandbox settings, when finished
-/// agents' worktrees go, what quitting does to team agents and the master step limit.
+/// agents' worktrees go, what quitting does to team agents and the master step, time and
+/// frame size limits.
 /// Input: built by the setup page. Output: run on the owner worker; the reply
 /// arrives as `SettingsEvent::AppSetup`.
 pub(in crate::tui) enum AppSetupJob {
@@ -60,6 +62,11 @@ pub(in crate::tui) enum AppSetupJob {
         settings: MasterTimeSettings,
         generation: u64,
     },
+    MasterFrames,
+    SetMasterFrames {
+        settings: MasterFrameSettings,
+        generation: u64,
+    },
 }
 
 /// One change to an installed default-pack entry at the pack version the page showed.
@@ -90,6 +97,8 @@ pub(in crate::tui) enum AppSetupEvent {
     MasterStepsSet(Result<(), String>),
     MasterTime(Result<MasterTimeSettings, String>),
     MasterTimeSet(Result<(), String>),
+    MasterFrames(Result<MasterFrameSettings, String>),
+    MasterFramesSet(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -115,6 +124,8 @@ impl AppSetupJob {
             Self::SetMasterSteps { .. } => "SetMasterSteps",
             Self::MasterTime => "MasterTime",
             Self::SetMasterTime { .. } => "SetMasterTime",
+            Self::MasterFrames => "MasterFrames",
+            Self::SetMasterFrames { .. } => "SetMasterFrames",
         }
     }
 }
@@ -142,6 +153,8 @@ impl AppSetupEvent {
             AppSetupJob::SetMasterSteps { .. } => Self::MasterStepsSet(Err(problem)),
             AppSetupJob::MasterTime => Self::MasterTime(Err(problem)),
             AppSetupJob::SetMasterTime { .. } => Self::MasterTimeSet(Err(problem)),
+            AppSetupJob::MasterFrames => Self::MasterFrames(Err(problem)),
+            AppSetupJob::SetMasterFrames { .. } => Self::MasterFramesSet(Err(problem)),
         }
     }
 }
@@ -287,6 +300,22 @@ impl NativeOwner {
                     .set_master_time_settings(settings, generation)
                     .await,
                 "master_time_settings_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::MasterFrames => AppSetupEvent::MasterFrames(
+                controller
+                    .master_frame_settings()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetMasterFrames {
+                settings,
+                generation,
+            } => AppSetupEvent::MasterFramesSet(applied(
+                controller
+                    .set_master_frame_settings(settings, generation)
+                    .await,
+                "master_frame_settings_outcome_unknown",
                 lost,
             )),
         }
@@ -538,6 +567,31 @@ mod tests {
             let read_time = AppSetupJob::MasterTime;
             let AppSetupEvent::MasterTime(Ok(read)) = ask(&mut native, read_time).await else {
                 panic!("master time limit required")
+            };
+            assert_eq!(read, settings, "{limit:?} is stored as picked");
+        }
+
+        let read_frames = AppSetupJob::MasterFrames;
+        let AppSetupEvent::MasterFrames(Ok(frames)) = ask(&mut native, read_frames).await else {
+            panic!("master frame size limit required")
+        };
+        assert_eq!(frames, MasterFrameSettings::default());
+        assert_eq!(frames.limit, crate::master_frame_limit::FrameSize::Kib64);
+        let limits = crate::master_frame_limit::FrameSize::ALL;
+        for (generation, limit) in (17..).zip(limits.into_iter().rev()) {
+            let settings = MasterFrameSettings { limit };
+            let set = ask(
+                &mut native,
+                AppSetupJob::SetMasterFrames {
+                    settings,
+                    generation,
+                },
+            )
+            .await;
+            assert!(matches!(set, AppSetupEvent::MasterFramesSet(Ok(()))));
+            let read_frames = AppSetupJob::MasterFrames;
+            let AppSetupEvent::MasterFrames(Ok(read)) = ask(&mut native, read_frames).await else {
+                panic!("master frame size limit required")
             };
             assert_eq!(read, settings, "{limit:?} is stored as picked");
         }

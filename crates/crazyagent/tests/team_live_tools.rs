@@ -336,7 +336,15 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
         "the agent is named once: {status}"
     );
     assert!(!writer_line.contains(" / "), "{status}");
-    assert!(!status.contains("old-job"), "{status}");
+    let old_job_lines: Vec<&str> = status
+        .lines()
+        .filter(|line| line.contains("old-job"))
+        .collect();
+    assert_eq!(old_job_lines.len(), 1, "{status}");
+    assert!(
+        old_job_lines[0].starts_with("Retired sub-agents, whose worktrees are gone"),
+        "{status}"
+    );
     assert!(
         status.contains("asks: Proceed? (owner) Approved: push --force"),
         "{status}"

@@ -30,6 +30,15 @@ impl CodexHostProtocol {
         })
     }
 
+    /// Bounds each frame the host writes by the owner's master frame size limit (F39), before
+    /// its first frame. Input: the bound in bytes, from the engine wire frame to
+    /// `master_frame_limit::BYTES_MAX`. Output: none.
+    pub fn limit_frames(&mut self, bytes: usize) {
+        assert_eq!(self.protocol.state(), State::New);
+        self.protocol = std::mem::take(&mut self.protocol).with_frame_limit(bytes);
+        assert_eq!(self.protocol.frame_limit(), bytes);
+    }
+
     pub fn initialize(&mut self) -> Result<Vec<u8>, EngineError> {
         self.protocol.initialize().map_err(protocol_error)
     }

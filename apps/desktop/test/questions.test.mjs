@@ -170,6 +170,46 @@ test("a settled question shows its status and answer, with no answer controls", 
   assert.deepEqual(client.statusBadge("dismissed"), { word: "Dismissed", tone: "neutral" });
 });
 
+test("a question the master closed says so: withdrawn, asked again as a choice, or answered in its terminal (F12, F14)", () => {
+  assert.deepEqual(client.statusBadge("dismissed", "master"), { word: "Withdrawn by the master", tone: "neutral" });
+  assert.deepEqual(client.statusBadge("dismissed", "replaced"), { word: "Asked again as a choice", tone: "neutral" });
+  assert.deepEqual(client.statusBadge("answered_in_terminal", "relay"), { word: "Answered in the master's terminal", tone: "ok" });
+  assert.deepEqual(client.statusBadge("pending", "master"), { word: "Waiting for you", tone: "warn" }, "a waiting question is never shown as closed");
+  assert.deepEqual(client.statusBadge("dismissed", null), { word: "Dismissed", tone: "neutral" });
+  const withdrawn = card(question({ status: "dismissed", closed_by: "master", settled_ms: NOW }));
+  assert.match(withdrawn, />Withdrawn by the master</);
+  assert.doesNotMatch(withdrawn, />Dismiss</);
+  const relayed = card(question({ status: "answered_in_terminal", closed_by: "relay", answer: "Use SQLite.", settled_ms: NOW }));
+  assert.match(relayed, />Answered in the master's terminal</);
+  assert.match(relayed, /<span class="pj-secondary">The master reports: <\/span>Use SQLite\./);
+  assert.match(card(question({ status: "dismissed", closed_by: "replaced", settled_ms: NOW })), />Asked again as a choice</);
+});
+
+test("Dismiss all sends the waiting questions shown, oldest first, at most one page, and says what happened to each", async () => {
+  const shown = [
+    question({ id: 1, status: "answered", answer: "Yes", settled_ms: NOW }),
+    ...Array.from({ length: client.BULK_DISMISS_MAX + 3 }, (_, at) => question({ id: 100 + at, version: at, created_ms: NOW - 1000 + at })),
+  ];
+  const waiting = view.dismissAllOf(view.mergedQuestions({ items: shown, next: null }, []));
+  assert.equal(waiting.length, client.BULK_DISMISS_MAX);
+  assert.equal(client.BULK_DISMISS_MAX, 50);
+  assert.ok(waiting.every((item) => item.status === "pending"));
+  assert.deepEqual(waiting.slice(0, 2).map((item) => item.id), [100, 101]);
+  assert.deepEqual(view.dismissAllOf([question({ status: "answered" })]), []);
+  assert.equal(client.bulkDismissedLine({ settled: [1, 2], stale: [], refused: [] }), "Dismissed 2 questions.");
+  assert.equal(
+    client.bulkDismissedLine({ settled: [1], stale: [3], refused: [{ id: 4, code: "questions_delivery_full" }] }),
+    "Dismissed 1 question. 1 changed since you read them. Review them again. 1 could not be dismissed: The master's conversation is full right now. Try again after it reads its messages.",
+  );
+  assert.match(client.bulkDismissNote(3), /^All 3 waiting questions leave the list\. Each agent that asked is told once/);
+  await assert.rejects(async () => client.dismissQuestions([]), /1 to 50 questions/);
+  const source = readFileSync(new URL("../src/api-questions.ts", import.meta.url), "utf8");
+  assert.match(source, /call<QuestionsDismissed>\("desktop_dismiss_questions", \{ items: questions\.map\(\(question\) => \[question\.id, question\.version\]\) \}\)/);
+  const tab = readFileSync(new URL("../src/screens/project/questions.tsx", import.meta.url), "utf8");
+  assert.match(tab, /waiting\.length >= 2 && /);
+  assert.match(tab, /<ConfirmDialog open=\{dismissingAll !== null\}/);
+});
+
 test("a question settled from an older page never stays waiting: the older pages are dropped and read again", () => {
   const empty = { items: [], next: null };
   const opened = view.olderAfter(view.olderAfter(empty, { kind: "first", next: 9 }), { kind: "older", page: { items: [question({ id: 6 })], next: 3 } });
@@ -224,7 +264,7 @@ test("a stale answer says the question changed, and every questions code reads a
   assert.ok(own.includes("owner_busy") && own.includes("versioned_unavailable"), "connection and versioning codes are read too");
   assert.ok(own.length >= 3, `engine questions codes: ${own.length}`);
   const transport = ["questions_request_bounds", "questions_reply_bounds", "questions_request_invalid"];
-  const askSide = ["questions_ask_invalid", "questions_asker_full", "questions_full", "questions_not_terminal", "questions_notes_invalid", "questions_owner_turn_invalid", "questions_page_unavailable"];
+  const askSide = ["questions_ask_invalid", "questions_asker_full", "questions_full", "questions_not_terminal", "questions_notes_invalid", "questions_owner_not_typed", "questions_owner_turn_invalid", "questions_owner_turn_used", "questions_page_unavailable", "questions_replace_invalid"];
   for (const code of askSide) assert.ok(own.includes(code), `${code} is still an engine code; drop it from the ask-side list when it goes`);
   for (const code of own.filter((code) => ![...transport, ...askSide].includes(code))) {
     assert.ok(client.QUESTIONS_REFUSALS.includes(code), `${code} has its own sentence`);
@@ -251,6 +291,8 @@ test("a project's flag counts its pending questions once, with its other unseen 
   assert.deepEqual(Object.fromEntries(flags), { "p-1": 3, "p-2": 1, "p-3": 4 });
   assert.deepEqual([...client.withPendingQuestions(new Map([["p-1", 1]]), new Map([["p-1", 5]]), new Map())], [], "a seen-out count never goes below zero");
   assert.deepEqual([...client.withPendingQuestions(new Map(), new Map(), new Map([["p-9", 1]]))], [["p-9", 1]], "an answered-later question stays counted while pending");
+  const linked = client.unseenQuestionAlerts([{ project_id: "p-7", unseen: 1, questions: 1 }]);
+  assert.deepEqual([...client.withPendingQuestions(new Map([["p-7", 1]]), linked, new Map([["p-7", 1]]))], [["p-7", 1]], "a team question linked into the questions log, its alert unseen, counts once (F12)");
 });
 
 test("the Questions tab sits after Changes and the commands go through the bridge with only ids, version and the choice", async () => {

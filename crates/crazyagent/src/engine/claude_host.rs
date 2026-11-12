@@ -23,8 +23,6 @@ pub(crate) fn start_end_code(clocked: bool) -> &'static str {
         "claude_host_startup_timeout"
     }
 }
-#[cfg(unix)]
-use crate::protocol::FRAME_BYTES_MAX;
 use crate::protocol::{CredentialRef, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
@@ -87,22 +85,24 @@ pub(in crate::engine) struct MasterTools<'a> {
 
 impl MasterTools<'_> {
     /// The arguments of the engine's team server, the same for Claude Code and Codex and in
-    /// the team runtime's order: `team-mcp`, the drop file, the mailbox and the tools left out.
-    /// Input: the tools. Output: the arguments, or `claude_host_invalid_launch` for a relative
-    /// path, one with a control character or an unknown tool name.
+    /// the team runtime's order: `team-mcp`, the drop file, the mailbox, the tools left out and
+    /// `wake`, which a conversation master leaves out because it wakes no sub-agent. Input: the
+    /// tools. Output: the arguments, or `claude_host_invalid_launch` for a relative path, one
+    /// with a control character or an unknown tool name.
     pub(in crate::engine) fn server_args(&self) -> Result<Vec<String>, EngineError> {
         let (Some(drop), Some(mailbox)) = (plain_path(self.drop), plain_path(self.mailbox)) else {
             return Err(failure("claude_host_invalid_launch"));
         };
-        if !crate::team::tool::known_tools(self.off) {
+        let wake = crate::team::tool::WAKE_TOOL;
+        let args: Vec<String> = [crate::team::tool::SERVER_COMMAND.to_owned(), drop, mailbox]
+            .into_iter()
+            .chain(self.off.iter().cloned())
+            .chain(std::iter::once(wake.to_owned()))
+            .collect();
+        if !crate::team::tool::known_tools(&args[3..]) || self.off.iter().any(|tool| tool == wake) {
             return Err(failure("claude_host_invalid_launch"));
         }
-        Ok(
-            [crate::team::tool::SERVER_COMMAND.to_owned(), drop, mailbox]
-                .into_iter()
-                .chain(self.off.iter().cloned())
-                .collect(),
-        )
+        Ok(args)
     }
 }
 
@@ -460,6 +460,7 @@ pub(in crate::engine) struct ClaudeHost {
     diagnostic: Arc<std::sync::Mutex<Option<diagnostic::StreamDiagnostic>>>,
     close_time: Duration,
     expires: Option<tokio::time::Instant>,
+    frame_bytes: usize,
 }
 
 /// Waits for a master host's wall clock to run out; with none, the owner's choice of no
@@ -477,8 +478,9 @@ async fn expired(at: Option<tokio::time::Instant>) {
 impl ClaudeHost {
     /// Starts one Claude Code master under custody. Inputs: the engine's command, its
     /// sandbox, the account lease, the turn's home, the launch action, the account, the
-    /// wall clock, none for no master time limit (OB-5c), and the turn's budget, whose
-    /// output bounds it keeps. Output: the host, or the refusal.
+    /// wall clock, none for no master time limit (OB-5c), the turn's budget, whose output
+    /// bounds it keeps, and the owner's master frame size limit, which bounds each prompt
+    /// frame (F39). Output: the host, or the refusal.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         command: Command,
@@ -489,10 +491,13 @@ impl ClaudeHost {
         account_ref: CredentialRef,
         run_time: Option<Duration>,
         budget: ResourceBudget,
+        frames: crate::master_frame_limit::FrameSize,
     ) -> Result<Self, EngineError> {
         let limits = ClaudeHostLimits::from_budget(&budget, run_time)?;
+        let frame_bytes = frames.bytes();
         let protocol = ClaudeProtocol::new(action, account_ref)
-            .map_err(|error| Fault::Protocol(error).error())?;
+            .map_err(|error| Fault::Protocol(error).error())?
+            .with_frame_limit(frame_bytes);
         let (turns, input) = sync_channel(1);
         let (output, events) = mpsc::channel(128);
         let (report, status) = watch::channel(Status {
@@ -518,6 +523,7 @@ impl ClaudeHost {
             expires: limits
                 .run_time
                 .map(|time| tokio::time::Instant::now() + time),
+            frame_bytes,
         };
         let _custodian = std::thread::Builder::new()
             .name("claude-master-custodian".into())
@@ -570,9 +576,11 @@ impl ClaudeHost {
         if self.stop.load(Ordering::Acquire)
             || self.status.borrow().phase != Phase::Running
             || text.is_empty()
-            || text.len() > FRAME_BYTES_MAX
         {
             return Err(failure("claude_host_turn_unavailable"));
+        }
+        if text.len() > self.frame_bytes {
+            return Err(failure("claude_host_input_limit"));
         }
         let (reply, mut response) = oneshot::channel();
         self.turns
@@ -692,8 +700,8 @@ pub(in crate::engine) enum ClaudeHost {}
 #[cfg(not(unix))]
 impl ClaudeHost {
     /// Never starts: takes the command, boundary, uninhabited profile lease, turn home,
-    /// action, account, wall clock and budget. Returns nothing because the lease cannot
-    /// exist.
+    /// action, account, wall clock, budget and frame size. Returns nothing because the
+    /// lease cannot exist.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         _command: Command,
@@ -704,6 +712,7 @@ impl ClaudeHost {
         _account_ref: CredentialRef,
         _run_time: Option<std::time::Duration>,
         _budget: ResourceBudget,
+        _frames: crate::master_frame_limit::FrameSize,
     ) -> Result<Self, EngineError> {
         match profile {}
     }
@@ -749,7 +758,8 @@ fn failure(code: &'static str) -> EngineError {
 
 /// Reads the team server a tools-on master command names, so the command can be built
 /// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable,
-/// drop file, mailbox and tools switched off, or none when the text is not one engine server.
+/// drop file, mailbox and tools switched off before the trailing `wake` that `server_args`
+/// adds, or none when the text is not one engine server ending in it.
 #[cfg(unix)]
 fn named_tools(config: &str) -> Option<(PathBuf, PathBuf, PathBuf, Vec<String>)> {
     let config: serde_json::Value = serde_json::from_str(config).ok()?;
@@ -763,9 +773,12 @@ fn named_tools(config: &str) -> Option<(PathBuf, PathBuf, PathBuf, Vec<String>)>
         .iter()
         .map(serde_json::Value::as_str)
         .collect::<Option<Vec<&str>>>()?;
-    let [_, drop, mailbox, off @ ..] = args.as_slice() else {
+    let [_, drop, mailbox, off @ .., last] = args.as_slice() else {
         return None;
     };
+    if *last != crate::team::tool::WAKE_TOOL {
+        return None;
+    }
     Some((
         PathBuf::from(engine),
         PathBuf::from(drop),
