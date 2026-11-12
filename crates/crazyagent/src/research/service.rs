@@ -26,7 +26,8 @@ const STATUS_EVERY_TICKS: u32 = 5;
 #[cfg(unix)]
 const CHECKS_MAX: usize = 8;
 /// How soon a status run that found no account tries again while the engine still
-/// re-proves earlier sign-ins (DEC-108): the re-proof settles them within its own bound.
+/// re-proves earlier sign-ins (DEC-108) or an account check of this engine run holds its
+/// profile: each settles within its own bound.
 #[cfg(unix)]
 const SETTLING_RETRY_MS: i64 = 10 * 1000;
 #[cfg(unix)]
@@ -348,7 +349,7 @@ impl StatusUpkeep {
             db,
             checks: &mut self.checks,
             upkeep: Upkeep::Roadmap,
-            settling: runner.reproving(),
+            settling: runner.reproving() || crate::storage::account_check_running(db),
         };
         let now = crate::team::now_ms();
         if let Err(error) = crate::roadmap_status::tick(db, &mut starts, now)
@@ -392,8 +393,8 @@ impl StatusUpkeep {
 /// Starts the runs a store hands out, for the store `upkeep` names: on the first account a
 /// harness resolves for the project, later when every fitting account is paused, and when
 /// the pool has none, soon again with no line while the engine still re-proves earlier
-/// sign-ins (`settling`), else later again under one plain line that stays until a run
-/// gets an account.
+/// sign-ins or an account check of this engine run holds its profile (`settling`), else
+/// later again under one plain line that stays until a run gets an account.
 #[cfg(unix)]
 struct StatusStarts<'a, F> {
     runner: &'a Arc<ResearchRunner>,
@@ -883,7 +884,7 @@ mod tests {
         let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
         let engine = temp.path().canonicalize().unwrap().join("engine");
         let mut upkeep = StatusUpkeep::open(&engine.join("engine.db"));
-        let mut pass = |upkeep: &mut StatusUpkeep| {
+        let pass = |upkeep: &mut StatusUpkeep| {
             for _ in 0..STATUS_EVERY_TICKS {
                 upkeep.tick(&runner, &resolve);
             }
