@@ -3473,7 +3473,7 @@ impl TeamRuntime {
         paused: &BTreeSet<CredentialRef>,
         model: Option<&str>,
     ) -> Result<Option<TeamAccount>, String> {
-        self.account_as(access, project, harness, paused, None)
+        self.account_as(access, project, harness, paused, model, None)
     }
 
     /// Picks the pool account as `account_for` does, for a new agent or for one that
@@ -3481,14 +3481,15 @@ impl TeamRuntime {
     /// its own account used, and its account wins every tie, so the answer differs from the
     /// account it holds only when the owner's schedule puts another clearly before it
     /// (`Choice::clearly_before`) or its own can no longer take work. Takes the live
-    /// access, the project, the harness, the paused accounts and the running agent, none
-    /// for a new one. Returns as `account_for`.
+    /// access, the project, the harness, the paused accounts, the model, none for any
+    /// account's own, and the running agent, none for a new one. Returns as `account_for`.
     fn account_as(
         &self,
         access: &ModelAccess,
         project: &ProjectId,
         harness: &str,
         paused: &BTreeSet<CredentialRef>,
+        model: Option<&str>,
         holder: Option<i64>,
     ) -> Result<Option<TeamAccount>, String> {
         let held = holder.map(|id| &self.workers[&id].connection);
@@ -4545,8 +4546,15 @@ impl TeamRuntime {
         if !quiet || self.work_in_flight(project)? {
             return Ok(());
         }
-        let Ok(Some(top)) = self.account_as(access, project, &worker.harness, paused, Some(id))
-        else {
+        let held_model = worker.model.clone();
+        let Ok(Some(top)) = self.account_as(
+            access,
+            project,
+            &worker.harness,
+            paused,
+            held_model.as_deref(),
+            Some(id),
+        ) else {
             return Ok(());
         };
         if top.connection == worker.connection {
