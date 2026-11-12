@@ -79,15 +79,16 @@ fn database(root: &Path) -> Connection {
 }
 
 fn git(root: &Path, home: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("/usr/bin/git")
-        .args(arguments)
-        .current_dir(root)
-        .env_clear()
-        .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .args(arguments)
+            .current_dir(root)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1"),
+    )
+    .unwrap();
     assert!(output.status.success(), "git {arguments:?}");
     String::from_utf8(output.stdout).unwrap()
 }
