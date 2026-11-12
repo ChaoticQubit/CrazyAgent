@@ -3444,6 +3444,11 @@ mod turn_line_tests {
                 "master_bootstrap_uncertain",
                 "Turn 1: Blocked | Its copy of the project could not be checked: close it (F4), open it again (F2, Enter), then send again (master_bootstrap_uncertain)",
             ),
+            (
+                MasterReason::ModelRefused,
+                "master_model_refused",
+                "Turn 1: Blocked | The harness refused the master model on this account: send again to fall back as your model fallback setting says, or pick another master model in Settings, Harnesses (master_model_refused)",
+            ),
         ] {
             let mut lines = Vec::new();
             turn_lines(&turn(reason, cause), &[], &mut lines);

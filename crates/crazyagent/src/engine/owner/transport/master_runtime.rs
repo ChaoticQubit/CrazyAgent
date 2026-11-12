@@ -2132,6 +2132,24 @@ mod tests {
         }
     }
 
+    /// A harness that refused the master model ends the turn with its own code and reason,
+    /// never a bare Codex turn failure (DEC-150 M-10).
+    #[test]
+    fn a_refused_master_model_ends_the_turn_as_model_refused() {
+        assert_eq!(
+            assistant_failure(crate::harnesses::launch::CLAUDE_MODEL_REFUSED),
+            super::super::master_host_launch::MASTER_MODEL_REFUSED
+        );
+        assert_eq!(
+            assistant_failure("model_not_found_yet"),
+            "codex_host_turn_failed"
+        );
+        assert_eq!(
+            reason_for_error(&EngineError("master_model_refused".into())),
+            MasterReason::ModelRefused
+        );
+    }
+
     #[test]
     fn a_revoked_or_expiring_profile_sign_in_asks_the_owner_to_sign_in_again() {
         for code in [
