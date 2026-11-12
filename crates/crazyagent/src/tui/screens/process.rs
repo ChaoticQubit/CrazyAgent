@@ -1780,6 +1780,10 @@ impl ProcessPage {
 }
 
 impl Screen for ProcessPage {
+    fn wraps_hints(&self) -> bool {
+        self.scope == Scope::App
+    }
+
     fn crumbs(&self) -> Vec<String> {
         match &self.scope {
             Scope::App => vec!["Settings".into(), "Process".into()],
