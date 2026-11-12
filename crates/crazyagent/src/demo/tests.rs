@@ -1,0 +1,361 @@
+use super::*;
+use std::process::Command;
+
+const POOLS: &str = r#"
+[model_access]
+accounts = ["account-codex", "account-claude", "account-rcli"]
+[[model_access.connections]]
+id = "m-codex"
+provider = "provider-codex"
+harness = "codex"
+protocol = "native"
+account_ref = "account-codex"
+endpoint = { kind = "native" }
+model = { id = "native-default", author = "author-codex" }
+auth = { method = "native_managed", profile_ref = "profile-codex" }
+[[model_access.connections]]
+id = "m-claude"
+provider = "provider-claude"
+harness = "claude"
+protocol = "native"
+account_ref = "account-claude"
+endpoint = { kind = "native" }
+model = { id = "native-default", author = "author-claude" }
+auth = { method = "native_managed", profile_ref = "profile-claude" }
+[[model_access.connections]]
+id = "m-rcli"
+provider = "openai-compatible"
+harness = "rcli"
+protocol = "openai-chat"
+account_ref = "account-rcli"
+endpoint = { kind = "http", url = "http://127.0.0.1:9/v1" }
+model = { id = "local-model", author = "openai-compatible" }
+auth = { method = "none" }
+[[model_access.pools]]
+id = "pool-codex"
+members = ["m-codex"]
+projects = []
+roles = []
+fallback_allowed = false
+[[model_access.pools]]
+id = "pool-claude"
+members = ["m-claude"]
+projects = []
+roles = []
+fallback_allowed = false
+[[model_access.pools]]
+id = "pool-rcli"
+members = ["m-rcli"]
+projects = []
+roles = []
+fallback_allowed = false
+"#;
+
+fn config() -> EffectiveConfig {
+    crate::config::resolve_config_bytes(POOLS, "").unwrap()
+}
+
+fn pool(id: &str) -> CredentialRef {
+    CredentialRef::new(id).unwrap()
+}
+
+fn database(root: &Path) -> Connection {
+    let db = Connection::open(root.join("engine.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY);
+         CREATE TABLE native_auth_operations(profile_key TEXT, generation INTEGER, phase TEXT);
+         CREATE TABLE master_sessions(id TEXT PRIMARY KEY, project TEXT);
+         CREATE TABLE master_turns(session TEXT, ordinal INTEGER);
+         CREATE TABLE team_agents(project TEXT, role TEXT);
+         CREATE TABLE landing_change_sets(project TEXT, state TEXT);",
+    )
+    .unwrap();
+    crate::questions::initialize(&db).unwrap();
+    initialize(&db).unwrap();
+    db
+}
+
+fn git(root: &Path, home: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("/usr/bin/git")
+        .args(arguments)
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {arguments:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn staged(root: &Path) -> std::path::PathBuf {
+    let staging = root.join("staging");
+    let home = root.join("git-home");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    crate::research::runner::ensure_repository(&staging, &home).unwrap();
+    crate::projects_home::prepare_layout(&staging).unwrap();
+    assert!(crate::projects_home::exclude_from_git(&staging).unwrap());
+    staging
+}
+
+#[test]
+fn the_seed_is_a_small_web_page_with_a_node_test_that_needs_nothing_installed_or_fetched() {
+    let paths: Vec<&str> = SEED.iter().map(|(path, _)| *path).collect();
+    assert_eq!(
+        paths,
+        [
+            "index.html",
+            "style.css",
+            "app.js",
+            "test/app.test.js",
+            "README.md"
+        ]
+    );
+    for (path, text) in SEED {
+        assert!(!text.is_empty() && text.len() < 4096, "{path} is small");
+        assert!(
+            !text.contains("http://") && !text.contains("https://"),
+            "{path} fetches nothing"
+        );
+        assert!(
+            !text.contains("<!--") && !text.contains("/*"),
+            "{path} has no comments"
+        );
+    }
+    let test = SEED[3].1;
+    for line in test.lines().filter(|line| line.contains("require(")) {
+        assert!(
+            line.contains("\"node:") || line.contains("\"../app.js\""),
+            "the test needs only Node and the page: {line}"
+        );
+    }
+    assert!(SEED[0].1.contains("<script src=\"app.js\"></script>"));
+    assert!(SEED[4].1.contains("node --test"));
+    assert!(GOAL.contains("node --test") && GOAL.contains("no dependencies"));
+}
+
+#[test]
+fn seeding_commits_the_page_on_the_start_commit_with_no_remote_and_leaves_no_git_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let staging = staged(temp.path());
+    seed(&staging).unwrap();
+    let home = temp.path().join("git-home");
+    assert_eq!(
+        git(&staging, &home, &["log", "--format=%s"]),
+        "Add the demo web page\nStart project\n"
+    );
+    assert_eq!(git(&staging, &home, &["remote"]), "");
+    let mut tracked: Vec<String> = git(&staging, &home, &["ls-files"])
+        .lines()
+        .map(String::from)
+        .collect();
+    tracked.sort();
+    assert_eq!(
+        tracked,
+        [
+            "README.md",
+            "app.js",
+            "index.html",
+            "style.css",
+            "test/app.test.js"
+        ]
+    );
+    assert_eq!(git(&staging, &home, &["status", "--porcelain"]), "");
+    let state = crate::projects_home::state_folder(&staging);
+    assert!(!state.join("demo-git-home").exists());
+}
+
+#[test]
+fn seeding_refuses_a_file_already_there_and_never_replaces_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let staging = staged(temp.path());
+    std::fs::write(staging.join("index.html"), "OWNER_PAGE_4471").unwrap();
+    assert_eq!(seed(&staging), Err("demo_seed_failed"));
+    assert_eq!(
+        std::fs::read_to_string(staging.join("index.html")).unwrap(),
+        "OWNER_PAGE_4471"
+    );
+    let state = crate::projects_home::state_folder(&staging);
+    assert!(!state.join("demo-git-home").exists());
+}
+
+#[test]
+fn a_demo_is_a_plain_new_project_with_the_picked_pool_and_only_the_demo_id() {
+    let id = ProjectId::new(PROJECT_ID).unwrap();
+    if !cfg!(target_os = "macos") {
+        assert_eq!(
+            create_action(&id, &pool("pool-codex")).unwrap_err().0,
+            "demo_platform_unqualified"
+        );
+        return;
+    }
+    let action = create_action(&id, &pool("pool-codex")).unwrap();
+    let SetupAction::Create {
+        project_id,
+        spec,
+        setup,
+    } = action
+    else {
+        panic!("a demo is a Create");
+    };
+    assert_eq!(project_id.as_str(), PROJECT_ID);
+    assert_eq!(spec.name, NAME);
+    assert!(spec.repositories.is_empty());
+    assert!(setup.documents.is_empty() && setup.research.is_empty());
+    assert_eq!(setup.pool, Some(pool("pool-codex")));
+    assert_eq!(
+        setup.team, None,
+        "New Project's own team default picks the master"
+    );
+    let other = ProjectId::new("project-other").unwrap();
+    assert_eq!(
+        create_action(&other, &pool("pool-codex")).unwrap_err().0,
+        "demo_project_id_invalid"
+    );
+}
+
+#[test]
+fn a_pool_offers_the_demo_only_with_an_account_for_its_master_and_never_on_rcli_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = database(temp.path());
+    let config = config();
+    let tx = db.transaction().unwrap();
+    let why = |id: &str| pool_unavailable(&tx, &config, &pool(id)).unwrap();
+    assert_eq!(why("pool-codex"), None);
+    assert_eq!(why("pool-rcli"), Some("demo_harness_unavailable"));
+    assert_eq!(
+        why("pool-claude"),
+        Some("demo_pool_not_ready"),
+        "signed out"
+    );
+    assert_eq!(why("pool-gone"), Some("demo_pool_missing"));
+    let key = crate::memory::hash(b"profile-claude");
+    tx.execute(
+        "INSERT INTO native_auth_operations VALUES(?1,1,'authenticated_observed')",
+        [key],
+    )
+    .unwrap();
+    assert_eq!(
+        pool_unavailable(&tx, &config, &pool("pool-claude")).unwrap(),
+        None,
+        "a signed-in Claude account runs the master"
+    );
+}
+
+#[test]
+fn the_demo_reads_each_step_from_its_own_rows_and_reads_none_once_the_project_is_gone() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = database(temp.path());
+    let config = config();
+    let tx = db.transaction().unwrap();
+    let empty = view(&tx, &config).unwrap();
+    assert_eq!(empty.project_id, None);
+    assert_eq!(empty.created_ms, None);
+    assert_eq!(empty.steps, DemoSteps::default());
+    assert_eq!(empty.goal, GOAL);
+    assert_eq!(empty.pools.len(), 4);
+    assert!(!exists(&tx).unwrap());
+    let id = ProjectId::new(PROJECT_ID).unwrap();
+    tx.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
+        .unwrap();
+    record(&tx, &id, 1_000).unwrap();
+    assert!(exists(&tx).unwrap());
+    let made = view(&tx, &config).unwrap();
+    assert_eq!(
+        made.project_id.as_ref().map(ProjectId::as_str),
+        Some(PROJECT_ID)
+    );
+    assert_eq!(made.created_ms, Some(1_000));
+    assert_eq!(
+        made.steps,
+        DemoSteps {
+            created: true,
+            ..DemoSteps::default()
+        }
+    );
+    tx.execute_batch(
+        "INSERT INTO master_sessions VALUES('s1','crazyagent-demo');
+         INSERT INTO master_turns VALUES('s1',1);
+         INSERT INTO team_agents VALUES('crazyagent-demo','master');",
+    )
+    .unwrap();
+    let sent = view(&tx, &config).unwrap().steps;
+    assert!(
+        sent.goal_sent && !sent.agent_started,
+        "the master alone is not a team agent"
+    );
+    tx.execute_batch(
+        "INSERT INTO team_agents VALUES('crazyagent-demo','agent');
+         INSERT INTO landing_change_sets VALUES('other-project','accepted');
+         INSERT INTO landing_change_sets VALUES('crazyagent-demo','pending');",
+    )
+    .unwrap();
+    let working = view(&tx, &config).unwrap().steps;
+    assert!(working.agent_started && !working.change_set_accepted);
+    tx.execute(
+        "UPDATE landing_change_sets SET state='accepted' WHERE project=?1",
+        [PROJECT_ID],
+    )
+    .unwrap();
+    assert!(view(&tx, &config).unwrap().steps.change_set_accepted);
+    tx.execute("DELETE FROM projects WHERE id=?1", [PROJECT_ID])
+        .unwrap();
+    let gone = view(&tx, &config).unwrap();
+    assert_eq!(gone.project_id, None);
+    assert_eq!(gone.steps, DemoSteps::default());
+    record(&tx, &id, 2_000).unwrap();
+    tx.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
+        .unwrap();
+    assert_eq!(view(&tx, &config).unwrap().created_ms, Some(2_000));
+}
+
+#[test]
+fn the_planted_question_is_the_engines_own_once_and_its_answer_ticks_the_step() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = database(temp.path());
+    db.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
+        .unwrap();
+    let first = plant_question(&db).unwrap();
+    assert_eq!(
+        plant_question(&db).unwrap(),
+        first,
+        "asked once while it waits"
+    );
+    let (asker, source, question, status): (String, String, String, String) = db
+        .query_row(
+            "SELECT asker,source,question,status FROM questions_log WHERE id=?1",
+            [first],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            asker.as_str(),
+            source.as_str(),
+            question.as_str(),
+            status.as_str()
+        ),
+        ("engine:demo", "engine", QUESTION, "pending")
+    );
+    assert_eq!(crate::questions::asker_label(&asker), "the demo");
+    db.execute(
+        "UPDATE questions_log SET status='answered' WHERE id=?1",
+        [first],
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    record(&tx, &ProjectId::new(PROJECT_ID).unwrap(), 1_000).unwrap();
+    assert!(view(&tx, &config()).unwrap().steps.question_answered);
+}
+
+#[test]
+fn every_demo_refusal_the_dialog_names_is_listed_once() {
+    for code in ["project_exists", "home_destination_exists", "pool_missing"] {
+        assert!(CODES.contains(&refusal(code.into()).as_str()), "{code}");
+    }
+    assert_eq!(refusal("projects_home_unset".into()), "projects_home_unset");
+    let unique: std::collections::BTreeSet<&str> = CODES.into_iter().collect();
+    assert_eq!(unique.len(), CODES.len());
+}

@@ -2385,6 +2385,27 @@ fn repository_setup(root: &Path) -> RepositorySetup {
     RepositorySetup(key)
 }
 
+/// Runs one git command the engine makes in a project folder it created: the safe git
+/// options, a cleared environment with a private HOME and TMPDIR, no system config, no input
+/// or output, bounded by SETUP_TIMEOUT. Inputs: the folder, the private home and the
+/// arguments. Output: whether git succeeded, or the spawn or wait failure.
+pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<bool, RunError> {
+    let mut command = Command::new(GIT);
+    command
+        .args(GIT_SAFE)
+        .args(arguments)
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", tmp)
+        .env("TMPDIR", tmp)
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)? == Ended::Succeeded)
+}
+
 /// Makes a project folder the engine created a git repository with one empty start commit,
 /// one setup per repository at a time. A folder with any `.git` entry is the owner's repository and
 /// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
@@ -2402,25 +2423,7 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
             "the project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit".into(),
         ));
     }
-    let git = |arguments: &[&str]| -> Result<bool, RunError> {
-        let mut command = Command::new(GIT);
-        command
-            .args(GIT_SAFE)
-            .args(arguments)
-            .current_dir(root)
-            .env_clear()
-            .env("HOME", tmp)
-            .env("TMPDIR", tmp)
-            .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        Ok(
-            wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)?
-                == Ended::Succeeded,
-        )
-    };
+    let git = |arguments: &[&str]| engine_git(root, tmp, arguments);
     let created = git(&["init", "-q", "--template="])?
         && git(&[
             "-c",
