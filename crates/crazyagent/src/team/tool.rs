@@ -137,7 +137,7 @@ const REPLY_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60)
 const SPAWN_INVALID: &str = "Not started: give a task of plain text up to 4000 bytes and, if you choose one, a harness name such as codex or claude-code.";
 const MODE_INVALID: &str =
     "Not started: mode is native or app_spawned, or left out for the owner's setting.";
-const MODEL_INVALID: &str = "Not started: model is a model id from the owner's list, such as gpt-5.6-sol, given with a reason of one plain line up to 240 bytes; leave both out for the default model.";
+const MODEL_INVALID: &str = "Not started: model is a model id from the owner's list, such as gpt-6.1-sol, given with a reason of one plain line up to 240 bytes; leave both out for the default model.";
 /// The longest reason the master or a lead gives for the model it picked, one plain line.
 pub const MODEL_REASON_BYTES_MAX: usize = 240;
 const ROLE_INVALID: &str =
@@ -783,7 +783,7 @@ fn spec(name: &str) -> Value {
                 "role": {"type": "string", "description": "Optional short role such as onboarding-fix; the agent is then @onboarding-fix."},
                 "mode": {"type": "string", "enum": ["native", "app_spawned"], "description": "Master only, fixed for the lead's life: native (its sub-agents are its own Claude Code teammates) or app_spawned (it starts them with spawn); left out, the owner's setting for that harness."},
                 "ticket": {"type": "string", "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$", "description": "Optional ticket this task works on, such as CA-12; the engine links the task to it."},
-                "model": {"type": "string", "description": "Optional model for this agent, one of the models the owner allows for its harness, listed in your instructions; left out, the owner's default. Give a reason with it."},
+                "model": {"type": "string", "description": "Optional model for this agent, one of the models the owner allows for its harness, as your turn instructions or inspect_work list them; left out, the owner's default. Give a reason with it."},
                 "reason": {"type": "string", "description": "With model: why this model fits the task, one short line the owner sees."},
             }, "required": ["task"], "additionalProperties": false}),
         ),

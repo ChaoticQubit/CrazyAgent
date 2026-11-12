@@ -368,6 +368,12 @@ pub(super) fn inspect_work(
             Err(problem) => super::unreadable(problem),
         });
         sections.push(super::changes(answering).0);
+        let models =
+            crate::team::model_pick::plan_lines(connection, project, &answering.stored.team)
+                .unwrap_or_default();
+        if !models.is_empty() {
+            sections.push(models.trim_end().to_owned());
+        }
     } else if !led.is_empty() {
         sections.push(super::lead_status(connection, project, agent)?.0);
         sections.push(super::lead_changes(connection, answering, agent)?.0);

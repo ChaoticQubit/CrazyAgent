@@ -187,6 +187,62 @@ pub(crate) fn start_model(
     )
 }
 
+/// The line that heads the master's list of models a task may name (DEC-150 F9).
+pub(crate) const MODELS_HEAD: &str = "Models a task may name, by harness:";
+
+/// Writes the master's list of the models a spawn may name for each harness the plan uses
+/// (DEC-150 F9), as the owner's pick rule offers them, so the master picks only from the
+/// allowed list. Takes the database, the project and the harnesses, repeats allowed.
+/// Returns the head and one line per harness whose model CrazyAgent chooses, empty when
+/// none is, or a store or SQLite failure.
+pub(crate) fn master_lines(
+    db: &Connection,
+    project: &ProjectId,
+    harnesses: &[&str],
+) -> Result<String, EngineError> {
+    let mut seen: Vec<&str> = Vec::with_capacity(harnesses.len());
+    let mut lines = String::new();
+    for harness in harnesses {
+        if seen.contains(harness) {
+            continue;
+        }
+        seen.push(harness);
+        let catalog = crate::model_choice::catalog(harness);
+        let Some(offer) = store::offer(db, harness, &catalog, project)? else {
+            continue;
+        };
+        let default = match offer.default.as_deref() {
+            Some(model) => format!("the default, {model}"),
+            None => "the account's own model".to_owned(),
+        };
+        let line = if offer.allowed.is_empty() {
+            format!("- {harness}: leave model out; tasks run {default}\n")
+        } else {
+            let ids = offer.allowed.join(", ");
+            format!("- {harness}: {ids}; leave model out for {default}\n")
+        };
+        lines.push_str(&line);
+    }
+    if lines.is_empty() {
+        return Ok(lines);
+    }
+    Ok(format!("{MODELS_HEAD}\n{lines}"))
+}
+
+/// Writes the master's list of models a task may name for the harnesses a team plan hands
+/// work to (DEC-150 F9), as `master_lines` does. Takes the database, the project and the
+/// plan. Returns the text, empty when no harness's model is chosen, or a store or SQLite
+/// failure.
+pub(crate) fn plan_lines(
+    db: &Connection,
+    project: &ProjectId,
+    plan: &crate::project_setup::TeamPlan,
+) -> Result<String, EngineError> {
+    let harnesses = super::plan_harnesses(plan);
+    let names: Vec<&str> = harnesses.iter().map(String::as_str).collect();
+    master_lines(db, project, &names)
+}
+
 /// Checks a model a task was pinned to or an agent was started on against the owner's
 /// current choices and pick rule, as a new pick would be (MS-1): one the owner since took
 /// off the list, or no longer offers, gives way to the agent default, and one the rule

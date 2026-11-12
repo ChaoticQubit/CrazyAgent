@@ -4343,6 +4343,10 @@ impl TeamRuntime {
         }
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         prompt.push_str(&heard);
+        prompt.push_str(
+            &super::model_pick::plan_lines(&self.connection, project, &stored.team)
+                .unwrap_or_default(),
+        );
         if team_tool {
             self.log_master_asks(project, id)?;
             let pending = crate::questions::pending(&self.connection, project).unwrap_or_default();

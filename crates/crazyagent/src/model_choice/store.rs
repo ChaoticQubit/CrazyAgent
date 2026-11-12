@@ -156,11 +156,80 @@ pub fn pick(
     project: &ProjectId,
     picked: Option<&str>,
 ) -> Result<Pick, EngineError> {
-    let Some(harness) = harness_id(harness).filter(|id| supported(id, Slot::Agent)) else {
+    let Some(Terms {
+        default,
+        allowed,
+        usable,
+        rule,
+    }) = terms(db, harness, catalog, project)?
+    else {
         return Ok(match picked {
             None => Pick::Run(None),
             Some(_) => Pick::Unsupported,
         });
+    };
+    let offered = picked.is_some_and(|model| usable.iter().any(|id| id == model));
+    let model = match picked {
+        None => return Ok(Pick::Run(default)),
+        Some(model) if default.as_deref() == Some(model) => return Ok(Pick::Run(default)),
+        Some(model) => model,
+    };
+    Ok(match rule {
+        PickRule::Default => Pick::Overruled(default),
+        PickRule::Strict if allowed.iter().any(|id| id == model) => {
+            Pick::Run(Some(model.to_owned()))
+        }
+        PickRule::Hint if offered => Pick::Run(Some(model.to_owned())),
+        PickRule::Strict | PickRule::Hint => Pick::Refused { allowed, default },
+    })
+}
+
+/// What a spawn may pick for a harness's agents in one project (DEC-150 F9): the agent
+/// default, none for the account's own, and the ids the owner's pick rule lists, as
+/// `pick` judges a pick; Default lists none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+    pub default: Option<String>,
+    pub allowed: Vec<String>,
+}
+
+/// Reads what a spawn may pick for a harness's agents in a project, as `pick` judges it
+/// (DEC-150 F9). Inputs: the engine database, the harness name, its model catalog and the
+/// project. Output: the offer, none for a harness whose model CrazyAgent does not choose,
+/// or `model_choice_unavailable`.
+pub fn offer(
+    db: &Connection,
+    harness: &str,
+    catalog: &[String],
+    project: &ProjectId,
+) -> Result<Option<Offer>, EngineError> {
+    Ok(terms(db, harness, catalog, project)?.map(|terms| Offer {
+        default: terms.default,
+        allowed: terms.allowed,
+    }))
+}
+
+/// The terms a pick is judged by: the agent default, the ids the pick rule lists, every
+/// usable id and the rule.
+struct Terms {
+    default: Option<String>,
+    allowed: Vec<String>,
+    usable: Vec<String>,
+    rule: PickRule,
+}
+
+/// Reads the terms a pick for a harness's agents in a project is judged by, in one read
+/// snapshot. Inputs: the engine database, the harness name, its catalog and the project.
+/// Output: the terms, none for a harness whose model CrazyAgent does not choose, or
+/// `model_choice_unavailable`.
+fn terms(
+    db: &Connection,
+    harness: &str,
+    catalog: &[String],
+    project: &ProjectId,
+) -> Result<Option<Terms>, EngineError> {
+    let Some(harness) = harness_id(harness).filter(|id| supported(id, Slot::Agent)) else {
+        return Ok(None);
     };
     assert_catalog(harness, catalog);
     let own = snapshot(db)?;
@@ -180,25 +249,18 @@ pub fn pick(
         .unwrap_or_default();
     assert!(allowed.iter().all(|id| usable.contains(id)));
     let rule = super::rules::rules(tx)?.pick;
-    let offered = picked.is_some_and(|model| usable.iter().any(|id| id == model));
     let allowed: Vec<String> = match rule {
         PickRule::Strict => allowed,
-        PickRule::Hint => usable.into_iter().take(super::ALLOWED_MAX).collect(),
+        PickRule::Hint => usable.iter().take(super::ALLOWED_MAX).cloned().collect(),
         PickRule::Default => Vec::new(),
     };
-    let model = match picked {
-        None => return Ok(Pick::Run(default)),
-        Some(model) if default.as_deref() == Some(model) => return Ok(Pick::Run(default)),
-        Some(model) => model,
-    };
-    Ok(match rule {
-        PickRule::Default => Pick::Overruled(default),
-        PickRule::Strict if allowed.iter().any(|id| id == model) => {
-            Pick::Run(Some(model.to_owned()))
-        }
-        PickRule::Hint if offered => Pick::Run(Some(model.to_owned())),
-        PickRule::Strict | PickRule::Hint => Pick::Refused { allowed, default },
-    })
+    assert!(allowed.len() <= super::ALLOWED_MAX);
+    Ok(Some(Terms {
+        default,
+        allowed,
+        usable,
+        rule,
+    }))
 }
 
 /// Adds one model id the owner typed for a harness, waiting for its test launch, unless
