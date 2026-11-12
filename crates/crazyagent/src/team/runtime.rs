@@ -1410,7 +1410,47 @@ impl TeamRuntime {
         self.sweep()?;
         crate::ide::workspace::follow(&self.connection, &self.root)?;
         self.watch_master_questions()?;
-        super::questions::tick(&mut self.connection, now_ms())
+        let questions = super::questions::tick(&mut self.connection, now_ms());
+        let lanes = self.lanes();
+        questions.and(lanes)
+    }
+
+    /// Moves every project's heavy lane one step (F28): the lane folders of each project's
+    /// agents that are not stopping, read with that project's coordination settings. Every
+    /// project is served before the first failure is returned, so one unreadable lane holds
+    /// up no other project's.
+    fn lanes(&self) -> Result<(), EngineError> {
+        use crate::coord::lane::{FOLDER, Holder};
+        let mut projects: BTreeMap<ProjectId, Vec<Holder>> = BTreeMap::new();
+        for (id, worker) in &self.workers {
+            if worker.stopping {
+                continue;
+            }
+            projects
+                .entry(worker.project.clone())
+                .or_default()
+                .push(Holder {
+                    agent: *id,
+                    folder: self.agent_folder(*id).join("tmp").join(FOLDER),
+                });
+        }
+        let mut first = None;
+        for (project, holders) in &projects {
+            let moved =
+                crate::coord::settings::read(&self.connection, project).and_then(|settings| {
+                    crate::coord::lane::tick(
+                        &self.connection,
+                        project,
+                        holders,
+                        &settings,
+                        now_ms(),
+                    )
+                });
+            if let Err(problem) = moved {
+                first.get_or_insert(problem);
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 
     /// Logs each question a live master's harness asks the owner in its own terminal as
@@ -7871,6 +7911,7 @@ impl TeamRuntime {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
         }
+        let _ = private_directory(&tmp.join(crate::coord::lane::FOLDER));
         let context = self.context(&stored.project_id, id, role, tools, layout)?;
         let task_start = match role {
             AgentRole::Sub | AgentRole::Master => context.task_start(launch, tools),
@@ -8333,6 +8374,22 @@ impl TeamRuntime {
                 &self.mailbox(id),
             ),
             _ => context,
+        };
+        let context = match &self.delegation_tool {
+            Some(engine) => {
+                let resources = crate::coord::settings::read(&self.connection, project)
+                    .map_err(|e| {
+                        with_code("the coordination settings could not be read", Some(&e.0))
+                    })?
+                    .shared_resources;
+                context.with_heavy_lane(
+                    engine
+                        .verified_path()
+                        .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?,
+                    &resources,
+                )
+            }
+            None => context,
         };
         Ok(context)
     }

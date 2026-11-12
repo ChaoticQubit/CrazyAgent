@@ -36,7 +36,19 @@ pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize = INSTRUCTIONS_BYTES_MAX
     + TEAM_INDEX_BYTES_MAX
     + SECTION_SLACK
     + MEMORY_TOOLS_BYTES_MAX
-    + MASTER_LANDING_RULES.len();
+    + MASTER_LANDING_RULES.len()
+    + HEAVY_LANE_BYTES_MAX;
+/// The most bytes of the section that tells an agent how to run heavy commands through the
+/// project's heavy lane (F28): the engine path, the shared resource names and the rule.
+pub const HEAVY_LANE_BYTES_MAX: usize = 3 * 1024;
+const HEAVY_LANE_ENGINE_BYTES_MAX: usize = 1024;
+const _: () = assert!(
+    HEAVY_LANE_ENGINE_BYTES_MAX
+        + crate::coord::settings::SHARED_RESOURCES_MAX
+            * (crate::coord::settings::RESOURCE_NAME_BYTES_MAX + 2)
+        + 1024
+        <= HEAVY_LANE_BYTES_MAX
+);
 /// The most bytes of the section that names a master's `remember` and `recall` tools.
 pub const MEMORY_TOOLS_BYTES_MAX: usize = 512;
 
@@ -764,6 +776,25 @@ impl AgentContext {
         self
     }
 
+    /// Tells a team agent of any harness how to run heavy commands through the project's
+    /// heavy lane (F28) with the engine's `lane` command, naming the project's shared
+    /// resources. An engine path the section cannot quote leaves it out. Input: the absolute
+    /// engine executable and the project's shared resources. Output: the context.
+    pub fn with_heavy_lane(
+        mut self,
+        engine: &Path,
+        resources: &[crate::coord::settings::SharedResource],
+    ) -> Self {
+        if let Some(section) = heavy_lane_section(engine, resources) {
+            self.instructions.push_str(&section);
+        }
+        assert!(
+            self.instructions.len()
+                <= MASTER_INSTRUCTIONS_BYTES_MAX + 1 + LIVE_INSTRUCTIONS_BYTES_MAX
+        );
+        self
+    }
+
     /// Adds the owner's own instructions for one team agent after the app and project text
     /// this context writes into its home, before the instruction files section, which stays
     /// last. Inputs: a connection to `engine.db`, the project and the agent id, above 0.
@@ -1383,6 +1414,42 @@ fn size(bytes: u64) -> String {
         1024..1_048_576 => format!("{} KB", bytes.div_ceil(1024)),
         _ => format!("{} MB", bytes.div_ceil(1_048_576)),
     }
+}
+
+/// The section that tells an agent to run heavy commands through the project's heavy lane
+/// (F28): the exact `lane` command with the quoted engine path, the shared resources it may
+/// name, and that a queued command needs a long timeout or the background. Input: the
+/// absolute engine executable and the project's shared resources. Output: the section, at
+/// most `HEAVY_LANE_BYTES_MAX` bytes, or None for an engine path that is not plain UTF-8,
+/// holds a quote or a line break, or passes `HEAVY_LANE_ENGINE_BYTES_MAX` bytes.
+pub fn heavy_lane_section(
+    engine: &Path,
+    resources: &[crate::coord::settings::SharedResource],
+) -> Option<String> {
+    let engine = engine
+        .to_str()
+        .filter(|text| text.len() <= HEAVY_LANE_ENGINE_BYTES_MAX)
+        .filter(|text| !text.contains(['\'', '\n', '\r']))?;
+    let names: Vec<&str> = resources
+        .iter()
+        .take(crate::coord::settings::SHARED_RESOURCES_MAX)
+        .map(|resource| resource.name.as_str())
+        .collect();
+    let shared = if names.is_empty() {
+        "This project names no shared resources yet.".to_owned()
+    } else {
+        format!(
+            "This project's shared resources: {}. Add --uses <name> for each one the command uses, such as --uses {}.",
+            names.join(", "),
+            names[0]
+        )
+    };
+    let section = format!(
+        "\n## Heavy commands\n\nRun every heavy command through the project's heavy lane, so it waits its turn instead of piling up with other agents' commands: full test suites, builds, and anything that loads a local model or a database. Write it as:\n'{engine}' {} -- <command>\n{shared} The command may wait before it starts, so give it a long timeout or run it in the background. Short commands, such as one test, a format check or git, run as usual.\n",
+        crate::coord::lane::COMMAND
+    );
+    assert!(section.len() <= HEAVY_LANE_BYTES_MAX);
+    Some(section)
 }
 
 /// Tells an agent how its work lands in its git layout: a linked worktree leaves edits for

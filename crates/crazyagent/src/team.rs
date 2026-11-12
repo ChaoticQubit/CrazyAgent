@@ -852,16 +852,20 @@ pub struct HarnessCoordination {
     pub displays: Vec<crate::coord::settings::TerminalDisplay>,
 }
 
-/// A project's coordination settings (DEC-104) with every harness kind's mode and delivery.
+/// A project's coordination settings (DEC-104) with every harness kind's mode and delivery,
+/// and its heavy lane: the heavy commands that run and wait (F28). An engine from before F28
+/// sends no lane, which reads as empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinationView {
     pub settings: crate::coord::settings::CoordSettings,
     pub harnesses: Vec<HarnessCoordination>,
+    #[serde(default)]
+    pub lane: crate::coord::lane::LaneView,
 }
 
-/// Reads a project's coordination settings and each harness kind's sub-agent mode and delivery,
-/// with the plan defaults for anything the owner never set.
+/// Reads a project's coordination settings, each harness kind's sub-agent mode and delivery,
+/// with the plan defaults for anything the owner never set, and its heavy lane (F28).
 /// Takes a connection and the project. Returns the view, one row per harness kind.
 pub fn coordination(
     connection: &Connection,
@@ -881,6 +885,7 @@ pub fn coordination(
     let view = CoordinationView {
         settings: settings::read(connection, project)?,
         harnesses,
+        lane: crate::coord::lane::view(connection, project)?,
     };
     assert!(
         view.harnesses
