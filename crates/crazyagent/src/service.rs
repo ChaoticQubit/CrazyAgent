@@ -745,12 +745,10 @@ WantedBy=default.target\n",
 }
 
 /// The first entry on a path that someone other than this user or root can change: an
-/// entry another user owns, or a world-writable folder such as `/tmp`, where a name that
-/// goes away can be taken by anyone. It reads the path as written and with the links of its
-/// existing part resolved. A link's own mode bits, group-writable folders and missing
-/// entries are not counted (only who can change a folder can create an entry in it), and an
-/// entry that cannot be read counts as changeable. Input: the absolute path.
-/// Output: the entry, or none when only this user and the system can change it.
+/// entry another user owns, a world-writable entry such as `/tmp`, or a folder its group
+/// can write unless that group is trusted ([`trusted_group`]). It reads the path as written
+/// and with its links resolved; a link's own mode bits and missing entries are not counted,
+/// an unreadable entry is. Input: the absolute path. Output: the entry, or none.
 #[cfg(unix)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
@@ -763,6 +761,9 @@ pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
             Ok(metadata) => {
                 (metadata.uid() != me && metadata.uid() != 0)
                     || (!metadata.file_type().is_symlink() && metadata.mode() & 0o002 != 0)
+                    || (metadata.is_dir()
+                        && metadata.mode() & 0o020 != 0
+                        && !trusted_group(metadata.gid()))
             }
             Err(error) => error.kind() != std::io::ErrorKind::NotFound,
         })
@@ -956,6 +957,26 @@ fn windows_quoted(text: &str) -> String {
 #[cfg(unix)]
 fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
+}
+
+/// The macOS admin group, whose members can already act as root.
+#[cfg(target_os = "macos")]
+const ADMIN_GROUP: u32 = 80;
+
+/// Whether a group that can write a folder holds only users who may already act as root:
+/// wheel and admin. Every macOS user is in staff, so a staff folder is not trusted.
+/// Input: the group id. Output: the answer.
+#[cfg(target_os = "macos")]
+fn trusted_group(group: u32) -> bool {
+    group == 0 || group == ADMIN_GROUP
+}
+
+/// Whether a group that can write a folder holds only root or this user: root's group, or
+/// this user's own group, as user private groups give it. Input: the group id. Output:
+/// the answer.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn trusted_group(group: u32) -> bool {
+    group == 0 || group == rustix::process::getegid().as_raw()
 }
 
 /// Names no user id where launchd domains do not exist. Output: zero, unused off macOS.

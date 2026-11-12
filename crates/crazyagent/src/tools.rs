@@ -15,6 +15,16 @@ const SHEBANG_WORDS_MAX: usize = 8;
 const INTERPRETER_DEPTH_MAX: usize = 2;
 const VERSION_ENTRIES_MAX: usize = 64;
 const VERSIONS_PER_MANAGER_MAX: usize = 4;
+const ANCESTORS_MAX: usize = 128;
+const TEMP_FOLDERS: [&str; 7] = [
+    "/tmp",
+    "/private/tmp",
+    "/var/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders",
+    "/dev/shm",
+];
 const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 /// Linux package folders often missing from the engine's PATH: Linuxbrew, where setup
@@ -54,41 +64,61 @@ pub const TMUX_MISSING: &str =
     "The live master's terminal can't open on this computer. Try again in a moment.";
 
 /// The folders the resolver looks in, in order, built once from what the engine knows: no
-/// program is run, no shell file is read and every folder is absolute and bounded.
+/// program is run, no shell file is read and every folder is absolute and bounded. No
+/// folder agents can write is kept ([`Places::agent_writable`]); the engine's data folder,
+/// which holds the agents' HOMEs and worktrees, is kept here so its files are refused too.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Places {
     folders: Vec<PathBuf>,
     home: Option<PathBuf>,
+    engine_roots: Vec<PathBuf>,
 }
 
 impl Places {
     /// Builds places from explicit folders and HOME, for a caller that names its own search
-    /// space. Relative, oversized and repeated folders are dropped. Inputs: the folders in
-    /// order and HOME. Output: the bounded places.
+    /// space. Relative, oversized and repeated folders are dropped, and so is every folder
+    /// inside a project or a `.crazyagent` folder. Inputs: the folders in order and HOME.
+    /// Output: the bounded places.
     pub fn new(folders: Vec<PathBuf>, home: Option<PathBuf>) -> Self {
-        let mut kept: Vec<PathBuf> = Vec::new();
-        for folder in folders {
-            if kept.len() == PLACES_MAX {
-                break;
-            }
-            if usable(&folder) && !kept.contains(&folder) {
-                kept.push(folder);
-            }
-        }
-        let home = home.filter(|home| usable(home));
-        assert!(kept.len() <= PLACES_MAX);
-        Self {
-            folders: kept,
-            home,
-        }
+        Self::kept(folders, home, Vec::new())
     }
 
-    /// Builds the engine's places: the app's own folder, the engine's setup folder, the PATH
-    /// folders other than the system ones, Homebrew on Apple silicon and Intel, the HOME
+    /// Keeps the folders in order, dropping relative, oversized and repeated ones and every
+    /// one agents can write, at most [`PLACES_MAX`]. Inputs: the folders, HOME and the
+    /// engine data folders. Output: the bounded places.
+    fn kept(folders: Vec<PathBuf>, home: Option<PathBuf>, engine_roots: Vec<PathBuf>) -> Self {
+        let mut places = Self {
+            folders: Vec::new(),
+            home: home.filter(|home| usable(home)),
+            engine_roots: engine_roots
+                .into_iter()
+                .filter(|root| usable(root))
+                .collect(),
+        };
+        for folder in folders {
+            if places.folders.len() == PLACES_MAX {
+                break;
+            }
+            if usable(&folder)
+                && !places.folders.contains(&folder)
+                && !places.agent_writable(&folder)
+            {
+                places.folders.push(folder);
+            }
+        }
+        assert!(places.folders.len() <= PLACES_MAX);
+        assert!(places.engine_roots.iter().all(|root| root.is_absolute()));
+        places
+    }
+
+    /// Builds the engine's places: the app's own folder, the engine's setup folder, Homebrew
+    /// on Apple silicon and Intel, all fixed and ahead of the PATH the engine inherited, then
+    /// the PATH folders other than the system ones and those in a temp folder, the HOME
     /// folders the harness catalog uses (nvm, fnm, pnpm, ~/.local/bin, ~/.cargo/bin and
     /// more), the real installs of volta, asdf, mise and fnm, each harness's own install
-    /// folders under HOME, then the system folders last. Inputs: the engine root, the app's
-    /// folder, HOME and the PATH value. Output: the bounded places.
+    /// folders under HOME, then the system folders last. A folder agents can write is never
+    /// kept ([`Places::agent_writable`]). Inputs: the engine root, the app's folder, HOME and
+    /// the PATH value. Output: the bounded places.
     pub fn engine(
         engine_root: Option<&Path>,
         app_folder: Option<&Path>,
@@ -100,13 +130,13 @@ impl Places {
         let mut folders: Vec<PathBuf> = Vec::new();
         folders.extend(app_folder.map(Path::to_path_buf));
         folders.extend(engine_root.map(|root| root.join("setup").join("bin")));
+        folders.extend(homebrew_folders());
         if let Some(path) = path {
             folders.extend(
                 std::env::split_paths(path)
-                    .filter(|f| !system.contains(f) && !homebrew.contains(f)),
+                    .filter(|f| !system.contains(f) && !homebrew.contains(f) && !in_temp(f)),
             );
         }
-        folders.extend(homebrew_folders());
         if let Some(home) = home.as_deref().filter(|home| home.is_absolute()) {
             folders.extend(crate::harnesses::home_places(home));
             folders.extend(node_version_folders(home));
@@ -120,40 +150,52 @@ impl Places {
         #[cfg(target_os = "linux")]
         folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
         folders.extend(system);
-        Self::new(folders, home)
+        Self::kept(folders, home, engine_roots(engine_root))
     }
 
     /// Builds the engine's places from this process's HOME and PATH and the folder of the
-    /// running executable. Input: the engine root. Output: the places ([`Places::engine`]).
+    /// running executable. With no engine root given, this process's data folder is still
+    /// refused, though its setup folder is not looked in. Input: the engine root. Output:
+    /// the places ([`Places::engine`]).
     pub fn from_environment(engine_root: Option<&Path>) -> Self {
         let app = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.canonicalize().ok())
             .and_then(|exe| exe.parent().map(Path::to_path_buf));
-        Self::engine(
-            engine_root,
-            app.as_deref(),
-            std::env::var_os("HOME").map(PathBuf::from),
-            std::env::var_os("PATH").as_deref(),
-        )
+        let data_root = engine_root.map(Path::to_path_buf).or_else(|| {
+            crate::paths::Layout::current()
+                .ok()
+                .map(|layout| layout.root().to_path_buf())
+        });
+        Self {
+            engine_roots: engine_roots(data_root.as_deref()),
+            ..Self::engine(
+                engine_root,
+                app.as_deref(),
+                std::env::var_os("HOME").map(PathBuf::from),
+                std::env::var_os("PATH").as_deref(),
+            )
+        }
         .with_probed(probe::folders())
     }
 
     /// Adds the folders the background probes found ([`probe::folders`]), such as npm's
     /// global prefix and the login shell's PATH, after every folder known without running a
-    /// program and before the system folders; folders in a `.crazyagent` folder are dropped.
-    /// Input: the probed folders. Output: the places.
+    /// program and before the system folders; folders in a temp folder and folders agents
+    /// can write are dropped. Input: the probed folders. Output: the places.
     pub fn with_probed(self, probed: Vec<PathBuf>) -> Self {
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
         let (last, mut folders): (Vec<PathBuf>, Vec<PathBuf>) = self
             .folders
             .into_iter()
             .partition(|folder| system.contains(folder));
-        folders.extend(probed.into_iter().filter(|folder| {
-            !system.contains(folder) && !crate::harnesses::in_crazyagent_folder(folder)
-        }));
+        folders.extend(
+            probed
+                .into_iter()
+                .filter(|folder| !system.contains(folder) && !in_temp(folder)),
+        );
         folders.extend(last);
-        Self::new(folders, self.home)
+        Self::kept(folders, self.home, self.engine_roots)
     }
 
     /// The folders looked in, in order. Output: the folders.
@@ -165,10 +207,76 @@ impl Places {
     pub fn home(&self) -> Option<&Path> {
         self.home.as_deref()
     }
+
+    /// Whether agents can write a folder or file, read as written and with its links
+    /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]) or inside
+    /// the engine's data folder outside its `setup` folder. Input: the path. Output: the
+    /// answer.
+    fn agent_writable(&self, path: &Path) -> bool {
+        let real = path.canonicalize().ok();
+        std::iter::once(path).chain(real.as_deref()).any(|path| {
+            crate::harnesses::in_crazyagent_folder(path)
+                || in_project(self.home(), path)
+                || self
+                    .engine_roots
+                    .iter()
+                    .any(|root| path.starts_with(root) && !path.starts_with(root.join("setup")))
+        })
+    }
+}
+
+/// The engine data folder as given and with its links resolved. Input: the folder, or
+/// none. Output: the folders.
+fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = root.map(Path::to_path_buf).into_iter().collect();
+    if let Some(real) = root.and_then(|root| root.canonicalize().ok())
+        && !roots.contains(&real)
+    {
+        roots.push(real);
+    }
+    assert!(roots.len() <= 2);
+    roots
+}
+
+/// Whether a path is inside a CrazyAgent project: it or a folder above it, other than HOME
+/// and `/`, holds a `.crazyagent` entry, which the sandbox never lets an agent remove. A
+/// path deeper than [`ANCESTORS_MAX`] counts as inside. Inputs: HOME and the path.
+/// Output: the answer.
+fn in_project(home: Option<&Path>, path: &Path) -> bool {
+    if path.components().count() > ANCESTORS_MAX {
+        return true;
+    }
+    let real_home = home.and_then(|home| home.canonicalize().ok());
+    path.ancestors()
+        .filter(|folder| {
+            folder.parent().is_some()
+                && Some(*folder) != home
+                && Some(*folder) != real_home.as_deref()
+        })
+        .any(|folder| {
+            std::fs::symlink_metadata(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY))
+                .is_ok()
+        })
+}
+
+/// Whether a folder is in a temp folder, which other users, or agents with the temp folder
+/// grant, can write: this user's temp folder or a shared one, as written and with its links
+/// resolved. Input: the folder. Output: the answer.
+fn in_temp(folder: &Path) -> bool {
+    let owner = std::env::temp_dir();
+    let real = folder.canonicalize().ok();
+    std::iter::once(folder)
+        .chain(real.as_deref())
+        .any(|folder| {
+            (owner.is_absolute() && folder.starts_with(&owner))
+                || TEMP_FOLDERS.iter().any(|temp| folder.starts_with(temp))
+        })
 }
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
 /// named by path in its first line or by name through `env`, which needs a search path.
+/// `by_name` also marks an interpreter found past a version-manager shim the first line
+/// names, so the launch names the real install and never the shim.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
     Native,
@@ -189,19 +297,24 @@ pub struct Resolved {
 
 impl Resolved {
     /// The words that start this tool with no search path: the real file, which the system
-    /// runs itself for a program or a script naming its interpreter by path, or for a script
-    /// that asks `env` for its interpreter by name, that interpreter's words, the first
-    /// line's arguments, then the script's real file. A launch adds its own arguments after
-    /// these. Output: the absolute words.
+    /// runs itself for a program or a script whose first line names a program by path;
+    /// otherwise the interpreter's own words, the first line's arguments, then the script's
+    /// real file, for a script that asks `env` by name, names a shim, or names an interpreter
+    /// that is itself a script, which macOS does not run. Output: the absolute words.
     pub fn argv(&self) -> Vec<OsString> {
         let words: Vec<OsString> = match &self.kind {
-            Kind::Native | Kind::Script { by_name: false, .. } => {
+            Kind::Native => vec![self.program.clone().into_os_string()],
+            Kind::Script {
+                interpreter,
+                by_name: false,
+                ..
+            } if interpreter.kind == Kind::Native => {
                 vec![self.program.clone().into_os_string()]
             }
             Kind::Script {
                 interpreter,
                 arguments,
-                by_name: true,
+                ..
             } => {
                 let mut words = interpreter.argv();
                 words.extend(arguments.iter().map(OsString::from));
@@ -214,7 +327,8 @@ impl Resolved {
     }
 
     /// Every real file this tool runs or reads to start, the program first and then each
-    /// interpreter, which is exactly what a sandbox grants it. Output: the files.
+    /// interpreter, which is exactly what a sandbox grants it. A Node package's own folder is
+    /// not among them; the sandbox adds it from the program's npm prefix. Output: the files.
     pub fn grants(&self) -> Vec<PathBuf> {
         let mut files = vec![self.program.clone()];
         if let Kind::Script { interpreter, .. } = &self.kind {
@@ -287,7 +401,8 @@ impl Missing {
 
 /// Finds a tool by its program name wherever the places look, passing over version-manager
 /// shims, files in a `.crazyagent` folder and files others can change, then reads how it
-/// runs. Harness launches keep their pinned entry and call [`resolve_entry`] instead.
+/// runs; a miss asks the background probes to look again ([`probe::missed`]). Harness
+/// launches keep their pinned entry and call [`resolve_entry`] instead.
 /// Inputs: the program name and the places. Output: the tool, or why it cannot run.
 pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
     resolve_at(name, places, 0)
@@ -295,8 +410,8 @@ pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
 
 /// Reads how an entry already chosen runs, such as a harness file the engine pinned: its
 /// real file and, for a script, the interpreter its first line names, found by
-/// [`resolve`]. Inputs: the absolute entry and the places. Output: the tool, or why it
-/// cannot run.
+/// [`resolve`]. The entry and every interpreter pass the same checks as a tool found by
+/// name. Inputs: the absolute entry and the places. Output: the tool, or why it cannot run.
 pub fn resolve_entry(entry: &Path, places: &Places) -> Result<Resolved, Missing> {
     entry_at(entry, places, 0)
 }
@@ -312,12 +427,15 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
     if !valid_name(name) {
         return Err(not_found());
     }
-    let found = places
+    let Some(found) = places
         .folders
         .iter()
         .map(|folder| folder.join(name))
-        .find(|candidate| usable_candidate(places.home(), candidate))
-        .ok_or_else(not_found)?;
+        .find(|candidate| usable_candidate(places, candidate))
+    else {
+        probe::missed();
+        return Err(not_found());
+    };
     entry_at(&found, places, depth).map_err(|missing| Missing {
         tool: name.to_owned(),
         ..missing
@@ -333,7 +451,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     let program = entry
         .canonicalize()
         .ok()
-        .filter(|real| entry.is_absolute() && executable_file(real))
+        .filter(|_| entry.is_absolute() && usable_candidate(places, entry))
         .ok_or_else(|| Missing {
             tool: tool.clone(),
             reason: Reason::NotFound,
@@ -357,8 +475,11 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     if depth == INTERPRETER_DEPTH_MAX {
         return Err(needs(&interpreter_name));
     }
+    let through_shim =
+        shebang.by_name.is_none() && crate::harnesses::is_shim(places.home(), &shebang.interpreter);
     let interpreter = match &shebang.by_name {
-        Some(name) => resolve_at(name, places, depth + 1),
+        Some(name) => named_interpreter(name, &program, places, depth + 1),
+        None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
         None => entry_at(&shebang.interpreter, places, depth + 1),
     }
     .map_err(|_| needs(&interpreter_name))?;
@@ -368,9 +489,30 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         kind: Kind::Script {
             interpreter: Box::new(interpreter),
             arguments: shebang.arguments,
-            by_name: shebang.by_name.is_some(),
+            by_name: shebang.by_name.is_some() || through_shim,
         },
     })
+}
+
+/// Finds the interpreter a script's first line asks `env` for by name: for `node`, first the
+/// one in the script's own npm prefix ([`crate::harnesses::node_prefix`]), so a harness
+/// installed under one Node starts under that Node, then the places in order. Inputs: the
+/// name, the script's real file, the places and the depth. Output: the interpreter, or why.
+fn named_interpreter(
+    name: &str,
+    script: &Path,
+    places: &Places,
+    depth: usize,
+) -> Result<Resolved, Missing> {
+    assert!(depth <= INTERPRETER_DEPTH_MAX);
+    let own = (name == "node")
+        .then(|| crate::harnesses::node_prefix(script))
+        .flatten()
+        .and_then(|prefix| entry_at(&prefix.join("bin").join(name), places, depth).ok());
+    match own {
+        Some(node) => Ok(node),
+        None => resolve_at(name, places, depth),
+    }
 }
 
 /// A script's first line: the absolute interpreter, or the program name `env` looks up,
@@ -535,15 +677,13 @@ fn install_hint(tool: &str) -> &'static str {
 }
 
 /// Whether a found file can be used: an executable file that is not a version-manager shim,
-/// not in a `.crazyagent` folder and not changeable by another user. Inputs: HOME and the
-/// file. Output: the answer.
-fn usable_candidate(home: Option<&Path>, candidate: &Path) -> bool {
+/// that agents cannot write, as found or through its links ([`Places::agent_writable`]),
+/// and that no other user can change. Inputs: the places and the file. Output: the answer.
+fn usable_candidate(places: &Places, candidate: &Path) -> bool {
     executable_file(candidate)
-        && !crate::harnesses::is_shim(home, candidate)
-        && !crate::harnesses::in_crazyagent_folder(candidate)
-        && candidate
-            .canonicalize()
-            .is_ok_and(|real| !crate::harnesses::in_crazyagent_folder(&real))
+        && candidate.canonicalize().is_ok()
+        && !crate::harnesses::is_shim(places.home(), candidate)
+        && !places.agent_writable(candidate)
         && crate::service::changeable_by_others(candidate).is_none()
 }
 
@@ -555,10 +695,19 @@ fn valid_name(name: &str) -> bool {
         && !name.contains(['/', '\\', '\0'])
 }
 
+/// Whether a path may name a place: absolute, bounded, not `/` and plain, with no `.` or
+/// `..` part that would read one folder as another. Input: the path. Output: the answer.
 fn usable(path: &Path) -> bool {
+    use std::path::Component;
     path.is_absolute()
         && path.as_os_str().len() <= PATH_BYTES_MAX
         && path.as_os_str() != OsStr::new("/")
+        && path.components().all(|part| {
+            matches!(
+                part,
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+            )
+        })
 }
 
 fn below(base: &Path, relative: &str) -> PathBuf {
