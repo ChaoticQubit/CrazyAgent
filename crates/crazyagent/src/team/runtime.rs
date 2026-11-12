@@ -610,6 +610,7 @@ struct Worker {
     background_held: bool,
     kept_session: bool,
     fresh: Option<i64>,
+    resumed: bool,
     own_turn: Option<i64>,
     own_rules: Option<(Duration, TurnRules)>,
     turn_started: Option<i64>,
@@ -6579,6 +6580,7 @@ impl TeamRuntime {
         };
         assert!(!(kept_session && live));
         let fresh = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_none()).then(now_ms);
+        let resumed = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_some());
         let (access, toolchains, network) = match &launch {
             Launch::Fresh(plan, _) => (plan.access, Some(plan.toolchains.clone()), plan.network),
             Launch::Adopt(adoption) => (
@@ -6642,6 +6644,7 @@ impl TeamRuntime {
                 background_held: false,
                 kept_session,
                 fresh,
+                resumed,
                 own_turn: None,
                 fed: None,
                 own_rules: None,
@@ -9005,7 +9008,7 @@ impl TeamRuntime {
                     && !worker.stopping
                     && super::master::live(&self.connection, &worker.project)?
                 {
-                    if worker.fresh.is_none()
+                    if worker.resumed
                         && !worker.input_ready
                         && let Some(session) = worker.session.as_deref()
                     {

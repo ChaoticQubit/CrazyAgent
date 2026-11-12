@@ -15765,6 +15765,7 @@ fn between_turns(
         background_held: false,
         kept_session,
         fresh: None,
+        resumed: false,
         own_turn: None,
         own_rules: None,
         counted_none: false,
