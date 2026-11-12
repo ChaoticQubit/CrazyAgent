@@ -1339,3 +1339,14 @@ fn a_huge_record_with_no_line_break_is_read_only_up_to_the_budget() {
     );
     assert!(took < std::time::Duration::from_secs(3), "{took:?}");
 }
+
+/// F33: the session search names engine-typed record messages `engine`, and keeps the
+/// reader's own roles for instructions, summaries, owner-typed text, replies and tools.
+#[test]
+fn record_messages_the_engine_typed_are_searched_as_the_engine_s() {
+    assert_eq!(record_role("typed", "[team] Agent 4 finished"), "engine");
+    assert_eq!(record_role("typed", "Ship the parser"), "typed");
+    for role in ["instructions", "summary", "agent", "tool"] {
+        assert_eq!(record_role(role, "[team] Agent 4 finished"), role);
+    }
+}

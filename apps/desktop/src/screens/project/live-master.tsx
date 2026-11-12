@@ -122,6 +122,34 @@ export function movedNote(team: Result<TeamStatus> | undefined, projectId: strin
   return now - last.created_ms < MOVED_SHOWN_MS ? last.text : null;
 }
 
+/** Words the time a live master has left before its Master run time (F01). Input: the
+ * milliseconds left. Output: such as "6 d 23 h left", "5 h 10 min left" or "Time is up". */
+export function timeLeftWords(left: number): string {
+  if (left <= 0) return "Time is up; it stops if it works on without you";
+  const minutes = Math.ceil(left / 60_000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  if (days > 0) return `${days} d ${hours} h left`;
+  return hours > 0 ? `${hours} h ${minutes % 60} min left` : `${minutes} min left`;
+}
+
+/** The line the master area shows about its limits: the time the live master has left under
+ * Master run time and the sub-agent rounds of your current goal (F01, F09). Inputs: the latest
+ * team read, the project shown and the time now in milliseconds. Output: the line, or null
+ * without a good read of this project. */
+export function masterLimitsLine(team: Result<TeamStatus> | undefined, projectId: string, now: number): string | null {
+  if (team?.kind !== "ok" || team.value.project_id !== projectId) return null;
+  const status = team.value;
+  const used = status.rounds_used ?? 0;
+  const max = status.master_rounds ?? null;
+  const rounds = status.rounds_kept_going === true && max !== null
+    ? `Sub-agent rounds: ${used}, no limit for this goal`
+    : max === null ? `Sub-agent rounds: ${used}` : `Sub-agent rounds: ${used} of ${max}`;
+  if (status.master_run_secs === null) return `No time limit. ${rounds}.`;
+  const deadline = status.master_deadline_ms ?? null;
+  return deadline === null ? `${rounds}.` : `${timeLeftWords(deadline - now)}. ${rounds}.`;
+}
+
 /** Whether the engine says this project's Live terminal setting is Off (DEC-117 Q4). Inputs:
  * the team read and the project shown. Output: true only for a good read of this project
  * showing Off, so a failed read never closes a running terminal. */
@@ -413,6 +441,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
     return () => window.clearInterval(timer);
   }, []);
   const moved = live.kind === "running" ? movedNote(data.team.result, data.id, now) : null;
+  const limits = live.kind === "running" ? masterLimitsLine(data.team.result, data.id, now) : null;
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
   const off = live.kind === "stopped" || live.kind === "refused";
   const startTeam = async () => {
@@ -435,6 +464,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       <span className={`pj-console-state ${state.tone}`}>{state.word}</span>
       {account && <span className="pj-console-detail">{displayText(account)}</span>}
       {head.waits && <span className="pj-console-detail" data-testid="master-switch-waits">{displayText(head.waits)}</span>}
+      {limits && <span className="pj-console-detail" data-testid="master-limits">{displayText(limits)}</span>}
       <span className="pj-console-actions"><MasterSettingsButton /></span>
     </div>
     {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} mark={mark} harnesses={harnesses} onSwitched={async () => {

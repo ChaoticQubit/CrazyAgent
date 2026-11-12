@@ -260,6 +260,10 @@ mod wire {
         Ok(())
     }
 
+    /// What one delivery returns: the turn the server named, and the Codex release when it is
+    /// newer than the checked ones.
+    type Delivery = (Option<String>, Option<(u64, u64, u64)>);
+
     /// Puts text into the agent's thread through one session, trying again once when the
     /// turn changed under the request. Takes the socket, the text, whether an idle thread may
     /// start a turn and the pane's first process. Returns the turn the server named and the
@@ -269,7 +273,7 @@ mod wire {
         text: &str,
         start: bool,
         pane: u32,
-    ) -> Result<(Option<String>, Option<(u64, u64, u64)>), &'static str> {
+    ) -> Result<Delivery, &'static str> {
         let mut wire = session(socket, pane)?;
         let thread = wire.thread()?;
         for _ in 0..ATTEMPTS_MAX {

@@ -23,7 +23,7 @@ pub(crate) fn start_end_code(clocked: bool) -> &'static str {
         "claude_host_startup_timeout"
     }
 }
-use crate::protocol::{CredentialRef, RequestId};
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
@@ -478,9 +478,10 @@ async fn expired(at: Option<tokio::time::Instant>) {
 impl ClaudeHost {
     /// Starts one Claude Code master under custody. Inputs: the engine's command, its
     /// sandbox, the account lease, the turn's home, the launch action, the account, the
-    /// wall clock, none for no master time limit (OB-5c), the turn's budget, whose output
-    /// bounds it keeps, and the owner's master frame size limit, which bounds each prompt
-    /// frame (F39). Output: the host, or the refusal.
+    /// project whose leftover setting and owner view its leftovers follow, the wall clock,
+    /// none for no master time limit (OB-5c), the turn's budget, whose output bounds it keeps,
+    /// and the owner's master frame size limit, which bounds each prompt frame (F39). Output:
+    /// the host, or the refusal.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         command: Command,
@@ -489,6 +490,7 @@ impl ClaudeHost {
         home: PathBuf,
         action: NativeAction,
         account_ref: CredentialRef,
+        project: ProjectId,
         run_time: Option<Duration>,
         budget: ResourceBudget,
         frames: crate::master_frame_limit::FrameSize,
@@ -531,7 +533,7 @@ impl ClaudeHost {
                 process::run(
                     command,
                     sandbox,
-                    profile,
+                    (profile, project),
                     home,
                     protocol,
                     limits,
@@ -700,8 +702,8 @@ pub(in crate::engine) enum ClaudeHost {}
 #[cfg(not(unix))]
 impl ClaudeHost {
     /// Never starts: takes the command, boundary, uninhabited profile lease, turn home,
-    /// action, account, wall clock, budget and frame size. Returns nothing because the
-    /// lease cannot exist.
+    /// action, account, project, wall clock, budget and frame size. Returns nothing because
+    /// the lease cannot exist.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         _command: Command,
@@ -710,6 +712,7 @@ impl ClaudeHost {
         _home: PathBuf,
         _action: NativeAction,
         _account_ref: CredentialRef,
+        _project: ProjectId,
         _run_time: Option<std::time::Duration>,
         _budget: ResourceBudget,
         _frames: crate::master_frame_limit::FrameSize,

@@ -1070,7 +1070,7 @@ pub fn catalog(
         documents_max: DOCUMENTS_MAX,
         document_bytes_max: DOCUMENT_BYTES_MAX,
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
-        default_team: default_team(config, pool, research, signed_in),
+        default_team: default_team(config, pool, signed_in),
         default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
         agent_access: LevelView::all(),
     };
@@ -1139,43 +1139,29 @@ pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
     })
 }
 
-/// Builds the smart team defaults for the New Project Team step.
-/// Takes the configuration, the chosen pool, the research toggles and the signed-in connections.
-/// Returns the pool's best signed-in harness, Codex before Claude Code, as master and as one
-/// research agent per toggle, tools on; Codex when the pool has no signed-in harness, never RCLI.
-/// Without research no harness is chosen, which means any harness up to `TEAM_AGENTS_MAX`.
+/// Builds the smart team defaults for the New Project Team step (DEC-147.1).
+/// Takes the configuration, the chosen pool and the signed-in connections.
+/// Returns the pool's best signed-in harness, Codex before Claude Code, as master with tools
+/// on; Codex when the pool has no signed-in harness, never RCLI. No sub-agent harness is
+/// named and the team maximum is `TEAM_AGENTS_MAX`, so any harness runs with no limit.
 pub fn default_team(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
-    research: &[ResearchKind],
     signed_in: &BTreeSet<CredentialRef>,
 ) -> TeamPlan {
     let master = best_signed_in_harness(config, pool, signed_in)
         .unwrap_or(DEFAULT_TEAM_HARNESS)
         .to_owned();
     assert!(master != "rcli" && harness_valid(&master));
-    let agents = u8::try_from(research.len().min(usize::from(HARNESS_AGENTS_MAX))).unwrap_or(1);
-    let sub_harnesses = if agents == 0 {
-        Vec::new()
-    } else {
-        vec![HarnessSlot {
-            harness: master.clone(),
-            agents,
-            tools: true,
-        }]
-    };
     let team = TeamPlan {
         master,
         master_tools: true,
-        max_agents: if sub_harnesses.is_empty() {
-            TEAM_AGENTS_MAX
-        } else {
-            1 + agents
-        },
-        sub_harnesses,
+        sub_harnesses: Vec::new(),
         min_agents: 1,
+        max_agents: TEAM_AGENTS_MAX,
     };
     assert!(team.validate().is_ok());
+    assert!(team.sub_harnesses.is_empty() && team.max_agents == TEAM_AGENTS_MAX);
     team
 }
 
@@ -2479,7 +2465,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 50] = [
+const REMOVED_WITH_PROJECT: [&str; 54] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2501,6 +2487,8 @@ const REMOVED_WITH_PROJECT: [&str; 50] = [
     "team_master_branch",
     "team_land_on",
     "team_background",
+    "team_leftovers",
+    "team_agent_ends",
     "team_merge_ask",
     "team_master_lands",
     "team_reask_empty",
@@ -2520,6 +2508,8 @@ const REMOVED_WITH_PROJECT: [&str; 50] = [
     "team_status_log",
     "team_owner_turns",
     "team_caps",
+    "team_master_limits",
+    "team_master_clocks",
     "team_token_budgets",
     "team_teammates",
     "team_account_spread",
@@ -2666,8 +2656,8 @@ fn set_agent_policy(
 /// ended agents are deleted, so a waiting step is never
 /// claimed and a running one stops; its read folders, agent access, agent settings and its
 /// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
-/// per-project switches are cleared too, so a new project reusing the id never inherits
-/// them. The versions of its read folders, agent access, agent settings, project
+/// per-project switches are cleared too, and so are the memories its agents saved, so a new
+/// project reusing the id never inherits them. The versions of its read folders, agent access, agent settings, project
 /// instructions, team settings and project wake rule move on once more, so a project added
 /// again under the same id refuses a save from a screen read before the removal (V2V-1,
 /// V2SYNC-2); agent ids are never reused, so its agents' instruction versions are dropped
@@ -2737,6 +2727,7 @@ fn remove(
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
     assert_eq!(removed, 1);
+    crate::memory::library::forget_orphan_agent_memories(tx)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
 }
@@ -2808,7 +2799,7 @@ fn check_new(
         Some(team) => team,
         None => {
             let signed = signed_in_connections(tx, config, setup.pool.as_ref())?;
-            default_team(config, setup.pool.as_ref(), &setup.research, &signed)
+            default_team(config, setup.pool.as_ref(), &signed)
         }
     };
     team.validate()?;

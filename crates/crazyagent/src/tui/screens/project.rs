@@ -654,6 +654,7 @@ pub(in crate::tui) enum ProjectReply {
     TeamSettings,
     Master,
     Process,
+    Memory,
     Usage,
     Session(SessionsAction),
     AccountOrder(Option<crate::scheduling::Strategy>),
@@ -2328,6 +2329,7 @@ impl ProjectScreen {
                 Some(_) => self.problem = Some("The project brief can't be deleted.".into()),
                 None => {}
             },
+            KeyCode::Char('p') => return ProjectReply::Memory,
             KeyCode::Char('m') => {
                 let research = item
                     .as_ref()

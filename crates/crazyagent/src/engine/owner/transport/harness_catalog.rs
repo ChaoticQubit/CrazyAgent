@@ -1,4 +1,5 @@
 use super::*;
+use crate::harnesses::finding::{self, Found};
 use crate::harnesses::update::{
     CheckWhen, HarnessVersions, InstallFromApp, OnlineLookup, UpdateMode,
 };
@@ -36,6 +37,13 @@ enum Action {
         online: OnlineLookup,
         install: InstallFromApp,
     },
+    Find {
+        id: String,
+    },
+    ChoosePath {
+        id: String,
+        path: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,6 +64,9 @@ enum WireReply {
         when: CheckWhen,
         online: OnlineLookup,
         install: InstallFromApp,
+    },
+    Found {
+        found: Found,
     },
 }
 
@@ -116,6 +127,31 @@ impl OwnerClient {
     }
 }
 
+/// Has Check again pin Codex and Claude Code when the engine started without them, after the
+/// grant is checked, so the list and sign-in agree without a restart; a harness that is
+/// still missing or refused only stays out of the pinned slots. Inputs: the engine,
+/// authority, packet, admission and runtime. Output: Ok, or the grant refusal.
+async fn look_again(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    packet: &[u8; 37],
+    admission: &Admission,
+    runtime: &OwnerRuntimeHandle,
+) -> Result<(), EngineError> {
+    {
+        let _barrier = engine.owner_egress.write().await;
+        if &authority.authenticate(packet)? != admission {
+            return Err(failure("owner_grant_stale_or_revoked"));
+        }
+    }
+    for id in finding::CHOOSABLE {
+        if let Ok(Found::Refused { code, .. }) = runtime.look_again(id) {
+            eprintln!("{id} was found on Check again but not used ({code})");
+        }
+    }
+    Ok(())
+}
+
 /// Encodes this protocol's refusal of a request the engine did not run.
 /// Input: the refusal code. Output: the reply frame.
 pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
@@ -131,7 +167,7 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    if bytes.len() > 256 {
+    if bytes.len() > updates::REQUEST_BYTES_MAX {
         return Err(failure("harness_catalog_request_bounds"));
     }
     let Envelope {
@@ -141,7 +177,12 @@ pub(super) async fn serve(
         engine: engine.clone(),
         authority: authority.clone(),
     };
-    let mut search = Search::from_environment();
+    if matches!(action, Action::Check) {
+        look_again(engine, authority, packet, admission, &runtime).await?;
+    }
+    let mut search = runtime
+        .held_search()?
+        .unwrap_or_else(Search::from_environment);
     for (id, executable) in [
         ("codex", runtime.registered_codex_executable()),
         ("claude-code", runtime.registered_claude_executable()),

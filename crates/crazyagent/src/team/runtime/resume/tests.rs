@@ -1299,7 +1299,16 @@ mod live {
         let thread = std::thread::spawn(move || {
             let cancel = AtomicBool::new(false);
             let interrupt = AtomicBool::new(false);
-            per_turn(&plan, &home, &ordered, &reports, &cancel, &interrupt)
+            per_turn(
+                &plan,
+                &home,
+                &ordered,
+                &reports,
+                &cancel,
+                &interrupt,
+                &AtomicBool::new(false),
+                &crate::team::runtime::test_by(),
+            )
         });
         (reported, thread)
     }

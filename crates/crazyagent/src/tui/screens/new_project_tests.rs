@@ -1,7 +1,7 @@
 use super::new_project::*;
 use crate::config::{EffectiveConfig, resolve_config_bytes};
 use crate::project_setup::{
-    HarnessSlot, Platform, ResearchKind, TEAM_AGENTS_MAX, TeamPlan, catalog,
+    HARNESS_AGENTS_MAX, HarnessSlot, Platform, ResearchKind, TEAM_AGENTS_MAX, TeamPlan, catalog,
 };
 use crate::protocol::CredentialRef;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -79,7 +79,45 @@ pub(super) fn wizard() -> Wizard {
     Wizard::new(pool_choices(&config()), None)
 }
 
+/// Serves the wizard the engine's own catalog for its pool and research, the default team
+/// exactly as the engine builds it (DEC-147.1: no harness named, no cap). Takes the wizard
+/// and the signed-in connection ids. Returns nothing.
+pub(super) fn load_engine_catalog(wizard: &mut Wizard, signed_in: &[&str]) {
+    let (pool, research, served) = engine_catalog(wizard, signed_in);
+    wizard.apply_catalog(pool, research, Ok(served));
+}
+
+/// Serves the wizard the engine's catalog with a team the owner could pick for wizard row
+/// tests: with research on, one row of the master's harness with one agent per toggle and
+/// a team maximum of the master plus those agents; without research, the engine's team.
+/// Takes the wizard and the signed-in connection ids. Returns nothing.
 pub(super) fn load_catalog(wizard: &mut Wizard, signed_in: &[&str]) {
+    let (pool, research, mut served) = engine_catalog(wizard, signed_in);
+    let agents = u8::try_from(research.len().min(usize::from(HARNESS_AGENTS_MAX))).unwrap();
+    if agents > 0 {
+        let team = &mut served.default_team;
+        assert!(team.sub_harnesses.is_empty());
+        team.sub_harnesses = vec![HarnessSlot {
+            harness: team.master.clone(),
+            agents,
+            tools: true,
+        }];
+        team.max_agents = 1 + agents;
+        assert!(team.validate().is_ok());
+    }
+    wizard.apply_catalog(pool, research, Ok(served));
+}
+
+/// Reads the engine's catalog for the wizard's current request. Takes the wizard and the
+/// signed-in connection ids. Returns the pool, the research and the catalog.
+fn engine_catalog(
+    wizard: &mut Wizard,
+    signed_in: &[&str],
+) -> (
+    Option<CredentialRef>,
+    Vec<ResearchKind>,
+    crate::project_setup::ProjectCatalog,
+) {
     let config = config();
     let signed: BTreeSet<CredentialRef> = signed_in
         .iter()
@@ -87,7 +125,7 @@ pub(super) fn load_catalog(wizard: &mut Wizard, signed_in: &[&str]) {
         .collect();
     let (pool, research) = wizard.catalog_request().expect("catalog request");
     let served = catalog(&config, pool.as_ref(), &research, &signed).unwrap();
-    wizard.apply_catalog(pool, research, Ok(served));
+    (pool, research, served)
 }
 
 #[test]
@@ -188,38 +226,38 @@ fn team_defaults_come_from_the_engine_and_owner_edits_survive_a_reload() {
         ResearchKind::CompetitorResearch,
         ResearchKind::MarketResearch,
     ];
-    load_catalog(&mut wizard, &["c-codex"]);
+    load_engine_catalog(&mut wizard, &["c-codex"]);
     let team = wizard.team.clone().unwrap();
+    let top = TEAM_AGENTS_MAX.to_string();
     assert_eq!(team.master, "codex");
-    assert_eq!(
-        team.sub_harnesses
-            .iter()
-            .map(|s| (s.harness.as_str(), s.agents, s.tools))
-            .collect::<Vec<_>>(),
-        [("codex", 2, true)]
+    assert!(
+        team.sub_harnesses.is_empty(),
+        "research toggles name no harness and cap nothing (DEC-147.1)"
     );
-    assert_eq!((team.min_agents, team.max_agents), (1, 3));
-    assert_eq!((wizard.min.value(), wizard.max.value()), ("1", "3"));
+    assert_eq!((team.min_agents, team.max_agents), (1, TEAM_AGENTS_MAX));
+    assert_eq!(
+        (wizard.min.value(), wizard.max.value()),
+        ("1", top.as_str())
+    );
     assert_eq!(wizard.catalog_request(), None);
 
     wizard.research.push(ResearchKind::DesignResearch);
-    load_catalog(&mut wizard, &["c-codex"]);
-    assert_eq!(wizard.team.as_ref().unwrap().sub_harnesses[0].agents, 3);
-    assert_eq!(wizard.max.value(), "4");
+    load_engine_catalog(&mut wizard, &["c-codex"]);
+    assert!(wizard.team.as_ref().unwrap().sub_harnesses.is_empty());
+    assert_eq!(wizard.max.value(), top.as_str());
 
     wizard.go(Step::Team);
-    wizard.key(key(KeyCode::Down));
-    wizard.key(key(KeyCode::Left));
+    wizard.key(key(KeyCode::Char(' ')));
     assert!(wizard.team_edited);
     wizard.research.pop();
-    load_catalog(&mut wizard, &[]);
+    load_engine_catalog(&mut wizard, &[]);
     let kept = wizard.team.clone().unwrap();
     assert_eq!(kept.master, "codex");
-    assert_eq!(kept.sub_harnesses[0].agents, 2);
-    assert_eq!(kept.max_agents, 4);
+    assert!(!kept.master_tools, "the owner's edit survives the reload");
+    assert_eq!(kept.max_agents, TEAM_AGENTS_MAX);
 
     let mut unsigned = Wizard::new(pool_choices(&config()), None);
-    load_catalog(&mut unsigned, &[]);
+    load_engine_catalog(&mut unsigned, &[]);
     let fallback = unsigned.team.unwrap();
     assert_eq!(
         fallback.master, "codex",
@@ -630,10 +668,10 @@ fn the_default_team_moves_off_harnesses_that_are_not_installed() {
         ResearchKind::MarketResearch,
         ResearchKind::CompetitorResearch,
     ];
-    load_catalog(&mut fresh, &["c-codex"]);
+    load_engine_catalog(&mut fresh, &["c-codex"]);
     let team = fresh.team.clone().unwrap();
     assert_eq!(team.master, "codex");
-    assert_eq!(team.sub_harnesses[0].harness, "codex");
+    assert!(team.sub_harnesses.is_empty());
     let catalog = |codex: HarnessState| {
         vec![
             HarnessChoice {
@@ -659,14 +697,13 @@ fn the_default_team_moves_off_harnesses_that_are_not_installed() {
     fresh.set_harnesses(catalog(HarnessState::NotInstalled));
     let fitted = fresh.team.clone().unwrap();
     assert_eq!(fitted.master, "claude-code");
-    assert_eq!(fitted.sub_harnesses[0].harness, "claude-code");
-    assert_eq!(fitted.sub_harnesses[0].agents, 2);
-    assert_eq!((fitted.min_agents, fitted.max_agents), (1, 3));
+    assert!(fitted.sub_harnesses.is_empty());
+    assert_eq!((fitted.min_agents, fitted.max_agents), (1, TEAM_AGENTS_MAX));
     assert!(fresh.check_team().is_ok());
 
     let mut edited = wizard();
     edited.research = vec![ResearchKind::MarketResearch];
-    load_catalog(&mut edited, &["c-codex"]);
+    load_engine_catalog(&mut edited, &["c-codex"]);
     edited.go(Step::Team);
     edited.key(key(KeyCode::Char(' ')));
     assert!(!edited.team.as_ref().unwrap().master_tools);
@@ -681,12 +718,12 @@ fn the_default_team_moves_off_harnesses_that_are_not_installed() {
     early.research = vec![ResearchKind::MarketResearch];
     early.set_harnesses(catalog(HarnessState::NotInstalled));
     assert_eq!(early.team, None);
-    load_catalog(&mut early, &["c-codex"]);
+    load_engine_catalog(&mut early, &["c-codex"]);
     assert_eq!(early.team.as_ref().unwrap().master, "claude-code");
 
     let mut none = wizard();
     none.research = vec![ResearchKind::MarketResearch];
-    load_catalog(&mut none, &["c-codex"]);
+    load_engine_catalog(&mut none, &["c-codex"]);
     none.set_harnesses(vec![HarnessChoice {
         id: "codex".into(),
         name: "Codex".into(),
@@ -913,7 +950,7 @@ fn create_sends_every_field_and_then_waits_for_the_engine() {
     wizard.research = vec![ResearchKind::FrontEndDesign, ResearchKind::MarketResearch];
     wizard.platforms = vec![Platform::Cli, Platform::Website];
     wizard.tech = vec!["Rust".into()];
-    load_catalog(&mut wizard, &["c-codex"]);
+    load_engine_catalog(&mut wizard, &["c-codex"]);
     wizard.go(Step::Documents);
     type_text(&mut wizard, "~/scope.csv");
     wizard.key(key(KeyCode::Enter));
@@ -938,7 +975,8 @@ fn create_sends_every_field_and_then_waits_for_the_engine() {
         setup.pool.as_ref().map(CredentialRef::as_str),
         Some("pool-main")
     );
-    assert_eq!(setup.team.as_ref().unwrap().max_agents, 3);
+    assert_eq!(setup.team.as_ref().unwrap().max_agents, TEAM_AGENTS_MAX);
+    assert!(setup.team.as_ref().unwrap().sub_harnesses.is_empty());
     assert_eq!(setup.documents.len(), 1);
     assert!(setup.documents[0].ends_with("/scope.csv"));
     assert!(setup.validate().is_ok());

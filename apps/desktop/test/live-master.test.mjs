@@ -689,3 +689,18 @@ test("Live terminal stays available with no master known yet (OWNER-Q4-2-L3 F2)"
   assert.equal(row.disabled, null, `no master yet: available: ${row.text}`);
   assert.doesNotMatch(row.text, /no live terminal/);
 });
+
+test("the master area shows the time left under Master run time and the rounds of the current goal (F01, F09)", () => {
+  const now = Date.UTC(2026, 10, 11, 22, 0);
+  const read = (extra) => ({ kind: "ok", value: { project_id: "alpha", rounds_used: 2, master_rounds: null, rounds_kept_going: false, master_run_secs: 604_800, master_deadline_ms: now + 6 * 86_400_000 + 23 * 3_600_000, ...extra } });
+  assert.equal(live.masterLimitsLine(undefined, "alpha", now), null, "not read yet");
+  assert.equal(live.masterLimitsLine(read({}), "beta", now), null, "another project's read");
+  assert.equal(live.masterLimitsLine(read({}), "alpha", now), "6 d 23 h left. Sub-agent rounds: 2.");
+  assert.equal(live.masterLimitsLine(read({ master_rounds: 3 }), "alpha", now), "6 d 23 h left. Sub-agent rounds: 2 of 3.");
+  assert.equal(live.masterLimitsLine(read({ master_rounds: 3, rounds_kept_going: true }), "alpha", now), "6 d 23 h left. Sub-agent rounds: 2, no limit for this goal.");
+  assert.equal(live.masterLimitsLine(read({ master_run_secs: null, master_deadline_ms: null }), "alpha", now), "No time limit. Sub-agent rounds: 2.");
+  assert.equal(live.masterLimitsLine(read({ master_deadline_ms: null }), "alpha", now), "Sub-agent rounds: 2.", "no clock while no pane runs");
+  assert.equal(live.timeLeftWords(5 * 3_600_000 + 10 * 60_000), "5 h 10 min left");
+  assert.equal(live.timeLeftWords(12 * 60_000), "12 min left");
+  assert.equal(live.timeLeftWords(0), "Time is up; it stops if it works on without you");
+});

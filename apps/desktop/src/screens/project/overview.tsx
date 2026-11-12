@@ -67,6 +67,7 @@ const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "
   work_closed: { icon: "circle-x", tone: "" },
   phase: { icon: "layers", tone: "", own: true },
   test: { icon: "shield-check", tone: "", own: true },
+  team_action: { icon: "circle-pause", tone: "warn" },
 };
 
 /** What a row's Undo does: the change set being undone, if any, and the ask before it. */

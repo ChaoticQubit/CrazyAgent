@@ -215,6 +215,100 @@ fn a_project_with_no_onboarding_row_gets_its_main_graph_refreshed() {
     );
 }
 
+/// F25: a project that started empty and has no onboarding row is refreshable once its
+/// folder is named, and every commit that lands on its main branch makes the published
+/// main graph due again, so the idle loop rebuilds it at its next check (DEC-123).
+#[cfg(unix)]
+#[test]
+fn a_landing_on_main_makes_the_published_main_graph_due_again() {
+    use std::process::{Command, Stdio};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (repo, home) = (root.join("fresh"), root.join("home"));
+    for folder in [&repo, &home] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let output = crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("LC_ALL", "C")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=Owner",
+                    "-c",
+                    "user.email=owner@example.invalid",
+                ])
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    std::fs::create_dir(repo.join(CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(repo.join("graphify-out")).unwrap();
+    std::fs::write(
+        repo.join("graphify-out").join("graph.json"),
+        "{\"nodes\":1}",
+    )
+    .unwrap();
+
+    let database = database();
+    database
+        .execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    let body = serde_json::json!({
+        "project_id": "fresh",
+        "spec": {"name": "fresh", "repositories": [repo.to_str().unwrap()]}
+    });
+    database
+        .execute(
+            "INSERT INTO projects(id,body) VALUES ('fresh',?1)",
+            [body.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        refreshable(&database).unwrap(),
+        [("fresh".to_owned(), repo.clone())]
+    );
+
+    let hidden = main_graph::hidden_digest(&[]);
+    let first = main_tip(&database, "fresh", &repo).unwrap();
+    assert!(main_graph::due(None, &first, &hidden));
+    let built = main_graph::Build {
+        tip: first.clone(),
+        built_ms: 1_000,
+        hidden: hidden.clone(),
+    };
+    assert!(main_graph::publish(&repo, &built).unwrap());
+    assert!(!main_graph::due(
+        main_graph::latest(&repo).as_ref(),
+        &first,
+        &hidden
+    ));
+
+    git(&["commit", "-q", "--allow-empty", "-m", "landed change set"]);
+    let landed = main_tip(&database, "fresh", &repo).unwrap();
+    assert_ne!(landed, first);
+    assert!(
+        main_graph::due(main_graph::latest(&repo).as_ref(), &landed, &hidden),
+        "a landing makes the published graph due again"
+    );
+}
+
 #[test]
 fn run_names_differ_between_onboardings_of_one_project_id_and_stay_in_bound() {
     let database = database();

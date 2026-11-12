@@ -1302,6 +1302,10 @@ async fn master_selection_cannot_cross_backend_account_profile_or_approved_pool(
     f.stop().await;
 }
 
+/// Owner actions naming another project's session or turn are refused. Each project's turn
+/// has ended before the next revision is read, since a turn ending moves the revision: a
+/// send read before that end is refused as stale, and a refusal below would then prove
+/// nothing about crossing projects.
 #[tokio::test]
 async fn master_session_actions_cannot_cross_project_or_cancel_another_turn() {
     let f = Fixture::start(CATALOG).await;
@@ -1316,10 +1320,12 @@ async fn master_session_actions_cannot_cross_project_or_cancel_another_turn() {
         .await;
     f.submit(&owner, "p-turn", &p, "Project P requirement.")
         .await;
+    let p_turn = f.settled(&owner, &p, "p-turn").await;
+    f.quiet(&owner, "p").await;
     f.submit(&owner, "q-turn", &q, "Project Q requirement.")
         .await;
-    let p_turn = f.settled(&owner, &p, "p-turn").await;
     let q_turn = f.settled(&owner, &q, "q-turn").await;
+    f.quiet(&owner, "q").await;
     blocked(&p_turn, &p, "p-turn", MasterReason::RuntimeUnavailable);
     blocked(&q_turn, &q, "q-turn", MasterReason::RuntimeUnavailable);
     for (index, action) in [

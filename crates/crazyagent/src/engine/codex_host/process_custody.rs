@@ -4,6 +4,7 @@ use super::process::{
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use crate::protocol::ProjectId;
 use crate::sandbox::warden::{self, Warden};
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -40,6 +41,7 @@ struct OwnedChild {
     follower: Option<Follower>,
     lineage: Option<Result<Lineage, Unstopped>>,
     profile: Option<NativeProfileUse>,
+    project: Option<ProjectId>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
@@ -61,14 +63,14 @@ struct Custody(Option<OwnedChild>);
 
 pub(super) fn run(
     command: Command,
-    profile: Option<NativeProfileUse>,
+    lease: Option<(NativeProfileUse, ProjectId)>,
     unconfined: bool,
     mut input: mpsc::Receiver<WriteRequest>,
     shared: Arc<ProcessShared>,
     deadline: Option<Instant>,
     output_limit: u64,
 ) {
-    let mut custody = match start(command, profile, unconfined, &shared) {
+    let mut custody = match start(command, lease, unconfined, &shared) {
         Ok(custody) => custody,
         Err(code) => {
             if let Ok(mut state) = shared.lock() {
@@ -105,10 +107,11 @@ pub(super) fn run(
 
 fn start(
     command: Command,
-    profile: Option<NativeProfileUse>,
+    lease: Option<(NativeProfileUse, ProjectId)>,
     unconfined: bool,
     shared: &Arc<ProcessShared>,
 ) -> Result<Custody, &'static str> {
+    let (profile, project) = lease.unzip();
     if let Some(profile) = &profile {
         profile
             .revalidate_retained()
@@ -134,6 +137,7 @@ fn start(
         follower,
         lineage: None,
         profile,
+        project,
         stdin: None,
         stdout: None,
         stderr: None,
@@ -446,8 +450,9 @@ impl OwnedChild {
     /// Publishes the run's end and releases the account lease. At Full access, no warden
     /// reaches what left the group, so the lineage taken at the stop, or now when the harness
     /// ended on its own, is checked first; while some of it still runs the run ends with that
-    /// code and the lease stays held until it ends or the owner signs the account out.
-    /// Takes nothing.
+    /// code and a hold follows it by its project's leftover setting, listed in the project's
+    /// owner view, keeping the lease until none of it runs, the owner keeps it running or
+    /// signs the account out. Takes nothing.
     fn publish_completion(&mut self) {
         assert!(self.complete());
         assert!(self.status.is_some() || self.abandoned);
@@ -467,7 +472,17 @@ impl OwnedChild {
             left = Some(unstopped.code());
             self.shared.fail(unstopped.code());
             if let (Unstopped::Left(leftovers), Some(profile)) = (unstopped, self.profile.take()) {
-                leftovers.hold(Some(profile.account().clone()), profile);
+                let project = self.project.as_ref().map(ProjectId::as_str);
+                assert!(project.is_some(), "a leased Codex host names its project");
+                leftovers.hold(
+                    Some(profile.account().clone()),
+                    profile,
+                    crate::harnesses::leftovers::HoldBy {
+                        project: project.map(str::to_owned),
+                        who: "a Codex host turn".to_owned(),
+                    },
+                    crate::harnesses::leftovers::mode_of(project),
+                );
             }
         }
         self.profile = None;

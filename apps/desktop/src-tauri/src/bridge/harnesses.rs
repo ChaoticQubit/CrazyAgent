@@ -1,5 +1,6 @@
 use super::{BridgeError, ENGINE_VERSION_MISMATCH, NativeBridge, bounded, caused, failure};
 use crazyagent::harnesses::HarnessEntry;
+use crazyagent::harnesses::finding::{self, Found};
 use crazyagent::harnesses::update::{HarnessVersions, UpdateSettings};
 
 const HARNESS_ID_BYTES_MAX: usize = 64;
@@ -33,6 +34,47 @@ const HARNESS_CODES: [&str; 26] = [
     "harness_install_not_found",
     "harness_install_failed",
 ];
+
+/// The refusals a Check again or a chosen harness file may carry to the window; any other
+/// engine text becomes `harness_path_refused`, so raw engine text never reaches the window.
+const FOUND_CODES: [&str; 13] = [
+    finding::UNKNOWN_HARNESS,
+    finding::PATH_INVALID,
+    finding::PATH_NOT_FOUND,
+    finding::PATH_NOT_EXECUTABLE,
+    finding::PATH_AGENT_SPACE,
+    finding::PATH_SHIM,
+    finding::PATH_CHANGEABLE,
+    finding::PATH_UNREADABLE,
+    "native_auth_host_executable_unsafe",
+    "native_auth_host_executable_changed",
+    "native_auth_host_unavailable",
+    "native_auth_host_registration_frozen",
+    "owner_runtime_stale",
+];
+const FOUND_REFUSED: &str = "harness_path_refused";
+
+/// The plain code for a refusal of a found or chosen harness file. Input: the engine code.
+/// Output: a known code, or `harness_path_refused`.
+fn found_code(engine: &str) -> &'static str {
+    if engine == ENGINE_VERSION_MISMATCH {
+        return ENGINE_VERSION_MISMATCH;
+    }
+    FOUND_CODES
+        .into_iter()
+        .find(|code| *code == engine)
+        .unwrap_or(FOUND_REFUSED)
+}
+
+/// Refuses a harness id that has no chosen file before it reaches the engine.
+/// Input: the id from the window. Output: Ok for codex or claude-code, else the refusal.
+fn choosable(id: &str) -> Result<(), BridgeError> {
+    if finding::CHOOSABLE.contains(&id) {
+        Ok(())
+    } else {
+        Err(failure(finding::UNKNOWN_HARNESS))
+    }
+}
 
 /// Refuses a harness id the catalog could never hold before it reaches the engine.
 /// Input: the id from the window. Output: Ok, or `harness_update_unknown_harness`.
@@ -132,6 +174,55 @@ impl NativeBridge {
             .map_err(|error| harness_failure(&error.0))
     }
 
+    /// Has the engine look for Codex or Claude Code again and pin it for sign-in when the engine
+    /// started without it. Input: the catalog id. Output: what was found, with any refusal as
+    /// a plain code, or the refusal of the request.
+    pub async fn harness_find(&self, id: &str) -> Result<Found, BridgeError> {
+        choosable(id)?;
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        let found = self
+            .reader()?
+            .harness_find(id)
+            .await
+            .map_err(|error| failure(found_code(&error.0)))?;
+        bounded(plain_found(found))
+    }
+
+    /// Saves the harness file the owner chose, after every engine check, and looks again with
+    /// it; none clears the choice. Inputs: the catalog id and the absolute path from the
+    /// chooser or typed by the owner. Output: what was found, or the plain refusal.
+    pub async fn harness_choose_path(
+        &self,
+        id: &str,
+        path: Option<&str>,
+    ) -> Result<Found, BridgeError> {
+        choosable(id)?;
+        let path = match path {
+            Some(text) => {
+                let trimmed = text.trim_end_matches(['\n', '\r']);
+                let fits = trimmed.len() <= finding::PATH_BYTES_MAX
+                    && std::path::Path::new(trimmed).is_absolute()
+                    && !trimmed.chars().any(char::is_control);
+                if !fits {
+                    return Err(failure(finding::PATH_INVALID));
+                }
+                Some(std::path::PathBuf::from(trimmed))
+            }
+            None => None,
+        };
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        let found = self
+            .reader()?
+            .harness_choose_path(id, path.as_deref())
+            .await
+            .map_err(|error| failure(found_code(&error.0)))?;
+        bounded(plain_found(found))
+    }
+
     /// Reads the owner's harness update settings. Output: the settings, or a harness code.
     pub async fn harness_update_settings(&self) -> Result<UpdateSettings, BridgeError> {
         if !self.status().connected {
@@ -157,6 +248,18 @@ impl NativeBridge {
             .await
             .map(|_| ())
             .map_err(|error| harness_failure(&error.0))
+    }
+}
+
+/// Keeps a found answer to plain codes: a refusal's engine text is replaced by its known code
+/// or `harness_path_refused`. Input: the engine answer. Output: the answer for the window.
+fn plain_found(found: Found) -> Found {
+    match found {
+        Found::Refused { path, code } => Found::Refused {
+            path,
+            code: found_code(&code).to_owned(),
+        },
+        other => other,
     }
 }
 
@@ -187,6 +290,35 @@ mod tests {
     }
 
     /// Only an id the catalog could hold reaches the engine.
+    #[test]
+    fn a_found_refusal_reaches_the_window_only_as_a_known_code() {
+        let refused = |code: &str| Found::Refused {
+            path: "/opt/homebrew/bin/codex".into(),
+            code: code.into(),
+        };
+        assert_eq!(
+            plain_found(refused("native_auth_host_executable_unsafe")),
+            refused("native_auth_host_executable_unsafe")
+        );
+        assert_eq!(
+            plain_found(refused("Permission denied (os error 13) at /Users/someone")),
+            refused(FOUND_REFUSED)
+        );
+        let missing = Found::Missing {
+            looked: vec!["~/.local/bin".into()],
+        };
+        assert_eq!(plain_found(missing.clone()), missing);
+        assert!(choosable("codex").is_ok());
+        assert!(choosable("claude-code").is_ok());
+        for id in ["claude", "aider", "rcli", ""] {
+            assert_eq!(
+                choosable(id).unwrap_err().code,
+                finding::UNKNOWN_HARNESS,
+                "{id}"
+            );
+        }
+    }
+
     #[test]
     fn a_harness_id_is_short_lowercase_words() {
         for id in ["claude-code", "codex", "cursor-agent", "rcli"] {

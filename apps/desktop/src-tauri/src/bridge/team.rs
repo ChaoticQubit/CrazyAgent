@@ -387,6 +387,39 @@ impl NativeBridge {
         .await
     }
 
+    /// Sets what a project's agents leave running after their stop does (DEC-147.4): End them,
+    /// Keep running and release the account, or Ask me. Takes the project id, the setting and
+    /// the client generation. Returns the actual commit receipt.
+    pub async fn team_leftovers(
+        &mut self,
+        id: &str,
+        mode: crazyagent::team::LeftoverMode,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::LeftoversAtEnd { project_id, mode }, generation)
+            .await
+    }
+
+    /// Ends or keeps the processes one hold of a project lists, the owner's End or Keep in the
+    /// team view. Takes the project id, the hold's key, whether to end them and the client
+    /// generation. Returns the actual commit receipt; a hold that is gone is refused.
+    pub async fn team_leftover_hold(
+        &mut self,
+        id: &str,
+        key: u64,
+        end: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let action = if end {
+            TeamAction::EndLeftovers { project_id, key }
+        } else {
+            TeamAction::KeepLeftovers { project_id, key }
+        };
+        self.team_action(action, generation).await
+    }
+
     /// Turns a project's "Master accepts change sets" setting on or
     /// off: on, the master's merge of a finished harness waits for the owner's Accept.
     /// Takes the project id, the switch and the client generation. Returns the actual
@@ -428,6 +461,21 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::ReaskEmptyReply { project_id, on }, generation)
+            .await
+    }
+
+    /// Saves a project's "End a turn after done" choice (F15): how long a sub-agent's task
+    /// turn may stay quiet after its agent reported done before the engine ends it, in
+    /// seconds, none for Off. Takes the project id, the choice and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn team_done_quiet(
+        &mut self,
+        id: &str,
+        secs: Option<u32>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::DoneQuiet { project_id, secs }, generation)
             .await
     }
 
@@ -777,6 +825,32 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::MaxTeammates { project_id, max }, generation)
+            .await
+    }
+
+    /// Sets Sub-agent rounds per message, None for Until the goal is done (F09). Takes the
+    /// project id, the choice and the client generation. Returns the actual commit receipt.
+    pub async fn team_master_rounds(
+        &mut self,
+        id: &str,
+        max: Option<u8>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MasterRounds { project_id, max }, generation)
+            .await
+    }
+
+    /// Sets Master run time in seconds, None for No limit (F01). Takes the project id, the
+    /// choice and the client generation. Returns the actual commit receipt.
+    pub async fn team_master_run_time(
+        &mut self,
+        id: &str,
+        secs: Option<u32>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MasterRunTime { project_id, secs }, generation)
             .await
     }
 

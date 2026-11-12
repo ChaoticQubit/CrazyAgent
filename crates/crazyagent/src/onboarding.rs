@@ -551,7 +551,7 @@ pub(crate) fn execute(
         Some(team) => team,
         None => {
             let signed = crate::project_setup::signed_in_connections(tx, config, Some(pool))?;
-            crate::project_setup::default_team(config, Some(pool), &[], &signed)
+            crate::project_setup::default_team(config, Some(pool), &signed)
         }
     };
     team.validate()?;

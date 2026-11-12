@@ -1,8 +1,8 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandingMode, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setLeftovers, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandingMode, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMasterRounds, setMasterRunTime, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setDoneQuiet, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, LandingMode, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
+import type { BackgroundAtEnd, LeftoverMode, BranchMode, ChildLanding, IntentReceipt, LandingMode, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { IconName, SelectOption } from "../../ui";
 import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
@@ -79,6 +79,21 @@ export const SWITCH_OPTIONS: SelectOption[] = [
   { value: "fresh", label: "Start fresh" },
 ];
 
+export const DONE_QUIET_OPTIONS: SelectOption[] = [
+  { value: "off", label: "Off" },
+  { value: "120", label: "2 min" },
+  { value: "600", label: "10 min" },
+  { value: "3600", label: "1 h" },
+];
+
+/** The End a turn after done choice a team status holds as its select value (F15): the
+ * seconds, "off" for Off, and 10 min when an older engine sends none. Input: the status.
+ * Output: the value. */
+export function doneQuietValue(status: Pick<TeamStatus, "done_quiet_secs">): string {
+  if (status.done_quiet_secs === null) return "off";
+  return String(status.done_quiet_secs ?? 600);
+}
+
 export const MASTER_IDLE_OPTIONS: SelectOption[] = [
   { value: "off", label: "Off" },
   { value: "fifteen_minutes", label: "15 min" },
@@ -114,6 +129,13 @@ export const BACKGROUND_OPTIONS: SelectOption[] = [
   { value: "stop", label: "Stop them when the turn ends" },
 ];
 
+/** The choices of Left running after a stop. End them is the default (DEC-147.4). */
+export const LEFTOVER_OPTIONS: SelectOption[] = [
+  { value: "end", label: "End them" },
+  { value: "keep", label: "Keep running and release the account" },
+  { value: "ask", label: "Ask me" },
+];
+
 /** The default grace time, also offered when the owner first picks one, and its bounds,
  * in seconds. */
 export const GRACE_SECS_DEFAULT = 1800;
@@ -145,6 +167,16 @@ export const LANDING_OPTIONS: SelectOption[] = [
  * engine's own list. */
 export const CAP_CHOICES = [1, 2, 3, 4, 5, 6, 8, 10, 15] as const;
 
+/** The Sub-agent rounds per message choices besides Until the goal is done, the engine's own
+ * list (F09). */
+export const ROUND_CHOICES = [1, 2, 3, 5, 10, 20] as const;
+
+/** The Master run time choices besides No limit, the engine's own list, in seconds (F01). */
+export const RUN_CHOICES_SECS = [86_400, 259_200, 604_800, 1_209_600, 2_592_000] as const;
+
+/** The Master run time a project has until the owner picks one: 7 days. */
+export const RUN_DEFAULT_SECS = 604_800;
+
 /** The Token budget choices besides Off, the engine's own list, in tokens. */
 export const BUDGET_CHOICES = [10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000] as const;
 
@@ -160,6 +192,24 @@ export function tokenWords(tokens: number): string {
  * value is the number, or "off". */
 export function capOptions(): SelectOption[] {
   return [{ value: NO_LIMIT, label: "No limit" }, ...CAP_CHOICES.map((cap) => ({ value: String(cap), label: String(cap) }))];
+}
+
+/** The Sub-agent rounds per message choices: Until the goal is done first, then each of
+ * `ROUND_CHOICES`. Output: options whose value is the number, or "off". */
+export function roundOptions(): SelectOption[] {
+  return [{ value: NO_LIMIT, label: "Until the goal is done" }, ...ROUND_CHOICES.map((max) => ({ value: String(max), label: max === 1 ? "1 round" : `${max} rounds` }))];
+}
+
+/** Words a Master run time in whole days. Input: the seconds. Output: such as "1 day" or "7 days". */
+export function runWords(secs: number): string {
+  const days = Math.round(secs / 86_400);
+  return days === 1 ? "1 day" : `${days} days`;
+}
+
+/** The Master run time choices: each of `RUN_CHOICES_SECS`, then No limit. Output: options whose
+ * value is the seconds, or "off". */
+export function runOptions(): SelectOption[] {
+  return [...RUN_CHOICES_SECS.map((secs) => ({ value: String(secs), label: runWords(secs) })), { value: NO_LIMIT, label: "No limit" }];
 }
 
 /** The Token budget choices: Off first, then each of `BUDGET_CHOICES`. Output: options whose
@@ -258,11 +308,11 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "access", title: "Access and merging", about: "What agents may touch, and who merges finished work.", icon: "shield-check",
     rows: ["Agent access", MERGE_INTO_MAIN, "Master accepts change sets", "Agent branches", RESTARTS_FROM_MAIN, "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
-    rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"] },
+    rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply", "End a turn after done"] },
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
     rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Landing", "Finished agents", "Terminal display", "Heavy lane", "Shared resources", ...PER_HARNESS_ROWS] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
-    rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"] },
+    rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Left running after a stop", "Token budget", "Master run time", "Sub-agent rounds per message"] },
 ];
 
 function findWords(query: string): string {
@@ -357,6 +407,24 @@ export function LiveTerminalSetting({ projectId, status, reload, liveHarness }: 
     <span className="set-label" aria-hidden="true">Live terminal</span>
     <span className="set-ctl"><Switch id={`tg-live-terminal-${projectId}`} label="Live terminal" hideLabel disabledReason={liveHarness ? undefined : "This master has no live terminal: its conversation is the console."} checked={shown === "on"} onChecked={(on) => { if (!busy) void choose(on); }} /></span>
     {liveHarness && <span className="tg-terminal-note">You see and type into the master's own terminal.</span>}
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </SettingRow>;
+}
+
+/** The End a turn after done setting as one row, on Agent settings and in the master's
+ * settings (F15): how long a sub-agent's task turn may stay quiet after its agent reported
+ * done before CrazyAgent ends it. Inputs: the project id, the team status and a reload.
+ * Output: the row. */
+export function DoneQuietSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const { busy, note, change } = useChange(reload);
+  const [shown, hold] = useHeld<string>(doneQuietValue(status), Object.is, status);
+
+  const choose = (value: string) => change(() => setDoneQuiet(projectId, value === "off" ? null : Number(value)), "the end a turn after done setting", () => hold(value));
+
+  return <SettingRow label="End a turn after done">
+    <Select id={`tg-done-quiet-${projectId}`} label="End a turn after done" value={shown} options={DONE_QUIET_OPTIONS}
+      onValue={(value) => { if (!busy && DONE_QUIET_OPTIONS.some((option) => option.value === value)) void choose(value); }}
+      helper="A sub-agent's commits go to Changes as soon as it makes them or says its task is done; the rest goes when its turn ends. If it stays quiet this long after saying done, CrazyAgent ends its turn." />
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </SettingRow>;
 }
@@ -505,6 +573,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const [lands, holdLands] = useHeld<ChildLanding>(status.child_landing ?? "lead", Object.is, status);
   const [branchMode, holdBranchMode] = useHeld<BranchMode>(status.agent_branches ?? "named", Object.is, status);
   const [spread, holdSpread] = useHeld<"off" | "on">(status.spread_accounts === true ? "on" : "off", Object.is, status);
+  const [leftoversShown, holdLeftovers] = useHeld<LeftoverMode>(status.leftovers ?? "end", Object.is, status);
   const [askMerge, holdAskMerge] = useHeld<"off" | "on">(status.ask_before_merge === true ? "on" : "off", Object.is, status);
   const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits", Object.is, status);
   const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on", Object.is, status);
@@ -514,6 +583,8 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses), Object.is, status);
   const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates), Object.is, status);
   const [tokenBudget, holdTokenBudget] = useHeld(capValue(status.token_budget), Object.is, status);
+  const [masterRounds, holdMasterRounds] = useHeld(capValue(status.master_rounds), Object.is, status);
+  const [masterRun, holdMasterRun] = useHeld(capValue(status.master_run_secs === undefined ? RUN_DEFAULT_SECS : status.master_run_secs), Object.is, status);
   const [backgroundShown, holdBackground] = useHeld(backgroundChoice(status), sameBackground, status);
   const [masterBranchSaved, holdMasterBranch] = useHeld(status.master_branch ?? null, Object.is, status);
   const [landOnSaved, holdLandOn] = useHeld(status.land_on ?? null, Object.is, status);
@@ -563,6 +634,18 @@ export function TeamControls({ projectId, status, reload, data, group }: {
     else void change(() => setMaxTeammates(projectId, max), "the Max teammates setting", () => holdMaxTeammates(value));
   }
 
+  function chooseRounds(value: string) {
+    const max = chosen(value, ROUND_CHOICES);
+    if (max === undefined) return;
+    void change(() => setMasterRounds(projectId, max), "the Sub-agent rounds setting", () => holdMasterRounds(value));
+  }
+
+  function chooseRun(value: string) {
+    const secs = chosen(value, RUN_CHOICES_SECS);
+    if (secs === undefined) return;
+    void change(() => setMasterRunTime(projectId, secs), "the Master run time setting", () => holdMasterRun(value));
+  }
+
   const chooseSpread = (choice: "off" | "on") => change(() => setSpreadAccounts(projectId, choice === "on"), "the account spread setting", () => holdSpread(choice));
 
   function budget(value: string) {
@@ -571,6 +654,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   }
 
   const chooseMasterLands = (choice: MasterLands) => change(() => setMasterLands(projectId, choice), "what the master does with its conflict fixes", () => holdMasterLands(choice));
+  const chooseLeftovers = (choice: LeftoverMode) => change(() => setLeftovers(projectId, choice), "the Left running after a stop setting", () => holdLeftovers(choice));
   const chooseAskMerge = (choice: "off" | "on") => change(() => setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting", () => holdAskMerge(choice));
   const chooseCatchUp = (choice: "off" | "on") => change(() => setCatchUpMain(projectId, choice), "the catch up with main setting", () => holdCatchUp(choice));
   const chooseReuseIdle = (choice: "off" | "on") => change(() => setReuseIdle(projectId, choice), "the reuse idle agents setting", () => holdReuseIdle(choice));
@@ -697,6 +781,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
         <SettingGroup group={tools} prefix={prefix}>
           <ToolsControls projectId={projectId} status={status} reload={reload} />
           <ReaskSetting projectId={projectId} status={status} reload={reload} />
+          <DoneQuietSetting projectId={projectId} status={status} reload={reload} />
         </SettingGroup>
         <SettingGroup group={coord} prefix={prefix}>
           <CoordinationControls projectId={projectId} status={status} reload={reload}>
@@ -755,12 +840,27 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               <span className="tg-terminal-note" id={`tg-grace-help-${projectId}`}>From 10 to 3600 seconds.</span>
             </form>}
           </SettingRow>
+          <SettingRow label="Left running after a stop">
+            <Select id={`tg-leftovers-${projectId}`} label="Left running after a stop" value={leftoversShown} options={LEFTOVER_OPTIONS}
+              onValue={(value) => { if (!busy && (value === "end" || value === "keep" || value === "ask")) void chooseLeftovers(value); }}
+              helper="What happens to processes an agent started that still run after it stopped, such as a dev server. End them asks them to stop, ends any still running after 10 seconds, then lets the account go. Keep running lets the account go at once and lists them until they end. Ask me keeps the account until you pick End or Keep under Left running in this view." />
+          </SettingRow>
           <SettingRow label="Token budget">
             <Select id={`tg-token-budget-${projectId}`} label="Token budget" value={tokenBudget} options={budgetOptions()}
               onValue={(value) => void budget(value)}
               helper={tokenBudget === NO_LIMIT
                 ? "Off lets the agents use tokens as their accounts allow. A budget counts new input, cache writes and output; re-reads from cache are not counted. It counts from when you set it or start the team again."
                 : `Used ${tokenWords(status.budget_used ?? 0)} of ${tokenWords(Number(tokenBudget))}. At the budget the engine stops every agent and notifies you.`} />
+          </SettingRow>
+          <SettingRow label="Master run time">
+            <Select id={`tg-master-run-${projectId}`} label="Master run time" value={masterRun} options={runOptions()}
+              onValue={chooseRun}
+              helper="How long the live master works on without a message, an answer, a key or another action from you. It never stops while it waits for you. Each of them starts the time again. 7 days is the default." />
+          </SettingRow>
+          <SettingRow label="Sub-agent rounds per message">
+            <Select id={`tg-master-rounds-${projectId}`} label="Sub-agent rounds per message" value={masterRounds} options={roundOptions()}
+              onValue={chooseRounds}
+              helper="How many times the master may hand work to sub-agents for one message from you. Until the goal is done is the default. At a limit, reply keep going to let it finish that goal." />
           </SettingRow>
         </SettingGroup>
         {note && <p className="pj-note warn set-note" role="alert">{displayText(note)}</p>}

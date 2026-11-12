@@ -146,6 +146,8 @@ const REPLY_INVALID: &str =
 const MESSAGE_INVALID: &str = "Not sent: a message or note names who gets it in to, and carries no for or severity; ask a question with kind question.";
 const KEY_INVALID: &str = "Not sent: a key is up to 128 letters, digits, '-', '_', '.' or ':'.";
 const TRANSFER_INVALID: &str = "Not changed: give the work number, the version inspect_work shows and an action (assign, accept, decline, release, handoff or reopen); assign and handoff also name the agent in to.";
+const INSPECT_INVALID: &str =
+    "Not read: task is the number of an ended task, as a results message names it.";
 const FINISH_INVALID: &str = "Not finished: give the work number, the version inspect_work shows, an outcome (review_ready, complete or closed) and evidence of plain text up to 4000 bytes.";
 const AGENT_INVALID: &str =
     "Not done: name the agent by its persona name, its @role handle or its number.";
@@ -238,7 +240,10 @@ pub enum Call {
         title: String,
         claims: Vec<String>,
     },
-    InspectWork,
+    InspectWork {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<i64>,
+    },
     UpdateWork {
         kind: Update,
         text: String,
@@ -332,7 +337,7 @@ impl Call {
     pub fn name(&self) -> &'static str {
         let name = match self {
             Self::StartWork { .. } => START_WORK_TOOL,
-            Self::InspectWork => INSPECT_WORK_TOOL,
+            Self::InspectWork { .. } => INSPECT_WORK_TOOL,
             Self::UpdateWork { .. } => UPDATE_WORK_TOOL,
             Self::TransferWork { .. } => TRANSFER_WORK_TOOL,
             Self::FinishWork { .. } => FINISH_WORK_TOOL,
@@ -670,7 +675,6 @@ fn spec(name: &str) -> Value {
     let agent = json!({"type": "string", "description": "The agent: its persona name, its @role handle or its number."});
     let work = json!({"type": "integer", "minimum": 1, "description": "The work number start_work or inspect_work gave."});
     let version = json!({"type": "integer", "minimum": 1, "description": "The work's version inspect_work shows; a stale one is refused so the first change wins."});
-    let none = json!({"type": "object", "properties": {}, "additionalProperties": false});
     let (description, schema) = match name {
         START_WORK_TOOL => (
             "Start a unit of work before you edit, with a short title, and claim what it touches: each claim a file, a folder ending in /, a glob, module:<name> or domain:<name>. The engine tells you and the other agents when a claim overlaps theirs and notes a claim too broad to share. Returns the work number and version.",
@@ -680,8 +684,10 @@ fn spec(name: &str) -> Value {
             }, "required": ["title"], "additionalProperties": false}),
         ),
         INSPECT_WORK_TOOL => (
-            "Read your work with its number and version, the messages and questions waiting for you (reading them here marks them read), what you sent and how far each got, and claims that overlap yours. A lead or the master also reads the agents it leads, their work and the change sets waiting.",
-            none,
+            "Read your work with its number and version, the messages and questions waiting for you (reading them here marks them read), what you sent and how far each got, and claims that overlap yours. A lead or the master also reads the agents it leads, their work and the change sets waiting. With task, read instead the whole result of that ended task, one you ran or one an agent you lead ran, when a results message cut it.",
+            json!({"type": "object", "properties": {
+                "task": {"type": "integer", "minimum": 1, "description": "The number of an ended task whose whole result you read, as a results message names it."},
+            }, "additionalProperties": false}),
         ),
         UPDATE_WORK_TOOL => (
             "Send to another agent of this project. kind message asks the agent in to for something, note tells it something, question asks with for (me for the owner, master, or lead) and severity (high, normal or low) and the engine routes it, reply answers a question or a message (work for you) whose number is in reply_to. A note takes no reply: to answer one, send kind note with to its sender. A for me question reaches the owner only. Pass a question on up the chain as a question whose reply_to names it, at the same or a higher severity. A message to a finished agent you lead wakes it with your text.",
@@ -755,7 +761,7 @@ fn spec(name: &str) -> Value {
             json!({"type": "object", "properties": {"id": {"type": "string", "description": "The conversation id that sessions gave."}, "offset": {"type": "integer", "minimum": 0, "description": "The message number to start from; 0 when left out."}}, "required": ["id"], "additionalProperties": false}),
         ),
         REMEMBER_TOOL => (
-            "Save one fact, decision or lesson that agents should know in later sessions. Scope project keeps it to this project; app shares it with every project. The owner sees it with your name in the Memory tab, can delete it, and may have to approve it first.",
+            "Save one fact, decision or lesson that agents should know in later sessions. Scope project keeps it to this project; app asks to share it with every project, and the owner's setting may keep it in this project instead. The owner sees it with your name in the Memory tab, can delete it, and may have to approve it first.",
             json!({"type": "object", "properties": {"text": {"type": "string", "description": "The memory in plain words, up to 2000 bytes."}, "scope": {"type": "string", "enum": ["project", "app"], "description": "project (the default) or app."}}, "required": ["text"], "additionalProperties": false}),
         ),
         RECALL_TOOL => (
@@ -913,7 +919,10 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
                 _ => Err(START_INVALID),
             }
         }
-        INSPECT_WORK_TOOL => Ok(Call::InspectWork),
+        INSPECT_WORK_TOOL => match number("task") {
+            Some(task) => Ok(Call::InspectWork { task }),
+            None => Err(INSPECT_INVALID),
+        },
         UPDATE_WORK_TOOL => {
             let to = match argument("to").map(str::trim) {
                 None | Some("") => Some(None),
@@ -1312,7 +1321,7 @@ fn withdraw_call(arguments: Option<&Value>) -> Option<Call> {
 pub fn checked(call: Call) -> Result<Call, &'static str> {
     let arguments = match &call {
         Call::StartWork { title, claims } => json!({"title": title, "claims": claims}),
-        Call::InspectWork => json!({}),
+        Call::InspectWork { task } => json!({"task": task}),
         Call::UpdateWork {
             kind,
             text,

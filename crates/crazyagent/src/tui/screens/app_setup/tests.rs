@@ -1624,7 +1624,7 @@ fn the_master_step_limit_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
     for (width, height) in ASK_SIZES {
         let mut shell = settings(width, height);
         shell.key(Key::Char('m'));
-        let (first, last) = ("Master step limit:", "counts no steps.");
+        let (first, last) = ("Master step limit:", "never stops it.");
         ask_in_body(&mut shell, width, height, first, last);
     }
 }

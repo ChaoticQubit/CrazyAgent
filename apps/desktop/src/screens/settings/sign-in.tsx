@@ -8,6 +8,7 @@ import {
 } from "../../native-auth";
 import { useAppSession } from "../../state";
 import { Button, Icon, Notice, SecretField } from "../../ui";
+import { HarnessFile } from "./harnesses";
 
 type Challenge = NonNullable<NativeAuthView["challenge"]>;
 type Account = NonNullable<NativeAuthView["account"]>;
@@ -75,7 +76,7 @@ export function signInFailure(code: string, provider: SubscriptionProvider, runn
       : plainError(code), hint: "retry" };
   }
   if (code === "native_auth_host_unavailable") {
-    return { text: `${harness} isn't installed on this Mac, so ${name} sign-in isn't available. Install ${harness}, then check again in Settings, Harnesses.`, hint: "missing" };
+    return { text: `CrazyAgent didn't find a ${harness} it can run on this Mac, so ${name} sign-in isn't available. Install ${harness}, then choose Check again, or choose its file.`, hint: "missing" };
   }
   if (code === "native_auth_host_executable_unsafe") {
     return { text: `${harness} on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall ${harness}, then try again.`, hint: "retry" };
@@ -421,11 +422,15 @@ export function SignInPanel({ provider, method, state, onStart, onCancel, onChec
   if (stage.kind === "failed") {
     const checkMethod = signInMethodFor(signInHarness(provider), "check");
     const retry = stage.hint === "expired" ? "Get a new code" : stage.hint === "check" ? "Check again" : stage.hint === "sign_in" ? "Sign in again" : "Try again";
+    if (stage.hint === "missing") return <div className="stack-small">
+      <Notice tone="danger" alert>{stage.text}</Notice>
+      <HarnessFile id={provider === "chatgpt" ? "codex" : "claude-code"} name={provider === "chatgpt" ? "Codex" : "Claude Code"} onFound={() => onStart(method)} readyLabel="Try again" />
+      {onUseKey && <span><Button onClick={onUseKey}>Use an API key instead</Button></span>}
+    </div>;
     return <div className="stack-small">
       <Notice tone="danger" alert>{stage.text}</Notice>
       <div className="row">
-        {stage.hint === "missing" ? onUseKey && <Button variant="primary" onClick={onUseKey}>Use an API key instead</Button>
-          : <Button variant="primary" onClick={() => stage.hint === "check" ? onCheck() : onStart(stage.hint === "sign_in" ? freshSignIn(provider) : method)}>{retry}</Button>}
+        <Button variant="primary" onClick={() => stage.hint === "check" ? onCheck() : onStart(stage.hint === "sign_in" ? freshSignIn(provider) : method)}>{retry}</Button>
         {(stage.hint === "retry" || stage.hint === "expired") && checkMethod && signInWay(method) !== "check" && state?.operation && !state.error &&
           <Button variant="quiet" onClick={() => onStart(checkMethod)}>{CHECK_SIGN_IN}</Button>}
       </div>

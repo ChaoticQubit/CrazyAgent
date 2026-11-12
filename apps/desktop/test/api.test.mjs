@@ -60,3 +60,26 @@ test("calls outside the desktop shell report the engine as unreachable instead o
   assert.equal(result.kind, "error");
   assert.equal(result.code, "engine_unreachable");
 });
+
+test("an engine that did not start because its upgrade backup failed says so plainly (F36)", () => {
+  const failed = api.classifyFailure({ code: "engine_backup_failed" });
+  assert.equal(failed.code, "engine_backup_failed");
+  assert.equal(failed.message,
+    "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.");
+  assert.notEqual(failed.message, api.plainError("engine_start_failed"));
+});
+
+test("a connect refused by a locator a stopped engine left reads one plain line, the same as the TUI's (F35)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/bootstrap.rs", import.meta.url), "utf8");
+  for (const cause of api.STALE_ENGINE_CAUSES) {
+    const failed = api.classifyFailure({ code: "owner_unavailable", cause });
+    assert.equal(failed.code, "engine_stopped_unclean", cause);
+    assert.equal(failed.cause, cause);
+    assert.equal(failed.message, api.plainError("engine_stopped_unclean"));
+    assert.ok(engine.includes(`    "${cause}",\n`), `${cause} is listed in STALE_ENGINE_CODES`);
+  }
+  assert.ok(engine.includes(`"${api.plainError("engine_stopped_unclean")}"`), "the desktop line is the engine's STALE_ENGINE_TEXT");
+  assert.equal(api.classifyFailure({ code: "owner_unavailable", cause: "owner_locator_missing" }).code, "engine_unreachable");
+  assert.equal(api.classifyFailure({ code: "owner_unavailable" }).code, "engine_unreachable");
+});
