@@ -5326,6 +5326,11 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
         },
         terminal_display: crate::coord::settings::TerminalDisplay::Fullscreen,
         task_start: crate::coord::settings::TaskStart::Off,
+        heavy_lane: crate::coord::settings::HeavyLane::Two,
+        shared_resources: vec![crate::coord::settings::SharedResource {
+            name: "ollama".into(),
+            slots: 1,
+        }],
     };
     for action in [
         TeamAction::CoordSettings {
