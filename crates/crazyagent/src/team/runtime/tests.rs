@@ -29615,6 +29615,57 @@ fn a_stop_fallback_fails_a_task_no_pool_account_can_run_instead_of_starting_it()
     assert_eq!(agents, 0);
 }
 
+/// Under the Stop fallback rule a task whose model only a resting account can run waits
+/// for that account instead of failing, though another pool account is free on its own
+/// model (DEC-150 H1): Stop is for a model no pool account can run, not for a rate limit.
+#[test]
+fn a_stop_fallback_waits_while_the_accounts_that_can_run_the_model_rest() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let mut access = fixture.access.clone();
+    let mut other = access.connections[0].clone();
+    other.id = reference("local-b");
+    other.model.id = "other-model".into();
+    access.connections.push(other);
+    access.pools[0].members.push(reference("local-b"));
+    codex_model(&fixture, "qwen2.5:0.5b", crate::model_choice::Slot::Agent);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    let resting = BTreeSet::from([reference(ENDPOINT)]);
+    team.dispatch(&fixture.setup, &access, &resting).unwrap();
+    let (status, error, wait): (String, Option<String>, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error,wait FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "queued", "{error:?}");
+    assert!(
+        wait.as_deref()
+            .is_some_and(|wait| wait.contains("rate limit")),
+        "{wait:?}"
+    );
+    let agents: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agents, 0, "no agent on the other account's own model");
+}
+
 /// The owner's Wake of a sub-agent started on a model no pool account can run now picks
 /// its account as a new start does (DEC-150 F4): under the Stop fallback rule it stays
 /// stopped and the team note names the model, instead of waking on the endpoint's own.
