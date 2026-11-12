@@ -1,7 +1,8 @@
-use super::{SHIM_DIRECTORIES, SHIM_PROGRAMS, Search, below};
+use super::{Search, is_shim, is_shim_folder};
 use crate::engine::EngineError;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// The harnesses whose file the owner may choose: the two with a managed sign-in.
@@ -18,6 +19,7 @@ pub const PATH_UNREADABLE: &str = "harness_path_unreadable";
 /// The most folders a "where we looked" answer names, and the longest one shown.
 pub const LOOKED_MAX: usize = 48;
 pub const LOOKED_BYTES_MAX: usize = 256;
+const SHIM_SKIPPED: &str = " (shim, skipped)";
 #[cfg(target_os = "macos")]
 const AGENT_TMP: &str = "/private/tmp/ca-";
 #[cfg(not(target_os = "macos"))]
@@ -129,10 +131,10 @@ pub fn at_start(root: &Path, home: Option<&Path>) -> crate::paths::Harnesses {
     }
 }
 
-/// Checks a file the owner chose for a harness before it is stored or used: an absolute
-/// path of at most [`PATH_BYTES_MAX`] bytes with no control characters, to a runnable
-/// regular file, no version-manager shim, outside the engine folder that holds every agent
-/// home and outside the agents' temp folders, and in folders no other user can change.
+/// Checks a harness file, chosen or found, before it is pinned or stored: an absolute path
+/// of at most [`PATH_BYTES_MAX`] bytes with no control characters, to a runnable regular
+/// file, no version-manager shim, outside the engine folder that holds every agent home and
+/// the agents' temp folders, and in folders no other user can change.
 /// Inputs: the id, the path, the engine folder and HOME. Output: the path, links kept.
 pub fn check(
     id: &str,
@@ -156,17 +158,7 @@ pub fn check(
     if !metadata.is_file() || !owner_runnable(&metadata) {
         return Err(failure(PATH_NOT_EXECUTABLE));
     }
-    let shim_program = real
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| SHIM_PROGRAMS.contains(&name));
-    let shim_folder = home.is_some_and(|home| {
-        SHIM_DIRECTORIES
-            .iter()
-            .map(|relative| below(home, relative))
-            .any(|folder| path.starts_with(&folder) || real.starts_with(&folder))
-    });
-    if shim_program || shim_folder {
+    if is_shim(home, path) {
         return Err(failure(PATH_SHIM));
     }
     let engine = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -185,6 +177,29 @@ pub fn check(
     Ok(path.to_path_buf())
 }
 
+/// Picks the file a pin may use from what a search finds: the first candidate, in search
+/// order and then on PATH, that passes [`check`], so a shim or a file in a folder another
+/// user can change never hides a good install after it. Inputs: the id, the search, the PATH
+/// value and the engine folder. Output: the entry, the first refusal when every candidate
+/// failed, or none when nothing was found.
+pub fn pick(
+    id: &str,
+    search: &Search,
+    path: Option<&OsStr>,
+    root: &Path,
+) -> Option<Result<PathBuf, (PathBuf, EngineError)>> {
+    let mut refused = None;
+    for candidate in crate::paths::harness_candidates(id, search, path) {
+        match check(id, &candidate, root, search.home()) {
+            Ok(entry) => return Some(Ok(entry)),
+            Err(error) => {
+                refused.get_or_insert((candidate, error));
+            }
+        }
+    }
+    refused.map(Err)
+}
+
 #[cfg(unix)]
 fn owner_runnable(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -197,18 +212,22 @@ fn owner_runnable(_metadata: &std::fs::Metadata) -> bool {
 }
 
 /// The folders a search looked in for one harness as the owner reads them: HOME shown as
-/// `~`, at most [`LOOKED_MAX`] folders, each at most [`LOOKED_BYTES_MAX`] bytes, so the
-/// answer always fits one reply frame. Inputs: the search and the id. Output: the lines.
+/// `~`, a shim folder marked "(shim, skipped)", at most [`LOOKED_MAX`] folders, each at most
+/// [`LOOKED_BYTES_MAX`] bytes, so the answer always fits one reply frame. Inputs: the search
+/// and the id. Output: the lines.
 pub fn looked(search: &Search, id: &str) -> Vec<String> {
     let home = search.home();
     let lines: Vec<String> = search
         .looked(id)
         .into_iter()
         .filter_map(|folder| {
-            let shown = match home.and_then(|home| folder.strip_prefix(home).ok()) {
+            let mut shown = match home.and_then(|home| folder.strip_prefix(home).ok()) {
                 Some(rest) => format!("~/{}", rest.display()),
                 None => folder.display().to_string(),
             };
+            if is_shim_folder(home, &folder) {
+                shown.push_str(SHIM_SKIPPED);
+            }
             (shown.len() <= LOOKED_BYTES_MAX).then_some(shown)
         })
         .take(LOOKED_MAX)

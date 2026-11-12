@@ -3,7 +3,7 @@ use super::finding::{
     self, PATH_AGENT_SPACE, PATH_INVALID, PATH_NOT_EXECUTABLE, PATH_NOT_FOUND, PATH_SHIM,
     UNKNOWN_HARNESS,
 };
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 struct Case {
@@ -218,7 +218,21 @@ fn where_we_looked_names_home_as_tilde_and_stays_bounded() {
     let search = Search::new(Vec::new(), Some(case.home.clone()), Vec::new());
     let looked = finding::looked(&search, "codex");
     assert!(looked.contains(&"~/.local/bin".to_owned()), "{looked:?}");
-    assert!(looked.contains(&"~/.volta/bin".to_owned()), "{looked:?}");
+    assert!(
+        looked.contains(&"~/.volta/bin (shim, skipped)".to_owned()),
+        "{looked:?}"
+    );
+    assert!(!looked.contains(&"~/.local/bin (shim, skipped)".to_owned()));
+    let volta = case.home.join(".volta/bin");
+    let on_path = Search::new(vec![volta], Some(case.home.clone()), Vec::new());
+    let shown = finding::looked(&on_path, "codex");
+    assert_eq!(
+        shown
+            .iter()
+            .filter(|line| line.starts_with("~/.volta/bin"))
+            .collect::<Vec<_>>(),
+        ["~/.volta/bin (shim, skipped)"]
+    );
     assert!(
         looked
             .iter()
@@ -241,6 +255,102 @@ fn the_node_folder_of_a_node_script_harness_is_its_npm_prefix_bin_holding_node()
     assert_eq!(super::node_prefix(&script), Some(prefix.clone()));
     let native = case.file("tools/codex", 0o755);
     assert_eq!(super::node_prefix(&native), None);
+    let open = case.file("open/node", 0o755);
+    std::fs::set_permissions(
+        open.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    let node = prefix.join("bin/node");
+    std::fs::remove_file(&node).unwrap();
+    std::os::unix::fs::symlink(&open, &node).unwrap();
+    assert_eq!(super::node_prefix(&script), None);
+    std::fs::remove_file(&node).unwrap();
+    case.file("nvm/versions/node/v22.11.0/bin/node", 0o755);
+    assert_eq!(super::node_prefix(&script), Some(prefix.clone()));
     std::fs::set_permissions(prefix.join("bin"), std::fs::Permissions::from_mode(0o777)).unwrap();
     assert_eq!(super::node_prefix(&script), None);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pin_takes_the_first_found_file_that_passes_the_chosen_file_checks_and_else_the_first_refusal()
+{
+    let case = Case::new();
+    let volta = case.file("home/.volta/bin/codex", 0o755);
+    let open = case.file("open/codex", 0o700);
+    std::fs::set_permissions(
+        open.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    let agent = case.file("engine/agent-1/bin/codex", 0o755);
+    let good = case.file("tools/codex", 0o755);
+    let search = |folders: &[&PathBuf]| {
+        let folders = folders
+            .iter()
+            .map(|file| file.parent().unwrap().to_path_buf())
+            .collect();
+        Search::new(folders, Some(case.home.clone()), Vec::new())
+    };
+    let pick = |folders: &[&PathBuf]| {
+        finding::pick("codex", &search(folders), None, &case.engine)
+            .map(|picked| picked.map_err(|(path, error)| (path, error.0)))
+    };
+    assert_eq!(
+        pick(&[&volta]),
+        Some(Err((volta.clone(), PATH_SHIM.into())))
+    );
+    assert_eq!(search(&[&volta]).find("codex"), None);
+    assert_eq!(
+        pick(&[&open]),
+        Some(Err((open.clone(), finding::PATH_CHANGEABLE.into())))
+    );
+    assert_eq!(
+        pick(&[&agent]),
+        Some(Err((agent.clone(), PATH_AGENT_SPACE.into())))
+    );
+    assert_eq!(
+        pick(&[&volta, &open, &agent]),
+        Some(Err((volta.clone(), PATH_SHIM.into())))
+    );
+    assert_eq!(
+        pick(&[&volta, &open, &agent, &good]),
+        Some(Ok(good.clone()))
+    );
+    assert_eq!(pick(&[]), None);
+    assert_eq!(
+        finding::pick("aider", &search(&[&good]), None, &case.engine),
+        None
+    );
+}
+
+#[test]
+fn a_pipe_at_the_nvm_default_alias_never_holds_up_the_search() {
+    let case = Case::new();
+    let version = case.home.join(".nvm/versions/node/v22.11.0/bin");
+    std::fs::create_dir_all(&version).unwrap();
+    let alias = case.home.join(".nvm/alias/default");
+    std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    let made = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&alias)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    assert!(
+        std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
+    let (sent, searched) = std::sync::mpsc::channel();
+    let home = case.home.clone();
+    std::thread::spawn(move || {
+        let search = Search::engine(None, &[], Some(home));
+        sent.send(search.looked("codex")).unwrap();
+    });
+    let looked = searched
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the search waited on the pipe");
+    assert!(looked.contains(&version), "{looked:?}");
 }

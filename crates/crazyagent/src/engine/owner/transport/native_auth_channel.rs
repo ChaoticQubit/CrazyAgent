@@ -528,9 +528,9 @@ impl OwnerRuntimeHandle {
     }
 
     /// Looks for Codex or Claude Code again, for Check again, Choose file, a sign-in retry
-    /// and the install pin: the chosen file, else the engine search, captured with every
-    /// check of an engine-start registration. It fills an empty slot or one whose pinned file
-    /// is gone ([`RegisteredNativeAuthHost::vanished`]); no other pin is replaced, and a disabled
+    /// and the install pin: the chosen file, else the first search hit, that passes
+    /// [`finding::check`](crate::harnesses::finding::check), captured as at engine start. It fills
+    /// an empty slot or one whose pinned file is gone; no other pin is replaced, and a disabled
     /// registration refuses. Inputs: the id, chosen file, search and PATH. Output: [`Found`].
     pub(crate) fn find_harness(
         &self,
@@ -587,14 +587,27 @@ impl OwnerRuntimeHandle {
                 },
             );
         }
-        let entry = match chosen {
-            Some(chosen) => Some(chosen.to_path_buf()),
-            None => crate::paths::harness_entry(harness, search, path),
+        let root = super::changes::engine_root(&self.authority)?;
+        let picked = match chosen {
+            Some(chosen) => Some(
+                crate::harnesses::finding::check(harness, chosen, &root, search.home())
+                    .map_err(|error| (chosen.to_path_buf(), error)),
+            ),
+            None => crate::harnesses::finding::pick(harness, search, path, &root),
         };
-        let Some(entry) = entry else {
-            return Ok(Found::Missing {
-                looked: crate::harnesses::finding::looked(search, harness),
-            });
+        let entry = match picked {
+            Some(Ok(entry)) => entry,
+            Some(Err((refused, error))) => {
+                return Ok(Found::Refused {
+                    path: refused,
+                    code: error.0,
+                });
+            }
+            None => {
+                return Ok(Found::Missing {
+                    looked: crate::harnesses::finding::looked(search, harness),
+                });
+            }
         };
         assert!(entry.is_absolute());
         let captured = RegisteredNativeAuthHost::capture_entry(&entry).and_then(|host| {
@@ -675,7 +688,7 @@ impl OwnerRuntimeHandle {
     /// Looks for Codex or Claude Code again as Check again and a sign-in retry do: the file
     /// the owner chose, when it still passes its checks, else the search set at engine start
     /// (none set: no search), off the async worker since a capture hashes the whole file. A
-    /// refused chosen file is the answer only when nothing else is found. Input: the catalog
+    /// refused chosen file is the answer when nothing usable is found. Input: the catalog
     /// id. Output: what was found ([`Found`]), or the refusal code.
     pub(crate) fn look_again(&self, harness: &str) -> Result<Found, EngineError> {
         use crate::harnesses::finding;
@@ -698,7 +711,9 @@ impl OwnerRuntimeHandle {
         #[cfg(not(unix))]
         let found = work()?;
         Ok(match (found, refused) {
-            (Found::Missing { .. }, Some((path, code))) => Found::Refused { path, code },
+            (Found::Missing { .. } | Found::Refused { .. }, Some((path, code))) => {
+                Found::Refused { path, code }
+            }
             (found, _) => found,
         })
     }

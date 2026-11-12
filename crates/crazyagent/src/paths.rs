@@ -308,6 +308,23 @@ pub fn resolve_harnesses(
     path: Option<&OsStr>,
     executable_folder: Option<&Path>,
 ) -> Harnesses {
+    Harnesses {
+        codex: given.codex.or_else(|| harness_entry("codex", search, path)),
+        claude: given
+            .claude
+            .or_else(|| harness_entry("claude-code", search, path)),
+        rcli: rcli_entry(given.rcli, path, executable_folder),
+    }
+}
+
+/// Resolves the RCLI host for one engine start: the given path, else the host next to the
+/// running executable, then on PATH, links kept. Inputs: the given path, the PATH value and
+/// the folder holding the running executable. Output: the entry, or none.
+pub fn rcli_entry(
+    given: Option<PathBuf>,
+    path: Option<&OsStr>,
+    executable_folder: Option<&Path>,
+) -> Option<PathBuf> {
     let beside = || {
         let folder = executable_folder?;
         executable_names(RCLI_EXECUTABLE)
@@ -315,16 +332,9 @@ pub fn resolve_harnesses(
             .map(|file| folder.join(file))
             .find(|entry| executable_file(entry).is_some())
     };
-    Harnesses {
-        codex: given.codex.or_else(|| harness_entry("codex", search, path)),
-        claude: given
-            .claude
-            .or_else(|| harness_entry("claude-code", search, path)),
-        rcli: given
-            .rcli
-            .or_else(beside)
-            .or_else(|| path_entry(RCLI_EXECUTABLE, path)),
-    }
+    given
+        .or_else(beside)
+        .or_else(|| path_entry(RCLI_EXECUTABLE, path))
 }
 
 /// How the team runtime, usage upkeep, research and onboarding find a harness the engine did
@@ -346,11 +356,42 @@ pub fn harness_entry(
 ) -> Option<PathBuf> {
     let spec = crate::harnesses::spec(harness)
         .filter(|spec| spec.id == harness && spec.launch.is_none())?;
-    let entry = search
-        .find(harness)
-        .or_else(|| spec.binaries.iter().find_map(|name| path_entry(name, path)))?;
+    let entry = search.find(harness).or_else(|| {
+        spec.binaries.iter().find_map(|name| {
+            path_entry(name, path).filter(|entry| !crate::harnesses::is_shim(search.home(), entry))
+        })
+    })?;
     assert!(entry.is_absolute());
     Some(entry)
+}
+
+/// Every file a pin may check for a harness CrazyAgent starts itself, in the order
+/// [`harness_entry`] looks: the search's candidates, shims included, then each PATH match by
+/// the platform's executable names, each once. Inputs: the catalog id, the engine search and
+/// the PATH value. Output: the absolute entries, bounded; empty for a harness with an adapter.
+pub fn harness_candidates(
+    harness: &str,
+    search: &crate::harnesses::Search,
+    path: Option<&OsStr>,
+) -> Vec<PathBuf> {
+    let Some(spec) =
+        crate::harnesses::spec(harness).filter(|spec| spec.id == harness && spec.launch.is_none())
+    else {
+        return Vec::new();
+    };
+    let mut entries = search.candidates(harness);
+    for entry in spec
+        .binaries
+        .iter()
+        .filter_map(|name| path_entry(name, path))
+    {
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    assert!(entries.len() <= crate::harnesses::CANDIDATES_MAX + spec.binaries.len());
+    assert!(entries.iter().all(|entry| entry.is_absolute()));
+    entries
 }
 
 /// Resolves a harness entry kept at engine start to the real file a launch runs and its
@@ -717,6 +758,7 @@ mod tests {
         assert_eq!(found.rcli, Some(app.join(RCLI_EXECUTABLE)));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_finder_path_still_finds_codex_in_a_system_folder_at_engine_start() {
         let temp = tempfile::tempdir().unwrap();
@@ -801,6 +843,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_catalog_and_engine_start_find_the_same_codex_and_claude() {
         let temp = tempfile::tempdir().unwrap();

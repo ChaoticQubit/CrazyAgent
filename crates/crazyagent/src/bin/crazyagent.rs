@@ -496,9 +496,9 @@ fn uses_defaults(args: &[OsString]) -> bool {
 }
 
 /// Reads the default engine form: no positional arguments, an optional `--home` and the
-/// harness flags. Each harness is its flag, else the file the owner chose, else what the
-/// shared search finds (PATH, system, then HOME folders). Input: the command arguments.
-/// Output: the start with its layout prepared and its harnesses resolved, or a usage error.
+/// harness flags. Each harness is its flag, else the file the owner chose, else the first file
+/// the shared search finds that passes the chosen-file checks (`finding::pick`). Input: the
+/// command arguments. Output: the start with its layout prepared and harnesses resolved.
 fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     let mut home = None;
     let mut explicit = crazyagent::paths::Harnesses::default();
@@ -541,17 +541,28 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     ];
     let search = crazyagent::harnesses::Search::from_environment();
     let chosen = crazyagent::harnesses::finding::at_start(layout.root(), search.home());
-    let given = crazyagent::paths::Harnesses {
-        codex: explicit.codex.or(chosen.codex),
-        claude: explicit.claude.or(chosen.claude),
-        rcli: explicit.rcli,
-    };
-    let harnesses = crazyagent::paths::resolve_harnesses(
-        given,
+    let path = std::env::var_os("PATH");
+    let found = |id: &str| match crazyagent::harnesses::finding::pick(
+        id,
         &search,
-        std::env::var_os("PATH").as_deref(),
-        executable.parent(),
-    );
+        path.as_deref(),
+        layout.root(),
+    ) {
+        Some(Ok(entry)) => Some(entry),
+        Some(Err((_, error))) => {
+            eprintln!("the found {id} file is not used ({})", error.0);
+            None
+        }
+        None => None,
+    };
+    let harnesses = crazyagent::paths::Harnesses {
+        codex: explicit.codex.or(chosen.codex).or_else(|| found("codex")),
+        claude: explicit
+            .claude
+            .or(chosen.claude)
+            .or_else(|| found("claude-code")),
+        rcli: crazyagent::paths::rcli_entry(explicit.rcli, path.as_deref(), executable.parent()),
+    };
     Ok(EngineStart {
         root: layout.root().to_path_buf(),
         global: layout.global_settings(),
