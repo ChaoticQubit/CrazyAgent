@@ -124,11 +124,12 @@ export function isDemoProject(view: Loaded<DemoView>, projectId: string): boolea
 }
 
 /** The calls Create the demo makes, passed in so the order can be held by a test: send the
- * create, reconcile a lost reply once, give the pool to the new project, and the next intent
- * generation for each change. */
+ * create, reconcile a lost reply once, read the demo when the answer stays unconfirmed, give
+ * the pool to the new project, and the next intent generation for each change. */
 export interface DemoMaker {
   create: (pool: string, generation: number) => Promise<Result<IntentReceipt>>;
   reconcile: () => Promise<Result<IntentReceipt>>;
+  read: () => Promise<Result<DemoView>>;
   assign: (project: string, pool: string, generation: number) => Promise<Result<ReceiptState>>;
   generation: () => number;
 }
@@ -138,9 +139,10 @@ export interface DemoMaker {
 export type DemoMade = { kind: "made"; project: string; note: string | null } | { kind: "refused"; message: string };
 
 /** Makes the demo on the picked pool the way New Project makes a project: sends Create the
- * demo, reconciles a lost reply once, and only after an applied answer gives the same pool to
- * the new demo, since the engine leaves pool settings to that one path. A refused or
- * unconfirmed create gives no pool. Inputs: the pool id and the calls. Output: the outcome. */
+ * demo, reconciles a lost reply once, and gives the same pool to the demo once it exists,
+ * since the engine leaves pool settings to that one path. An answer still unconfirmed is
+ * settled by reading the demo, as the TUI does; a refused create gives no pool. Inputs: the
+ * pool id and the calls. Output: the outcome. */
 export async function makeDemo(pool: string, maker: DemoMaker): Promise<DemoMade> {
   const sent = await maker.create(pool, maker.generation());
   if (sent.kind === "not_ready") return { kind: "refused", message: DEMO_NOT_READY };
@@ -148,9 +150,17 @@ export async function makeDemo(pool: string, maker: DemoMaker): Promise<DemoMade
   const receipt = needsReconcile(sent.value) ? settledReceipt(sent.value, await maker.reconcile()) : sent.value;
   const state = receiptState(receipt);
   if (state.kind === "rejected") return { kind: "refused", message: refusalCopy({ code: state.code }) };
-  if (state.kind !== "applied" || !receipt.project_id) return { kind: "refused", message: DEMO_UNCONFIRMED };
-  const project = receipt.project_id;
+  const project = state.kind === "applied" && receipt.project_id ? receipt.project_id : await madeDemo(maker);
+  if (project === null) return { kind: "refused", message: DEMO_UNCONFIRMED };
   const given = await maker.assign(project, pool, maker.generation());
   const note = given.kind === "ok" && given.value.kind === "applied" ? null : DEMO_POOL_UNASSIGNED;
   return { kind: "made", project, note };
+}
+
+/** The demo's id when a fresh read finds the demo, which settles a Create the demo whose
+ * answer stayed unconfirmed. Input: the calls. Output: the id, or null when the read fails
+ * or finds no demo. */
+async function madeDemo(maker: DemoMaker): Promise<string | null> {
+  const read = await maker.read();
+  return read.kind === "ok" ? read.value.project_id : null;
 }

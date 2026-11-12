@@ -129,6 +129,7 @@ export function DemoPage() {
         session?.noteResult(settled.kind === "ok" ? receiptResult(settled.value) : settled);
         return settled;
       },
+      read: loadDemo,
       assign: setProjectPool,
       generation: nextGeneration,
     });
