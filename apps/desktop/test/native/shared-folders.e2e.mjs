@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import { test } from "node:test";
 import { POLL_MS, STEP_MS, value } from "./e2e-harness.mjs";
 import { handOff, onEngine, startingWith } from "./codex-task-engine.mjs";
@@ -111,7 +112,7 @@ for (const option of OPTIONS) {
       if (changed) await me.click("Save agent access", "button");
       for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
         const saved = await value(bridge, "desktop_project_agent_policy", { id: project });
-        if (JSON.stringify(saved.shared_folders) === JSON.stringify(option.saved)) break;
+        if (isDeepStrictEqual(saved.shared_folders, option.saved)) break;
         assert.ok(Date.now() < deadline, `the engine never kept ${option.label}: ${JSON.stringify(saved.shared_folders)}`);
       }
       await me.capture(`shared-${option.id}`);

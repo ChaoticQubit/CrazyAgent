@@ -337,3 +337,15 @@ test("a new project's access save keeps the toolchains onboarding recorded and t
   assert.deepEqual(policy.shared_folders, recorded.shared_folders);
   assert.equal(policy.access, "own_branch");
 });
+
+test("every shared folders refusal has its own sentence in both UIs", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/shared_folders.rs", import.meta.url), "utf8");
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project.rs", import.meta.url), "utf8");
+  const codes = [...new Set([...engine.matchAll(/"(shared_folders_[a-z_]+)"/g)].map((match) => match[1]))];
+  assert.deepEqual(codes.sort(), ["shared_folders_need_macos", "shared_folders_refused", "shared_folders_too_many", "shared_folders_unlisted"]);
+  for (const code of codes) {
+    assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
+    assert.ok(tui.includes(`"${code}" =>`), `the TUI names ${code} plainly`);
+    assert.match(api.plainError(code), /Agent access/, code);
+  }
+});
