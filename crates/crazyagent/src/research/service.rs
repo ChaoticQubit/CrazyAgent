@@ -417,6 +417,21 @@ where
         let now = crate::team::now_ms();
         let stored = match picked(resolved) {
             Picked::Account(root, account) => {
+                let found = match self.upkeep {
+                    Upkeep::Roadmap => {
+                        crate::roadmap_status::account_found(self.db, project, claim)
+                    }
+                    Upkeep::Overview => {
+                        crate::project_overview::account_found(self.db, project, claim)
+                    }
+                };
+                if let Err(error) = found {
+                    eprintln!(
+                        "upkeep_line_kept store={:?} cause={}",
+                        self.upkeep,
+                        crate::protocol::plain_code(&error.0)
+                    );
+                }
                 let (runner, project, upkeep) = (self.runner.clone(), project.clone(), self.upkeep);
                 self.checks.push(std::thread::spawn(move || match upkeep {
                     Upkeep::Roadmap => {
@@ -691,9 +706,11 @@ mod tests {
 
     /// An engine folder with a private engine database, a runner with no harness, so every
     /// run a status store hands out finds no account, and a connection with the roadmap
-    /// status and Overview tables made. Output: the folder guard, the runner and the
-    /// connection.
-    fn engine_without_accounts() -> (tempfile::TempDir, Arc<ResearchRunner>, rusqlite::Connection) {
+    /// status and Overview tables made. Input: the engine's re-proof flag, if any. Output:
+    /// the folder guard, the runner and the connection.
+    fn engine_without_accounts(
+        reproving: Option<Arc<AtomicBool>>,
+    ) -> (tempfile::TempDir, Arc<ResearchRunner>, rusqlite::Connection) {
         let private = || std::fs::Permissions::from_mode(0o700);
         let temp = tempfile::Builder::new()
             .prefix("ca-upkeep-")
@@ -712,8 +729,11 @@ mod tests {
         std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
         crate::roadmap_status::initialize(&db).unwrap();
         crate::project_overview::initialize(&db).unwrap();
-        let runner =
+        let mut runner =
             ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
+        if let Some(reproving) = reproving {
+            runner = runner.with_reproof(reproving);
+        }
         assert!(
             STATUS_HARNESSES
                 .into_iter()
@@ -740,7 +760,7 @@ mod tests {
 
     #[test]
     fn an_overview_run_with_no_account_keeps_waiting_for_one_under_one_plain_line() {
-        let (_temp, runner, db) = engine_without_accounts();
+        let (_temp, runner, db) = engine_without_accounts(None);
         let project = ProjectId::new("alpha").unwrap();
         crate::project_overview::refresh(&db, &project).unwrap();
         let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
@@ -772,7 +792,7 @@ mod tests {
 
     #[test]
     fn a_roadmap_check_with_no_account_keeps_waiting_for_one_under_one_plain_line() {
-        let (_temp, runner, db) = engine_without_accounts();
+        let (_temp, runner, db) = engine_without_accounts(None);
         let project = ProjectId::new("alpha").unwrap();
         crate::roadmap_status::refresh(&db, &project).unwrap();
         let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
@@ -801,17 +821,9 @@ mod tests {
 
     #[test]
     fn a_status_run_with_no_account_waits_without_a_line_while_the_engine_re_proves_sign_ins() {
-        let (temp, runner, db) = engine_without_accounts();
-        let engine = temp.path().canonicalize().unwrap().join("engine");
         let flag = Arc::new(AtomicBool::new(true));
-        let flagged = ResearchRunner::without_codex(
-            &engine.join("engine.db"),
-            &engine.join("research"),
-            ResearchLimits::default(),
-        )
-        .unwrap()
-        .with_reproof(flag.clone());
-        assert!(flagged.reproving() && !runner.reproving());
+        let (_temp, runner, db) = engine_without_accounts(Some(flag.clone()));
+        assert!(runner.reproving());
         let project = ProjectId::new("alpha").unwrap();
         crate::project_overview::refresh(&db, &project).unwrap();
         crate::roadmap_status::refresh(&db, &project).unwrap();
@@ -823,7 +835,7 @@ mod tests {
             db: &db,
             checks: &mut checks,
             upkeep: Upkeep::Roadmap,
-            settling: flagged.reproving(),
+            settling: runner.reproving(),
         };
         let now = crate::team::now_ms();
         assert_eq!(
@@ -851,6 +863,6 @@ mod tests {
             assert!(due_ms <= now.saturating_add(SETTLING_RETRY_MS) + 1000);
         }
         flag.store(false, Ordering::SeqCst);
-        assert!(!flagged.reproving(), "the wait ends with the re-proof");
+        assert!(!runner.reproving(), "the wait ends with the re-proof");
     }
 }
