@@ -44,6 +44,10 @@ const WIDE: usize = 96;
 const PANEL_TEXT_LINES: usize = 2;
 const DRAFT_LINES: usize = 3;
 const DEFAULT_MODEL: &str = "Default";
+const LABEL: usize = 14;
+/// What a panel row says after its ellipsis when a problem or result holds more than the
+/// panel shows: the key that opens the reader of the whole text.
+const WHOLE_TEXT: &str = "Enter shows all";
 
 /// One short line under a live view after a change, a hint or a failed read.
 /// Holds the plain text and whether it reports a problem.
@@ -103,6 +107,15 @@ impl Notice {
 pub(in crate::tui) enum TeamFocus {
     Agents,
     Tasks,
+}
+
+/// The open reader of one whole problem or result: whether it belongs to an agent or a
+/// task, that agent's or task's id, and the first wrapped row in view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Reading {
+    focus: TeamFocus,
+    id: i64,
+    first: usize,
 }
 
 /// What the Team view asks its host to do after a key.
@@ -304,6 +317,8 @@ pub(in crate::tui) struct TeamView {
     settings_scroll: usize,
     settings_scroll_max: std::cell::Cell<usize>,
     settings_window: std::cell::Cell<usize>,
+    reading: Option<Reading>,
+    reading_view: std::cell::Cell<(usize, usize)>,
 }
 
 impl TeamView {
@@ -358,6 +373,8 @@ impl TeamView {
             settings_scroll: 0,
             settings_scroll_max: std::cell::Cell::new(0),
             settings_window: std::cell::Cell::new(0),
+            reading: None,
+            reading_view: std::cell::Cell::new((0, 1)),
         }
     }
 
@@ -794,7 +811,14 @@ impl TeamView {
                 _ => TeamReply::Handled,
             };
         }
+        if let Some(reading) = self.reading {
+            if self.long_text(reading.focus, reading.id).is_some() {
+                return self.reading_key(reading, key);
+            }
+            self.reading = None;
+        }
         let reply = match key.code {
+            KeyCode::Enter => self.open_reading(),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     TeamFocus::Agents => TeamFocus::Tasks,
@@ -885,6 +909,104 @@ impl TeamView {
         };
         self.clamp();
         reply
+    }
+
+    /// The whole text the reader shows for one agent or task: a done task's result, else a
+    /// task's or an agent's problem. Takes the focus and the id. Returns whether it is a
+    /// problem, whose it is and the text, none when there is no text to read.
+    fn long_text(&self, focus: TeamFocus, id: i64) -> Option<(bool, String, &str)> {
+        let (problem, name, text) = match focus {
+            TeamFocus::Tasks => {
+                let task = self.task(id)?;
+                match (&task.result, &task.problem) {
+                    (Some(result), _) if task.status == TaskStatus::Done => {
+                        (false, title(&task.prompt), result)
+                    }
+                    (_, Some(problem)) => (true, title(&task.prompt), problem),
+                    _ => return None,
+                }
+            }
+            TeamFocus::Agents => {
+                let agent = self.agent(id)?;
+                (true, agent.label.clone(), agent.problem.as_ref()?)
+            }
+        };
+        (!text.trim().is_empty()).then_some((problem, name, text.as_str()))
+    }
+
+    /// Opens the reader of the focused agent's or task's whole problem or result. Returns
+    /// Handled, or Ignored when the focused row has no text to read.
+    fn open_reading(&mut self) -> TeamReply {
+        let id = match self.focus {
+            TeamFocus::Tasks => self.tasks().get(self.task_cursor).map(|task| task.id),
+            TeamFocus::Agents => self.agents().get(self.agent_cursor).map(|agent| agent.id),
+        };
+        let Some(id) = id.filter(|id| self.long_text(self.focus, *id).is_some()) else {
+            return TeamReply::Ignored;
+        };
+        self.reading = Some(Reading {
+            focus: self.focus,
+            id,
+            first: 0,
+        });
+        TeamReply::Handled
+    }
+
+    /// Moves the open reader a row or a page within the range of the last frame drawn, or
+    /// closes it on Esc or Enter. Every other key is held, so nothing behind the reader
+    /// changes. Takes the reader and the key. Returns Handled.
+    fn reading_key(&mut self, mut reading: Reading, key: KeyEvent) -> TeamReply {
+        let (max, page) = self.reading_view.get();
+        let first = reading.first.min(max);
+        reading.first = match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                self.reading = None;
+                return TeamReply::Handled;
+            }
+            KeyCode::Up => first.saturating_sub(1),
+            KeyCode::Down => (first + 1).min(max),
+            KeyCode::PageUp => first.saturating_sub(page),
+            KeyCode::PageDown => (first + page).min(max),
+            _ => first,
+        };
+        assert!(reading.first <= max);
+        self.reading = Some(reading);
+        TeamReply::Handled
+    }
+
+    /// The reader of one whole problem or result: a heading naming it with the rows in view
+    /// out of all, then the text wrapped to the content width from the first row in view.
+    /// Takes the content width, the rows the window holds and the look. Returns the rows,
+    /// none while no reader is open or its agent or task has no text any more.
+    fn reading_rows(&self, content: usize, room: usize, look: &Look) -> Option<Vec<Row>> {
+        let reading = self.reading?;
+        let (problem, name, text) = self.long_text(reading.focus, reading.id)?;
+        let lines = wrap_words(text.trim(), content);
+        let page = room.saturating_sub(1).max(1);
+        let max = lines.len().saturating_sub(page);
+        self.reading_view.set((max, page));
+        let first = reading.first.min(max);
+        let last = lines.len().min(first + page);
+        let (what, style) = if problem {
+            ("Problem", look.error)
+        } else {
+            ("Result", look.fg)
+        };
+        let mut rows = vec![spread(
+            content,
+            Row::of(format!("{what}: {name}"), look.heading),
+            Row::of(
+                format!("Rows {}-{last} of {}", first + 1, lines.len()),
+                look.muted,
+            ),
+        )];
+        rows.extend(
+            lines[first..last]
+                .iter()
+                .map(|line| Row::of(line.clone(), style)),
+        );
+        assert!(first < last && rows.len() <= page + 1);
+        Some(rows)
     }
 
     /// Moves the settings rows after the first by the rows in view, down or up, after
@@ -3303,6 +3425,9 @@ impl TeamView {
         accounts: &[AccountRow],
         look: &Look,
     ) -> (Vec<Row>, Help, Option<(usize, usize)>) {
+        if let Some(rows) = self.reading_rows(content, room, look) {
+            return (rows, self.help(), None);
+        }
         let wide = content >= WIDE;
         let (mut lines, packed) = self.summary(content, look);
         let summary_rows = lines.len();
@@ -3375,7 +3500,7 @@ impl TeamView {
                 Some(edit) => self.coord_rows(edit, content, look),
                 None => {
                     detail = true;
-                    (self.panel(content, accounts, false, look), None)
+                    (self.panel(content, accounts, false, 0, look), None)
                 }
             },
         };
@@ -3385,8 +3510,9 @@ impl TeamView {
         let over = (fixed + 2).saturating_sub(room);
         let spacers = over.min(2);
         let whole = panel.len();
-        let panel = if detail && over > spacers {
-            self.panel(content, accounts, true, look)
+        let brief = detail && over > spacers;
+        let panel = if brief {
+            self.panel(content, accounts, true, 0, look)
         } else {
             panel
         };
@@ -3428,6 +3554,15 @@ impl TeamView {
             );
         }
         let fixed = fixed - spacers - briefed - plan_gives_way - won;
+        let short = (fixed + 2).saturating_sub(room);
+        let (panel, fixed) = if detail && short > 0 {
+            let cut = self.panel(content, accounts, brief, short, look);
+            assert!(cut.len() <= panel.len());
+            let fixed = fixed - (panel.len() - cut.len());
+            (cut, fixed)
+        } else {
+            (panel, fixed)
+        };
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -3755,11 +3890,19 @@ impl TeamView {
 
     /// The panel under the lists for the focused agent or task. When `brief`, for a short
     /// window, an agent's Tools and Working copy rows give way; a task's panel stays whole.
-    /// Takes the content width, the accounts, whether to be brief and the look. Returns the
-    /// rows.
-    fn panel(&self, content: usize, accounts: &[AccountRow], brief: bool, look: &Look) -> Vec<Row> {
+    /// A problem wraps whole but for the `give_up` rows a window still lacks. Takes the
+    /// content width, the accounts, whether to be brief, those rows and the look. Returns
+    /// the rows.
+    fn panel(
+        &self,
+        content: usize,
+        accounts: &[AccountRow],
+        brief: bool,
+        give_up: usize,
+        look: &Look,
+    ) -> Vec<Row> {
         let entry =
-            |label: &str, value: String| Row::of(label, look.muted).pad(14).push(value, look.fg);
+            |label: &str, value: String| Row::of(label, look.muted).pad(LABEL).push(value, look.fg);
         let mut rows = Vec::new();
         match self.focus {
             TeamFocus::Agents => {
@@ -3837,12 +3980,7 @@ impl TeamView {
                     }
                 }
                 if let Some(problem) = &agent.problem {
-                    rows.extend(
-                        wrap_words(problem, content)
-                            .into_iter()
-                            .take(PANEL_TEXT_LINES)
-                            .map(|line| Row::of(line, look.error)),
-                    );
+                    rows.extend(whole_rows(problem, content, give_up, look.error, look));
                 }
             }
             TeamFocus::Tasks => {
@@ -3901,14 +4039,11 @@ impl TeamView {
                 }
                 match (&task.result, &task.problem) {
                     (Some(result), _) if task.status == TaskStatus::Done => {
-                        rows.push(entry("Result", title(result)));
+                        rows.push(result_row(result, content, look));
                     }
-                    (_, Some(problem)) => rows.extend(
-                        wrap_words(problem, content)
-                            .into_iter()
-                            .take(PANEL_TEXT_LINES)
-                            .map(|line| Row::of(line, look.error)),
-                    ),
+                    (_, Some(problem)) => {
+                        rows.extend(whole_rows(problem, content, give_up, look.error, look));
+                    }
                     _ => {}
                 }
             }
@@ -3989,6 +4124,16 @@ impl TeamView {
     pub fn help(&self) -> Help {
         if let Some(list) = &self.messages {
             return list.help();
+        }
+        if self
+            .reading
+            .is_some_and(|reading| self.long_text(reading.focus, reading.id).is_some())
+        {
+            return vec![
+                ("\u{2191}\u{2193}", "Scroll"),
+                ("PgUp PgDn", "Page"),
+                ("Esc", "Close"),
+            ];
         }
         if self.message_row.is_some() {
             return vec![
@@ -4671,6 +4816,48 @@ fn draft_models(models: &Models) -> DraftModels {
         default: format!("{DEFAULT_MODEL} ({})", agent.unwrap_or(ACCOUNT_MODEL)),
         ids,
     }
+}
+
+/// Wraps a problem whole, or when the window is short by `give_up` rows keeps all but those
+/// and never fewer than `PANEL_TEXT_LINES`; the last kept row then ends with an ellipsis and
+/// the key that shows all. Takes the text, the content width, the rows to give up, the text
+/// style and the look. Returns the rows.
+fn whole_rows(text: &str, content: usize, give_up: usize, style: Style, look: &Look) -> Vec<Row> {
+    let lines = wrap_words(text, content);
+    let keep = lines.len().saturating_sub(give_up).max(PANEL_TEXT_LINES);
+    if keep >= lines.len() {
+        return lines.into_iter().map(|line| Row::of(line, style)).collect();
+    }
+    let mut rows: Vec<Row> = lines[..keep - 1]
+        .iter()
+        .map(|line| Row::of(line.clone(), style))
+        .collect();
+    rows.push(more_row(&lines[keep - 1], content, style, look));
+    assert_eq!(rows.len(), keep);
+    rows
+}
+
+/// One row of text that holds more than it shows: the text cut to leave room for an
+/// ellipsis and the key that shows all. Takes the text, the width, the text style and the
+/// look. Returns the row.
+fn more_row(text: &str, width: usize, style: Style, look: &Look) -> Row {
+    let hint = format!("  {WHOLE_TEXT}");
+    let room = width.saturating_sub(crate::tui::text::width(&hint));
+    let shown = crate::tui::text::cut(&format!("{text}\u{2026}"), room, "\u{2026}");
+    Row::of(shown, style).push(hint, look.accent)
+}
+
+/// A done task's Result row: the result's first line, ending with an ellipsis and the key
+/// that shows all when the result holds more than the row shows. Takes the result, the
+/// content width and the look. Returns the row.
+fn result_row(result: &str, content: usize, look: &Look) -> Row {
+    let first = title(result);
+    let room = content.saturating_sub(LABEL);
+    let label = Row::of("Result", look.muted).pad(LABEL);
+    if first == result.trim() && crate::tui::text::width(&first) <= room {
+        return label.push(first, look.fg);
+    }
+    label.cat(more_row(&first, room, look.fg, look))
 }
 
 fn draft_rows(draft: &Draft, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {

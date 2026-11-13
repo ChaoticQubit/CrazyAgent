@@ -5840,3 +5840,124 @@ fn a_stop_or_cancel_question_reports_asking_so_n_answers_it() {
         "the open alerts list takes the key first and leaves n alone"
     );
 }
+
+const MODEL_PROBLEM: &str = "Claude Code could not start claude-opus-9 because no account in this project's pool can run that model for sub-agents. Pick another agent model in Settings, Harnesses.";
+const LAST_SENTENCE: &str = "Pick another agent model in Settings, Harnesses.";
+
+/// A view of the fixture team with one more task that failed with `problem`, its task
+/// focused under the cursor. Takes the problem. Returns the view.
+fn failed_task_view(problem: &str) -> TeamView {
+    let mut status = team();
+    let mut failed = task(
+        13,
+        TaskSource::Master,
+        "Add the export button",
+        TaskStatus::Failed,
+    );
+    failed.problem = Some(problem.into());
+    failed.started_ms = Some(NOW - 3 * MINUTE);
+    failed.finished_ms = Some(NOW - MINUTE);
+    status.tasks.push(failed);
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    assert_eq!(view.key(press(KeyCode::Tab)), TeamReply::Handled);
+    let at = view.tasks().iter().position(|task| task.id == 13).unwrap();
+    for _ in 0..at {
+        view.key(press(KeyCode::Down));
+    }
+    assert_eq!(view.tasks()[view.task_cursor].id, 13);
+    view
+}
+
+#[test]
+fn a_problem_at_80_columns_shows_its_last_sentence_for_a_task_and_an_agent() {
+    assert!(MODEL_PROBLEM.len() > 2 * 76);
+    let view = failed_task_view(MODEL_PROBLEM);
+    let rows = frame(&view, 80, 24);
+    assert!(
+        words(&rows).contains(LAST_SENTENCE),
+        "the task's problem shows whole:\n{}",
+        rows.join("\n")
+    );
+    assert!(rows.iter().all(|row| !row.contains("Enter shows all")));
+
+    let mut status = team();
+    status.agents[2].problem = Some(MODEL_PROBLEM.into());
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let at = view
+        .agents()
+        .iter()
+        .position(|agent| agent.id == 4)
+        .unwrap();
+    for _ in 0..at {
+        view.key(press(KeyCode::Down));
+    }
+    let rows = frame(&view, 80, 24);
+    assert!(
+        words(&rows).contains(LAST_SENTENCE),
+        "the agent's problem shows whole:\n{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
+fn a_problem_longer_than_the_window_ends_with_a_mark_and_enter_reads_it_all() {
+    let long = format!("{}{LAST_SENTENCE}", "The harness said no. ".repeat(380));
+    assert!(long.len() > 7900 && long.len() <= 8192);
+    let mut view = failed_task_view(&long);
+    let rows = frame(&view, 80, 24);
+    let mark = find(&rows, "Enter shows all");
+    assert!(mark.contains('\u{2026}'), "{}", rows.join("\n"));
+    assert!(
+        rows.iter().any(|row| row.contains("Tasks  4")),
+        "the lists stay"
+    );
+    assert!(!words(&rows).contains(LAST_SENTENCE));
+
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    let rows = frame(&view, 80, 24);
+    assert!(find(&rows, "Problem: Add the export button").contains("Rows 1-"));
+    assert!(rows.iter().all(|row| !row.contains("Keep warm")));
+    for _ in 0..20 {
+        assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+        frame(&view, 80, 24);
+    }
+    let rows = frame(&view, 80, 24);
+    assert!(
+        words(&rows).contains(LAST_SENTENCE),
+        "the reader reaches the end:\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    let rows = frame(&view, 80, 24);
+    assert!(find(&rows, "Enter shows all").contains('\u{2026}'));
+}
+
+#[test]
+fn a_result_with_more_than_its_row_shows_says_enter_shows_all() {
+    let mut status = team();
+    status.tasks[0].result =
+        Some("Created the Next.js app and the Postgres schema.\nAdded the readings table.".into());
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    view.key(press(KeyCode::Tab));
+    let at = view.tasks().iter().position(|task| task.id == 10).unwrap();
+    for _ in 0..at {
+        view.key(press(KeyCode::Down));
+    }
+    let rows = frame(&view, 80, 24);
+    let result = find(&rows, "Result");
+    assert!(result.contains("Created the Next.js app"));
+    assert!(result.contains("\u{2026}") && result.contains("Enter shows all"));
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    let rows = frame(&view, 80, 24);
+    assert!(find(&rows, "Result: Set up the project").contains("Rows 1-"));
+    assert!(words(&rows).contains("Added the readings table."));
+
+    let mut idle = loaded();
+    assert_eq!(idle.key(press(KeyCode::Enter)), TeamReply::Ignored);
+}
