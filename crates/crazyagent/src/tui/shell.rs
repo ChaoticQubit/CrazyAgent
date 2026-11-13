@@ -312,6 +312,7 @@ impl Shell {
             .request(Request::Changes(Box::new(ChangesQuery::Waiting {
                 project,
             })));
+        intake::ask(&mut self.ctx, IntakeQuery::JobStatus);
         self.watch_resets();
         self.refresh();
     }
@@ -321,7 +322,29 @@ impl Shell {
     /// lists the new one; a stop or a dismiss reads the status at once. A failed read keeps
     /// the last view. Input: the intake reply. Output: none.
     fn intake_job(&mut self, event: &IntakeEvent) {
-        let _ = (&mut self.ctx, event);
+        let view = match (&event.query, &event.result) {
+            (IntakeQuery::JobStatus | IntakeQuery::JobStart { .. }, Ok(IntakeView::Job(view))) => {
+                view
+            }
+            (IntakeQuery::JobStop { .. } | IntakeQuery::JobDismiss { .. }, _) => {
+                intake::ask(&mut self.ctx, IntakeQuery::JobStatus);
+                return;
+            }
+            _ => return,
+        };
+        let said = intake_job::end_line(self.ctx.store.intake.as_ref(), view.as_ref());
+        self.ctx.store.intake = view.clone();
+        let Some(text) = said else {
+            return;
+        };
+        let landed = view.as_ref().map(|job| &job.state) == Some(&JobState::Done);
+        self.ctx.say(if landed {
+            Message::success(&text, "")
+        } else {
+            Message::warning(&text, "")
+        });
+        intake::ask(&mut self.ctx, IntakeQuery::Found);
+        assert!(self.ctx.store.intake.is_some());
     }
 
     /// Asks for the stored extras, never the detail rows, once the watch is due, with the
@@ -1066,8 +1089,14 @@ fn with_waiting(waiting: Option<String>, status: Line<'static>, theme: &Theme) -
 /// shows on every screen; with no running job the status is unchanged. Inputs: the job, if
 /// any, the status and the theme. Output: the line.
 fn with_intake(job: Option<&JobView>, status: Line<'static>, theme: &Theme) -> Line<'static> {
-    let _ = (job, theme);
-    status
+    let Some(job) = job.filter(|job| intake_job::running(job)) else {
+        return status;
+    };
+    let note = Line::from(Span::styled(intake_job::line(job), theme.accent));
+    if status.width() == 0 {
+        return note;
+    }
+    join([note, Line::raw("  "), status])
 }
 
 /// The header's count of change sets that wait for the owner. On a project's screens, once
