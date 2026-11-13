@@ -1028,6 +1028,32 @@ mod tests {
     }
 
     #[test]
+    fn an_intake_job_reaches_the_window_with_listed_codes_only() {
+        let view = |state| JobView {
+            id: RequestId::new("add-1").unwrap(),
+            source: "/Users/mira/site".into(),
+            mode: AddMode::Copy,
+            overrides: vec![AddOverride::TooLarge],
+            stopping: false,
+            state,
+        };
+        let failed = |code: &str| JobState::Failed {
+            code: code.into(),
+            phase: crazyagent::projects_home::job::Phase::Copying,
+        };
+        let raw = shown(view(failed("open /Users/mira/site/a: denied")));
+        assert_eq!(raw.state, failed("intake_failed"));
+        assert_eq!(shown(view(failed("home_add_cancelled"))).state, failed("home_add_cancelled"));
+        let asked = shown(view(JobState::NeedsAnswer { code: "weird".into() }));
+        assert_eq!(asked.state, JobState::NeedsAnswer { code: "intake_failed".into() });
+        assert_eq!(asked.overrides, vec![AddOverride::TooLarge]);
+        assert_eq!(shown(view(JobState::Done)), view(JobState::Done));
+        for code in ["intake_busy", "home_add_in_progress", "home_add_interrupted"] {
+            assert_eq!(intake_code(code), Some(code));
+        }
+    }
+
+    #[test]
     fn a_refused_setup_or_pack_change_reaches_the_window_with_its_own_code() {
         let refused = |code: &str| {
             known(
