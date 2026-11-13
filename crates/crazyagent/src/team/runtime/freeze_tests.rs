@@ -328,12 +328,27 @@ struct NativeLead {
     id: i64,
     record: PaneRecord,
     left: u32,
+    beats: PathBuf,
     _down: LeadServersDown,
 }
 
+/// A stand-in Claude Code that, run as a native lead, starts one process in a session of
+/// its own, as [`LEAVING_CLAUDE`] does, which then adds a line to `beats` in the lead's
+/// folder every 50 ms, so a row sees whether it ran at all.
+const BEATING_CLAUDE: &str = r#"#!/bin/sh
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; while (1) { open(my $beat, ">>", $ARGV[1]) or die; print $beat "x\n"; close($beat); select(undef, undef, undef, 0.05) }' "$PWD/left.pid" "$PWD/beats" &
+exec /bin/sleep 300
+"#;
+
 impl NativeLead {
-    /// Starts the lead and waits for its process in a session of its own. Output: the lead.
+    /// Starts the lead with [`LEAVING_CLAUDE`]. Output: the lead.
     fn start() -> Self {
+        Self::start_with(LEAVING_CLAUDE)
+    }
+
+    /// Starts the lead with the stand-in `script` and waits for its process in a session of
+    /// its own. Input: the stand-in. Output: the lead.
+    fn start_with(script: &str) -> Self {
         use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
         let fixture = Fixture::new(1);
         let project = ProjectId::new(PROJECT).unwrap();
@@ -359,7 +374,7 @@ impl NativeLead {
         )
         .unwrap();
         let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
-        let runtime = standin_claude_runtime(&fixture, LEAVING_CLAUDE)
+        let runtime = standin_claude_runtime(&fixture, script)
             .with_terminal(host.clone())
             .unwrap();
         let profile = reference("managed-profile");
@@ -432,6 +447,7 @@ impl NativeLead {
         assert_eq!(record.freeze, Some(true));
         fixture.keep(id, &record);
         session.leave();
+        let beats = plan.working_dir.join("beats");
         Self {
             fixture,
             runtime,
@@ -439,8 +455,14 @@ impl NativeLead {
             id,
             record,
             left,
+            beats,
             _down: down,
         }
+    }
+
+    /// How many beats a [`BEATING_CLAUDE`] lead's process wrote so far.
+    fn beats(&self) -> usize {
+        std::fs::read_to_string(&self.beats).map_or(0, |text| text.lines().count())
     }
 
     /// The processes each server keeper of a frozen record keeps: the lead's own server and
@@ -551,6 +573,158 @@ fn an_engine_start_does_not_wait_on_a_frozen_native_lead_and_leaves_it_unfrozen(
         );
     }
     lead.end(&frozen);
+}
+
+/// DEC-158: a frozen native lead that the next engine refuses, here because its team was
+/// paused while no engine ran, is ended while still frozen: no process of it runs again,
+/// not even for the moment before the refusal, so it never runs with its proxy port free.
+#[test]
+fn a_frozen_native_lead_the_next_engine_refuses_ends_without_running_again() {
+    let lead = NativeLead::start_with(BEATING_CLAUDE);
+    let deadline = Instant::now() + WAIT;
+    while lead.beats() == 0 {
+        assert!(Instant::now() < deadline, "the lead's process never beat");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let frozen = lead
+        .runtime
+        .freeze_kept(&lead.host, lead.id, &lead.record)
+        .expect("the native lead froze");
+    assert_eq!(
+        state_of(lead.left),
+        Some('T'),
+        "the lead's own process runs"
+    );
+    lead.fixture
+        .connection
+        .execute(
+            "UPDATE team_panes SET record=?2 WHERE agent=?1",
+            params![lead.id, frozen.encode().unwrap()],
+        )
+        .unwrap();
+    lead.fixture
+        .connection
+        .execute(
+            "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let before = lead.beats();
+
+    let mut next = standin_claude_runtime(&lead.fixture, BEATING_CLAUDE)
+        .with_terminal(lead.host.clone())
+        .unwrap();
+    assert!(lead.fixture.note(&format!(
+        "The terminal of team agent {} was closed: the team is paused.",
+        lead.id
+    )));
+    let deadline = Instant::now() + WAIT;
+    while state_of(lead.left).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "the refused lead's process still runs"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        lead.beats(),
+        before,
+        "the refused lead ran again after its freeze"
+    );
+    assert!(next.shutdown().unwrap().is_empty());
+    lead.end(&frozen);
+}
+
+/// DEC-158: when the quitting engine cannot store one frozen pane's record, that pane is
+/// ended rather than left frozen with nothing to thaw it by, every later proxied pane is
+/// still frozen, and the failure is still reported.
+#[test]
+fn a_frozen_record_that_cannot_be_stored_ends_its_pane_and_later_panes_still_freeze() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let open = endpoint_runtimes(&fixture);
+    let first = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let failing = Proxied::keep(&fixture, &host, first, free_proxy_port());
+    let second = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let later = Proxied::keep(&fixture, &host, second, free_proxy_port());
+    assert!(first < second, "the failing pane is frozen first");
+    let mut team = open().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "both proxied panes are taken over", |f| {
+        f.agent_status(first) == (AgentStatus::Idle, None)
+            && f.agent_status(second) == (AgentStatus::Idle, None)
+    });
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER refused_record BEFORE UPDATE ON team_panes WHEN NEW.agent={first} \
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;"
+        ))
+        .unwrap();
+
+    assert!(
+        team.shutdown().is_err(),
+        "the failed store was not reported"
+    );
+    for pid in later.pids() {
+        assert_eq!(
+            state_of(pid),
+            Some('T'),
+            "process {pid} of the later pane still runs"
+        );
+    }
+    failing.gone("the pane whose frozen record could not be stored ended");
+    later.end(&host);
+    host.close(&[]).unwrap();
+}
+
+/// DEC-158: a pane whose record no longer fits its bound once it says when the pane froze
+/// is ended while the engine quits, not kept frozen with no record to thaw it by.
+#[test]
+fn a_pane_whose_frozen_record_does_not_fit_is_ended_not_kept() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let open = endpoint_runtimes(&fixture);
+    let id = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let pane = Proxied::keep(&fixture, &host, id, free_proxy_port());
+    let mut team = open().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the proxied pane is taken over", |f| {
+        f.agent_status(id) == (AgentStatus::Idle, None)
+    });
+    let kept = team
+        .kept_record(id)
+        .unwrap()
+        .expect("the taken-over pane has a record");
+    let padded = |length: usize| PaneRecord {
+        key: Some(PathBuf::from(format!("/{}", "k".repeat(length)))),
+        ..kept.clone()
+    };
+    let record = (1..)
+        .map(padded)
+        .take_while(|record| record.encode().is_some())
+        .last()
+        .expect("the record fits with a short key");
+    let at = u64::try_from(now_ms()).unwrap();
+    assert!(
+        PaneRecord {
+            frozen_ms: Some(at),
+            ..record.clone()
+        }
+        .encode()
+        .is_none(),
+        "the frozen record still fits"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_panes SET record=?2 WHERE agent=?1",
+            params![id, record.encode().unwrap()],
+        )
+        .unwrap();
+
+    assert!(team.shutdown().unwrap().is_empty());
+    pane.gone("the pane whose frozen record does not fit ended");
+    assert!(!fixture.recorded(id));
+    host.close(&[]).unwrap();
 }
 
 /// DEC-158: a proxied agent's pane starts under a keeper given the engine's freeze record,
