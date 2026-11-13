@@ -226,6 +226,13 @@ static RAN: Mutex<Option<RanFile>> = Mutex::new(None);
 /// new file can wait behind the system's first-run checks; the version read setup does next
 /// reports it. Takes the tmux. Returns the answer.
 pub fn runs(tmux: &crate::tools::Resolved) -> bool {
+    read(tmux, VERSION_READ_TIME)
+}
+
+/// Answers [`runs`] with the version read bounded by the given time, so a test can let a
+/// read run out of time quickly. Takes the tmux and the bound. Returns the answer.
+fn read(tmux: &crate::tools::Resolved, time: Duration) -> bool {
+    assert!(!time.is_zero() && time <= VERSION_READ_TIME);
     let Ok(metadata) = std::fs::metadata(&tmux.program) else {
         return false;
     };
@@ -255,7 +262,7 @@ pub fn runs(tmux: &crate::tools::Resolved) -> bool {
         &arguments,
         &[],
         &std::env::temp_dir(),
-        VERSION_READ_TIME,
+        time,
     );
     let passed = match read {
         Err(crate::setup::InstallError(code)) => return code == "setup_timeout",
