@@ -775,6 +775,19 @@ mod tests {
         assert_eq!(found.rcli, Some(app.join(RCLI_EXECUTABLE)));
     }
 
+    /// 2.4.1 r1 RH-L1: the RCLI host is looked for in the engine's places, so one only in a
+    /// temp folder on the inherited PATH, which agents with the owner's temp folder grant or
+    /// other users write, is never registered.
+    #[test]
+    fn an_rcli_host_only_in_a_temp_folder_on_path_is_not_registered() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        program(&bin.join(RCLI_EXECUTABLE), 0o755);
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        let found = resolve_harnesses(Harnesses::default(), &on_path(&path), Some(&path), None);
+        assert_eq!(found.rcli, None);
+    }
+
     /// Keeps only the folders of `places` inside `root`, in their order, so a row sees the
     /// engine's search order without this machine's Homebrew and system folders. Inputs:
     /// the places and the scratch root. Output: the places.
