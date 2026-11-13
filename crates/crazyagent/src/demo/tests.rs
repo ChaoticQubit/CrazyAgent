@@ -1,5 +1,5 @@
 use super::*;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const POOLS: &str = r#"
 [model_access]
@@ -86,10 +86,17 @@ fn git(root: &Path, home: &Path, arguments: &[&str]) -> String {
             .env_clear()
             .env("HOME", home)
             .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_NOSYSTEM", "1"),
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
     )
     .unwrap();
-    assert!(output.status.success(), "git {arguments:?}");
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).unwrap()
 }
 
