@@ -664,9 +664,9 @@ fn a_launch_looks_in_the_engine_setup_folder_like_setup_does() {
 }
 
 /// The app's folder as a release lays it out, holding the engine and the bundled
-/// `crazyagent-tmux` beside it (DEC-157), plus a Homebrew-like folder with its own `tmux` that
-/// the engine's places look in through PATH. Input: HOME. Output: the places, the sidecar and
-/// the Homebrew-like tmux.
+/// `crazyagent-tmux` beside it (DEC-157), plus a Homebrew-like folder with its own `tmux`.
+/// The places look only in that folder, past the app's folder, so no row reads the host's
+/// own tmux. Input: HOME. Output: the places, the sidecar and the Homebrew-like tmux.
 fn bundled_layout(home: &Path) -> (Places, PathBuf, PathBuf) {
     let app = home.join("Applications/CrazyAgent.app/Contents/MacOS");
     program(&app.join("crazyagent"), "#!/bin/sh\n");
@@ -675,21 +675,15 @@ fn bundled_layout(home: &Path) -> (Places, PathBuf, PathBuf) {
         &home.join("opt/homebrew/bin/tmux"),
         "#!/bin/sh\necho tmux 3.5a\n",
     );
-    let path = brew.parent().unwrap().as_os_str().to_owned();
-    let places = Places::engine(None, Some(&app), Some(home.to_path_buf()), Some(&path));
+    let places = Places {
+        app_folder: Some(app),
+        ..Places::new(
+            vec![brew.parent().unwrap().to_path_buf()],
+            Some(home.to_path_buf()),
+        )
+    };
+    assert_eq!(places.folders().len(), 1);
     (places, sidecar, brew)
-}
-
-/// The tmux the places find with the bundled one left out: the usual search order over the
-/// same folders. Input: the places. Output: what that search finds.
-fn usual_tmux(places: &Places) -> Result<Resolved, Missing> {
-    resolve(
-        "tmux",
-        &Places::new(
-            places.folders().to_vec(),
-            places.home().map(Path::to_path_buf),
-        ),
-    )
 }
 
 /// DEC-157, leader 15:41 and 18:31: the engine uses the tmux it ships. The name `tmux` finds
@@ -717,25 +711,26 @@ fn the_bundled_tmux_beside_the_engine_wins_over_a_homebrew_tmux() {
 #[test]
 fn the_bundled_tmux_stays_first_once_the_probed_folders_are_added() {
     let (_folder, home) = scratch();
-    let (places, sidecar, brew) = bundled_layout(&home);
-    let probed = places.with_probed(vec![
+    let (_places, sidecar, brew) = bundled_layout(&home);
+    let app = sidecar.parent().unwrap();
+    let engine = Places::engine(None, Some(app), Some(home.clone()), None);
+    let probed = engine.with_probed(vec![
         brew.parent().unwrap().to_path_buf(),
         home.join("probed/bin"),
     ]);
+    assert_eq!(probed.bundled("tmux"), Some(sidecar.clone()));
     assert_eq!(resolve("tmux", &probed).unwrap().entry, sidecar);
 }
 
 /// With no bundled tmux beside the engine, such as a 2.4.0 install or a dev build, the name
-/// `tmux` finds what the usual search order finds, and no other tool name ever gets the
-/// bundled file.
+/// `tmux` finds what the usual search order finds, here the Homebrew-like one, and no other
+/// tool name ever gets the bundled file.
 #[test]
 fn a_missing_bundled_tmux_falls_back_to_the_usual_search_order() {
     let (_folder, home) = scratch();
-    let (places, sidecar, _brew) = bundled_layout(&home);
+    let (places, sidecar, brew) = bundled_layout(&home);
     std::fs::remove_file(&sidecar).unwrap();
-    let found = resolve("tmux", &places).unwrap();
-    assert_eq!(found, usual_tmux(&places).unwrap());
-    assert_ne!(found.entry, sidecar);
+    assert_eq!(resolve("tmux", &places).unwrap().entry, brew);
     let (_other, home) = scratch();
     let (places, sidecar, _brew) = bundled_layout(&home);
     for name in ["uv", "node", "screen"] {
@@ -751,21 +746,21 @@ fn a_missing_bundled_tmux_falls_back_to_the_usual_search_order() {
 #[test]
 fn a_bundled_tmux_others_can_change_or_that_cannot_run_is_passed_over_for_the_usual_search() {
     let (_folder, home) = scratch();
-    let (places, sidecar, _brew) = bundled_layout(&home);
+    let (places, sidecar, brew) = bundled_layout(&home);
     std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o757)).unwrap();
     let found = resolve("tmux", &places).unwrap();
     assert_ne!(
         found.entry, sidecar,
         "a world-writable bundled tmux is never used"
     );
-    assert_eq!(found, usual_tmux(&places).unwrap());
+    assert_eq!(found.entry, brew);
     std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
     let found = resolve("tmux", &places).unwrap();
     assert_ne!(
         found.entry, sidecar,
         "a bundled tmux that cannot run is never used"
     );
-    assert_eq!(found, usual_tmux(&places).unwrap());
+    assert_eq!(found.entry, brew);
     std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(resolve("tmux", &places).unwrap().entry, sidecar);
 }
