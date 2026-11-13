@@ -1,0 +1,76 @@
+import "./load-source.mjs";
+import assert from "node:assert/strict";
+import test from "node:test";
+
+const intake = await import("../src/screens/intake/intake.ts");
+
+const SOURCE = "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop";
+const job = (state, extra = {}) => ({ id: "add-1", source: SOURCE, mode: "move", overrides: [], stopping: false, state, ...extra });
+const downloading = (done, total) => ({ state: "downloading", progress: { done, total } });
+const copying = (copied, checked = 0) => ({ state: "copying", copied, checked });
+const failed = (code, phase) => ({ state: "failed", code, phase });
+
+test("an intake job line says what it does now, with counts as files land", () => {
+  assert.equal(intake.jobLine(job(downloading(0, 0))), "Downloading shop from iCloud...");
+  assert.equal(intake.jobLine(job(downloading(12, 3000))), "Downloading shop from iCloud: 12 of 3000 files");
+  assert.throws(() => intake.jobLine(job(downloading(4, 3))));
+  assert.equal(intake.jobLine(job(copying(0))), "Moving shop...");
+  assert.equal(intake.jobLine(job(copying(0), { mode: "copy" })), "Copying shop...");
+  assert.equal(intake.jobLine(job(copying(18), { mode: "copy" })), "Copying shop: 18 files copied");
+  assert.equal(intake.jobLine(job(copying(18, 5))), "Checking the copy of shop: 5 files checked");
+  assert.equal(intake.jobLine(job({ state: "clearing" })), "Removing shop from its old place...");
+  assert.equal(intake.jobLine(job(copying(18), { stopping: true })), "Stopping shop...");
+  assert.equal(intake.jobLine(job({ state: "done" })), "shop is in your projects folder. Set it up from Home.");
+  assert.equal(intake.jobLine(job({ state: "cancelled", phase: "copying" })), "Adding shop stopped. Nothing was moved or copied.");
+  assert.equal(intake.jobLine(job(failed("home_copy_failed", "copying"))), "shop: Couldn't copy the folder. The original is untouched. Try again.");
+  assert.equal(intake.jobLine(job(failed("home_move_source_left", "clearing"))),
+    "shop: The folder was added, but part of the original couldn't be removed. Check its old place.");
+  assert.equal(intake.jobLine(job({ state: "needs_answer", code: "home_move_worktrees" })), "shop needs your answer before it is moved.");
+  assert.equal(intake.jobLine(job({ state: "needs_answer", code: "home_copy_too_large" }, { mode: "copy" })), "shop needs your answer before it is copied.");
+});
+
+test("an intake job offers stop while it runs, retry only when nothing landed, and an answer for a soft refusal", () => {
+  assert.deepEqual(intake.jobActions(job(downloading(1, 3))), ["stop"]);
+  assert.deepEqual(intake.jobActions(job(downloading(1, 3), { stopping: true })), []);
+  assert.deepEqual(intake.jobActions(job(copying(4))), ["stop"]);
+  assert.deepEqual(intake.jobActions(job({ state: "clearing" })), []);
+  assert.deepEqual(intake.jobActions(job({ state: "done" })), ["dismiss"]);
+  assert.deepEqual(intake.jobActions(job(failed("home_copy_failed", "copying"))), ["retry", "dismiss"]);
+  assert.deepEqual(intake.jobActions(job(failed("home_icloud_not_downloaded", "downloading"))), ["retry", "dismiss"]);
+  assert.deepEqual(intake.jobActions(job(failed("home_move_source_left", "clearing"))), ["dismiss"]);
+  assert.deepEqual(intake.jobActions(job({ state: "cancelled", phase: "downloading" })), ["retry", "dismiss"]);
+  assert.deepEqual(intake.jobActions(job({ state: "needs_answer", code: "home_move_worktrees" })), ["answer", "dismiss"]);
+});
+
+test("the app reads the job every second while it runs and at the found-folder pace otherwise", () => {
+  assert.equal(intake.INTAKE_POLL_MS, 1000);
+  assert.equal(intake.intakePollMs(null), intake.FOUND_POLL_MS);
+  assert.equal(intake.intakePollMs(job(downloading(0, 0))), intake.INTAKE_POLL_MS);
+  assert.equal(intake.intakePollMs(job({ state: "clearing" })), intake.INTAKE_POLL_MS);
+  assert.equal(intake.intakePollMs(job({ state: "done" })), intake.FOUND_POLL_MS);
+  assert.equal(intake.jobRunning(job(copying(1))), true);
+  assert.equal(intake.jobRunning(job({ state: "cancelled", phase: "copying" })), false);
+  assert.equal(intake.jobRunning(null), false);
+});
+
+test("a job's end is said once, when the read after a running one shows that job ended", () => {
+  const running = job(copying(3));
+  const done = job({ state: "done" });
+  assert.equal(intake.jobEndLine(running, done), "shop is in your projects folder. Set it up from Home.");
+  assert.equal(intake.jobEndLine(done, done), null);
+  assert.equal(intake.jobEndLine(null, done), null);
+  assert.equal(intake.jobEndLine(running, running), null);
+  assert.equal(intake.jobEndLine(running, null), null);
+  assert.equal(intake.jobEndLine(running, { ...done, id: "add-2" }), null);
+});
+
+test("answering a soft refusal on Home asks about that issue and keeps the job's own overrides", () => {
+  assert.deepEqual(intake.jobQuestion(job({ state: "needs_answer", code: "home_copy_too_large" }, { mode: "copy", overrides: ["linked_checkout"] })),
+    { issues: ["too_many"], overrides: ["linked_checkout", "too_large"] });
+  assert.deepEqual(intake.jobQuestion(job({ state: "needs_answer", code: "home_move_worktrees" }, { overrides: ["too_large"] })),
+    { issues: ["worktrees"], overrides: ["worktrees", "too_large"] });
+  assert.deepEqual(intake.jobQuestion(job({ state: "needs_answer", code: "home_copy_linked_checkout" }, { mode: "copy", overrides: ["linked_checkout"] })),
+    { issues: ["linked_checkout"], overrides: ["linked_checkout"] });
+  assert.throws(() => intake.jobQuestion(job({ state: "done" })));
+  assert.throws(() => intake.jobQuestion(job({ state: "needs_answer", code: "intake_failed" })));
+});
