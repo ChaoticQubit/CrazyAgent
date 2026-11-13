@@ -212,14 +212,16 @@ impl IntakeJob {
             },
             Stage::Ended(state) => state.clone(),
         };
-        JobView {
+        let view = JobView {
             id: self.id.clone(),
             source: self.source.clone(),
             mode: self.mode,
-            overrides: Vec::new(),
+            overrides: self.overrides.clone(),
             stopping: self.tally.stopped(),
             state,
-        }
+        };
+        assert!(view.overrides.len() <= ADD_OVERRIDES_MAX);
+        view
     }
 }
 
