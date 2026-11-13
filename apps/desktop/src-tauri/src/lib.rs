@@ -3018,6 +3018,29 @@ async fn desktop_set_quit_settings(
 }
 
 #[tauri::command]
+async fn desktop_provider_retry(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::provider_retry::ProviderRetryView, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.provider_retry().await
+}
+
+#[tauri::command]
+async fn desktop_set_provider_retry(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    choice: crazyagent::provider_retry::ProviderRetry,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_provider_retry(choice, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_learning_progress(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5003,6 +5026,8 @@ native_commands! {
     desktop_set_cleanup_settings,
     desktop_quit_settings,
     desktop_set_quit_settings,
+    desktop_provider_retry,
+    desktop_set_provider_retry,
     desktop_learning_progress,
     desktop_set_learning_mark,
     desktop_master_step_settings,

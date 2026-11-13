@@ -2312,6 +2312,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .set_quit_settings(settings, generation) .await }.await;
             routed(result)
         }
+        "desktop_provider_retry" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.provider_retry().await }.await;
+            routed(result)
+        }
+        "desktop_set_provider_retry" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                choice: crazyagent::provider_retry::ProviderRetry,
+                generation: u64,
+            }
+            let Args { choice, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.set_provider_retry(choice, generation).await }.await;
+            routed(result)
+        }
         "desktop_learning_progress" => {
             let result: Result<_, BridgeError> = async { lock(state).await?.learning_progress().await }.await;
             routed(result)

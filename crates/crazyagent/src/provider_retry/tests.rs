@@ -180,3 +180,11 @@ fn every_harness_has_a_line_for_every_option_in_the_owner_view() {
         serde_json::json!(["stop_at_once", "retry_briefly", "harness_default"])
     );
 }
+
+/// The engine never names Codex's built-in provider as a custom one: Codex refuses to
+/// start on any `model_providers.openai` key, so such a call is a bug, stopped at once.
+#[test]
+#[should_panic(expected = "never the built-in openai")]
+fn a_custom_codex_provider_named_openai_is_a_bug() {
+    let _ = ProviderRetry::StopAtOnce.codex_settings(CodexProvider::Custom("openai"));
+}
