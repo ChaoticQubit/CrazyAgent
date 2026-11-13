@@ -78,15 +78,16 @@ pub const TMUX_MISSING: &str =
 
 /// The folders the resolver looks in, in order, built once from what the engine knows: no
 /// program is run, no shell file is read and every folder is absolute and bounded. No
-/// folder agents can write is kept ([`Places::agent_writable`]); the engine's data folder,
-/// which holds the agents' HOMEs and worktrees, is kept here so its files are refused too.
-/// The engine's own places also refuse a probed folder in a temp folder ([`Places::with_probed`]).
+/// folder agents can write is kept ([`Places::agent_writable`]), the engine's data folder
+/// included; one in the engine's `setup` folder is set aside so [`resolve`] names a tool
+/// there, and the engine's own places refuse a probed temp folder ([`Places::with_probed`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Places {
     folders: Vec<PathBuf>,
     home: Option<PathBuf>,
     engine_roots: Vec<PathBuf>,
     temp_refused: bool,
+    refused_setup: Vec<PathBuf>,
 }
 
 impl Places {
@@ -99,9 +100,9 @@ impl Places {
     }
 
     /// Keeps the folders in order, dropping relative, oversized and repeated ones and every
-    /// one agents can write, at most [`PLACES_MAX`]. Inputs: the folders, HOME, the engine
-    /// data folders and whether probed folders in a temp folder are refused. Output: the
-    /// bounded places.
+    /// one agents can write, at most [`PLACES_MAX`], and sets aside one of those in an engine
+    /// `setup` folder ([`Places::in_engine_setup`]). Inputs: the folders, HOME, the engine
+    /// data folders and whether probed temp folders are refused. Output: the bounded places.
     fn kept(
         folders: Vec<PathBuf>,
         home: Option<PathBuf>,
@@ -116,21 +117,37 @@ impl Places {
                 .filter(|root| usable(root))
                 .collect(),
             temp_refused,
+            refused_setup: Vec::new(),
         };
         for folder in folders {
             if places.folders.len() == PLACES_MAX {
                 break;
             }
-            if usable(&folder)
-                && !places.folders.contains(&folder)
-                && !places.agent_writable(&folder)
-            {
+            if !usable(&folder) || places.folders.contains(&folder) {
+                continue;
+            }
+            if !places.agent_writable(&folder) {
                 places.folders.push(folder);
+            } else if places.in_engine_setup(&folder)
+                && !places.refused_setup.contains(&folder)
+                && places.refused_setup.len() < PLACES_MAX
+            {
+                places.refused_setup.push(folder);
             }
         }
         assert!(places.folders.len() <= PLACES_MAX);
+        assert!(places.refused_setup.len() <= PLACES_MAX);
         assert!(places.engine_roots.iter().all(|root| root.is_absolute()));
         places
+    }
+
+    /// Whether a folder lies in an engine data folder's `setup` folder, which only a data
+    /// folder inside a project makes one agents can write. Input: the folder. Output: the
+    /// answer.
+    fn in_engine_setup(&self, folder: &Path) -> bool {
+        self.engine_roots
+            .iter()
+            .any(|root| folder.starts_with(root.join("setup")))
     }
 
     /// Builds the engine's places: the app's own folder, the engine's setup folder, Homebrew
@@ -228,7 +245,14 @@ impl Places {
                 .filter(|folder| !system.contains(folder) && !(temp_refused && in_temp(folder))),
         );
         folders.extend(last);
-        Self::kept(folders, self.home, self.engine_roots, temp_refused)
+        let set_aside = self.refused_setup;
+        let mut places = Self::kept(folders, self.home, self.engine_roots, temp_refused);
+        for folder in set_aside {
+            if !places.refused_setup.contains(&folder) && places.refused_setup.len() < PLACES_MAX {
+                places.refused_setup.push(folder);
+            }
+        }
+        places
     }
 
     /// The folders looked in, in order. Output: the folders.
@@ -470,9 +494,9 @@ impl Missing {
 
 /// Finds a tool by its program name wherever the places look, passing over version-manager
 /// shims, files agents can write and files others can change, then reads how it runs; a
-/// miss names the first file passed over, if any ([`Refused`]), and asks the background
-/// probes to look again ([`probe::missed`]). Harness launches call [`resolve_entry`].
-/// Inputs: the program name and the places. Output: the tool, or why it cannot run.
+/// miss names the first file passed over ([`Refused`]), a set-aside `setup` folder's first,
+/// and asks the background probes to look again ([`probe::missed`]). Harness launches call
+/// [`resolve_entry`]. Inputs: the program name and the places. Output: the tool, or why not.
 pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
     resolve_at(name, places, 0)
 }
@@ -497,7 +521,17 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
     if !valid_name(name) {
         return Err(not_found());
     }
-    let mut refused = None;
+    let mut refused = places
+        .refused_setup
+        .iter()
+        .map(|folder| folder.join(name))
+        .find_map(|candidate| match check_candidate(places, &candidate) {
+            Some(Err(why)) => Some(Refused {
+                file: candidate,
+                why,
+            }),
+            _ => None,
+        });
     let found =
         places.folders.iter().map(|folder| folder.join(name)).find(
             |candidate| match check_candidate(places, candidate) {
