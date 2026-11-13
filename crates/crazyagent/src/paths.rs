@@ -301,7 +301,8 @@ pub struct Harnesses {
 /// the given paths (flags, else the owner's chosen files), the engine search, the PATH value
 /// and the folder holding the running executable. Output: each given path, else the `codex`
 /// and `claude` entries the search finds as the catalog does (PATH, system, then HOME
-/// folders), and the RCLI host next to the executable, then on PATH, links kept.
+/// folders), and the RCLI host next to the executable, then in the engine's places with that
+/// PATH ([`crate::tools::Places::engine`]), which set aside a temp folder, links kept.
 pub fn resolve_harnesses(
     given: Harnesses,
     search: &crate::harnesses::Search,
@@ -315,11 +316,7 @@ pub fn resolve_harnesses(
             .or_else(|| harness_entry("claude-code", search, path)),
         rcli: rcli_entry(
             given.rcli,
-            &crate::tools::Places::new(
-                path.map(|path| std::env::split_paths(path).collect())
-                    .unwrap_or_default(),
-                None,
-            ),
+            &crate::tools::Places::engine(None, None, None, path),
             executable_folder,
         ),
     }
@@ -757,15 +754,17 @@ mod tests {
         let app = root.join("app");
         let bin = root.join("bin");
         program(&bin.join(RCLI_EXECUTABLE), 0o755);
-        let path = std::env::join_paths([bin.clone()]).unwrap();
-        let found = resolve_harnesses(
-            Harnesses::default(),
-            &on_path(&path),
-            Some(&path),
-            Some(&app),
+        let places = crate::tools::Places::new(vec![bin.clone()], None);
+        assert_eq!(
+            rcli_entry(None, &places, Some(&app)),
+            Some(bin.join(RCLI_EXECUTABLE))
         );
-        assert_eq!(found.rcli, Some(bin.join(RCLI_EXECUTABLE)));
         program(&app.join(RCLI_EXECUTABLE), 0o755);
+        assert_eq!(
+            rcli_entry(None, &places, Some(&app)),
+            Some(app.join(RCLI_EXECUTABLE))
+        );
+        let path = std::env::join_paths([bin.clone()]).unwrap();
         let found = resolve_harnesses(
             Harnesses::default(),
             &on_path(&path),
