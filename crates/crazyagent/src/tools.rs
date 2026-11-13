@@ -695,9 +695,22 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     }
     let through_shim =
         shebang.by_name.is_none() && crate::harnesses::is_shim(places.home(), &shebang.interpreter);
+    let into_temp = places.temp_refused
+        && shebang
+            .interpreter
+            .canonicalize()
+            .is_ok_and(|real| leads_into_temp(entry, &real, &places.temps));
     let interpreter = match &shebang.by_name {
         Some(name) => named_interpreter(name, &program, places, depth + 1),
         None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
+        None if into_temp => Err(Missing {
+            reason: Reason::Refused,
+            refused: Some(Box::new(Refused {
+                file: shebang.interpreter.clone(),
+                why: Refusal::InTemp,
+            })),
+            ..not_there()
+        }),
         None => entry_at(&shebang.interpreter, places, depth + 1),
     }
     .map_err(|missing| match missing.reason {
