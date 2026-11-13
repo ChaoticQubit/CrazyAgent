@@ -29805,6 +29805,20 @@ tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
 exec /bin/sleep 300
 "#;
 
+/// A stand-in Claude Code that, run as a native lead, kills the warden of its own server,
+/// which the keeper's shim forks inside the lead's sandbox as the server's child, and ends
+/// that server's holder window (FBTMUX-P1-R1-L1 r1), so neither the warden nor the holder
+/// ends the server; then it writes its own id to `left.pid` and waits. A refused kill or
+/// end fails the row.
+#[cfg(target_os = "macos")]
+const WARDEN_ENDING_CLAUDE: &str = r#"#!/bin/sh
+s="${TMPDIR%/}/tmux.sock"
+p=$(tmux -S "$s" display-message -p '#{pid}') && [ -n "$p" ] || exit 1
+/usr/bin/pkill -9 -P "$p" perl || exit 1
+tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
+exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid"
+"#;
+
 /// Starts a native lead on a host whose holders and keepers read the deadline every 2 s and
 /// end a server after two passed reads, waits until the stand-in wrote its process, renews
 /// once 4 s ahead as a running engine's last pass does and never again, as after a quit,
@@ -29888,6 +29902,19 @@ fn a_native_lead_that_ends_its_holder_window_still_ends_at_its_deadline() {
         !running,
         "what the lead started on its own ended with its server"
     );
+}
+
+/// FBTMUX-P1-R1-L1 r1: a native lead that kills its own server's warden, which runs inside
+/// its sandbox, and ends its holder window still has its own server, its teammates' server
+/// and its own process end at the deadline the engine last renewed, since the keeper ends
+/// the server it started from outside the sandbox.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_that_kills_its_warden_still_ends_at_its_deadline() {
+    let (own, mates, running) = native_lead_past_its_deadline(WARDEN_ENDING_CLAUDE, |_| {});
+    assert!(own, "the lead's own server ended at its deadline");
+    assert!(mates, "the teammates' server ended at its deadline");
+    assert!(!running, "the lead's own process ended with its server");
 }
 
 /// KEEPER (b): a native lead's own server runs under the keeper and its warden, so the
