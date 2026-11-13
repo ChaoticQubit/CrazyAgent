@@ -38,8 +38,8 @@ const LIVE_TIME: Duration = Duration::from_secs(90);
 const PANE_TIME: Duration = Duration::from_secs(5);
 const STOP_TIME: Duration = Duration::from_secs(40);
 const POLL: Duration = Duration::from_millis(250);
-const MARKER_DEPTH_MAX: usize = 14;
-const MARKER_ENTRIES_MAX: usize = 50_000;
+const LIVE_OFF_START: &str = "The live master was turned off: it could not start: ";
+const LIVE_OFF_END: &str = ". Start it again from the master view.";
 
 const CODEX_SCRIPT: &str = "#!/usr/bin/env node\nimport(\"../dist/cli.js\");\n";
 
@@ -102,7 +102,9 @@ impl Report {
 
     fn saw(&mut self, outcome: &Live) {
         self.seen.push(match outcome {
-            Live::Ran { node, script } => format!("ran with node {node:?} and script {script:?}"),
+            Live::Ran { node, script, args } => {
+                format!("ran with node {node:?}, script {script:?} and args {args:?}")
+            }
             Live::Stopped(line) => format!("stopped with {line:?}"),
             Live::Waiting(last) => format!("still waiting, last line {last:?}"),
         });
@@ -185,9 +187,10 @@ fn link(target: &str, at: &Path) {
 }
 
 /// The node stand-in: answers `--version` for itself and for the Codex script it is
-/// handed, else leaves a marker naming the node and script it ran as, in the first of the
-/// agent's home, working or temp folder it may write, names that folder and says it ran on
-/// its pane (the agent's temp folder sits outside the gate's private Mac) and stays open.
+/// handed. On a terminal, as in the master's pane, it leaves a marker naming the node,
+/// script and arguments it ran with in the first of the agent's home, working or temp
+/// folder it may write and names that folder; a probe's run has no terminal and leaves
+/// none. It then says it ran and stays open.
 fn node_text() -> String {
     format!(
         "#!/bin/sh\n\
@@ -200,12 +203,14 @@ fn node_text() -> String {
          \x20   exit 0\n\
          \x20 fi\n\
          done\n\
-         for folder in \"$HOME\" \"$PWD\" \"$TMPDIR\"; do\n\
-         \x20 if [ -n \"$folder\" ] && printf 'node=%s\\nscript=%s\\n' \"$0\" \"$1\" > \"$folder/{MARKER_FILE}\" 2>/dev/null; then\n\
-         \x20   printf '{FOLDER_KEY}%s\\n' \"$folder\"\n\
-         \x20   break\n\
-         \x20 fi\n\
-         done\n\
+         if [ -t 1 ]; then\n\
+         \x20 for folder in \"$HOME\" \"$PWD\" \"$TMPDIR\"; do\n\
+         \x20   if [ -n \"$folder\" ] && printf 'node=%s\\nscript=%s\\nargs=%s\\n' \"$0\" \"$1\" \"$*\" > \"$folder/{MARKER_FILE}\" 2>/dev/null; then\n\
+         \x20     printf '{FOLDER_KEY}%s\\n' \"$folder\"\n\
+         \x20     break\n\
+         \x20   fi\n\
+         \x20 done\n\
+         fi\n\
          printf '%s\\n' '{marker}'\n\
          exec /bin/cat\n",
         marker = String::from_utf8_lossy(MARKER_LINE),
@@ -216,7 +221,7 @@ fn node_text() -> String {
 /// `/opt/homebrew` and `/usr/local` folders are mapped into, the engine root, and the
 /// gate folder its logs are kept in. Dropping it stops the engine and its tmux server.
 struct Mac {
-    _temp: tempfile::TempDir,
+    temp: tempfile::TempDir,
     run: PathBuf,
     home: PathBuf,
     system: PathBuf,
@@ -264,7 +269,7 @@ impl Mac {
         let _ = fs::remove_dir_all(&kept);
         fs::create_dir_all(&kept).unwrap();
         let mac = Self {
-            _temp: temp,
+            temp,
             run,
             home,
             system,
@@ -454,6 +459,13 @@ impl Mac {
 impl Drop for Mac {
     fn drop(&mut self) {
         self.stop();
+        if std::thread::panicking() {
+            self.temp.disable_cleanup(true);
+            let _ = fs::write(
+                self.kept.join("kept-mac.txt"),
+                format!("{}\n", self.run.display()),
+            );
+        }
         let socket = self
             .root
             .join(crazyagent::terminal::FOLDER)
@@ -657,36 +669,19 @@ fn stop_on_host_tools(mac: &Mac, setup: &SetupStatus, codex: &HarnessEntry) {
     );
 }
 
-/// What one live master start came to: the stand-in harness ran (with the node and script
-/// it ran as, when its marker file was readable), the start stopped with a problem line, or
-/// it was still waiting when the gate's time ran out, with the last line shown.
+/// What one live master start came to: the stand-in harness ran in the master's own pane
+/// (with the node, script and arguments it ran with, when its marker file was readable),
+/// the start stopped with a problem line, or it was still waiting when the gate's time ran
+/// out, with the last line shown.
 #[derive(Debug)]
 enum Live {
     Ran {
         node: Option<String>,
         script: Option<String>,
+        args: Option<String>,
     },
     Stopped(String),
     Waiting(Option<String>),
-}
-
-fn marker(folder: &Path, depth: usize, seen: &mut usize) -> Option<String> {
-    if depth > MARKER_DEPTH_MAX || *seen > MARKER_ENTRIES_MAX {
-        return None;
-    }
-    for entry in fs::read_dir(folder).ok()?.flatten() {
-        *seen += 1;
-        let kind = entry.file_type().ok()?;
-        if kind.is_file() && entry.file_name() == MARKER_FILE {
-            return fs::read_to_string(entry.path()).ok();
-        }
-        if kind.is_dir()
-            && let Some(text) = marker(&entry.path(), depth + 1, seen)
-        {
-            return Some(text);
-        }
-    }
-    None
 }
 
 fn marker_field(text: &str, key: &str) -> Option<String> {
@@ -746,19 +741,17 @@ fn pane_marker(seen: &[u8]) -> Option<String> {
     text
 }
 
-async fn live_outcome(owner: &mut Owner, mac: &Mac, refused: Option<String>) -> Live {
+/// What a live master start came to: the team's stop line is read first, and a run counts
+/// only when the master's own pane shows the stand-in ran, so no other run of the
+/// stand-in, such as a probe's, is taken for the master. Inputs: the owner and the
+/// refusal code of the switch, if any. Output: the outcome.
+async fn live_outcome(owner: &mut Owner, refused: Option<String>) -> Live {
     if let Some(code) = refused {
         return Live::Stopped(owner.team().await.live_problem.unwrap_or(code));
     }
     let start = Instant::now();
     let mut last = None;
     while start.elapsed() < LIVE_TIME {
-        if let Some(text) = marker(&mac.run, 0, &mut 0) {
-            return Live::Ran {
-                node: marker_field(&text, "node"),
-                script: marker_field(&text, "script"),
-            };
-        }
         let team = owner.team().await;
         if team.live_master == Some(false)
             && let Some(problem) = &team.live_problem
@@ -772,6 +765,7 @@ async fn live_outcome(owner: &mut Owner, mac: &Mac, refused: Option<String>) -> 
                 script: text
                     .as_deref()
                     .and_then(|text| marker_field(text, "script")),
+                args: text.as_deref().and_then(|text| marker_field(text, "args")),
             };
         }
         last.clone_from(&team.live_problem);
@@ -781,15 +775,19 @@ async fn live_outcome(owner: &mut Owner, mac: &Mac, refused: Option<String>) -> 
 }
 
 /// Whether a stopped start says which tool is missing in the resolver's typed line: the
-/// exact tmux line, or a line that starts with the missing tool's name, never one that only
-/// says the master had to start again. Inputs: the line and the tools it may name.
-/// Output: true for a typed reason.
+/// exact tmux line, or a reason that starts with the missing tool's name, read bare or
+/// inside the engine's live-off line, never one that only says the master had to start
+/// again. Inputs: the line and the tools it may name. Output: true for a typed reason.
 fn typed_reason(line: &str, tools: &[&str]) -> bool {
-    let tmux = tools.contains(&"tmux") && line == crazyagent::tools::TMUX_MISSING;
+    let reason = line
+        .strip_prefix(LIVE_OFF_START)
+        .and_then(|rest| rest.strip_suffix(LIVE_OFF_END))
+        .unwrap_or(line);
+    let tmux = tools.contains(&"tmux") && reason == crazyagent::tools::TMUX_MISSING;
     let named = tools
         .iter()
         .filter(|tool| **tool != "tmux")
-        .any(|tool| line.starts_with(&format!("{tool} ")));
+        .any(|tool| reason.starts_with(&format!("{tool} ")));
     (tmux || named) && !line.contains(RESTARTS_ONLY)
 }
 
@@ -804,6 +802,7 @@ fn assert_ran_with(outcome: &Live, node: &Path, script: &Path) {
         Live::Ran {
             node: Some(ran_node),
             script: Some(ran_script),
+            ..
         } => {
             assert_eq!(real(ran_node), node.canonicalize().unwrap(), "{outcome:?}");
             assert_eq!(
@@ -842,7 +841,7 @@ async fn a_nothing_installed_mac_says_what_is_missing_and_never_waits_forever() 
     assert_eq!(codex.status, HarnessStatus::NotInstalled, "{codex:?}");
     report.step("live master start");
     let refused = owner.live_on().await;
-    let outcome = live_outcome(&mut owner, &mac, refused).await;
+    let outcome = live_outcome(&mut owner, refused).await;
     report.saw(&outcome);
     match outcome {
         Live::Stopped(line) => assert!(
@@ -878,7 +877,7 @@ async fn a_homebrew_mac_with_npm_codex_runs_the_live_master_through_the_found_no
     );
     report.step("live master start");
     let refused = owner.live_on().await;
-    let outcome = live_outcome(&mut owner, &mac, refused).await;
+    let outcome = live_outcome(&mut owner, refused).await;
     report.saw(&outcome);
     assert_ran_with(
         &outcome,
@@ -903,7 +902,7 @@ async fn an_nvm_mac_with_npm_codex_runs_the_live_master_through_the_nvm_node() {
         .join("lib/node_modules/@openai/codex/bin/codex.js");
     report.step("live master start");
     let refused = owner.live_on().await;
-    let outcome = live_outcome(&mut owner, &mac, refused).await;
+    let outcome = live_outcome(&mut owner, refused).await;
     report.saw(&outcome);
     assert_ran_with(&outcome, &mac.nvm().join("bin/node"), &script);
     report.passed = true;
@@ -922,7 +921,7 @@ async fn tmux_installed_after_the_engine_started_is_used_without_an_engine_resta
     assert_eq!(codex.status, HarnessStatus::Ready, "{codex:?}");
     report.step("live master start before tmux");
     let refused = owner.live_on().await;
-    let outcome = live_outcome(&mut owner, &mac, refused).await;
+    let outcome = live_outcome(&mut owner, refused).await;
     report.saw(&outcome);
     match outcome {
         Live::Stopped(line) => assert!(
@@ -943,7 +942,7 @@ async fn tmux_installed_after_the_engine_started_is_used_without_an_engine_resta
     }
     report.step("live master start after tmux");
     let refused = owner.live_on().await;
-    let outcome = live_outcome(&mut owner, &mac, refused).await;
+    let outcome = live_outcome(&mut owner, refused).await;
     report.saw(&outcome);
     assert_ran_with(
         &outcome,
