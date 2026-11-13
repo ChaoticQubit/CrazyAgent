@@ -6169,12 +6169,12 @@ mod tests {
         claude.tool();
         claude.said("1. one\n2. tw");
         claude.said("o\n3. three\n");
-        assert_eq!(claude.text().as_deref(), Some("1. one\n2. two\n3. three\n"));
+        assert_eq!(claude.text(), Some("1. one\n2. two\n3. three\n"));
         let mut codex = Reply::new(ResearchHarness::Codex, 64);
         codex.said("Reading the notes.");
         codex.tool();
         codex.said("The report.");
-        assert_eq!(codex.text().as_deref(), Some("The report."));
+        assert_eq!(codex.text(), Some("The report."));
         let mut long = Reply::new(ResearchHarness::ClaudeCode, 8);
         long.said("1234");
         long.said("56789");
@@ -6183,7 +6183,7 @@ mod tests {
         again.said("123456789");
         again.tool();
         again.said("1234");
-        assert_eq!(again.text().as_deref(), Some("1234"));
+        assert_eq!(again.text(), Some("1234"));
     }
 
     /// A Claude Code stream is read as its bytes arrive, lines split over reads and a last
