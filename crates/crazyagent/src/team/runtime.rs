@@ -508,6 +508,7 @@ enum TurnEnd {
     Cancelled,
     Interrupted,
     Closed,
+    ModelRefusalSaid,
 }
 
 impl TurnEnd {
@@ -522,6 +523,7 @@ impl TurnEnd {
             Self::Cancelled => "cancelled",
             Self::Interrupted => "interrupted",
             Self::Closed => "closed",
+            Self::ModelRefusalSaid => "model_refusal_said",
         }
     }
 }
@@ -10743,7 +10745,7 @@ impl TeamRuntime {
                 Some("The account hit its rate limit"),
             ),
             TurnEnd::TimedOut => (TaskStatus::Failed, Some(timed.as_str())),
-            TurnEnd::Failed => (
+            TurnEnd::Failed | TurnEnd::ModelRefusalSaid => (
                 if retry {
                     TaskStatus::Queued
                 } else {
@@ -11577,6 +11579,7 @@ fn live_serve(
                 Some(
                     TranscriptEvent::ToolUse { .. }
                     | TranscriptEvent::Waiting
+                    | TranscriptEvent::ModelRefusalSaid
                     | TranscriptEvent::BackgroundStarted { .. }
                     | TranscriptEvent::BackgroundEnded { .. },
                 )
@@ -12330,6 +12333,48 @@ fn keeps_session(end: TurnEnd, background: usize, held: bool, wrapped: bool) -> 
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+
+/// How a task or message turn ends once its harness finished it: a success, else the
+/// owner's interrupt, else a model refusal its transcript said (shown only, never recorded,
+/// Q-6), else a rate limit, else a failure. Takes whether the harness called the turn a
+/// success, whether it was interrupted, whether a refusal was said and whether it was
+/// rate limited. Returns the end.
+fn finished_end(success: bool, interrupted: bool, said: bool, limited: bool) -> TurnEnd {
+    let _ = said;
+    if success {
+        TurnEnd::Success
+    } else if interrupted {
+        TurnEnd::Interrupted
+    } else if limited {
+        TurnEnd::RateLimited
+    } else {
+        TurnEnd::Failed
+    }
+}
+
+/// The plain line a pane turn whose transcript said the provider refused its model leaves
+/// for the owner: the harness and the model it ran, and that the work stops. The agent can
+/// write that transcript, so the line says what the harness reported and nothing is recorded
+/// (Q-6). Takes the harness id, the model, none for the account's default, and whether the
+/// turn was the master's. Returns the line, the same words in the desktop app and the TUI.
+fn refusal_said_line(harness: &str, model: Option<&str>, master: bool) -> String {
+    let name = crate::harnesses::spec(harness)
+        .filter(|spec| spec.id == harness)
+        .map_or(harness, |spec| spec.name);
+    let model = model.map_or_else(
+        || "its default model".to_owned(),
+        |model| format!("the model {model}"),
+    );
+    if master {
+        format!(
+            "{name} reported that its account cannot run {model}, so the master stopped before it replied. Pick another master model in Settings, Harnesses."
+        )
+    } else {
+        format!(
+            "{name} reported that its account cannot run {model}, so the task stopped and was not tried again. Pick another agent model in Settings, Harnesses."
+        )
+    }
+}
 
 /// The problem a sub-agent's turn leaves on its agent: the closed process with the turn's
 /// code for a turn that closed it, or for a turn the engine ended at one of its own bounds
@@ -13491,15 +13536,7 @@ fn turn(
             }
             Ok(Some(LaunchEvent::Interrupted)) => interrupted = true,
             Ok(Some(LaunchEvent::TurnFinished { success })) => {
-                break if success {
-                    TurnEnd::Success
-                } else if interrupted {
-                    TurnEnd::Interrupted
-                } else if limited {
-                    TurnEnd::RateLimited
-                } else {
-                    TurnEnd::Failed
-                };
+                break finished_end(success, interrupted, false, limited);
             }
             Ok(Some(LaunchEvent::Exited { .. })) => break TurnEnd::Closed,
             Err(problem) => {

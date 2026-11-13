@@ -855,7 +855,9 @@ impl TerminalSession {
                 continue;
             }
             let event = match fact {
-                TranscriptEvent::Interrupted | TranscriptEvent::TurnError { .. }
+                TranscriptEvent::Interrupted
+                | TranscriptEvent::TurnError { .. }
+                | TranscriptEvent::ModelRefusalSaid
                     if self.over_hold =>
                 {
                     continue;
@@ -866,6 +868,7 @@ impl TerminalSession {
                 TranscriptEvent::TurnError { rate_limited } => {
                     LaunchEvent::TurnError { rate_limited }
                 }
+                TranscriptEvent::ModelRefusalSaid => LaunchEvent::ModelRefusalSaid,
                 TranscriptEvent::TurnFinished { success } => {
                     if !self.background.is_empty() && (success || self.over_hold) {
                         self.held = true;

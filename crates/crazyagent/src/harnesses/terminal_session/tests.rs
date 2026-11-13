@@ -633,8 +633,9 @@ mod own_turns {
         assert!(pane.session.held(), "{first:?}");
     }
 
-    /// Q-6: a refusal code in the transcript a live agent can write is a failed turn, never a
-    /// model refusal, so a forged line cannot keep a model off the project's accounts.
+    /// Q-6: a refusal code in the transcript a live agent can write is a failed turn whose
+    /// refusal is only said, for the owner's line, never a model refusal, so a forged line
+    /// cannot keep a model off the project's accounts.
     #[test]
     fn a_refusal_line_in_an_agent_s_transcript_is_a_failed_turn_and_never_a_refusal() {
         const REFUSED: &str = r#"{"type":"assistant","isApiErrorMessage":true,"error":"model_not_found","message":{"content":[{"type":"text","text":"There's an issue with the selected model."}]}}"#;
@@ -652,6 +653,7 @@ mod own_turns {
             seen.contains(&LaunchEvent::TurnFinished { success: false }),
             "{seen:?}"
         );
+        assert!(seen.contains(&LaunchEvent::ModelRefusalSaid), "{seen:?}");
         assert!(
             !seen
                 .iter()

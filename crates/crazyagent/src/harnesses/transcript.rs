@@ -104,6 +104,7 @@ pub enum TranscriptEvent {
     Interrupted,
     TurnFinished { success: bool },
     TurnError { rate_limited: bool },
+    ModelRefusalSaid,
     BackgroundStarted { id: String },
     BackgroundEnded { id: String },
 }

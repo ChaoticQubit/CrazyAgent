@@ -355,6 +355,7 @@ pub enum LaunchEvent {
     Usage { tokens: Tokens },
     TurnError { rate_limited: bool },
     ModelRefused,
+    ModelRefusalSaid,
     Exited { code: Option<i32> },
     LateOutput { lines: u64 },
 }

@@ -29731,6 +29731,158 @@ fn a_model_refusal_is_recorded_for_the_account_and_stops_the_agent_that_got_it()
     assert!(team.master_restarts.contains(&project));
 }
 
+/// The end a finished pane turn reads (DEC-150 r2 item 2): a model refusal its transcript
+/// said ends the turn as said, after the owner's interrupt and before a rate limit, and a
+/// success stays a success; without one every end is as before.
+#[test]
+fn a_finished_turn_reads_a_said_refusal_after_an_interrupt_and_before_a_rate_limit() {
+    for (success, interrupted, said, limited, end) in [
+        (true, false, true, false, TurnEnd::Success),
+        (false, true, true, true, TurnEnd::Interrupted),
+        (false, false, true, true, TurnEnd::ModelRefusalSaid),
+        (false, false, true, false, TurnEnd::ModelRefusalSaid),
+        (false, false, false, true, TurnEnd::RateLimited),
+        (false, false, false, false, TurnEnd::Failed),
+        (true, false, false, true, TurnEnd::Success),
+    ] {
+        assert_eq!(
+            finished_end(success, interrupted, said, limited),
+            end,
+            "success {success} interrupted {interrupted} said {said} limited {limited}"
+        );
+    }
+}
+
+/// Counts the model refusals recorded in the fixture's database. Takes the fixture.
+/// Returns the count.
+fn recorded_refusals(fixture: &Fixture) -> i64 {
+    fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM team_model_refusals", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+/// A pane sub-agent's turn whose transcript said the provider refused its model fails its
+/// task once with a plain line naming the harness and the model, never queued again though
+/// an attempt is left, also for a held agent, and records no refusal, since the agent can
+/// write that transcript (DEC-150 r2 item 2, Q-6). The agent stops; a sibling runs on.
+#[test]
+fn a_pane_task_turn_whose_refusal_was_said_fails_once_naming_harness_and_model() {
+    for held in [false, true] {
+        let fixture = Fixture::new(1);
+        ledger::initialize(&fixture.connection).unwrap();
+        let mut team = fixture.runtime();
+        let project = fixture.setup.project_id.clone();
+        let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,created_ms) VALUES (?1,'master','codex',0,'Plan the page','running',?2,1,1)",
+                params![PROJECT, sub],
+            )
+            .unwrap();
+        let task = fixture.connection.last_insert_rowid();
+        let mut worker = between_turns(&project, AgentRole::Sub, false, false);
+        worker.model = Some("gpt-a".to_owned());
+        worker.busy = Some(Busy::Task(task));
+        worker.held = held;
+        team.workers.insert(sub, worker);
+        let sibling = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+        team.workers.insert(
+            sibling,
+            between_turns(&project, AgentRole::Sub, false, false),
+        );
+
+        team.apply(
+            sub,
+            Report::Finished {
+                text: String::new(),
+                end: TurnEnd::ModelRefusalSaid,
+                cause: None,
+            },
+        )
+        .unwrap();
+
+        let (status, problem): (String, Option<String>) = fixture
+            .connection
+            .query_row(
+                "SELECT status,error FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed", "held {held}: {problem:?}");
+        assert_eq!(
+            problem.as_deref(),
+            Some(
+                "Codex reported that its account cannot run the model gpt-a, so the task stopped and was not tried again. Pick another agent model in Settings, Harnesses."
+            ),
+            "held {held}"
+        );
+        assert_eq!(recorded_refusals(&fixture), 0, "held {held}");
+        assert!(team.master_restarts.is_empty(), "held {held}");
+        assert!(team.workers[&sub].stopping, "held {held}");
+        assert!(!team.workers[&sibling].stopping, "held {held}");
+        team.workers.clear();
+    }
+}
+
+/// A pane master's turn whose transcript said the provider refused its model leaves the
+/// owner a note naming the harness and the model, the words both clients show, and its
+/// message fails rather than waits again; no refusal is recorded (DEC-150 r2 item 2, Q-6).
+#[test]
+fn a_pane_master_turn_whose_refusal_was_said_notes_harness_and_model() {
+    let mut fixture = Fixture::new(1);
+    ledger::initialize(&fixture.connection).unwrap();
+    let project = fixture.setup.project_id.clone();
+    let tx = fixture.connection.transaction().unwrap();
+    let message = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Plan the page",
+        MessageState::Pending,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let mut team = fixture.runtime();
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Working);
+    let mut worker = between_turns(&project, AgentRole::Master, false, false);
+    worker.harness = "claude-code".into();
+    worker.model = Some("claude-x".to_owned());
+    worker.busy = Some(Busy::Message(message));
+    team.workers.insert(master, worker);
+
+    team.apply(
+        master,
+        Report::Finished {
+            text: String::new(),
+            end: TurnEnd::ModelRefusalSaid,
+            cause: None,
+        },
+    )
+    .unwrap();
+
+    let said = "Claude Code reported that its account cannot run the model claude-x, so the master stopped before it replied. Pick another master model in Settings, Harnesses.";
+    assert!(fixture.note(said), "{:#?}", fixture.status());
+    let state: String = fixture
+        .connection
+        .query_row(
+            "SELECT state FROM team_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "failed");
+    assert_eq!(recorded_refusals(&fixture), 0);
+    assert!(team.master_restarts.is_empty());
+    team.workers.clear();
+}
+
 /// With idle agents kept for reuse, a task whose model no idle agent of its harness runs
 /// does not wait behind them forever (DEC-150 F3): when the harness slot is full, dispatch
 /// stops one idle agent on another model, so the task can start on its own model.
