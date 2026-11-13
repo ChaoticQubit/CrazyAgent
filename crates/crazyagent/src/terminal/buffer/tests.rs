@@ -48,6 +48,27 @@ fn a_slow_viewer_loses_the_oldest_output_and_is_told_how_much() {
 }
 
 #[test]
+fn many_tiny_writes_reach_a_viewer_that_has_not_read_yet_whole_and_in_order() {
+    let (feed, mut chunks) = buffer();
+    let mut pushed = Vec::new();
+    for index in 0..STREAM_CHUNKS_MAX * 4 {
+        let write = format!("\x1b[{}m{}", index % 8, index % 10).into_bytes();
+        assert!(feed.push(&write));
+        pushed.extend_from_slice(&write);
+    }
+    assert!(pushed.len() < VIEWER_BUFFER_BYTES_MAX);
+    let mut read = Vec::new();
+    while let Ok(next) = chunks.try_recv() {
+        read.extend_from_slice(&next);
+    }
+    assert_eq!(
+        String::from_utf8_lossy(&read),
+        String::from_utf8_lossy(&pushed),
+        "small writes far under the byte bound are never dropped, however many there are"
+    );
+}
+
+#[test]
 fn the_host_forgets_a_viewer_that_went_away() {
     let (feed, chunks) = buffer();
     assert!(feed.open());
