@@ -1063,15 +1063,19 @@ fn turn_sandbox(
     Ok(installed)
 }
 
-/// Reads the owner's sandbox settings from the engine database without writing to it.
-/// Input: the owner root. Output: the settings, or `master_sandbox_unavailable` when they
-/// cannot be read, so the turn fails closed rather than start under another option.
+/// Reads the owner's sandbox settings from the engine database in the engine root around
+/// the owner generation, without writing to it. Input: the generation's root. Output: the
+/// settings, or `master_sandbox_unavailable` when they cannot be read, so the turn fails
+/// closed rather than start under another option.
 #[cfg(any(target_os = "linux", test))]
 fn stored_sandbox_settings(
     root: &Root,
 ) -> Result<crate::sandbox_settings::SandboxSettings, EngineError> {
+    let engine = root
+        .engine_root()
+        .map_err(|_| failure("master_sandbox_unavailable"))?;
     let connection = rusqlite::Connection::open_with_flags(
-        root.path.join("engine.db"),
+        engine.join("engine.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -1700,9 +1704,8 @@ mod tests {
     fn a_master_turn_folder_goes_with_everything_its_turn_wrote_when_the_launch_lets_go() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -1771,9 +1774,8 @@ mod tests {
     fn the_live_master_keeps_only_its_model_port_under_every_project_choice() {
         use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -1823,9 +1825,8 @@ mod tests {
     fn the_live_master_sandbox_is_confined_under_sandboxed_and_own_branch() {
         use crate::sandbox::policy::AgentPolicy;
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -1888,7 +1889,7 @@ mod tests {
     fn master_sandbox_lets_a_real_child_write_only_in_the_project_worktree_and_its_own_dirs() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
@@ -2183,7 +2184,7 @@ mod tests {
     fn master_sandbox_hides_a_listed_folder_from_a_real_child() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
@@ -2245,9 +2246,8 @@ mod tests {
     #[test]
     fn master_sandbox_refuses_a_listed_folder_off_macos() {
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -2292,7 +2292,7 @@ mod tests {
     fn master_sandbox_refuses_a_folder_git_now_tracks() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
@@ -2351,9 +2351,8 @@ mod tests {
     fn a_tools_off_master_reads_the_repository_but_cannot_move_its_refs() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let leases = base.join("worktrees");
         let home = base.join("profile-home");
@@ -2528,9 +2527,8 @@ mod tests {
     fn a_tools_on_master_turn_under_no_network_is_refused_rather_than_reaching_every_host() {
         use crate::sandbox::policy::AgentNetwork;
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -2595,9 +2593,8 @@ mod tests {
     fn a_tools_on_master_writes_only_in_its_worktree_and_own_folders_and_runs_the_engine() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
