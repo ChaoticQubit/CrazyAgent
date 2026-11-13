@@ -688,3 +688,22 @@ fn a_harness_in_an_agent_home_under_a_custom_engine_root_is_refused() {
         crate::harnesses::interactive::launch_tool(&entry, &launch).unwrap_err();
     assert!(line.contains(&entry.display().to_string()), "{line}");
 }
+
+/// Clean-Mac gate shape d: under the gate's stand-in system root, a folder the login shell
+/// probe found outside that root and HOME, such as this computer's real Homebrew, is never
+/// looked in, while the gate's own Homebrew and HOME folders are; a release, with no gate
+/// root, keeps every probed folder as before.
+#[test]
+fn under_the_gate_root_a_probed_folder_outside_the_gate_mac_is_dropped() {
+    let (_folder, home) = scratch();
+    let root = home.join("system");
+    let mapped = root.join("opt/homebrew/bin");
+    let npm = home.join(".npm-global/bin");
+    let host = PathBuf::from("/opt/homebrew/bin");
+    let probed = vec![host.clone(), mapped.clone(), npm.clone()];
+    assert_eq!(
+        probed_kept(probed.clone(), Some(&root), Some(&home)),
+        vec![mapped, npm]
+    );
+    assert_eq!(probed_kept(probed.clone(), None, Some(&home)), probed);
+}
