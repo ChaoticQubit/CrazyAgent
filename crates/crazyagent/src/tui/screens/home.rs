@@ -244,6 +244,12 @@ fn checking(status: &SetupStatus) -> bool {
 /// there is no pack row beside it. Input: the setup status. Output: the names of tools not
 /// found, bundled or installed.
 fn missing_tools(status: &SetupStatus) -> Vec<String> {
+    unready(status).into_iter().map(home_name).collect()
+}
+
+/// The tools Get set up still waits for, in the setup check's order, leaving out Node.
+/// Input: the setup status. Output: the rows not found, bundled or installed.
+fn unready(status: &SetupStatus) -> Vec<&crate::setup::DependencyStatus> {
     status
         .dependencies
         .iter()
@@ -257,11 +263,38 @@ fn missing_tools(status: &SetupStatus) -> Vec<String> {
                     | DependencyState::Installed { .. }
             )
         })
-        .map(|tool| match tool.name {
-            Dependency::Graphify => "Graphify".into(),
-            _ => tool.label.clone(),
-        })
         .collect()
+}
+
+fn home_name(tool: &crate::setup::DependencyStatus) -> String {
+    match tool.name {
+        Dependency::Graphify => "Graphify".into(),
+        _ => tool.label.clone(),
+    }
+}
+
+/// Home's line for the tools Get set up waits for: the missing ones, then the ones found and
+/// not used (DEC-162), which only setup can fix. Input: the setup status. Output: the line,
+/// empty when every tool is ready.
+fn tools_line(status: &SetupStatus) -> String {
+    let (unused, missing): (Vec<_>, Vec<_>) = unready(status)
+        .into_iter()
+        .partition(|tool| matches!(tool.state, DependencyState::Refused { .. }));
+    let names = |tools: Vec<&crate::setup::DependencyStatus>| {
+        tools
+            .into_iter()
+            .map(home_name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        parts.push(format!("Missing: {}.", names(missing)));
+    }
+    if !unused.is_empty() {
+        parts.push(format!("Found, not used: {}.", names(unused)));
+    }
+    parts.join(" ")
 }
 
 /// Home: the project list and, until setup is done, the "Get set up" panel.
@@ -465,20 +498,17 @@ impl Home {
 
     fn items(ctx: &Ctx) -> [(bool, &'static str, Vec<String>, Place); 4] {
         let setup = Self::setup(ctx).unwrap_or_default();
-        let missing = ctx
+        let line = ctx
             .store
             .setup
             .ready()
             .filter(|status| !checking(status))
-            .map(missing_tools)
+            .map(tools_line)
             .unwrap_or_default();
-        let tools = if missing.is_empty() {
+        let tools = if line.is_empty() {
             vec!["Agents need tmux, uv and".into(), "Graphify.".into()]
         } else {
-            wrap(
-                &format!("Missing: {}.", missing.join(", ")),
-                TOOLS_TEXT_CHARS,
-            )
+            wrap(&line, TOOLS_TEXT_CHARS)
         };
         let harness = match &ctx.store.harnesses {
             Load::Ready((ready, all)) => vec![
