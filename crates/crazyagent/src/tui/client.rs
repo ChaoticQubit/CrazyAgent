@@ -318,7 +318,7 @@ impl Connection {
                                 .expect("creation requires paired configuration");
                             let was_ready = native.ready;
                             let event = runtime.block_on(native.creation(*job));
-                            let problem = event.result.as_ref().err().map(String::as_str);
+                            let problem = creation_loss(&event);
                             if !report_loss(was_ready, native, problem, &mut client, &owner_replies)
                             {
                                 break;
@@ -2323,6 +2323,21 @@ impl NativeOwner {
             _ => Err("owner_read_kind".into()),
         }
     }
+}
+
+/// The problem a creation job hands the loss check: the job's failure, if any.
+/// Input: the creation event. Output: the problem the loss check reads, or none.
+fn creation_loss(event: &CreationEvent) -> Option<&str> {
+    let problem = event.result.as_ref().err().map(String::as_str);
+    assert!(
+        problem.is_none_or(|code| !code.is_empty()),
+        "every problem carries a code"
+    );
+    assert!(
+        !event.retained || event.operation.is_some(),
+        "a kept creation names its change"
+    );
+    problem
 }
 
 /// Tells whether a failed owner job means the trusted connection is gone.
