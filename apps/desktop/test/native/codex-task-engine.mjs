@@ -174,9 +174,11 @@ async function addProject(bridge, repo, generation) {
  * Agents tab, runs the steps and stops everything. Inputs: the test context, the temporary
  * folder prefix, the steps (given the first project, every project, the engine root, the
  * owner on the page, the page, the served app and the bridge), how many projects, one to
- * four, and the stand-in Codex script. Output: none. */
-export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_CODEX) {
+ * four, the stand-in Codex script and whether the engine gets its own private temp folder
+ * beside its root, as the owner's engine does, instead of the one holding it. Output: none. */
+export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_CODEX, { ownTemp = false } = {}) {
   assert.ok(Number.isInteger(count) && count >= 1 && count <= 4, `one to four projects, not ${count}`);
+  assert.equal(typeof ownTemp, "boolean", "ownTemp is true or false");
   assert.ok(typeof codex === "string" && codex.startsWith("#!/bin/sh\n"), "the stand-in Codex is a shell script");
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -188,7 +190,8 @@ export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_COD
   const home = join(root, "home");
   const projects = join(root, "projects");
   const repos = Array.from({ length: count }, (_, index) => join(root, "repos", index === 0 ? "fruit-stand" : `fruit-stand-${index + 1}`));
-  for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, ...repos]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const temp = ownTemp ? join(root, "tmp") : tmpdir();
+  for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, ...repos, ...(ownTemp ? [temp] : [])]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   repos.forEach(ownerRepo);
   const provider = await closedPort();
   writeFileSync(join(runtime, "global.toml"), `version = 1
@@ -202,7 +205,7 @@ connections = [
 ]
 pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
-  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
+  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: temp, LANG: "en_US.UTF-8" };
   const log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
   let engine;
   let bridgeProcess;

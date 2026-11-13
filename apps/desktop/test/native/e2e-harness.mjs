@@ -277,7 +277,12 @@ export function owner({ evaluate, send }, evidence) {
       const element = wanted === null ? all[0] : all.find((item) => (item.innerText ?? item.textContent ?? "").replace(/\\s+/g, " ").trim() === wanted
         || item.getAttribute("aria-label") === wanted);
       if (!element) return { missing: all.map((item) => (item.innerText ?? "").trim()).filter(Boolean).slice(0, 40) };
-      element.scrollIntoView({ block: "center" });
+      const reached = (rect) => {
+        if (rect.top < 0 || rect.left < 0 || rect.bottom > innerHeight || rect.right > innerWidth) return false;
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return hit !== null && (hit === element || element.contains(hit));
+      };
+      if (!reached(element.getBoundingClientRect())) element.scrollIntoView({ block: "center" });
       const rect = element.getBoundingClientRect();
       const x = rect.left + rect.width / 2;
       const y = rect.top + rect.height / 2;

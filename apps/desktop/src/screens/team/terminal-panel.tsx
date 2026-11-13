@@ -378,10 +378,11 @@ function TerminalHead({ node, harness, tile, message, boxed, onMessage, onStop, 
  * it owns the head, `tile` for a terminal wall tile, `swaps` for the one panel a graph click
  * replaces, `follow` when an ended terminal opens again on its own, cleared, for an agent
  * that restarts in a new pane, and the one-line report of what the agent's harness loaded and
- * invoked, shown in the head, and the project id a wall window attaches for. Where the owner
+ * invoked, shown in the head, the project id a wall window attaches for, and what hears the
+ * terminal open at its first frame and close, so the live master's wait ends only then. Where the owner
  * types (the terminal, the message box under it, or both) is the one Terminal input in
  * Settings, for every agent on every screen. Output: the panel. */
-export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId }: {
+export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
@@ -392,6 +393,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   follow?: boolean;
   reported?: string;
   projectId?: string;
+  onOpened?: (open: boolean) => void;
 }) {
   if (embedded && tile) throw new Error("a terminal is either embedded in a console or a wall tile, never both");
   if (embedded && swaps) throw new Error("only a terminal with its own head says it swaps");
@@ -408,6 +410,11 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   const latest = useRef<(() => void) | null>(null);
   const term = useRef<Terminal | null>(null);
   const [view, setView] = useState<View>({ kind: "connecting" });
+  const opened = useRef(onOpened);
+  opened.current = onOpened;
+  const open = view.kind === "live";
+  useEffect(() => { opened.current?.(open); }, [open]);
+  useEffect(() => () => opened.current?.(false), []);
   const [behind, setBehind] = useState(false);
   const [mouse, setMouse] = useState(false);
   const [menu, setMenu] = useState<MenuAt | null>(null);

@@ -49,7 +49,7 @@ while IFS= read -r line; do
   if [ "$ran" = 0 ]; then
     ran=1
     lane=$(/usr/bin/grep -o "'[^']*' lane --folder '[^']*'" "$CODEX_HOME/config.toml" | /usr/bin/head -n 1)
-    uses=$(/usr/bin/grep -o "such as --uses [a-z0-9._-]*" "$CODEX_HOME/config.toml" | /usr/bin/head -n 1 | /usr/bin/sed 's/^such as //')
+    uses=$(/usr/bin/grep -o "such as --uses [a-z0-9._-]*" "$CODEX_HOME/config.toml" | /usr/bin/head -n 1 | /usr/bin/sed 's/^such as //; s/[.]$//')
     printf '%s\n' "$lane" > "$CODEX_HOME/lane-line"
     if [ -n "$lane" ]; then
       for n in 1 2 3 4 5; do

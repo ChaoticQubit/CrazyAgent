@@ -269,7 +269,13 @@ impl StatusLine {
             (false, Some(at)) => row.push(format!("   Checked {}", ago(now_ms, at)), look.muted),
             (false, None) => row,
         };
-        if let Some(problem) = status.problem.as_ref().or(self.problem.as_ref()) {
+        if let Some(problem) = &status.problem {
+            row = if status.running || status.stale {
+                row.push(format!("   {problem}"), look.muted)
+            } else {
+                row.push(format!("   ! {problem}"), look.warning)
+            };
+        } else if let Some(problem) = &self.problem {
             row = row.push(format!("   ! {problem}"), look.warning);
         }
         if status.running {

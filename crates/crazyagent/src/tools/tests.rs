@@ -379,13 +379,14 @@ fn a_link_into_a_project_is_refused() {
     std::os::unix::fs::symlink(&planted, home.join(".local/bin/tmux")).unwrap();
     assert_eq!(
         resolve("tmux", &home_only(&home)).unwrap_err().reason,
-        Reason::NotFound
+        Reason::Refused
     );
 }
 
 /// R-L1 and F2: an interpreter named by path goes through the same checks as a tool found by
-/// name: one inside a project's `.crazyagent` folder, or inside a project, is refused as a
-/// missing interpreter, and a pinned entry inside a project is refused too.
+/// name: one inside a project's `.crazyagent` folder, or inside a project, is reported as
+/// refused with its own file and why, never as a missing interpreter, and a pinned entry
+/// inside a project is refused too.
 #[test]
 fn an_interpreter_or_entry_inside_a_project_is_refused() {
     let (_folder, home) = scratch();
@@ -396,17 +397,19 @@ fn an_interpreter_or_entry_inside_a_project_is_refused() {
         &format!("#!{}\n", planted.display()),
     );
     let missing = resolve("agentic", &home_only(&home)).unwrap_err();
-    assert_eq!(missing.reason, Reason::NeedsInterpreter);
-    assert_eq!(missing.needs.as_deref(), Some("node"));
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused.map(|refused| (refused.file, refused.why)),
+        Some((planted, Refusal::AgentsCanWrite))
+    );
     let inside = program(&work.join("tools/node"), NODE);
     program(
         &home.join(".local/bin/inside"),
         &format!("#!/usr/bin/env {}\n", inside.display()),
     );
-    assert_eq!(
-        resolve("inside", &home_only(&home)).unwrap_err().reason,
-        Reason::NeedsInterpreter
-    );
+    let missing = resolve("inside", &home_only(&home)).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(missing.refused.map(|refused| refused.file), Some(inside));
     let pinned = program(&work.join("bin/codex"), NODE);
     assert!(resolve_entry(&pinned, &home_only(&home)).is_err());
 }
@@ -461,7 +464,7 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
     );
     assert_eq!(
         resolve("node", &home_only(&home)).unwrap_err().reason,
-        Reason::NotFound
+        Reason::Refused
     );
     #[cfg(target_os = "macos")]
     if std::os::unix::fs::chown(&bin, None, Some(80)).is_ok() {
@@ -534,4 +537,154 @@ fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
     let tool = program(&own.join("tool"), NODE);
     let places = Places::new(vec![own.clone()], None);
     assert_eq!(resolve("tool", &places).unwrap().program, tool);
+}
+
+/// RC-M1 on Linux: the engine looks in Linuxbrew and the NixOS system and default profiles,
+/// in that order and before the system folders. A tool in a Linuxbrew prefix and one a
+/// profile links into its store are found; a profile link into a project is refused.
+#[cfg(target_os = "linux")]
+#[test]
+fn linuxbrew_and_nixos_profile_tools_are_found_and_a_link_into_a_project_is_refused() {
+    let (_folder, home) = scratch();
+    let engine = Places::engine(None, None, Some(home.clone()), Some(OsStr::new("")));
+    let at = |folder: &str| {
+        engine
+            .folders()
+            .iter()
+            .position(|f| f == Path::new(folder))
+            .unwrap_or_else(|| panic!("{folder} is looked in"))
+    };
+    let linux = LINUX_FOLDERS.map(at);
+    assert!(linux.windows(2).all(|pair| pair[0] < pair[1]), "{linux:?}");
+    assert!(linux[2] < at(SYSTEM_FOLDERS[0]));
+
+    let brew = home.join("home/linuxbrew/.linuxbrew/bin");
+    let brewed = program(&brew.join("tmux"), NODE);
+    let stored = program(&home.join("nix/store/0-uv/bin/uv"), NODE);
+    let profile = home.join("nix/var/nix/profiles/default/bin");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::os::unix::fs::symlink(&stored, profile.join("uv")).unwrap();
+    let places = Places::new(vec![brew, profile.clone()], Some(home.clone()));
+    assert_eq!(resolve("tmux", &places).unwrap().program, brewed);
+    let uv = resolve("uv", &places).unwrap();
+    assert_eq!((uv.entry, uv.program), (profile.join("uv"), stored));
+
+    let planted = program(&project(&home.join("work/app")).join("uv"), NODE);
+    let twin = home.join("run/current-system/sw/bin");
+    std::fs::create_dir_all(&twin).unwrap();
+    std::os::unix::fs::symlink(&planted, twin.join("uv")).unwrap();
+    let refused = Places::new(vec![twin], Some(home));
+    assert_eq!(resolve("uv", &refused).unwrap_err().reason, Reason::Refused);
+}
+
+/// The macOS group every local user is in and the resolver does not trust for writes.
+#[cfg(target_os = "macos")]
+const STAFF: u32 = 20;
+
+/// F2 (r2): a tmux the resolver passes over, here in a Homebrew folder the staff group can
+/// write, is reported as refused with the file and the folder to fix, never as missing with
+/// how to install it: brew would answer that it is installed and Try again would loop.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refused_tool_names_its_file_and_why_and_never_says_it_is_missing() {
+    let (_folder, home) = scratch();
+    let bin = home.join("opt/homebrew/bin");
+    let tmux = program(&bin.join("tmux"), NODE);
+    std::os::unix::fs::chown(&bin, None, Some(STAFF)).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let missing = resolve("tmux", &Places::new(vec![bin.clone()], Some(home))).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused,
+        Some(Box::new(Refused {
+            file: tmux.clone(),
+            why: Refusal::OthersCanChange(bin.clone()),
+        }))
+    );
+    let line = missing.line();
+    assert_ne!(line, TMUX_MISSING);
+    assert!(
+        !line.contains("missing") && !line.contains("brew install"),
+        "{line}"
+    );
+    assert!(line.contains(&tmux.display().to_string()), "{line}");
+    assert!(
+        line.contains(&format!("change {}.", bin.display())),
+        "{line}"
+    );
+}
+
+/// R2-L1: a tool file the staff group can write, in this user's 0755 folder, is passed over
+/// with the refused line naming the file; at 0755 it is found, and an admin-group file is
+/// still trusted.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_file_the_staff_group_can_write_is_passed_over() {
+    let (_folder, home) = scratch();
+    let bin = home.join("tools");
+    let tool = program(&bin.join("tool"), NODE);
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::chown(&tool, None, Some(STAFF)).unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let places = Places::new(vec![bin.clone()], Some(home));
+    let missing = resolve("tool", &places).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused,
+        Some(Box::new(Refused {
+            file: tool.clone(),
+            why: Refusal::OthersCanChange(tool.clone()),
+        }))
+    );
+    assert!(missing.line().contains(&tool.display().to_string()));
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(resolve("tool", &places).unwrap().program, tool);
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o775)).unwrap();
+    if std::os::unix::fs::chown(&tool, None, Some(80)).is_ok() {
+        assert_eq!(
+            resolve("tool", &places).unwrap().program,
+            tool,
+            "admin's group is trusted"
+        );
+    }
+}
+
+/// r2 item 5: a tool only in the engine's `<root>/setup/bin`, such as the node an in-app
+/// setup installed, is found by setup and by a harness launch alike. A launch names no root
+/// of its own, so it uses the root this process's engine recorded, given here explicitly
+/// so no row records the global.
+#[test]
+fn a_launch_looks_in_the_engine_setup_folder_like_setup_does() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let node = program(&root.join("setup/bin/node"), NODE);
+    let codex = program(&home.join("npm/bin/codex"), "#!/usr/bin/env node\n");
+    let setup = Places::from_environment(Some(&root));
+    assert_eq!(resolve("node", &setup).unwrap().program, node);
+    let launch = Places::at_roots(None, Some(&root));
+    let started = crate::harnesses::interactive::launch_tool(&codex, &launch).unwrap();
+    assert_eq!(started.argv()[0], node.into_os_string());
+}
+
+/// rv-v3sec M16-S1: an engine started with a non-default `--home`, `CRAZYAGENT_HOME` unset,
+/// refuses a harness file agents can write under that root, such as one in an agent's
+/// home: a launch takes the root the engine recorded, given here explicitly.
+#[test]
+fn a_harness_in_an_agent_home_under_a_custom_engine_root_is_refused() {
+    let (_folder, home) = scratch();
+    let root = home.join("custom-engine");
+    let entry = program(
+        &root.join("team/agents/agent-1/home/.local/bin/codex"),
+        NODE,
+    );
+    let launch = Places::at_roots(None, Some(&root));
+    let missing = resolve_entry(&entry, &launch).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused.map(|refused| refused.why),
+        Some(Refusal::AgentsCanWrite)
+    );
+    let crate::harnesses::launch::LaunchError(line, _) =
+        crate::harnesses::interactive::launch_tool(&entry, &launch).unwrap_err();
+    assert!(line.contains(&entry.display().to_string()), "{line}");
 }

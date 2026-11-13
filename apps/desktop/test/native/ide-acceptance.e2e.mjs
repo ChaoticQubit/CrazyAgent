@@ -181,7 +181,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           assert.ok(!IDE_FAILED.test(text), `the IDE download reports a failure: ${text.slice(0, 600)}`);
           assert.ok(Date.now() < deadline, "the IDE build never became Ready");
         }
-        assert.deepEqual(await swapped(), ["tab-ide"], "a Ready build lists the IDE in place of Changes and Context");
+        assert.deepEqual(await swapped(), ["tab-ide", "tab-context"], "a Ready build lists the IDE in place of Changes, with Context still a tab beside it (DEC-152)");
         await me.click("IDE", "[role=tab]");
         await me.capture("ide-tab");
         for (const deadline = Date.now() + BUILD_MS; opened.length === 0; await pause(POLL_MS * 10)) {

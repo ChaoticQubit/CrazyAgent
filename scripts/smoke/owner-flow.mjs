@@ -1,8 +1,9 @@
+import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { constants } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { constants, tmpdir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 
@@ -21,8 +22,8 @@ const TREE_FILES = 16;
 const LARGE_BYTES = 50 * 1024 * 1024;
 const LFS_POINTER = "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
 const REPO = "owner-shaped";
-const ROOT_PREFIX = "ca-of-";
-const ROOT_NAME = /^ca-of-[A-Za-z0-9]{6}$/;
+const ROOT_PREFIX = "owner-flow-";
+const ROOT_NAME = /^owner-flow-[A-Za-z0-9]{6}$/;
 const ROOT_MARK = "owner-flow-root";
 const ROOT_QUIET_MS = 15 * 60 * 1000;
 const ROOT_ACTIVITY = [".", "h/engine.db", "h/engine.db-wal", `repos/${REPO}/.git`, `repos/${REPO}/.git/index`];
@@ -340,7 +341,7 @@ function rootText(path) {
   return lstatSync(path, { throwIfNoEntry: false })?.isFile() ? readFileSync(path, "utf8") : "";
 }
 
-/** Says why --clean keeps a ca-of-* folder: gone, not this user's folder, held open by a live
+/** Says why --clean keeps an owner-flow-* folder: gone, not this user's folder, held open by a live
  * process, without this smoke's stand-in claude, kept for SMOKE_EVIDENCE, or changed within 15
  * minutes. Input: the folder, the pid holding a file in it (if any) and the time now.
  * Output: the reason, or null when the folder may be removed. */
@@ -349,19 +350,19 @@ function keepReason(root, holder, now) {
   if (!folder) return "already gone";
   if (!folder.isDirectory() || folder.uid !== process.getuid()) return "not this smoke's";
   if (holder) return `in use by pid ${holder}`;
-  if (!rootText(join(root, "bin", "claude")).includes(STAND_IN_SIGN)) return "not this smoke's";
+  if (!rootText(join(root, "u", ".local", "bin", "claude")).includes(STAND_IN_SIGN)) return "not this smoke's";
   if (rootText(join(root, ROOT_MARK)) === "kept\n") return "kept for SMOKE_EVIDENCE";
   const changed = Math.max(...ROOT_ACTIVITY.map((path) => lstatSync(join(root, path), { throwIfNoEntry: false })?.mtimeMs ?? 0));
   if (now - changed < ROOT_QUIET_MS) return `changed ${Math.round((now - changed) / 60000)} min ago`;
   return null;
 }
 
-/** Removes the temp roots that earlier smoke runs left in /tmp, keeping every folder keepReason
+/** Removes the temp roots that earlier smoke runs left in the temp folder, keeping every folder keepReason
  * names. lsof lists the open files of this user's processes once, so a running smoke's root is
- * never touched. Input: whether to list only. Output: one line per ca-of-* folder and the counts;
+ * never touched. Input: whether to list only. Output: one line per owner-flow-* folder and the counts;
  * exit 2 when lsof cannot list, 1 when a root could not be removed. */
 function clean(dryRun) {
-  const base = realpathSync("/tmp");
+  const base = realpathSync(tmpdir());
   const listed = spawnSync("lsof", ["-n", "-P", "-w", "-u", String(process.getuid()), "-F", "pn"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
   if (listed.status !== 0 || !listed.stdout) {
     console.error(`BLOCKED: lsof could not list open files (${listed.error?.code ?? listed.status}), so no root is known to be unused`);
@@ -410,14 +411,17 @@ async function main() {
   const bridgeBinary = required("SMOKE_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   const real = realProfile();
   process.umask(0o077);
-  const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), ROOT_PREFIX)));
+  const root = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), ROOT_PREFIX)));
   const evidence = process.env.SMOKE_EVIDENCE && isAbsolute(process.env.SMOKE_EVIDENCE) ? process.env.SMOKE_EVIDENCE : join(root, "evidence");
   const keep = Boolean(process.env.SMOKE_EVIDENCE) && evidence === join(root, "evidence");
   claimRoot(root, keep);
+  for (let at = root; at !== dirname(at); at = dirname(at)) {
+    assert((statSync(at).mode & 0o002) === 0, `${at} is writable by every user, so the engine refuses a harness under it: set TMPDIR to a private folder`);
+  }
   console.log(`temp root ${root} (${keep ? "kept for SMOKE_EVIDENCE" : "removed on exit; SMOKE_EVIDENCE=1 keeps it"})`);
   const crazyHome = join(root, "h");
   const userHome = join(root, "u");
-  const bin = join(root, "bin");
+  const bin = join(userHome, ".local", "bin");
   const repo = join(root, "repos", REPO);
   const linked = join(root, "repos", `${REPO}-worktrees`);
   const projects = join(root, "projects");

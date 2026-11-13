@@ -85,6 +85,19 @@ test("a check that is due and a failed check are both said in plain words", () =
   assert.match(refused, /role="alert"[^>]*>Roadmap status is off in Project settings\.</);
 });
 
+test("a check that waits for an account says why under a status, never as a failed check alert, while it is due or running", () => {
+  const reason = "No account in this project's pool can run the check";
+  for (const value of [status({ stale: true, problem: reason }), status({ stale: true, running: true, problem: reason })]) {
+    const html = shown(value);
+    assert.doesNotMatch(html, /role="alert"/);
+    assert.doesNotMatch(html, /The last check failed/);
+    assert.match(html, /role="status">No account in this project&#x27;s pool can run the check\.</);
+  }
+  assert.match(shown(status({ stale: true, refresh: "off", problem: reason })), /role="alert"[^>]*>The last check failed: No account/);
+  const refused = shown(status({ stale: true, problem: reason }), { problem: "Roadmap status is off in Project settings." });
+  assert.match(refused, /role="alert"[^>]*>Roadmap status is off in Project settings\.</);
+});
+
 test("text from the roadmap and the agent is shown through displayText, so hidden characters cannot hide", () => {
   const html = shown(status({
     items: [{ item: { section: "V1‮", text: "Sign​in" }, status: "done", evidence: "set‮41" }],

@@ -131,6 +131,7 @@ impl Dependency {
             reason: crate::tools::Reason::NotFound,
             needs: None,
             looked: Vec::new(),
+            refused: None,
         }
     }
 

@@ -3,7 +3,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chooseHome, clearWebStore } from "./run-layout.mjs";
+import { SevereServiceError } from "webdriverio";
+import { chooseHome, clearWebStore, lockHome } from "./run-layout.mjs";
 
 process.umask(0o077);
 const app = process.env.WD_APP;
@@ -179,6 +180,8 @@ function stopTerminals() {
   if (existsSync(server)) spawnSync("tmux", ["-S", server, "kill-server"], { env: { PATH: process.env.PATH }, stdio: "ignore" });
 }
 
+let homeLock = null;
+
 export const config = {
   runner: "local",
   specs: [fileURLToPath(new URL("master-switch.e2e.mjs", import.meta.url))],
@@ -206,6 +209,11 @@ export const config = {
       throw new Error(`MS_ROOT must name a new folder: ${root}`);
     }
     mkdirSync(home, { recursive: true, mode: 0o700 });
+    try {
+      homeLock = await lockHome(home, { label: `wdio ${evidence}` });
+    } catch (failure) {
+      throw new SevereServiceError(String(failure.message));
+    }
     mkdirSync(join(root, "codex"), { mode: 0o700 });
     clearWebStore(home);
     mkdirSync(runtime, { mode: 0o700 });
@@ -226,5 +234,6 @@ export const config = {
   onComplete: async function () {
     await stopEngine();
     stopTerminals();
+    homeLock?.release();
   },
 };

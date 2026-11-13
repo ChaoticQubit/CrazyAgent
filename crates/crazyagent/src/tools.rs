@@ -49,6 +49,19 @@ const NODE_VERSION_FOLDERS: [(&str, &str); 5] = [
     ),
 ];
 
+/// The data root of the engine this process runs, recorded once at its start
+/// ([`record_engine_root`]).
+static ENGINE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Records the data root of the engine this process runs, once, at its start, so a launch
+/// looks in the same places setup does ([`Places::from_environment`]). Only the engine
+/// binary records it; recording another root later is a bug. Input: the absolute root.
+pub fn record_engine_root(root: &Path) {
+    assert!(root.is_absolute());
+    let kept = ENGINE_ROOT.get_or_init(|| root.to_path_buf());
+    assert_eq!(kept, root, "one engine root per process");
+}
+
 /// The owner line when tmux is found nowhere the resolver looks, with how to install it.
 /// The live master's problem line, its team note and the setup row show it word for word.
 #[cfg(target_os = "macos")]
@@ -154,10 +167,19 @@ impl Places {
     }
 
     /// Builds the engine's places from this process's HOME and PATH and the folder of the
-    /// running executable. With no engine root given, this process's data folder is still
-    /// refused, though its setup folder is not looked in. Input: the engine root. Output:
-    /// the places ([`Places::engine`]).
+    /// running executable. With no engine root given, a launch takes the one this process's
+    /// engine recorded ([`record_engine_root`]), so it looks where setup does; with none,
+    /// the data folder is still refused, though its setup folder is not looked in. Input:
+    /// the engine root. Output: the places ([`Places::engine`]).
     pub fn from_environment(engine_root: Option<&Path>) -> Self {
+        Self::at_roots(engine_root, ENGINE_ROOT.get().map(PathBuf::as_path))
+    }
+
+    /// Builds the engine's places as [`Places::from_environment`] does, with the engine
+    /// root this process recorded given explicitly so rows never record the global. Inputs:
+    /// the engine root given, if any, and the recorded one. Output: the places.
+    fn at_roots(engine_root: Option<&Path>, recorded: Option<&Path>) -> Self {
+        let engine_root = engine_root.or(recorded);
         let app = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.canonicalize().ok())
@@ -357,6 +379,7 @@ pub enum Reason {
     NotFound,
     NeedsInterpreter,
     WrongVersion,
+    Refused,
 }
 
 impl Reason {
@@ -366,23 +389,44 @@ impl Reason {
             Self::NotFound => "tool_not_found",
             Self::NeedsInterpreter => "tool_needs_interpreter",
             Self::WrongVersion => "tool_wrong_version",
+            Self::Refused => "tool_refused",
         }
     }
 }
 
+/// Why the resolver passed over a file it found: a part another user or group can change,
+/// named so the owner knows what to fix, a file agents can write, or a version-manager shim
+/// with no real install found behind it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    OthersCanChange(PathBuf),
+    AgentsCanWrite,
+    Shim,
+}
+
+/// A file the resolver found and passed over, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub file: PathBuf,
+    pub why: Refusal,
+}
+
 /// A tool that cannot run: which one, why, the interpreter it needs when that is what is
-/// missing, and the folders looked in, kept apart from the owner line so the line is fixed.
+/// missing, the folders looked in and the first file passed over when no usable one was
+/// found, boxed so the error stays small, kept apart from the owner line so it is fixed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Missing {
     pub tool: String,
     pub reason: Reason,
     pub needs: Option<String>,
     pub looked: Vec<PathBuf>,
+    pub refused: Option<Box<Refused>>,
 }
 
 impl Missing {
-    /// The one owner line for this tool and reason, with how to install what is missing;
-    /// the same tool and reason always give the same line. Output: the line.
+    /// The one owner line for this tool and reason, with how to install what is missing, or
+    /// for a file passed over, the file, why and what to change, never an install hint; the
+    /// same tool, reason and file always give the same line. Output: the line.
     pub fn line(&self) -> String {
         match (self.reason, self.tool.as_str(), self.needs.as_deref()) {
             (Reason::NotFound, "tmux", _) => TMUX_MISSING.to_owned(),
@@ -399,14 +443,20 @@ impl Missing {
             (Reason::WrongVersion, tool, _) => {
                 format!("{tool} is too old for CrazyAgent. Update it, then try again.")
             }
+            (Reason::Refused, tool, _) => match &self.refused {
+                Some(refused) => refused_line(tool, refused),
+                None => format!(
+                    "{tool} can't start: the file found for it is not used, since others can change it. Check who can write it, then try again."
+                ),
+            },
         }
     }
 }
 
 /// Finds a tool by its program name wherever the places look, passing over version-manager
-/// shims, files in a `.crazyagent` folder and files others can change, then reads how it
-/// runs; a miss asks the background probes to look again ([`probe::missed`]). Harness
-/// launches keep their pinned entry and call [`resolve_entry`] instead.
+/// shims, files agents can write and files others can change, then reads how it runs; a
+/// miss names the first file passed over, if any ([`Refused`]), and asks the background
+/// probes to look again ([`probe::missed`]). Harness launches call [`resolve_entry`].
 /// Inputs: the program name and the places. Output: the tool, or why it cannot run.
 pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
     resolve_at(name, places, 0)
@@ -427,18 +477,36 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
         reason: Reason::NotFound,
         needs: None,
         looked: places.folders.clone(),
+        refused: None,
     };
     if !valid_name(name) {
         return Err(not_found());
     }
-    let Some(found) = places
-        .folders
-        .iter()
-        .map(|folder| folder.join(name))
-        .find(|candidate| usable_candidate(places, candidate))
-    else {
+    let mut refused = None;
+    let found =
+        places.folders.iter().map(|folder| folder.join(name)).find(
+            |candidate| match check_candidate(places, candidate) {
+                Some(Ok(())) => true,
+                Some(Err(why)) => {
+                    refused.get_or_insert_with(|| Refused {
+                        file: candidate.clone(),
+                        why,
+                    });
+                    false
+                }
+                None => false,
+            },
+        );
+    let Some(found) = found else {
         probe::missed();
-        return Err(not_found());
+        return Err(match refused {
+            Some(refused) => Missing {
+                reason: Reason::Refused,
+                refused: Some(Box::new(refused)),
+                ..not_found()
+            },
+            None => not_found(),
+        });
     };
     entry_at(&found, places, depth).map_err(|missing| Missing {
         tool: name.to_owned(),
@@ -452,16 +520,32 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         .and_then(OsStr::to_str)
         .unwrap_or("the program")
         .to_owned();
+    let not_there = || Missing {
+        tool: tool.clone(),
+        reason: Reason::NotFound,
+        needs: None,
+        looked: entry.parent().map(Path::to_path_buf).into_iter().collect(),
+        refused: None,
+    };
     let program = entry
         .canonicalize()
         .ok()
-        .filter(|_| entry.is_absolute() && usable_candidate(places, entry))
-        .ok_or_else(|| Missing {
-            tool: tool.clone(),
-            reason: Reason::NotFound,
-            needs: None,
-            looked: entry.parent().map(Path::to_path_buf).into_iter().collect(),
-        })?;
+        .filter(|_| entry.is_absolute())
+        .ok_or_else(not_there)?;
+    match check_candidate(places, entry) {
+        Some(Ok(())) => {}
+        Some(Err(why)) => {
+            return Err(Missing {
+                reason: Reason::Refused,
+                refused: Some(Box::new(Refused {
+                    file: entry.to_path_buf(),
+                    why,
+                })),
+                ..not_there()
+            });
+        }
+        None => return Err(not_there()),
+    }
     let Some(shebang) = shebang(&program) else {
         return Ok(Resolved {
             entry: entry.to_path_buf(),
@@ -474,6 +558,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         reason: Reason::NeedsInterpreter,
         needs: Some(name.to_owned()),
         looked: places.folders.clone(),
+        refused: None,
     };
     let interpreter_name = shebang.interpreter_name();
     if depth == INTERPRETER_DEPTH_MAX {
@@ -486,7 +571,13 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
         None => entry_at(&shebang.interpreter, places, depth + 1),
     }
-    .map_err(|_| needs(&interpreter_name))?;
+    .map_err(|missing| match missing.reason {
+        Reason::Refused => Missing {
+            tool: tool.clone(),
+            ..missing
+        },
+        _ => needs(&interpreter_name),
+    })?;
     Ok(Resolved {
         entry: entry.to_path_buf(),
         program,
@@ -666,6 +757,25 @@ fn version(name: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
+/// The owner line for a file the resolver passed over: the file, why and what to change,
+/// never how to install the tool, which would only answer that it is installed already.
+/// Inputs: the tool and the file passed over. Output: the line.
+fn refused_line(tool: &str, refused: &Refused) -> String {
+    let file = refused.file.display();
+    match &refused.why {
+        Refusal::OthersCanChange(part) => format!(
+            "{tool} can't start: {file} is not used because another user or group can change {}. Make it writable only by you or an admin (for example chmod go-w), then try again.",
+            part.display()
+        ),
+        Refusal::AgentsCanWrite => format!(
+            "{tool} can't start: {file} is not used because agents can change it there (inside a project, a .crazyagent folder or the app's data). Use a copy outside your projects, then try again."
+        ),
+        Refusal::Shim => format!(
+            "{tool} can't start: {file} is a version manager shim with no install found behind it. Add a version with that version manager, then try again."
+        ),
+    }
+}
+
 /// The owner's next step to install a tool by name. Input: the program name. Output: the
 /// sentence.
 fn install_hint(tool: &str) -> &'static str {
@@ -680,15 +790,24 @@ fn install_hint(tool: &str) -> &'static str {
     }
 }
 
-/// Whether a found file can be used: an executable file that is not a version-manager shim,
-/// that agents cannot write, as found or through its links ([`Places::agent_writable`]),
-/// and that no other user can change ([`crate::service::changeable_past_sticky`]). Inputs: the places and the file. Output: the answer.
-fn usable_candidate(places: &Places, candidate: &Path) -> bool {
-    executable_file(candidate)
-        && candidate.canonicalize().is_ok()
-        && !crate::harnesses::is_shim(places.home(), candidate)
-        && !places.agent_writable(candidate)
-        && crate::service::changeable_past_sticky(candidate).is_none()
+/// Checks a found file: none when it is not an executable file whose links resolve, else
+/// passed, or passed over as a version-manager shim, as a file agents can write, as found or
+/// through its links ([`Places::agent_writable`]), or with the part another user or group
+/// can change ([`crate::service::changeable_past_sticky`]). Inputs: the places and the
+/// file. Output: the check.
+fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
+    if !executable_file(candidate) || candidate.canonicalize().is_err() {
+        return None;
+    }
+    Some(if crate::harnesses::is_shim(places.home(), candidate) {
+        Err(Refusal::Shim)
+    } else if places.agent_writable(candidate) {
+        Err(Refusal::AgentsCanWrite)
+    } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
+        Err(Refusal::OthersCanChange(part))
+    } else {
+        Ok(())
+    })
 }
 
 fn valid_name(name: &str) -> bool {

@@ -347,13 +347,59 @@ fn the_first_read_asks_for_the_first_writing_run_and_lists_the_four_tabs_in_orde
             .iter()
             .all(|tab| tab.text.is_none() && tab.version.is_empty() && !tab.edited)
     );
-    db.execute("UPDATE project_overview SET stale=0", [])
+    db.execute("UPDATE project_overview SET stale=0, checked_ms=2", [])
         .unwrap();
     assert!(!read(&db, &project, folder.path(), 2).unwrap().stale);
     refresh(&db, &project).unwrap();
     assert!(state(&db, &project).unwrap().stale);
     set_refresh(&db, &project, Refresh::Off).unwrap();
     assert_eq!(refresh(&db, &project).unwrap_err().0, OFF);
+}
+
+/// The due time of a project's next writing run. Inputs: the connection and the project.
+/// Output: the time in ms, 0 for at once.
+fn due_ms(db: &Connection, project: &ProjectId) -> i64 {
+    db.query_row(
+        "SELECT due_ms FROM project_overview WHERE project=?1",
+        [project.as_str()],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// V240-BRIDGE-REDS (overview-tabs:209): what happens to refreshed tabs, or After each
+/// landed change set, saved before the Overview was ever read still lets the first read ask
+/// for the first writing run at once; Refresh only and Off still wait for Refresh, and a
+/// project whose run already wrote its tabs is never asked again by a read.
+#[test]
+fn a_setting_saved_before_the_first_read_still_lets_that_read_ask_for_the_first_run() {
+    for apply in [Apply::WhenUnedited, Apply::AlwaysAsk] {
+        let (db, project, folder) = case();
+        set_apply(&db, &project, apply).unwrap();
+        assert!(!state(&db, &project).unwrap().stale);
+        let overview = read(&db, &project, folder.path(), 1).unwrap();
+        assert!(overview.stale, "{apply:?}");
+        assert_eq!(overview.apply, apply);
+        assert_eq!(due_ms(&db, &project), 0, "{apply:?}");
+    }
+    let (db, project, folder) = case();
+    set_refresh(&db, &project, Refresh::AfterLanding).unwrap();
+    assert!(read(&db, &project, folder.path(), 1).unwrap().stale);
+    assert_eq!(due_ms(&db, &project), 0);
+    for refresh in [Refresh::RefreshOnly, Refresh::Off] {
+        let (db, project, folder) = case();
+        set_refresh(&db, &project, refresh).unwrap();
+        set_apply(&db, &project, Apply::WhenUnedited).unwrap();
+        assert!(
+            !read(&db, &project, folder.path(), 1).unwrap().stale,
+            "{refresh:?}"
+        );
+    }
+    let (db, project, folder) = case();
+    set_apply(&db, &project, Apply::WhenUnedited).unwrap();
+    db.execute("UPDATE project_overview SET checked_ms=5", [])
+        .unwrap();
+    assert!(!read(&db, &project, folder.path(), 6).unwrap().stale);
 }
 
 #[test]

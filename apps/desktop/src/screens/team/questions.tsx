@@ -214,7 +214,7 @@ export function QuestionsPanel({ projectId, read, reload, onOpen, focus = null }
       <span className="grow">{displayText(`Couldn't refresh your questions. ${read.stale} Showing the last read.`)}</span>
       <Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button>
     </Notice>}
-    {count === 0 && inbox.waiting.length === 0 && <p className="tg-terminal-note">No agent is waiting on you.</p>}
+    {count === 0 && <p className="tg-terminal-note">No questions here. Agents' questions wait on the Questions page.</p>}
     {inbox.questions.length > 0 && <ul className="pj-rows" aria-label="Open questions">
       {inbox.questions.map((question, index) => <QuestionRow key={question.id} projectId={projectId} question={question} onOpen={onOpen} onAnswered={reload}
         focusRef={focus === "questions" && index === 0 ? target : undefined} />)}

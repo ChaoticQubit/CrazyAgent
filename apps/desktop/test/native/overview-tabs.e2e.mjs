@@ -44,6 +44,19 @@ function codex() {
 
 const CODEX = codex();
 
+/** The stand-in for the landed change set case: as CODEX, but a team sub-agent's turn, run
+ * in its own worktree (<state>/worktrees/agent-<id>), also writes fruit.md as the handed-off
+ * task asks, so its turn end opens a change set. The master, the owner's folder and the
+ * writing runs write nothing. Output: the script. */
+function landingCodex() {
+  const started = String.raw`  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"` + "\n";
+  assert.equal(CODEX.split(started).length, 2, "the stand-in marks each turn started once");
+  const write = String.raw`  case "$(/bin/pwd -P)" in */worktrees/agent-[0-9]*) printf '%s\n' 'Apples are crisp.' > fruit.md || exit 1 ;; esac` + "\n";
+  return CODEX.replace(started, write + started);
+}
+
+const LANDING_CODEX = landingCodex();
+
 /** Reads a project's Overview through the bridge, the read the page makes. Inputs: the
  * bridge and the project. Output: the overview. */
 function overview(bridge, project) {
@@ -170,7 +183,7 @@ test("Overview tabs, After each landed change set: a landed change set brings a 
     const proposed = await until(bridge, project, "the landing never brought a proposal", (read) => tabOf(read, "features").proposal !== null, QUIET_MS + RUN_MS);
     assert.ok(Date.now() - landedAt >= QUIET_MS, "the run waited for the quiet period");
     assert.ok(tabOf(proposed, "features").proposal.includes(ADDED));
-  }, 1, CODEX);
+  }, 1, LANDING_CODEX);
 });
 
 test("Overview tabs, Refresh only: nothing is written until the owner chooses Refresh", { timeout: 900000 }, async (t) => {

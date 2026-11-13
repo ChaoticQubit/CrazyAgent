@@ -26,6 +26,7 @@ const ASK_MODE: &str = "ask-owner";
 const SKILLS_MODE: &str = "role-skills";
 const START_MODE: &str = "start-work";
 const FINISH_MODE: &str = "finish-work";
+const WORKTREE_MODE: &str = "record-worktree-start";
 const RECORD_ARGS_MAX: usize = 10;
 const IDE_OPEN: &str = "e2e_ide_open";
 const CONFIGURE_PROFILE: &str = "desktop_configure_account_profile";
@@ -420,6 +421,27 @@ fn finish_work(args: &[OsString]) -> Result<String, String> {
     Ok(version.to_string())
 }
 
+/// Records the commit a new agent worktree starts from the way the team runtime does right
+/// after it adds one, through the engine's own `landing::record_worktree_start` on its
+/// database, so a commit the agent makes there lands in its change set. Inputs: engine root,
+/// owner checkout, agent worktree and its git folder. Output: `started`.
+fn worktree_start(args: &[OsString]) -> Result<String, String> {
+    let [root, repository, worktree, git_dir] = args else {
+        return Err(format!(
+            "usage: desktop-e2e-bridge {WORKTREE_MODE} <engine root> <repository> <worktree> <git dir>"
+        ));
+    };
+    let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
+    crazyagent::landing::record_worktree_start(
+        &db,
+        Path::new(repository),
+        Path::new(worktree),
+        Path::new(git_dir),
+    )
+    .map_err(|error| error.0)?;
+    Ok("started".to_owned())
+}
+
 /// The time now in ms since 1970, as the engine stamps its rows. Output: the time, or why
 /// the clock cannot give it.
 fn now_ms() -> Result<i64, String> {
@@ -485,10 +507,11 @@ fn role_skills(args: &[OsString]) -> Result<String, String> {
 /// stdin stays open; with `record-turn-end` first, records one ended agent turn, with
 /// `master-turn-end` first, records one ended master turn and lands it when the setting lets it, with
 /// `ask-owner` first, puts one agent's question to the owner, with `role-skills` first,
-/// installs one team role's skills, and with `start-work` or `finish-work` first, starts or
-/// finishes one agent's work. Input: the engine socket path. Output: prints
-/// `ready <port> <token>` once listening, or the recorded change set, the question's id,
-/// the installed skills or the start's or finish's answer; exits non-zero when it cannot.
+/// installs one team role's skills, with `start-work` or `finish-work` first, starts or
+/// finishes one agent's work, and with `record-worktree-start` first, records where a new
+/// agent worktree starts. Input: the engine socket path. Output: prints `ready <port> <token>`
+/// once listening, or the recorded change set, the question's id, the installed skills, the
+/// start's or finish's answer or `started`; exits non-zero when it cannot.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let all: Vec<OsString> = std::env::args_os().skip(1).take(RECORD_ARGS_MAX).collect();
@@ -510,6 +533,7 @@ async fn main() -> std::process::ExitCode {
             start_work as fn(&[OsString]) -> Result<String, String>,
         ),
         (FINISH_MODE, finish_work),
+        (WORKTREE_MODE, worktree_start),
     ] {
         if all.first().is_some_and(|first| first == mode) {
             return match run(&all[1..]) {

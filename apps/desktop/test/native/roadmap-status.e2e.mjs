@@ -174,6 +174,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         };
 
         await open("overview");
+        await me.click("Activity", "[role=tab]");
         await me.waitFor("the roadmap status before any check", (text) => text.includes("Roadmap status") && text.includes("Not checked yet"));
         const refreshOff = () => page.evaluate(`[...document.querySelectorAll("section[aria-labelledby=pj-roadmap-status] button")].find((button) => button.textContent.trim() === "Refresh")?.disabled ?? null`);
         assert.equal(await refreshOff(), false, "Refresh can be pressed while the status follows landings");
@@ -184,6 +185,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.ok(marked.due > landed - STEP_MS && marked.due <= Date.now() + QUIET_MS, `the check waits the quiet period after the landing: ${JSON.stringify(marked)}`);
         assert.equal(marked.problem, null, "no check ran inside the quiet period");
         await open("overview");
+        await me.click("Activity", "[role=tab]");
         await me.waitFor("the line saying a check is due after the landing", (text) => text.includes(STALE_LINE));
         await me.capture("roadmap-status-after-landing-due");
         const ran = await until(runtime, project, "no check ran after the quiet period", (now) => now.stale === 0 && now.running === null && now.problem !== null, QUIET_MS + 2 * CHECK_MS);
@@ -197,6 +199,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await pause(CHECK_MS / 4);
         assert.equal(stored(runtime, project).stale, 0, "under Refresh only a landing asks for no check");
         await open("overview");
+        await me.click("Activity", "[role=tab]");
         await me.waitFor("the roadmap status under Refresh only", (text) => text.includes("Roadmap status") && !text.includes(DUE_LINE));
         const before = log.trail.filter((call) => call.cmd === "desktop_refresh_roadmap_status").length;
         await me.click("Refresh", "section[aria-labelledby=pj-roadmap-status] button");
@@ -211,6 +214,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await pause(CHECK_MS / 4);
         assert.equal(stored(runtime, project).stale, 0, "under Off a landing asks for no check");
         await open("overview");
+        await me.click("Activity", "[role=tab]");
         await me.waitFor("the line saying roadmap status is off", (text) => text.includes(OFF_LINE));
         assert.equal(await refreshOff(), true, "Refresh is disabled under Off");
         assert.equal((await value(bridge, "desktop_roadmap_status", { id: project })).refresh, "off", "the engine reports the Off setting");

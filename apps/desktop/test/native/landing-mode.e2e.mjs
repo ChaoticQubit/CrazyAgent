@@ -112,7 +112,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     const agents = AGENTS.map((agent) => {
       const worktree = join(root, "agents", agent.name);
       git(repo, "worktree", "add", "-q", "--detach", worktree, "HEAD");
-      return { ...agent, worktree, member: teamAgent(runtime, project, repo, worktree, agent.name) };
+      const member = teamAgent(runtime, project, repo, worktree, agent.name);
+      const started = spawnSync(bridgeBinary, ["record-worktree-start", runtime, repo, worktree, join(repo, ".git", "worktrees", agent.name)], { encoding: "utf8", env: { ...env } });
+      assert.equal(started.status, 0, `the engine records where the agent's worktree starts, as the team runtime does when it adds one: ${started.stderr}`);
+      assert.equal(started.stdout.trim(), "started");
+      return { ...agent, worktree, member };
     });
     const recordTurn = (agent, prompt) => {
       const result = spawnSync(bridgeBinary, ["record-turn-end", runtime, project, agent.member, agent.label, repo, agent.worktree, join(repo, ".git", "worktrees", agent.name), prompt], { encoding: "utf8", env: { ...env } });

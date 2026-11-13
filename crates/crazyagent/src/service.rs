@@ -745,10 +745,11 @@ WantedBy=default.target\n",
 }
 
 /// The first entry on a path that someone other than this user or root can change: an
-/// entry another user owns, a world-writable entry such as `/tmp`, or a folder an untrusted
-/// group can write ([`trusted_group`]), except a sticky store such as /nix/store above an
-/// entry's own folder ([`first_changeable_part`]). It reads the path as written and with its
-/// links resolved; an unreadable entry counts. Input: the absolute path. Output: the entry.
+/// entry another user owns, a world-writable entry such as `/tmp`, or a file or folder an
+/// untrusted group can write ([`trusted_group`]), except a sticky store such as /nix/store
+/// above an entry's own folder ([`first_changeable_part`]). It reads the path as written and
+/// with its links resolved; an unreadable entry counts. Input: the absolute path. Output:
+/// the entry.
 #[cfg(unix)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
     changeable(path, false)
@@ -832,7 +833,7 @@ pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) 
                 let owned = owner == me || owner == 0;
                 let store = depth >= 2 && below_exists && owned && folder && mode & 0o1000 != 0;
                 let world = !link && mode & 0o002 != 0;
-                let grouped = folder && mode & 0o020 != 0 && !trusted_group(group);
+                let grouped = !link && mode & 0o020 != 0 && !trusted_group(group);
                 !owned || (world && !(store && open_stores)) || (grouped && !store)
             }
         };

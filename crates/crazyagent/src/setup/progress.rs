@@ -174,6 +174,7 @@ mod tests {
             reason: crate::tools::Reason::NeedsInterpreter,
             needs: Some("python3".into()),
             looked: Vec::new(),
+            refused: None,
         };
         let progress = Progress {
             checked: Some(Checked {

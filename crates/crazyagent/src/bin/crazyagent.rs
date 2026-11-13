@@ -545,6 +545,7 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     }
     .map_err(|e| e.to_string())?;
     layout.prepare().map_err(|e| e.to_string())?;
+    crazyagent::tools::record_engine_root(layout.root());
     let executable = current_executable()?;
     let found_on_path = [
         explicit.codex.is_none(),

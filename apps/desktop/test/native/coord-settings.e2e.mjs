@@ -24,6 +24,13 @@ const SWITCHES = `[...document.querySelectorAll('[role=switch][id^="tool-"]')]`;
 const ROWS = `${SWITCHES}.map((button) => [button.closest(".set-row")?.querySelector(".set-label .mono")?.innerText.trim() ?? null,
   button.getAttribute("aria-checked"), document.getElementById(button.getAttribute("aria-labelledby"))?.innerText.trim() ?? null])`;
 const HARNESSES = ["claude-code", "codex", "rcli"];
+/** The engine's sentence for a harness kind no sub-agent runs on (DEC-141 PA-15), read from
+ * its source so the spec follows the engine's words. */
+const NO_SUB_AGENTS = readFileSync(new URL("../../../../crates/crazyagent/src/team.rs", import.meta.url), "utf8")
+  .match(/pub const NO_SUB_AGENTS: &str =\s*"([^"]+)";/u)?.[1];
+/** Each harness kind that runs only as a master, with its sub-agent and message row labels:
+ * those rows say why instead of holding a control. */
+const MASTER_ONLY = new Map([["rcli", ["rcli sub-agents", "Messages to rcli agents"]]]);
 const DEFAULT_COUNTED = ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"];
 const COUNTED = ["start_work", "ctx_*", "review_notes"];
 
@@ -255,18 +262,21 @@ test("Agents tab coordination: each harness's mode and delivery, questions, over
       questions: view.settings.questions_to, overlaps: view.settings.overlaps, nudges: view.settings.nudges, counted: view.settings.counted_tools,
     };
   };
+  const cells = HARNESSES.map((harness) => MASTER_ONLY.has(harness) ? [harness, "note", ...MASTER_ONLY.get(harness)] : [harness, "field", mode(harness), delivery(harness)]);
   const shown = () => page.evaluate(`(() => {
     const field = (id) => document.getElementById(id)?.value ?? null;
+    const note = (label) => document.querySelector('.set-row[data-setting="' + label + '"] .tg-terminal-note')?.innerText.trim() ?? null;
     const radio = (group) => document.querySelector('[role=radiogroup][aria-label="' + group + '"] [role=radio][aria-checked="true"]')?.innerText.trim() ?? null;
     return {
-      harnesses: ${JSON.stringify(HARNESSES.map((harness) => [harness, mode(harness), delivery(harness)]))}.map(([harness, modeId, deliveryId]) => [harness, field(modeId), field(deliveryId)]),
+      harnesses: ${JSON.stringify(cells)}.map(([harness, kind, first, second]) => kind === "note" ? [harness, note(first), note(second)] : [harness, field(first), field(second)]),
       questions: radio("Sub-agent questions go to"), overlaps: radio("Overlapping edits"), nudges: radio("Workflow nudges"), counted: field(${JSON.stringify(counted)}),
     };
   })()`);
   const engineWords = { questions: { lead: "Their lead", me: "Me directly" }, overlaps: { warn: "Warn both (default)", block: "Block the later one", off: "Off", wait: "Wait until the first lands" }, nudges: { off: "Off", ten_minutes: "Every 10 minutes", first_edit: "First edit" } };
   const both = async (what, wanted) => {
     await until(`the engine keeping ${what}`, wanted, kept);
-    const words = { ...wanted, questions: engineWords.questions[wanted.questions], overlaps: engineWords.overlaps[wanted.overlaps], nudges: engineWords.nudges[wanted.nudges], counted: wanted.counted.join("\n") };
+    const harnesses = wanted.harnesses.map(([harness, modeValue, deliveryValue]) => MASTER_ONLY.has(harness) ? [harness, NO_SUB_AGENTS, NO_SUB_AGENTS] : [harness, modeValue, deliveryValue]);
+    const words = { ...wanted, harnesses, questions: engineWords.questions[wanted.questions], overlaps: engineWords.overlaps[wanted.overlaps], nudges: engineWords.nudges[wanted.nudges], counted: wanted.counted.join("\n") };
     await until(`the Agents tab showing ${what}`, words, shown);
   };
 
@@ -275,7 +285,10 @@ test("Agents tab coordination: each harness's mode and delivery, questions, over
     harnesses: [["claude-code", "app_spawned", "auto"], ["codex", "app_spawned", "auto"], ["rcli", "app_spawned", "auto"]],
     questions: "lead", overlaps: "warn", nudges: "off", counted: DEFAULT_COUNTED,
   };
+  assert.ok(NO_SUB_AGENTS, "the engine names why a harness kind runs no sub-agent");
   await both("the plan defaults", wanted);
+  const controls = await page.evaluate(`${JSON.stringify([...MASTER_ONLY.keys()].flatMap((harness) => [mode(harness), delivery(harness)]))}.filter((id) => document.getElementById(id) !== null)`);
+  assert.deepEqual(controls, [], "a harness kind that runs only as a master has no sub-agent mode or delivery control");
   await me.capture("coord-defaults");
 
   await choose(page, mode("claude-code"), "native");
