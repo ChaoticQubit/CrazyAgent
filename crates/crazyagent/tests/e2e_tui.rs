@@ -1843,10 +1843,15 @@ fn save_retry(
     title: &str,
 ) -> crazyagent::provider_retry::ProviderRetry {
     pty.keys(&["p"]);
-    pty.until("p asks what harnesses do", |screen| {
-        screen.contains("When a model provider can't be reached: what harnesses do.")
-            && screen.contains("Harness default")
-    });
+    pty.until(
+        "p asks what harnesses do, with each harness line",
+        |screen| {
+            screen.contains("When a model provider can't be reached: what harnesses do.")
+                && screen.contains("Harness default")
+                && screen.contains("RCLI: one try. The engine never repeats an RCLI request.")
+                && screen.contains("Claude Code: no retries.")
+        },
+    );
     pty.keys(keys);
     let picked = format!("> {title}");
     pty.until("the arrows pick the option", |screen| {
@@ -1867,8 +1872,8 @@ fn save_retry(
 }
 
 /// One row per option of When a model provider can't be reached (DEC-163): the TUI opens
-/// Settings, Setup, shows Retry briefly with its harness lines on a fresh engine, saves the
-/// option and the engine keeps it. Inputs: the scratch prefix, the arrow keys, the
+/// Settings, Setup, shows Retry briefly on a fresh engine and each harness line in its ask,
+/// saves the option and the engine keeps it. Inputs: the scratch prefix, the arrow keys, the
 /// option's title and the option. Output: none; panics when a step fails.
 fn provider_retry_row(
     prefix: &str,
@@ -1888,15 +1893,16 @@ fn provider_retry_row(
     );
     pty.keys(&["C-k"]);
     pty.until("Ctrl-K opens Go to", |screen| {
-        screen.contains("Settings / Setup")
+        screen.contains("Projects, tabs, settings, actions. Enter goes there.")
     });
     pty.text("Settings / Setup");
     pty.keys(&["Enter"]);
     pty.until(
-        "Settings, Setup shows Retry briefly with its lines",
+        "Settings, Setup shows Provider retry at Retry briefly",
         |screen| {
-            line_of(screen, "Provider retry  ").contains("Retry briefly")
-                && screen.contains("RCLI: one try. The engine never repeats an RCLI request.")
+            screen
+                .lines()
+                .any(|line| line.contains("Provider retry  ") && line.contains("Retry briefly"))
         },
     );
     if title == "Retry briefly" {

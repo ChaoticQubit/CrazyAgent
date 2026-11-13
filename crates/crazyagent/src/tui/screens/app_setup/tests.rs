@@ -1960,3 +1960,32 @@ fn a_stored_provider_retry_setting_this_version_does_not_know_is_not_offered() {
     assert!(jobs(&mut shell).is_empty());
     assert_eq!(lead(&shell), "The provider retry setting is not known yet.");
 }
+
+/// At the TUI e2e size of 120 by 40, Settings, Setup still shows the Provider retry row,
+/// the last one, and its ask shows every option whole.
+#[test]
+fn the_provider_retry_row_and_its_ask_fit_a_120_by_40_terminal() {
+    let mut shell = settings(120, 40);
+    let rows = render(&mut shell, 120, 40);
+    assert!(find(&rows, "Provider retry  ").contains("Retry briefly"));
+    assert!(bar(&rows).contains("p Provider retry"));
+    shell.key(Key::Char('p'));
+    let rows = render(&mut shell, 120, 40);
+    find(
+        &rows,
+        "When a model provider can't be reached: what harnesses do.",
+    );
+    find(&rows, "  Stop at once");
+    find(&rows, "> Retry briefly");
+    find(&rows, "  Harness default");
+    let shown = flat(&rows);
+    assert!(
+        shown.contains("Each harness line is proven on read-only runs."),
+        "{shown}"
+    );
+    shell.key(Key::Esc);
+    shell.arrive(event(AppSetupEvent::ProviderRetry(Ok(
+        crate::provider_retry::view(ProviderRetry::HarnessDefault),
+    ))));
+    assert!(find(&render(&mut shell, 120, 40), "Provider retry  ").contains("Harness default"));
+}
