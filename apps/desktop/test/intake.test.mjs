@@ -1217,3 +1217,44 @@ test("the Node row says what Node is for and offers its own Install only while i
   const pack = readFileSync(new URL("../src/screens/settings/pack.tsx", import.meta.url), "utf8");
   assert.match(pack, /toolsOffer\(status\)/, "Settings, Pack offers Install tools through the one test");
 });
+
+const FIX = { tree: "/h/py", recursive: true, command: "chmod -R go-w '/h/py'" };
+const refusedRow = (extra = {}) => dep("graphify", { state: "refused", line: "graphify can't start: /h/g/bin/python3 is not used.", file: "/h/g/bin/python3", part: "/h/py/bin/python3.13", fix: FIX, ...extra }, "Graphify command");
+
+test("a refused tool reads Found, not used with its line, offers its fix by the setting and still offers CrazyAgent's own copy", () => {
+  const status = (row, extra = {}) => ({ dependencies: [row], pack: [], running: false, version: 1, refused_tool: "fix_button", ...extra });
+  const row = refusedRow();
+  assert.deepEqual(intake.stateView(row.state), { word: "Found, not used", tone: "warn", line: "graphify can't start: /h/g/bin/python3 is not used." });
+  assert.deepEqual(intake.rowFix(row, status(row)), FIX);
+  assert.deepEqual(intake.rowFix(row, { ...status(row), refused_tool: undefined }), FIX, "an engine without the setting reads as the fix button");
+  assert.equal(intake.fixCommand(row, status(row)), null);
+  assert.equal(intake.rowFix(row, status(row, { refused_tool: "command_only" })), null);
+  assert.equal(intake.fixCommand(row, status(row, { refused_tool: "command_only" })), FIX.command);
+  assert.equal(intake.rowFix(row, status(row, { running: true })), null, "not while setup runs");
+  const unfixable = refusedRow({ fix: null });
+  assert.equal(intake.rowFix(unfixable, status(unfixable)), null);
+  assert.equal(intake.fixCommand(unfixable, status(unfixable, { refused_tool: "command_only" })), null);
+  assert.equal(intake.toolsOffer(status(row)), true, "installing CrazyAgent's own copy stays offered");
+  const words = intake.fixConfirm("Graphify command", FIX);
+  assert.equal(words.title, "Fix permissions for Graphify command?");
+  assert.match(words.body, /removes write access for group and others from \/h\/py and everything in it/);
+  assert.match(intake.fixConfirm("uv", { ...FIX, recursive: false }).body, /from \/h\/py, the same/);
+  assert.equal(words.command, FIX.command);
+  assert.equal(words.confirm, "Fix permissions");
+  assert.deepEqual(intake.REFUSED_TOOL_CHOICES.map((choice) => choice.value), ["fix_button", "command_only"]);
+});
+
+test("the tools step shows a refused tool's fix, its command only by the setting and a failed fix in red", () => {
+  const value = (row, extra = {}) => ({ dependencies: [dep("tmux", { state: "found", version: "3.5a" }), row], pack, running: false, refused_tool: "fix_button", ...extra });
+  const base = (status) => ({ status: ok(status), ticks: [], onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop, onFix: noop });
+  const rowOf = (markup) => markup.split('<li class="in-row">').find((row) => row.includes("Graphify command"));
+  const offered = rowOf(html(ToolsSetupView, base(value(refusedRow()))));
+  assert.match(offered, /Found, not used/);
+  assert.match(offered, /graphify can&#x27;t start/);
+  assert.match(offered, /<button[^>]*>(<svg[\s\S]*?<\/svg>)?Fix permissions<\/button>/);
+  const failed = rowOf(html(ToolsSetupView, base(value(refusedRow({ fix_failed: "The permissions could not be changed. Run the command shown instead." })))));
+  assert.match(failed, /class="pj-small pj-error">The permissions could not be changed\./);
+  const command = rowOf(html(ToolsSetupView, base(value(refusedRow(), { refused_tool: "command_only" }))));
+  assert.doesNotMatch(command, /Fix permissions/);
+  assert.match(command, /To fix it, run in Terminal:[\s\S]*<code>chmod -R go-w &#x27;\/h\/py&#x27;<\/code>/);
+});
