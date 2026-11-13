@@ -80,11 +80,13 @@ pub const TMUX_MISSING: &str =
 /// program is run, no shell file is read and every folder is absolute and bounded. No
 /// folder agents can write is kept ([`Places::agent_writable`]); the engine's data folder,
 /// which holds the agents' HOMEs and worktrees, is kept here so its files are refused too.
+/// The engine's own places also refuse a probed folder in a temp folder ([`Places::with_probed`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Places {
     folders: Vec<PathBuf>,
     home: Option<PathBuf>,
     engine_roots: Vec<PathBuf>,
+    temp_refused: bool,
 }
 
 impl Places {
@@ -93,13 +95,19 @@ impl Places {
     /// inside a project or a `.crazyagent` folder. Inputs: the folders in order and HOME.
     /// Output: the bounded places.
     pub fn new(folders: Vec<PathBuf>, home: Option<PathBuf>) -> Self {
-        Self::kept(folders, home, Vec::new())
+        Self::kept(folders, home, Vec::new(), false)
     }
 
     /// Keeps the folders in order, dropping relative, oversized and repeated ones and every
-    /// one agents can write, at most [`PLACES_MAX`]. Inputs: the folders, HOME and the
-    /// engine data folders. Output: the bounded places.
-    fn kept(folders: Vec<PathBuf>, home: Option<PathBuf>, engine_roots: Vec<PathBuf>) -> Self {
+    /// one agents can write, at most [`PLACES_MAX`]. Inputs: the folders, HOME, the engine
+    /// data folders and whether probed folders in a temp folder are refused. Output: the
+    /// bounded places.
+    fn kept(
+        folders: Vec<PathBuf>,
+        home: Option<PathBuf>,
+        engine_roots: Vec<PathBuf>,
+        temp_refused: bool,
+    ) -> Self {
         let mut places = Self {
             folders: Vec::new(),
             home: home.filter(|home| usable(home)),
@@ -107,6 +115,7 @@ impl Places {
                 .into_iter()
                 .filter(|root| usable(root))
                 .collect(),
+            temp_refused,
         };
         for folder in folders {
             if places.folders.len() == PLACES_MAX {
@@ -163,7 +172,7 @@ impl Places {
         #[cfg(target_os = "linux")]
         folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
         folders.extend(system);
-        Self::kept(folders, home, engine_roots(engine_root))
+        Self::kept(folders, home, engine_roots(engine_root), true)
     }
 
     /// Builds the engine's places from this process's HOME and PATH and the folder of the
@@ -203,18 +212,23 @@ impl Places {
 
     /// Adds the folders the background probes found ([`probe::folders`]), such as npm's
     /// global prefix and the login shell's PATH, after every folder known without running a
-    /// program and before the system folders; folders agents can write are dropped. The
-    /// probes keep only folders [`probe::kept`] passes, which also drops shared temp folders
-    /// others can change. Input: the probed folders. Output: the places.
+    /// program and before the system folders; folders agents can write are dropped, and on
+    /// the engine's places ([`Places::engine`]) so is one in a temp folder, which agents with
+    /// the owner's temp folder grant or other users write. Input: the folders. Output: the places.
     pub fn with_probed(self, probed: Vec<PathBuf>) -> Self {
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
+        let temp_refused = self.temp_refused;
         let (last, mut folders): (Vec<PathBuf>, Vec<PathBuf>) = self
             .folders
             .into_iter()
             .partition(|folder| system.contains(folder));
-        folders.extend(probed.into_iter().filter(|folder| !system.contains(folder)));
+        folders.extend(
+            probed
+                .into_iter()
+                .filter(|folder| !system.contains(folder) && !(temp_refused && in_temp(folder))),
+        );
         folders.extend(last);
-        Self::kept(folders, self.home, self.engine_roots)
+        Self::kept(folders, self.home, self.engine_roots, temp_refused)
     }
 
     /// The folders looked in, in order. Output: the folders.
