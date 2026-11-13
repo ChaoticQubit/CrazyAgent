@@ -4122,6 +4122,35 @@ async fn desktop_notify_question(
 }
 
 #[tauri::command]
+async fn desktop_notify_intake(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    notices: State<'_, Notices>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    bridge::notify::available()?;
+    if webview.window().is_focused().unwrap_or(false) {
+        return Ok(());
+    }
+    let call = lock(&state).await?.intake_status()?;
+    let Some(job) = call.await? else {
+        return Ok(());
+    };
+    if job.id.as_str() != id {
+        return Ok(());
+    }
+    let Some(notice) = bridge::notify::intake_notice(&job) else {
+        return Ok(());
+    };
+    let Some(number) = notices.claim_job(&id)? else {
+        return Ok(());
+    };
+    bridge::notify::show(tauri::Manager::app_handle(&webview), number, &notice)
+        .inspect_err(|_| notices.release_job(&id, number))
+}
+
+#[tauri::command]
 async fn desktop_notification_target(
     webview: Webview,
     notices: State<'_, Notices>,
@@ -5117,6 +5146,7 @@ native_commands! {
     desktop_dismiss_questions,
     desktop_question_counts,
     desktop_notify_question,
+    desktop_notify_intake,
     desktop_notification_target,
     desktop_system_notifications,
     desktop_process_text,

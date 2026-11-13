@@ -276,6 +276,7 @@
     "allow-desktop-dismiss-questions",
     "allow-desktop-question-counts",
     "allow-desktop-notify-question",
+    "allow-desktop-notify-intake",
     "allow-desktop-notification-target",
     "allow-desktop-system-notifications",
     "allow-desktop-process-text",

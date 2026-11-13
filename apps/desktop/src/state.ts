@@ -6,6 +6,7 @@ import type { Route } from "./ui/router";
 import { watchUnconfirmed, leavesProfileUnconfirmed } from "./engine-client";
 import type { ActionReceipt, FoundProject, IntakeJob, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
 import { loadFoundProjects, loadIntakeJob } from "./api-intake";
+import { notifyIntake } from "./notify";
 import { FOUND_POLL_MS, intakePollMs, jobEndLine } from "./screens/intake/intake";
 import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
 import type { InputChoice } from "./screens/team/terminal-io";
@@ -281,9 +282,10 @@ export function useSession(): Session {
         const line = jobEndLine(intakeSeen.current, result.value);
         intakeSeen.current = result.value;
         setIntake(result.value);
-        if (line) {
+        if (line && result.value) {
           showToast(line, { name: "home" });
           setFoundTick((value) => value + 1);
+          void notifyIntake(result.value.id);
         }
       }
       if (result.kind !== "not_ready") timer = setTimeout(() => void read(), intakePollMs(intakeSeen.current));

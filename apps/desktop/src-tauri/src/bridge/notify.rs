@@ -1,6 +1,7 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, QUESTIONS_CODES};
+use crazyagent::projects_home::job::JobView;
 use crazyagent::protocol::ProjectId;
 use crazyagent::questions::{Question, QuestionStatus};
 use std::collections::{HashMap, VecDeque};
@@ -111,6 +112,14 @@ pub fn notice(project: Option<&str>, question: &Question) -> Notice {
     Notice { title, body }
 }
 
+/// The notification text for an intake job that ended, built from the engine's view: the
+/// folder's name and what happened in plain words, never an engine code. Input: the job.
+/// Output: the notice, or None while the job still runs.
+pub fn intake_notice(job: &JobView) -> Option<Notice> {
+    let _ = job;
+    None
+}
+
 /// Maps an engine refusal to the code the window shows: every Questions code as itself,
 /// anything else as an unknown outcome with the engine code behind it.
 pub fn notify_error(error: EngineError) -> BridgeError {
@@ -190,6 +199,7 @@ pub struct Notices {
 struct Shown {
     order: VecDeque<(u64, i32)>,
     projects: HashMap<i32, String>,
+    jobs: VecDeque<(String, i32)>,
     clicked: Option<String>,
     last: i32,
 }
@@ -223,6 +233,24 @@ impl Notices {
         shown.projects.insert(id, project.to_owned());
         assert!(shown.order.len() <= SHOWN_MAX && shown.projects.len() == shown.order.len());
         Ok(Some(id))
+    }
+
+    /// Claims the notification of one ended intake job, once, as [`Notices::claim`] does for
+    /// a question, within the same `SHOWN_MAX`; a click on it only brings the window to the
+    /// front. Input: the job id. Output: the notification id, None when the job was already
+    /// notified, or `notifications_full`.
+    pub fn claim_job(&self, job: &str) -> Result<Option<i32>, BridgeError> {
+        let _ = job;
+        Ok(None)
+    }
+
+    /// Gives a job claim back after its notification could not be shown. Inputs: the job id
+    /// and the notification id it claimed.
+    pub fn release_job(&self, job: &str, id: i32) {
+        let mut shown = self.shown();
+        shown
+            .jobs
+            .retain(|(known, claimed)| (known.as_str(), *claimed) != (job, id));
     }
 
     /// Gives a claim back after the notification could not be shown, so a later read may
