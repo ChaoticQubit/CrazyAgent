@@ -276,3 +276,20 @@ fn repeated_failing_hold_reads_within_the_retry_window_log_once() {
     });
     assert_eq!(logged.into_inner(), 1);
 }
+
+/// HFO-L1 r1: a racing thread's slightly older `now` is not a clock that went back, so it
+/// neither logs a second `account_hold_unread` line nor rewinds the stamp; only a full
+/// `HOLD_UNREAD_RETRY_MS` gap either way logs, and a real clock-back then stamps its time so
+/// the next read a second later stays quiet.
+#[test]
+fn a_racing_pick_with_a_slightly_older_now_neither_logs_nor_rewinds_the_stamp() {
+    let start = 1_789_000_000_000;
+    let logged = AtomicI64::new(start + 1);
+    assert!(!unread_log_due(&logged, start));
+    assert_eq!(logged.load(std::sync::atomic::Ordering::Relaxed), start + 1);
+    assert!(!unread_log_due(&logged, start + HOLD_UNREAD_RETRY_MS));
+    assert!(unread_log_due(&logged, start + 1 + HOLD_UNREAD_RETRY_MS));
+    let back = start - 10 * HOLD_UNREAD_RETRY_MS;
+    assert!(unread_log_due(&logged, back));
+    assert!(!unread_log_due(&logged, back + 1_000));
+}
