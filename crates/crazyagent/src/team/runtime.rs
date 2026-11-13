@@ -12402,6 +12402,40 @@ fn keeps_session(end: TurnEnd, background: usize, held: bool, wrapped: bool) -> 
 
 const PROCESS_CLOSED: &str = "The agent process closed";
 
+/// What a pane turn has read of its harness's events so far that decides how it ends: a
+/// rate limit, the owner's interrupt and a model refusal its transcript said.
+#[derive(Debug, Default)]
+struct TurnRead {
+    limited: bool,
+    interrupted: bool,
+    said: bool,
+}
+
+impl TurnRead {
+    /// Folds one harness event into the turn. Takes the event. Returns the turn's end when
+    /// the event ends it: the harness finished it, by [`finished_end`], or the harness
+    /// exited, as said when a refusal was said, else closed; none for any other event.
+    fn fold(&mut self, event: &LaunchEvent) -> Option<TurnEnd> {
+        match event {
+            LaunchEvent::TurnError { rate_limited } => self.limited |= rate_limited,
+            LaunchEvent::ModelRefusalSaid => self.said = true,
+            LaunchEvent::Interrupted => self.interrupted = true,
+            LaunchEvent::TurnFinished { success } => {
+                return Some(finished_end(
+                    *success,
+                    self.interrupted,
+                    self.said,
+                    self.limited,
+                ));
+            }
+            LaunchEvent::Exited { .. } if self.said => return Some(TurnEnd::ModelRefusalSaid),
+            LaunchEvent::Exited { .. } => return Some(TurnEnd::Closed),
+            _ => {}
+        }
+        None
+    }
+}
+
 /// How a task or message turn ends once its harness finished it: a success, else the
 /// owner's interrupt, else a model refusal its transcript said (shown only, never recorded,
 /// Q-6), else a rate limit, else a failure. Takes whether the harness called the turn a
@@ -13635,9 +13669,7 @@ fn turn(
     }
     let deadline = rules.limit.map(|limit| Instant::now() + limit);
     let mut text = String::new();
-    let mut limited = false;
-    let mut interrupted = false;
-    let mut said = false;
+    let mut read = TurnRead::default();
     let mut progress = Instant::now();
     let mut cause = None;
     let mut held_since = None;
@@ -13688,26 +13720,22 @@ fn turn(
             Ok(Some(LaunchEvent::Text { text: part })) => {
                 push_trimmed(&mut text, &part, TURN_TEXT_BYTES_MAX);
             }
-            Ok(Some(LaunchEvent::TurnError { rate_limited })) => limited |= rate_limited,
             Ok(Some(LaunchEvent::ModelRefused)) => {
                 let _ = reports.send(Report::ModelRefused);
             }
-            Ok(Some(LaunchEvent::ModelRefusalSaid)) => said = true,
             Ok(Some(LaunchEvent::Usage { tokens })) => {
                 let _ = reports.send(Report::Usage { tokens });
             }
-            Ok(Some(LaunchEvent::Interrupted)) => interrupted = true,
-            Ok(Some(LaunchEvent::TurnFinished { success })) => {
-                break finished_end(success, interrupted, said, limited);
+            Ok(Some(event)) => {
+                if let Some(end) = read.fold(&event) {
+                    break end;
+                }
             }
-            Ok(Some(LaunchEvent::Exited { .. })) if said => break TurnEnd::ModelRefusalSaid,
-            Ok(Some(LaunchEvent::Exited { .. })) => break TurnEnd::Closed,
             Err(problem) => {
                 let (end, code) = launch_end(problem);
                 cause = code;
                 break end;
             }
-            Ok(Some(_)) => {}
         }
     };
     assert!(released.is_none() || (end == TurnEnd::Success && session.held()));
