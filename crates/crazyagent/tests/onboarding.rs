@@ -748,6 +748,7 @@ fn agent_runs(agents: &Path, prefix: &str) -> usize {
 async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
     require_model();
     let mut bench = Bench::start(|_| {}).await;
+    require_engine_graphify(&bench.root);
     bench.use_repos_as_home().await;
     let project = bench.start_onboarding().await;
     assert_eq!(bench.home_entry().await.state, FoundState::Onboarding);
@@ -1369,11 +1370,25 @@ fn graphify() -> PathBuf {
     installed_graphify().expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)")
 }
 
+/// Panics BLOCKED unless the engine at `root` finds a graphify the way its graph step
+/// does: in the engine's `setup/bin`, then through the HOME and PATH this test passes to
+/// the engine, never the account's own home folder, so the row reads the same in any
+/// HOME. Input: the engine root.
+#[cfg(target_os = "macos")]
+fn require_engine_graphify(root: &Path) {
+    assert!(
+        crazyagent::setup::platform_installer(root)
+            .program(crazyagent::setup::Dependency::Graphify.program())
+            .is_some(),
+        "BLOCKED: graphify not found where the engine looks (setup/bin, HOME, PATH)"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_engine_started_without_codex_builds_the_graph_and_reports_codex_missing() {
-    graphify();
     let mut bench = Bench::start_binary().await;
+    require_engine_graphify(&bench.root);
     let project = bench.start_onboarding().await;
     let view = bench.settle(&project, Duration::from_secs(660)).await;
     assert_eq!(view.graph, Step::Done, "{view:?}");
@@ -2004,8 +2019,12 @@ fn onboarding_created_ms(root: &Path) -> i64 {
 async fn a_step_that_cannot_start_records_its_cause_code() {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
+    let provider = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let account = ResearchAccount::Endpoint {
-        base_url: "http://127.0.0.1:9/v1".into(),
+        base_url: format!(
+            "http://127.0.0.1:{}/v1",
+            provider.local_addr().unwrap().port()
+        ),
         model: "never-asked-model".into(),
         key: None,
     };
@@ -2027,6 +2046,7 @@ async fn a_step_that_cannot_start_records_its_cause_code() {
     );
     let view = bench.settle(&project, Duration::from_secs(60)).await;
     stop_service(service).await;
+    drop(provider);
     assert_eq!(
         view.graph,
         failed("Graph build could not start (run_name_used)"),

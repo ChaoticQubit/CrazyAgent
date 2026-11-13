@@ -527,6 +527,10 @@ fn shown(phase: NativeAuthPhase) -> bool {
     phase != NativeAuthPhase::Starting
 }
 
+/// Whether a sign-in has settled, read as both clients read it: Uncertain is still moving,
+/// since a killed custodian's lost channel can show it before the engine reaps the custodian
+/// and settles the attempt, and an attempt that stays Uncertain fails at the settle bound.
+/// Input: the phase. Output: the answer.
 fn ended(phase: NativeAuthPhase) -> bool {
     !matches!(
         phase,
@@ -534,6 +538,7 @@ fn ended(phase: NativeAuthPhase) -> bool {
             | NativeAuthPhase::AwaitingOwner
             | NativeAuthPhase::CheckingAccount
             | NativeAuthPhase::Cancelling
+            | NativeAuthPhase::Uncertain
     )
 }
 

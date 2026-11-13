@@ -1129,24 +1129,29 @@ fn only_linux_refuses_the_graph_build_with_a_plain_line() {
     assert_eq!(graph::unavailable("macos"), None);
 }
 
-/// macOS only: by DEC-094 the graph build is refused on Linux, so a Linux host installs no
-/// graphify for the engine to find (`only_linux_refuses_the_graph_build_with_a_plain_line`).
+/// The graph step runs the graphify setup put in `<engine root>/setup/bin` first, a stand-in
+/// here so the row reads the same in any HOME, and looks again on each step: once it is gone
+/// the engine finds what an engine with no setup install finds. macOS only: by DEC-094 a
+/// Linux host installs no graphify (`only_linux_refuses_the_graph_build_with_a_plain_line`).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
-    let system = service::installed_graphify()
-        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    use std::os::unix::fs::PermissionsExt;
     let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     let bin = root.path().join("setup/bin");
     std::fs::create_dir_all(&bin).unwrap();
-    symlink(&system, bin.join("graphify")).unwrap();
+    std::fs::write(bin.join("graphify"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("graphify"), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
         service::engine_graphify(root.path()),
         Some(bin.join("graphify"))
     );
     std::fs::remove_file(bin.join("graphify")).unwrap();
-    let found = service::engine_graphify(root.path()).expect("the system graphify");
-    assert_eq!(found.canonicalize().unwrap(), system);
+    let elsewhere = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    assert_eq!(
+        service::engine_graphify(root.path()),
+        service::engine_graphify(elsewhere.path())
+    );
 }
 
 /// Makes a stand-in graphify below `root`, laid out as uv 0.13 lays out a tool: the
