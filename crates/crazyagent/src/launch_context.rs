@@ -1050,7 +1050,7 @@ impl AgentContext {
 
     /// Builds a context with no skills, MCP servers, process files or owner settings,
     /// for tests that need a real `install`. Output: the context.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn empty() -> Self {
         Self {
             plugins: LaunchPlugins::default(),
