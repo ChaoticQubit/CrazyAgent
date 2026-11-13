@@ -205,34 +205,38 @@ fn master_launches(fixture: &Fixture) -> usize {
         .sum()
 }
 
+/// Sends the owner's live master switch-on, Start or Try again, from the desktop or the TUI
+/// (LiveMaster on) through the owner action path. Takes the fixture.
+fn owner_switch_on(fixture: &mut Fixture) {
+    use crate::protocol::Outcome;
+    use crate::team::TeamAction;
+    let project = fixture.setup.project_id.clone();
+    let tx = fixture.connection.transaction().unwrap();
+    let version = crate::team::settings_version(&tx, &project).unwrap();
+    let on = TeamAction::LiveMaster {
+        project_id: project,
+        on: true,
+        version,
+    };
+    assert_eq!(
+        crate::team::execute(&tx, &fixture.access, &on).unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+}
+
 /// r2 F1: the owner's Try again while the live master's switch is already on, as on an
 /// overdue terminal, is a retry from the desktop and the TUI alike (both send LiveMaster
 /// on, DEC-141): the tool probes look again and a master that has not read keys a minute
 /// after its start starts once more; a young master only gets the look.
 #[test]
 fn an_overdue_try_again_looks_for_tools_again_and_restarts_the_master_once() {
-    use crate::protocol::Outcome;
-    use crate::team::TeamAction;
     let mut fixture = Fixture::new(1);
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, SILENT_CODEX, TeamLimits::default())
         .with_tools_refresh(count_retry_look);
     let project = fixture.setup.project_id.clone();
-    let switch_on = |fixture: &mut Fixture| {
-        let tx = fixture.connection.transaction().unwrap();
-        let version = crate::team::settings_version(&tx, &project).unwrap();
-        let on = TeamAction::LiveMaster {
-            project_id: project.clone(),
-            on: true,
-            version,
-        };
-        assert_eq!(
-            crate::team::execute(&tx, &fixture.access, &on).unwrap(),
-            Outcome::Applied
-        );
-        tx.commit().unwrap();
-    };
-    switch_on(&mut fixture);
+    owner_switch_on(&mut fixture);
     fixture.until(&mut team, "the master starts", |f| master_launches(f) == 1);
     idle_ticks(&mut team);
     assert_eq!(
@@ -241,7 +245,7 @@ fn an_overdue_try_again_looks_for_tools_again_and_restarts_the_master_once() {
         "the start looked once"
     );
 
-    switch_on(&mut fixture);
+    owner_switch_on(&mut fixture);
     idle_ticks(&mut team);
     assert_eq!(
         (
@@ -256,7 +260,7 @@ fn an_overdue_try_again_looks_for_tools_again_and_restarts_the_master_once() {
     team.workers.get_mut(&id).unwrap().spawned = Instant::now()
         .checked_sub(Duration::from_secs(600))
         .unwrap();
-    switch_on(&mut fixture);
+    owner_switch_on(&mut fixture);
     fixture.until(&mut team, "the overdue master starts again", |f| {
         master_launches(f) == 2
     });
@@ -268,6 +272,39 @@ fn an_overdue_try_again_looks_for_tools_again_and_restarts_the_master_once() {
         ),
         (3, 2),
         "one more look and one restart"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// r2 (leader 18:20): the owner's own Try again is never refused by the automatic start
+/// limit (`LIVE_STARTS_MAX` starts in `LIVE_STARTS_WINDOW`): each owner press clears the
+/// project's automatic start count, so more overdue Try agains than the limit each start
+/// the master again and the live master stays on.
+#[test]
+fn an_owner_try_again_is_never_refused_by_the_start_limit() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, SILENT_CODEX, TeamLimits::default())
+        .with_tools_refresh(|| {});
+    let project = fixture.setup.project_id.clone();
+    owner_switch_on(&mut fixture);
+    fixture.until(&mut team, "the master starts", |f| master_launches(f) == 1);
+    for press in 1..=LIVE_STARTS_MAX {
+        let id = team.master(&project).expect("the master runs");
+        team.workers.get_mut(&id).unwrap().spawned = Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .unwrap();
+        owner_switch_on(&mut fixture);
+        fixture.until(&mut team, "Try again starts the master again", |f| {
+            master_launches(f) == press + 1
+        });
+    }
+    idle_ticks(&mut team);
+    assert!(
+        super::super::super::master::live(&fixture.connection, &project).unwrap(),
+        "{:?}",
+        fixture.status().live_problem
     );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();

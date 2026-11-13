@@ -4165,9 +4165,10 @@ impl TeamRuntime {
     /// harness that has no live terminal, such as RCLI, it turns the live master off with one
     /// note, so the one-turn master answers (F06). Each time the owner switches it on, as
     /// Start or Try again, the tool probes look again at once, so a tool the owner just
-    /// installed is found; a Try again with the switch already on also stops a master that
-    /// has not read keys [`MASTER_OVERDUE`] after its start, to start again as a counted
-    /// start. Takes the setup, live access and paused accounts.
+    /// installed is found, and the automatic start count clears, so the owner's own press
+    /// is never refused by [`LIVE_STARTS_MAX`]; a Try again with the switch already on also
+    /// stops a master that has not read keys [`MASTER_OVERDUE`] after its start, to start
+    /// again as the first counted start. Takes the setup, live access and paused accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -4180,6 +4181,7 @@ impl TeamRuntime {
         if !on {
             self.live_switched_on.remove(project);
         } else if self.live_switched_on.insert(project.clone()) || retry {
+            self.live_starts.remove(project);
             (self.tools_refresh)();
         }
         if self.workers.values().any(|w| {
