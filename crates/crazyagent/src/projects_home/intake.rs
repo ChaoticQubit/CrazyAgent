@@ -65,6 +65,17 @@ impl Tally {
         self.clearing.load(Ordering::SeqCst)
     }
 
+    /// Whether a stop was asked.
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Marks the checked copy in place and the old folder being cleared.
+    pub(super) fn mark_clearing(&self) {
+        let before = self.clearing.swap(true, Ordering::SeqCst);
+        assert!(!before, "clearing starts once");
+    }
+
     /// Asks the copy to stop at its next entry. Clearing the old folder never stops, since
     /// the copy it follows is complete and checked.
     pub fn stop(&self) {
@@ -139,7 +150,7 @@ impl AddPlan {
         match self.place(tally)? {
             Placed::Whole => Ok(()),
             Placed::Copied(old) => {
-                tally.clearing.store(true, Ordering::SeqCst);
+                tally.mark_clearing();
                 old.clear()
             }
         }

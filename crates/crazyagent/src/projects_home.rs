@@ -1,5 +1,6 @@
 pub mod icloud;
 mod intake;
+pub mod job;
 mod layout;
 mod move_project;
 #[cfg(all(test, unix))]
