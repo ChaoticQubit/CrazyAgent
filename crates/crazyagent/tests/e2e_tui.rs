@@ -1814,3 +1814,127 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
     drop(pty);
     engine.stop();
 }
+
+/// Reads the option the engine keeps for When a model provider can't be reached.
+/// Input: the engine. Output: the stored option.
+async fn stored_retry(engine: &Engine) -> crazyagent::provider_retry::ProviderRetry {
+    let mut owner = Owner::attach(engine).await;
+    let read = owner
+        .controller
+        .read(OwnerRead::ProviderRetry)
+        .await
+        .unwrap();
+    owner.controller.detach();
+    let OwnerData::ProviderRetry { settings } = read.data else {
+        panic!("the engine answers with the provider retry setting")
+    };
+    settings.choice
+}
+
+/// Opens Settings, Setup through Go to, presses p and saves the option `keys` move to,
+/// waiting until the page names it, and returns what the engine then keeps. Inputs: the
+/// TUI, the runtime, the engine, the arrow keys and the option's title. Output: the
+/// stored option.
+fn save_retry(
+    pty: &Pty,
+    runtime: &tokio::runtime::Runtime,
+    engine: &Engine,
+    keys: &[&str],
+    title: &str,
+) -> crazyagent::provider_retry::ProviderRetry {
+    pty.keys(&["p"]);
+    pty.until("p asks what harnesses do", |screen| {
+        screen.contains("When a model provider can't be reached: what harnesses do.")
+            && screen.contains("Harness default")
+    });
+    pty.keys(keys);
+    let picked = format!("> {title}");
+    pty.until("the arrows pick the option", |screen| {
+        screen.contains(&picked)
+    });
+    pty.keys(&["Enter"]);
+    let said = format!("Provider retry: {title}.");
+    pty.until(
+        "the save names the option and the page shows it",
+        |screen| {
+            screen.contains(&said)
+                && screen
+                    .lines()
+                    .any(|line| line.contains("Provider retry  ") && line.contains(title))
+        },
+    );
+    runtime.block_on(stored_retry(engine))
+}
+
+/// One row per option of When a model provider can't be reached (DEC-163): the TUI opens
+/// Settings, Setup, shows Retry briefly with its harness lines on a fresh engine, saves the
+/// option and the engine keeps it. Inputs: the scratch prefix, the arrow keys, the
+/// option's title and the option. Output: none; panics when a step fails.
+fn provider_retry_row(
+    prefix: &str,
+    keys: &[&str],
+    title: &str,
+    wanted: crazyagent::provider_retry::ProviderRetry,
+) {
+    use crazyagent::provider_retry::ProviderRetry;
+    let (mut engine, pty, _project, _disk) = switch_settings(prefix);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime.block_on(stored_retry(&engine)),
+        ProviderRetry::RetryBriefly
+    );
+    pty.keys(&["C-k"]);
+    pty.until("Ctrl-K opens Go to", |screen| {
+        screen.contains("Settings / Setup")
+    });
+    pty.text("Settings / Setup");
+    pty.keys(&["Enter"]);
+    pty.until(
+        "Settings, Setup shows Retry briefly with its lines",
+        |screen| {
+            line_of(screen, "Provider retry  ").contains("Retry briefly")
+                && screen.contains("RCLI: one try. The engine never repeats an RCLI request.")
+        },
+    );
+    if title == "Retry briefly" {
+        let stored = save_retry(&pty, &runtime, &engine, &["Up"], "Stop at once");
+        assert_eq!(stored, ProviderRetry::StopAtOnce);
+    }
+    let stored = save_retry(&pty, &runtime, &engine, keys, title);
+    assert_eq!(stored, wanted, "the engine keeps {title}");
+    drop(pty);
+    engine.stop();
+}
+
+#[test]
+fn the_tui_saves_stop_at_once_for_a_model_provider_that_cant_be_reached() {
+    provider_retry_row(
+        "ca-e2e-retry-stop-",
+        &["Up"],
+        "Stop at once",
+        crazyagent::provider_retry::ProviderRetry::StopAtOnce,
+    );
+}
+
+#[test]
+fn the_tui_saves_retry_briefly_for_a_model_provider_that_cant_be_reached() {
+    provider_retry_row(
+        "ca-e2e-retry-brief-",
+        &["Down"],
+        "Retry briefly",
+        crazyagent::provider_retry::ProviderRetry::RetryBriefly,
+    );
+}
+
+#[test]
+fn the_tui_saves_harness_default_for_a_model_provider_that_cant_be_reached() {
+    provider_retry_row(
+        "ca-e2e-retry-default-",
+        &["Down"],
+        "Harness default",
+        crazyagent::provider_retry::ProviderRetry::HarnessDefault,
+    );
+}
