@@ -198,9 +198,10 @@ impl Search {
     }
 
     /// Builds the one search engine start, the catalog, Check again and sign-in all use: the
-    /// PATH folders outside temp folders, as the tool resolver sets them aside, then the system
-    /// folders no other user can change, then the HOME folders (see [`home_places`]), kept
-    /// even in temp. Inputs: the PATH value, the system folders and HOME. Output: the search.
+    /// PATH folders except those in a temp folder, as the tool resolver sets them aside, though
+    /// a HOME folder keeps its PATH place; then the system folders no other user can change,
+    /// then the HOME folders ([`home_places`]). Inputs: the PATH value, the system folders and
+    /// HOME. Output: the search.
     pub fn engine(path: Option<&OsStr>, system: &[PathBuf], home: Option<PathBuf>) -> Self {
         Self::engine_in(path, system, home, &crate::tools::temp_roots())
     }
@@ -215,11 +216,16 @@ impl Search {
         home: Option<PathBuf>,
         temps: &[PathBuf],
     ) -> Self {
+        let kept: Vec<PathBuf> = home
+            .as_deref()
+            .filter(|home| usable_path(home))
+            .map(home_places)
+            .unwrap_or_default();
         let (set_aside, mut directories): (Vec<PathBuf>, Vec<PathBuf>) = path
             .map(|path| std::env::split_paths(path).collect::<Vec<PathBuf>>())
             .unwrap_or_default()
             .into_iter()
-            .partition(|folder| crate::tools::in_temp_of(folder, temps));
+            .partition(|folder| crate::tools::in_temp_of(folder, temps) && !kept.contains(folder));
         for folder in system {
             if !directories.contains(folder)
                 && crate::service::changeable_by_others(folder).is_none()

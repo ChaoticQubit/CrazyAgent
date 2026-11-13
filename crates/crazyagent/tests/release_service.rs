@@ -169,7 +169,8 @@ fn a_found_harness_the_engine_cannot_register_is_skipped_not_fatal() {
         std::fs::write(file, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o775)).unwrap();
     }
-    let path = std::env::join_paths([bin.clone(), PathBuf::from("/usr/bin")]).unwrap();
+    let path =
+        std::env::join_paths([bin.clone(), kept.clone(), PathBuf::from("/usr/bin")]).unwrap();
     let root = temp.path().join("engine");
     let mut command = Command::new(BIN);
     command
