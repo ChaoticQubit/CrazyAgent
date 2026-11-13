@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -54,4 +55,10 @@ test("a refused model pick says why in the TUI's words, refused by the engine or
     assert.equal(controls.changeNote({ kind: "ok", value: receipt(code) }, "x"), sentence);
   }
   assert.equal(controls.changeNote({ kind: "error", code: "team_action_invalid", cause: "team_model_invalid" }, "x"), WORDS.team_model_invalid);
+});
+
+test("the hand-off form reads the harness's models without starting it for a live list; only the Models page opening does (DEC-150 addendum 11)", () => {
+  const source = readFileSync(new URL("../src/screens/team/controls.tsx", import.meta.url), "utf8");
+  assert.match(source, /loadModels\(target, projectId, false\)/);
+  assert.doesNotMatch(source, /loadModels\(target, projectId\)/);
 });
