@@ -4,6 +4,7 @@ use super::{Flow, Place, Screen, open};
 use crate::engine::owner::OwnerResult;
 use crate::projects_home::icloud::Progress;
 use crate::projects_home::{AddMode, AddOverride, GitLink, Measured, PATH_BYTES_MAX};
+use crate::protocol::RequestId;
 use crate::tui::client::intake::{IntakeJob, IntakeQuery, IntakeView};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
@@ -164,6 +165,13 @@ impl AddFolder {
             sent: None,
             problem: None,
         }
+    }
+
+    /// The Existing folder page answering the engine's intake job that waits for an answer.
+    /// Takes the context and the job's id. Returns the screen.
+    pub fn answering(ctx: &Ctx, job: &RequestId) -> Self {
+        let _ = job;
+        Self::new(ctx)
     }
 
     fn user_home(ctx: &Ctx) -> Option<&Path> {

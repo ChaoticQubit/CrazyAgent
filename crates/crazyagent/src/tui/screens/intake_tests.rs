@@ -217,6 +217,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         IntakeQuery::AddExisting { .. } => "add existing",
                         IntakeQuery::StartOnboarding { .. } => "start onboarding",
                         IntakeQuery::Onboarding { .. } => "onboarding",
+                        IntakeQuery::JobStart { .. } => "job start",
+                        IntakeQuery::JobStatus => "job status",
+                        IntakeQuery::JobStop { .. } => "job stop",
+                        IntakeQuery::JobDismiss { .. } => "job dismiss",
                         _ => "github",
                     });
                     connection.intake(*job).unwrap();
@@ -247,6 +251,26 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
             "engine reads never settled: {sent:?}"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Reads the engine's intake job until it ended, the way the shell's tick reads it, without
+/// the tick's other reads. Takes the shell and the connection. Returns the ended job.
+async fn job_ended(shell: &mut Shell, connection: &mut Connection) -> JobView {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let ended = shell.ctx.store.intake.clone();
+        if let Some(job) = ended.filter(|job| !super::intake_job::running(job)) {
+            return job;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the intake job never ended: {:?}",
+            shell.ctx.store.intake
+        );
+        super::intake::ask(&mut shell.ctx, IntakeQuery::JobStatus);
+        pump(shell, connection).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 

@@ -67,7 +67,7 @@ use super::ctx::Ctx;
 use super::frame::{Hint, Modal};
 use super::keys::Key;
 use super::seam::Arrival;
-use crate::protocol::{CredentialRef, ProjectId};
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
@@ -217,6 +217,9 @@ pub enum Place {
     FirstRunAccounts,
     AddProject,
     AddFolder,
+    AnswerAdd {
+        job: RequestId,
+    },
     CloneRepo,
     Usage,
     Demo,
@@ -386,6 +389,7 @@ pub trait Screen {
             | Place::FirstRunAccounts
             | Place::AddProject
             | Place::AddFolder
+            | Place::AnswerAdd { .. }
             | Place::CloneRepo
             | Place::Usage
             | Place::Demo => None,
@@ -428,6 +432,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::FirstRunAccounts => Box::new(first_run_accounts::FirstRunAccounts::new()),
         Place::AddProject => Box::new(add_project::AddProject::new()),
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
+        Place::AnswerAdd { job } => Box::new(add_folder::AddFolder::answering(ctx, job)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
         Place::Usage => Box::new(usage::UsagePage::new()),
         Place::Demo => Box::new(demo::DemoPage::new()),
