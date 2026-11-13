@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { installDependency, intakeCopy, loadSetupStatus, runSetup } from "../../api-intake";
-import type { Dependency, PackEntry, SetupStatus } from "../../engine-client";
+import { fixToolPermissions, installDependency, intakeCopy, loadSetupStatus, runSetup } from "../../api-intake";
+import type { Dependency, PackEntry, SetupStatus, ToolFix } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
-import { Button, Checkbox, Icon, Skeleton, StatusBadge } from "../../ui";
+import { Button, Checkbox, Dialog, Icon, Skeleton, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { NotReady } from "../project/shared";
-import { SETUP_READS, approvalLine, dependencyView, entryIcon, entryName, foldSetupRead, installed, packGroups, packStateView, packTicks, retryTicks, rowInstall, setupBusy, setupPollMs, setupProgress, toolsChecking } from "./intake";
+import { SETUP_READS, approvalLine, dependencyView, entryIcon, entryName, fixCommand, fixConfirm, fixFailed, foldSetupRead, installed, packGroups, packStateView, packTicks, retryTicks, rowFix, rowInstall, setupBusy, setupPollMs, setupProgress, toolsChecking } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -23,13 +23,35 @@ function PackRow({ entry, ticked, onTick, locked }: { entry: PackEntry; ticked: 
   </li>;
 }
 
+export type ToolFixAsk = { dependency: Dependency; fix: ToolFix };
+
+/** The confirm before a permission fix (DEC-162), on the setup step and in Settings, Pack: it
+ * names the tool, the tree it changes and the command that makes the same change, and neither
+ * closes nor cancels while the fix starts. Inputs: the pending fix, whether it is starting and
+ * the handlers. */
+export function ToolFixDialog({ ask, pending, onCancel, onConfirm }: {
+  ask: ToolFixAsk | null;
+  pending: boolean;
+  onCancel: () => void;
+  onConfirm: (ask: ToolFixAsk) => void;
+}) {
+  const words = ask ? fixConfirm(ask.dependency.label.trim() || ask.dependency.name, ask.fix) : null;
+  return <Dialog open={ask !== null} title={words?.title ?? ""} busy={pending} onClose={onCancel}
+    footer={<><Button disabled={pending} onClick={onCancel}>Cancel</Button>
+      <Button variant="primary" pending={pending} pendingLabel="Starting..." onClick={() => { if (ask) onConfirm(ask); }}>{words?.confirm ?? "Fix permissions"}</Button></>}>
+    <p>{words?.body}</p>
+    <p><code>{words?.command}</code></p>
+    <p className="pj-secondary">{words?.note}</p>
+  </Dialog>;
+}
+
 /** The desktop setup screen as a view of its state: tmux, uv and graphify with their state and
  * version, the default pack as ticks grouped like the manifest, the sentence naming the ticked MCP
  * servers that continuing approves, progress while setup installs, and Try again once a run ended
  * with failures. Inputs: the setup read, the ticked ids and their handler, flags, the last problem,
  * the failed refresh line (empty when the last read worked), the Run, Try again and Continue
- * handlers and, when given, the one-tool Install handler. */
-export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, stale = "", onRun, onRetry = () => undefined, onContinue, onInstall }: {
+ * handlers and, when given, the one-tool Install and the refused tool's Fix permissions handlers. */
+export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, stale = "", onRun, onRetry = () => undefined, onContinue, onInstall, onFix }: {
   status: Loaded<SetupStatus>;
   ticks: string[];
   onTick: (id: string, on: boolean) => void;
@@ -41,6 +63,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
   onRetry?: () => void;
   onContinue: () => void;
   onInstall?: (dependency: Dependency) => void;
+  onFix?: (dependency: Dependency, fix: ToolFix) => void;
 }) {
   if (status.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (status.kind === "not_ready") return <div className="pj-stack-s">
@@ -61,10 +84,16 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
       <h2>Tools</h2>
       <ul className="in-list">{dependencies.map((dependency) => {
         const row = dependencyView(dependency);
+        const fix = onFix ? rowFix(dependency, status.value) : null;
+        const command = fixCommand(dependency, status.value);
+        const failed = fixFailed(dependency);
         return <li className="in-row" key={dependency.name}>
           <span className="in-row-main"><span className="pj-row"><Icon name="wrench" size={14} /><strong>{row.title}</strong></span><span className="pj-small pj-secondary">{row.about}</span>
-            {row.line && <span className={`pj-small ${dependency.state.state === "failed" ? "pj-error" : "pj-muted"}`}>{row.line}</span>}</span>
+            {row.line && <span className={`pj-small ${dependency.state.state === "failed" ? "pj-error" : "pj-muted"}`}>{row.line}</span>}
+            {failed && <span className="pj-small pj-error">{failed}</span>}
+            {command && <span className="pj-small pj-muted">To fix it, run in Terminal: <code>{command}</code></span>}</span>
           <span className="pj-row"><StatusBadge word={row.word} tone={row.tone} />
+            {fix && onFix && <Button size="small" icon="wrench" disabled={busy} onClick={() => onFix(dependency, fix)}>Fix permissions</Button>}
             {onInstall && rowInstall(dependency, status.value) && <Button size="small" icon="wrench" disabled={busy} onClick={() => onInstall(dependency)}>Install</Button>}</span>
         </li>;
       })}</ul>
@@ -95,9 +124,10 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
   </div>;
 }
 
-/** The desktop setup screen: reads setup, installs missing tools and the ticked pack, and reads
- * again every few seconds while setup runs, waiting longer and saying so after a failed read.
- * Input: what to do on Continue. */
+/** The desktop setup screen: reads setup, installs missing tools and the ticked pack, fixes a
+ * refused tool's permissions once the owner confirms the tree, and reads again every few seconds
+ * while setup runs, waiting longer and saying so after a failed read. Input: what to do on
+ * Continue. */
 export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
   const [loaded, reload] = useLoad(loadSetupStatus, [], "setup-status");
   const [known, setKnown] = useState(SETUP_READS);
@@ -105,6 +135,7 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
   const [busy, setBusy] = useState(false);
   const [started, setStarted] = useState(false);
   const [problem, setProblem] = useState("");
+  const [fixAsk, setFixAsk] = useState<ToolFixAsk | null>(null);
   const status: Loaded<SetupStatus> = known.latest ? { kind: "ok", value: known.latest } : loaded;
   const value = status.kind === "ok" ? status.value : null;
   const running = value !== null && setupBusy(value);
@@ -145,12 +176,26 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
     setKnown((old) => ({ ...old, latest: result.value, failures: 0, line: "" }));
   };
 
+  const fixPermissions = async (ask: ToolFixAsk) => {
+    if (busy) return;
+    setBusy(true);
+    setProblem("");
+    const result = await fixToolPermissions(ask.dependency.name, ask.fix.tree);
+    setBusy(false);
+    setFixAsk(null);
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Fixing permissions isn't in this build." : intakeCopy(result)); reload(); return; }
+    setKnown((old) => ({ ...old, latest: result.value, failures: 0, line: "" }));
+  };
+
   const tick = (id: string, on: boolean) => setTicks((old) => {
     const list = old ?? [];
     return on ? (list.includes(id) ? list : [...list, id]) : list.filter((item) => item !== id);
   });
 
-  return <ToolsSetupView status={status} ticks={ticks ?? []} onTick={tick} busy={busy} started={started} problem={problem} stale={known.line} onRun={() => void run()}
-    onRetry={() => void run(value === null || ticks === null ? null : retryTicks(value, ticks))} onContinue={onContinue}
-    onInstall={(dependency) => void install(dependency)} />;
+  return <>
+    <ToolsSetupView status={status} ticks={ticks ?? []} onTick={tick} busy={busy} started={started} problem={problem} stale={known.line} onRun={() => void run()}
+      onRetry={() => void run(value === null || ticks === null ? null : retryTicks(value, ticks))} onContinue={onContinue}
+      onInstall={(dependency) => void install(dependency)} onFix={(dependency, fix) => setFixAsk({ dependency, fix })} />
+    <ToolFixDialog ask={fixAsk} pending={busy} onCancel={() => { if (!busy) setFixAsk(null); }} onConfirm={(ask) => void fixPermissions(ask)} />
+  </>;
 }

@@ -138,6 +138,8 @@
     "allow-desktop-setup-status",
     "allow-desktop-run-setup",
     "allow-desktop-install-dependency",
+    "allow-desktop-fix-tool-permissions",
+    "allow-desktop-set-refused-tool",
     "allow-desktop-set-pack-entry",
     "allow-desktop-remove-pack-entry",
     "allow-desktop-project-memories",

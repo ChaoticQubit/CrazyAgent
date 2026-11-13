@@ -399,6 +399,8 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   start_onboarding: "starting project setup",
   run_setup: "running project setup",
   install_dependency: "installing a tool",
+  fix_tool_permissions: "fixing a tool's permissions",
+  refused_tool: "saving what setup offers for unused tools",
   pack_set: "changing the default pack",
   pack_remove: "removing a pack",
   team: "changing the team",
