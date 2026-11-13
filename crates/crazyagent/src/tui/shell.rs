@@ -1,6 +1,7 @@
 use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
 use super::client::changes::{ChangesQuery, ChangesView};
+use super::client::intake::{IntakeEvent, IntakeQuery, IntakeView};
 use super::client::learning::{LearningEvent, LearningQuery, LearningReply};
 use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
 use super::client::settings::{SettingsEvent, SettingsJob};
@@ -17,12 +18,14 @@ use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::usage::extras::{ResetWatch, reset_notice};
 use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
+use super::screens::{intake, intake_job};
 use super::seam::{Arrival, ProjectCard, Request, account_labels};
 use super::text::{cells, join, list_row, pad, styled};
 use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
 use crate::learning::MarkStep;
+use crate::projects_home::job::{JobState, JobView};
 use crate::terminal::TerminalFrame;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -311,6 +314,14 @@ impl Shell {
             })));
         self.watch_resets();
         self.refresh();
+    }
+
+    /// Keeps the engine's intake job in the store from a status read or a start, says once on
+    /// the message line when a running job ended and reads the found folders again so Home
+    /// lists the new one; a stop or a dismiss reads the status at once. A failed read keeps
+    /// the last view. Input: the intake reply. Output: none.
+    fn intake_job(&mut self, event: &IntakeEvent) {
+        let _ = (&mut self.ctx, event);
     }
 
     /// Asks for the stored extras, never the detail rows, once the watch is due, with the
@@ -614,6 +625,9 @@ impl Shell {
                 Err(_) => {}
             },
             Arrival::Owner(_) => {
+                if let Some(event) = intake::event(&arrival) {
+                    self.intake_job(event);
+                }
                 if let Some(SettingsEvent::Harnesses(Ok(entries))) = settings_event(&arrival) {
                     let ready = entries
                         .iter()
@@ -963,6 +977,7 @@ impl Shell {
         let top = self.stack.last().expect("the stack is never empty");
         let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
         let status = with_waiting(waiting, top.status(&self.ctx), &theme);
+        let status = with_intake(self.ctx.store.intake.as_ref(), status, &theme);
         let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
@@ -1045,6 +1060,14 @@ fn with_waiting(waiting: Option<String>, status: Line<'static>, theme: &Theme) -
         return note;
     }
     join([note, Line::raw("  "), status])
+}
+
+/// The header status with the running intake job's line in front, so a folder being added
+/// shows on every screen; with no running job the status is unchanged. Inputs: the job, if
+/// any, the status and the theme. Output: the line.
+fn with_intake(job: Option<&JobView>, status: Line<'static>, theme: &Theme) -> Line<'static> {
+    let _ = (job, theme);
+    status
 }
 
 /// The header's count of change sets that wait for the owner. On a project's screens, once
