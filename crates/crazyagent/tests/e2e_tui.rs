@@ -2235,6 +2235,7 @@ mod models {
     use super::*;
     use crazyagent::client_controller::OwnerController;
     use crazyagent::harness_settings::{Access, Source};
+    use crazyagent::harnesses::finding::Found;
     use crazyagent::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
     use crazyagent::model_choice::{Models, NOT_SUPPORTED, Origin, Row, Slot, Written};
     use serde_json::{Value, json};
@@ -2545,6 +2546,34 @@ mod models {
             drop(pty);
             engine.stop();
         }
+    }
+
+    /// The engine pins the Codex and Claude Code stand-ins of the test HOME at start, never
+    /// an install found on this machine, so no Models row runs a real harness with the test
+    /// HOME (V3SI-S1, STD-M1).
+    #[test]
+    fn the_models_rows_pin_their_stand_ins_and_never_a_real_install() {
+        let tui = Tui::start("ca-e2e-m00-");
+        let bin = tui
+            .engine
+            .home
+            .clone()
+            .expect("the Models rows set HOME")
+            .join(".local/bin");
+        for (id, file) in [("codex", "codex"), (HARNESS, "claude")] {
+            let found = tui.owner(move |controller| {
+                Box::pin(async move { controller.harness_find(id).await.unwrap() })
+            });
+            let stand_in = bin.join(file);
+            assert!(
+                matches!(
+                    &found,
+                    Found::Registered { path } | Found::Ready { path } if *path == stand_in
+                ),
+                "{id} must pin {stand_in:?}, found {found:?}"
+            );
+        }
+        tui.finish();
     }
 
     #[test]
