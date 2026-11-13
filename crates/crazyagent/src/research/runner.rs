@@ -1132,7 +1132,8 @@ impl ResearchRunner {
             let group = session.process_group();
             #[cfg(unix)]
             let mut lifeline = Lifeline::watch(group)?;
-            let ending = self.supervise_pane(jobs, job, &granted, &mut session, &prompt, &output);
+            let ending =
+                self.supervise_pane(jobs, job, &granted, &mut session, &prompt, harness, &output);
             let stopped = session.stop();
             #[cfg(unix)]
             lifeline.release();
@@ -1390,8 +1391,8 @@ impl ResearchRunner {
     /// Types the research prompt into the agent's pane and follows its session record until
     /// the turn ends or reports a rate or usage limit, the job is cancelled, the saved policy
     /// no longer covers what it was granted, the runner stops or a limit passes. The agent's
-    /// last reply becomes the report at `output`, as `codex exec -o` and `claude -p` give.
-    /// Returns how the run ended.
+    /// [`Reply`] becomes the report at `output`. Returns how the run ended.
+    #[allow(clippy::too_many_arguments)]
     fn supervise_pane(
         &self,
         jobs: &ResearchJobs,
@@ -1399,9 +1400,10 @@ impl ResearchRunner {
         granted: &Granted,
         session: &mut TerminalSession,
         prompt: &str,
+        harness: ResearchHarness,
         output: &Path,
     ) -> Result<Ending, RunError> {
-        let mut last = String::new();
+        let mut reply = Reply::new(harness, report_bound(self.limits.report_bytes_max));
         let mut counted: u64 = 0;
         if let Err(problem) = session.send_or_cancel(prompt, &self.stopping) {
             if problem.0 == "launch_cancelled" {
@@ -1428,8 +1430,9 @@ impl ResearchRunner {
             match session.next_event(POLL) {
                 Ok(Some(LaunchEvent::Text { text })) => {
                     counted += text.len() as u64;
-                    last = text;
+                    reply.said(&text);
                 }
+                Ok(Some(LaunchEvent::ToolUse { .. })) => reply.tool(),
                 Ok(Some(LaunchEvent::TurnFinished { success })) => break Ending::Exited(success),
                 Ok(Some(LaunchEvent::TurnError { rate_limited: true })) => {
                     break Ending::RateLimited;
@@ -1445,9 +1448,11 @@ impl ResearchRunner {
             }
         };
         let _ = jobs.heartbeat(job, counted);
-        if matches!(ending, Ending::Exited(true)) {
-            assert!(last.len() as u64 <= counted);
-            write_private(&self.state.join("agents"), output, last.as_bytes())?;
+        if matches!(ending, Ending::Exited(true))
+            && let Some(text) = reply.text()
+        {
+            assert!(text.len() as u64 <= counted);
+            write_private(&self.state.join("agents"), output, text.as_bytes())?;
         }
         Ok(ending)
     }
@@ -3382,6 +3387,38 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
         }
         Err(error) => Err(error),
     }
+}
+
+/// The reply a research agent ends its turn with, kept as its words arrive.
+struct Reply {
+    text: String,
+}
+
+impl Reply {
+    /// An empty reply. Inputs: the harness and the most bytes it may hold. Output: the reply.
+    fn new(_harness: ResearchHarness, _bytes_max: usize) -> Self {
+        Self {
+            text: String::new(),
+        }
+    }
+
+    /// Takes words the agent said. Input: the words. Output: none.
+    fn said(&mut self, words: &str) {
+        self.text = words.to_owned();
+    }
+
+    /// Takes a tool call the agent made. Output: none.
+    fn tool(&mut self) {}
+
+    /// The reply. Output: its text.
+    fn text(self) -> Option<String> {
+        Some(self.text)
+    }
+}
+
+/// The report bound as a byte count a [`Reply`] can hold. Input: the bound. Output: the count.
+fn report_bound(bytes_max: u64) -> usize {
+    usize::try_from(bytes_max).unwrap_or(usize::MAX)
 }
 
 /// The whole answer of a tools-off Claude Code run, read from its stream of JSON events:
@@ -5987,6 +6024,33 @@ mod tests {
             claude_answer(&stream).as_deref(),
             Some("## Numbers\n\n1. one\n2. two\n3. three\n")
         );
+    }
+
+    /// A Claude Code pane's reply is every part it said since its last tool call, so an
+    /// answer continued past the output cap stays whole; a Codex pane's reply is its last
+    /// message; a reply that outgrows the report bound is none until a tool call starts over.
+    #[test]
+    fn a_research_pane_keeps_the_whole_answer_its_agent_ends_with() {
+        let mut claude = Reply::new(ResearchHarness::ClaudeCode, 64);
+        claude.said("I will read the notes first.\n");
+        claude.tool();
+        claude.said("1. one\n2. tw");
+        claude.said("o\n3. three\n");
+        assert_eq!(claude.text().as_deref(), Some("1. one\n2. two\n3. three\n"));
+        let mut codex = Reply::new(ResearchHarness::Codex, 64);
+        codex.said("Reading the notes.");
+        codex.tool();
+        codex.said("The report.");
+        assert_eq!(codex.text().as_deref(), Some("The report."));
+        let mut long = Reply::new(ResearchHarness::ClaudeCode, 8);
+        long.said("1234");
+        long.said("56789");
+        assert_eq!(long.text(), None);
+        let mut again = Reply::new(ResearchHarness::ClaudeCode, 8);
+        again.said("123456789");
+        again.tool();
+        again.said("1234");
+        assert_eq!(again.text().as_deref(), Some("1234"));
     }
 }
 
