@@ -36,13 +36,15 @@ pub enum JobState {
 }
 
 /// One intake job as a client sees it: its id, which is the add's request id, the folder,
-/// the mode, whether a stop was asked and its state.
+/// the mode, the soft refusals it goes past, whether a stop was asked and its state. A client
+/// answering a soft refusal starts again with these overrides and the new one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobView {
     pub id: RequestId,
     pub source: String,
     pub mode: AddMode,
+    pub overrides: Vec<AddOverride>,
     pub stopping: bool,
     pub state: JobState,
 }
@@ -214,6 +216,7 @@ impl IntakeJob {
             id: self.id.clone(),
             source: self.source.clone(),
             mode: self.mode,
+            overrides: Vec::new(),
             stopping: self.tally.stopped(),
             state,
         }
