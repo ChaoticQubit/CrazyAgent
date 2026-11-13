@@ -166,6 +166,8 @@ pub struct Search {
     home_places: Vec<PathBuf>,
     engine: Option<PathBuf>,
     registered: Vec<(String, PathBuf)>,
+    temps: Vec<PathBuf>,
+    set_aside: Vec<PathBuf>,
 }
 
 impl Search {
@@ -196,17 +198,40 @@ impl Search {
             home_places,
             engine: None,
             registered,
+            temps: Vec::new(),
+            set_aside: Vec::new(),
         }
     }
 
     /// Builds the one search engine start, the catalog, Check again and sign-in all use: the
-    /// PATH folders, then the system folders no other user can change, then the HOME folders
-    /// (see [`home_places`]). Inputs: the PATH value, the system folders and HOME.
-    /// Output: the bounded search.
+    /// PATH folders except those in a temp folder, as the tool resolver sets them aside, though
+    /// a HOME folder keeps its PATH place; then the system folders no other user can change,
+    /// then the HOME folders ([`home_places`]). Inputs: the PATH value, the system folders and
+    /// HOME. Output: the search.
     pub fn engine(path: Option<&OsStr>, system: &[PathBuf], home: Option<PathBuf>) -> Self {
-        let mut directories: Vec<PathBuf> = path
-            .map(|path| std::env::split_paths(path).collect())
+        Self::engine_in(path, system, home, &crate::tools::temp_roots())
+    }
+
+    /// Builds the engine search as [`Search::engine`] does with the temp folders given, so a
+    /// row can name a folder outside every temp folder while each folder it makes lies in the
+    /// real one. Inputs: the PATH value, the system folders, HOME and the temp folders.
+    /// Output: the bounded search.
+    pub(crate) fn engine_in(
+        path: Option<&OsStr>,
+        system: &[PathBuf],
+        home: Option<PathBuf>,
+        temps: &[PathBuf],
+    ) -> Self {
+        let kept: Vec<PathBuf> = home
+            .as_deref()
+            .filter(|home| usable_path(home))
+            .map(home_places)
             .unwrap_or_default();
+        let (set_aside, mut directories): (Vec<PathBuf>, Vec<PathBuf>) = path
+            .map(|path| std::env::split_paths(path).collect::<Vec<PathBuf>>())
+            .unwrap_or_default()
+            .into_iter()
+            .partition(|folder| crate::tools::in_temp_of(folder, temps) && !kept.contains(folder));
         for folder in system {
             if !directories.contains(folder)
                 && crate::service::changeable_by_others(folder).is_none()
@@ -214,7 +239,77 @@ impl Search {
                 directories.push(folder.clone());
             }
         }
-        Self::new(directories, home, Vec::new())
+        let mut search = Self::new(directories, home, Vec::new());
+        search.temps = temps.to_vec();
+        for folder in set_aside {
+            if search.set_aside.len() == SEARCH_DIRECTORIES_MAX {
+                break;
+            }
+            if usable_path(&folder) && !search.set_aside.contains(&folder) {
+                search.set_aside.push(folder);
+            }
+        }
+        assert!(search.set_aside.len() <= SEARCH_DIRECTORIES_MAX);
+        assert!(search.set_aside.iter().all(|folder| folder.is_absolute()));
+        search
+    }
+
+    /// The temp folders this search refuses: none for a search built from explicit folders
+    /// ([`Search::new`]). Output: the folders.
+    pub(crate) fn temps(&self) -> &[PathBuf] {
+        &self.temps
+    }
+
+    /// The folders where this search passed over one harness for a temp folder: a set-aside
+    /// PATH folder holding it, unless the same folder is looked in anyway, as a HOME folder
+    /// is, then a looked-in folder whose file for it leads into a temp folder. Input: the
+    /// catalog id. Output: the folders, bounded; empty for an alias or unknown id.
+    pub fn temp_skipped(&self, id: &str) -> Vec<PathBuf> {
+        let Some(spec) = spec(id).filter(|spec| spec.id == id) else {
+            return Vec::new();
+        };
+        let mut folders = self.set_aside_holding(spec);
+        for folder in self.places(spec) {
+            let leads = spec.binaries.iter().any(|binary| {
+                let file = folder.join(binary);
+                executable_file(&file) && self.links_into_temp(&file)
+            });
+            if leads && !folders.contains(&folder) {
+                folders.push(folder);
+            }
+        }
+        assert!(
+            folders.len()
+                <= SEARCH_DIRECTORIES_MAX
+                    + SEARCH_DIRECTORIES_MAX
+                    + HOME_PLACES_MAX
+                    + LOCATIONS_MAX
+        );
+        folders
+    }
+
+    /// The set-aside PATH folders that hold a file for one spec and are not looked in anyway.
+    /// Input: the spec. Output: the folders, in PATH order.
+    fn set_aside_holding(&self, spec: &HarnessSpec) -> Vec<PathBuf> {
+        let places = self.places(spec);
+        self.set_aside
+            .iter()
+            .filter(|folder| !places.contains(folder))
+            .filter(|folder| {
+                spec.binaries
+                    .iter()
+                    .any(|binary| executable_file(&folder.join(binary)))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a file this search found in a kept folder really lies in a temp folder it
+    /// refuses ([`crate::tools::leads_into_temp`]). Input: the file. Output: the answer.
+    fn links_into_temp(&self, file: &Path) -> bool {
+        !self.temps.is_empty()
+            && std::fs::canonicalize(file)
+                .is_ok_and(|real| crate::tools::leads_into_temp(file, &real, &self.temps))
     }
 
     /// Builds the engine search from this process's PATH and HOME and the built-in system
@@ -255,14 +350,16 @@ impl Search {
         self.hits(spec, CANDIDATES_MAX, true)
     }
 
-    /// The folders this search looks in for one harness, in order, then the version-manager
-    /// shim folders it never uses, for the owner's "where we looked" line. Input: the catalog
-    /// id. Output: the folders, bounded; empty for an alias or unknown id.
+    /// The folders this search looks in for one harness, in order, after the set-aside temp
+    /// PATH folders that hold it ([`Search::temp_skipped`]), then the version-manager shim
+    /// folders it never uses, for the owner's "where we looked" line. Input: the catalog id.
+    /// Output: the folders, bounded; empty for an alias or unknown id.
     pub fn looked(&self, id: &str) -> Vec<PathBuf> {
         let Some(spec) = spec(id).filter(|spec| spec.id == id) else {
             return Vec::new();
         };
-        let mut folders = self.places(spec);
+        let mut folders = self.set_aside_holding(spec);
+        folders.extend(self.places(spec));
         if let Some(home) = &self.home {
             for shim in SHIM_DIRECTORIES
                 .iter()
@@ -276,6 +373,7 @@ impl Search {
         assert!(
             folders.len()
                 <= SEARCH_DIRECTORIES_MAX
+                    + SEARCH_DIRECTORIES_MAX
                     + HOME_PLACES_MAX
                     + LOCATIONS_MAX
                     + 1
@@ -356,6 +454,7 @@ impl Search {
                 let candidate = directory.join(binary);
                 if found.contains(&candidate)
                     || !executable_file(&candidate)
+                    || self.links_into_temp(&candidate)
                     || (!shims && is_shim(self.home(), &candidate))
                 {
                     continue;

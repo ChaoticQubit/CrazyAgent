@@ -88,6 +88,7 @@ pub struct Places {
     home: Option<PathBuf>,
     engine_roots: Vec<PathBuf>,
     temp_refused: bool,
+    temps: Vec<PathBuf>,
     refused_setup: Vec<PathBuf>,
     refused_temp: Vec<PathBuf>,
 }
@@ -119,6 +120,11 @@ impl Places {
                 .filter(|root| usable(root))
                 .collect(),
             temp_refused,
+            temps: if temp_refused {
+                temp_roots()
+            } else {
+                Vec::new()
+            },
             refused_setup: Vec::new(),
             refused_temp: Vec::new(),
         };
@@ -142,6 +148,16 @@ impl Places {
         assert!(places.refused_setup.len() <= PLACES_MAX);
         assert!(places.engine_roots.iter().all(|root| root.is_absolute()));
         places
+    }
+
+    /// Replaces the temp folders the engine's places refuse, so a row can name a folder
+    /// outside every temp folder while each folder it makes lies in the real one. Input: the
+    /// temp folders. Output: the places.
+    #[cfg(test)]
+    fn with_temps(mut self, temps: Vec<PathBuf>) -> Self {
+        assert!(self.temp_refused);
+        self.temps = temps;
+        self
     }
 
     /// Sets aside temp folders the engine's places refuse, never looked in, so [`resolve`]
@@ -372,7 +388,7 @@ fn in_project(home: Option<&Path>, path: &Path) -> bool {
 /// temp folder grant can replace; a file whose place is itself in a temp folder (a test HOME,
 /// an engine root, a mounted app) does not. Inputs: the file as written, its real path and
 /// the temp folders. Output: the answer.
-fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
+pub(crate) fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
     let inside = |path: &Path| temps.iter().any(|temp| path.starts_with(temp));
     !inside(written) && inside(real)
 }
@@ -380,7 +396,7 @@ fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
 /// The temp folders: the shared ones and this user's own, as given and with its links
 /// resolved, so a path matches however it is written; an owner temp folder of `/` is
 /// dropped. Output: the absolute folders.
-fn temp_roots() -> Vec<PathBuf> {
+pub(crate) fn temp_roots() -> Vec<PathBuf> {
     let owner = std::env::temp_dir();
     let real = owner.canonicalize().ok();
     let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
@@ -397,7 +413,16 @@ fn temp_roots() -> Vec<PathBuf> {
 /// grant, can write: this user's temp folder or a shared one, as written and with its links
 /// resolved. Input: the folder. Output: the answer.
 fn in_temp(folder: &Path) -> bool {
-    let temps = temp_roots();
+    in_temp_of(folder, &temp_roots())
+}
+
+/// Whether a folder is in one of the temp folders given, as written and with its links
+/// resolved; none given refuses nothing. Inputs: the folder and the temp folders. Output:
+/// the answer.
+pub(crate) fn in_temp_of(folder: &Path, temps: &[PathBuf]) -> bool {
+    if temps.is_empty() {
+        return false;
+    }
     let real = folder.canonicalize().ok();
     std::iter::once(folder)
         .chain(real.as_deref())
@@ -694,9 +719,22 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     }
     let through_shim =
         shebang.by_name.is_none() && crate::harnesses::is_shim(places.home(), &shebang.interpreter);
+    let into_temp = places.temp_refused
+        && shebang
+            .interpreter
+            .canonicalize()
+            .is_ok_and(|real| leads_into_temp(entry, &real, &places.temps));
     let interpreter = match &shebang.by_name {
         Some(name) => named_interpreter(name, &program, places, depth + 1),
         None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
+        None if into_temp => Err(Missing {
+            reason: Reason::Refused,
+            refused: Some(Box::new(Refused {
+                file: shebang.interpreter.clone(),
+                why: Refusal::InTemp,
+            })),
+            ..not_there()
+        }),
         None => entry_at(&shebang.interpreter, places, depth + 1),
     }
     .map_err(|missing| match missing.reason {
@@ -938,7 +976,7 @@ fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refus
         Err(Refusal::AgentsCanWrite)
     } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
         Err(Refusal::OthersCanChange(part))
-    } else if places.temp_refused && leads_into_temp(candidate, &real, &temp_roots()) {
+    } else if places.temp_refused && leads_into_temp(candidate, &real, &places.temps) {
         Err(Refusal::InTemp)
     } else {
         Ok(())

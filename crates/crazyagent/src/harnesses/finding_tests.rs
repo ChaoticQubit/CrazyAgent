@@ -1,7 +1,7 @@
 use super::Search;
 use super::finding::{
     self, PATH_AGENT_SPACE, PATH_INVALID, PATH_NOT_EXECUTABLE, PATH_NOT_FOUND, PATH_SHIM,
-    UNKNOWN_HARNESS,
+    TEMP_SKIPPED, UNKNOWN_HARNESS,
 };
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -570,4 +570,109 @@ fn an_npm_harness_the_engine_installed_in_its_setup_folder_passes_and_other_engi
     );
     let beside = case.file("engine/setup-other/codex", 0o755);
     assert_eq!(case.check("codex", &beside), Err(PATH_AGENT_SPACE.into()));
+}
+
+/// Writes a runnable file, its folders made first. Input: the file. Output: the file.
+fn runnable(file: &Path) -> PathBuf {
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    file.to_path_buf()
+}
+
+/// V241-HARNESS-TEMP door 1 (DEC-157): the engine's search sets aside a PATH folder in a temp
+/// folder and passes over a file in a kept folder whose real file lies in one, and where we
+/// looked names each folder with the temp folder reason; an explicit search is unchanged.
+#[test]
+fn the_engine_search_sets_aside_temp_path_folders_and_names_them_where_it_looked() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let temps = vec![root.join("tmp")];
+    let set_aside = root.join("tmp/bin");
+    let kept = root.join("kept/bin");
+    let codex = runnable(&set_aside.join("codex"));
+    let real = runnable(&root.join("tmp/real/claude"));
+    std::fs::create_dir_all(&kept).unwrap();
+    std::os::unix::fs::symlink(&real, kept.join("claude")).unwrap();
+    let path = std::env::join_paths([set_aside.clone(), kept.clone()]).unwrap();
+    let search = Search::engine_in(Some(&path), &[], None, &temps);
+    assert_eq!(search.find("codex"), None);
+    assert!(search.candidates("codex").is_empty());
+    assert_eq!(search.find("claude-code"), None);
+    assert!(search.candidates("claude-code").is_empty());
+    let codex_looked = finding::looked(&search, "codex");
+    assert!(
+        codex_looked.contains(&format!("{}{TEMP_SKIPPED}", set_aside.display())),
+        "{codex_looked:?}"
+    );
+    let claude_looked = finding::looked(&search, "claude-code");
+    assert!(
+        claude_looked.contains(&format!("{}{TEMP_SKIPPED}", kept.display())),
+        "{claude_looked:?}"
+    );
+    assert!(
+        claude_looked
+            .iter()
+            .all(|line| !line.starts_with(set_aside.to_str().unwrap())),
+        "a set-aside folder without the harness is not named: {claude_looked:?}"
+    );
+    let explicit = Search::new(vec![set_aside, kept.clone()], None, Vec::new());
+    assert_eq!(explicit.find("codex"), Some(codex));
+    assert_eq!(explicit.find("claude-code"), Some(kept.join("claude")));
+}
+
+/// V241-HARNESS-TEMP guard (DEC-157): a HOME place inside a temp folder, as a test HOME is,
+/// is still looked in and gives its harness, also when the same folder is on PATH, and it is
+/// never marked as skipped.
+#[test]
+fn a_home_place_inside_a_temp_folder_is_kept_and_not_marked_even_on_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let home = root.join("home");
+    let codex = runnable(&home.join(".local/bin/codex"));
+    let path = std::env::join_paths([home.join(".local/bin")]).unwrap();
+    let search = Search::engine_in(Some(&path), &[], Some(home), &[root]);
+    assert_eq!(search.find("codex"), Some(codex.clone()));
+    assert_eq!(search.candidates("codex"), vec![codex]);
+    let looked = finding::looked(&search, "codex");
+    assert!(looked.contains(&"~/.local/bin".to_owned()), "{looked:?}");
+    assert!(
+        looked.iter().all(|line| !line.contains(TEMP_SKIPPED)),
+        "{looked:?}"
+    );
+}
+
+/// V241-HARNESS-TEMP r1 F1: a PATH folder in a temp folder that is also a HOME place keeps its
+/// PATH position, so a test HOME's stand-in on PATH is found before the same harness in a later
+/// PATH folder or a system folder such as Homebrew's, at the search and at the pin's entry.
+#[test]
+fn a_home_place_on_path_inside_a_temp_folder_keeps_its_path_position() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let home = root.join("home");
+    let stand_in = runnable(&home.join(".local/bin/codex"));
+    let later = runnable(&root.join("later/bin/codex"));
+    let system = root.join("opt/homebrew/bin");
+    runnable(&system.join("codex"));
+    let path = std::env::join_paths([home.join(".local/bin"), root.join("later/bin")]).unwrap();
+    let search = Search::engine_in(
+        Some(&path),
+        std::slice::from_ref(&system),
+        Some(home.clone()),
+        std::slice::from_ref(&home),
+    );
+    assert_eq!(search.find("codex"), Some(stand_in.clone()));
+    let candidates = search.candidates("codex");
+    assert_eq!(candidates.first(), Some(&stand_in), "{candidates:?}");
+    assert!(candidates.contains(&later), "{candidates:?}");
+    assert_eq!(
+        crate::paths::harness_entry("codex", &search, Some(&path)),
+        Some(stand_in)
+    );
+    let looked = finding::looked(&search, "codex");
+    assert_eq!(
+        looked.first().map(String::as_str),
+        Some("~/.local/bin"),
+        "{looked:?}"
+    );
 }

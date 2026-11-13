@@ -21,6 +21,10 @@ pub const PATH_UNREADABLE: &str = "harness_path_unreadable";
 pub const LOOKED_MAX: usize = 48;
 pub const LOOKED_BYTES_MAX: usize = 256;
 const SHIM_SKIPPED: &str = " (shim, skipped)";
+/// The mark on a folder the engine's search passed over for a temp folder, in the words the
+/// tool resolver uses for the same refusal.
+pub const TEMP_SKIPPED: &str =
+    " (skipped: in a temp folder or links to one, which agents or other users can change)";
 #[cfg(target_os = "macos")]
 const AGENT_TMP: &str = "/private/tmp/ca-";
 #[cfg(not(target_os = "macos"))]
@@ -430,11 +434,13 @@ fn owner_runnable(_metadata: &std::fs::Metadata) -> bool {
 }
 
 /// The folders a search looked in for one harness as the owner reads them: HOME shown as
-/// `~`, a shim folder marked "(shim, skipped)", at most [`LOOKED_MAX`] folders, each at most
+/// `~`, a shim folder marked "(shim, skipped)", a folder passed over for a temp folder marked
+/// with that reason ([`TEMP_SKIPPED`]), at most [`LOOKED_MAX`] folders, each at most
 /// [`LOOKED_BYTES_MAX`] bytes, so the answer always fits one reply frame. Inputs: the search
 /// and the id. Output: the lines.
 pub fn looked(search: &Search, id: &str) -> Vec<String> {
     let home = search.home();
+    let skipped = search.temp_skipped(id);
     let lines: Vec<String> = search
         .looked(id)
         .into_iter()
@@ -445,6 +451,8 @@ pub fn looked(search: &Search, id: &str) -> Vec<String> {
             };
             if is_shim_folder(home, &folder) {
                 shown.push_str(SHIM_SKIPPED);
+            } else if skipped.contains(&folder) {
+                shown.push_str(TEMP_SKIPPED);
             }
             (shown.len() <= LOOKED_BYTES_MAX).then_some(shown)
         })
