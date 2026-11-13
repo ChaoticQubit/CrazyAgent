@@ -501,11 +501,12 @@ fn hold_end(
 
 /// Tells whether an unread hold seen at `now` is logged (HFO-L1): once per
 /// `HOLD_UNREAD_RETRY_MS` for one cause however many picks, resolvers and threads see it,
-/// and again at once after the clock went back. Takes the cause's last logged time, set to
-/// `now` when this one logs, and the time. Returns whether to log.
+/// only on a full window's gap either way, so a racing thread's slightly older `now` neither
+/// logs nor moves the stamp. Takes the cause's last logged time, set to `now` when this one
+/// logs, and the time. Returns whether to log.
 fn unread_log_due(logged: &AtomicI64, now: i64) -> bool {
     let last = logged.load(Ordering::Relaxed);
-    let due = now < last || now.saturating_sub(last) >= HOLD_UNREAD_RETRY_MS;
+    let due = now.abs_diff(last) >= HOLD_UNREAD_RETRY_MS.unsigned_abs();
     due && logged
         .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
