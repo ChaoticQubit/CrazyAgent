@@ -234,3 +234,45 @@ fn a_hold_read_that_fails_counts_the_account_as_held_for_that_pick() {
         );
     }
 }
+
+/// A lasting unread hold logs one `account_hold_unread` line per cause per
+/// `HOLD_UNREAD_RETRY_MS`, not one per pick on every research tick (HFO-L1): repeated
+/// failing reads within the window log once, the first read past it logs again, each cause
+/// keeps its own window, a clock that went back logs again, and racing picks log once.
+#[test]
+fn repeated_failing_hold_reads_within_the_retry_window_log_once() {
+    let read_failed = AtomicI64::new(i64::MIN);
+    let no_database = AtomicI64::new(i64::MIN);
+    let start = 1_789_000_000_000;
+    assert!(unread_log_due(&read_failed, start));
+    for later in [
+        start,
+        start + 1,
+        start + 1_000,
+        start + HOLD_UNREAD_RETRY_MS - 1,
+    ] {
+        assert!(!unread_log_due(&read_failed, later), "{later}");
+    }
+    assert!(unread_log_due(&no_database, start + 1_000));
+    assert!(unread_log_due(&read_failed, start + HOLD_UNREAD_RETRY_MS));
+    assert!(!unread_log_due(
+        &read_failed,
+        start + HOLD_UNREAD_RETRY_MS + 1
+    ));
+    assert!(!unread_log_due(&no_database, start + HOLD_UNREAD_RETRY_MS));
+    assert!(unread_log_due(&read_failed, start));
+    assert!(!unread_log_due(&read_failed, start + 1));
+
+    let raced = AtomicI64::new(i64::MIN);
+    let logged = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                if unread_log_due(&raced, start) {
+                    logged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    assert_eq!(logged.into_inner(), 1);
+}

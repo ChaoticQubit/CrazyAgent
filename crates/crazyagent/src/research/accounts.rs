@@ -9,6 +9,7 @@ use crate::scheduling::{Candidate, Choice};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicI64;
 use std::time::Duration;
 
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
@@ -494,6 +495,12 @@ fn hold_end(
     let until = now.saturating_add(HOLD_UNREAD_RETRY_MS);
     assert!(until > now);
     Some(until)
+}
+
+/// Tells whether an unread hold seen at `now` is logged (HFO-L1). Takes the cause's last
+/// logged time and the time. Returns whether to log; today every read that fails logs.
+fn unread_log_due(_logged: &AtomicI64, _now: i64) -> bool {
+    true
 }
 
 /// The folder the engine recorded for a set-up project, such as its folder
