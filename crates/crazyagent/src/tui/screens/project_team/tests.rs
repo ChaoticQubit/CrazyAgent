@@ -5362,11 +5362,7 @@ fn failed_task_view(problem: &str) -> TeamView {
     let query = view.next_query(NOW).unwrap();
     view.apply(&query, Ok(SetupView::Team(Box::new(status))));
     assert_eq!(view.key(press(KeyCode::Tab)), TeamReply::Handled);
-    let at = view
-        .tasks()
-        .iter()
-        .position(|task| task.id == 13)
-        .unwrap();
+    let at = view.tasks().iter().position(|task| task.id == 13).unwrap();
     for _ in 0..at {
         view.key(press(KeyCode::Down));
     }
@@ -5415,7 +5411,10 @@ fn a_problem_longer_than_the_window_ends_with_a_mark_and_enter_reads_it_all() {
     let rows = frame(&view, 80, 24);
     let mark = find(&rows, "Enter shows all");
     assert!(mark.contains('\u{2026}'), "{}", rows.join("\n"));
-    assert!(rows.iter().any(|row| row.contains("Tasks  4")), "the lists stay");
+    assert!(
+        rows.iter().any(|row| row.contains("Tasks  4")),
+        "the lists stay"
+    );
     assert!(!words(&rows).contains(LAST_SENTENCE));
 
     assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
@@ -5446,11 +5445,7 @@ fn a_result_with_more_than_its_row_shows_says_enter_shows_all() {
     let query = view.next_query(NOW).unwrap();
     view.apply(&query, Ok(SetupView::Team(Box::new(status))));
     view.key(press(KeyCode::Tab));
-    let at = view
-        .tasks()
-        .iter()
-        .position(|task| task.id == 10)
-        .unwrap();
+    let at = view.tasks().iter().position(|task| task.id == 10).unwrap();
     for _ in 0..at {
         view.key(press(KeyCode::Down));
     }
