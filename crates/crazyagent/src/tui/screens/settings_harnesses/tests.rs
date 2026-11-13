@@ -1528,3 +1528,36 @@ fn a_harness_the_catalog_lists_cant_run_shows_its_line_and_node_settling_reads_t
     );
     assert!(!row.contains("Can't run"), "{row}");
 }
+
+/// v241 HR-M1: while a listed harness needs Node and setup's Node row still reads Checking, the
+/// page reads setup again on each refresh until the row settles, so the Install Node.js offer
+/// shows once it reads Missing; r reads setup's Node row again too.
+#[test]
+fn a_node_row_still_checking_is_read_again_until_it_settles_and_r_reads_it_again() {
+    let found = found();
+    let mut shell = on(&found, "codex");
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Setup]);
+    shell.arrive(setup_node(DependencyState::Checking));
+    assert!(!footer(&mut shell).contains("Install Node.js"));
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Setup],
+        "a Node row still checking is read again on the next refresh"
+    );
+    shell.arrive(setup_node(DependencyState::Missing));
+    assert_eq!(footer(&mut shell).matches("n Install Node.js").count(), 1);
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![],
+        "a settled Node row is not read again"
+    );
+    shell.key(Key::Char('r'));
+    let calls = sent(&mut shell.ctx);
+    assert!(
+        calls.contains(&Sent::Setup),
+        "r reads setup's Node row again: {calls:?}"
+    );
+}
