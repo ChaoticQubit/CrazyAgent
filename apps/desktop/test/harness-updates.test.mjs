@@ -379,3 +379,15 @@ test("the page's Node.js offer follows the listed harnesses that need Node and s
   assert.deepEqual(view.pageNode(["codex"], reads, setupWith({ state: "failed", reason: NODE_FAILED })), { kind: "failed", reason: NODE_FAILED });
   assert.deepEqual(view.pageNode(["codex"], reads, setupWith({ state: "installed", version: "26.13.1" })), { kind: "none" });
 });
+
+test("the page reads setup again while a listed harness needs Node and the Node row is checking, installing, or settled while a read still needs Node, and stops on a settled offer", () => {
+  const reads = { codex: codexNeeds };
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "checking" })), true, "a Node row still checking is read again");
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "installing" })), true);
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "missing" }, true)), true, "a setup run that goes on is read until it ends");
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "installed", version: "26.13.1" })), true, "Node is there but a read still needs it");
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "missing" })), false, "a settled Missing row shows the offer and is not read again");
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "failed", reason: NODE_FAILED })), false);
+  assert.equal(view.pageNodeReads(["codex"], { codex: { ...codexNeeds, needs: null } }, setupWith({ state: "checking" })), false, "nothing listed needs Node");
+  assert.equal(view.pageNodeReads([], reads, setupWith({ state: "checking" })), false, "a harness gone from the list needs nothing");
+});
