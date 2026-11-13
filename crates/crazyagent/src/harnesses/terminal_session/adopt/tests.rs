@@ -420,6 +420,10 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         network: None,
         lineage: None,
         grants: None,
+        freeze: None,
+        frozen_ms: None,
+        frozen_for_ms: None,
+        keepers: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
@@ -674,6 +678,10 @@ fn keyed(key: &std::path::Path) -> PaneRecord {
         network: None,
         lineage: None,
         grants: None,
+        freeze: None,
+        frozen_ms: None,
+        frozen_for_ms: None,
+        keepers: None,
     }
 }
 

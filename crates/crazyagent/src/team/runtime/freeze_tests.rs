@@ -132,7 +132,10 @@ impl Proxied {
         let deadline = Instant::now() + WAIT;
         for pid in self.pids() {
             while state_of(pid).is_some() {
-                assert!(Instant::now() < deadline, "{what}: process {pid} still runs");
+                assert!(
+                    Instant::now() < deadline,
+                    "{what}: process {pid} still runs"
+                );
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
@@ -342,6 +345,15 @@ impl NativeLead {
             std::fs::Permissions::from_mode(0o600),
         )
         .unwrap();
+        crate::sandbox::policy::save(
+            &fixture.connection,
+            PROJECT,
+            &crate::sandbox::policy::AgentPolicy {
+                network: crate::sandbox::policy::AgentNetwork::None,
+                ..crate::sandbox::policy::AgentPolicy::default()
+            },
+        )
+        .unwrap();
         let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
         let runtime = standin_claude_runtime(&fixture, LEAVING_CLAUDE)
             .with_terminal(host.clone())
@@ -402,13 +414,17 @@ impl NativeLead {
             {
                 break pid;
             }
-            assert!(Instant::now() < deadline, "the stand-in never wrote left.pid");
+            assert!(
+                Instant::now() < deadline,
+                "the stand-in never wrote left.pid"
+            );
             std::thread::sleep(Duration::from_millis(50));
         };
-        let record = PaneRecord {
-            proxy: Some(free_proxy_port()),
-            ..session.pane_record().expect("the lead's pane has a record")
-        };
+        let record = session
+            .pane_record()
+            .expect("the lead's pane has a record");
+        assert!(record.proxy.is_some(), "a native lead under None gets a model proxy");
+        assert_eq!(record.freeze, Some(true));
         fixture.keep(id, &record);
         session.leave();
         Self {
@@ -454,7 +470,10 @@ impl NativeLead {
         }
         let deadline = Instant::now() + WAIT;
         while state_of(self.left).is_some() {
-            assert!(Instant::now() < deadline, "the lead's process outlived its servers");
+            assert!(
+                Instant::now() < deadline,
+                "the lead's process outlived its servers"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -472,7 +491,11 @@ fn a_kept_proxied_native_lead_is_stopped_in_both_servers_when_frozen() {
         .expect("the native lead froze");
     assert!(frozen.frozen_ms.is_some());
     assert_eq!(frozen.keepers.as_ref().map(Vec::len), Some(2));
-    assert_eq!(state_of(lead.left), Some('T'), "the lead's own process runs");
+    assert_eq!(
+        state_of(lead.left),
+        Some('T'),
+        "the lead's own process runs"
+    );
     for pid in NativeLead::servers(&frozen) {
         assert_eq!(state_of(pid), Some('T'), "server process {pid} runs");
     }
@@ -506,9 +529,17 @@ fn an_engine_start_does_not_wait_on_a_frozen_native_lead_and_leaves_it_unfrozen(
         .recv_timeout(WAIT)
         .expect("the engine start waited on the frozen lead's servers")
         .unwrap();
-    assert_ne!(state_of(lead.left), Some('T'), "the lead's own process stayed stopped");
+    assert_ne!(
+        state_of(lead.left),
+        Some('T'),
+        "the lead's own process stayed stopped"
+    );
     for pid in NativeLead::servers(&frozen) {
-        assert_ne!(state_of(pid), Some('T'), "server process {pid} stayed stopped");
+        assert_ne!(
+            state_of(pid),
+            Some('T'),
+            "server process {pid} stayed stopped"
+        );
     }
     lead.end(&frozen);
 }
@@ -528,7 +559,10 @@ fn a_proxied_agent_s_pane_record_says_its_keeper_can_freeze_it() {
         Some(context),
     )
     .unwrap();
-    assert_eq!(session.record().and_then(|record| record.freeze), Some(true));
+    assert_eq!(
+        session.record().and_then(|record| record.freeze),
+        Some(true)
+    );
     drop(session);
     host.close(&[]).unwrap();
 }

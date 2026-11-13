@@ -513,11 +513,14 @@ pub fn agent_env<'a>(
 
 /// The end of the agent shims: forks the run's warden when handed a [`warden::WARDEN_FD`],
 /// keeping that descriptor and variable from the harness, then replaces the shim with the
-/// harness program and its arguments.
+/// harness program and its arguments. Asked `S` on its line, the warden stops every other
+/// process in the sandbox three times over, through the kill call that spares its sender,
+/// and answers `s` only when every pass took; asked `C`, it continues them and answers `c`
+/// (DEC-158). At the line's end it kills them all, as before.
 #[cfg(unix)]
 macro_rules! warden_then_harness {
     () => {
-        r#"if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#
+        r#"if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; while (sysread($line, $byte, 1)) { if ($byte eq "S") { my $stopped = 1; for (1 .. 3) { $stopped &&= syscall(37, -1, POSIX::SIGSTOP(), 0) == 0; select(undef, undef, undef, 0.05) } syswrite($line, "s") if $stopped } elsif ($byte eq "C") { kill("CONT", -1); syswrite($line, "c") } } syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#
     };
 }
 
@@ -565,14 +568,18 @@ pub const PANE_SHIM: [&str; 5] = [
 /// deadline ahead, stops after that many reads in a row found it passed or unreadable
 /// (FBTMUX-P1-R1-L1): it kills its command, the server, itself from outside the sandbox, so
 /// a killed warden cannot keep the server, then has the warden end the rest, and exits
-/// with status 3 when the warden does not confirm.
+/// with status 3 when the warden does not confirm. Given [`KEEPER_STATE`], user signal 1
+/// asks the warden to stop every process in the sandbox and user signal 2 to continue
+/// them, and each answer is written to that record as `S` or `C` (DEC-158); without it
+/// both signals are ignored. Its deadline reads count wall time, so answers do not hasten
+/// them.
 #[cfg(target_os = "macos")]
 pub const KEEPER: [&str; 6] = [
     "/usr/bin/perl",
     "-mPOSIX",
     "-MSocket",
     "-e",
-    r#"$^F = 1023; my $why = ""; my ($every, $late, $record) = split(/ /, delete($ENV{CRAZYAGENT_KEEPER_DEADLINE}) // "", 3); !defined($record) || ($every =~ /\A[1-9][0-9]{0,3}\z/ && $late =~ /\A[1-9][0-9]{0,2}\z/ && $record =~ m{\A/}) or die "crazyagent: no deadline\n"; my ($tick, $armed, $missed) = (0, 0, 0); $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE); $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD); close($keep); $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { select(undef, undef, undef, 1); next unless defined($record) && ++$tick >= $every; $tick = 0; my $ahead = 0; if (my @at = lstat($record)) { if (-f _ && $at[4] == $< && $at[7] <= 19 && open(my $in, "<", $record)) { $ahead = (<$in> // "") =~ /\A([0-9]{1,19})\z/ && time < $1 } } if ($ahead) { ($armed, $missed) = (1, 0) } elsif ($armed && ++$missed >= $late) { $why = "LATE" } } kill("KILL", $harness) if $why eq "LATE"; shutdown($keep, 1); my ($report, $wanted) = ("", ""); vec($wanted, fileno($keep), 1) = 1; my $until = time + 4; while (time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } POSIX::_exit(0) if $report eq "AF" || $report eq "U" || $why eq "HUP"; POSIX::_exit(3) if $why eq "LATE"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
+    r#"$^F = 1023; my $why = ""; my ($every, $late, $record) = split(/ /, delete($ENV{CRAZYAGENT_KEEPER_DEADLINE}) // "", 3); !defined($record) || ($every =~ /\A[1-9][0-9]{0,3}\z/ && $late =~ /\A[1-9][0-9]{0,2}\z/ && $record =~ m{\A/}) or die "crazyagent: no deadline\n"; my $state = delete($ENV{CRAZYAGENT_KEEPER_STATE}); !defined($state) || $state =~ m{\A/[^\n]{1,1000}\z} or die "crazyagent: no state record\n"; my ($next, $armed, $missed, $want) = (time + ($every // 0), 0, 0, ""); $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE USR1 USR2); if (defined($state)) { $SIG{USR1} = sub { $want = "S" }; $SIG{USR2} = sub { $want = "C" } } $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD USR1 USR2); close($keep); $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); my ($seen, $open, $wanted) = ("", 1, ""); vec($wanted, fileno($keep), 1) = 1; until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { if (length($want)) { syswrite($keep, $want) if $open; $want = "" } my $ready = $open ? $wanted : ""; if (select($ready, undef, undef, 1) > 0 && defined(my $got = sysread($keep, my $more, 8))) { $open = 0 if !$got; $seen .= $more // ""; if ($seen =~ s/([sc]+)\z// && defined($state)) { my $now = uc(substr($1, -1)); unlink("$state.new"); if (sysopen(my $out, "$state.new", POSIX::O_WRONLY() | POSIX::O_CREAT() | POSIX::O_EXCL(), 0600)) { syswrite($out, $now); close($out); rename("$state.new", $state) or unlink("$state.new") } } } next unless defined($record) && time >= $next; $next = time + $every; my $ahead = 0; if (my @at = lstat($record)) { if (-f _ && $at[4] == $< && $at[7] <= 19 && open(my $in, "<", $record)) { $ahead = (<$in> // "") =~ /\A([0-9]{1,19})\z/ && time < $1 } } if ($ahead) { ($armed, $missed) = (1, 0) } elsif ($armed && ++$missed >= $late) { $why = "LATE" } } kill("KILL", $harness) if $why eq "LATE"; shutdown($keep, 1); my $report = ""; my $until = time + 4; while ($open && time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } my $said = $seen . $report; POSIX::_exit(0) if $said =~ /\AA[sc]*F\z/ || $said eq "U" || $why eq "HUP"; POSIX::_exit(3) if $why eq "LATE"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
     "--",
 ];
 
@@ -582,6 +589,12 @@ pub const KEEPER: [&str; 6] = [
 /// spaces. The [`KEEPER`] removes it before the command starts; a kept pane has none.
 #[cfg(target_os = "macos")]
 pub const KEEPER_DEADLINE: &str = "CRAZYAGENT_KEEPER_DEADLINE";
+
+/// The variable that names the engine's absolute freeze record to a [`KEEPER`], whose
+/// warden then stops and continues the sandbox on the engine's signals (DEC-158). The
+/// keeper removes it before the command starts.
+#[cfg(target_os = "macos")]
+pub const KEEPER_STATE: &str = "CRAZYAGENT_KEEPER_STATE";
 
 /// Puts a pane's sandboxed command under the [`KEEPER`] and the [`PANE_SHIM`], so stopping
 /// the pane ends every process its agent started. Input: the argv `sandbox-exec -f
