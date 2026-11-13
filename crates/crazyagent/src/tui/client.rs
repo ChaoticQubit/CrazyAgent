@@ -3200,6 +3200,14 @@ mod creation_recovery_tests {
                 Some(late),
                 "with nothing kept to check, a late answer still counts: {late}"
             );
+            for unchecked in [MutationDelivery::Reconcile, MutationDelivery::Retry] {
+                assert_eq!(
+                    creation_loss(&event(Err(late.into()), true), unchecked),
+                    Some(late),
+                    "no check follows a late check or retry, and a revoked client's \
+                     stream closes unanswered, so it counts as lost: {late}"
+                );
+            }
         }
         for gone in [
             "trusted_owner_connection_failed",
