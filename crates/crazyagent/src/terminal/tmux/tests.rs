@@ -327,6 +327,28 @@ fn a_pane_command_with_a_perl_load_variable_is_refused() {
     }
 }
 
+/// DEC-158: a kept pane's keeper takes the engine's freeze record as an argument, so the
+/// pane variable gate stays as it was and still refuses a pane command that carries the
+/// keeper's own state variable.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_command_with_the_keeper_state_variable_is_still_refused() {
+    let agent = AgentId::team(4).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/usr/local/bin/claude".into()],
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![(
+            crate::sandbox::KEEPER_STATE.into(),
+            "/private/tmp/state".into(),
+        )],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    assert_eq!(
+        spawn_line(&agent, &command).map_err(|error| error.0),
+        Err("terminal_command_invalid".to_owned())
+    );
+}
+
 #[test]
 fn spawn_commands_go_through_env_with_every_argument_quoted() {
     let agent = AgentId::team(4).unwrap();
