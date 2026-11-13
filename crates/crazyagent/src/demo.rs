@@ -112,6 +112,7 @@ pub(crate) fn demo_id() -> Result<ProjectId, EngineError> {
 
 /// Makes the table that marks the demo project, one row at most. Input: the engine
 /// connection. Output: done, or the database failure.
+#[cfg(unix)]
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS demo_projects (

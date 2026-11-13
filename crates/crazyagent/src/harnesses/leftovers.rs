@@ -462,6 +462,7 @@ pub(crate) struct Lineage {
     #[cfg(unix)]
     table: &'static [&'static str],
     unchecked: bool,
+    #[cfg(unix)]
     scanned: bool,
     #[cfg(unix)]
     pending: Option<Listing>,
@@ -907,8 +908,8 @@ impl Lineage {
     /// the leader's session and loses its parent stays known (SECAUDIT-SETSID-LEFTOVER). A
     /// follow that finds another caller reading skips; a failed read keeps what was known.
     /// Input: the lineage. Output: none.
+    #[cfg(unix)]
     pub(crate) fn follow(&mut self) {
-        #[cfg(unix)]
         if let Some(read) = shared_rows() {
             self.noted(
                 read.as_ref()
