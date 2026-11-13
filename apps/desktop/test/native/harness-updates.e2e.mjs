@@ -142,11 +142,10 @@ async function until(what, wanted, read, ms = STEP_MS) {
 }
 
 /** Starts the real engine and the bridge with fake harnesses in the test HOME's harness folders,
- * also first on its PATH, makes one project, serves the built app to a browser page, runs the
- * steps and stops everything. Inputs: the test context, the folder prefix, the steps, whether
- * HTTPS goes through a refusing proxy, whether the fake Codex is installed at start, and the
- * page's local answers. The steps get the bridge, the owner, the page and its helpers, the
- * fakes, the proxy and the engine. */
+ * makes one project, serves the built app to a browser page, runs the steps and stops all.
+ * Inputs: the test context, the folder prefix, the steps, whether HTTPS goes through a refusing
+ * proxy, whether the fake Codex is installed at start, and the page's local answers. The steps
+ * get the bridge, the owner, the page and its helpers, the fakes, the proxy and the engine. */
 async function onEngine(t, prefix, steps, { offline = false, codexAtStart = true, local = {} } = {}) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");

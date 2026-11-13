@@ -260,7 +260,7 @@ impl Search {
         for folder in self.places(spec) {
             let leads = spec.binaries.iter().any(|binary| {
                 let file = folder.join(binary);
-                executable_file(&file) && self.into_temp(&file)
+                executable_file(&file) && self.links_into_temp(&file)
             });
             if leads && !folders.contains(&folder) {
                 folders.push(folder);
@@ -294,7 +294,7 @@ impl Search {
 
     /// Whether a file this search found in a kept folder really lies in a temp folder it
     /// refuses ([`crate::tools::leads_into_temp`]). Input: the file. Output: the answer.
-    fn into_temp(&self, file: &Path) -> bool {
+    fn links_into_temp(&self, file: &Path) -> bool {
         !self.temps.is_empty()
             && std::fs::canonicalize(file)
                 .is_ok_and(|real| crate::tools::leads_into_temp(file, &real, &self.temps))
@@ -419,7 +419,7 @@ impl Search {
                 let candidate = directory.join(binary);
                 if found.contains(&candidate)
                     || !executable_file(&candidate)
-                    || self.into_temp(&candidate)
+                    || self.links_into_temp(&candidate)
                     || (!shims && is_shim(self.home(), &candidate))
                 {
                     continue;
