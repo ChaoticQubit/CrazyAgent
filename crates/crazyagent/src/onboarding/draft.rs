@@ -784,10 +784,24 @@ fn first_paragraph(overview: &str) -> String {
     String::new()
 }
 
+/// Whether every code fence `text` opens is closed again, counting the lines that start
+/// with a fence. An answer cut to its last part, or one that sent a cut json block again,
+/// leaves one open, and such text is no overview (DEC-160). Input: the text. Output: the
+/// answer.
+pub(crate) fn fences_closed(text: &str) -> bool {
+    let fences = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count();
+    assert!(fences <= text.len() / 3);
+    fences % 2 == 0
+}
+
 /// Splits the agent's answer into its overview and the draft fields of its
 /// last fenced json block. A missing or unreadable block leaves the fields
 /// empty; `about` then falls back to the overview's first paragraph. Overview lines,
-/// entries and an `about` naming a path that looks like it holds a secret are dropped.
+/// entries and an `about` naming a path that looks like it holds a secret are dropped,
+/// and an overview that leaves a code fence open is no overview.
 #[cfg(unix)]
 pub(crate) fn parse_answer(text: &str) -> Answer {
     let text = clip(text, OVERVIEW_BYTES_MAX * 2);
@@ -807,6 +821,11 @@ pub(crate) fn parse_answer(text: &str) -> Answer {
     let overview = names::without_secret_paths(clip(overview, OVERVIEW_BYTES_MAX))
         .trim()
         .to_owned();
+    let overview = if fences_closed(&overview) {
+        overview
+    } else {
+        String::new()
+    };
     let clean = |list: &[String]| -> Vec<String> {
         let mut cleaned = Vec::new();
         for value in list.iter().take(FACTS_MAX) {
