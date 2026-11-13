@@ -1475,7 +1475,8 @@ fn with_updates_off_a_harness_that_cant_run_still_reads_cant_run_and_no_version_
 
 /// v241 HR-L1: a harness the engine lists as Can't run reads Can't run with the engine's line
 /// and Try again before its versions arrive, and once a Node.js install the page waited on
-/// settles, the page reads the catalog again too, so its status and the Home count follow.
+/// settles and the read no longer needs Node, the page reads the catalog again too, so its
+/// status and the Home count follow.
 #[test]
 fn a_harness_the_catalog_lists_cant_run_shows_its_line_and_node_settling_reads_the_catalog_again() {
     let mut found = found();
@@ -1513,20 +1514,77 @@ fn a_harness_the_catalog_lists_cant_run_shows_its_line_and_node_settling_reads_t
     }));
     let calls = sent(&mut shell.ctx);
     assert!(
-        calls.contains(&Sent::Catalog),
-        "once Node settles the catalog is read again: {calls:?}"
-    );
-    assert!(
         calls.contains(&Sent::Versions("codex".into(), false)),
         "{calls:?}"
     );
     deliver(&mut shell, codex_runs(Some("0.167.1")));
+    let calls = sent(&mut shell.ctx);
+    assert!(
+        calls.contains(&Sent::Catalog),
+        "the read that no longer needs Node reads the catalog again: {calls:?}"
+    );
     let row = table_row(&frame(&mut shell), "Codex");
     assert!(
         row.contains("Ready"),
         "a fresh read that runs wins over the catalog's older word: {row}"
     );
     assert!(!row.contains("Can't run"), "{row}");
+}
+
+/// v241 leader 20:31 fix 2: with Node already settled, a later read that no longer needs Node
+/// on a row the catalog lists as Can't run reads the catalog again at once, so a harness the
+/// engine holds as Limited shows Can't start, never Ready; a clean read of a row the catalog
+/// no longer lists as Can't run reads nothing more.
+#[test]
+fn a_read_that_clears_a_harness_needs_reads_the_catalog_again_so_its_real_state_shows() {
+    let mut found = found();
+    let codex = found
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == "codex")
+        .unwrap();
+    codex.status = HarnessStatus::CantRun {
+        reason: NEEDS_LINE.into(),
+    };
+    codex.status_label = codex.status.label();
+    let mut shell = on(&found, "codex");
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    sent(&mut shell.ctx);
+    shell.arrive(setup_node(DependencyState::Found {
+        version: Version::parse("22.11.0").unwrap(),
+    }));
+    sent(&mut shell.ctx);
+    shell.arrive(arrival(SettingsEvent::Harnesses(Ok(found.entries.clone()))));
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    assert!(
+        !sent(&mut shell.ctx).contains(&Sent::Catalog),
+        "a read that still needs Node agrees with the catalog"
+    );
+
+    deliver(&mut shell, codex_runs(Some("0.167.1")));
+    let calls = sent(&mut shell.ctx);
+    assert!(
+        calls.contains(&Sent::Catalog),
+        "the read that no longer needs Node reads the catalog again: {calls:?}"
+    );
+    let mut limited = found.entries.clone();
+    let codex = limited
+        .iter_mut()
+        .find(|entry| entry.id == "codex")
+        .unwrap();
+    codex.status = HarnessStatus::Limited {
+        reason: "installed, but CrazyAgent cannot start it yet".into(),
+    };
+    codex.status_label = codex.status.label();
+    shell.arrive(arrival(SettingsEvent::Harnesses(Ok(limited))));
+    let row = table_row(&frame(&mut shell), "Codex");
+    assert!(row.contains("Can't start"), "{row}");
+    assert!(!row.contains("Ready"), "{row}");
+    deliver(&mut shell, codex_runs(Some("0.167.1")));
+    assert!(
+        !sent(&mut shell.ctx).contains(&Sent::Catalog),
+        "a clean read the catalog agrees with reads nothing more"
+    );
 }
 
 /// v241 HR-M1: while a listed harness needs Node and setup's Node row still reads Checking, the

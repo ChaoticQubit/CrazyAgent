@@ -1957,6 +1957,60 @@ fn an_npm_codex_with_no_node_the_resolver_finds_reads_needs_node_until_node_is_i
     );
 }
 
+/// v241 leader 20:31 fix 3: while a found harness still needs a program the resolver cannot
+/// find, a versions read never asks the harness for its version, so the Settings and first-run
+/// reads that wait on Node start nothing however often they come; the first read after the
+/// resolver finds the program asks once.
+#[test]
+fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_resolver_finds_it() {
+    let machine = Machine::new();
+    machine.npm("node");
+    let real = machine
+        .root
+        .path()
+        .join("node/lib/node_modules/@openai/codex/bin/codex.js");
+    executable(&real, "#!/usr/bin/env ca-version-runtime\n");
+    let codex = machine.root.path().join("node/bin/codex");
+    std::os::unix::fs::symlink(&real, &codex).unwrap();
+    let asked = machine.root.path().join("asked");
+    executable(
+        &machine.root.path().join("node/bin/ca-version-runtime"),
+        &format!(
+            "#!/bin/sh\necho asked >> {}\necho 'codex-cli 0.167.1'\n",
+            asked.display()
+        ),
+    );
+    assert!(matches!(
+        method("codex", &real, &machine.roots()),
+        Method::Npm { .. }
+    ));
+    let case = Case::new(machine, entry("codex", Some(codex)), None);
+    for _ in 0..3 {
+        let versions = case.versions(false);
+        assert_eq!(
+            versions
+                .needs
+                .as_ref()
+                .and_then(|needs| needs.program.as_deref()),
+            Some("ca-version-runtime")
+        );
+        assert_eq!(versions.installed, None);
+    }
+    assert!(
+        !asked.exists(),
+        "a harness that still needs its program is never run for its version"
+    );
+    case.machine.program("setup/bin/ca-version-runtime", 0o755);
+    let versions = case.versions(false);
+    assert_eq!(versions.needs, None);
+    assert_eq!(versions.installed.as_deref(), Some("0.167.1"));
+    assert_eq!(
+        std::fs::read_to_string(&asked).unwrap().lines().count(),
+        1,
+        "the read that finds the program asks once"
+    );
+}
+
 fn listed(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }

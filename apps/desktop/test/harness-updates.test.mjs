@@ -341,6 +341,18 @@ test("a harness the engine lists as Can't run is grouped under Can't run, never 
   assert.doesNotMatch(runs, /Can't run|Try again/);
 });
 
+test("a read that stops needing a program on a row the catalog lists as Can't run reads the catalog again, so a Limited harness shows Limited, and a read that agrees with the catalog reads nothing more", () => {
+  const blocked = entry("codex", "Codex", { kind: "cant_run", reason: NEEDS_LINE });
+  const runs = { ...codexNeeds, needs: null, installed: "0.167.1" };
+  assert.equal(view.catalogReadAgain(blocked, runs), true, "the settle that clears needs reads the catalog again");
+  assert.equal(view.catalogReadAgain(blocked, codexNeeds), false, "a row that still needs its program agrees with the catalog");
+  assert.equal(view.catalogReadAgain(limited("codex", "Codex"), runs), false, "once the catalog lists it Limited, a clean read reads nothing more");
+  assert.equal(view.catalogReadAgain(ready("codex", "Codex"), runs), false);
+  assert.equal(view.catalogReadAgain(ready("codex", "Codex"), codexNeeds), true, "a row the catalog lists Ready that now needs a program reads the catalog again");
+  assert.equal(view.catalogReadAgain(blocked, { ...runs, running: true }), false, "an update that runs is followed first");
+  assert.equal(view.catalogReadAgain(missing("codex", "Codex"), codexNeeds), false, "a harness that is not installed never moves on a needs read");
+});
+
 test("a harness that is not installed never reads Can't run", () => {
   const html = row({ entry: missing("codex", "Codex"), versions: { ...codexNeeds, install: "/opt/homebrew/bin/npm install -g @openai/codex" }, mode: "check_and_update", onRetry: quiet });
   assert.match(html, />Not installed</);
