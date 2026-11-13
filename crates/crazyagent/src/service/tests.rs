@@ -808,6 +808,51 @@ fn an_appimage_persisted_tmux_is_found_beside_the_engine_not_refused() {
     assert_eq!(tmux.entry, app.join("crazyagent-tmux"));
 }
 
+/// The copy a 2.4.0 AppImage kept in `<data root>/bin`, a private folder (700) holding the
+/// release files and a stranger file. Input: the layout. Output: the old engine executable.
+#[cfg(unix)]
+fn old_copy(layout: &Layout) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let old = layout.root().join("bin");
+    let engine = bundle(&old);
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o700)).unwrap();
+    engine
+}
+
+/// rv-code F1: retiring removes files only from a `<data root>/bin` that is a real folder,
+/// not a link, owned by this user and private (700), as 2.4.0 made it; through a link, or
+/// in a folder others can read, a release-named file stays, wherever it sits.
+#[cfg(unix)]
+#[test]
+fn retiring_never_follows_a_linked_or_shared_old_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = layout.root().join("bin");
+    let elsewhere = bundle(&temp.path().join("elsewhere"));
+    std::os::unix::fs::symlink(elsewhere.parent().unwrap(), &old).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    retire_old_copies_with(&layout, &installed, None);
+    assert!(elsewhere.is_file(), "a file outside the data root stays");
+    assert!(
+        std::fs::symlink_metadata(&old)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    std::fs::remove_file(&old).unwrap();
+    let shared = bundle(&old);
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+    retire_old_copies_with(&layout, &installed, None);
+    assert!(
+        shared.is_file(),
+        "a folder that is not private is left alone"
+    );
+}
+
 /// Leader 20:15: the first start after the move retires the old `<data root>/bin` copy: the
 /// command line link that named it names the new copy, every release file there is removed,
 /// a file CrazyAgent did not put there stays, and the folder goes once it is empty.
@@ -820,7 +865,7 @@ fn a_first_start_retires_the_old_appimage_copy_and_repoints_the_command_line_lin
     let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
     layout.prepare().unwrap();
     let old = layout.root().join("bin");
-    bundle(&old);
+    old_copy(&layout);
     let cli = temp.path().join("home").join(".local").join("bin");
     std::fs::create_dir_all(&cli).unwrap();
     std::os::unix::fs::symlink(old.join("crazyagent"), cli.join("crazyagent")).unwrap();
@@ -858,7 +903,7 @@ fn keeping_the_engine_leaves_the_old_copy_a_login_service_may_still_name() {
     let bundled = bundle(&mount.join("usr").join("bin"));
     let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
     layout.prepare().unwrap();
-    let old = bundle(&layout.root().join("bin"));
+    let old = old_copy(&layout);
     let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
     assert_ne!(installed, old);
     assert!(
@@ -880,7 +925,7 @@ fn retiring_the_old_appimage_copy_leaves_a_link_to_another_engine_alone() {
     let bundled = bundle(&mount.join("usr").join("bin"));
     let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
     layout.prepare().unwrap();
-    bundle(&layout.root().join("bin"));
+    old_copy(&layout);
     let other = bundle(&temp.path().join("other"));
     let cli = temp.path().join("home").join(".local").join("bin");
     std::fs::create_dir_all(&cli).unwrap();
