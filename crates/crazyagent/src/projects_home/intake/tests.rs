@@ -11,7 +11,14 @@ fn a_move_deletes_only_the_source_entries_still_as_its_check_saw_them() {
     fs::write(source.join("sub/deep/c.txt"), "c\n").unwrap();
     std::os::unix::fs::symlink("b.txt", source.join("sub/link")).unwrap();
     let landed = base.join("landed");
-    let verified = copy_into(&source, &landed, Copying::Exact, COPY_BOUNDS).unwrap();
+    let verified = copy_into(
+        &source,
+        &landed,
+        Copying::Exact,
+        COPY_BOUNDS,
+        &Tally::default(),
+    )
+    .unwrap();
     fs::write(source.join("sub/synced.txt"), "from another Mac\n").unwrap();
     fs::write(source.join("a.txt"), "A\n").unwrap();
 
@@ -66,7 +73,14 @@ fn a_move_keeps_a_source_file_rewritten_with_the_same_size_and_modify_time() {
     let long_ago = SystemTime::now() - Duration::from_secs(3600);
     set_modified(&source.join("old.txt"), long_ago);
     let landed = base.join("landed");
-    let verified = copy_into(&source, &landed, Copying::Exact, COPY_BOUNDS).unwrap();
+    let verified = copy_into(
+        &source,
+        &landed,
+        Copying::Exact,
+        COPY_BOUNDS,
+        &Tally::default(),
+    )
+    .unwrap();
 
     let checked = fs::metadata(source.join("a.txt")).unwrap();
     fs::write(source.join("a.txt"), "A\n").unwrap();
