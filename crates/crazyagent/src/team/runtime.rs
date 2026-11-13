@@ -13368,6 +13368,16 @@ pub fn agent_teammates_server_pid(state: &Path, id: i64) -> PathBuf {
         .join(format!("agent-{id}-teammates-server.pid"))
 }
 
+/// Where the engine keeps the deadline a native-mode lead's own and teammates' tmux servers
+/// end at (FBTMUX-P1-R1-L1), beside the profiles no agent writes: each renewal pass moves
+/// it ahead and each server's keeper, outside the sandboxes, reads it. Inputs: the team
+/// state folder and the lead's id. Output: `<state>/profiles/agent-<id>-servers.deadline`.
+pub fn agent_servers_deadline(state: &Path, id: i64) -> PathBuf {
+    state
+        .join("profiles")
+        .join(format!("agent-{id}-servers.deadline"))
+}
+
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,
 /// pool assignment read live from the engine's settings files on every tick.
 /// Takes the runtime folder, both settings files, the launch executables by harness, the
