@@ -33,6 +33,8 @@ pub const MODEL_CHOICE_PROTOCOL_CODES: &[&str] = &[
     "model_choice_pool_needed",
     "model_choice_pool_unknown",
     "model_choice_project_unknown",
+    "model_choice_provider_needed",
+    "model_choice_provider_unknown",
     "model_choice_reply_bounds",
     "model_choice_request_bounds",
     "model_choice_request_invalid",

@@ -42,6 +42,8 @@ pub const MODEL_CHOICE_CODES: &[&str] = &[
     "model_choice_not_supported",
     "model_choice_custom_full",
     "model_choice_custom_not_pending",
+    "model_choice_provider_needed",
+    "model_choice_provider_unknown",
     "model_choice_unavailable",
 ];
 
@@ -210,30 +212,39 @@ pub struct ModelCatalog {
     pub providers: BTreeMap<String, String>,
 }
 
-/// The providers an RCLI catalog id may name: the keyed account kinds that serve a listed
-/// id. URL and Ollama accounts serve only their own model, so none is listed for them.
-pub const RCLI_PROVIDERS: &[&str] = &["anthropic", "openai", "openrouter"];
-
 /// The providers an RCLI catalog id or an owner's RCLI id may name: every keyed provider
 /// RCLI runs a chosen model on, as the account catalog defines them (DEC-150 addendum 9e).
 /// Output: the RCLI provider ids, distinct, in account catalog order.
 pub fn rcli_providers() -> Vec<&'static str> {
-    Vec::new()
+    crate::accounts::rcli_keyed_providers()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }
 
 /// Lists the providers the owner picks one of when adding a model id to a harness: every
 /// keyed RCLI provider with its account screen name for RCLI, none for a harness whose
 /// account decides its provider. Input: the catalog harness id. Output: the choices.
 pub fn provider_choices(harness: &str) -> Vec<ProviderChoice> {
-    let _ = harness;
-    Vec::new()
+    if harness != "rcli" {
+        return Vec::new();
+    }
+    crate::accounts::rcli_keyed_providers()
+        .into_iter()
+        .map(|(id, provider)| ProviderChoice {
+            id: id.to_owned(),
+            name: crate::accounts::provider_name(provider).to_owned(),
+        })
+        .collect()
 }
 
 /// Names one RCLI provider as the account screens show it. Input: the RCLI provider id.
 /// Output: the name, none for an id that is not a keyed RCLI provider.
 pub fn rcli_provider_name(id: &str) -> Option<&'static str> {
-    let _ = id;
-    None
+    crate::accounts::rcli_keyed_providers()
+        .into_iter()
+        .find(|(keyed, _)| *keyed == id)
+        .map(|(_, provider)| crate::accounts::provider_name(provider))
 }
 
 /// Names the provider RCLI's shipped catalog lists for one model id (DEC-150 M-5). Inputs:
@@ -242,9 +253,8 @@ pub fn rcli_provider_name(id: &str) -> Option<&'static str> {
 pub fn catalog_provider(harness: &str, model: &str) -> Option<&'static str> {
     let catalog = shipped(harness)?;
     let named = catalog.providers.get(model)?;
-    RCLI_PROVIDERS
-        .iter()
-        .copied()
+    rcli_providers()
+        .into_iter()
         .find(|provider| *provider == named.as_str())
 }
 
@@ -258,21 +268,17 @@ pub fn rcli_serves(
     connection: &crate::config::ModelConnection,
     custom: Option<&str>,
 ) -> bool {
-    use crate::accounts::Provider;
-    let _ = custom;
     assert_eq!(connection.harness.as_str(), "rcli");
+    let keyed = crate::accounts::rcli_keyed_providers();
+    assert!(custom.is_none_or(|custom| keyed.iter().any(|(id, _)| *id == custom)));
     if connection.model.id == model {
         return true;
     }
-    let served = match crate::accounts::provider_of(connection) {
-        Provider::AnthropicApi => "anthropic",
-        Provider::OpenaiApi => "openai",
-        Provider::Openrouter => "openrouter",
-        Provider::Chatgpt | Provider::Claude | Provider::OpenaiCompatible | Provider::Local => {
-            return false;
-        }
+    let provider = crate::accounts::provider_of(connection);
+    let Some((served, _)) = keyed.into_iter().find(|(_, keyed)| *keyed == provider) else {
+        return false;
     };
-    catalog_provider("rcli", model) == Some(served)
+    catalog_provider("rcli", model) == Some(served) || custom == Some(served)
 }
 
 /// Lists the model ids a harness's shipped catalog offers, the candidates the store checks
@@ -329,7 +335,7 @@ pub fn shipped(name: &str) -> Option<ModelCatalog> {
 /// Reads one model catalog and checks it against the contract: a harness CrazyAgent chooses
 /// a model for in some slot, 1 to `VERSIONS_MAX` exact versions, 1 to `SOURCES_MAX` https
 /// sources, 1 to `CATALOG_MODELS_MAX` distinct ids valid for the harness, and for RCLI alone
-/// one `RCLI_PROVIDERS` entry for exactly every id. Input: the JSON bytes. Output: the
+/// one `rcli_providers` entry for exactly every id. Input: the JSON bytes. Output: the
 /// catalog, or none when it breaks the contract.
 pub(crate) fn parse_catalog(bytes: &[u8]) -> Option<ModelCatalog> {
     if bytes.len() > CATALOG_JSON_MAX {
@@ -364,7 +370,7 @@ pub(crate) fn parse_catalog(bytes: &[u8]) -> Option<ModelCatalog> {
                     catalog
                         .providers
                         .get(id)
-                        .is_some_and(|provider| RCLI_PROVIDERS.contains(&provider.as_str()))
+                        .is_some_and(|provider| rcli_providers().contains(&provider.as_str()))
                 })
         }
         _ => catalog.providers.is_empty(),

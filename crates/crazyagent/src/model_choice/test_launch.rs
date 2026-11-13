@@ -163,16 +163,54 @@ pub enum RcliEnded {
 /// else, an OpenRouter 404 included, leaves it pending with a fixed reason. Inputs: the
 /// RCLI provider id and the ending. Output: the decision and its pending reason.
 pub fn rcli_outcome(provider: &str, ended: RcliEnded) -> (Tested, Option<String>) {
-    let _ = (provider, ended);
-    (Tested::Pending, Some(String::new()))
+    use crate::rcli_host::RcliProviderFailure;
+    let name = super::rcli_provider_name(provider).expect("a keyed RCLI provider");
+    let refuses = matches!(provider, "openai" | "anthropic");
+    let decided = match ended {
+        RcliEnded::Answered => (Tested::Verified, None),
+        RcliEnded::Failed(Some(RcliProviderFailure::NotFound)) if refuses => (Tested::Failed, None),
+        RcliEnded::Failed(_) => (
+            Tested::Pending,
+            Some(format!(
+                "Not reported by {name}: the test launch ended without an answer or a refusal."
+            )),
+        ),
+        RcliEnded::TimedOut => (
+            Tested::Pending,
+            Some("The test launch timed out.".to_owned()),
+        ),
+        RcliEnded::Stopped => (
+            Tested::Pending,
+            Some("The engine stopped the test launch.".to_owned()),
+        ),
+    };
+    assert_eq!(decided.0 == Tested::Pending, decided.1.is_some());
+    assert!(
+        decided
+            .1
+            .as_ref()
+            .is_none_or(|reason| reason.len() <= REASON_BYTES_MAX)
+    );
+    decided
 }
 
 /// Words the pending reason of an RCLI test launch that started no run, by the provider
 /// the id is tested on. Inputs: the RCLI provider id and why. Output: the reason, at most
 /// `REASON_BYTES_MAX` bytes.
 pub fn rcli_not_started(provider: &str, why: NotStarted) -> String {
-    let _ = (provider, why);
-    String::new()
+    let name = super::rcli_provider_name(provider).expect("a keyed RCLI provider");
+    let reason = match why {
+        NotStarted::NotInstalled => "RCLI is not installed, so the id was not tested.".to_owned(),
+        NotStarted::NoAccount => format!("No set-up {name} account in this pool."),
+        NotStarted::Paused => {
+            format!("Every {name} account in this pool is paused after a limit.")
+        }
+        NotStarted::UrlAccount | NotStarted::CouldNotStart => {
+            format!("The RCLI test launch on {name} could not start.")
+        }
+    };
+    assert!(!reason.is_empty() && reason.len() <= REASON_BYTES_MAX);
+    reason
 }
 
 /// One test launch to run: the engine's data folder, the two settings files, the

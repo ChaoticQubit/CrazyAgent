@@ -250,7 +250,30 @@ pub fn catalog() -> Vec<ProviderEntry> {
 /// RCLI provider id its account saves. A subscription provider's API key saves one of these
 /// ids. Output: (id, provider) pairs in catalog order, every keyed RCLI id exactly once.
 pub fn rcli_keyed_providers() -> Vec<(&'static str, Provider)> {
-    Vec::new()
+    let keyed = |provider: Provider, method: SignInMethod| {
+        spec(provider, method)
+            .filter(|spec| {
+                spec.harness == "rcli"
+                    && spec.key == Field::Required
+                    && spec.url == Field::Hidden
+                    && spec.url_preset.is_some()
+            })
+            .map(|spec| spec.author)
+    };
+    let pairs: Vec<(&'static str, Provider)> = PROVIDERS
+        .iter()
+        .filter(|&&provider| methods(provider) == [SignInMethod::ApiKey])
+        .filter_map(|&provider| keyed(provider, SignInMethod::ApiKey).map(|id| (id, provider)))
+        .collect();
+    for &provider in &PROVIDERS {
+        for &method in methods(provider) {
+            if let Some(id) = keyed(provider, method) {
+                assert_eq!(pairs.iter().filter(|(named, _)| *named == id).count(), 1);
+            }
+        }
+    }
+    assert!(!pairs.is_empty() && pairs.len() <= PROVIDERS.len());
+    pairs
 }
 
 /// Checks one owner-entered account name: trimmed, bounded and free of control or

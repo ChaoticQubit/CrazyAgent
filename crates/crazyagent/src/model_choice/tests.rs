@@ -787,11 +787,11 @@ fn each_launch_harness_ships_a_checked_model_catalog() {
     let mut served = std::collections::BTreeSet::new();
     for id in &rcli.models {
         let provider = catalog_provider("rcli", id).unwrap_or_else(|| panic!("{id}"));
-        assert!(RCLI_PROVIDERS.contains(&provider), "{id}");
+        assert!(rcli_providers().contains(&provider), "{id}");
         assert_eq!(provider == "openrouter", id.contains('/'), "{id}");
         served.insert(provider);
     }
-    assert_eq!(served.len(), RCLI_PROVIDERS.len());
+    assert_eq!(served.len(), rcli_providers().len());
     assert_eq!(unqualified("rcli", Some("3.0.4")), None);
     assert!(unqualified("rcli", Some("3.0.5")).is_some());
     assert!(super::catalog("no-such-harness").is_empty());
