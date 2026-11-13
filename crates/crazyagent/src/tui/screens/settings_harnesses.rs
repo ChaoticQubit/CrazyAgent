@@ -1,6 +1,7 @@
 use super::app_setup::{setup_plain, setup_reason};
 use super::harness_setup::{
     CANT_RUN, INSTALL_NODE, INSTALLING_NODE, NodeOffer, TRY_AGAIN, node_needed, node_offer,
+    node_reads_again,
 };
 use super::project_markdown::sanitize;
 use super::settings::{draw_page, step};
@@ -618,6 +619,17 @@ impl Harnesses {
         send(ctx, SettingsJob::AppSetup(AppSetupJob::Status));
     }
 
+    /// Reads setup's Node row again with a fresh poll budget, as r does, when a listed harness
+    /// needs Node. Input: the context. Output: none.
+    fn reread_node(&mut self, ctx: &mut Ctx) {
+        if !self.versions.values().any(node_needed) {
+            return;
+        }
+        self.node_polls = 0;
+        self.read_setup(ctx);
+        assert!(self.setup_asked);
+    }
+
     fn install_node(&mut self, ctx: &mut Ctx) {
         let wanted = matches!(
             self.node_offer(),
@@ -637,10 +649,11 @@ impl Harnesses {
         );
     }
 
-    /// Takes setup's Node row; once a Node.js install the page waited on settles, the harnesses
-    /// that needed Node and the catalog are read again, so the rows, the catalog's Can't run
-    /// and the Home count follow. A failed read keeps what the page knew and the next refresh
-    /// reads again. Inputs: the read and the context. Output: none.
+    /// Takes setup's Node row; while it is settled and a harness still needs Node, or once a
+    /// Node.js install the page waited on settles, the harnesses that needed Node are read
+    /// again, and the catalog once on settling, so the rows, the catalog's Can't run and the Home
+    /// count follow. A failed read keeps what the page knew and the next refresh reads again.
+    /// Inputs: the read and the context. Output: none.
     fn arrive_setup(&mut self, result: &Result<SetupStatus, String>, ctx: &mut Ctx) {
         if !std::mem::take(&mut self.setup_asked) {
             return;
@@ -649,6 +662,10 @@ impl Harnesses {
             return;
         };
         let waited = self.node_offer() == NodeOffer::Installing;
+        let was_settled = matches!(
+            self.node,
+            Some(DependencyState::Found { .. } | DependencyState::Installed { .. })
+        );
         self.setup_busy = status.running;
         self.node = status
             .dependencies
@@ -659,9 +676,12 @@ impl Harnesses {
             self.node,
             Some(DependencyState::Found { .. } | DependencyState::Installed { .. })
         );
-        if waited && settled {
+        let needed = self.versions.values().any(node_needed);
+        if settled && (waited || needed) {
             self.read_where(|_, versions| node_needed(versions), ctx);
-            self.reload(ctx);
+            if !was_settled {
+                self.reload(ctx);
+            }
         }
     }
 
@@ -1464,6 +1484,7 @@ impl Screen for Harnesses {
                     |entry, versions| needs_line(entry, Some(versions)).is_some(),
                     ctx,
                 );
+                self.reread_node(ctx);
             }
             Key::Char('n') => self.install_node(ctx),
             Key::Char('c') => self.check(ctx),
@@ -1562,7 +1583,8 @@ impl Screen for Harnesses {
             send(ctx, SettingsJob::HarnessUpdateSettings);
         }
         self.poll(ctx);
-        let waiting = self.node_offer() == NodeOffer::Installing;
+        let needed = self.versions.values().any(node_needed);
+        let waiting = node_reads_again(needed, self.node.as_ref(), self.setup_busy);
         if waiting && !self.setup_asked && self.node_polls < NODE_POLLS_MAX {
             self.node_polls += 1;
             self.read_setup(ctx);

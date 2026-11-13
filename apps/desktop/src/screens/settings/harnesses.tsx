@@ -8,7 +8,7 @@ import {
 import { installDependency, loadSetupStatus } from "../../api-intake";
 import type { DependencyState, SetupStatus } from "../../engine-client";
 import { displayText } from "../conversation";
-import { HARNESS_WORDS, nodeNeeded, nodeOffer, rowBadge, type NodeOffer } from "../first-run/harnesses";
+import { HARNESS_WORDS, nodeNeeded, nodeOffer, nodeReadsAgain, rowBadge, type NodeOffer } from "../first-run/harnesses";
 import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode, pathCopy, pickHarnessFile, LOOKED_MAX, type ChoosableHarness, type Found } from "../../api-harness-path";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
@@ -96,6 +96,15 @@ export function openLook(installed: boolean, mode: UpdateMode, onOpen: boolean):
 export function pageNode(ids: readonly string[], reads: Reads, setup: SetupStatus | null): NodeOffer {
   const node = setup?.dependencies.find((item) => item.name === "node")?.state ?? null;
   return nodeOffer(nodeNeeded(ids.map((id) => reads[id] ?? null)), node, setup?.running ?? false);
+}
+
+/** Whether the page reads setup again for Node, the first-run step's rule (`nodeReadsAgain`):
+ * while a listed harness needs Node and the Node row is checking or installing, or settled while
+ * a read still needs Node. Inputs: the listed ids, the reads by id and setup's status, null while
+ * unread. Output: the answer; the caller bounds it with its poll cap. */
+export function pageNodeReads(ids: readonly string[], reads: Reads, setup: SetupStatus | null): boolean {
+  const node = setup?.dependencies.find((item) => item.name === "node")?.state ?? null;
+  return nodeReadsAgain(nodeNeeded(ids.map((id) => reads[id] ?? null)), node, setup?.running ?? false);
 }
 
 function statusWord(entry: HarnessEntry): string {
@@ -319,8 +328,9 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function HarnessRow({ entry, settings, again, onCatalog, onRead }: {
+function HarnessRow({ entry, settings, again, onCatalog, onRead, onNodeAgain }: {
   entry: HarnessEntry; settings: UpdateSettings | null; again: number; onCatalog: () => void; onRead: (id: string, versions: HarnessVersions | null) => void;
+  onNodeAgain: () => void;
 }) {
   const [versions, setVersions] = useState<HarnessVersions | null>(null);
   const [problem, setProblem] = useState<string>();
@@ -353,7 +363,9 @@ function HarnessRow({ entry, settings, again, onCatalog, onRead }: {
   };
   const take = (read: Result<HarnessVersions>) => {
     show(read);
-    if (alive.current && read.kind === "ok" && read.value.running) void follow();
+    if (!alive.current || read.kind !== "ok") return;
+    if (read.value.running) { void follow(); return; }
+    if (installed && (entry.status.kind === "cant_run") !== Boolean(read.value.needs)) onCatalog();
   };
   useEffect(() => {
     if (!known) return;
@@ -377,7 +389,7 @@ function HarnessRow({ entry, settings, again, onCatalog, onRead }: {
     setChecking(true);
     take(await harnessVersions(entry.id, false));
     setChecking(false);
-    if (alive.current) onCatalog();
+    if (alive.current) onNodeAgain();
   };
   const ask = async (job: HarnessJob) => {
     setChecking(true);
@@ -421,10 +433,10 @@ function UpdateSettingsRows({ settings, onSaved }: { settings: UpdateSettings; o
  * needs Node. Inputs: the catalog read, when it was checked, the recheck action, the settings and
  * their save and read failure, the Node.js offer with its install, and the rows' re-read count and
  * read report. Output: the page. */
-export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, onSettings, settingsError, node = NO_NODE, nodeBusy = false, nodeProblem, onInstallNode, again = 0, onRead }: {
+export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, onSettings, settingsError, node = NO_NODE, nodeBusy = false, nodeProblem, onInstallNode, again = 0, onRead, onNodeAgain }: {
   catalog: Loaded<HarnessEntry[]>; checkedAt?: string; onCheck: () => void; settings?: UpdateSettings | null; onSettings?: (settings: UpdateSettings) => void;
   settingsError?: { message: string; onRetry: () => void }; node?: NodeOffer; nodeBusy?: boolean; nodeProblem?: string; onInstallNode?: () => void;
-  again?: number; onRead?: (id: string, versions: HarnessVersions | null) => void;
+  again?: number; onRead?: (id: string, versions: HarnessVersions | null) => void; onNodeAgain?: () => void;
 }) {
   return <div className="stack">
     <div className="settings-top">
@@ -444,22 +456,25 @@ export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, on
       : catalog.kind === "not_ready" ? <NotReady what="The harness list" />
       : catalog.kind === "error" ? <LoadError message="Couldn't check harnesses." onRetry={onCheck} />
       : harnessGroups(catalog.value).map((group) => <SettingSection key={group.title} title={`${group.title} (${group.entries.length})`}>
-        {group.entries.map((entry) => <HarnessRow key={entry.id} entry={entry} settings={settings} again={again} onCatalog={onCheck} onRead={onRead ?? ignoreRead} />)}
+        {group.entries.map((entry) => <HarnessRow key={entry.id} entry={entry} settings={settings} again={again} onCatalog={onCheck} onRead={onRead ?? ignoreRead} onNodeAgain={onNodeAgain ?? ignoreAgain} />)}
       </SettingSection>)}
   </div>;
 }
 
 function ignoreRead(): void {}
 
+function ignoreAgain(): void {}
+
 /** The page's one Node.js install, the first-run step's: reads setup's Node row once a listed
- * harness needs Node, installs Node alone through setup, reads setup again every
- * `UPDATE_POLL_MS` while Node installs, at most `UPDATE_POLLS_MAX` reads, and once Node settles
- * bumps the re-read count so the rows that needed it read again. Input: the catalog read.
- * Output: the offer, its state and actions, the re-read count and the rows' read report. */
+ * harness needs Node and again on Try again or Check again, installs Node alone through setup,
+ * reads setup again every `UPDATE_POLL_MS` while `pageNodeReads` says so, at most
+ * `UPDATE_POLLS_MAX` reads, and while Node is settled bumps the re-read count so the rows that
+ * needed it read again. Input: the catalog read. Output: the offer, its state and actions, the
+ * re-read count, the rows' read report and the setup re-read. */
 function useNodeOffer(catalog: Loaded<HarnessEntry[]>) {
   const [reads, setReads] = useState<Reads>({});
   const [setup, setSetup] = useState<SetupStatus | null>(null);
-  const [asked, setAsked] = useState(false);
+  const [asks, setAsks] = useState(0);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string>();
   const [again, setAgain] = useState(0);
@@ -472,13 +487,15 @@ function useNodeOffer(catalog: Loaded<HarnessEntry[]>) {
   const ids = catalog.kind === "ok" ? catalog.value.map((entry) => entry.id) : [];
   const needed = nodeNeeded(ids.map((id) => reads[id] ?? null));
   const node = pageNode(ids, reads, setup);
+  const waits = pageNodeReads(ids, reads, setup);
   useEffect(() => {
-    if (!needed || asked) return;
-    setAsked(true);
-    void loadSetupStatus().then((read) => { if (alive.current && read.kind === "ok") setSetup(read.value); });
-  }, [needed, asked]);
+    if (!needed) return;
+    let live = true;
+    void loadSetupStatus().then((read) => { if (live && alive.current && read.kind === "ok") setSetup(read.value); });
+    return () => { live = false; };
+  }, [needed, asks]);
   useEffect(() => {
-    if (node.kind !== "installing" || polls >= UPDATE_POLLS_MAX) return;
+    if (!waits || polls >= UPDATE_POLLS_MAX) return;
     const timer = window.setTimeout(() => {
       void loadSetupStatus().then((read) => {
         if (!alive.current) return;
@@ -490,7 +507,7 @@ function useNodeOffer(catalog: Loaded<HarnessEntry[]>) {
       });
     }, UPDATE_POLL_MS);
     return () => window.clearTimeout(timer);
-  }, [node.kind, polls]);
+  }, [waits, polls]);
   const install = async () => {
     if (busy) return;
     setBusy(true);
@@ -503,7 +520,8 @@ function useNodeOffer(catalog: Loaded<HarnessEntry[]>) {
     setPolls(0);
   };
   const onRead = (id: string, versions: HarnessVersions | null) => setReads((old) => old[id] === versions ? old : { ...old, [id]: versions });
-  return { node, busy, problem, again, onRead, install };
+  const reread = () => { setPolls(0); setAsks((count) => count + 1); };
+  return { node, busy, problem, again, onRead, install, reread };
 }
 
 /** Settings, Harnesses: has the engine look for harnesses again on every visit and on Check
@@ -516,9 +534,8 @@ export function Harnesses() {
   const [checkedAt, setCheckedAt] = useState<string>();
   const offer = useNodeOffer(catalog);
   useEffect(() => { if (loaded.kind === "ok") setSettings(loaded.value); }, [loaded]);
-  useEffect(() => { if (offer.again > 0) reload(); }, [offer.again]);
   const settingsError = loaded.kind === "error" ? { message: failureCopy(loaded) ?? updateCopy("harness_update_settings_unreadable"), onRetry: reloadSettings } : undefined;
   return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)} settings={settings} onSettings={setSettings} settingsError={settingsError}
-    node={offer.node} nodeBusy={offer.busy} nodeProblem={offer.problem} onInstallNode={() => void offer.install()} again={offer.again} onRead={offer.onRead}
-    onCheck={() => { reload(); setCheckedAt(`at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`); }} />;
+    node={offer.node} nodeBusy={offer.busy} nodeProblem={offer.problem} onInstallNode={() => void offer.install()} again={offer.again} onRead={offer.onRead} onNodeAgain={offer.reread}
+    onCheck={() => { reload(); offer.reread(); setCheckedAt(`at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`); }} />;
 }
