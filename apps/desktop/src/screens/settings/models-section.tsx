@@ -185,7 +185,10 @@ export function OwnIdsView({ candidates, field, busy, note, onField, onAdd, onRe
   testable: boolean; testing?: string | null; onTest?: (id: string) => void;
 }) {
   const own = candidates.filter((candidate) => candidate.origin !== "catalog");
-  return <SettingSection title="Your model ids" about="Add a model id this harness's list doesn't have yet. It waits for a test launch and can be chosen once that passes.">
+  const about = testable
+    ? "Add a model id this harness's list doesn't have yet. It waits for a test launch and can be chosen once that passes."
+    : "The model ids you added to this harness.";
+  return <SettingSection title="Your model ids" about={about}>
     {testable
       ? <SettingLine label="Model id" htmlFor="models-add-id" help="Letters, digits and - _ . : / @ +, starting with a letter or digit.">
         <span className="models-add">
