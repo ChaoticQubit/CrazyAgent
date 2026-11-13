@@ -1695,6 +1695,30 @@ pub(in crate::tui) mod tests {
         assert_eq!(missing_tools(&status), Vec::<String>::new());
     }
 
+    /// DEC-162: a tool found and not used keeps Get set up open, since agents cannot use it,
+    /// and Home names it as not used, never as missing.
+    #[test]
+    fn a_tool_found_and_not_used_keeps_get_set_up_and_reads_not_used_not_missing() {
+        let mut status = tools(&[Dependency::Uv]);
+        status.dependencies[2].state = DependencyState::Refused {
+            line: "graphify can't start".into(),
+            file: "/h/g/bin/python3".into(),
+            part: None,
+            fix: None,
+            fix_failed: None,
+        };
+        assert_eq!(missing_tools(&status), ["uv", "Graphify"]);
+        assert_eq!(
+            tools_line(&status),
+            "Missing: uv. Found, not used: Graphify."
+        );
+        status.dependencies[1].state = DependencyState::Found {
+            version: Version::parse("0.13.5").unwrap(),
+        };
+        assert_eq!(tools_line(&status), "Found, not used: Graphify.");
+        assert_eq!(tools_line(&tools(&[])), "");
+    }
+
     #[test]
     fn node_is_not_a_tool_home_waits_for_as_only_npm_harnesses_need_it() {
         assert_eq!(
