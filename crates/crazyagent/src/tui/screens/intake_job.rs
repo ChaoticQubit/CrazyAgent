@@ -2,6 +2,9 @@ use super::intake::copy;
 use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobState, JobView, Phase};
 
+#[cfg(test)]
+mod tests;
+
 /// What the TUI offers for the engine's intake job: stop it, start it again, answer its soft
 /// refusal in Add folder, or forget it once it ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
