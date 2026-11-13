@@ -17,14 +17,12 @@ async function openPending() {
   await click(`${PANEL} .notice-filters label:has(input[value="pending"])`);
 }
 
-/** Reads the bell panel's Account sign-in row, where every account's sign-in folds into one
- * row. Output: its text, or "" when the panel shows none. */
-function signInRow() {
-  return browser.execute((panel) => {
-    const row = [...document.querySelectorAll(`${panel} li.notice-row`)]
-      .find((node) => node.querySelector(".notice-kind")?.innerText.trim() === "Account sign-in");
-    return row ? row.innerText.replace(/\s+/gu, " ").trim() : "";
-  }, PANEL);
+/** Reads every Account sign-in row the bell panel shows, where every account's sign-in should
+ * fold into one row. Output: each row's text, empty when the panel shows none. */
+function signInRows() {
+  return browser.execute((panel) => [...document.querySelectorAll(`${panel} li.notice-row`)]
+    .filter((node) => node.querySelector(".notice-kind")?.innerText.trim() === "Account sign-in")
+    .map((node) => node.innerText.replace(/\s+/gu, " ").trim()), PANEL);
 }
 
 export const checks = [{
@@ -42,9 +40,9 @@ export const checks = [{
       await kit.until(async () => (await signIns()).some((item) => item.target?.account === account.id), kit.UI_MS,
         `the engine never held a sign-in for ${account.name}`);
       await openPending();
-      await kit.until(async () => (await signInRow()) !== "", kit.UI_MS, "the bell never showed an Account sign-in row");
+      await kit.until(async () => (await signInRows()).length > 0, kit.UI_MS, "the bell never showed an Account sign-in row");
       await kit.screen();
-      return signInRowsVerdict({ name: account.name, account: account.id, items: await signIns(), row: await signInRow() });
+      return signInRowsVerdict({ name: account.name, account: account.id, items: await signIns(), rows: await signInRows() });
     }, async () => {
       if (await shown(PANEL)) await browser.keys("Escape");
       await closeDialog(kit);
