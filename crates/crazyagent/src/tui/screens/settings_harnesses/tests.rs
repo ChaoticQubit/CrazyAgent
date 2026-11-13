@@ -1127,6 +1127,32 @@ fn codex_missing() -> Found {
 }
 
 #[test]
+fn where_it_looked_shows_a_temp_folder_it_passed_over_with_the_whole_reason() {
+    use crate::harnesses::finding::{Found as Look, TEMP_SKIPPED};
+    let missing = codex_missing();
+    let mut shell = on(&missing, "codex");
+    shell.key(Key::Char('w'));
+    shell.key(Key::Char('w'));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Find("codex".into())]);
+    let looked = vec![
+        format!("/private/tmp/cad-bin{TEMP_SKIPPED}"),
+        "/opt/homebrew/bin".to_owned(),
+    ];
+    shell.arrive(arrival(SettingsEvent::HarnessFound(
+        "codex".into(),
+        Ok(Look::Missing { looked }),
+    )));
+    let shown = frame(&mut shell);
+    assert!(shown.contains("/private/tmp/cad-bin"), "{shown}");
+    assert!(
+        shown.contains("(skipped: in a temp folder or links to one,"),
+        "{shown}"
+    );
+    assert!(shown.contains("users can change)"), "{shown}");
+    assert!(shown.contains("/opt/homebrew/bin"), "{shown}");
+}
+
+#[test]
 fn w_lists_where_the_engine_looked_for_a_missing_codex_and_f_chooses_its_file_by_path() {
     use crate::harnesses::finding::Found as Look;
     let missing = codex_missing();
