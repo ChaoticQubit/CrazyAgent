@@ -530,6 +530,14 @@ test("the master's harness that is not installed gets the design's line", () => 
   assert.equal(research.masterMissingLine(null, "codex"), null);
 });
 
+test("the master's harness the engine lists as Can't run gets the words New Project and the team pickers use", () => {
+  const entry = (id, name, status, executable) => ({ id, name, status, status_label: "", executable, headless: "", tools: { kind: "switchable" }, model_selection: false, account_kinds: [], aliases: [] });
+  const reason = "codex needs node, which is missing. Install Node.js from Settings > Harnesses. Then try again.";
+  const catalog = [entry("codex", "Codex", { kind: "cant_run", reason }, "/opt/homebrew/bin/codex"), entry("claude", "Claude Code", { kind: "ready" }, "/opt/homebrew/bin/claude")];
+  assert.equal(research.masterMissingLine(catalog, "codex"), "Codex can't run on this Mac. Pick another harness.");
+  assert.equal(research.masterMissingLine(catalog, "claude"), null);
+});
+
 test("only the brief offers Edit, which opens the project details it is written from", async () => {
   const context = await import("../src/screens/project/context.tsx");
   const folder = { kind: "ok", value: { project_id: "p-1", folder: "/tmp/p-1", items: [
