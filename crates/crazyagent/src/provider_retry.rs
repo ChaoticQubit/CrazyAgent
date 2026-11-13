@@ -180,15 +180,22 @@ pub fn load(connection: &Connection) -> Result<ProviderRetry, EngineError> {
 /// sets nothing, when the database has no such table or holds a choice this engine does not
 /// know, with the cause on stderr. Input: the engine database. Output: the option.
 pub fn for_launch(connection: &Connection) -> ProviderRetry {
-    let _ = connection;
-    ProviderRetry::HarnessDefault
+    load(connection).unwrap_or_else(|problem| {
+        eprintln!("provider_retry_unread cause={}", problem.0);
+        ProviderRetry::HarnessDefault
+    })
 }
 
 /// [`for_launch`] on the engine database at `database`, opened read-only for this one read.
 /// Input: the database path. Output: the option.
 pub fn for_launch_at(database: &std::path::Path) -> ProviderRetry {
-    let _ = database;
-    ProviderRetry::HarnessDefault
+    match Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Ok(connection) => for_launch(&connection),
+        Err(problem) => {
+            eprintln!("provider_retry_unread cause={problem}");
+            ProviderRetry::HarnessDefault
+        }
+    }
 }
 
 /// The owner read of the setting. Input: the open transaction. Output: the choice and every

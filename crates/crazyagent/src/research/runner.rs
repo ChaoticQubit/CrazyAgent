@@ -2221,7 +2221,6 @@ fn codex_arguments(
     account: &ResearchAccount,
     retry: crate::provider_retry::ProviderRetry,
 ) -> Result<(), RunError> {
-    let _ = retry;
     command
         .arg("exec")
         .args(["--skip-git-repo-check", "--color", "never", "--json"])
@@ -2295,6 +2294,18 @@ fn codex_arguments(
             return Err(RunError::Invalid("account does not fit Codex".into()));
         }
     }
+    let provider = match account {
+        ResearchAccount::Endpoint { .. } => {
+            crate::provider_retry::CodexProvider::Custom("crazyagent_endpoint")
+        }
+        ResearchAccount::ManagedCodex { .. } => crate::provider_retry::CodexProvider::BuiltIn,
+        ResearchAccount::AnthropicEndpoint { .. } | ResearchAccount::ManagedClaude { .. } => {
+            return Err(RunError::Invalid("account does not fit Codex".into()));
+        }
+    };
+    for setting in retry.codex_settings(provider) {
+        command.arg("-c").arg(setting);
+    }
     command.arg("-");
     Ok(())
 }
@@ -2305,8 +2316,9 @@ fn codex_arguments(
 /// either a managed config directory or a keyless Anthropic endpoint in bare
 /// mode that never reads the keychain.
 /// Takes the command, the agent home and temp dir, the tools switch, the most
-/// output tokens of each request (`None` for Claude Code's own limit) and the
-/// account. Returns an error for an account that does not fit Claude Code.
+/// output tokens of each request (`None` for Claude Code's own limit), the
+/// account and the owner's retry option (DEC-163). Returns an error for an account
+/// that does not fit Claude Code.
 fn claude_arguments(
     command: &mut Command,
     home: &Path,
@@ -2316,7 +2328,9 @@ fn claude_arguments(
     account: &ResearchAccount,
     retry: crate::provider_retry::ProviderRetry,
 ) -> Result<(), RunError> {
-    let _ = retry;
+    if let Some((name, value)) = retry.claude_env() {
+        command.env(name, value);
+    }
     let key_file = match account {
         ResearchAccount::AnthropicEndpoint {
             base_url,

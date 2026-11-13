@@ -818,6 +818,13 @@ pub(super) fn codex_configuration(
             configuration.push("model_provider=\"crazyagent\"".into());
         }
     }
+    let provider = match &request.account {
+        AccountBinding::Subscription { .. } => crate::provider_retry::CodexProvider::BuiltIn,
+        AccountBinding::ApiKey { .. } | AccountBinding::Url { .. } => {
+            crate::provider_retry::CodexProvider::Custom("crazyagent")
+        }
+    };
+    configuration.extend(request.limits.provider_retry.codex_settings(provider));
     if let Some(model) = &request.model {
         configuration.push(format!("model=\"{model}\""));
     }
@@ -957,6 +964,9 @@ fn claude_invocation(
             OsString::from("1"),
         ),
     ];
+    if let Some((name, value)) = request.limits.provider_retry.claude_env() {
+        environment.push((name, OsString::from(value)));
+    }
     if request.tools {
         environment.push(("SHELL", OsString::from("/bin/zsh")));
         environment.push((

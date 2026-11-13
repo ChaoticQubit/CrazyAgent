@@ -733,6 +733,9 @@ fn claude_environment(
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
     );
+    if let Some((name, value)) = request.limits.provider_retry.claude_env() {
+        environment.push((name.to_owned(), value.to_owned()));
+    }
     if request.tools {
         environment.push(("SHELL".to_owned(), "/bin/zsh".to_owned()));
         environment.push((
