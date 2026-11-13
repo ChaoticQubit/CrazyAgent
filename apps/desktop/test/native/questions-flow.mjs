@@ -10,7 +10,7 @@ import { INTERNALS, bridgeCall, owner, serveApp, start, stop } from "./e2e-harne
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const LIVE_MASTER = fileURLToPath(new URL("./questions-live-master.mjs", import.meta.url));
-const ROOT_PREFIX = "ca-qf-";
+const ROOT_PREFIX = "cad-qf-";
 const REPO = "qf-shop";
 const IMPORTED = "qf-imported";
 const ABOUT = "A small shop that sells house plants online.";
