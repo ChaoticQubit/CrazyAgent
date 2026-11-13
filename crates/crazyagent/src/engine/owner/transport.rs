@@ -1566,6 +1566,10 @@ impl OwnerServer {
             Arc::downgrade(&self.authority),
             upkeep_stopped,
         ));
+        self.authority
+            .intake
+            .restore(&self.engine, self.timeout)
+            .await;
         let backfill = setup::engine_root(&self.authority).ok().map(|root| {
             tokio::spawn(setup::backfill_hooks(
                 self.engine.storage.sender.clone(),

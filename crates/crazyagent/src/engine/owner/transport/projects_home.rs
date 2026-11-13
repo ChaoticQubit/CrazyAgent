@@ -339,6 +339,13 @@ pub(super) async fn serve(
             mutation: OwnerMutation::MoveProjectHome { .. }
         }
     );
+    let adding = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::AddExistingFolder { .. }
+        }
+    )
+    .then(|| id.clone());
     #[cfg(unix)]
     let mut _moved_ide = None;
     let mut after = After::default();
@@ -477,6 +484,12 @@ pub(super) async fn serve(
     if deleting && !forgotten {
         settle_delete(engine, exchange).await;
     }
+    if let Some(added) = adding {
+        settled(engine, "home_add_not_settled", |reply| {
+            Job::HomeAddSettle(added.clone(), reply)
+        })
+        .await;
+    }
     answered.map_err(|_| failure(UNKNOWN))?
 }
 
@@ -547,9 +560,10 @@ async fn plan(
         } => {
             let (source, mode, overrides): (String, AddMode, Vec<AddOverride>) =
                 (source.clone(), *mode, overrides.clone());
+            let id = request.request_id.clone();
             engine
                 .owner_job(|reply| {
-                    Job::HomeAddPlan(a.clone(), expected, source, mode, overrides, reply)
+                    Job::HomeAddPlan(a.clone(), expected, id, source, mode, overrides, reply)
                 })
                 .await
                 .map(Work::Add)

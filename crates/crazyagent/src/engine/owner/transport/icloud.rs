@@ -284,8 +284,14 @@ async fn handle(
         Action::Stop { request_id } => Ok(Reply::Stopped {
             running: authority.intake.stop(&request_id),
         }),
-        Action::Dismiss { request_id } => Ok(Reply::Dismissed {
-            forgotten: authority.intake.dismiss(&request_id),
-        }),
+        Action::Dismiss { request_id } => {
+            let forgotten = authority.intake.dismiss(&request_id);
+            if forgotten {
+                engine
+                    .owner_job(|reply| Job::HomeAddForget(request_id, reply))
+                    .await?;
+            }
+            Ok(Reply::Dismissed { forgotten })
+        }
     }
 }

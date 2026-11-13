@@ -1400,3 +1400,105 @@ async fn an_engine_stop_ends_a_running_intake_job_with_no_copy_left() {
     assert_eq!(status, None, "a new engine has no job");
     engine.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_finishes_after_the_client_that_started_it_goes() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources/big"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 100, 100);
+    let engine = Engine::start().await;
+    let mut owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(id("intake-left"), text(&source), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    owner.controller.detach();
+    let after = engine.owner().await;
+    let done = job_until(&after, |job| job.state == JobState::Done).await;
+    assert_eq!(done.id, id("intake-left"));
+    assert_eq!(
+        fs::read_to_string(home.join("big/p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("p0/f0.txt")).unwrap(),
+        "0 0\n"
+    );
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let (source, landed) = (place.join("sources/site"), home.join("site"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 2, 2);
+    let staging = home.join(".crazyagent-adding-0011223344556677");
+    tree(&staging, 1, 1);
+    let mut engine = Engine::start().await;
+    let mut owner = homed(&engine, &home).await;
+    let database = engine.root.path().join("engine.db");
+    let cut = |request: &str| {
+        format!(
+            "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+             VALUES ('{request}', 'owner', '{}', '{}', 'move');",
+            text(&source),
+            text(&landed)
+        )
+    };
+    sql(&database, &cut("cut-1"));
+    let elsewhere = OwnerMutation::SetProjectsHome {
+        path: text(&place.join("elsewhere")),
+    };
+    assert_eq!(
+        owner.apply(elsewhere).await,
+        rejected("home_add_in_progress"),
+        "an add holds the projects home"
+    );
+    owner.controller.detach();
+    engine.restart().await;
+    let after = engine.owner().await;
+    let client = after.owner_client().unwrap();
+    let restored = client.intake_status().await.unwrap().expect("the cut add");
+    assert_eq!(restored.id, id("cut-1"));
+    let interrupted = JobState::Failed {
+        code: "home_add_interrupted".into(),
+        phase: Phase::Copying,
+    };
+    assert_eq!(restored.state, interrupted);
+    assert!(!staging.exists(), "the start removed the cut add's staging");
+    assert_eq!(
+        fs::read_to_string(source.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    assert!(client.intake_dismiss(id("cut-1")).await.unwrap());
+    assert_eq!(client.intake_status().await.unwrap(), None);
+
+    fs::create_dir(&landed).unwrap();
+    sql(&database, &cut("cut-2"));
+    engine.restart().await;
+    let again = engine.owner().await;
+    let client = again.owner_client().unwrap();
+    let restored = client
+        .intake_status()
+        .await
+        .unwrap()
+        .expect("the landed move");
+    let left = JobState::Failed {
+        code: "home_move_source_left".into(),
+        phase: Phase::Clearing,
+    };
+    assert_eq!(restored.state, left);
+    assert_eq!(
+        fs::read_to_string(source.join("p1/f1.txt")).unwrap(),
+        "1 1\n",
+        "a start deletes nothing of the old folder"
+    );
+    engine.stop().await;
+}

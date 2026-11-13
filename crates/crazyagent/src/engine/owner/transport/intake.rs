@@ -25,7 +25,7 @@ pub(super) struct Intake(Mutex<Option<Held>>);
 struct Held {
     job: Arc<IntakeJob>,
     real: PathBuf,
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Intake {
@@ -61,6 +61,7 @@ impl Intake {
         let Some(claim) = Running::claim(authority, &a.owner_id, &asked.request_id) else {
             return Err(failure("intake_busy"));
         };
+        let replaced = held.as_ref().map(|ended| ended.job.id().clone());
         let job = Arc::new(IntakeJob::new(
             asked.request_id,
             a.owner_id.clone(),
@@ -75,8 +76,10 @@ impl Intake {
             a.clone(),
             Arc::clone(&job),
             claim,
+            replaced,
         ));
         let view = job.view();
+        let task = Some(task);
         *held = Some(Held { job, real, task });
         assert!(held.is_some());
         Ok(view)
@@ -97,6 +100,44 @@ impl Intake {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Reads the newest add an engine stop cut short, so status shows how it ended until
+    /// the owner dismisses it or a new job starts. Runs at server start; a job a client
+    /// started first wins. Inputs: the engine and the wait. Output: none; a failed read is
+    /// logged and shows nothing.
+    pub(super) async fn restore(&self, engine: &Engine, wait: Duration) {
+        let read = engine.owner_job(Job::HomeAddEnded);
+        let ended = match tokio::time::timeout(wait, read).await {
+            Ok(Ok(Some(ended))) => ended,
+            Ok(Ok(None)) => return,
+            Ok(Err(e)) => {
+                eprintln!("home_add_not_restored cause={}", e.0);
+                return;
+            }
+            Err(_) => {
+                eprintln!("home_add_not_restored cause=timeout");
+                return;
+            }
+        };
+        let real = PathBuf::from(&ended.source);
+        let job = IntakeJob::restored(
+            ended.request,
+            ended.owner,
+            ended.source,
+            ended.mode,
+            &ended.ended,
+        );
+        assert!(job.ended());
+        let mut held = self.lock();
+        if held.is_none() {
+            let job = Arc::new(job);
+            *held = Some(Held {
+                job,
+                real,
+                task: None,
+            });
         }
     }
 
@@ -122,6 +163,9 @@ impl Intake {
             return;
         };
         assert!(self.lock().is_none());
+        let Some(task) = task else {
+            return;
+        };
         job.stop();
         let abort = task.abort_handle();
         if tokio::time::timeout(wait, task).await.is_err() {
@@ -137,11 +181,12 @@ impl Intake {
     }
 }
 
-/// Runs one intake job: downloads what of the folder is only in iCloud, then serves the
-/// add with the job as its sink and records how the job ended. The claim on the job's id is
-/// dropped before the end is recorded, so a new job that may start then never finds two
-/// job claims held. Inputs: the engine, the authority, the packet and admission of the
-/// client that started it, the job and its claim.
+/// Runs one intake job: forgets the ended add it replaced, downloads what of the folder is
+/// only in iCloud, then serves the add with the job as its sink and records how the job
+/// ended. The claim on the job's id is dropped before the end is recorded, so a new job
+/// that may start then never finds two job claims held. Inputs: the engine, the authority,
+/// the packet and admission of the client that started it, the job, its claim and the
+/// ended job it replaced.
 async fn run(
     engine: Arc<Engine>,
     authority: Arc<Authority>,
@@ -149,8 +194,16 @@ async fn run(
     a: Admission,
     job: Arc<IntakeJob>,
     claim: Running,
+    replaced: Option<RequestId>,
 ) {
     let ending = Ending(Arc::clone(&job));
+    if let Some(old) = replaced
+        && let Err(e) = engine
+            .owner_job(|reply| Job::HomeAddForget(old, reply))
+            .await
+    {
+        eprintln!("home_add_not_forgotten cause={}", e.0);
+    }
     let result = match fetch(&authority, &job).await {
         Ok(()) => {
             job.copying();
