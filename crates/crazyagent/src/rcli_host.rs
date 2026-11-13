@@ -931,14 +931,16 @@ enum TurnStatus {
 }
 
 /// A provider failure a failed rcli turn names: the model provider's rate limit, its spent
-/// quota or credit, or its refusal of the key (`PROVIDER_FAILURES` in host.codec.ts). The
-/// engine moves the master to the next pool account on each (PA-6, DEC-091).
+/// quota or credit, its refusal of the key, or an HTTP 404 (`PROVIDER_FAILURES` in
+/// host.codec.ts). The engine moves the master to the next pool account on the first three
+/// (PA-6, DEC-091); a 404 is read by the account's provider (DEC-150 addendum 9e).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RcliProviderFailure {
     RateLimited,
     QuotaExhausted,
     InvalidAuthentication,
+    NotFound,
 }
 
 /// Reads a completion's named provider failure, refusing a null so only an absent field

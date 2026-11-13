@@ -75,7 +75,9 @@ fn failed_turn_code(failure: Option<crate::rcli_host::RcliProviderFailure>) -> &
         Some(crate::rcli_host::RcliProviderFailure::InvalidAuthentication) => {
             "gateway_invalid_authentication"
         }
-        None => "rcli_master_execution_failed",
+        Some(crate::rcli_host::RcliProviderFailure::NotFound) | None => {
+            "rcli_master_execution_failed"
+        }
     }
 }
 
