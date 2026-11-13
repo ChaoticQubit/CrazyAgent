@@ -7,8 +7,8 @@ use super::new_project_view::{
 use super::planning_line::{planning, planning_value};
 use super::project::{
     Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, OVERVIEW_TAB_LABELS, Picks, ProjectScreen,
-    REVIEW_ROWS, RemoveChoice, Speaker, Tab, Transcript, memory_source, plain_problem,
-    research_kind,
+    REVIEW_ROWS, RemoveChoice, Speaker, Tab, Transcript, memory_source, overview_pending,
+    plain_problem, research_kind,
 };
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render, sanitize};
@@ -928,11 +928,18 @@ fn overview_tab_rows(
     }
     let mut rows = vec![Row::default(), strip];
     if let Some(failure) = &overview.failure {
-        let line = format!("Couldn't refresh the tabs. {}", sanitize(failure));
+        let (line, style) = if overview_pending(overview) {
+            (sanitize(failure), look.muted)
+        } else {
+            (
+                format!("Couldn't refresh the tabs. {}", sanitize(failure)),
+                look.warning,
+            )
+        };
         rows.extend(
             wrap_words(&line, width)
                 .into_iter()
-                .map(|line| Row::of(line, look.warning)),
+                .map(|line| Row::of(line, style)),
         );
     }
     let (notes, text) = overview_picked(overview, screen.overview_tab);

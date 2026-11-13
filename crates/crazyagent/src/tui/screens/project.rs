@@ -939,12 +939,7 @@ impl ProjectScreen {
         if now_ms.saturating_sub(read_ms) < REFRESH_MS {
             return false;
         }
-        self.overview_tabs.as_ref().is_none_or(|overview| {
-            let waits = overview.stale
-                && overview.refresh != crate::roadmap_status::Refresh::Off
-                && !overview.needs_home;
-            overview.running || waits
-        })
+        self.overview_tabs.as_ref().is_none_or(overview_pending)
     }
 
     /// Answers Shift+R on the Overview: asks for one writing run of the tabs, or says why
@@ -3033,6 +3028,16 @@ pub(in crate::tui) fn research_kind(path: &str) -> Option<ResearchKind> {
         .strip_prefix("/research/")?
         .strip_suffix(".md")?;
     ResearchKind::parse(name)
+}
+
+/// Whether an Overview run is writing or waits to start: after a refresh, a landed change
+/// set or while no account of the pool can run it. Takes the overview. Returns the answer;
+/// tabs that are off or must move into the projects home never wait.
+pub(in crate::tui) fn overview_pending(overview: &crate::project_overview::Overview) -> bool {
+    let waits = overview.stale
+        && overview.refresh != crate::roadmap_status::Refresh::Off
+        && !overview.needs_home;
+    overview.running || waits
 }
 
 /// Turns an engine rejection code into a plain sentence.
