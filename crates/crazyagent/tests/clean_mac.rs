@@ -221,7 +221,7 @@ fn node_text() -> String {
 /// `/opt/homebrew` and `/usr/local` folders are mapped into, the engine root, and the
 /// gate folder its logs are kept in. Dropping it stops the engine and its tmux server.
 struct Mac {
-    _temp: tempfile::TempDir,
+    temp: tempfile::TempDir,
     run: PathBuf,
     home: PathBuf,
     system: PathBuf,
@@ -269,7 +269,7 @@ impl Mac {
         let _ = fs::remove_dir_all(&kept);
         fs::create_dir_all(&kept).unwrap();
         let mac = Self {
-            _temp: temp,
+            temp,
             run,
             home,
             system,
@@ -459,6 +459,13 @@ impl Mac {
 impl Drop for Mac {
     fn drop(&mut self) {
         self.stop();
+        if std::thread::panicking() {
+            self.temp.disable_cleanup(true);
+            let _ = fs::write(
+                self.kept.join("kept-mac.txt"),
+                format!("{}\n", self.run.display()),
+            );
+        }
         let socket = self
             .root
             .join(crazyagent::terminal::FOLDER)
