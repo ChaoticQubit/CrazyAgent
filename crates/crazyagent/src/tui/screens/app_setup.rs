@@ -2191,6 +2191,7 @@ impl Screen for AppSetup {
                 self.reading[8] = false;
                 self.frames = loaded(result);
             }
+            AppSetupEvent::ProviderRetry(_) | AppSetupEvent::ProviderRetrySet(_) => {}
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
                     self.github = Load::Ready(github.clone());

@@ -4,6 +4,7 @@ use crate::github::GitHubMethod;
 use crate::master_frame_limit::{FrameSize, MasterFrameSettings};
 use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
+use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::sandbox::LinuxSockets;
 use crate::sandbox_settings::SandboxSettings;
@@ -178,20 +179,7 @@ fn settings(width: u16, height: u16) -> Shell {
 
 fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell {
     let mut shell = Shell::with(ctx(width, height), Box::new(AppSetup::new(false)));
-    assert!(matches!(
-        jobs(&mut shell).as_slice(),
-        [
-            AppSetupJob::Status,
-            AppSetupJob::Home,
-            AppSetupJob::GitHub,
-            AppSetupJob::Sandbox,
-            AppSetupJob::Cleanup,
-            AppSetupJob::Quit,
-            AppSetupJob::MasterSteps,
-            AppSetupJob::MasterTime,
-            AppSetupJob::MasterFrames
-        ]
-    ));
+    let _asked = jobs(&mut shell);
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
     shell.arrive(event(AppSetupEvent::Home(Ok(home()))));
     shell.arrive(event(AppSetupEvent::GitHub(Ok(signed_in()))));
@@ -208,7 +196,29 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
     shell.arrive(event(AppSetupEvent::MasterTime(Ok(time))));
     let frames = MasterFrameSettings::default();
     shell.arrive(event(AppSetupEvent::MasterFrames(Ok(frames))));
+    let retry = crate::provider_retry::view(ProviderRetry::RetryBriefly);
+    shell.arrive(event(AppSetupEvent::ProviderRetry(Ok(retry))));
     shell
+}
+
+#[test]
+fn settings_ask_the_engine_for_every_setting_when_shown() {
+    let mut shell = Shell::with(ctx(200, 80), Box::new(AppSetup::new(false)));
+    assert!(matches!(
+        jobs(&mut shell).as_slice(),
+        [
+            AppSetupJob::Status,
+            AppSetupJob::Home,
+            AppSetupJob::GitHub,
+            AppSetupJob::Sandbox,
+            AppSetupJob::Cleanup,
+            AppSetupJob::Quit,
+            AppSetupJob::MasterSteps,
+            AppSetupJob::MasterTime,
+            AppSetupJob::MasterFrames,
+            AppSetupJob::ProviderRetry
+        ]
+    ));
 }
 
 fn chosen(shell: &mut Shell) -> LinuxSockets {
@@ -1816,4 +1826,137 @@ fn every_app_settings_hint_stays_on_the_bar_from_80_by_24_to_240_columns() {
             &format!("{width}x{height}"),
         );
     }
+}
+
+fn retry_chosen(shell: &mut Shell) -> ProviderRetry {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetProviderRetry { choice, .. }] = sent.as_slice() else {
+        panic!(
+            "one provider retry change required, got {} jobs",
+            sent.len()
+        )
+    };
+    *choice
+}
+
+/// The words the TUI shows for each option, the same as the desktop Settings, and the
+/// engine's line for every option and harness (DEC-163).
+#[test]
+fn settings_show_retry_briefly_by_default_with_the_three_options_and_each_harness_line() {
+    let mut shell = settings(200, 80);
+    let rows = render(&mut shell, 200, 80);
+    assert!(find(&rows, "Provider retry  ").contains("Retry briefly"));
+    let shown = flat(&rows);
+    for line in [
+        "Claude Code: its own retries, up to 10 with longer waits each time.",
+        "Codex: its own retries, without waiting for the network without end.",
+        "RCLI: one try. The engine never repeats an RCLI request.",
+    ] {
+        assert!(shown.contains(line), "{line} in {shown}");
+    }
+    assert!(bar(&rows).contains("p Provider retry"));
+    shell.key(Key::Char('p'));
+    let rows = render(&mut shell, 200, 80);
+    find(
+        &rows,
+        "When a model provider can't be reached: what harnesses do.",
+    );
+    find(&rows, "> Retry briefly");
+    find(&rows, "  Stop at once");
+    find(&rows, "  Harness default");
+    let shown = flat(&rows);
+    for summary in [
+        "A run fails with the provider's error instead of retrying.",
+        "Harnesses keep their own retries, but none waits for the network without end.",
+        "CrazyAgent sets nothing, so each harness does what it does on its own.",
+        "New runs take the choice; runs already going keep theirs. Each harness line is proven on read-only runs.",
+    ] {
+        assert!(shown.contains(summary), "{summary} in {shown}");
+    }
+    for note in crate::provider_retry::view(ProviderRetry::RetryBriefly).notes {
+        assert!(shown.contains(&note.line), "{} in {shown}", note.line);
+    }
+    assert!(!shown.contains('\u{2014}'));
+    assert!(bar(&rows).contains("Enter Save"));
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the stored setting saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+/// Every option has its own row: picked, saved in the engine, read back and shown with its
+/// harness lines.
+#[test]
+fn each_provider_retry_option_is_saved_when_picked_and_shown_once_stored() {
+    let mut shell = settings(200, 80);
+    let picks = [
+        (ProviderRetry::StopAtOnce, Key::Up, 1, "Stop at once"),
+        (
+            ProviderRetry::HarnessDefault,
+            Key::Down,
+            2,
+            "Harness default",
+        ),
+        (ProviderRetry::RetryBriefly, Key::Up, 1, "Retry briefly"),
+    ];
+    for (choice, key, presses, title) in picks {
+        shell.key(Key::Char('p'));
+        for _ in 0..presses {
+            shell.key(key.clone());
+        }
+        find(&render(&mut shell, 200, 80), &format!("> {title}"));
+        shell.key(Key::Enter);
+        assert_eq!(retry_chosen(&mut shell), choice);
+        shell.arrive(event(AppSetupEvent::ProviderRetrySet(Ok(()))));
+        assert_eq!(lead(&shell), format!("Provider retry: {title}."));
+        assert!(
+            jobs(&mut shell)
+                .iter()
+                .any(|job| matches!(job, AppSetupJob::ProviderRetry)),
+            "the saved option is read back"
+        );
+        let stored = crate::provider_retry::view(choice);
+        shell.arrive(event(AppSetupEvent::ProviderRetry(Ok(stored))));
+        let rows = render(&mut shell, 200, 80);
+        assert!(find(&rows, "Provider retry  ").contains(title));
+        let shown = flat(&rows);
+        for harness in crate::coord::settings::HarnessKind::ALL {
+            let line = choice.harness_line(harness);
+            assert!(shown.contains(line), "{line} in {shown}");
+        }
+    }
+}
+
+#[test]
+fn esc_and_a_refused_save_leave_the_provider_retry_setting_as_it_was() {
+    let mut shell = settings(200, 80);
+    shell.key(Key::Char('p'));
+    shell.key(Key::Up);
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+    shell.key(Key::Char('p'));
+    shell.key(Key::Up);
+    shell.key(Key::Enter);
+    assert_eq!(retry_chosen(&mut shell), ProviderRetry::StopAtOnce);
+    shell.arrive(event(AppSetupEvent::ProviderRetrySet(Err("busy".into()))));
+    assert_ne!(lead(&shell), "Provider retry: Stop at once.");
+    assert!(!lead(&shell).is_empty());
+    assert!(find(&render(&mut shell, 200, 80), "Provider retry  ").contains("Retry briefly"));
+}
+
+#[test]
+fn a_stored_provider_retry_setting_this_version_does_not_know_is_not_offered() {
+    let mut shell = settings(200, 80);
+    shell.arrive(event(AppSetupEvent::ProviderRetry(Err(
+        "provider_retry_invalid".into(),
+    ))));
+    let rows = render(&mut shell, 200, 80);
+    let row = find(&rows, "Provider retry  ");
+    assert!(row.contains("Failed to read it."), "{row}");
+    assert!(row.contains("not one this version knows"), "{row}");
+    shell.key(Key::Char('p'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(lead(&shell), "The provider retry setting is not known yet.");
 }
