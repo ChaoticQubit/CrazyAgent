@@ -2083,7 +2083,7 @@ pub(in crate::tui) mod tests {
         shell.arrive(reply(hide(*generation), Err("owner_busy".into())));
         assert_eq!(
             shell.ctx.message().map(|message| message.lead.clone()),
-            Some("Your Learn CrazyAgent progress was not saved.".into())
+            Some("Your learning progress was not saved.".into())
         );
         shell.arrive(mark(MarkStep::Skipped, Ok(LearningReply::Marked)));
         assert_eq!(
