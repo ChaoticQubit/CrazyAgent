@@ -131,13 +131,7 @@ impl Dependency {
     /// Why this dependency cannot run when no answer names another reason: it is found
     /// nowhere the tool resolver looks. Output: the missing tool, with its owner line.
     pub fn not_found(self) -> crate::tools::Missing {
-        crate::tools::Missing {
-            tool: self.program().to_owned(),
-            reason: crate::tools::Reason::NotFound,
-            needs: None,
-            looked: Vec::new(),
-            refused: None,
-        }
+        program_not_found(self.program())
     }
 
     /// The plain name the setup screen shows, such as `Graphify command`, kept apart
@@ -510,6 +504,13 @@ pub trait Installer: Send + Sync {
         None
     }
 
+    /// Finds one program as [`Installer::program`] does, naming why it cannot run when it
+    /// is found and passed over (DEC-162), the line the onboarding graph step shows. Input:
+    /// the program name. Output: the program, or why it cannot run.
+    fn lookup_program(&self, name: &str) -> Result<std::path::PathBuf, crate::tools::Missing> {
+        self.program(name).ok_or_else(|| program_not_found(name))
+    }
+
     /// The permission fix target for a tool found and passed over, by this installer's
     /// places (DEC-162). Input: why the tool cannot run. Output: the target, or none.
     fn fix_target(
@@ -531,6 +532,18 @@ pub trait Installer: Send + Sync {
     ) -> Result<crate::tools::permission_fix::Report, &'static str> {
         let _ = (dep, confirmed);
         Err(crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE)
+    }
+}
+
+/// Why a program cannot run when it is found nowhere the tool resolver looks. Input: the
+/// program name. Output: the missing tool, with its owner line.
+pub(crate) fn program_not_found(name: &str) -> crate::tools::Missing {
+    crate::tools::Missing {
+        tool: name.to_owned(),
+        reason: crate::tools::Reason::NotFound,
+        needs: None,
+        looked: Vec::new(),
+        refused: None,
     }
 }
 

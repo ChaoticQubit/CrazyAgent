@@ -1144,7 +1144,7 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     std::fs::set_permissions(bin.join("graphify"), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
         service::engine_graphify(root.path()),
-        Some(bin.join("graphify"))
+        Ok(bin.join("graphify"))
     );
     std::fs::remove_file(bin.join("graphify")).unwrap();
     let elsewhere = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
@@ -2529,6 +2529,17 @@ fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
     };
     assert_ne!(refused.line(), graph::GRAPHIFY_MISSING);
     assert_eq!(service::graphify_failure(&refused), refused.line());
+    let deep = std::path::PathBuf::from(format!("/h/{}/python3", "deep/".repeat(40)));
+    let long = crate::tools::Missing {
+        refused: Some(Box::new(crate::tools::Refused {
+            file: deep.clone(),
+            why: crate::tools::Refusal::OthersCanChange(deep),
+        })),
+        ..refused
+    };
+    assert!(long.line().len() > 256);
+    assert_eq!(service::graphify_failure(&long), service::GRAPHIFY_REFUSED);
+    assert!(service::GRAPHIFY_REFUSED.len() <= 256);
     let missing = crate::setup::Dependency::Graphify.not_found();
     assert_eq!(service::graphify_failure(&missing), graph::GRAPHIFY_MISSING);
 }

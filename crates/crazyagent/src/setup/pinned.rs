@@ -508,12 +508,14 @@ impl Installer for PinnedInstaller {
     }
 
     fn program(&self, name: &str) -> Option<PathBuf> {
+        self.lookup_program(name).ok()
+    }
+
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
         if name.is_empty() || name.contains('/') || name.starts_with('.') {
-            return None;
+            return Err(super::program_not_found(name));
         }
-        crate::tools::resolve(name, &self.places)
-            .ok()
-            .map(|found| found.entry)
+        crate::tools::resolve(name, &self.places).map(|found| found.entry)
     }
 
     fn fix_target(&self, missing: &crate::tools::Missing) -> Option<permission_fix::Target> {

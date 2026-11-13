@@ -122,6 +122,10 @@ impl Installer for LinuxInstaller {
         self.common.program(name)
     }
 
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+        self.common.lookup_program(name)
+    }
+
     fn fix_target(
         &self,
         missing: &crate::tools::Missing,
