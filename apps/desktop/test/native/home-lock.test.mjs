@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import fs, { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -139,4 +141,127 @@ test("both native runners lock their home before they change it; the wdio runner
   assert.match(prepare, /throw new SevereServiceError\(/, "a held home stops the wdio run, which logs a plain hook error and goes on");
   const complete = conf.slice(conf.indexOf("onComplete:"));
   assert.ok(complete.indexOf("homeLock?.release()") > complete.indexOf("stopTerminals()"), "the home is freed after the engine and terminals stop");
+});
+
+/** A lock as lockHome writes it, for a holder this test plays. Inputs: the pid and label.
+ * Output: the lock's text. */
+function lockText(pid, label) {
+  return JSON.stringify({ pid, started: new Date().toISOString(), label, token: randomBytes(16).toString("hex") });
+}
+
+/** A pid that no process has: a child that already ended. Output: the pid. */
+function deadPid() {
+  const ended = spawnSync(process.execPath, ["-e", ""]);
+  assert.equal(ended.status, 0);
+  return ended.pid;
+}
+
+/** Runs a check with some node:fs calls of run-layout.mjs replaced, then puts them back.
+ * Inputs: the replacements by name and the check. Output: the check's result. */
+async function withFs(replacements, check) {
+  const kept = Object.fromEntries(Object.keys(replacements).map((name) => [name, fs[name]]));
+  Object.assign(fs, replacements);
+  syncBuiltinESMExports();
+  try {
+    return await check();
+  } finally {
+    Object.assign(fs, kept);
+    syncBuiltinESMExports();
+  }
+}
+
+test("a taker that read a dead holder never removes the live lock a faster taker put in its place, while a third taker waits on an empty home", async () => {
+  await withHome(async (home) => {
+    const lock = join(home, LOCK);
+    const dead = lockText(deadPid(), "killed suite");
+    const faster = lockText(process.pid, "faster taker");
+    const third = lockText(process.pid, "third taker");
+    writeFileSync(lock, dead, { flag: "wx", mode: 0o600 });
+    const { readFileSync: read, renameSync: rename, rmSync: remove, unlinkSync: unlink } = fs;
+    let swapped = false;
+    let thirdTook = false;
+    const thirdTakes = () => {
+      if (!swapped || thirdTook || existsSync(lock)) return;
+      thirdTook = true;
+      writeFileSync(lock, third, { flag: "wx", mode: 0o600 });
+    };
+    const after = (call) => function (...args) {
+      try {
+        return call.apply(this, args);
+      } finally {
+        thirdTakes();
+      }
+    };
+    await withFs({
+      readFileSync(path, ...rest) {
+        const text = read.call(this, path, ...rest);
+        if (path === lock && !swapped && text === dead) {
+          swapped = true;
+          remove(lock);
+          writeFileSync(lock, faster, { flag: "wx", mode: 0o600 });
+        }
+        return text;
+      },
+      renameSync: after(rename),
+      rmSync: after(remove),
+      unlinkSync: after(unlink),
+    }, async () => {
+      await assert.rejects(lockHome(home, { label: "slow taker", waitMs: 0 }), /in use by pid/);
+    });
+    assert.equal(swapped, true, "the faster taker took the home after the slow taker read the dead holder");
+    assert.equal(readFileSync(lock, "utf8"), faster, "the faster taker's live lock stays, so no two suites share the home");
+    assert.equal(thirdTook, false, "the home is never left empty for a third taker while the faster one holds it");
+    assert.deepEqual(readdirSync(home), [LOCK], "no takeover or draft file is left");
+  });
+});
+
+test("a takeover lock left by a taker that died is refused, naming it, and the dead holder's lock stays", async () => {
+  await withHome(async (home) => {
+    const lock = join(home, LOCK);
+    const dead = lockText(deadPid(), "killed suite");
+    writeFileSync(lock, dead, { flag: "wx", mode: 0o600 });
+    writeFileSync(`${lock}.takeover`, lockText(deadPid(), "killed taker"), { flag: "wx", mode: 0o600 });
+    await assert.rejects(lockHome(home, { label: "second suite", waitMs: 0 }), (error) => {
+      assert.ok(error.message.includes(`${lock}.takeover`), error.message);
+      return true;
+    });
+    assert.equal(readFileSync(lock, "utf8"), dead, "no taker removes the dead holder's lock while a takeover may be half done");
+  });
+});
+
+test("the five confs built on master-switch keep its hooks, so each locks the home it gives the app and frees it", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "ca-home-lock-conf-"));
+  const names = ["WD_APP", "MS_ENGINE", "MS_ROOT", "MS_EVIDENCE", "WD_PORT", "CRAZYAGENT_E2E_HOME"];
+  const kept = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  try {
+    Object.assign(process.env, { WD_APP: join(scratch, "app"), MS_ENGINE: join(scratch, "engine"), MS_ROOT: join(scratch, "root"), MS_EVIDENCE: join(scratch, "evidence"), WD_PORT: "4555" });
+    delete process.env.CRAZYAGENT_E2E_HOME;
+    const base = await import("./master-switch.wdio.conf.mjs");
+    assert.equal(base.home, join(scratch, "root", "home"));
+    for (const name of ["done-quiet", "ide-window", "live-master-account", "live-terminal", "master-idle-stop"]) {
+      const { config } = await import(`./${name}.wdio.conf.mjs`);
+      assert.equal(config.onPrepare, base.config.onPrepare, `${name} runs master-switch's onPrepare, which locks the home`);
+      assert.equal(config.onComplete, base.config.onComplete, `${name} runs master-switch's onComplete, which frees it`);
+      assert.equal(config.services[0][1].env.HOME, base.home, `${name} gives the app the home master-switch locks`);
+    }
+  } finally {
+    for (const name of names) {
+      if (kept[name] === undefined) delete process.env[name];
+      else process.env[name] = kept[name];
+    }
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("v1-flow locks the HOME its app and engine inherit before it starts the engine, stops on a held home and frees it last", () => {
+  const conf = source("./v1-flow.wdio.conf.mjs");
+  assert.match(conf, /import \{ SevereServiceError \} from "webdriverio";/);
+  assert.match(conf, /const home = process\.env\.HOME;/);
+  assert.match(conf, /\["HOME", home\]/, "HOME must be an absolute path");
+  const prepare = conf.slice(conf.indexOf("onPrepare:"), conf.indexOf("before:"));
+  assert.ok(prepare.includes("homeLock = await lockHome(home, { label: `wdio v1-flow"), "onPrepare takes the lock");
+  assert.ok(prepare.indexOf("lockHome(home") < prepare.indexOf("startEngine()"), "the home is locked before the engine starts");
+  assert.match(prepare, /throw new SevereServiceError\(/, "a held home stops the wdio run");
+  const complete = conf.slice(conf.indexOf("onComplete:"));
+  assert.ok(complete.indexOf("homeLock?.release()") > complete.indexOf("stopEngine()"), "the home is freed after the engine stops");
 });
