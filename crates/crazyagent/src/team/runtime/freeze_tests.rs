@@ -61,26 +61,26 @@ impl Proxied {
              while :; do for address in 127.0.0.1 ::1; do /usr/bin/nc -z -G 1 $address {port} 2>/dev/null && echo x >> '{dir}/dialed'; done; sleep 0.1; done\n",
             dir = folder.display(),
         );
-        let argv = crate::sandbox::kept_pane(vec![
-            crate::sandbox::SANDBOX_EXEC.to_owned(),
-            "-f".to_owned(),
-            profile.display().to_string(),
-            "/bin/sh".to_owned(),
-            "-c".to_owned(),
-            script,
-        ])
+        let state = agent_pane_state(&fixture.base.join("team"), id);
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        let argv = crate::sandbox::kept_pane(
+            vec![
+                crate::sandbox::SANDBOX_EXEC.to_owned(),
+                "-f".to_owned(),
+                profile.display().to_string(),
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                script,
+            ],
+            Some(&state),
+        )
         .unwrap();
         let file = fixture.base.join(format!("session-{id}.jsonl"));
         std::fs::write(&file, format!("{TURN_OPEN}\n{TURN_DONE}\n")).unwrap();
-        let state = agent_pane_state(&fixture.base.join("team"), id);
-        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
         let command = InteractiveCommand {
             argv,
             cwd: fixture.base.clone(),
-            env: vec![(
-                crate::sandbox::KEEPER_STATE.to_owned(),
-                state.display().to_string(),
-            )],
+            env: vec![],
             transcript: Transcript::ClaudeSession { file },
         };
         let agent = AgentId::team(id).unwrap();

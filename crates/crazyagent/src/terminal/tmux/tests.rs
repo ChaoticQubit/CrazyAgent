@@ -261,7 +261,7 @@ fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
     };
     let line = |argv: Vec<String>| confined_line(&agent, &command(argv), profile, &[]);
     let lead = plain("/private/tmp/lead.sb");
-    let kept = kept_pane(lead.clone()).unwrap();
+    let kept = kept_pane(lead.clone(), None).unwrap();
     assert_eq!(
         line(kept.clone()).map_err(|error| error.0),
         Ok(line(lead.clone()).unwrap()),
@@ -285,7 +285,8 @@ fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
     ];
     wrapped.extend(lead.clone());
     let refused = [
-        kept_pane(plain("/private/tmp/other.sb")).unwrap(),
+        kept_pane(plain("/private/tmp/other.sb"), None).unwrap(),
+        kept_pane(lead.clone(), Some(Path::new("/private/tmp/state"))).unwrap(),
         keeper_text,
         shim_text,
         no_shim,
@@ -323,6 +324,52 @@ fn a_pane_command_with_a_perl_load_variable_is_refused() {
             spawn_line(&agent, &command(name)).map_err(|error| error.0),
             Err("terminal_command_invalid".to_owned()),
             "{name}"
+        );
+    }
+}
+
+/// DEC-158: a kept pane's keeper takes the engine's freeze record as the word before its
+/// `sandbox-exec`, so a kept freezable pane passes the pane gate with no variable of the
+/// engine's own; a record that is not one absolute line of at most 1001 bytes is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_kept_pane_hands_its_keeper_the_freeze_record_as_an_argument() {
+    use crate::sandbox::{KEEPER, PANE_SHIM, SANDBOX_EXEC, kept_pane};
+    let agent = AgentId::team(4).unwrap();
+    let plain: Vec<String> = [
+        SANDBOX_EXEC,
+        "-f",
+        "/private/tmp/agent.sb",
+        "/usr/local/bin/claude",
+    ]
+    .map(String::from)
+    .to_vec();
+    let state = Path::new("/private/tmp/team/state");
+    let kept = kept_pane(plain.clone(), Some(state)).unwrap();
+    assert_eq!(kept.len(), KEEPER.len() + 1 + PANE_SHIM.len() + plain.len());
+    assert_eq!(kept[KEEPER.len()], "/private/tmp/team/state");
+    assert_eq!(kept[KEEPER.len() + 1..KEEPER.len() + 4], plain[..3]);
+    assert_eq!(kept.last(), plain.last());
+    let command = InteractiveCommand {
+        argv: kept,
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    assert!(spawn_line(&agent, &command).is_ok());
+    let longest = format!("/{}", "a".repeat(1000));
+    assert!(kept_pane(plain.clone(), Some(Path::new(&longest))).is_some());
+    let longer = format!("/{}", "a".repeat(1001));
+    for refused in [
+        "private/tmp/state",
+        "/private/tmp/a\nb",
+        "/",
+        longer.as_str(),
+    ] {
+        assert_eq!(
+            kept_pane(plain.clone(), Some(Path::new(refused))),
+            None,
+            "{refused:?}"
         );
     }
 }

@@ -290,14 +290,25 @@ impl TerminalSession {
         if let Some(team) = installed.as_ref().and_then(Installed::native) {
             interactive::write_teammate_command(&home, &command, &request, team)?;
         }
+        let freeze_record = installed.as_ref().and_then(Installed::freeze_record);
+        let native = installed
+            .as_ref()
+            .is_some_and(|installed| installed.native().is_some());
+        #[cfg(target_os = "macos")]
+        let kept_freeze = !request.unconfined && !native && freeze_record.is_some();
+        #[cfg(not(target_os = "macos"))]
+        let kept_freeze = false;
         #[cfg(target_os = "macos")]
         let command = if request.unconfined {
             assert_ne!(command.argv[0], crate::sandbox::SANDBOX_EXEC);
             command
         } else {
             interactive::InteractiveCommand {
-                argv: crate::sandbox::kept_pane(command.argv)
-                    .ok_or_else(|| failure("launch_sandbox_required"))?,
+                argv: crate::sandbox::kept_pane(
+                    command.argv,
+                    freeze_record.filter(|_| kept_freeze),
+                )
+                .ok_or_else(|| failure("launch_sandbox_required"))?,
                 ..command
             }
         };
@@ -309,21 +320,6 @@ impl TerminalSession {
         command
             .env
             .push((LINEAGE_VARIABLE.to_owned(), token.as_str().to_owned()));
-        let freeze_record = installed.as_ref().and_then(Installed::freeze_record);
-        let native = installed
-            .as_ref()
-            .is_some_and(|installed| installed.native().is_some());
-        #[cfg(target_os = "macos")]
-        let kept_freeze = !request.unconfined && !native && freeze_record.is_some();
-        #[cfg(not(target_os = "macos"))]
-        let kept_freeze = false;
-        #[cfg(target_os = "macos")]
-        if kept_freeze && let Some(record) = freeze_record {
-            command.env.push((
-                crate::sandbox::KEEPER_STATE.to_owned(),
-                record.display().to_string(),
-            ));
-        }
         let freeze = (kept_freeze || (native && freeze_record.is_some())).then_some(true);
         if let Some(context) = context {
             context.refuse_exposed(
