@@ -1,22 +1,26 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 #[test]
 fn imp1035_claude_commands_use_only_official_auth_subcommands() {
     let home = Path::new("/private/tmp/imp1035-profile");
+    let temp = tempfile::tempdir().unwrap();
+    let claude = std::fs::canonicalize(temp.path()).unwrap().join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
     for (action, expected) in [
         (ClaudeAuthCommand::Login, "login"),
         (ClaudeAuthCommand::Status, "status"),
         (ClaudeAuthCommand::Logout, "logout"),
     ] {
-        let command =
-            auth_command(Path::new("/private/tmp/official-claude"), home, action).unwrap();
+        let command = auth_command(&claude, home, action).unwrap();
         let args = command
             .get_args()
             .map(|value| value.to_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(args, ["auth", expected]);
-        assert_eq!(command.get_program(), "/private/tmp/official-claude");
+        assert_eq!(command.get_program(), claude.as_os_str());
         assert_eq!(command.get_current_dir(), Some(home));
         let variables = command
             .get_envs()

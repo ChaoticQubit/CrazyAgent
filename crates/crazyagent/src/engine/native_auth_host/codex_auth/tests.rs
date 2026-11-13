@@ -224,8 +224,12 @@ fn native_auth_codex_error_cleanup_reaps_the_real_owned_group_before_releasing_p
 #[test]
 fn native_auth_codex_launch_uses_official_stdio_and_only_explicit_environment() {
     let case = Case::new();
-    let command = super::command(std::path::Path::new("/qualified/codex"), &case.home).unwrap();
-    assert_eq!(command.get_program(), "/qualified/codex");
+    let temp = tempfile::tempdir().unwrap();
+    let codex = std::fs::canonicalize(temp.path()).unwrap().join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let command = super::command(&codex, &case.home).unwrap();
+    assert_eq!(command.get_program(), codex.as_os_str());
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
         [
