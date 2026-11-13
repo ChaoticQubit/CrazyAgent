@@ -317,6 +317,7 @@ impl TerminalSession {
         let kept_freeze = !request.unconfined && !native && freeze_record.is_some();
         #[cfg(not(target_os = "macos"))]
         let kept_freeze = false;
+        #[cfg(target_os = "macos")]
         if kept_freeze && let Some(record) = freeze_record {
             command.env.push((
                 crate::sandbox::KEEPER_STATE.to_owned(),

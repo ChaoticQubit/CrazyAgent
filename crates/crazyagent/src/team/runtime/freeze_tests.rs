@@ -420,10 +420,11 @@ impl NativeLead {
             );
             std::thread::sleep(Duration::from_millis(50));
         };
-        let record = session
-            .pane_record()
-            .expect("the lead's pane has a record");
-        assert!(record.proxy.is_some(), "a native lead under None gets a model proxy");
+        let record = session.pane_record().expect("the lead's pane has a record");
+        assert!(
+            record.proxy.is_some(),
+            "a native lead under None gets a model proxy"
+        );
         assert_eq!(record.freeze, Some(true));
         fixture.keep(id, &record);
         session.leave();

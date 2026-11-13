@@ -2932,7 +2932,6 @@ impl TeamRuntime {
             .collect())
     }
 
-    /// Tells whether a later engine could take over the agent's pane from its stored record.
     /// Reads the pane record the engine keeps for a team agent. Takes the id. Returns the
     /// record, none when there is none or it does not read.
     fn kept_record(&self, id: i64) -> Result<Option<PaneRecord>, EngineError> {
@@ -3060,6 +3059,7 @@ impl TeamRuntime {
         Ok(bind_kept_proxy(id, port, launch, &reach).map(Some))
     }
 
+    /// Tells whether a later engine could take over the agent's pane from its stored record.
     fn has_pane_record(&self, id: i64) -> Result<bool, EngineError> {
         self.connection
             .query_row(
@@ -13693,6 +13693,7 @@ fn keeper_started(_pid: u32) -> Option<String> {
 /// Asks each server keeper a frozen native lead holds to end its server, so its warden
 /// kills every process in the lead's sandbox, frozen ones included, and nothing resumes.
 /// Takes the keepers, each proven current. Returns nothing.
+#[cfg(target_os = "macos")]
 fn end_keepers(pins: &[KeeperPin]) {
     for pin in pins {
         if let Some(process) = i32::try_from(pin.pid)
@@ -13704,6 +13705,10 @@ fn end_keepers(pins: &[KeeperPin]) {
         }
     }
 }
+
+/// Ends no keeper where no keeper runs (DEC-094). Takes unused. Returns nothing.
+#[cfg(not(target_os = "macos"))]
+fn end_keepers(_pins: &[KeeperPin]) {}
 
 /// Where the engine keeps the deadline a native-mode lead's own and teammates' tmux servers
 /// end at (FBTMUX-P1-R1-L1), beside the profiles no agent writes: each renewal pass moves
