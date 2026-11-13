@@ -86,12 +86,11 @@ pub(in crate::engine::owner::transport) fn run(
     let custody = NativeProfileCustody::capture(&database, &opened).map_err(|_| UNAVAILABLE)?;
     let custody = RefCell::new(custody);
     let stamp = host.identity();
-    let homes = host.authority.root.path.clone();
     let set_up = |connection: &ModelConnection| {
         let Some(profile) = crate::config::configured_profile_ref(connection) else {
             return false;
         };
-        matches!(generated_home_needs_key(&homes, &profile), Ok(false))
+        matches!(generated_home_needs_key(&root, &profile), Ok(false))
             && custody
                 .borrow_mut()
                 .configured_rcli_profile(&stamp, connection, &profile)
