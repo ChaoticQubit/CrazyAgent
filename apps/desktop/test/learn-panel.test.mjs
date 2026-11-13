@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { HomeView, setupSteps } = await import("../src/screens/dashboard/index.tsx");
+const { HomeView, setupSteps, hideGuideNote } = await import("../src/screens/dashboard/index.tsx");
 const { learnSteps, marksForRoute, TOPIC_HEADINGS } = await import("../src/screens/dashboard/learn.tsx");
 
 const ok = (value) => ({ kind: "ok", value });
@@ -126,4 +126,10 @@ test("a page mark is sent once per app session, and again on the next visit only
   } finally {
     globalThis.window = before;
   }
+});
+
+test("a Hide guide that did not save leads its toast with the same words as the TUI, then the plain reason", () => {
+  assert.equal(hideGuideNote({ kind: "ok", value: undefined }), undefined);
+  assert.equal(hideGuideNote({ kind: "error", code: "owner_busy", message: "CrazyAgent is busy. Try again." }),
+    "Your learning progress was not saved. CrazyAgent is busy. Try again.");
 });
