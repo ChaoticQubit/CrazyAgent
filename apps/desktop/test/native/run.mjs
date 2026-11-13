@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   accessSync, closeSync, constants, mkdirSync, mkdtempSync, openSync,
-  readFileSync, realpathSync, statSync, writeFileSync, writeSync,
+  readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync,
 } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,6 +18,7 @@ const rawRoot = join(workRoot, "native-runs");
 mkdirSync(rawRoot, { recursive: true, mode: 0o700 });
 const evidence = mkdtempSync(join(rawRoot, "run-"));
 const engineRoot = mkdtempSync("/tmp/cad-");
+let standing = null;
 const owned = [];
 const started = new Date().toISOString();
 const began = performance.now();
@@ -66,7 +67,8 @@ function catalogVersion() {
  * a folder others can write (/tmp). For the project suite, whose page lists installed
  * harnesses only, a Claude Code answering the catalog's first version; for the app suite, a
  * Codex whose model list command fails, adding a line to the evidence folder's codex.lists
- * each run. Output: the folder to put first on PATH, or none for every other suite. */
+ * each run; the folder is removed when the suite ends. Output: the folder to put first on
+ * PATH, or none for every other suite. */
 function standIns() {
   const lists = join(evidence, "codex.lists");
   assert(!lists.includes("'"), "the codex.lists path fits in a quoted shell word");
@@ -76,6 +78,9 @@ function standIns() {
   }[suite];
   if (scripts === undefined) return null;
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "cad-bin-")));
+  standing = folder;
+  const repository = realpathSync(resolve(appRoot, "../.."));
+  assert(!`${folder}/`.startsWith(`${repository}/`), `${folder} is inside the repository, a project, so the engine refuses to launch a harness there: set TMPDIR outside it`);
   for (let at = folder; at !== dirname(at); at = dirname(at)) {
     assert((statSync(at).mode & 0o002) === 0, `${at} is writable by every user, so the engine refuses a harness under it: set TMPDIR to a private folder`);
   }
@@ -268,6 +273,7 @@ async function execute() {
       await Promise.race([engine.done, pause(8000)]);
     }
     try { await stopOwned(engine); } catch (error) { failure ??= String(error.message); }
+    if (standing) rmSync(standing, { recursive: true, force: true });
   }
   if (interrupted) failure ??= "native test runner interrupted";
   if (engine.reason || engine.result?.code !== 0) failure ??= "fixture cleanup was not successful";
@@ -284,6 +290,7 @@ async function execute() {
 try { process.exitCode = await execute(); }
 catch (error) {
   for (const entry of owned.reverse()) await stopOwned(entry);
+  if (standing) rmSync(standing, { recursive: true, force: true });
   writeFileSync(join(evidence, "setup-failure.json"), JSON.stringify({
     started, ended: new Date().toISOString(), failure: String(error.message),
   }), { flag: "wx", mode: 0o600 });
