@@ -7,6 +7,7 @@ use crate::master_frame_limit::{FrameSize, MasterFrameSettings};
 use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
+use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::{
     HOURS_DEFAULT, HOURS_MAX, HOURS_MIN, LeftRunning, OnQuit, QuitSettings,
 };
@@ -39,6 +40,8 @@ const NAME_WIDTH: usize = 26;
 const KIND_WIDTH: usize = 10;
 const LICENSE_WIDTH: usize = 12;
 const LABEL_WIDTH: usize = 17;
+const RETRY_TEXT: &str = "When a model provider can't be reached: what harnesses do.";
+const RETRY_HELP: &str = "New runs take the choice; runs already going keep theirs. Each harness line is proven on read-only runs.";
 const FIELD_WIDTH: usize = 72;
 const WINDOW_MIN: usize = 3;
 const NOT_READY_TEXT: &str =
@@ -187,6 +190,35 @@ pub(in crate::tui) fn frame_size_words(limit: FrameSize) -> (&'static str, &'sta
     }
 }
 
+/// The title of one provider retry option and what it does, the same words as the desktop
+/// Settings. Input: the option. Output: the title and the sentence.
+pub(in crate::tui) fn provider_retry_words(choice: ProviderRetry) -> (&'static str, &'static str) {
+    match choice {
+        ProviderRetry::StopAtOnce => (
+            "Stop at once",
+            "A run fails with the provider's error instead of retrying.",
+        ),
+        ProviderRetry::RetryBriefly => (
+            "Retry briefly",
+            "Harnesses keep their own retries, but none waits for the network without end.",
+        ),
+        ProviderRetry::HarnessDefault => (
+            "Harness default",
+            "CrazyAgent sets nothing, so each harness does what it does on its own.",
+        ),
+    }
+}
+
+/// The engine's line for every harness under `choice`, in the view's harness order.
+/// Inputs: the view and the option. Output: the lines.
+fn retry_lines(view: &ProviderRetryView, choice: ProviderRetry) -> Vec<String> {
+    view.notes
+        .iter()
+        .filter(|note| note.option == choice)
+        .map(|note| note.line.clone())
+        .collect()
+}
+
 /// The plain title and explanation of one Linux sockets option, as Settings shows it.
 /// Input: the option. Output: the title and the sentence naming what it allows and risks.
 pub(in crate::tui) fn sockets_words(sockets: LinuxSockets) -> (&'static str, &'static str) {
@@ -229,6 +261,9 @@ pub fn setup_plain(code: &str) -> String {
         }
         "master_frame_settings_invalid" => {
             "The stored master frame size limit is not one this version knows."
+        }
+        "provider_retry_invalid" => {
+            "The stored provider retry setting is not one this version knows."
         }
         crate::storage::versioned::STALE_CODE => {
             "The pack changed in another window, so this was not saved. The list shows it now."
@@ -363,6 +398,9 @@ enum Ask {
     Frames {
         choice: usize,
     },
+    Retry {
+        choice: usize,
+    },
 }
 
 enum Sent {
@@ -375,8 +413,9 @@ enum Sent {
 /// home folder: Enter installs and continues to the Accounts step, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
 /// remove, the projects home folder, the GitHub account, the Linux sockets
-/// setting, when finished agents' worktrees go, what quitting does to team agents and
-/// the master step, time and frame size limits.
+/// setting, when finished agents' worktrees go, what quitting does to team agents, the
+/// master step, time and frame size limits and what harnesses do when a model provider
+/// can't be reached.
 pub struct AppSetup {
     first_run: bool,
     setup: Load<SetupStatus>,
@@ -388,10 +427,11 @@ pub struct AppSetup {
     steps: Load<MasterStepSettings>,
     time: Load<MasterTimeSettings>,
     frames: Load<MasterFrameSettings>,
+    retry: Load<ProviderRetryView>,
     chosen: BTreeMap<String, bool>,
     selected: usize,
     offset: usize,
-    reading: [bool; 9],
+    reading: [bool; 10],
     sent: Option<Sent>,
     started: bool,
     finished_with_problems: bool,
@@ -399,11 +439,11 @@ pub struct AppSetup {
 }
 
 impl AppSetup {
-    /// A setup page with nothing loaded yet.
-    /// Input: true during first run. Output: the screen; `shown` asks the
-    /// engine for the setup status, and in Settings also for the projects
-    /// home, the GitHub account, the sandbox settings, the finished agents
-    /// setting, the quitting setting and the master step, time and frame size limits.
+    /// A setup page with nothing loaded yet. Input: true during first run. Output: the
+    /// screen; `shown` asks the engine for the setup status, and in Settings also for the
+    /// projects home, the GitHub account, the sandbox settings, the finished agents setting,
+    /// the quitting setting, the master step, time and frame size limits and the provider
+    /// retry setting.
     pub fn new(first_run: bool) -> Self {
         Self {
             first_run,
@@ -416,10 +456,11 @@ impl AppSetup {
             steps: Load::Idle,
             time: Load::Idle,
             frames: Load::Idle,
+            retry: Load::Idle,
             chosen: BTreeMap::new(),
             selected: 0,
             offset: 0,
-            reading: [false; 9],
+            reading: [false; 10],
             sent: None,
             started: false,
             finished_with_problems: false,
@@ -515,6 +556,10 @@ impl AppSetup {
             self.frames = Load::Loading;
         }
         self.read(8, AppSetupJob::MasterFrames, ctx);
+        if matches!(self.retry, Load::Idle) {
+            self.retry = Load::Loading;
+        }
+        self.read(9, AppSetupJob::ProviderRetry, ctx);
     }
 
     fn change(&mut self, job: AppSetupJob, sent: Sent, ctx: &mut Ctx) {
@@ -1001,6 +1046,85 @@ impl AppSetup {
         lines
     }
 
+    fn ask_retry(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(view) = &self.retry else {
+            ctx.say(Message::warning(
+                "The provider retry setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = ProviderRetry::ALL
+            .iter()
+            .position(|option| *option == view.choice)
+            .expect("every option is listed");
+        assert!(choice < ProviderRetry::ALL.len());
+        self.ask = Some(Ask::Retry { choice });
+    }
+
+    fn set_retry(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < ProviderRetry::ALL.len());
+        let picked = ProviderRetry::ALL[choice];
+        let Load::Ready(current) = &self.retry else {
+            ctx.say(Message::warning(
+                "The provider retry setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        if current.choice == picked {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!("Provider retry: {}.", provider_retry_words(picked).0);
+        let job = AppSetupJob::SetProviderRetry {
+            choice: picked,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn retry_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.retry {
+            Load::Ready(view) => Line::raw(provider_retry_words(view.choice).0),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn retry_rows(&self, choice: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        assert!(choice < ProviderRetry::ALL.len());
+        let theme = &ctx.theme;
+        let muted = |text: &str, inset: usize| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(inset).max(1))
+                .into_iter()
+                .map(|part| styled(format!("{}{part}", " ".repeat(inset)), Role::Muted, theme))
+                .collect()
+        };
+        let Load::Ready(view) = &self.retry else {
+            return muted(RETRY_TEXT, 0);
+        };
+        let mut lines = muted(RETRY_TEXT, 0);
+        for (index, option) in ProviderRetry::ALL.iter().enumerate() {
+            let (title, detail) = provider_retry_words(*option);
+            let mark = if index == choice { "> " } else { "  " };
+            let title = styled(title, Role::Heading, theme);
+            lines.push(join([Line::raw(mark), title]));
+            lines.extend(muted(detail, 4));
+            for line in retry_lines(view, *option) {
+                lines.extend(muted(&line, 4));
+            }
+        }
+        lines.extend(muted(RETRY_HELP, 0));
+        assert!(lines.len() > 2 * ProviderRetry::ALL.len());
+        lines
+    }
+
     fn ask_steps(&mut self, ctx: &mut Ctx) {
         let Load::Ready(settings) = &self.steps else {
             ctx.say(Message::warning(
@@ -1355,6 +1479,21 @@ impl AppSetup {
                 Key::Enter => self.pick_cleanup(choice, ctx),
                 Key::Esc => {}
                 _ => self.ask = Some(Ask::Cleanup { choice }),
+            },
+            Ask::Retry { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Retry {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Retry {
+                        choice: (choice + 1).min(ProviderRetry::ALL.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_retry(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Retry { choice }),
             },
             Ask::Steps { choice } => match key {
                 Key::Up => {
@@ -1768,6 +1907,12 @@ impl AppSetup {
         if matches!(self.frames, Load::Ready(_)) {
             lines.extend(note(FRAMES_NOTE));
         }
+        lines.push(label("Provider retry", self.retry_value(ctx)));
+        if let Load::Ready(view) = &self.retry {
+            for line in retry_lines(view, view.choice) {
+                lines.extend(note(&line));
+            }
+        }
         lines
     }
 
@@ -1821,6 +1966,7 @@ impl AppSetup {
             Some(Ask::Steps { choice }) => lines.extend(self.steps_rows(*choice, limit, ctx)),
             Some(Ask::Time { choice }) => lines.extend(self.time_rows(*choice, limit, ctx)),
             Some(Ask::Frames { choice }) => lines.extend(self.frames_rows(*choice, limit, ctx)),
+            Some(Ask::Retry { choice }) => lines.extend(self.retry_rows(*choice, limit, ctx)),
             Some(Ask::CleanupDays(field)) => {
                 let (field_lines, at) =
                     field.lines(limit.min(FIELD_WIDTH), true, theme, ctx.glyphs);
@@ -2011,7 +2157,8 @@ impl Screen for AppSetup {
                 | Ask::QuitLimit { .. }
                 | Ask::Steps { .. }
                 | Ask::Time { .. }
-                | Ask::Frames { .. }),
+                | Ask::Frames { .. }
+                | Ask::Retry { .. }),
             ) => {
                 let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
                 let enter = if matches!(ask, Ask::QuitChoice { .. }) {
@@ -2066,6 +2213,7 @@ impl Screen for AppSetup {
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
             hints.push(hint("z", "Master frame"));
+            hints.push(hint("p", "Provider retry"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -2143,13 +2291,17 @@ impl Screen for AppSetup {
                 self.ask_frames(ctx);
                 Flow::Handled
             }
+            Key::Char('p') if !self.first_run => {
+                self.ask_retry(ctx);
+                Flow::Handled
+            }
             _ => Flow::Ignored,
         }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if matches!(arrival, Arrival::Disconnected(_)) {
-            self.reading = [false; 9];
+            self.reading = [false; 10];
             self.sent = None;
             return Flow::Handled;
         }
@@ -2166,7 +2318,8 @@ impl Screen for AppSetup {
             | AppSetupEvent::QuitSet(result)
             | AppSetupEvent::MasterStepsSet(result)
             | AppSetupEvent::MasterTimeSet(result)
-            | AppSetupEvent::MasterFramesSet(result) => self.changed(result, ctx),
+            | AppSetupEvent::MasterFramesSet(result)
+            | AppSetupEvent::ProviderRetrySet(result) => self.changed(result, ctx),
             AppSetupEvent::Sandbox(result) => {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
@@ -2191,7 +2344,10 @@ impl Screen for AppSetup {
                 self.reading[8] = false;
                 self.frames = loaded(result);
             }
-            AppSetupEvent::ProviderRetry(_) | AppSetupEvent::ProviderRetrySet(_) => {}
+            AppSetupEvent::ProviderRetry(result) => {
+                self.reading[9] = false;
+                self.retry = loaded(result);
+            }
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
                     self.github = Load::Ready(github.clone());
@@ -2244,6 +2400,7 @@ impl Screen for AppSetup {
             || matches!(self.steps, Load::Loading)
             || matches!(self.time, Load::Loading)
             || matches!(self.frames, Load::Loading)
+            || matches!(self.retry, Load::Loading)
             || matches!(self.ask, Some(Ask::HomeChoice { size: None, .. }))
     }
 

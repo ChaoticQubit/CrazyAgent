@@ -330,8 +330,18 @@ impl NativeOwner {
                 "master_frame_settings_outcome_unknown",
                 lost,
             )),
-            job @ (AppSetupJob::ProviderRetry | AppSetupJob::SetProviderRetry { .. }) => {
-                AppSetupEvent::failed(&job, crate::tui::seam::NOT_READY.to_owned())
+            AppSetupJob::ProviderRetry => AppSetupEvent::ProviderRetry(
+                controller
+                    .provider_retry()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetProviderRetry { choice, generation } => {
+                AppSetupEvent::ProviderRetrySet(applied(
+                    controller.set_provider_retry(choice, generation).await,
+                    "provider_retry_outcome_unknown",
+                    lost,
+                ))
             }
         }
     }
