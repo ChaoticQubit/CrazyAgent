@@ -521,6 +521,32 @@ fn a_path_folder_in_a_temp_folder_is_refused() {
     );
 }
 
+/// 2.4.1 R1: a folder the probes found, a login shell PATH folder or npm's global prefix,
+/// that sits in this user's temp folder or a shared one is refused on the engine's places,
+/// as written and by its real path: agents with the owner's temp folder grant write the one
+/// and other users the other, and the engine runs what it finds there outside any sandbox.
+#[test]
+fn a_probed_folder_in_a_temp_folder_is_refused_on_the_engine_places() {
+    let (_folder, home) = scratch();
+    let owner_temp = tempfile::Builder::new()
+        .prefix("tools-probed-")
+        .tempdir()
+        .unwrap();
+    let written = owner_temp.path().join("bin");
+    std::fs::create_dir_all(&written).unwrap();
+    let real = written.canonicalize().unwrap();
+    let shared = PathBuf::from("/private/tmp/tools-planted/bin");
+    let engine = Places::engine(None, None, Some(home), Some(OsStr::new("")));
+    let probed = engine.with_probed(vec![written.clone(), real.clone(), shared.clone()]);
+    for folder in [&written, &real, &shared] {
+        assert!(
+            !probed.folders().contains(folder),
+            "{folder:?} in {:?}",
+            probed.folders()
+        );
+    }
+}
+
 /// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
 /// can replace a folder this user owns there, so test stand-ins and engines started from a
 /// `/tmp` folder resolve (leader 17:12, L8c).
