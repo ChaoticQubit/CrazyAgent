@@ -240,8 +240,13 @@ impl Downloads {
 #[cfg(feature = "e2e-model-source")]
 pub const SOURCE_ENV: &str = "CRAZYAGENT_E2E_MODEL_SOURCE";
 
+/// What `SOURCE_ENV` named, read once per engine: the test model source's curl and pins,
+/// none when the variable is not set, or why the named folder cannot serve.
 #[cfg(feature = "e2e-model-source")]
-static SOURCE: LazyLock<Result<Option<(PathBuf, [Pinned; 2])>, String>> = LazyLock::new(|| {
+type Source = Result<Option<(PathBuf, [Pinned; 2])>, String>;
+
+#[cfg(feature = "e2e-model-source")]
+static SOURCE: LazyLock<Source> = LazyLock::new(|| {
     std::env::var_os(SOURCE_ENV)
         .map_or(Ok(None), |folder| source_pins(Path::new(&folder)).map(Some))
 });
