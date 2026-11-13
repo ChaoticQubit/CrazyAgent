@@ -23,7 +23,16 @@ const GROUPS = [
   ["Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Landing", "Finished agents", "Terminal display", "Heavy lane", "Shared resources", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]],
   ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Left running after a stop", "Token budget", "Master run time", "Sub-agent rounds per message"]],
 ];
-const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main"];
+/** The engine's sentence for a harness kind no sub-agent runs on (DEC-141 PA-15), read from
+ * its source so the spec follows the engine's words. */
+const NO_SUB_AGENTS = readFileSync(new URL("../../../../crates/crazyagent/src/team.rs", import.meta.url), "utf8")
+  .match(/pub const NO_SUB_AGENTS: &str =\s*"([^"]+)";/u)?.[1];
+/** The rows of rcli, which runs only as a master: each says why instead of holding a control,
+ * so Tab never stops on it. */
+const MASTER_ONLY = ["rcli sub-agents", "Messages to rcli agents"];
+const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main", ...MASTER_ONLY];
+/** Reads the first note of each master-only row, the reason it holds no control. */
+const MASTER_ONLY_NOTES = `${JSON.stringify(MASTER_ONLY)}.map((label) => document.querySelector('.set-row[data-setting="' + label + '"] .tg-terminal-note')?.innerText.trim() ?? null)`;
 const DRAWER_GROUPS = [
   ["Master", ["Harness", "Account", "Live terminal"]],
   ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
@@ -219,8 +228,11 @@ for (const width of [1024, 1440]) {
       assert.deepEqual(measured.past, [], "nothing runs past a group's panel");
       assert.ok(measured.sideways <= 0, `the page does not scroll sideways, ${measured.sideways} px`);
       await me.capture(`agent-settings-${width}`);
+      assert.ok(NO_SUB_AGENTS, "the engine names why a harness kind runs no sub-agent");
+      assert.deepEqual(await page.evaluate(MASTER_ONLY_NOTES), MASTER_ONLY.map(() => NO_SUB_AGENTS), "each rcli row says it runs only as a master");
       const reached = await tabThrough(page);
       assert.deepEqual(GROUPS.flatMap(([, rows]) => rows).filter((row) => !READ_ONLY.includes(row) && !reached.includes(row)), [], "Tab reaches every setting with a control");
+      assert.deepEqual(MASTER_ONLY.filter((row) => reached.includes(row)), [], "Tab never stops on an rcli row, which holds no control");
       await page.send("Page.navigate", { url: `http://127.0.0.1:${port}/#/projects/${encodeURIComponent(project)}/agents?section=limits` });
       await me.waitFor("Agent settings opened at Limits", (text) => text.includes("Token budget"));
       for (const deadline = Date.now() + 5000; (await page.evaluate("document.activeElement?.textContent ?? null")) !== "Limits"; await pause(POLL_MS)) {
