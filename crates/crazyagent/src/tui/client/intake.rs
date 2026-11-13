@@ -3,12 +3,9 @@ use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
-use crate::projects_home::icloud::Progress;
 use crate::projects_home::job::JobView;
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, RequestId};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -26,12 +23,6 @@ pub(in crate::tui) enum IntakeQuery {
     Found,
     FolderSize {
         path: String,
-    },
-    AddExisting {
-        source: String,
-        mode: AddMode,
-        overrides: Vec<AddOverride>,
-        generation: u64,
     },
     StartOnboarding {
         path: String,
@@ -51,9 +42,6 @@ pub(in crate::tui) enum IntakeQuery {
     CloneRepo {
         full_name: String,
     },
-    IcloudDownload {
-        path: String,
-    },
     JobStart {
         source: String,
         mode: AddMode,
@@ -68,17 +56,12 @@ pub(in crate::tui) enum IntakeQuery {
     },
 }
 
-/// One intake job for the owner worker: a plain query, a pasted GitHub token, or an iCloud
-/// download with the flag the screen sets to stop it.
+/// One intake job for the owner worker: a plain query or a pasted GitHub token.
 /// The token travels only here, never in a query, so no reply, log or Debug output can echo it.
-/// The token job answers as a `GitHubStatus` query, the download as an `IcloudDownload` query.
+/// The token job answers as a `GitHubStatus` query.
 pub(in crate::tui) enum IntakeJob {
     Query(IntakeQuery),
     GitHubToken(AccountSecret),
-    IcloudDownload {
-        path: String,
-        cancel: Arc<AtomicBool>,
-    },
 }
 
 /// What the engine answered to one intake request.
@@ -96,8 +79,6 @@ pub(in crate::tui) enum IntakeView {
     Repos(GitHubRepoPage),
     Cloned(CloneReceipt),
     Changed(OwnerResult),
-    IcloudProgress(Progress),
-    IcloudDownloaded(u64),
     Job(Option<JobView>),
     JobStopped(bool),
     JobDismissed(bool),
@@ -139,7 +120,6 @@ impl IntakeJob {
         match self {
             Self::Query(query) => query.clone(),
             Self::GitHubToken(_) => IntakeQuery::GitHubStatus,
-            Self::IcloudDownload { path, .. } => IntakeQuery::IcloudDownload { path: path.clone() },
         }
     }
 }
@@ -155,28 +135,19 @@ impl Connection {
 
 impl NativeOwner {
     /// Runs one intake job through the trusted owner controller.
-    /// Takes the job and where a download's progress events go while it runs.
+    /// Takes the job.
     /// Returns the event; a transport failure detaches the connection so the shell reconnects.
-    pub(super) async fn intake(
-        &mut self,
-        job: IntakeJob,
-        report: impl FnMut(IntakeEvent),
-    ) -> IntakeEvent {
+    pub(super) async fn intake(&mut self, job: IntakeJob) -> IntakeEvent {
         let query = job.query();
         let mut lost = false;
-        let result = self.intake_view(job, &mut lost, report).await;
+        let result = self.intake_view(job, &mut lost).await;
         if lost {
             self.detach();
         }
         IntakeEvent { query, result }
     }
 
-    async fn intake_view(
-        &mut self,
-        job: IntakeJob,
-        lost: &mut bool,
-        mut report: impl FnMut(IntakeEvent),
-    ) -> Result<IntakeView, String> {
+    async fn intake_view(&mut self, job: IntakeJob, lost: &mut bool) -> Result<IntakeView, String> {
         if !self.ready {
             return Err("trusted_connection_unavailable".into());
         }
@@ -199,20 +170,6 @@ impl NativeOwner {
                     .map(IntakeView::GitHub)
                     .map_err(problem);
             }
-            IntakeJob::IcloudDownload { path, cancel } => {
-                let query = IntakeQuery::IcloudDownload { path: path.clone() };
-                let progress = |progress| {
-                    report(IntakeEvent {
-                        query: query.clone(),
-                        result: Ok(IntakeView::IcloudProgress(progress)),
-                    })
-                };
-                return controller
-                    .icloud_download(path, &cancel, progress)
-                    .await
-                    .map(IntakeView::IcloudDownloaded)
-                    .map_err(problem);
-            }
         };
         Ok(match query {
             IntakeQuery::Home => {
@@ -230,17 +187,6 @@ impl NativeOwner {
             IntakeQuery::FolderSize { path } => {
                 IntakeView::FolderSize(controller.folder_size(path).await.map_err(problem)?)
             }
-            IntakeQuery::AddExisting {
-                source,
-                mode,
-                overrides,
-                generation,
-            } => IntakeView::Changed(applied(
-                controller
-                    .add_existing_folder(source, mode, overrides, generation)
-                    .await
-                    .map_err(problem)?,
-            )?),
             IntakeQuery::StartOnboarding {
                 path,
                 pool,
@@ -276,7 +222,6 @@ impl NativeOwner {
             IntakeQuery::CloneRepo { full_name } => {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }
-            IntakeQuery::IcloudDownload { .. } => return Err("icloud_download_needs_job".into()),
             IntakeQuery::JobStart {
                 source,
                 mode,

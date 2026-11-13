@@ -212,7 +212,6 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         IntakeQuery::SetHome { .. } => "set home",
                         IntakeQuery::Found => "found",
                         IntakeQuery::FolderSize { .. } => "folder size",
-                        IntakeQuery::AddExisting { .. } => "add existing",
                         IntakeQuery::StartOnboarding { .. } => "start onboarding",
                         IntakeQuery::Onboarding { .. } => "onboarding",
                         IntakeQuery::JobStart { .. } => "job start",
