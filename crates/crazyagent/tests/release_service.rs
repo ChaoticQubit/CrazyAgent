@@ -156,16 +156,31 @@ fn engine_home_flag_names_the_root_without_the_environment() {
 }
 
 #[test]
-fn a_path_harness_the_engine_cannot_register_is_skipped_not_fatal() {
+fn a_found_harness_the_engine_cannot_register_is_skipped_not_fatal() {
     let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let home = temp.path().join("home");
+    let kept = home.join(".local").join("bin");
     let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&kept).unwrap();
     std::fs::create_dir(&bin).unwrap();
-    let codex = bin.join("codex");
-    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let codex = kept.join("codex");
+    let set_aside = bin.join("codex");
+    for file in [&codex, &set_aside] {
+        std::fs::write(file, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o775)).unwrap();
+    }
     let path = std::env::join_paths([bin.clone(), PathBuf::from("/usr/bin")]).unwrap();
     let root = temp.path().join("engine");
-    let mut child = engine(&[], Some(&root), &path);
+    let mut command = Command::new(BIN);
+    command
+        .arg("engine")
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env("CRAZYAGENT_HOME", &root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
     assert_eq!(ready(&mut child).trim(), "ready");
     assert_eq!(check(&root), ready_version());
     let stderr = stopped_stderr(Engine(child));
@@ -174,6 +189,10 @@ fn a_path_harness_the_engine_cannot_register_is_skipped_not_fatal() {
             "the found codex file {} is not used (harness_path_changeable)",
             codex.display()
         )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(&set_aside.display().to_string()),
         "{stderr}"
     );
     let explicit = crazyagent::spawn_gate::output(

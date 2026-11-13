@@ -431,11 +431,13 @@ fn owner_runnable(_metadata: &std::fs::Metadata) -> bool {
 }
 
 /// The folders a search looked in for one harness as the owner reads them: HOME shown as
-/// `~`, a shim folder marked "(shim, skipped)", at most [`LOOKED_MAX`] folders, each at most
+/// `~`, a shim folder marked "(shim, skipped)", a folder passed over for a temp folder marked
+/// with that reason ([`TEMP_SKIPPED`]), at most [`LOOKED_MAX`] folders, each at most
 /// [`LOOKED_BYTES_MAX`] bytes, so the answer always fits one reply frame. Inputs: the search
 /// and the id. Output: the lines.
 pub fn looked(search: &Search, id: &str) -> Vec<String> {
     let home = search.home();
+    let skipped = search.temp_skipped(id);
     let lines: Vec<String> = search
         .looked(id)
         .into_iter()
@@ -446,6 +448,8 @@ pub fn looked(search: &Search, id: &str) -> Vec<String> {
             };
             if is_shim_folder(home, &folder) {
                 shown.push_str(SHIM_SKIPPED);
+            } else if skipped.contains(&folder) {
+                shown.push_str(TEMP_SKIPPED);
             }
             (shown.len() <= LOOKED_BYTES_MAX).then_some(shown)
         })

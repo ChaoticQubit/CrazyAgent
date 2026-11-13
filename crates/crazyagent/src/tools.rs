@@ -398,7 +398,16 @@ pub(crate) fn temp_roots() -> Vec<PathBuf> {
 /// grant, can write: this user's temp folder or a shared one, as written and with its links
 /// resolved. Input: the folder. Output: the answer.
 fn in_temp(folder: &Path) -> bool {
-    let temps = temp_roots();
+    in_temp_of(folder, &temp_roots())
+}
+
+/// Whether a folder is in one of the temp folders given, as written and with its links
+/// resolved; none given refuses nothing. Inputs: the folder and the temp folders. Output:
+/// the answer.
+pub(crate) fn in_temp_of(folder: &Path, temps: &[PathBuf]) -> bool {
+    if temps.is_empty() {
+        return false;
+    }
     let real = folder.canonicalize().ok();
     std::iter::once(folder)
         .chain(real.as_deref())

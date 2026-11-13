@@ -263,20 +263,25 @@ fn executable_file(path: &Path) -> Option<PathBuf> {
     (metadata.is_file() && runnable).then_some(real)
 }
 
-/// Finds the PATH entry a shell would run for a name, skipping relative PATH folders.
-/// Inputs: the name and a PATH value. Output: the absolute entry with its links kept,
-/// or none when no entry leads to a runnable file.
-fn path_entry(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+/// Finds the PATH entry a shell would run for a name, skipping relative PATH folders, folders
+/// in the temp folders given and entries leading into one ([`crate::tools::leads_into_temp`]).
+/// Inputs: the name, a PATH value and the temp folders, none to refuse nothing. Output: the
+/// absolute entry with its links kept, or none when no entry leads to a runnable file.
+fn path_entry(name: &str, path: Option<&OsStr>, temps: &[PathBuf]) -> Option<PathBuf> {
     for folder in std::env::split_paths(path?) {
-        if !folder.is_absolute() {
+        if !folder.is_absolute() || crate::tools::in_temp_of(&folder, temps) {
             continue;
         }
         for file in executable_names(name) {
             let entry = folder.join(file);
-            if executable_file(&entry).is_some() {
-                assert!(entry.is_absolute());
-                return Some(entry);
+            let Some(real) = executable_file(&entry) else {
+                continue;
+            };
+            if crate::tools::leads_into_temp(&entry, &real, temps) {
+                continue;
             }
+            assert!(entry.is_absolute());
+            return Some(entry);
         }
     }
     None
@@ -286,7 +291,7 @@ fn path_entry(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
 /// Inputs: the name and a PATH value. Output: the first match with every link resolved,
 /// or none when it is missing.
 pub fn find_in_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
-    path_entry(name, path).and_then(|entry| executable_file(&entry))
+    path_entry(name, path, &[]).and_then(|entry| executable_file(&entry))
 }
 
 /// The harness executables one engine start registers; none means not installed.
@@ -358,11 +363,11 @@ pub fn rcli_entry(
 /// Input: the launch harness id. Output: the entry, or none.
 pub type HarnessLookup = std::sync::Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
 
-/// Finds the entry of a harness CrazyAgent starts itself, the one lookup engine start, the
-/// catalog, Check again and the install pin share: the search's folders first, then PATH by
-/// the platform's executable names. Inputs: the catalog id, the engine search and the PATH
-/// value. Output: the entry with its links kept; none for an alias or unknown id, for a
-/// harness without a launch adapter and for a harness found nowhere.
+/// Finds the entry of a harness CrazyAgent starts itself, as engine start, the catalog, Check
+/// again and the install pin do: the search's folders, then PATH outside the temp folders the
+/// search refuses. Inputs: the catalog id, the engine search and the PATH value. Output: the
+/// entry with its links kept; none for an alias, an unknown id, a harness with a launch
+/// adapter or one found nowhere.
 pub fn harness_entry(
     harness: &str,
     search: &crate::harnesses::Search,
@@ -372,7 +377,8 @@ pub fn harness_entry(
         .filter(|spec| spec.id == harness && spec.launch.is_none())?;
     let entry = search.find(harness).or_else(|| {
         spec.binaries.iter().find_map(|name| {
-            path_entry(name, path).filter(|entry| !crate::harnesses::is_shim(search.home(), entry))
+            path_entry(name, path, search.temps())
+                .filter(|entry| !crate::harnesses::is_shim(search.home(), entry))
         })
     })?;
     assert!(entry.is_absolute());
@@ -381,8 +387,9 @@ pub fn harness_entry(
 
 /// Every file a pin may check for a harness CrazyAgent starts itself, in the order
 /// [`harness_entry`] looks: the search's candidates, shims included, then each PATH match by
-/// the platform's executable names, each once. Inputs: the catalog id, the engine search and
-/// the PATH value. Output: the absolute entries, bounded; empty for a harness with an adapter.
+/// the platform's executable names outside the temp folders the search refuses, each once.
+/// Inputs: the catalog id, the engine search and the PATH value. Output: the absolute
+/// entries, bounded; empty for a harness with an adapter.
 pub fn harness_candidates(
     harness: &str,
     search: &crate::harnesses::Search,
@@ -397,7 +404,7 @@ pub fn harness_candidates(
     for entry in spec
         .binaries
         .iter()
-        .filter_map(|name| path_entry(name, path))
+        .filter_map(|name| path_entry(name, path, search.temps()))
     {
         if !entries.contains(&entry) {
             entries.push(entry);
@@ -411,7 +418,8 @@ pub fn harness_candidates(
 /// Resolves a harness entry kept at engine start to the real file a launch runs and its
 /// sandbox grants, as the entry stands now. Inputs: the absolute entry and the PATH value.
 /// Output: the entry's real file; when an entry in a PATH folder is gone, the first PATH
-/// match for its name; else NotFound, which a launch reports as not installed.
+/// match for its name, never one in a temp folder or leading into one for an entry outside
+/// every temp folder; else NotFound, which a launch reports as not installed.
 pub fn launch_executable(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
     launch_executable_in(entry, path, &crate::tools::temp_roots())
 }
@@ -422,15 +430,20 @@ pub fn launch_executable(entry: &Path, path: Option<&OsStr>) -> std::io::Result<
 fn launch_executable_in(
     entry: &Path,
     path: Option<&OsStr>,
-    _temps: &[PathBuf],
+    temps: &[PathBuf],
 ) -> std::io::Result<PathBuf> {
     assert!(entry.is_absolute(), "harness entry {}", entry.display());
     let on_path = || {
         let folder = entry.parent()?;
         let name = entry.file_name()?.to_str()?;
+        let refused: &[PathBuf] = if crate::tools::in_temp_of(folder, temps) {
+            &[]
+        } else {
+            temps
+        };
         std::env::split_paths(path?)
             .any(|listed| listed == folder)
-            .then(|| find_in_path(name, path))
+            .then(|| path_entry(name, path, refused).and_then(|entry| executable_file(&entry)))
             .flatten()
     };
     let real = executable_file(entry).or_else(on_path).ok_or_else(|| {
@@ -1088,10 +1101,11 @@ mod tests {
         ];
         for (id, entry) in layouts {
             program(&entry, 0o755);
-            let search = crate::harnesses::Search::engine(
+            let search = crate::harnesses::Search::engine_in(
                 Some(&path),
                 std::slice::from_ref(&system),
                 Some(home.clone()),
+                &[root.join("tmp")],
             );
             let started = resolve_harnesses(Harnesses::default(), &search, Some(&path), None);
             let catalog = crate::harnesses::catalog(&search);

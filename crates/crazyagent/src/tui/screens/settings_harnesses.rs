@@ -1136,7 +1136,8 @@ impl Harnesses {
     }
 
     /// The folders the engine looked in for a harness, at most [`LOOKED_SHOWN_MAX`] of them
-    /// with a count of the rest. Inputs: the id and the context. Output: the modal and hints.
+    /// with a count of the rest, a folder passed over for a temp folder followed by that whole
+    /// reason. Inputs: the id and the context. Output: the modal and hints.
     fn looked_modal(&self, id: &str, ctx: &Ctx) -> (Modal, Vec<Hint>) {
         let file = file_name(id);
         let room = usize::from(MODAL_WIDTH) - 4;
@@ -1152,11 +1153,18 @@ impl Harnesses {
         .map(Line::raw)
         .collect();
         for folder in looked.iter().take(LOOKED_SHOWN_MAX) {
+            let (place, reason) = match folder.strip_suffix(finding::TEMP_SKIPPED) {
+                Some(place) => (place, Some(finding::TEMP_SKIPPED.trim_start())),
+                None => (folder.as_str(), None),
+            };
             body.push(styled(
-                cut(&sanitize(folder), room, ctx.glyphs.ellipsis),
+                cut(&sanitize(place), room, ctx.glyphs.ellipsis),
                 Role::Accent,
                 &ctx.theme,
             ));
+            if let Some(reason) = reason {
+                body.extend(wrap(reason, room).into_iter().map(Line::raw));
+            }
         }
         if looked.len() > LOOKED_SHOWN_MAX {
             body.push(Line::raw(format!(
