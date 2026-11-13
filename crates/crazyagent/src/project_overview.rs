@@ -229,8 +229,9 @@ pub enum Competitors {
 }
 
 /// A project's Overview: the README, the four tabs in [`Tab::ALL`] order, the competitor
-/// state, where the writing run stands, the project's two Overview settings and whether
-/// the project has to move into the projects home before it can hold tab files.
+/// state, where the writing run stands, its stored line and whether that line is the wait
+/// for an account, the project's two Overview settings and whether the project has to move
+/// into the projects home before it can hold tab files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Overview {
     pub readme: Option<Readme>,
@@ -240,6 +241,7 @@ pub struct Overview {
     pub stale: bool,
     pub checked_ms: Option<i64>,
     pub failure: Option<String>,
+    pub waiting_for_account: bool,
     pub refresh: Refresh,
     pub apply: Apply,
     pub needs_home: bool,
@@ -1081,6 +1083,7 @@ pub fn read(
         stale: state.stale && !needs_home,
         checked_ms: state.checked_ms,
         failure,
+        waiting_for_account: false,
         refresh: state.refresh,
         apply: state.apply,
         needs_home,

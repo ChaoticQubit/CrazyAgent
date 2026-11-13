@@ -130,8 +130,8 @@ pub struct ItemState {
 }
 
 /// A project's roadmap status as its views show it: the items of the last check, when it
-/// ran, whether one runs now or is due, the refresh setting, the roadmap file it read and
-/// why the last check failed, if it did.
+/// ran, whether one runs now or is due, the refresh setting, the roadmap file it read, why
+/// the last check failed, if it did, and whether that line is the wait for an account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoadmapStatus {
     pub items: Vec<ItemState>,
@@ -141,6 +141,7 @@ pub struct RoadmapStatus {
     pub refresh: Refresh,
     pub source: Option<String>,
     pub problem: Option<String>,
+    pub waiting_for_account: bool,
 }
 
 /// The identity of one claimed status run: `tick` hands it to `Runs::start` and the run
@@ -485,6 +486,7 @@ fn read_at(
             refresh,
             source: None,
             problem: None,
+            waiting_for_account: false,
         });
     };
     let items = stored_items(&body.ok_or_else(|| unavailable(()))?)?;
@@ -497,6 +499,7 @@ fn read_at(
         refresh,
         source: note(source),
         problem: note(problem),
+        waiting_for_account: false,
     })
 }
 
