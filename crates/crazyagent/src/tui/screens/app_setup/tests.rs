@@ -68,7 +68,12 @@ fn first_run_status() -> SetupStatus {
                     version: version("3.5a"),
                 },
             ),
-            tool(Dependency::Uv, DependencyState::Missing),
+            tool(
+                Dependency::Uv,
+                DependencyState::Missing {
+                    line: Dependency::Uv.not_found().line(),
+                },
+            ),
             tool(
                 Dependency::Graphify,
                 DependencyState::Failed {
@@ -273,6 +278,7 @@ fn tools_show_found_missing_and_failed_in_plain_words() {
         let rows = render(&mut shell, width, height);
         assert!(find(&rows, "tmux").contains("Found 3.5a"));
         assert!(find(&rows, &format!("{:<14}", "uv")).contains("Not installed"));
+        find(&rows, "uv is missing.");
         assert!(find(&rows, "Graphify command").contains("Failed"));
         find(&rows, "uv is needed to install Graphify");
         assert!(rows.iter().all(|row| !row.contains("setup_")));

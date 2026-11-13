@@ -175,7 +175,7 @@ fn start_check(root: &Path) {
     let installer = platform_installer(root);
     tokio::spawn(async move {
         let found = tokio::task::spawn_blocking(move || {
-            Dependency::ALL.map(|dep| (dep, installer.find(dep)))
+            Dependency::ALL.map(|dep| (dep, installer.lookup(dep)))
         })
         .await;
         if let Ok(found) = found {
@@ -214,7 +214,24 @@ fn start_run(
         .into_iter()
         .filter(|entry| ticked.contains(&entry.id))
         .collect();
-    let begun = progress::with(&root, |state| {
+    if !begin_run(&root, &entries) {
+        return Err(failure("setup_busy"));
+    }
+    let guard = RunGuard(root);
+    tokio::spawn(async move {
+        let root = guard.0.clone();
+        run_setup(&sender, &root, entries).await;
+        drop(guard);
+    });
+    Ok(())
+}
+
+/// Marks a setup run as going for the owner's explicit Set up tools, Install missing or a
+/// tool row's Try again, unless one is going: every tool and the ticked pack entries start
+/// over as installing, and the background probes look for tool folders again at once.
+/// Inputs: the engine root and the ticked pack entries. Output: whether this run begins.
+pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
+    let begun = progress::with(root, |state| {
         if state.running {
             return false;
         }
@@ -226,16 +243,10 @@ fn start_run(
             .collect();
         true
     });
-    if !begun {
-        return Err(failure("setup_busy"));
+    if begun {
+        crate::tools::probe::refresh_now();
     }
-    let guard = RunGuard(root);
-    tokio::spawn(async move {
-        let root = guard.0.clone();
-        run_setup(&sender, &root, entries).await;
-        drop(guard);
-    });
-    Ok(())
+    begun
 }
 
 async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency) {

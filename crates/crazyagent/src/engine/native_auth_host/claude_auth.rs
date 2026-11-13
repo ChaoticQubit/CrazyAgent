@@ -39,7 +39,7 @@ fn auth_command(
     if !executable.is_absolute() || !home.is_absolute() {
         return Err(EngineError("native_auth_claude_launch_invalid".into()));
     }
-    let mut command = Command::new(executable);
+    let mut command = super::sign_in_command(executable)?;
     match action {
         ClaudeAuthCommand::Login => command.args(["auth", "login"]),
         ClaudeAuthCommand::Status => command.args(["auth", "status"]),
@@ -51,7 +51,7 @@ fn auth_command(
         .env("HOME", home)
         .env("CLAUDE_CONFIG_DIR", home)
         .env("TMPDIR", home)
-        .env("PATH", super::sign_in_path(executable))
+        .env("PATH", super::SIGN_IN_PATH)
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .current_dir(home)
@@ -64,7 +64,7 @@ fn auth_command(
         .stderr(Stdio::piped())
         .process_group(0);
     assert_eq!(command.get_current_dir(), Some(home));
-    assert_eq!(command.get_program(), executable.as_os_str());
+    assert!(Path::new(command.get_program()).is_absolute());
     Ok(command)
 }
 

@@ -600,7 +600,7 @@ export function stateView(state: DependencyState): { word: string; tone: Tone; l
     case "installing": return { word: "Installing", tone: "info", line: null };
     case "checking": return { word: "Checking", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
-    default: return { word: "Not installed", tone: "warn", line: "Setup installs it." };
+    default: return { word: "Not installed", tone: "warn", line: state.state === "missing" && state.line ? displayText(state.line) : "Setup installs it." };
   }
 }
 

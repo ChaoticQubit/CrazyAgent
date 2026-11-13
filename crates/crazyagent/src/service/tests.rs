@@ -1081,3 +1081,152 @@ fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
         assert!(!copied.stale(&bundled));
     }
 }
+
+/// A Nix-style store, a sticky folder its group can write such as /nix/store
+/// (root:nixbld 1775), is fine two or more levels above an entry whose folder below it
+/// exists, since its group cannot replace an entry another user owns; the entry's own
+/// folder, and a missing folder below the store, keep the full checks (L8c, 11-12).
+#[cfg(unix)]
+#[test]
+fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a_missing_one() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let temp = durable_folder();
+    let store = temp.path().join("store");
+    let package = store.join("hash-tool-1.0");
+    let bin = package.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("tool");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let loose = store.join("loose");
+    std::fs::write(&loose, "").unwrap();
+    let mode = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    mode(&tool, 0o555);
+    mode(&bin, 0o555);
+    mode(&package, 0o555);
+    mode(&store, 0o1775);
+    if trusted_group(std::fs::metadata(&store).unwrap().gid()) {
+        mode(&package, 0o755);
+        mode(&bin, 0o755);
+        return;
+    }
+    assert_eq!(changeable_by_others(&tool), None);
+    assert_eq!(changeable_by_others(&bin), None);
+    assert_eq!(
+        changeable_by_others(&loose),
+        Some(store.clone()),
+        "the entry's own folder keeps the full checks"
+    );
+    assert_eq!(
+        changeable_by_others(&store.join("gone/bin/tool")),
+        Some(store.clone()),
+        "the group could make a missing folder below the store"
+    );
+    mode(&store, 0o775);
+    assert_eq!(
+        changeable_by_others(&tool),
+        Some(store.clone()),
+        "without the sticky bit the group can replace the package"
+    );
+    mode(&package, 0o755);
+    mode(&bin, 0o755);
+}
+
+/// The ownership rule on synthetic parts, the entry first (leader 17:12, L8c): a /tmp-like
+/// folder (root 1777) above this user's 0700 folder passes for the tools the resolver runs
+/// and stays changeable for the engine service; a part another user owns below it is
+/// refused; a /nix/store-like folder (root:nixbld 1775) above 0555 packages passes for
+/// both; a missing part below a store, or a store as the entry's own folder, is refused.
+#[cfg(unix)]
+#[test]
+fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
+    const ME: u32 = 501;
+    const OTHER: u32 = 502;
+    const NIXBLD: u32 = 30_000;
+    let found = |owner, group, mode, folder| Part::Found {
+        owner,
+        group,
+        mode,
+        folder,
+        link: false,
+    };
+    let system = found(0, 0, 0o755, true);
+    let tmp = found(0, 0, 0o1777, true);
+    let tool = found(ME, 20, 0o755, false);
+    let own = found(ME, 20, 0o700, true);
+    let under_tmp = [tool, own, tmp, system, system];
+    assert_eq!(first_changeable_part(&under_tmp, ME, true), None);
+    assert_eq!(
+        first_changeable_part(&under_tmp, ME, false),
+        Some(2),
+        "the service check is unchanged"
+    );
+    let theirs = [tool, found(OTHER, 20, 0o700, true), tmp, system];
+    assert_eq!(first_changeable_part(&theirs, ME, true), Some(1));
+    let deeper = [tool, own, found(OTHER, 20, 0o755, true), tmp, system];
+    assert_eq!(first_changeable_part(&deeper, ME, true), Some(2));
+    assert_eq!(
+        first_changeable_part(&[tool, tmp, system], ME, true),
+        Some(1)
+    );
+    let missing = [Part::Missing, Part::Missing, tmp, system];
+    assert_eq!(first_changeable_part(&missing, ME, true), Some(2));
+    let package = found(0, 0, 0o555, true);
+    let nix = [
+        found(0, 0, 0o555, false),
+        package,
+        package,
+        found(0, NIXBLD, 0o1775, true),
+        system,
+        system,
+    ];
+    assert_eq!(first_changeable_part(&nix, ME, true), None);
+    assert_eq!(first_changeable_part(&nix, ME, false), None);
+    let plain = [tool, own, found(ME, 20, 0o775, true), system];
+    assert_eq!(
+        first_changeable_part(&plain, ME, true),
+        Some(2),
+        "a group-writable folder with no sticky bit"
+    );
+}
+
+/// R2-L1: a file a group other than root's can write counts as changeable, like a folder,
+/// for the engine service and for the tools the resolver runs: a 0775 staff file in this
+/// user's 0755 folder is refused, 0755 or a root-group 0775 passes, and a link's own mode is
+/// never read.
+#[cfg(unix)]
+#[test]
+fn a_file_an_untrusted_group_can_write_is_changeable_like_a_folder() {
+    const ME: u32 = 501;
+    const STAFF: u32 = 20;
+    let found = |group, mode, folder, link| Part::Found {
+        owner: ME,
+        group,
+        mode,
+        folder,
+        link,
+    };
+    let own = found(STAFF, 0o755, true, false);
+    let system = Part::Found {
+        owner: 0,
+        group: 0,
+        mode: 0o755,
+        folder: true,
+        link: false,
+    };
+    for open_stores in [false, true] {
+        let grouped = [found(STAFF, 0o775, false, false), own, system];
+        assert_eq!(first_changeable_part(&grouped, ME, open_stores), Some(0));
+        let plain = [found(STAFF, 0o755, false, false), own, system];
+        assert_eq!(first_changeable_part(&plain, ME, open_stores), None);
+        let root_group = [found(0, 0o775, false, false), own, system];
+        assert_eq!(first_changeable_part(&root_group, ME, open_stores), None);
+        let link = [found(STAFF, 0o777, false, true), own, system];
+        assert_eq!(
+            first_changeable_part(&link, ME, open_stores),
+            None,
+            "a link's own mode is not read"
+        );
+    }
+}

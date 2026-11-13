@@ -329,3 +329,23 @@ async fn the_backfill_makes_no_setup_folder_before_setup_and_seeds_the_shipped_h
     );
     owner.stop().await;
 }
+
+/// The owner's explicit setup run, the tool rows' Set up tools, Install missing and Try
+/// again, asks the background probes to look for tool folders again at once, whatever their
+/// backoff: each run that begins records a new folder run, while a passive look within the
+/// backoff ([`crate::tools::probe::missed`]) would not.
+#[test]
+fn an_explicit_setup_run_asks_the_probes_to_look_again_at_once() {
+    let _ = crate::tools::probe::folders();
+    let before = crate::tools::probe::last_run().map(|run| run.finished);
+    let root = tempfile::tempdir().unwrap();
+    assert!(setup::begin_run(root.path(), &[]));
+    let first = crate::tools::probe::last_run().unwrap().finished;
+    assert!(before.is_none_or(|before| first > before));
+    assert!(!setup::begin_run(root.path(), &[]), "one run at a time");
+    crate::setup::progress::with(root.path(), |state| state.running = false);
+    assert!(setup::begin_run(root.path(), &[]));
+    let second = crate::tools::probe::last_run().unwrap().finished;
+    assert!(second > first);
+    crate::setup::progress::with(root.path(), |state| state.running = false);
+}
