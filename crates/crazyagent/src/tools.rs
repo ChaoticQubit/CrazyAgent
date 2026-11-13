@@ -508,7 +508,10 @@ pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
 /// Whether this build ships tmux beside the engine: the release job sets
 /// `CRAZYAGENT_BUNDLES_TMUX=1` for every target that bundles `crazyagent-tmux`, so a dev
 /// build or a Windows build never says the bundled one is missing.
-pub const SHIPS_BUNDLED_TMUX: bool = matches!(option_env!("CRAZYAGENT_BUNDLES_TMUX"), Some("1"));
+pub const SHIPS_BUNDLED_TMUX: bool = match option_env!("CRAZYAGENT_BUNDLES_TMUX") {
+    Some(mark) => matches!(mark.as_bytes(), [b'1']),
+    None => false,
+};
 
 /// Why the engine runs another tmux than the one the app ships (DEC-157 15:41): the bundled
 /// file is not there, or it is there but cannot run (refused, or no supported version read).
