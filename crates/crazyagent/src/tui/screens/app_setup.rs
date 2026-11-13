@@ -296,6 +296,7 @@ fn tool_word(state: &DependencyState) -> String {
         DependencyState::Installing => "Installing".into(),
         DependencyState::Installed { version } => format!("Installed {}", version.as_str()),
         DependencyState::Failed { .. } => "Failed".into(),
+        DependencyState::Unsupported => "Not supported".into(),
     }
 }
 
@@ -372,7 +373,7 @@ enum Sent {
 
 /// The setup page: the tools CrazyAgent needs on this machine and the default
 /// skills and plugins pack, with ticks. First run shows it after the projects
-/// home folder: Enter installs and continues to the Accounts step, and continuing past the
+/// home folder: Enter installs and continues to the Harnesses step, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
 /// remove, the projects home folder, the GitHub account, the Linux sockets
 /// setting, when finished agents' worktrees go, what quitting does to team agents and
@@ -1452,14 +1453,14 @@ impl AppSetup {
         }
     }
 
-    /// Leaves first run's Setup for the Accounts step, the only way first run
+    /// Leaves first run's Setup for the Harnesses step, the only way first run
     /// leaves this page. Input: the context. Output: the flow that replaces Setup.
     fn next_step(ctx: &mut Ctx) -> Flow {
-        Flow::Replace(open(&Place::FirstRunAccounts, ctx))
+        Flow::Replace(open(&Place::HarnessSetup, ctx))
     }
 
     /// True when no setup run is going and no change waits for the engine.
-    /// Input: none. Output: whether first run may leave for its Accounts step.
+    /// Input: none. Output: whether first run may leave for its Harnesses step.
     fn quiet(&self) -> bool {
         !self.started && self.sent.is_none()
     }
@@ -2030,7 +2031,12 @@ impl Screen for AppSetup {
         let mut hints = Vec::new();
         match &self.setup {
             Load::Ready(_) if self.first_run => {
-                hints.push(hint("Enter", "Install and continue"));
+                let enter = if self.finished_with_problems && self.quiet() {
+                    "Try again"
+                } else {
+                    "Install and continue"
+                };
+                hints.push(hint("Enter", enter));
                 if self.quiet() {
                     let skip = if self.finished_with_problems {
                         "Continue without it"

@@ -417,7 +417,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "install_dependency" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -1532,7 +1532,7 @@ export function cloneRepo(fullName: string): Promise<CloneReceipt> {
   return invoke<CloneReceipt>("desktop_clone_repo", { fullName });
 }
 
-export type DependencyName = "tmux" | "uv" | "graphify";
+export type DependencyName = "tmux" | "uv" | "graphify" | "node";
 
 export type DependencyState =
   | { state: "checking" }
@@ -1540,7 +1540,9 @@ export type DependencyState =
   | { state: "found"; version: string }
   | { state: "installing" }
   | { state: "installed"; version: string }
-  | { state: "failed"; reason: string };
+  | { state: "bundled"; version: string }
+  | { state: "failed"; reason: string }
+  | { state: "unsupported" };
 
 export interface Dependency {
   name: DependencyName;
@@ -1655,6 +1657,12 @@ export function setupStatus(): Promise<SetupStatus> {
  * Inputs: the ticked ids and a generation. Output: the status as the run starts. */
 export function runSetup(pack: string[], generation: number): Promise<SetupStatus> {
   return invoke<SetupStatus>("desktop_run_setup", { pack, generation });
+}
+
+/** Installs one missing tool alone, such as Node. Inputs: its name and a generation.
+ * Output: the status as the install starts. */
+export function installDependency(name: DependencyName, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_install_dependency", { name, generation });
 }
 
 /** Switches one installed pack entry on or off. Inputs: its id, the state, the pack

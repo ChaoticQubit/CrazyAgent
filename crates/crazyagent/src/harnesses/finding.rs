@@ -68,12 +68,13 @@ enum Names {
 }
 
 /// The folders agents can write, where no harness file may come from: the engine folder
-/// with every agent home, the agents' temp folders, any `.crazyagent` folder with its agent
-/// worktrees, and each project folder, declared repository and agent worktree the engine
-/// database names, each kept as stored and as its real path. A folder holding the owner's
-/// home is left out, as no project may be one.
+/// outside its `setup` folder ([`crate::tools::in_engine_data`]) with every agent home, the
+/// agents' temp folders, any `.crazyagent` folder with its agent worktrees, and each project
+/// folder, declared repository and agent worktree the engine database names, each kept as
+/// stored and as its real path. A folder holding the owner's home is left out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSpace {
+    engine: Vec<PathBuf>,
     folders: Vec<PathBuf>,
 }
 
@@ -132,26 +133,27 @@ impl AgentSpace {
     /// folder kept as named and as its real path, none that holds the owner's home.
     fn of(root: &Path, named: Vec<PathBuf>) -> Self {
         let owner = crate::projects_home::owner_home().ok();
-        let mut folders = Vec::new();
-        for folder in std::iter::once(root.to_path_buf()).chain(named) {
-            if !folder.is_absolute() || folder.parent().is_none() {
-                continue;
-            }
-            let real = std::fs::canonicalize(&folder).ok();
-            for kept in std::iter::once(folder).chain(real) {
-                if owner
+        let usable = |folder: &PathBuf| {
+            folder.is_absolute()
+                && folder.parent().is_some()
+                && !owner
                     .as_deref()
-                    .is_some_and(|owner| owner.starts_with(&kept))
-                {
-                    continue;
-                }
-                folders.push(kept);
-            }
+                    .is_some_and(|owner| owner.starts_with(folder))
+        };
+        let engine: Vec<PathBuf> = crate::tools::engine_roots(Some(root))
+            .into_iter()
+            .filter(usable)
+            .collect();
+        let mut folders = Vec::new();
+        for folder in named {
+            let real = std::fs::canonicalize(&folder).ok();
+            folders.extend(std::iter::once(folder).chain(real).filter(usable));
         }
         folders.sort();
         folders.dedup();
+        assert!(engine.len() <= 2);
         assert!(folders.len() <= AGENT_FOLDERS_MAX);
-        Self { folders }
+        Self { engine, folders }
     }
 
     /// Whether agents could write a harness file or the link to it: the path as given, the
@@ -170,6 +172,7 @@ impl AgentSpace {
             .any(|at| {
                 in_crazyagent_folder(&at)
                     || at.to_str().is_some_and(|text| text.starts_with(AGENT_TMP))
+                    || crate::tools::in_engine_data(&self.engine, &at)
                     || self.folders.iter().any(|folder| at.starts_with(folder))
             })
     }

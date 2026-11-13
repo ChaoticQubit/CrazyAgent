@@ -403,7 +403,7 @@ fn continuing_installs_the_ticked_entries_then_opens_home() {
     done.pack[1].state = PackState::Available;
     done.pack[2].state = PackState::On;
     shell.arrive(event(AppSetupEvent::Status(Ok(done))));
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
 #[test]
@@ -415,7 +415,7 @@ fn first_run_offers_to_continue_without_installing_and_runs_nothing() {
         assert!(help.contains("Enter Install and continue"), "{help}");
         assert!(help.contains("c Continue without installing"), "{help}");
         shell.key(Key::Char('c'));
-        assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+        assert_eq!(shell.place(), Some(Place::HarnessSetup));
         let runs = jobs(&mut shell)
             .iter()
             .filter(|job| matches!(job, AppSetupJob::Run { .. }))
@@ -451,7 +451,37 @@ fn a_failed_install_keeps_first_run_here_until_the_owner_continues() {
         "caveman: The source could not be downloaded.",
     );
     shell.key(Key::Char('c'));
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
+}
+
+#[test]
+fn a_failed_install_offers_try_again_which_runs_only_what_is_not_installed() {
+    let mut shell = first_run(120, 36);
+    shell.key(Key::Enter);
+    jobs(&mut shell);
+    shell.arrive(event(AppSetupEvent::Ran(Ok(()))));
+    jobs(&mut shell);
+    let mut finished = installed_status();
+    finished.dependencies[0].state = DependencyState::Failed {
+        reason: "setup_homebrew_missing".into(),
+    };
+    finished.pack[2].state = PackState::Failed {
+        reason: "pack_fetch_failed".into(),
+    };
+    shell.arrive(event(AppSetupEvent::Status(Ok(finished))));
+    let rows = render(&mut shell, 120, 36);
+    let help = bar(&rows);
+    assert!(help.contains("Enter Try again"), "{help}");
+    assert!(help.contains("c Continue without it"), "{help}");
+    shell.key(Key::Enter);
+    let runs: Vec<Vec<String>> = jobs(&mut shell)
+        .into_iter()
+        .filter_map(|job| match job {
+            AppSetupJob::Run { pack, .. } => Some(pack),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(runs, vec![vec!["caveman".to_owned()]]);
 }
 
 #[test]
@@ -570,7 +600,7 @@ fn without_engine_support_first_run_says_not_ready_and_continues() {
     find(&rows, "Not ready yet.");
     assert!(bar(&rows).contains("Enter Continue"));
     shell.key(Key::Enter);
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
 #[test]

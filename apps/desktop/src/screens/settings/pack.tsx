@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { listSkills } from "../../api";
-import { intakeCopy, loadSetupStatus, removePackEntry, runSetup, setPackEntry } from "../../api-intake";
+import { installDependency, intakeCopy, loadSetupStatus, removePackEntry, runSetup, setPackEntry } from "../../api-intake";
 import type { SkillEntry } from "../../api-process";
-import type { PackEntry, SetupStatus } from "../../engine-client";
+import type { Dependency, PackEntry, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, SettingSection, Skeleton, StatusBadge, Switch } from "../../ui";
 import { SettingRow } from "../../ui/setting";
 import { displayText } from "../conversation";
-import { SETUP_POLL_MS, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
+import { SETUP_POLL_MS, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, rowInstall, setupBusy, toolsChecking, toolsOffer, toolsStep } from "../intake/intake";
 import { SkillTag, skillEntries } from "../skill-tag";
 import "../project/projects.css";
 
@@ -29,14 +29,13 @@ export function packConfirm(ask: PackAsk): { title: string; body: string; confir
       : `Agents in every project can use this skill. It comes from ${displayText(ask.entry.source)}.` };
 }
 
-/** The Tools section of Settings, Pack: tmux, uv and graphify with their state, any readiness
- * note such as agent git needing the Command Line Tools, and Install tools while one is
- * missing or failed and nothing is checking or installing.
- * Inputs: the setup status, the change in flight and the Install tools handler. */
-function ToolsSection({ status, busy, onInstallTools }: { status: SetupStatus; busy: string | null; onInstallTools: () => void }) {
+/** The Tools section of Settings, Pack: tmux, uv, graphify and Node with their state, any
+ * readiness note such as agent git needing the Command Line Tools, Install tools while one is
+ * missing or failed and nothing is checking or installing, and Install on a row that installs alone.
+ * Inputs: the setup status, the change in flight and the Install tools and row Install handlers. */
+function ToolsSection({ status, busy, onInstallTools, onInstall }: { status: SetupStatus; busy: string | null; onInstallTools: () => void; onInstall?: (dependency: Dependency) => void }) {
   const step = toolsStep({ kind: "ok", value: status });
-  const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed");
-  const offer = wanted && !setupBusy(status) && !toolsChecking(status);
+  const offer = toolsOffer(status);
   return <SettingSection title="Tools" about={step.body} actions={offer ? <Button variant="primary" size="small" icon="wrench" disabled={busy !== null && busy !== TOOLS_BUSY} pending={busy === TOOLS_BUSY}
     pendingLabel="Starting..." onClick={onInstallTools}>Install tools</Button> : undefined}>
     {status.dependencies.map((dependency) => {
@@ -47,7 +46,9 @@ function ToolsSection({ status, busy, onInstallTools }: { status: SetupStatus; b
           <span>{row.about}</span>
           {row.line && <span className={dependency.state.state === "failed" ? "pj-error" : undefined}>{row.line}</span>}
         </span>
-        <div className="set-ctl set-line-ctl"><StatusBadge word={row.word} tone={row.tone} /></div>
+        <div className="set-ctl set-line-ctl"><StatusBadge word={row.word} tone={row.tone} />
+          {onInstall && rowInstall(dependency, status) && <Button size="small" icon="wrench" disabled={busy !== null} pending={busy === TOOLS_BUSY + dependency.name}
+            pendingLabel="Starting..." onClick={() => onInstall(dependency)}>Install</Button>}</div>
       </SettingRow>;
     })}
     {status.notes && status.notes.length > 0 && <div className="set-body">{status.notes.map((note) => <p className="pj-error" key={note}>{displayText(note)}</p>)}</div>}
@@ -94,7 +95,7 @@ function PackRow({ entry, locked, busy, skills, onSwitch, onAsk }: {
  * line, the default pack grouped like setup and last tmux, uv and graphify. A group whose
  * installed entries differ from what ships is marked changed. Inputs: the setup read, the
  * change in flight, the last problem and the handlers. */
-export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAsk, onInstallTools, onRetry }: {
+export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAsk, onInstallTools, onInstall, onRetry }: {
   status: Loaded<SetupStatus>;
   busy: string | null;
   problem: string;
@@ -102,6 +103,7 @@ export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAs
   onSwitch: (entry: PackEntry, on: boolean) => void;
   onAsk: (ask: PackAsk) => void;
   onInstallTools: () => void;
+  onInstall?: (dependency: Dependency) => void;
   onRetry: () => void;
 }) {
   const running = status.kind === "ok" && setupBusy(status.value);
@@ -117,7 +119,7 @@ export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAs
           title={differsFromShipped(group.entries) ? <>{group.title}<span className="set-changed">changed</span></> : group.title}>
           {group.entries.map((entry) => <PackRow key={entry.id} entry={entry} locked={running || busy !== null} busy={busy} skills={skills} onSwitch={onSwitch} onAsk={onAsk} />)}
         </SettingSection>)}
-        {status.value.dependencies.length > 0 && <ToolsSection status={status.value} busy={busy} onInstallTools={onInstallTools} />}
+        {status.value.dependencies.length > 0 && <ToolsSection status={status.value} busy={busy} onInstallTools={onInstallTools} onInstall={onInstall} />}
       </>}
   </div>;
 }
@@ -186,7 +188,8 @@ export function PackSettings() {
 
   return <>
     <PackSettingsView status={status} busy={busy} problem={problem} skills={listed.kind === "ok" ? skillEntries(listed.value) : []} onRetry={reload} onAsk={setAsk}
-      onInstallTools={() => void apply(TOOLS_BUSY, () => runSetup([]), "Installing tmux, uv and graphify.")}
+      onInstallTools={() => void apply(TOOLS_BUSY, () => runSetup([]), "Installing the missing tools.")}
+      onInstall={(dependency) => void apply(TOOLS_BUSY + dependency.name, () => installDependency(dependency.name), `Installing ${dependency.label}.`)}
       onSwitch={(entry, on) => void apply(entry.id, () => setPackEntry(entry.id, on, version), `${entryName(entry)} is ${on ? "on" : "off"}.`)} />
     <PackConfirmDialogs ask={ask} pending={busy !== null} onCancel={() => { if (busy === null) setAsk(null); }} onConfirm={confirm} />
   </>;

@@ -146,9 +146,10 @@ fn the_newest_node_version_of_a_manager_is_found_first() {
     assert_eq!(resolve("node", &home_only(&home)).unwrap().program, newest);
 }
 
-/// The engine looks in the app's folder and its setup folder first, then Homebrew on Apple
-/// silicon and Intel, all before the PATH it inherited (R-M1), then HOME, and the system
-/// folders last.
+/// The engine looks in the app's folder, then Homebrew on Apple silicon and Intel, all
+/// before the PATH it inherited (R-M1), then HOME and the system folders, and last the app's
+/// own setup and npm harness folders, which no probed folder passes: the owner's own
+/// installs win and the app's are the fallback.
 #[test]
 fn the_engine_looks_in_homebrew_on_both_macs_and_the_system_folders_last() {
     let (_folder, home) = scratch();
@@ -165,15 +166,34 @@ fn the_engine_looks_in_homebrew_on_both_macs_and_the_system_folders_last() {
             .position(|f| f == Path::new(folder))
             .unwrap_or_else(|| panic!("{folder} is looked in"))
     };
+    let setup_bin = PathBuf::from("/engine/setup/bin");
+    let prefix_bin = crate::setup::harness_prefix(Path::new("/engine")).join("bin");
     assert_eq!(at("/app"), 0);
-    assert_eq!(at("/engine/setup/bin"), 1);
-    assert_eq!(at("/opt/homebrew/bin"), 2);
-    assert_eq!(at("/usr/local/bin"), 3);
-    assert_eq!(at("/custom/bin"), 4);
+    assert_eq!(at("/opt/homebrew/bin"), 1);
+    assert_eq!(at("/usr/local/bin"), 2);
+    assert_eq!(at("/custom/bin"), 3);
     assert!(at("/custom/bin") < folders.iter().position(|f| f.starts_with(&home)).unwrap());
+    let owners = folders.len() - 2;
     assert_eq!(
-        folders[folders.len() - 4..],
+        folders[owners - 4..owners],
         SYSTEM_FOLDERS.map(PathBuf::from)
+    );
+    assert_eq!(
+        folders[owners..],
+        [setup_bin.clone(), prefix_bin.clone()],
+        "the app's own installs are the fallback after every folder of the owner"
+    );
+    let probed = home.join("probed/bin");
+    let with_probed = places
+        .clone()
+        .with_probed(vec![probed.clone(), setup_bin.clone()]);
+    let folders = with_probed.folders();
+    let probed_at = folders.iter().position(|f| *f == probed).unwrap();
+    assert!(probed_at < folders.len() - 6, "{folders:?}");
+    assert_eq!(
+        folders[folders.len() - 2..],
+        [setup_bin, prefix_bin],
+        "a probed folder never moves the app's folders ahead"
     );
     assert!(folders.contains(&home.join(".local/bin")));
     assert!(folders.contains(&home.join(".cargo/bin")));
@@ -580,9 +600,14 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
         resolve("tmux", &places).map_or(true, |tmux| tmux.program != planted),
         "a link into an agent's HOME is never used"
     );
+    assert!(resolve_entry(&setup.join("tmux"), &places).is_err());
     std::fs::remove_file(setup.join("tmux")).unwrap();
     let own = program(&setup.join("tmux"), NODE);
-    assert_eq!(resolve("tmux", &places).unwrap().program, own);
+    assert_eq!(
+        resolve_entry(&setup.join("tmux"), &places).unwrap().program,
+        own,
+        "the setup folder is kept, though an owner tmux found first wins by name"
+    );
 }
 
 /// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,

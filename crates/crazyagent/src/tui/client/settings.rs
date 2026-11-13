@@ -40,6 +40,7 @@ pub(in crate::tui) enum SettingsJob {
     Accounts(AccountsRequest),
     AllAccounts,
     Harnesses,
+    HarnessList,
     HarnessVersions {
         id: String,
         look: bool,
@@ -50,6 +51,10 @@ pub(in crate::tui) enum SettingsJob {
     HarnessInstall {
         id: String,
     },
+    HarnessInstallMany {
+        ids: Vec<String>,
+    },
+    HarnessQueued,
     HarnessFind {
         id: String,
     },
@@ -233,9 +238,12 @@ impl std::fmt::Debug for SettingsJob {
             Self::Accounts(_) => "Accounts",
             Self::AllAccounts => "AllAccounts",
             Self::Harnesses => "Harnesses",
+            Self::HarnessList => "HarnessList",
             Self::HarnessVersions { .. } => "HarnessVersions",
             Self::HarnessUpdate { .. } => "HarnessUpdate",
             Self::HarnessInstall { .. } => "HarnessInstall",
+            Self::HarnessInstallMany { .. } => "HarnessInstallMany",
+            Self::HarnessQueued => "HarnessQueued",
             Self::HarnessFind { .. } => "HarnessFind",
             Self::HarnessChoosePath { .. } => "HarnessChoosePath",
             Self::HarnessUpdateSettings => "HarnessUpdateSettings",
@@ -365,6 +373,8 @@ pub(in crate::tui) enum SettingsEvent {
     HarnessVersions(String, Result<HarnessVersions, String>),
     HarnessUpdated(String, Result<(), String>),
     HarnessInstalled(String, Result<(), String>),
+    HarnessesQueued(Vec<String>, Result<(), String>),
+    HarnessQueue(Result<Vec<String>, String>),
     HarnessFound(String, Result<Found, String>),
     HarnessChosen(String, Option<String>, Result<Found, String>),
     HarnessUpdateSettings(Result<UpdateSettings, String>),
@@ -423,12 +433,16 @@ impl SettingsEvent {
         match job {
             SettingsJob::Accounts(_) => Self::Accounts(Err(problem)),
             SettingsJob::AllAccounts => Self::AllAccounts(Err(problem)),
-            SettingsJob::Harnesses => Self::Harnesses(Err(problem)),
+            SettingsJob::Harnesses | SettingsJob::HarnessList => Self::Harnesses(Err(problem)),
             SettingsJob::HarnessVersions { id, .. } => {
                 Self::HarnessVersions(id.clone(), Err(problem))
             }
             SettingsJob::HarnessUpdate { id } => Self::HarnessUpdated(id.clone(), Err(problem)),
             SettingsJob::HarnessInstall { id } => Self::HarnessInstalled(id.clone(), Err(problem)),
+            SettingsJob::HarnessInstallMany { ids } => {
+                Self::HarnessesQueued(ids.clone(), Err(problem))
+            }
+            SettingsJob::HarnessQueued => Self::HarnessQueue(Err(problem)),
             SettingsJob::HarnessFind { id } => Self::HarnessFound(id.clone(), Err(problem)),
             SettingsJob::HarnessChoosePath { id, path } => {
                 Self::HarnessChosen(id.clone(), path.clone(), Err(problem))
@@ -595,6 +609,15 @@ impl NativeOwner {
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
+            SettingsJob::HarnessList => {
+                SettingsEvent::Harnesses(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_catalog(false)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::HarnessVersions { id, look } => {
                 let result = match self.settings_controller() {
                     Ok(controller) => controller
@@ -624,6 +647,25 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 };
                 SettingsEvent::HarnessInstalled(id, result)
+            }
+            SettingsJob::HarnessInstallMany { ids } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_install_many(&ids)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessesQueued(ids, result)
+            }
+            SettingsJob::HarnessQueued => {
+                SettingsEvent::HarnessQueue(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_queued()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
             }
             SettingsJob::HarnessFind { id } => {
                 let result = match self.settings_controller() {

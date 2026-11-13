@@ -33,11 +33,11 @@ pub fn system_folders(fixed: Vec<PathBuf>) -> Vec<PathBuf> {
     system
 }
 
-/// Finds and installs uv and Graphify the same way on every Unix system. uv comes from
-/// its release archive, kept only when its SHA-256 matches the pin; Graphify and other
-/// Python tools come from their bundled hash locks. Installs go into `<engine root>/setup`:
-/// programs in `setup/bin`, tool environments, cache and Python under `setup/uv`. Lookups
-/// search `setup/bin` first, then the system folders. Nothing runs with sudo.
+/// Finds and installs uv and Graphify the same way on every Unix system: uv from its release
+/// archive, kept only when its SHA-256 matches the pin, Graphify and other Python tools from
+/// their bundled hash locks, all into `<engine root>/setup` (`setup/bin`, tools under
+/// `setup/uv`). Lookups go through the tool resolver's places, Node as a usable node and npm
+/// pair ([`super::node::usable`]). Nothing runs with sudo.
 pub struct PinnedInstaller {
     setup: PathBuf,
     search: Vec<PathBuf>,
@@ -79,6 +79,14 @@ impl PinnedInstaller {
             places,
             ..Self::with_paths(engine_root, system)
         }
+    }
+
+    /// Finds a usable Node ([`super::node::usable`]) on the installer's places and asks it
+    /// for its version. Output: the version, or none when no usable Node reports one.
+    fn node(&self) -> Option<Version> {
+        let found = super::node::usable(&self.places)?;
+        self.version(Dependency::Node, &[found.node.into_os_string()])
+            .ok()
     }
 
     /// Returns the private install folder, `<engine root>/setup`.
@@ -129,7 +137,7 @@ impl PinnedInstaller {
     fn version(&self, dep: Dependency, words: &[OsString]) -> Result<Version, InstallError> {
         let flag = match dep {
             Dependency::Tmux => "-V",
-            Dependency::Uv | Dependency::Graphify => "--version",
+            Dependency::Uv | Dependency::Graphify | Dependency::Node => "--version",
         };
         let (program, rest) = words
             .split_first()
@@ -145,6 +153,9 @@ impl PinnedInstaller {
         )?;
         if !ok {
             return Err(InstallError("setup_version_unreadable"));
+        }
+        if dep == Dependency::Node {
+            return node_version(&output);
         }
         version_from(&output)
     }
@@ -175,35 +186,7 @@ impl PinnedInstaller {
         let staging = staging_folder(&self.setup, "download")?;
         let result = (|| {
             let archive = staging.join("archive.tar.gz");
-            let (fetched, _) = run(
-                Path::new(CURL),
-                &[
-                    "-q".into(),
-                    "-fsSL".into(),
-                    "--proto".into(),
-                    "=https,file".into(),
-                    "--max-filesize".into(),
-                    ARCHIVE_BYTES_MAX.to_string().into(),
-                    "--max-time".into(),
-                    DOWNLOAD_TIME.as_secs().to_string().into(),
-                    "-o".into(),
-                    archive.clone().into_os_string(),
-                    url.into(),
-                ],
-                &self.env(),
-                &staging,
-                DOWNLOAD_TIME + Duration::from_secs(5),
-            )?;
-            let size = std::fs::symlink_metadata(&archive)
-                .map(|metadata| metadata.is_file().then_some(metadata.len()))
-                .ok()
-                .flatten();
-            if !fetched || size.is_none_or(|size| size > ARCHIVE_BYTES_MAX) {
-                return Err(InstallError("setup_download_failed"));
-            }
-            if file_sha256(&archive)? != sha256 {
-                return Err(InstallError("setup_checksum_mismatch"));
-            }
+            self.download(url, sha256, &archive, &staging)?;
             let out = staging.join("out");
             private_folder(&out)?;
             let (unpacked, _) = run(
@@ -234,6 +217,50 @@ impl PinnedInstaller {
         })();
         let _ = std::fs::remove_dir_all(&staging);
         result
+    }
+
+    /// Downloads one pinned archive with curl over https (or a local `file:///` source),
+    /// bounded in size and time, and keeps it only when its SHA-256 is the pinned one.
+    /// Inputs: the URL, the SHA-256, where to save it and the staging folder curl runs in.
+    /// Output: Ok, `setup_download_failed` or `setup_checksum_mismatch`.
+    pub(super) fn download(
+        &self,
+        url: &str,
+        sha256: &str,
+        archive: &Path,
+        staging: &Path,
+    ) -> Result<(), InstallError> {
+        assert!(is_sha256(sha256));
+        let (fetched, _) = run(
+            Path::new(CURL),
+            &[
+                "-q".into(),
+                "-fsSL".into(),
+                "--proto".into(),
+                "=https,file".into(),
+                "--max-filesize".into(),
+                ARCHIVE_BYTES_MAX.to_string().into(),
+                "--max-time".into(),
+                DOWNLOAD_TIME.as_secs().to_string().into(),
+                "-o".into(),
+                archive.as_os_str().to_owned(),
+                url.into(),
+            ],
+            &self.env(),
+            staging,
+            DOWNLOAD_TIME + Duration::from_secs(5),
+        )?;
+        let size = std::fs::symlink_metadata(archive)
+            .map(|metadata| metadata.is_file().then_some(metadata.len()))
+            .ok()
+            .flatten();
+        if !fetched || size.is_none_or(|size| size > ARCHIVE_BYTES_MAX) {
+            return Err(InstallError("setup_download_failed"));
+        }
+        if file_sha256(archive)? != sha256 {
+            return Err(InstallError("setup_checksum_mismatch"));
+        }
+        Ok(())
     }
 
     fn uv_tool(&self, package: &str, version: &Version, python: &str) -> Result<(), InstallError> {
@@ -388,7 +415,20 @@ fn plain_name(name: &str) -> bool {
         })
 }
 
-fn link(target: &Path, at: &Path) -> Result<(), InstallError> {
+/// Reads the version Node prints for `--version`: one word such as `v26.13.1` on the first
+/// line, kept without its `v`. Input: the output. Output: the version, or
+/// `setup_version_unreadable`.
+fn node_version(output: &[u8]) -> Result<Version, InstallError> {
+    let unreadable = InstallError("setup_version_unreadable");
+    let text = std::str::from_utf8(output).map_err(|_| unreadable)?;
+    let word = text.lines().next().unwrap_or_default().trim();
+    Version::parse(word.strip_prefix('v').ok_or(unreadable)?)
+}
+
+/// Points `at` at `target` with a new link put in place by one rename, so a reader never
+/// sees it missing. Inputs: the target and the link path. Output: Ok, or
+/// `setup_store_unavailable`.
+pub(super) fn link(target: &Path, at: &Path) -> Result<(), InstallError> {
     let unavailable = InstallError("setup_store_unavailable");
     let random = crate::engine::owner::random_id().map_err(|_| unavailable)?;
     let name = at.file_name().ok_or(unavailable)?.to_string_lossy();
@@ -417,6 +457,9 @@ impl Installer for PinnedInstaller {
     }
 
     fn lookup(&self, dep: Dependency) -> super::Lookup {
+        if dep == Dependency::Node {
+            return Ok(self.node().ok_or_else(|| dep.not_found()));
+        }
         Ok(self.resolved(dep)?.map(|(_, version)| version))
     }
 
@@ -454,7 +497,25 @@ impl Installer for PinnedInstaller {
                 self.uv_tool(package, version, python)?;
                 version
             }
-            Pin::Homebrew { .. } | Pin::Winget { .. } => {
+            Pin::Archive {
+                version,
+                url,
+                sha256,
+                top,
+            } if dep == Dependency::Node => {
+                let engine_root = self
+                    .setup
+                    .parent()
+                    .ok_or(InstallError("setup_store_unavailable"))?;
+                let pinned = super::node::NodePin {
+                    url: url.clone(),
+                    sha256: sha256.clone(),
+                    top: top.clone(),
+                };
+                super::node::install_pin(engine_root, &pinned)?;
+                version
+            }
+            Pin::Homebrew { .. } | Pin::Winget { .. } | Pin::Archive { .. } => {
                 return Err(InstallError("setup_pin_invalid"));
             }
         };

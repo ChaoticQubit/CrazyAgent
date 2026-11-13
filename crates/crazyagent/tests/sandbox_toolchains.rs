@@ -1183,6 +1183,51 @@ fn a_node_harness_reads_its_node_and_package_but_no_npm_credential_or_other_pack
 }
 
 #[test]
+fn a_node_harness_in_the_engine_prefix_runs_with_the_node_it_was_installed_with() {
+    let case = case();
+    let prefix = crazyagent::setup::harness_prefix(&case.tools.join("engine"));
+    let node = case.tools.join("setup-node/bin/node");
+    write(&node, "#!/bin/sh\necho \"linked node ran $1\"\n");
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+    crazyagent::setup::node::make_prefix(&prefix, &node).unwrap();
+    let script = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+    write(&script, "#!/usr/bin/env node\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(script.parent().unwrap())
+    .unwrap()
+    .allow_exec(&script)
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let profile = case.profiles.join("engine-node.sb");
+    sandbox.install(&profile).unwrap();
+    let mut harness = std::process::Command::new(&script);
+    harness.current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("linked node ran {}", script.display())
+    );
+}
+
+#[test]
 fn a_node_prefix_in_the_project_an_agent_worktree_or_the_agent_home_gives_no_path_entry() {
     let case = case();
     for prefix in [

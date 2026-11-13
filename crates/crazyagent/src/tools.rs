@@ -170,14 +170,14 @@ impl Places {
             .any(|root| folder.starts_with(root.join("setup")))
     }
 
-    /// Builds the engine's places: the app's own folder, the engine's setup folder, Homebrew
-    /// on Apple silicon and Intel, all fixed and ahead of the PATH the engine inherited, then
-    /// the PATH folders other than the system ones, those in a temp folder set aside, the HOME
-    /// folders the harness catalog uses (nvm, fnm, pnpm, ~/.local/bin, ~/.cargo/bin and
-    /// more), the real installs of volta, asdf, mise and fnm, each harness's own install
-    /// folders under HOME, then the system folders last. A folder agents can write is never
-    /// kept ([`Places::agent_writable`]). Inputs: the engine root, the app's folder, HOME and
-    /// the PATH value. Output: the bounded places.
+    /// Builds the engine's places: the app's own folder, Homebrew on Apple silicon and Intel
+    /// ahead of the PATH the engine inherited, then the PATH folders other than the system
+    /// ones, those in a temp folder set aside, the HOME folders the harness catalog uses (nvm,
+    /// fnm, pnpm, ~/.local/bin, ~/.cargo/bin and more), the real installs of volta, asdf, mise
+    /// and fnm, each harness's own install folders under HOME, the system folders, and last the
+    /// engine's own folders ([`engine_folders`]): the owner's installs win, the app's are the
+    /// fallback. A folder agents can write is never kept ([`Places::agent_writable`]).
+    /// Inputs: the engine root, the app's folder, HOME and the PATH. Output: the places.
     pub fn engine(
         engine_root: Option<&Path>,
         app_folder: Option<&Path>,
@@ -189,7 +189,6 @@ impl Places {
         let mut folders: Vec<PathBuf> = Vec::new();
         let mut temp: Vec<PathBuf> = Vec::new();
         folders.extend(app_folder.map(Path::to_path_buf));
-        folders.extend(engine_root.map(|root| root.join("setup").join("bin")));
         folders.extend(homebrew_folders());
         if let Some(path) = path {
             for folder in
@@ -215,6 +214,7 @@ impl Places {
         #[cfg(target_os = "linux")]
         folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
         folders.extend(system);
+        folders.extend(engine_root.into_iter().flat_map(engine_folders));
         Self::kept(folders, home, engine_roots(engine_root), true).set_aside_temp(temp)
     }
 
@@ -255,20 +255,25 @@ impl Places {
 
     /// Adds the folders the background probes found ([`probe::folders`]), such as npm's
     /// global prefix and the login shell's PATH, after every folder known without running a
-    /// program and before the system folders; folders agents can write are dropped, and on
-    /// the engine's places ([`Places::engine`]) one in a temp folder, which agents with the
-    /// owner's temp folder grant or other users write, is set aside ([`Places::set_aside_temp`]).
-    /// Input: the folders. Output: the places.
+    /// program and before the system folders and the engine's own folders, which stay last;
+    /// folders agents can write are dropped, and on the engine's places ([`Places::engine`])
+    /// one in a temp folder, which agents with the owner's temp folder grant or other users
+    /// write, is set aside ([`Places::set_aside_temp`]). Input: the folders. Output: the places.
     pub fn with_probed(self, probed: Vec<PathBuf>) -> Self {
-        let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
+        let mut tail: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
+        tail.extend(
+            self.engine_roots
+                .iter()
+                .flat_map(|root| engine_folders(root)),
+        );
         let temp_refused = self.temp_refused;
         let (last, mut folders): (Vec<PathBuf>, Vec<PathBuf>) = self
             .folders
             .into_iter()
-            .partition(|folder| system.contains(folder));
+            .partition(|folder| tail.contains(folder));
         let (temp, probed): (Vec<PathBuf>, Vec<PathBuf>) = probed
             .into_iter()
-            .filter(|folder| !system.contains(folder))
+            .filter(|folder| !tail.contains(folder))
             .partition(|folder| temp_refused && in_temp(folder));
         folders.extend(probed);
         folders.extend(last);
@@ -316,6 +321,16 @@ pub(crate) fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
     roots
         .iter()
         .any(|root| path.starts_with(root) && !path.starts_with(root.join("setup")))
+}
+
+/// The engine's own folders, looked in after every folder of the owner: its setup `bin`,
+/// then its npm harness prefix's `bin` ([`crate::setup::harness_prefix`]). Input: the engine
+/// root. Output: the two folders in that order.
+fn engine_folders(root: &Path) -> [PathBuf; 2] {
+    [
+        root.join("setup").join("bin"),
+        crate::setup::harness_prefix(root).join("bin"),
+    ]
 }
 
 /// The engine data folder as given and with its links resolved. Input: the folder, or

@@ -15,10 +15,18 @@ impl Machine {
         }
     }
     fn roots(&self) -> Roots {
+        let npm = self.root.path().join("brew/bin/npm");
+        let engine = crate::setup::harness_prefix(self.root.path());
         Roots {
             home: self.root.path().join("home"),
             brew_prefixes: vec![self.root.path().join("brew")],
             casks: true,
+            npm: npm.exists().then(|| NpmInstall {
+                node: self.root.path().join("brew/bin/node"),
+                program: npm,
+                search: vec![self.root.path().join("brew/bin"), engine.join("bin")],
+                prefix: engine,
+            }),
         }
     }
     fn program(&self, relative: &str, mode: u32) -> PathBuf {
@@ -1141,8 +1149,73 @@ fn npm_installs_into_the_prefix_the_harness_was_found_in_whatever_the_owners_npm
     let install = install_command("codex", &machine.roots()).unwrap();
     assert_eq!(install.program, machine.root.path().join("brew/bin/npm"));
     assert!(run(&install, &home, CHECK_TIME).unwrap().success);
-    assert!(machine.root.path().join("brew/installed").exists());
+    assert!(
+        crate::setup::harness_prefix(machine.root.path())
+            .join("installed")
+            .exists()
+    );
+    assert!(!machine.root.path().join("brew/installed").exists());
     assert!(!elsewhere.join("installed").exists());
+}
+
+#[test]
+fn an_npm_install_goes_to_the_engine_prefix_with_the_found_npm_and_never_to_a_homebrew_prefix() {
+    let machine = Machine::new();
+    machine.program("brew/bin/brew", 0o755);
+    let npm = machine.npm("brew");
+    executable(&npm, NPM_LIKE);
+    let engine = crate::setup::harness_prefix(machine.root.path());
+    let fixed = install_command("gemini-cli", &machine.roots()).unwrap();
+    assert_eq!(fixed.program, npm);
+    assert_eq!(fixed.args, ["install", "-g", "@google/gemini-cli"]);
+    assert_eq!(fixed.prefix.as_deref(), Some(engine.as_path()));
+    assert_eq!(
+        fixed.search,
+        vec![machine.root.path().join("brew/bin"), engine.join("bin")]
+    );
+    let home = machine.roots().home;
+    std::fs::create_dir_all(&home).unwrap();
+    assert!(run(&fixed, &home, CHECK_TIME).unwrap().success);
+    assert!(engine.join("installed").exists());
+    assert!(!machine.root.path().join("brew/installed").exists());
+    let no_node = Roots {
+        npm: None,
+        ..machine.roots()
+    };
+    assert_eq!(
+        install_command("gemini-cli", &no_node).unwrap_err(),
+        NEEDS_NODE
+    );
+}
+
+#[test]
+fn a_harness_npm_put_in_the_engine_prefix_updates_and_checks_with_the_found_npm() {
+    let machine = Machine::new();
+    let npm = machine.npm("brew");
+    let engine = crate::setup::harness_prefix(machine.root.path());
+    std::fs::create_dir_all(engine.join("lib/node_modules")).unwrap();
+    let relative = engine
+        .strip_prefix(machine.root.path())
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let real = machine.program(
+        &format!("{relative}/lib/node_modules/@google/gemini-cli/dist/index.js"),
+        0o755,
+    );
+    let update = update_command("gemini-cli", &real, &real, &machine.roots()).unwrap();
+    assert_eq!(update.program, npm);
+    assert_eq!(update.prefix.as_deref(), Some(engine.as_path()));
+    assert_eq!(
+        update.search,
+        vec![machine.root.path().join("brew/bin"), engine.join("bin")]
+    );
+    let check = check_command("gemini-cli", &real, &machine.roots())
+        .unwrap()
+        .unwrap();
+    assert_eq!(check.program, npm);
+    assert_eq!(check.args, ["view", "@google/gemini-cli", "version"]);
+    assert_eq!(check.prefix.as_deref(), Some(engine.as_path()));
 }
 
 /// The groups this user is in, as `/usr/bin/id -G` lists them.
@@ -1706,6 +1779,20 @@ fn an_install_runs_the_fixed_line_and_the_harness_is_found_right_after() {
 }
 
 #[test]
+fn an_npm_install_from_the_app_links_the_node_it_installs_with_into_the_engine_prefix() {
+    let machine = Machine::new();
+    executable(&machine.npm("brew"), NPM_LIKE);
+    let node = machine.program("brew/bin/node", 0o755);
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    let case = Case::new(machine, entry("gemini-cli", None), None);
+    case.install().unwrap();
+    case.finish();
+    let engine = crate::setup::harness_prefix(case.machine.root.path());
+    assert!(engine.join("installed").exists());
+    assert_eq!(std::fs::read_link(engine.join("bin/node")).unwrap(), node);
+}
+
+#[test]
 fn an_install_is_refused_when_installed_when_the_setting_is_off_and_while_another_job_runs() {
     assert_eq!(
         update_case("claude-code").install().unwrap_err(),
@@ -1773,4 +1860,275 @@ fn an_unrecognized_install_of_a_harness_crazyagent_cannot_start_is_never_run() {
     let system = update_case_at("claude-code", "usr/bin/claude");
     assert_eq!(system.versions(false).installed.as_deref(), Some("1.0.0"));
     assert!(system.machine.root.path().join("ran").exists());
+}
+
+/// The roots of a machine whose npm is the one setup's Node test finds on the resolver's
+/// folders under that machine's HOME only, so this Mac's own Node never counts.
+fn home_node_roots(machine: &Machine) -> Roots {
+    let home = machine.roots().home;
+    let folders: Vec<PathBuf> = crate::tools::Places::engine(None, None, Some(home.clone()), None)
+        .folders()
+        .iter()
+        .filter(|folder| folder.starts_with(&home))
+        .cloned()
+        .collect();
+    let places = crate::tools::Places::new(folders, Some(home));
+    Roots {
+        npm: super::state::engine_npm_at(machine.root.path(), &places),
+        ..machine.roots()
+    }
+}
+
+#[test]
+fn node_the_tool_resolver_finds_outside_homebrew_is_not_called_missing() {
+    for (bin, why) in [
+        ("home/.nvm/versions/node/v22.11.0/bin", "an nvm Node"),
+        (
+            "home/.volta/tools/image/node/22.11.0/bin",
+            "a volta Node, found through its real install, not its shim",
+        ),
+    ] {
+        let machine = Machine::new();
+        machine.program(&format!("{bin}/node"), 0o755);
+        assert_eq!(
+            install_command("codex", &home_node_roots(&machine)).unwrap_err(),
+            NEEDS_NODE,
+            "{why} without npm is not a usable Node"
+        );
+        let npm = machine.program(&format!("{bin}/npm"), 0o755);
+        let fixed = install_command("codex", &home_node_roots(&machine)).unwrap();
+        assert_eq!(fixed.program, npm, "{why}");
+        assert_eq!(
+            fixed.prefix.as_deref(),
+            Some(crate::setup::harness_prefix(machine.root.path()).as_path()),
+            "{why} installs into the engine prefix"
+        );
+    }
+    let other = Machine::new();
+    other.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o777);
+    other.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
+    assert_eq!(
+        install_command("codex", &home_node_roots(&other)).unwrap_err(),
+        NEEDS_NODE,
+        "a node anyone can change is not one the resolver uses"
+    );
+}
+
+#[test]
+fn an_npm_harness_on_a_mac_with_no_npm_needs_node_and_a_harness_with_no_package_has_no_installer() {
+    let machine = Machine::new();
+    for id in ["codex", "claude-code", "gemini-cli"] {
+        assert_eq!(
+            install_command(id, &machine.roots()).unwrap_err(),
+            "harness_install_needs_node",
+            "{id}"
+        );
+    }
+    for id in ["aider", "goose", "cursor-agent"] {
+        assert_eq!(
+            install_command(id, &machine.roots()).unwrap_err(),
+            NO_INSTALLER,
+            "{id}"
+        );
+    }
+    let missing = Case::new(Machine::new(), entry("codex", None), None);
+    assert_eq!(
+        missing.versions(false).refusal.as_deref(),
+        Some("harness_install_needs_node")
+    );
+}
+
+fn listed(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
+#[test]
+fn a_list_is_queued_only_when_each_id_is_a_catalog_harness_once_and_never_rcli() {
+    let updates = Updates::new();
+    let db = db();
+    for refused in [
+        listed(&[]),
+        listed(&["no-such-harness"]),
+        listed(&["rcli"]),
+        listed(&["codex", "codex"]),
+        listed(&["claude", "claude-code"]),
+        vec!["codex".to_owned(); crate::harnesses::specs().len() + 1],
+    ] {
+        assert_eq!(
+            updates.queue(&db, &refused).unwrap_err(),
+            "harness_install_list_invalid",
+            "{refused:?}"
+        );
+        assert!(updates.queued().is_empty());
+    }
+    assert_eq!(
+        updates.queue(&db, &listed(&["claude", "codex"])).unwrap(),
+        vec!["claude-code", "codex"]
+    );
+    assert_eq!(updates.queued(), listed(&["claude-code", "codex"]));
+    assert_eq!(
+        updates.queue(&db, &listed(&["aider"])).unwrap_err(),
+        "harness_update_busy"
+    );
+    let off = self::db();
+    set_settings(
+        &off,
+        UpdateSettings {
+            install: InstallFromApp::Off,
+            ..UpdateSettings::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        Updates::new().queue(&off, &listed(&["codex"])).unwrap_err(),
+        "harness_install_off"
+    );
+}
+
+#[test]
+fn a_queued_list_installs_in_order_one_at_a_time_and_a_failure_does_not_stop_the_rest() {
+    let case = slow_install_case("aider");
+    let ids = listed(&["aider", "goose", "codex"]);
+    assert_eq!(
+        case.updates.queue(&case.db, &ids).unwrap(),
+        vec!["aider", "goose", "codex"]
+    );
+    let seen: Arc<Mutex<Vec<(&'static str, bool)>>> = Arc::default();
+    let drain = {
+        let (updates, seen) = (case.updates.clone(), seen.clone());
+        let (roots, bin) = (case.machine.roots(), case.bin());
+        std::thread::spawn(move || {
+            let db = db();
+            let worker = updates.clone();
+            updates.drain(
+                move |id| {
+                    seen.lock().unwrap().push((id, worker.idle()));
+                    assert_eq!(worker.queued().first().map(String::as_str), Some(id));
+                    match id {
+                        "aider" => {
+                            let bin = bin.clone();
+                            worker.install(&db, &entry(id, None), &roots, move || {
+                                found_in(&bin, "aider")
+                            })
+                        }
+                        "goose" => Err(NO_INSTALLER),
+                        _ => Ok(()),
+                    }
+                },
+                WAIT_STEP,
+                WAIT_STEP * u32::try_from(WAIT_STEPS).unwrap(),
+            );
+        })
+    };
+    let running = (0..WAIT_STEPS).any(|_| {
+        std::thread::sleep(WAIT_STEP);
+        !case.updates.idle()
+    });
+    assert!(running);
+    let rest = listed(&["goose", "codex"]);
+    let waiting = (0..WAIT_STEPS).any(|_| {
+        let now = case.updates.queued();
+        assert!(now.ends_with(&rest), "{now:?}");
+        now == rest || {
+            std::thread::sleep(WAIT_STEP);
+            false
+        }
+    });
+    assert!(waiting, "aider leaves the queue once its install started");
+    case.finish();
+    drain.join().unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("aider", true), ("goose", true), ("codex", true)]
+    );
+    assert!(case.updates.queued().is_empty());
+    assert!(case.versions(false).last.unwrap().ok);
+    let goose = case.updates.versions(
+        &case.db,
+        &entry("goose", None),
+        &case.machine.roots(),
+        false,
+    );
+    assert_eq!(goose.last.unwrap().code.as_deref(), Some(NO_INSTALLER));
+}
+
+#[test]
+fn a_second_npm_install_keeps_the_prefix_node_on_the_real_node_when_the_resolver_finds_the_link_first()
+ {
+    let machine = Machine::new();
+    let root = machine.root.path();
+    let prefix = crate::setup::harness_prefix(root);
+    let node = machine.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o755);
+    machine.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
+    let places = crate::tools::Places::new(
+        vec![prefix.join("bin"), node.parent().unwrap().to_path_buf()],
+        None,
+    );
+    for round in ["first install", "second install"] {
+        let npm = super::state::engine_npm_at(root, &places).unwrap();
+        crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
+        assert_eq!(
+            std::fs::read_link(prefix.join("bin/node")).unwrap(),
+            node,
+            "{round} links the real node"
+        );
+    }
+    let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();
+    let script = machine.program(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix));
+}
+
+#[test]
+fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
+    let machine = Machine::new();
+    let root = machine.root.path();
+    let prefix = crate::setup::harness_prefix(root);
+    let brew_bin = root.join("brew/bin");
+    let old = machine.program("brew/Cellar/node/26.0.0/bin/node", 0o755);
+    machine.program("brew/bin/npm", 0o755);
+    std::os::unix::fs::symlink(&old, brew_bin.join("node")).unwrap();
+    let places = crate::tools::Places::new(vec![brew_bin.clone()], None);
+    let npm = super::state::engine_npm_at(root, &places).unwrap();
+    crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
+    let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();
+    let script = machine.program(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    let new = machine.program("brew/Cellar/node/26.1.0/bin/node", 0o755);
+    std::fs::remove_file(brew_bin.join("node")).unwrap();
+    std::os::unix::fs::symlink(&new, brew_bin.join("node")).unwrap();
+    std::fs::remove_dir_all(root.join("brew/Cellar/node/26.0.0")).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(prefix.join("bin/node")).ok(),
+        new.canonicalize().ok(),
+        "the prefix node follows brew's own link to the new keg"
+    );
+    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix.clone()));
+    let [project, home, tmp] = ["project", "agent-home", "agent-tmp"].map(|name| {
+        let folder = root.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    });
+    let sandbox = crate::sandbox::ProjectSandbox::new(
+        &project,
+        &home,
+        &tmp,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let package = prefix.join("lib/node_modules/@openai/codex");
+    assert!(
+        sandbox
+            .tool_roots()
+            .iter()
+            .chain(sandbox.read_roots())
+            .any(|granted| *granted == package),
+        "a sandboxed agent can still read the harness package"
+    );
 }

@@ -43,6 +43,8 @@ const COPY: Record<string, string> = {
   harness_install_already: "It's already installed on this Mac.",
   harness_install_not_found: "The install finished, but CrazyAgent can't find the harness. Choose Check again.",
   harness_install_failed: "The install didn't finish.",
+  harness_install_needs_node: "CrazyAgent installs this one with npm, and Node.js isn't on this Mac yet.",
+  harness_install_list_invalid: "CrazyAgent couldn't install that list of harnesses. Pick them again.",
 };
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -69,6 +71,20 @@ export function updateHarness(id: string): Promise<Result<void>> {
 export function installHarness(id: string): Promise<Result<void>> {
   assert(id.length > 0, "harness id");
   return call<void>("desktop_harness_install", { id });
+}
+
+/** Starts installing several harnesses one after another; the engine keeps going if the step
+ * closes, and a failure does not stop the rest. Input: the harness ids, RCLI left out.
+ * Output: ok once queued, or a plain error with its code. */
+export function installHarnesses(ids: readonly string[]): Promise<Result<void>> {
+  assert(ids.length > 0 && ids.every((id) => id.length > 0), "harness ids");
+  return call<void>("desktop_harness_install_many", { ids });
+}
+
+/** Reads the harness ids still waiting to install, in the order they will run.
+ * Output: the ids, not ready, or a plain error. */
+export function queuedHarnesses(): Promise<Result<string[]>> {
+  return call<string[]>("desktop_harness_queued");
 }
 
 /** Reads the harness update settings. Output: the four settings, not ready, or a plain error. */

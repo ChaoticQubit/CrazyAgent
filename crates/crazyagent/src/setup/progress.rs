@@ -67,9 +67,7 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
                 (None, Some(Some(Ok(Ok(version))))) => DependencyState::Found {
                     version: version.clone(),
                 },
-                (None, Some(Some(Err(code)))) => DependencyState::Failed {
-                    reason: super::plain_reason(code.0).to_owned(),
-                },
+                (None, Some(Some(Err(code)))) => DependencyState::refused(code.0),
                 (None, Some(Some(Ok(Err(missing))))) => DependencyState::Missing {
                     line: missing.line(),
                 },
@@ -144,7 +142,7 @@ mod tests {
     use crate::setup::{InstallError, Version};
 
     #[test]
-    fn a_system_setup_cannot_install_on_shows_its_own_plain_reason() {
+    fn a_tool_setup_cannot_install_on_this_system_is_unsupported_not_failed() {
         let unsupported = InstallError(super::super::PLATFORM_UNSUPPORTED);
         let progress = Progress {
             checked: Some(Checked {
@@ -156,12 +154,24 @@ mod tests {
         let rows = dependency_rows(&progress);
         assert_eq!(rows.len(), Dependency::ALL.len());
         for row in rows {
-            let DependencyState::Failed { reason } = row.state else {
-                panic!("{:?} is not failed", row.name);
-            };
-            assert_ne!(reason, super::super::plain_reason("setup_code_nobody_uses"));
-            assert!(reason.contains("this system"), "{reason}");
+            assert_eq!(row.state, DependencyState::Unsupported, "{:?}", row.name);
         }
+        assert_eq!(
+            serde_json::to_value(DependencyState::Unsupported).unwrap(),
+            serde_json::json!({ "state": "unsupported" })
+        );
+        let broken = InstallError("setup_install_failed");
+        let progress = Progress {
+            checked: Some(Checked {
+                at: Instant::now(),
+                found: Dependency::ALL.map(|dep| (dep, Err(broken))).to_vec(),
+            }),
+            ..Progress::default()
+        };
+        assert!(dependency_rows(&progress).iter().all(|row| matches!(
+            &row.state,
+            DependencyState::Failed { reason } if *reason == super::super::plain_reason("setup_install_failed")
+        )));
     }
 
     /// A tool setup finds nowhere, or a script whose interpreter is missing, shows the tool

@@ -365,6 +365,25 @@ async fn desktop_harness_install(
 }
 
 #[tauri::command]
+async fn desktop_harness_install_many(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    ids: Vec<String>,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_install_many(&ids).await
+}
+
+#[tauri::command]
+async fn desktop_harness_queued(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_queued().await
+}
+
+#[tauri::command]
 async fn desktop_harness_find(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2538,6 +2557,20 @@ async fn desktop_run_setup(
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.run_setup(pack, generation).await
+}
+
+#[tauri::command]
+async fn desktop_install_dependency(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: crazyagent::setup::Dependency,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .install_dependency(name, generation)
+        .await
 }
 
 #[tauri::command]
@@ -4814,6 +4847,8 @@ native_commands! {
     desktop_harness_versions,
     desktop_harness_update,
     desktop_harness_install,
+    desktop_harness_install_many,
+    desktop_harness_queued,
     desktop_harness_find,
     desktop_harness_choose_path,
     desktop_pick_harness_file,
@@ -4941,6 +4976,7 @@ native_commands! {
     desktop_icloud_cancel,
     desktop_setup_status,
     desktop_run_setup,
+    desktop_install_dependency,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,

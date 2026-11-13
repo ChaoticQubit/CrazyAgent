@@ -98,6 +98,23 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { read(state).await?.harness_install(&id).await }.await;
             routed(result)
         }
+        "desktop_harness_install_many" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                ids: Vec<String>,
+            }
+            let Args { ids } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state).await?.harness_install_many(&ids).await }.await;
+            routed(result)
+        }
+        "desktop_harness_queued" => {
+            let result: Result<_, BridgeError> = async { read(state).await?.harness_queued().await }.await;
+            routed(result)
+        }
         "desktop_harness_find" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -1894,6 +1911,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state).await?.run_setup(pack, generation).await }.await;
+            routed(result)
+        }
+        "desktop_install_dependency" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: crazyagent::setup::Dependency,
+                generation: u64,
+            }
+            let Args { name, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.install_dependency(name, generation).await }.await;
             routed(result)
         }
         "desktop_set_pack_entry" => {
