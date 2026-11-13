@@ -1924,7 +1924,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.install_dependency(name, generation).await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .install_dependency(name, generation) .await }.await;
             routed(result)
         }
         "desktop_set_pack_entry" => {
