@@ -540,6 +540,7 @@ async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackMan
 mod install_tests {
     use super::*;
     use crate::setup::Version;
+    use crate::tools::permission_fix::{Report, TOOL_FIX_CHANGED, Target};
 
     #[test]
     fn one_dependency_install_waits_for_no_run_and_clears_only_its_own_row() {
@@ -558,17 +559,120 @@ mod install_tests {
             state.dependencies.insert(Dependency::Uv, installed.clone());
             state.pack.insert("caveman".into(), PackState::Installing);
         });
-        let guard = begin_install(root.clone(), Dependency::Node).unwrap();
+        let guard = begin_one(root.clone(), Dependency::Node).unwrap();
         let during = progress::snapshot(&root);
         assert!(during.running);
         assert_eq!(during.dependencies.get(&Dependency::Node), None);
         assert_eq!(during.dependencies.get(&Dependency::Uv), Some(&installed));
         assert_eq!(during.pack.len(), 1);
         assert!(matches!(
-            begin_install(root.clone(), Dependency::Uv),
+            begin_one(root.clone(), Dependency::Uv),
             Err(error) if error.0 == "setup_busy"
         ));
         drop(guard);
         assert!(!progress::snapshot(&root).running);
+    }
+
+    struct FixFake(Result<Report, &'static str>);
+
+    impl Installer for FixFake {
+        fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError> {
+            Ok((dep != Dependency::Graphify).then(|| Version::parse("1.0.0").unwrap()))
+        }
+
+        fn install(
+            &self,
+            _dep: Dependency,
+            _pin: &crate::setup::Pin,
+        ) -> Result<Version, InstallError> {
+            Err(InstallError("setup_install_failed"))
+        }
+
+        fn fix_target(&self, missing: &crate::tools::Missing) -> Option<Target> {
+            (missing.tool == Dependency::Graphify.program()).then(|| Target {
+                path: PathBuf::from("/h/t"),
+                recursive: true,
+            })
+        }
+
+        fn fix_permissions(
+            &self,
+            dep: Dependency,
+            confirmed: &str,
+        ) -> Result<Report, &'static str> {
+            assert_eq!((dep, confirmed), (Dependency::Graphify, "/h/t"));
+            self.0
+        }
+    }
+
+    #[test]
+    fn the_check_keeps_a_fix_target_only_for_a_tool_found_and_passed_over() {
+        let (found, fixes) = look(&FixFake(Ok(Report::default())));
+        assert_eq!(found.len(), Dependency::ALL.len());
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes
+                .get(&Dependency::Graphify)
+                .map(|target| target.path.as_path()),
+            Some(Path::new("/h/t"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permission_fix_waits_for_no_run_and_names_only_its_own_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        progress::with(&root, |state| {
+            state
+                .fix_failed
+                .insert(Dependency::Graphify, "earlier".into());
+            state.fix_failed.insert(Dependency::Uv, "other".into());
+            state.checked = Some(progress::Checked {
+                at: std::time::Instant::now(),
+                found: Vec::new(),
+                probe: crate::tools::probe::mark(),
+            });
+        });
+        let guard = begin_one(root.clone(), Dependency::Graphify).unwrap();
+        assert_eq!(
+            progress::snapshot(&root)
+                .fix_failed
+                .get(&Dependency::Graphify),
+            None
+        );
+        assert!(matches!(
+            begin_one(root.clone(), Dependency::Uv),
+            Err(error) if error.0 == "setup_busy"
+        ));
+        let failing = Arc::new(FixFake(Err(TOOL_FIX_CHANGED)));
+        fix_dependency(failing, &root, Dependency::Graphify, "/h/t".into()).await;
+        drop(guard);
+        let after = progress::snapshot(&root);
+        assert_eq!(
+            after
+                .fix_failed
+                .get(&Dependency::Graphify)
+                .map(String::as_str),
+            Some(plain_reason(TOOL_FIX_CHANGED))
+        );
+        assert_eq!(
+            after.fix_failed.get(&Dependency::Uv).map(String::as_str),
+            Some("other")
+        );
+        assert!(after.checked.is_none());
+        assert!(!after.running);
+        let guard = begin_one(root.clone(), Dependency::Graphify).unwrap();
+        let fixed = Arc::new(FixFake(Ok(Report {
+            changed: 3,
+            ..Report::default()
+        })));
+        fix_dependency(fixed, &root, Dependency::Graphify, "/h/t".into()).await;
+        drop(guard);
+        assert_eq!(
+            progress::snapshot(&root)
+                .fix_failed
+                .get(&Dependency::Graphify),
+            None
+        );
     }
 }
