@@ -69,8 +69,10 @@ test("a harness the engine says has no test launch says Not supported on Add and
   assert.ok(none.includes(client.NO_TEST_LAUNCH), none);
   assert.equal((none.match(/Not supported by this harness\./g) ?? []).length, 2, "on Add and on the pending id");
   assert.ok(!none.includes("Waiting for its test launch"), none);
+  assert.ok(!/waits for a test launch/i.test(none), `the about line promises no test launch the harness lacks: ${none}`);
   assert.ok(none.includes('aria-label="Remove my-model"'), "the id can still be removed");
   const offered = ownIds({ testable: true });
   assert.ok(offered.includes('id="models-add-id"'), offered);
   assert.ok(!offered.includes("Not supported by this harness"), offered);
+  assert.ok(offered.includes("It waits for a test launch and can be chosen once that passes."), offered);
 });
