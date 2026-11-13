@@ -61,7 +61,18 @@ static VERSIONS: Mutex<BTreeMap<PathBuf, Known>> = Mutex::new(BTreeMap::new());
 /// cached, empty until the first run finishes, and starts a background run when one is due
 /// ([`Probes::start`]). Output: the absolute folders.
 pub fn folders() -> Vec<PathBuf> {
-    refreshed(|probes, now| probes.start(now, false))
+    refreshed(
+        |probes, now| probes.start(now, false),
+        |probes| probes.found.clone(),
+    )
+}
+
+/// Where the folder probes stand, after starting a run when one is due as [`folders`] does:
+/// setup reads it just before it builds its places and checks again once it moved, so a
+/// tool the login shell's PATH holds shows as soon as the run that found it ends. Never
+/// blocks. Output: the mark ([`Probes::mark`]).
+pub fn mark() -> Mark {
+    refreshed(|probes, now| probes.start(now, false), Probes::mark)
 }
 
 /// A program's version as it reports it, read in the background with a time limit and
@@ -96,14 +107,14 @@ pub fn version(program: &Path) -> Option<String> {
 /// background once the last run waited out its backoff ([`Probes::start`]); a run already
 /// going is enough. Never blocks.
 pub fn missed() {
-    refreshed(|probes, now| probes.start(now, true));
+    refreshed(|probes, now| probes.start(now, true), |_| ());
 }
 
 /// Starts a folder run in the background at once for a user's explicit retry (the live
 /// master's Try again or Start again, setup's Recheck or retry), whatever the backoff; a run
 /// already going is enough. Automatic resolves call [`missed`] instead. Never blocks.
 pub(crate) fn refresh_now() {
-    refreshed(|probes, _| probes.start_now());
+    refreshed(|probes, _| probes.start_now(), |_| ());
 }
 
 /// The last finished folder run, so a caller's row can check that an explicit retry
@@ -115,15 +126,27 @@ pub(crate) fn last_run() -> Option<Run> {
 }
 
 /// Starts a background folder run when the given rule marks one as going, recording a run
-/// that could not start as failed so it is retried. Input: the rule, given the cache and
-/// now. Output: the cached folders.
-fn refreshed(due: impl FnOnce(&mut Probes, Instant) -> bool) -> Vec<PathBuf> {
+/// that could not start as failed so it is retried, then reads the cache under the same
+/// lock. Inputs: the rule, given the cache and now, and the read. Output: what it read.
+fn refreshed<T>(
+    due: impl FnOnce(&mut Probes, Instant) -> bool,
+    read: impl FnOnce(&Probes) -> T,
+) -> T {
     let now = Instant::now();
     let mut probes = lock(&FOLDERS);
     if due(&mut probes, now) && !start_folder_probe() {
         probes.finish(Vec::new(), false, now);
     }
-    probes.found.clone()
+    read(&probes)
+}
+
+/// Where the folder probes stand for a check that resolved through them: the generation,
+/// which moves when the first run ends and whenever the kept folders change, and whether no
+/// run has ended yet, while a tool not found may still be on the login shell's PATH.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mark {
+    pub generation: u64,
+    pub first_run_pending: bool,
 }
 
 /// One finished folder probe run: when it ended and whether every probe in it answered.
@@ -133,14 +156,16 @@ pub(crate) struct Run {
     pub(crate) complete: bool,
 }
 
-/// The folder probes' cache: the folders found, whether a run is going, the last run, and
-/// how many runs in a row failed or found nothing new, which sets the backoff.
+/// The folder probes' cache: the folders found, whether a run is going, the last run, how
+/// many runs in a row failed or found nothing new, which sets the backoff, and the
+/// generation ([`Mark`]).
 #[derive(Debug)]
 pub(crate) struct Probes {
     pub(crate) found: Vec<PathBuf>,
     pub(crate) running: bool,
     pub(crate) last: Option<Run>,
     pub(crate) streak: u32,
+    pub(crate) generation: u64,
 }
 
 impl Probes {
@@ -151,6 +176,16 @@ impl Probes {
             running: false,
             last: None,
             streak: 0,
+            generation: 0,
+        }
+    }
+
+    /// Where the probes stand: the generation and whether no run has ended yet.
+    /// Output: the mark.
+    pub(crate) fn mark(&self) -> Mark {
+        Mark {
+            generation: self.generation,
+            first_run_pending: self.last.is_none(),
         }
     }
 
@@ -182,24 +217,31 @@ impl Probes {
     /// Records a finished run: a complete one replaces the folders, a failed one adds its
     /// folders before the ones found earlier, at most [`FOLDERS_MAX`]. The backoff starts
     /// over after a complete run that is the first or found something new, and grows after
-    /// any other. Inputs: the folders found, whether every probe answered and now.
+    /// any other. The generation moves when the first run ends and whenever the kept
+    /// folders change. Inputs: the folders found, whether every probe answered and now.
     pub(crate) fn finish(&mut self, found: Vec<PathBuf>, complete: bool, now: Instant) {
         assert!(self.running, "a run finishes only after it started");
         assert!(found.len() <= FOLDERS_MAX);
         let earlier = std::mem::take(&mut self.found);
-        let progressed = complete && (self.last.is_none() || found != earlier);
+        let first = self.last.is_none();
+        let progressed = complete && (first || found != earlier);
         let mut folders = found;
         if !complete {
-            for folder in earlier {
+            for folder in &earlier {
                 if folders.len() == FOLDERS_MAX {
                     break;
                 }
-                if !folders.contains(&folder) {
-                    folders.push(folder);
+                if !folders.contains(folder) {
+                    folders.push(folder.clone());
                 }
             }
         }
         assert!(folders.len() <= FOLDERS_MAX);
+        if first || folders != earlier {
+            let before = self.generation;
+            self.generation = before.wrapping_add(1);
+            assert_ne!(self.generation, before);
+        }
         self.found = folders;
         self.running = false;
         self.last = Some(Run {

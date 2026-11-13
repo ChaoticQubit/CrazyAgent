@@ -3,7 +3,11 @@ use super::{Dependency, DependencyState, DependencyStatus, PackEntry, PackState}
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long a background version check stands before a status read checks again, unless
+/// the probes' mark moved first ([`check_due`]).
+pub const RECHECK_AFTER: Duration = Duration::from_secs(30);
 
 /// What one engine's setup run is doing now: whether it runs, whether it installs the
 /// graphify command (only while the code graph entry is ticked or on), the dependencies it
@@ -21,11 +25,23 @@ pub struct Progress {
     pub checked: Option<Checked>,
 }
 
-/// What the last background version check found for each dependency, and when it ended.
+/// What the last background version check found for each dependency, when it ended, and
+/// the folder probes' mark it read just before building its places.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checked {
     pub at: Instant,
     pub found: Vec<(Dependency, crate::setup::Lookup)>,
+    pub probe: crate::tools::probe::Mark,
+}
+
+/// Whether a status read starts a new version check: none ended yet, the last one is
+/// [`RECHECK_AFTER`] old, or the probes' mark moved since it was read, so a tool the login
+/// shell's PATH holds shows on the next read. Inputs: the last check, the mark now and now.
+/// Output: the answer.
+pub fn check_due(checked: Option<&Checked>, mark: crate::tools::probe::Mark, now: Instant) -> bool {
+    checked.is_none_or(|checked| {
+        checked.probe != mark || now.saturating_duration_since(checked.at) >= RECHECK_AFTER
+    })
 }
 
 static PROGRESS: Mutex<BTreeMap<PathBuf, Progress>> = Mutex::new(BTreeMap::new());
@@ -49,13 +65,19 @@ pub fn snapshot(root: &Path) -> Progress {
 }
 
 /// Lists each dependency for the setup screen: the state a run gave it, else what the
-/// last version check found, else checking while no check has finished yet.
-/// Input: the progress. Output: one row per dependency in install order.
+/// last version check found, else checking while no check has finished yet. A tool the
+/// check did not find reads checking while the probes' first run had not ended, since the
+/// login shell's PATH may still hold it. Input: the progress. Output: one row per
+/// dependency in install order.
 pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
     let found = progress
         .checked
         .as_ref()
         .map(|checked| checked.found.as_slice());
+    let probing = progress
+        .checked
+        .as_ref()
+        .is_some_and(|checked| checked.probe.first_run_pending);
     let rows: Vec<DependencyStatus> = Dependency::ALL
         .iter()
         .map(|dep| {
@@ -84,6 +106,7 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
                     version: located.version.clone(),
                 },
                 (None, Some(Some(Err(code)))) => DependencyState::refused(code.0),
+                (None, Some(Some(Ok(Err(_))))) if probing => DependencyState::Checking,
                 (None, Some(Some(Ok(Err(missing))))) => DependencyState::Missing {
                     line: missing.line(),
                 },
@@ -187,7 +210,10 @@ mod tests {
                             note: None,
                         })),
                     ),
-                    (Dependency::Graphify, Err(InstallError("setup_install_failed"))),
+                    (
+                        Dependency::Graphify,
+                        Err(InstallError("setup_install_failed")),
+                    ),
                 ],
                 probe: Mark {
                     generation: 0,

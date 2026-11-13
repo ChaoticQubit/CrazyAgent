@@ -526,22 +526,35 @@ fn the_probe_mark_moves_when_the_first_run_ends_and_whenever_the_folders_change(
     let before = probes.mark();
     assert!(before.first_run_pending, "no run has ended yet");
     assert!(probes.start(first, false));
-    assert!(probes.mark().first_run_pending, "a run going is still pending");
+    assert!(
+        probes.mark().first_run_pending,
+        "a run going is still pending"
+    );
     probes.finish(Vec::new(), true, first);
     let ended = probes.mark();
     assert!(!ended.first_run_pending);
-    assert_ne!(ended.generation, before.generation, "the first run ends the wait");
+    assert_ne!(
+        ended.generation, before.generation,
+        "the first run ends the wait"
+    );
     assert!(probes.start_now());
     probes.finish(Vec::new(), true, first);
     assert_eq!(probes.mark(), ended, "the same folders leave the mark");
     assert!(probes.start_now());
     probes.finish(vec![a.clone()], true, first);
     let found = probes.mark();
-    assert_ne!(found.generation, ended.generation, "a new folder moves the mark");
+    assert_ne!(
+        found.generation, ended.generation,
+        "a new folder moves the mark"
+    );
     assert!(probes.start_now());
     probes.finish(Vec::new(), false, first);
     assert_eq!(probes.found, [a.clone()]);
-    assert_eq!(probes.mark(), found, "a failed run that keeps the folders leaves it");
+    assert_eq!(
+        probes.mark(),
+        found,
+        "a failed run that keeps the folders leaves it"
+    );
     assert!(probes.start_now());
     probes.finish(vec![b.clone()], false, first);
     assert_eq!(probes.found, [b, a]);
