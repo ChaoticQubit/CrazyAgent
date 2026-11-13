@@ -71,7 +71,7 @@ function questionRows(runtime, project, question, agent) {
   }
 }
 
-test("an agent's urgent question toasts, opens the Agents tab and its answer reaches the engine", { timeout: 600000 }, async (t) => {
+test("an agent's urgent question toasts, opens the Questions tab and its answer reaches the engine", { timeout: 600000 }, async (t) => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -164,46 +164,23 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(questionRows(runtime, project, question, agent).waiting, "question", "the engine paused the asker until the owner answers");
         await me.capture("questions-toast");
         await me.click("Open", "div.toast[role=status] button");
-        await me.waitFor("the question in the Questions for you drawer Open opened", (text) => text.includes("Questions for you (1)") && text.includes(QUESTION));
-        const focus = await page.evaluate(`document.activeElement?.closest("dialog.drawer[open] li.tg-question")?.innerText ?? null`);
-        assert.ok(focus?.includes(QUESTION), `Open puts the keyboard on the urgent question: ${focus}`);
-        assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/agents`), "Open goes to the project's Agents tab and the drawer opens once");
-        const row = await page.evaluate("document.querySelector('li.tg-question')?.innerText ?? null");
-        for (const part of ["Urgent", label, "The agent is paused until you answer.", QUESTION, "Open terminal", "Answer"]) {
-          assert.ok(row?.includes(part), `the question row shows "${part}": ${row}`);
+        await me.waitFor("the question on the Questions tab Open opened", (text) => text.includes(QUESTION) && text.includes("Your answer"));
+        assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/questions`), "Open goes to the project's Questions tab, where a linked team question waits (S4-R1)");
+        const cards = await page.evaluate(`[...document.querySelectorAll("section.qs-card")].map((card) => card.innerText)`);
+        assert.equal(cards.length, 1, `one question card: ${JSON.stringify(cards)}`);
+        for (const part of ["Waiting for you", QUESTION, "Your answer", "Answer", "Dismiss"]) {
+          assert.ok(cards[0].includes(part), `the question card shows "${part}": ${cards[0]}`);
         }
         await me.capture("questions-inbox");
 
-        await me.click("Open terminal", "li.tg-question button");
-        for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
-          const attach = log.trail.find((call) => call.cmd === "desktop_terminal_attach");
-          if (attach) {
-            assert.equal(attach.args.agent, `team-${agent}`, "Open terminal asks to attach the asker's own terminal");
-            assert.equal(attach.args.pane, null, "it asks for the whole terminal, not one pane");
-            break;
-          }
-          assert.ok(Date.now() < deadline, `the page never asked to attach a terminal: ${JSON.stringify(log.calls)}`);
-        }
-        assert.deepEqual(await page.evaluate(`[...document.querySelectorAll("section.tg-terminal")].map((panel) => panel.getAttribute("aria-label"))`), [`${label} terminal`], "the asker's terminal opens in the Agents tab's one terminal panel");
-        await me.capture("questions-terminal");
-
-        await me.asks();
-        await me.click("Answer", "li.tg-question button");
-        await me.type(".tg-answer textarea", ANSWER);
-        await me.click("Send answer", ".tg-answer button");
-        await me.waitFor("the emptied inbox", (text) => text.includes("No agent is waiting on you."));
-        const inbox = await page.evaluate(`(() => {
-          const section = document.querySelector('dialog.drawer[open] section[aria-label="Questions for you"]');
-          return section ? { text: section.innerText, rows: section.querySelectorAll("li.tg-question").length } : null;
-        })()`);
-        assert.ok(inbox !== null, "the drawer shows the Questions for you section");
-        assert.equal(inbox.rows, 0, `the answered question left the inbox:\n${inbox.text}`);
-        assert.ok(!inbox.text.includes(QUESTION), `the inbox no longer shows the answered question:\n${inbox.text}`);
+        await me.type("section.qs-card textarea", ANSWER);
+        await me.click("Answer", "section.qs-card button");
+        await me.waitFor("the answered question", (text) => text.includes(`Answer: ${ANSWER}`) && !text.includes("Your answer"));
         await me.capture("questions-answered");
-        const sent = log.trail.filter((call) => call.cmd === "desktop_coord_answer");
+        const sent = log.trail.filter((call) => call.cmd === "desktop_answer_question");
         assert.equal(sent.length, 1, `one answer was sent: ${JSON.stringify(sent)}`);
-        assert.deepEqual({ id: sent[0].args.id, message: sent[0].args.message, text: sent[0].args.text }, { id: project, message: question, text: ANSWER }, "the answer names the project and the question");
-        assert.equal(sent[0].answer.value?.outcome, "applied", `the engine took the answer: ${JSON.stringify(sent[0].answer)}`);
+        assert.equal(sent[0].args.comment, ANSWER, "the answer carries the owner's words");
+        assert.ok("value" in sent[0].answer, `the engine took the answer: ${JSON.stringify(sent[0].answer)}`);
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -219,7 +196,6 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       assert.ok(Date.now() < deadline, `answering lifts the pause the question set, but the asker still waits on: ${questionRows(runtime, project, question, agent).waiting}`);
     }
     const native = new Set(commands(readFileSync(LIB, "utf8")).filter((command) => plan(command).skip).map((command) => command.name));
-    assert.ok(native.has("desktop_terminal_attach"), "terminal attach is native-only, so this run proves the request, not a live attach");
     assert.deepEqual([...log.unrouted].filter((command) => !native.has(command)), [], "every plain command the page sent reached the bridge");
     t.diagnostic(`native-only commands the page called and this test cannot run: ${[...log.unrouted].join(", ") || "none"}`);
     assert.deepEqual(log.invalid, [], "the bridge accepted every argument the page sent");
