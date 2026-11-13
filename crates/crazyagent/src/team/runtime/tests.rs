@@ -29821,27 +29821,40 @@ exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$
 
 /// Starts a native lead on a host whose holders and keepers read the deadline every 2 s and
 /// end a server after two passed reads, waits until the stand-in wrote its process, renews
-/// once 4 s ahead as a running engine's last pass does and never again, as after a quit,
-/// lets `moved` act on the teammates' socket and waits up to `WAIT` for both of the lead's
-/// servers to stop accepting connections. Inputs: the stand-in and the move. Output:
-/// whether the lead's own server ended, whether its teammates' server ended, and whether
-/// the process the lead started in a session of its own still ran.
+/// once as a running engine's last pass does and never again, as after a quit: 4 s ahead
+/// once the lead runs, or with `renewed_first` 20 s ahead before the lead starts, so its
+/// servers start after that last pass. Then it lets `moved` act on the teammates' socket and
+/// waits up to `WAIT` for both of the lead's servers to stop accepting connections. Inputs:
+/// the stand-in, when the last pass runs and the move. Output: whether the lead's own server
+/// ended, whether its teammates' server ended, and whether the process the lead started in
+/// a session of its own still ran.
 #[cfg(target_os = "macos")]
-fn native_lead_past_its_deadline(script: &str, moved: impl FnOnce(&Path)) -> (bool, bool, bool) {
+fn native_lead_past_its_deadline(
+    script: &str,
+    renewed_first: bool,
+    moved: impl FnOnce(&Path),
+) -> (bool, bool, bool) {
     let root = std::cell::OnceCell::new();
     let ((session, own, mates), running) = ended_native_lead_on(
         script,
         false,
         |base, tmux| {
             assert!(root.set(base.to_path_buf()).is_ok(), "one engine root");
-            crate::terminal::tmux_host_checking(base, Some(tmux), 1, 2)
+            let host = crate::terminal::tmux_host_checking(base, Some(tmux), 1, 2);
+            if renewed_first {
+                host.renew(SystemTime::now() + Duration::from_secs(20))
+                    .unwrap();
+            }
+            host
         },
         |session, host, lead| {
             let root: &PathBuf = root.get().expect("the host was opened on the engine root");
             let own = crate::terminal::harness_socket(root, lead).unwrap();
             let mates = crate::terminal::teammates_socket(root, lead).unwrap();
-            host.renew(SystemTime::now() + Duration::from_secs(4))
-                .unwrap();
+            if !renewed_first {
+                host.renew(SystemTime::now() + Duration::from_secs(4))
+                    .unwrap();
+            }
             moved(&mates);
             let ended = |socket: &Path| crate::spawn_gate::connect_unix_std(socket).is_err();
             let deadline = Instant::now() + WAIT;
@@ -29862,7 +29875,7 @@ fn native_lead_past_its_deadline(script: &str, moved: impl FnOnce(&Path)) -> (bo
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_lead_that_moves_its_socket_times_ahead_still_ends_at_its_deadline() {
-    let (own, mates, running) = native_lead_past_its_deadline(SOCKET_TIME_CLAUDE, |mates| {
+    let (own, mates, running) = native_lead_past_its_deadline(SOCKET_TIME_CLAUDE, false, |mates| {
         let ahead = rustix::fs::Timestamps {
             last_access: rustix::fs::Timespec {
                 tv_sec: 0,
@@ -29895,7 +29908,7 @@ fn a_native_lead_that_moves_its_socket_times_ahead_still_ends_at_its_deadline() 
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_lead_that_ends_its_holder_window_still_ends_at_its_deadline() {
-    let (own, mates, running) = native_lead_past_its_deadline(HOLDER_ENDING_CLAUDE, |_| {});
+    let (own, mates, running) = native_lead_past_its_deadline(HOLDER_ENDING_CLAUDE, false, |_| {});
     assert!(own, "the lead's own server ended at its deadline");
     assert!(mates, "the teammates' server ended at its deadline");
     assert!(
@@ -29911,10 +29924,26 @@ fn a_native_lead_that_ends_its_holder_window_still_ends_at_its_deadline() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_lead_that_kills_its_warden_still_ends_at_its_deadline() {
-    let (own, mates, running) = native_lead_past_its_deadline(WARDEN_ENDING_CLAUDE, |_| {});
+    let (own, mates, running) = native_lead_past_its_deadline(WARDEN_ENDING_CLAUDE, false, |_| {});
     assert!(own, "the lead's own server ended at its deadline");
     assert!(mates, "the teammates' server ended at its deadline");
     assert!(!running, "the lead's own process ended with its server");
+}
+
+/// QL-L1: a native lead whose servers start after the engine's last renewal pass, as one
+/// started within a minute before a quit or a crash, still has both servers and what it
+/// started end at the deadline that pass set, since each keeper starts with the lead's
+/// record already holding that deadline.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_started_after_the_last_renewal_still_ends_at_its_deadline() {
+    let (own, mates, running) = native_lead_past_its_deadline(LEAVING_CLAUDE, true, |_| {});
+    assert!(own, "the lead's own server ended at its deadline");
+    assert!(mates, "the teammates' server ended at its deadline");
+    assert!(
+        !running,
+        "what the lead started on its own ended with its server"
+    );
 }
 
 /// KEEPER (b): a native lead's own server runs under the keeper and its warden, so the
