@@ -18,10 +18,6 @@ pub const CODEX_UNBOUNDED_OFF: &str = "features.unbounded_connection_retries=fal
 /// The Claude Code variable that caps how many times it retries a model request.
 pub const CLAUDE_MAX_RETRIES: &str = "CLAUDE_CODE_MAX_RETRIES";
 
-/// How many times the engine's model gateway retries an RCLI model request under Retry
-/// briefly.
-pub const RCLI_BRIEF_RETRIES: u8 = 2;
-
 /// What a harness does when its model provider fails ("When a model provider can't be
 /// reached", DEC-163): no retries, the harness's own retries with no endless wait, or the
 /// harness's own behaviour untouched. Before the first save it is Retry briefly.
@@ -97,14 +93,6 @@ impl ProviderRetry {
         (self == Self::StopAtOnce).then_some((CLAUDE_MAX_RETRIES, "0"))
     }
 
-    /// How many times the model gateway retries one RCLI model request under this option.
-    pub fn rcli_retries(self) -> u8 {
-        match self {
-            Self::RetryBriefly => RCLI_BRIEF_RETRIES,
-            Self::StopAtOnce | Self::HarnessDefault => 0,
-        }
-    }
-
     /// The line the setting shows for this option and `harness`. Output: the line.
     pub fn harness_line(self, harness: HarnessKind) -> &'static str {
         match (self, harness) {
@@ -112,14 +100,13 @@ impl ProviderRetry {
             (Self::StopAtOnce, HarnessKind::Codex) => {
                 "Codex: no retries on an API key or address account. With a ChatGPT sign-in Codex takes no retry count, so it only stops waiting for the network without end."
             }
-            (Self::StopAtOnce | Self::HarnessDefault, HarnessKind::Rcli) => "RCLI: one try.",
+            (_, HarnessKind::Rcli) => "RCLI: one try. The engine never repeats an RCLI request.",
             (Self::RetryBriefly | Self::HarnessDefault, HarnessKind::ClaudeCode) => {
                 "Claude Code: its own retries, up to 10 with longer waits each time."
             }
             (Self::RetryBriefly, HarnessKind::Codex) => {
                 "Codex: its own retries, without waiting for the network without end."
             }
-            (Self::RetryBriefly, HarnessKind::Rcli) => "RCLI: up to 2 retries.",
             (Self::HarnessDefault, HarnessKind::Codex) => {
                 "Codex: its own retries. A provider that refuses connections keeps it waiting for the network without end."
             }
