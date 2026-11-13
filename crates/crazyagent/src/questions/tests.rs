@@ -190,6 +190,9 @@ fn sample(id: u64, status: QuestionStatus, question: &str) -> Question {
         created_ms: 1,
         settled_ms: None,
         closed_by: None,
+        asker_name: None,
+        urgent: false,
+        paused: false,
     }
 }
 

@@ -698,3 +698,105 @@ async fn a_text_question_opens_its_answer_line_at_once() {
         }
     );
 }
+
+/// One pending text question from a team sub-agent, as the engine's page names it: its kept
+/// name, if any, and whether it is urgent and its asker paused. Inputs: the id, the agent,
+/// the name and both marks. Output: the question.
+fn team_question(
+    id: u64,
+    agent: i64,
+    name: Option<&str>,
+    urgent: bool,
+    paused: bool,
+) -> crate::questions::Question {
+    crate::questions::Question {
+        id,
+        project: ProjectId::new("plant-shop").unwrap(),
+        asker: crate::questions::Asker::Agent(agent).name(),
+        question: format!("Question {id} from agent {agent}?"),
+        kind: QuestionKind::Text,
+        options: Vec::new(),
+        recommended: None,
+        context: None,
+        status: QuestionStatus::Pending,
+        version: 0,
+        answer: None,
+        answered_by: None,
+        created_ms: u64::try_from(NOW).unwrap(),
+        settled_ms: None,
+        closed_by: None,
+        asker_name: name.map(str::to_owned),
+        urgent,
+        paused,
+    }
+}
+
+/// V241-QUESTION-UX P1, P3 (S4-R1, DEC-141): a team question names its asker by the name the
+/// engine sends, falls back to the agent's number only when no name came, and says
+/// "Urgent" and "The agent is paused until you answer." only while each holds, in the
+/// desktop card's words.
+#[test]
+fn a_team_question_names_its_asker_and_says_urgent_and_paused_only_while_they_hold() {
+    assert_eq!(crate::questions::URGENT_WORD, "Urgent");
+    assert_eq!(
+        crate::questions::PAUSED_NOTE,
+        "The agent is paused until you answer."
+    );
+    let project = ProjectId::new("plant-shop").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Plant Shop".into(), None);
+    screen.open(Tab::Questions);
+    let query = screen.questions.next_query(NOW).unwrap();
+    assert_eq!(query, QuestionsQuery::List { project });
+    let page = crate::questions::Page {
+        items: vec![
+            team_question(1, 7, Some("Ada (@menu-prices)"), true, true),
+            team_question(2, 8, None, true, false),
+            team_question(3, 9, Some("Lin"), false, false),
+        ],
+        next: None,
+    };
+    screen.questions.apply(&QuestionsEvent {
+        query,
+        result: Ok(QuestionsReply::Page(page)),
+    });
+
+    let first = shown(&mut screen, 120, 34);
+    assert!(
+        first
+            .lines()
+            .any(|line| line.contains("From") && line.contains("Ada (@menu-prices)")),
+        "{first}"
+    );
+    assert!(first.contains("Urgent"), "{first}");
+    assert!(
+        first.contains("The agent is paused until you answer."),
+        "{first}"
+    );
+
+    assert!(screen.questions.key(key(KeyCode::Down)));
+    let second = shown(&mut screen, 120, 34);
+    assert!(
+        second
+            .lines()
+            .any(|line| line.contains("From") && line.contains("agent 8")),
+        "no name came, so its number: {second}"
+    );
+    assert!(second.contains("Urgent"), "{second}");
+    assert!(
+        !second.contains("The agent is paused until you answer."),
+        "the pause no longer holds: {second}"
+    );
+
+    assert!(screen.questions.key(key(KeyCode::Down)));
+    let third = shown(&mut screen, 120, 34);
+    assert!(
+        third
+            .lines()
+            .any(|line| line.contains("From") && line.contains("Lin")),
+        "{third}"
+    );
+    assert!(
+        !third.contains("Urgent") && !third.contains("paused until you answer"),
+        "{third}"
+    );
+}

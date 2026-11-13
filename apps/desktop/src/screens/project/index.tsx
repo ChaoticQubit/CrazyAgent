@@ -288,7 +288,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
       {active === "agents" && <AgentsTab data={data} section={settingsSection} />}
       {active === "changes" && <ChangesTab data={data} />}
-      {active === "questions" && <QuestionsTab data={data} />}
+      {active === "questions" && <QuestionsTab data={data} section={settingsSection} />}
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "metrics" && <MetricsView key={data.id} projectId={data.id} />}

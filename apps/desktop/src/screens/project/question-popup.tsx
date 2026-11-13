@@ -41,7 +41,7 @@ export function dockAnnouncement(waiting: readonly OwnerQuestion[]): string {
   if (waiting.length === 0) return "";
   const newest = waiting.reduce((most, item) => (item.id > most.id ? item : most));
   const count = waiting.length === 1 ? "A question waits" : `${waiting.length} questions wait`;
-  return `${count} for you. The newest is from ${askerLabel(newest.asker)}.`;
+  return `${count} for you. The newest is from ${askerLabel(newest.asker, newest.asker_name)}.`;
 }
 
 const plural = (count: number) => `${count} ${count === 1 ? "question" : "questions"} waiting`;
