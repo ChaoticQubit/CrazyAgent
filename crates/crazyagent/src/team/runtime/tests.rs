@@ -29624,16 +29624,36 @@ exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$
 
 /// Starts a native lead on its own server as the lead's worker does, with a stand-in Claude
 /// Code that writes a process id to `left.pid` in the lead's folder or its teammates' config
-/// home, then ends the lead through `end`. With `earlier`, the lead's own server already
-/// runs, started inside the lead's profile with no keeper, as one an earlier engine left.
-/// Inputs: the stand-in, whether a server runs earlier and the ending, given the session,
-/// the host and the lead. Output: the ending's outcome and whether that process still ran
-/// up to 2 s after it, since the warden kills only after it reports; the process is killed
-/// before this returns.
+/// home, then ends the lead through `end`, on the engine's usual terminal host. Inputs and
+/// output as [`ended_native_lead_on`].
 #[cfg(target_os = "macos")]
 fn ended_native_lead<T>(
     script: &str,
     earlier: bool,
+    end: impl FnOnce(AgentSession, &Arc<dyn Host>, &AgentId) -> T,
+) -> (T, bool) {
+    ended_native_lead_on(
+        script,
+        earlier,
+        |base, tmux| crate::terminal::tmux_host(base, Some(tmux)),
+        end,
+    )
+}
+
+/// Starts a native lead on its own server as the lead's worker does, on the terminal host
+/// `open_host` opens for the engine root and tmux program, with a stand-in Claude Code that
+/// writes a process id to `left.pid` in the lead's folder or its teammates' config home,
+/// then ends the lead through `end`. With `earlier`, the lead's own server already runs,
+/// started inside the lead's profile with no keeper, as one an earlier engine left.
+/// Inputs: the stand-in, whether a server runs earlier, the host opener and the ending,
+/// given the session, the host and the lead. Output: the ending's outcome and whether that
+/// process still ran up to 2 s after it, since the warden kills only after it reports; the
+/// process is killed before this returns.
+#[cfg(target_os = "macos")]
+fn ended_native_lead_on<T>(
+    script: &str,
+    earlier: bool,
+    open_host: impl FnOnce(&Path, PathBuf) -> Arc<dyn Host>,
     end: impl FnOnce(AgentSession, &Arc<dyn Host>, &AgentId) -> T,
 ) -> (T, bool) {
     use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
@@ -29651,7 +29671,7 @@ fn ended_native_lead<T>(
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let host = open_host(&fixture.base, fixture.tmux.clone());
     let runtime = standin_claude_runtime(&fixture, script)
         .with_terminal(host.clone())
         .unwrap();
@@ -29758,6 +29778,116 @@ fn ended_native_lead<T>(
     let running = rustix::process::test_kill_process(process).is_ok();
     let _ = rustix::process::kill_process(process, rustix::process::Signal::KILL);
     (ended, running)
+}
+
+/// A stand-in Claude Code that, run as a native lead, keeps the socket time of its own
+/// server far ahead, as the lead's profile lets it (FBTMUX-P1-R1-L1), so a holder that reads
+/// that time never finds its deadline passed. It starts a process in a session of its own as
+/// [`LEAVING_CLAUDE`] does only once the first move took, so a refused move fails the row.
+#[cfg(target_os = "macos")]
+const SOCKET_TIME_CLAUDE: &str = r#"#!/bin/sh
+s="${TMPDIR%/}/tmux.sock"
+[ -S "$s" ] && /usr/bin/touch -t 209901010000 "$s" || exit 1
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid" &
+while /usr/bin/touch -t 209901010000 "$s"; do /bin/sleep 0.5; done
+exec /bin/sleep 300
+"#;
+
+/// A stand-in Claude Code that, run as a native lead, ends the holder window of its own
+/// server through a tmux client inside its profile (FBTMUX-P1-R1-L1), so no holder reads a
+/// deadline there. It starts a process in a session of its own as [`LEAVING_CLAUDE`] does
+/// only once the holder ended, so a refused end fails the row.
+#[cfg(target_os = "macos")]
+const HOLDER_ENDING_CLAUDE: &str = r#"#!/bin/sh
+s="${TMPDIR%/}/tmux.sock"
+tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid" &
+exec /bin/sleep 300
+"#;
+
+/// Starts a native lead on a host whose holders and keepers read the deadline every 2 s and
+/// end a server after two passed reads, waits until the stand-in wrote its process, renews
+/// once 4 s ahead as a running engine's last pass does and never again, as after a quit,
+/// lets `moved` act on the teammates' socket and waits up to `WAIT` for both of the lead's
+/// servers to stop accepting connections. Inputs: the stand-in and the move. Output:
+/// whether the lead's own server ended, whether its teammates' server ended, and whether
+/// the process the lead started in a session of its own still ran.
+#[cfg(target_os = "macos")]
+fn native_lead_past_its_deadline(script: &str, moved: impl FnOnce(&Path)) -> (bool, bool, bool) {
+    let root = std::cell::OnceCell::new();
+    let ((session, own, mates), running) = ended_native_lead_on(
+        script,
+        false,
+        |base, tmux| {
+            assert!(root.set(base.to_path_buf()).is_ok(), "one engine root");
+            crate::terminal::tmux_host_checking(base, Some(tmux), 1, 2)
+        },
+        |session, host, lead| {
+            let root: &PathBuf = root.get().expect("the host was opened on the engine root");
+            let own = crate::terminal::harness_socket(root, lead).unwrap();
+            let mates = crate::terminal::teammates_socket(root, lead).unwrap();
+            host.renew(SystemTime::now() + Duration::from_secs(4))
+                .unwrap();
+            moved(&mates);
+            let ended = |socket: &Path| crate::spawn_gate::connect_unix_std(socket).is_err();
+            let deadline = Instant::now() + WAIT;
+            while !(ended(&own) && ended(&mates)) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            (session, ended(&own), ended(&mates))
+        },
+    );
+    drop(session);
+    (own, mates, running)
+}
+
+/// FBTMUX-P1-R1-L1: a native lead that keeps its own server's socket time ahead, while its
+/// teammates' socket time is moved ahead as the teammates' profile allows, still has both
+/// servers and what it started end at the deadline the engine last renewed, since each
+/// server's keeper, outside the sandboxes, reads the engine's own record.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_that_moves_its_socket_times_ahead_still_ends_at_its_deadline() {
+    let (own, mates, running) = native_lead_past_its_deadline(SOCKET_TIME_CLAUDE, |mates| {
+        let ahead = rustix::fs::Timestamps {
+            last_access: rustix::fs::Timespec {
+                tv_sec: 0,
+                tv_nsec: rustix::fs::UTIME_OMIT,
+            },
+            last_modification: rustix::fs::Timespec {
+                tv_sec: 4_070_908_800,
+                tv_nsec: 0,
+            },
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            mates,
+            &ahead,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+    });
+    assert!(own, "the lead's own server ended at its deadline");
+    assert!(mates, "the teammates' server ended at its deadline");
+    assert!(
+        !running,
+        "what the lead started on its own ended with its server"
+    );
+}
+
+/// FBTMUX-P1-R1-L1: a native lead that ends its own server's holder window still has that
+/// server, its teammates' server and what it started end at the deadline the engine last
+/// renewed, since the reader that ends them is not inside the lead's sandbox.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_that_ends_its_holder_window_still_ends_at_its_deadline() {
+    let (own, mates, running) = native_lead_past_its_deadline(HOLDER_ENDING_CLAUDE, |_| {});
+    assert!(own, "the lead's own server ended at its deadline");
+    assert!(mates, "the teammates' server ended at its deadline");
+    assert!(
+        !running,
+        "what the lead started on its own ended with its server"
+    );
 }
 
 /// KEEPER (b): a native lead's own server runs under the keeper and its warden, so the

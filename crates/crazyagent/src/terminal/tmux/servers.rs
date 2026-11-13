@@ -50,6 +50,7 @@ pub struct Servers {
     members: Mutex<BTreeMap<AgentId, AgentId>>,
     pins: Mutex<BTreeMap<AgentId, Arc<ServerPin>>>,
     keepers: Mutex<BTreeMap<AgentId, Child>>,
+    deadline_checks: (u32, u32),
 }
 
 /// Whether a lead's own socket is a live socket of this user, read without following a link.
@@ -166,7 +167,18 @@ impl Servers {
             members: Mutex::new(BTreeMap::new()),
             pins: Mutex::new(BTreeMap::new()),
             keepers: Mutex::new(BTreeMap::new()),
+            deadline_checks: (super::DEADLINE_CHECK_LOOPS, super::DEADLINE_LATE_CHECKS),
         }
+    }
+
+    /// Has every lead server this host opens read its deadline every `loops` holder loops
+    /// and end after `late` passed reads, so a row sees the bound within seconds. Takes the
+    /// spacing and the count. Returns the host.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn with_deadline_checks(mut self, loops: u32, late: u32) -> Self {
+        assert!(loops >= 1 && late >= 1);
+        self.deadline_checks = (loops, late);
+        self
     }
 
     /// Starts a lead's own server under the [`crate::sandbox::KEEPER`] when none listens at
@@ -284,7 +296,10 @@ impl Servers {
             return Err(failure("terminal_unavailable"));
         }
         let profile = profile_of(&self.root, lead)?;
-        let server = Arc::new(Tmux::confined(self.program.clone(), socket, &profile)?);
+        let server = Arc::new(Tmux {
+            deadline_checks: self.deadline_checks,
+            ..Tmux::confined(self.program.clone(), socket, &profile)?
+        });
         leads.insert(lead.clone(), server.clone());
         assert!(leads.len() <= LEADS_KEPT_MAX);
         Ok(server)
@@ -314,13 +329,16 @@ impl Servers {
         if mates.len() >= LEADS_KEPT_MAX {
             return Err(failure("terminal_unavailable"));
         }
-        let server = Arc::new(Tmux::teammates(
-            self.program.clone(),
-            socket,
-            &profile_of(&self.root, lead)?,
-            &teammates_profile_of(&self.root, lead)?,
-            self.pin(lead, socket)?,
-        )?);
+        let server = Arc::new(Tmux {
+            deadline_checks: self.deadline_checks,
+            ..Tmux::teammates(
+                self.program.clone(),
+                socket,
+                &profile_of(&self.root, lead)?,
+                &teammates_profile_of(&self.root, lead)?,
+                self.pin(lead, socket)?,
+            )?
+        });
         mates.insert(lead.clone(), server.clone());
         assert!(mates.len() <= LEADS_KEPT_MAX);
         Ok(server)

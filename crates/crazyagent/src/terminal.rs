@@ -1000,6 +1000,24 @@ fn lead_temp_socket(engine_root: &Path, lead: &AgentId, name: &str) -> Result<Pa
     Ok(socket)
 }
 
+/// Opens the engine's terminal host as [`tmux_host`] does, with every server it starts
+/// reading its deadline every `loops` holder loops and ending after `late` passed reads, so
+/// a row sees the quit limit within seconds. Takes the engine root, the program, the spacing
+/// and the count. Returns the host.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn tmux_host_checking(
+    engine_root: &Path,
+    program: Option<PathBuf>,
+    loops: u32,
+    late: u32,
+) -> Arc<dyn Host> {
+    let engine = tmux::Tmux::open(program.clone(), &engine_root.join(FOLDER))
+        .with_deadline_checks(loops, late);
+    Arc::new(kept::LastScreenHost::new(
+        tmux::Servers::new(engine, engine_root, program).with_deadline_checks(loops, late),
+    ))
+}
+
 /// Opens this platform's terminal host for an engine: the ConPTY host on Windows, keeping the
 /// last screen of each terminal it ends.
 /// Takes the engine root, unused because ConPTY needs no server or socket.
