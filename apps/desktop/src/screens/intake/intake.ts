@@ -471,14 +471,20 @@ export function projectFolder(stored: StoredSetup): string {
   return name === ".crazyagent" ? clean.slice(0, clean.length - name.length - 1) : clean;
 }
 
-const MISSING_LABELS: Record<string, string> = {
-  name: "Project name", about: "What is it about", tech_stack: "Tech stack", platforms: "Target platforms",
+const MISSING_WORDS: Record<string, string> = {
+  name: "the project name", about: "what the project is about", tech_stack: "the tech stack", platforms: "the target platforms",
 };
 
-/** Names what the mapping agent couldn't find, as the form labels say it, once each.
- * Input: the missing item keys. Output: plain labels in order. */
-export function missingLabels(missing: string[]): string[] {
-  return [...new Set(missing)].map((item) => MISSING_LABELS[item] ?? displayText(item.replaceAll("_", " ")));
+/** The one line for the setup fields the mapping agent couldn't fill, in the words the TUI uses
+ * too (DEC-160, DEC-141): what CrazyAgent couldn't work out from the project's files, each once
+ * and in order, and what to do. Input: the missing field keys. Output: the line, or null when
+ * nothing is missing. */
+export function missingLine(missing: string[]): string | null {
+  const words = [...new Set(missing)].map((item) => MISSING_WORDS[item] ?? displayText(item.replaceAll("_", " ")));
+  const last = words.pop();
+  if (last === undefined) return null;
+  const list = words.length === 0 ? last : `${words.join(", ")} and ${last}`;
+  return `CrazyAgent couldn't work out ${list} from the project's files. Fill ${words.length === 0 ? "it" : "them"} in below.`;
 }
 
 /** Starts the review form from the mapping agent's draft, keeping the saved pool and team. A
