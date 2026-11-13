@@ -489,11 +489,7 @@ async fn handle(
                 )
             });
         }
-        let backoff = if retry {
-            std::time::Duration::ZERO
-        } else {
-            crate::model_choice::live::BACKOFF
-        };
+        let backoff = version_backoff(&action);
         let installed = executable.as_deref().and_then(|path| {
             installed::version_for_models(
                 path,
@@ -563,6 +559,13 @@ fn live_due(action: &Action) -> Option<&str> {
 /// owner's Check again in the desktop or r in the TUI. Input: the action. Output: the flag.
 fn retried(action: &Action) -> bool {
     matches!(action, Action::Values { retry: true, .. })
+}
+
+/// Says how long a failed `--version` ask for a Models read is kept before the harness is
+/// asked again: no time when the owner asked again, else the list backoff. Input: the
+/// action. Output: the wait.
+fn version_backoff(_action: &Action) -> std::time::Duration {
+    crate::model_choice::live::BACKOFF
 }
 
 /// Says on a Models reply whether the owner can ask its harness for the list again now: a

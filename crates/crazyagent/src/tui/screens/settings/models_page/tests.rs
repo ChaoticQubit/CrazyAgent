@@ -733,6 +733,22 @@ fn r_reads_the_harness_list_again_even_inside_the_backoff() {
     );
 }
 
+#[test]
+fn r_says_check_again_beside_the_not_reported_note_as_the_desktop_does() {
+    let mut shell = app_page(Models {
+        live_note: Some("live list not reported by Claude Code".into()),
+        live_retry: true,
+        ..plain_models()
+    });
+    let text = screen(&mut shell);
+    assert!(text.contains("r Check again"), "{text}");
+    assert!(!text.contains("r Read again"), "{text}");
+    let mut shell = app_page(plain_models());
+    let text = screen(&mut shell);
+    assert!(text.contains("r Read again"), "{text}");
+    assert!(!text.contains("r Check again"), "{text}");
+}
+
 fn pool(name: &str) -> crate::pools::PoolSummary {
     crate::pools::PoolSummary {
         id: crate::protocol::CredentialRef::new(name).unwrap(),
