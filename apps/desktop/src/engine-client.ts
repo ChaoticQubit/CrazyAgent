@@ -144,7 +144,7 @@ export interface BaselineDetail extends BaselineRow {
 
 export interface ActionReceipt {
   baseline_id: string;
-  outcome: "applied" | "rejected" | "unavailable" | "unknown" | "not_recorded_at_barrier" | "uncertain";
+  outcome: "applied" | "rejected" | "unavailable" | "unknown" | "in_progress" | "not_recorded_at_barrier" | "uncertain";
   pending: boolean;
 }
 

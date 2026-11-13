@@ -391,7 +391,9 @@ impl NewProjectPage {
                     creation.send(MutationDelivery::Retry, ctx);
                     return Flow::Handled;
                 }
-                OwnerResponse::OutcomeUnknown { .. } if recover => {
+                OwnerResponse::OutcomeUnknown { .. } | OwnerResponse::InProgress { .. }
+                    if recover =>
+                {
                     creation.recovered = true;
                     creation.send(MutationDelivery::Reconcile, ctx);
                     return Flow::Handled;

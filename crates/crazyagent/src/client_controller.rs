@@ -547,6 +547,7 @@ impl OwnerController {
                 self.pending = None;
             }
             OwnerResponse::OutcomeUnknown { operation_id }
+            | OwnerResponse::InProgress { operation_id }
                 if operation_id != &pending.request.request_id =>
             {
                 return Err(EngineError("controller_receipt_identity_mismatch".into()));

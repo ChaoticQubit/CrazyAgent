@@ -1491,10 +1491,15 @@ pub struct OwnerReadReply {
     pub data: OwnerData,
 }
 
+/// The engine's answer to one owner request. `InProgress` names a request id the engine is
+/// still running from an earlier send: a resend or a check of it answers that, plans nothing
+/// and touches no disk, and the client keeps the change, never resends it while that holds,
+/// and checks again later.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerResponse {
     OutcomeUnknown { operation_id: RequestId },
+    InProgress { operation_id: RequestId },
     Applied { operation: OwnerApplied },
     Read { state: OwnerReadReply },
     Committed { operation: OwnerApplied },

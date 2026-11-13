@@ -3,11 +3,11 @@ use crazyagent::conversation::{
     ConversationContent, ConversationCursor, ConversationEntry, ConversationMutation,
     TEXT_BYTES_MAX,
 };
-use crazyagent::engine::Client;
 use crazyagent::engine::owner::{
     OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerPageCursor, OwnerRead,
     OwnerResponse, OwnerResult, OwnerSummary, OwnerView,
 };
+use crazyagent::engine::{Client, EngineError};
 use crazyagent::protocol::{BaselineId, ProjectId, ProjectSpec};
 use crazyagent::verification::BaselineDraft;
 use serde::Serialize;
@@ -202,6 +202,7 @@ pub enum ActionOutcome {
     Rejected,
     Unavailable,
     Unknown,
+    InProgress,
     NotRecordedAtBarrier,
     Uncertain,
 }
@@ -860,8 +861,10 @@ impl NativeBridge {
     }
 
     /// Sends or reconciles the kept owner change and reports what the engine settled.
-    /// A send the engine answers with an unknown outcome is checked once right away by the
-    /// same identity, as the TUI does; a check that settles nothing keeps the unknown answer.
+    /// A send the engine answers with an unknown outcome, or whose answer did not come in
+    /// time, is checked once right away by the same identity, as the TUI does; a check that
+    /// settles nothing keeps the unknown answer. Only a failed connection lets go of the
+    /// engine: a slow answer keeps it, so the window never reads it as not running.
     /// Input: whether to reconcile instead of send. Output: the receipt for the kept change.
     async fn deliver_intent(&mut self, reconcile: bool) -> Result<IntentReceipt, BridgeError> {
         let intent = self
@@ -872,20 +875,12 @@ impl NativeBridge {
         self.model_access = None;
         self.model_access_next = None;
         self.projects_next = None;
-        let mut response = if reconcile {
+        let response = if reconcile {
             self.controller()?.reconcile_pending().await
         } else {
-            self.controller()?.retry_pending().await
+            let sent = self.controller()?.retry_pending().await;
+            self.checked_once(sent).await?
         };
-        if !reconcile && matches!(response, Ok(OwnerResponse::OutcomeUnknown { .. })) {
-            let checked = self.controller()?.reconcile_pending().await;
-            if !matches!(
-                checked,
-                Ok(OwnerResponse::Rejected { .. } | OwnerResponse::OutcomeUnknown { .. })
-            ) {
-                response = checked;
-            }
-        }
         let mut rejection = None;
         let outcome = match response {
             Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
@@ -907,8 +902,10 @@ impl NativeBridge {
                 ActionOutcome::Rejected
             }
             Ok(OwnerResponse::OutcomeUnknown { .. }) => ActionOutcome::Unknown,
+            Ok(OwnerResponse::InProgress { .. }) => ActionOutcome::InProgress,
             Ok(OwnerResponse::NotRecordedAtBarrier { .. }) => ActionOutcome::NotRecordedAtBarrier,
             Ok(OwnerResponse::Read { .. }) => return Err(failure("unexpected_reply")),
+            Err(error) if outcome_unknown(&error) => ActionOutcome::Unknown,
             Err(_) => {
                 self.ordinary = None;
                 self.controller()?.detach();
@@ -921,6 +918,40 @@ impl NativeBridge {
             pending: self.status().pending,
             rejection,
         })
+    }
+
+    /// Checks the kept change once by the same identity after a send whose outcome is
+    /// unknown, its answer lost or late, and takes the check's answer when it settles the
+    /// change, finds it still running or names a failed connection. Input: the send's answer.
+    /// Output: the answer to report.
+    async fn checked_once(
+        &mut self,
+        sent: Result<OwnerResponse, EngineError>,
+    ) -> Result<Result<OwnerResponse, EngineError>, BridgeError> {
+        let unknown = match &sent {
+            Ok(OwnerResponse::OutcomeUnknown { .. }) => true,
+            Err(error) => outcome_unknown(error),
+            Ok(_) => false,
+        };
+        if !unknown {
+            return Ok(sent);
+        }
+        assert!(
+            self.controller()?.pending().is_some(),
+            "an unknown send keeps its change"
+        );
+        let checked = self.controller()?.reconcile_pending().await;
+        let settled = match &checked {
+            Ok(
+                OwnerResponse::Applied { .. }
+                | OwnerResponse::Committed { .. }
+                | OwnerResponse::InProgress { .. }
+                | OwnerResponse::NotRecordedAtBarrier { .. },
+            ) => true,
+            Err(error) => !outcome_unknown(error),
+            Ok(_) => false,
+        };
+        Ok(if settled { checked } else { sent })
     }
 
     pub async fn projects(&mut self, next: bool) -> Result<ProjectPage, BridgeError> {
@@ -1237,6 +1268,17 @@ fn conversation_row(entry: ConversationEntry) -> ConversationRow {
 /// Input: the engine's refusal code. Output: the code to show.
 fn rejection_code(code: &str) -> String {
     crazyagent::protocol::plain_code(code).to_owned()
+}
+
+/// True for an owner send whose answer did not come back in time or could not be read: the
+/// engine may still be running it, so the connection is kept and the change checked, never
+/// read as the engine not running. Input: the send's error. Output: whether it is that kind.
+fn outcome_unknown(error: &EngineError) -> bool {
+    assert!(!error.0.is_empty(), "every owner error carries a code");
+    let unknown = error.0.starts_with("owner_outcome_unknown")
+        || error.0 == "owner_actor_stopped_outcome_unknown";
+    assert!(!unknown || !error.0.contains(' '), "a code, never text");
+    unknown
 }
 
 fn baseline_row(value: OwnerSummary) -> Result<BaselineRow, BridgeError> {

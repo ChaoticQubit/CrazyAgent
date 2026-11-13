@@ -330,9 +330,15 @@ export async function checkUnconfirmed(): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_reconcile_intent");
 }
 
-/** Sends the exact kept change again; the engine applies it once even if the first send
- * landed. Output: the receipt, or why it couldn't run. */
-export function retryUnconfirmed(): Promise<Result<IntentReceipt>> {
+/** Sends the exact kept change again, reconnecting first when a lost reply let go of the
+ * engine; the engine applies it once even if the first send landed, and answers that it is
+ * still running while the first send runs. Output: the receipt, or why it couldn't run. */
+export async function retryUnconfirmed(): Promise<Result<IntentReceipt>> {
+  const current = await status();
+  if (current.kind === "ok" && !current.value.connected) {
+    const connected = await connect();
+    if (connected.kind !== "ok") return connected;
+  }
   return call<IntentReceipt>("desktop_retry_intent");
 }
 
@@ -427,6 +433,7 @@ function capital(text: string): string {
 export function unconfirmedLine(intent: PendingIntent, outcome: ActionReceipt["outcome"] | null): string {
   const label = changeLabel(intent);
   if (outcome === "not_recorded_at_barrier") return `${capital(label)} never reached the engine. Retry sends it again, or Dismiss drops it.`;
+  if (outcome === "in_progress") return `${capital(label)} is still running in the engine. It finishes on its own; we keep checking.`;
   return `We couldn't confirm ${label}. Other changes wait until it's checked.`;
 }
 
