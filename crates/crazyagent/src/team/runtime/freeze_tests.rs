@@ -575,12 +575,36 @@ fn an_engine_start_does_not_wait_on_a_frozen_native_lead_and_leaves_it_unfrozen(
     lead.end(&frozen);
 }
 
+/// Moves a native lead onto a Claude Code endpoint account named by an https host, so the
+/// next engine can bind its model proxy again and nothing but a takeover check refuses
+/// it. Takes the lead. Returns the access the next engine opens with.
+fn admissible(lead: &NativeLead) -> ModelAccess {
+    let mut access = lead.fixture.access.clone();
+    let mut named = access.connections[0].clone();
+    named.id = reference("named-claude");
+    named.harness = reference("claude");
+    named.protocol = reference("anthropic-messages");
+    named.endpoint = ModelEndpoint::Http {
+        url: "https://models.crazyagent.test/v1".into(),
+    };
+    access.connections.push(named);
+    access.pools[0].members.push(reference("named-claude"));
+    lead.fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET connection='named-claude' WHERE id=?1",
+            [lead.id],
+        )
+        .unwrap();
+    access
+}
+
 /// DEC-158: a frozen native lead that the next engine refuses, here because its team was
 /// paused while no engine ran, is ended while still frozen: no process of it runs again,
 /// not even for the moment before the refusal, so it never runs with its proxy port free.
 #[test]
 fn a_frozen_native_lead_the_next_engine_refuses_ends_without_running_again() {
-    let lead = NativeLead::start_with(BEATING_CLAUDE);
+    let mut lead = NativeLead::start_with(BEATING_CLAUDE);
     let deadline = Instant::now() + WAIT;
     while lead.beats() == 0 {
         assert!(Instant::now() < deadline, "the lead's process never beat");
@@ -609,6 +633,15 @@ fn a_frozen_native_lead_the_next_engine_refuses_ends_without_running_again() {
             [PROJECT],
         )
         .unwrap();
+    let access = admissible(&lead);
+    assert!(
+        matches!(
+            lead.runtime.rebind(lead.id, &frozen, &access),
+            Ok(Ok(Some(_)))
+        ),
+        "the lead's proxy cannot bind again, so the pause is not what refuses it"
+    );
+    lead.fixture.access = access;
     let before = lead.beats();
 
     let mut next = standin_claude_runtime(&lead.fixture, BEATING_CLAUDE)
@@ -725,6 +758,37 @@ fn a_pane_whose_frozen_record_does_not_fit_is_ended_not_kept() {
     pane.gone("the pane whose frozen record does not fit ended");
     assert!(!fixture.recorded(id));
     host.close(&[]).unwrap();
+}
+
+/// DEC-158: a quitting engine that cannot store a native lead's frozen record ends the
+/// lead through the keepers of both its servers, so no stopped process of it is left with
+/// nothing to thaw it by, and the failure is still reported.
+#[test]
+fn a_native_lead_whose_frozen_record_cannot_be_stored_is_ended() {
+    let lead = NativeLead::start();
+    lead.fixture
+        .connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER refused_record BEFORE UPDATE ON team_panes WHEN NEW.agent={} \
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            lead.id
+        ))
+        .unwrap();
+
+    let (held, problem) = lead.runtime.freeze_or_end(lead.id);
+    assert!(
+        !held,
+        "the lead whose record could not be stored stayed frozen"
+    );
+    assert!(problem.is_some(), "the failed store was not reported");
+    let deadline = Instant::now() + WAIT;
+    while state_of(lead.left).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "the lead's process outlived the failed store"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// DEC-158: a proxied agent's pane starts under a keeper given the engine's freeze record,
