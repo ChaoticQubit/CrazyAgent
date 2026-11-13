@@ -48,7 +48,7 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
             "Needs approval",
             "Needs a pool",
             "Needs you",
-            "Missing",
+            "Fill in",
             "Rate limited",
         ],
     ),
@@ -326,7 +326,7 @@ mod tests {
             ("Setting up", Status::Active),
             ("Installing", Status::Active),
             ("Folder missing", Status::Fail),
-            ("Missing", Status::Needs),
+            ("Fill in", Status::Needs),
             ("Not set up", Status::Waiting),
             ("Waiting", Status::Waiting),
             ("Turned off", Status::Off),
@@ -334,7 +334,8 @@ mod tests {
         ] {
             assert_eq!(Status::of(word), Some(kind), "{word}");
         }
-        assert_eq!(Status::of("Missing: About, Platforms."), None);
+        assert_eq!(Status::of("Fill it in below."), None);
+        assert_eq!(Status::of("Fill in: About, Platforms."), None);
         assert_eq!(Status::Active.role(), Role::Running);
         assert_eq!(Status::Waiting.role(), Role::Muted);
         assert_eq!(UNICODE.status(Status::Fail), "✗");

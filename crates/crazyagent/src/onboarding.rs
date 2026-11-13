@@ -721,7 +721,9 @@ pub(crate) fn found_links(
 
 /// The onboarding of `project_id`: both steps, the draft, its proposed name, the extra
 /// facts, the fields still missing and the overview, read bounded and never through a link,
-/// as the mapping agent's only while it holds the text this engine sealed on writing it.
+/// as the mapping agent's only while it holds the text this engine sealed on writing it,
+/// and then only when it leaves no code fence open: an engine before DEC-160 sealed a JSON
+/// tail of a cut answer, which stays in the folder but is not shown.
 /// Once the owner saved the setup, name, draft and missing fields come from the saved
 /// setup. Returns `None` for a project that was not onboarded.
 pub(crate) fn status(
@@ -795,7 +797,11 @@ pub(crate) fn status(
         .map_err(error)?;
     let wrote = sealed.is_some() && found.as_deref().map(draft::overview_seal) == sealed;
     let found = found.map(|text| draft::names::without_secret_paths(&text));
-    let (overview, folder_overview) = if wrote { (found, None) } else { (None, found) };
+    let (overview, folder_overview) = if wrote {
+        (found.filter(|text| draft::fences_closed(text)), None)
+    } else {
+        (None, found)
+    };
     Ok(Some(OnboardingView {
         project_id: project_id.clone(),
         graph: Step::from_columns(&graph, graph_reason)?,
