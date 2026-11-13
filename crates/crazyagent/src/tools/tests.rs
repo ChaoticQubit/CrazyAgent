@@ -410,6 +410,9 @@ fn a_file_in_an_agent_short_temp_folder_is_refused_even_through_an_owner_link() 
     std::os::unix::fs::symlink(&planted, home.join(".local/bin/tmux")).unwrap();
     let missing = resolve("tmux", &home_only(&home)).unwrap_err();
     assert_eq!(missing.reason, Reason::Refused);
+    let line = missing.line();
+    assert!(line.contains("an agent's temp folder"), "{line}");
+    assert!(!line.contains("outside your projects"), "{line}");
     assert_eq!(
         missing.refused.map(|refused| refused.why),
         Some(Refusal::AgentsCanWrite)
