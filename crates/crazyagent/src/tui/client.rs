@@ -3158,6 +3158,49 @@ mod creation_recovery_tests {
         drop(db);
         h.close().await;
     }
+
+    #[tokio::test]
+    async fn a_late_answer_on_a_kept_creation_is_checked_before_the_connection_counts_as_lost() {
+        let h = RealNative::new().await;
+        let id = RequestId::new("late-creation").unwrap();
+        let event = |result: Result<Box<OwnerResponse>, String>, retained: bool| CreationEvent {
+            submission: h.submission(),
+            operation: retained.then(|| (id.clone(), "hash".to_owned())),
+            result,
+            retained,
+        };
+        for late in [
+            "owner_outcome_unknown_reconcile_same_identity",
+            "owner_actor_stopped_outcome_unknown",
+        ] {
+            assert_eq!(
+                creation_loss(&event(Err(late.into()), true)),
+                None,
+                "a late answer on a kept creation is reconciled, never read as a lost engine: {late}"
+            );
+            assert_eq!(
+                creation_loss(&event(Err(late.into()), false)),
+                Some(late),
+                "with nothing kept to check, a late answer still counts: {late}"
+            );
+        }
+        for gone in [
+            "trusted_owner_connection_failed",
+            "controller_disconnected",
+            "owner_socket_replaced",
+        ] {
+            assert_eq!(
+                creation_loss(&event(Err(gone.into()), true)),
+                Some(gone),
+                "a failed connection is lost even with a kept creation: {gone}"
+            );
+        }
+        let running = OwnerResponse::InProgress {
+            operation_id: id.clone(),
+        };
+        assert_eq!(creation_loss(&event(Ok(Box::new(running)), true)), None);
+        h.close().await;
+    }
 }
 
 #[cfg(all(test, unix))]

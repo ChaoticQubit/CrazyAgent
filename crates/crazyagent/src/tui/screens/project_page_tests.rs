@@ -4999,6 +4999,57 @@ async fn a_second_lost_reply_on_a_recovering_creation_says_the_project_is_unconf
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creation_the_engine_still_runs_is_checked_again_on_each_tick_until_it_answers() {
+    use crate::tui::client::MutationDelivery;
+    let engine = Engine::start().await;
+    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
+    let late = || Err("owner_outcome_unknown_reconcile_same_identity".to_owned());
+    let running = || {
+        Ok(Box::new(OwnerResponse::InProgress {
+            operation_id: crate::protocol::RequestId::new("late-creation").unwrap(),
+        }))
+    };
+
+    let sent = creation_reply(&mut shell, &submission, late(), true);
+    assert_eq!(sent.len(), 1, "a late answer is reconciled once");
+    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
+
+    for _ in 0..2 {
+        let sent = creation_reply(&mut shell, &submission, running(), true);
+        assert!(
+            sent.is_empty(),
+            "a running creation waits for the next tick"
+        );
+        let shown = render(&mut shell, 160, 24);
+        assert!(
+            !shown.contains("could not confirm"),
+            "the engine still runs the creation, so it is not unconfirmed: {shown}"
+        );
+        assert_eq!(
+            shell.ctx.message().map(|message| message.lead.clone()),
+            Some("Still creating the project.".to_owned())
+        );
+        shell.tick();
+        let checks = std::iter::from_fn(|| shell.ctx.next_request())
+            .filter_map(|request| match request {
+                Request::Creation(job) => Some(*job),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checks.len(),
+            1,
+            "each tick checks the running creation once"
+        );
+        assert!(matches!(checks[0].delivery, MutationDelivery::Reconcile));
+        assert_eq!(
+            checks[0].submission, submission,
+            "the same submission and project id, never a second one"
+        );
+    }
+}
+
 /// While the uncommitted-move banner takes rows above the tabs, the Changes tab offers
 /// Accept on a moved diff only once its last line was painted in the frame the owner
 /// sees, never from the taller view drawn after each key (RVA-1 r1 F2).
