@@ -630,6 +630,52 @@ fn a_probed_folder_in_a_temp_folder_is_refused_on_the_engine_places() {
     }
 }
 
+/// 2.4.1 r1 F1: a tool only in a temp folder the engine's places refuse, on the inherited
+/// PATH or found by the probes, is refused by its file with the temp folder line, never
+/// reported missing with an install hint, and so is a script whose `env` interpreter sits
+/// only there.
+#[test]
+fn a_tool_only_in_a_refused_temp_folder_is_named_as_refused_not_missing() {
+    let (_folder, home) = scratch();
+    let owner_temp = tempfile::Builder::new()
+        .prefix("tools-temp-")
+        .tempdir()
+        .unwrap();
+    let on_path = owner_temp.path().join("path/bin");
+    let probed = owner_temp.path().join("probed/bin");
+    let listed = program(&on_path.join("crazyagent-temp-tool"), NODE);
+    let found = program(&probed.join("crazyagent-probed-tool"), NODE);
+    let interpreter = program(&on_path.join("crazyagent-temp-node"), NODE);
+    program(
+        &home.join(".local/bin/crazyagent-temp-script"),
+        "#!/usr/bin/env crazyagent-temp-node\n",
+    );
+    let path = std::env::join_paths([&on_path]).unwrap();
+    let engine =
+        Places::engine(None, None, Some(home), Some(&path)).with_probed(vec![probed.clone()]);
+    for (tool, file) in [
+        ("crazyagent-temp-tool", &listed),
+        ("crazyagent-probed-tool", &found),
+        ("crazyagent-temp-script", &interpreter),
+    ] {
+        let missing = resolve(tool, &engine).unwrap_err();
+        assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+        assert_eq!(missing.tool, tool);
+        assert_eq!(
+            missing.refused,
+            Some(Box::new(Refused {
+                file: file.clone(),
+                why: Refusal::InTemp,
+            }))
+        );
+        assert!(
+            missing.line().contains("in a temp folder"),
+            "{}",
+            missing.line()
+        );
+    }
+}
+
 /// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
 /// can replace a folder this user owns there, so test stand-ins and engines started from a
 /// `/tmp` folder resolve (leader 17:12, L8c).
