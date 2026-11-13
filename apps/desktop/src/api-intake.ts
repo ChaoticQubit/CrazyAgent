@@ -3,11 +3,11 @@ import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
-  githubUseCli, icloudCancel, icloudDownload, icloudProgress, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
+  githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntentReceipt, OnboardingView,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt, OnboardingView,
   ProjectsHome, SetupStatus,
 } from "./engine-client";
 
@@ -55,6 +55,10 @@ const COPY: Record<string, string> = {
   home_new_project_failed: "The project folder couldn't be created. Nothing was kept.",
   home_add_unverified: "The folder didn't arrive in your projects folder. Check it and try again.",
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
+  home_add_cancelled: "Adding the folder stopped. Nothing was moved or copied.",
+  home_add_in_progress: "A folder is being added to your projects folder. Try again when it finishes.",
+  intake_busy: "Another folder is being added. Wait for it to finish on Home.",
+  intake_failed: "Adding the folder failed. Check your projects folder before trying again.",
   home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
   home_icloud_not_downloaded: "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.",
@@ -256,6 +260,31 @@ export function loadIcloudProgress(): Promise<Result<IcloudProgress | null>> {
  * Output: whether one was running. */
 export function cancelIcloudDownload(): Promise<Result<boolean>> {
   return wrap(icloudCancel);
+}
+
+/** Starts the engine's intake job, which downloads what is only in iCloud and then moves or
+ * copies the folder into the projects folder apart from the window, or attaches to the job
+ * adding that folder already. Inputs: the absolute folder, move or copy and the overrides.
+ * Output: the job, or intake_busy while another folder is being added. */
+export function startIntake(path: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
+  if (!path.startsWith("/")) return Promise.resolve(failure("home_source_invalid"));
+  return wrap(() => intakeStart(path, mode, overrides));
+}
+
+/** Reads the engine's intake job, running or last ended. Output: the job, or null. */
+export function loadIntakeJob(): Promise<Result<IntakeJob | null>> {
+  return wrap(intakeStatus);
+}
+
+/** Asks the running intake job to stop between files. Input: its id. Output: whether it ran. */
+export function stopIntake(id: string): Promise<Result<boolean>> {
+  return wrap(() => intakeStop(id));
+}
+
+/** Forgets an ended intake job so Home no longer shows it. Input: its id. Output: whether it
+ * was forgotten. */
+export function dismissIntake(id: string): Promise<Result<boolean>> {
+  return wrap(() => intakeDismiss(id));
 }
 
 /** Moves or copies a folder into the projects folder, where it then shows as found.

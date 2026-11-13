@@ -234,7 +234,16 @@ fn intake_failure(error: EngineError) -> BridgeError {
 /// An intake job's view as the window may show it: a failure or question code the window has
 /// no sentence for becomes `intake_failed`, so no raw engine text reaches the window.
 /// Input: the engine's view. Output: the same view with only listed codes.
-pub fn shown(view: JobView) -> JobView {
+pub fn shown(mut view: JobView) -> JobView {
+    if let JobState::Failed { code, .. } | JobState::NeedsAnswer { code } = &mut view.state {
+        *code = intake_code(code).unwrap_or("intake_failed").to_owned();
+    }
+    assert!(match &view.state {
+        JobState::Failed { code, .. } | JobState::NeedsAnswer { code } => {
+            intake_code(code).is_some()
+        }
+        _ => true,
+    });
     view
 }
 
