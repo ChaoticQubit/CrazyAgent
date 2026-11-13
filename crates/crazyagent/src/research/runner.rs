@@ -90,14 +90,23 @@ const PANE_PREFIX: &str = "research-";
 const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
 /// The variable that caps the output tokens of each Claude Code request.
 const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
-const CLAUDE_ARGUMENTS: [&str; 6] = [
-    "--print",
-    "--output-format",
-    "text",
-    "--strict-mcp-config",
-    "--setting-sources",
-    "",
-];
+const CLAUDE_ARGUMENTS: [&str; 4] = ["--print", "--strict-mcp-config", "--setting-sources", ""];
+const CLAUDE_TEXT: [&str; 2] = ["--output-format", "text"];
+#[cfg(unix)]
+const CLAUDE_EVENTS: [&str; 3] = ["--output-format", "stream-json", "--verbose"];
+/// The stdout log of a run that prints one JSON event per line.
+#[cfg(unix)]
+const EVENTS_LOG: &str = "events.jsonl";
+
+/// What a Claude Code research run prints: its last message as plain text, which a run
+/// with tools takes as its report, or one JSON event per line, from which a read-only run
+/// joins its whole answer (DEC-160).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaudeOutput {
+    Text,
+    #[cfg(unix)]
+    Events,
+}
 /// The model name Claude Code gives the messages it writes itself, such as its API errors.
 const CLAUDE_OWN_MODEL: &str = "<synthetic>";
 /// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
@@ -1166,7 +1175,15 @@ impl ResearchRunner {
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account)?;
+                claude_arguments(
+                    &mut launch,
+                    &home,
+                    &tmp,
+                    job.tools,
+                    None,
+                    ClaudeOutput::Text,
+                    account,
+                )?;
                 launch.args(installed.arguments());
                 (agent.join("output.md"), "output.md")
             }
@@ -1584,7 +1601,7 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub output_tokens: Option<u32>,
 }
 
-/// How a read-only agent run ended: its last message, a plain failure, out
+/// How a read-only agent run ended: its answer, a plain failure, out
 /// of time, or stopped by its caller or the runner's shutdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReadOnlyEnding {
@@ -1754,8 +1771,16 @@ impl ResearchRunner {
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
-                (agent.join("output.md"), "output.md")
+                claude_arguments(
+                    &mut command,
+                    &home,
+                    &tmp,
+                    false,
+                    run.output_tokens,
+                    ClaudeOutput::Events,
+                    account,
+                )?;
+                (agent.join(EVENTS_LOG), EVENTS_LOG)
             }
         };
         command
@@ -1839,8 +1864,14 @@ impl ResearchRunner {
             return Ok(ending);
         }
         let answer = read_bounded(&agent, &output, self.limits.report_bytes_max)
+            .ok()
+            .and_then(|text| match harness {
+                ResearchHarness::Codex => Some(text),
+                ResearchHarness::ClaudeCode => claude_answer(&text),
+            })
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
+        assert!(answer.len() as u64 <= self.limits.report_bytes_max);
         Ok(if answer.is_empty() {
             ReadOnlyEnding::Failed("Agent returned no answer".into())
         } else {
@@ -2224,14 +2255,16 @@ fn codex_arguments(
 /// either a managed config directory or a keyless Anthropic endpoint in bare
 /// mode that never reads the keychain.
 /// Takes the command, the agent home and temp dir, the tools switch, the most
-/// output tokens of each request (`None` for Claude Code's own limit) and the
-/// account. Returns an error for an account that does not fit Claude Code.
+/// output tokens of each request (`None` for Claude Code's own limit), what the
+/// run prints and the account. Returns an error for an account that does not
+/// fit Claude Code.
 fn claude_arguments(
     command: &mut Command,
     home: &Path,
     tmp: &Path,
     tools: bool,
     output_tokens: Option<u32>,
+    output: ClaudeOutput,
     account: &ResearchAccount,
 ) -> Result<(), RunError> {
     let key_file = match account {
@@ -2251,8 +2284,14 @@ fn claude_arguments(
         }
         None => CLAUDE_SETTINGS.to_owned(),
     };
+    let printed: &[&str] = match output {
+        ClaudeOutput::Text => &CLAUDE_TEXT,
+        #[cfg(unix)]
+        ClaudeOutput::Events => &CLAUDE_EVENTS,
+    };
     command
         .args(CLAUDE_ARGUMENTS)
+        .args(printed)
         .arg("--settings")
         .arg(settings)
         .env("CLAUDE_CONFIG_DIR", home)
@@ -3345,10 +3384,12 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-/// The answer of a tools-off Claude Code run, read from its stream of JSON events: the
-/// text of its assistant messages, their thinking and Claude Code's own error messages left
-/// out. Input: the event lines. Output: the answer, or `None` while the stream ends in no
-/// successful result, such as a log cut at its bound or a run Claude Code ended on an error.
+/// The whole answer of a tools-off Claude Code run, read from its stream of JSON events:
+/// the text of every assistant message joined in order, so an answer Claude Code continued
+/// past the output cap comes back whole, where `--print` text keeps only the last part
+/// (DEC-160). Thinking and Claude Code's own error messages are left out. Input: the event
+/// lines. Output: the answer, or `None` while the stream ends in no successful result, such
+/// as a log cut at its bound or a run Claude Code ended on an error.
 #[cfg(unix)]
 fn claude_answer(events: &str) -> Option<String> {
     let mut answer = String::new();
@@ -3359,7 +3400,6 @@ fn claude_answer(events: &str) -> Option<String> {
         };
         match event["type"].as_str() {
             Some("assistant") if !claude_error(&event) => {
-                answer.clear();
                 for block in event["message"]["content"].as_array().into_iter().flatten() {
                     if block["type"] == "text"
                         && let Some(text) = block["text"].as_str()
@@ -5744,12 +5784,18 @@ mod tests {
         };
         let launch = |tools: bool, output_tokens: Option<u32>| {
             let mut command = Command::new("/usr/bin/true");
+            let output = if tools {
+                ClaudeOutput::Text
+            } else {
+                ClaudeOutput::Events
+            };
             claude_arguments(
                 &mut command,
                 Path::new("/agent/home"),
                 Path::new("/agent/tmp"),
                 tools,
                 output_tokens,
+                output,
                 &account,
             )
             .unwrap();
@@ -5773,10 +5819,14 @@ mod tests {
             "{off:?}"
         );
         assert!(has(&off, ["--max-turns", "1"]), "{off:?}");
+        assert!(has(&off, ["--output-format", "stream-json"]), "{off:?}");
+        assert!(off.iter().any(|argument| argument == "--verbose"), "{off:?}");
+        assert!(!has(&off, ["--output-format", "text"]), "{off:?}");
         assert_eq!(cap.as_deref(), Some("16000"));
         assert!(CLAUDE_NO_TOOLS_PROMPT.contains("no tools"));
         let (on, cap) = launch(true, None);
         assert!(has(&on, ["--tools", "default"]), "{on:?}");
+        assert!(has(&on, ["--output-format", "text"]), "{on:?}");
         assert!(
             !on.iter()
                 .any(|argument| argument == "--system-prompt" || argument == "--max-turns")
