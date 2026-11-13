@@ -383,6 +383,36 @@ fn a_link_into_a_project_is_refused() {
     );
 }
 
+/// Removes a folder a row made outside its scratch folder when the row ends, passed or not.
+struct Removed(PathBuf);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// 2.4.1 R4: an agent's short temp folder (`ca-` and 16 hex digits in `/private/tmp`, `/tmp`
+/// off macOS), which the agent writes, counts as a place agents can write though this user
+/// owns it, so a file there is refused even when an owner link in a trusted folder names it.
+#[test]
+fn a_file_in_an_agent_short_temp_folder_is_refused_even_through_an_owner_link() {
+    let (_folder, home) = scratch();
+    let agent_temp = crate::sandbox::toolchains::tmp_path(&home);
+    std::fs::create_dir(&agent_temp).unwrap();
+    let _removed = Removed(agent_temp.clone());
+    let planted = program(&agent_temp.join("bin/tmux"), NODE);
+    assert!(
+        Places::new(Vec::new(), None).agent_writable(&planted),
+        "{planted:?}"
+    );
+    std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+    std::os::unix::fs::symlink(&planted, home.join(".local/bin/tmux")).unwrap();
+    let missing = resolve("tmux", &home_only(&home)).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(missing.refused.unwrap().why, Refusal::AgentsCanWrite);
+}
+
 /// R-L1 and F2: an interpreter named by path goes through the same checks as a tool found by
 /// name: one inside a project's `.crazyagent` folder, or inside a project, is refused as a
 /// missing interpreter, and a pinned entry inside a project is refused too.
