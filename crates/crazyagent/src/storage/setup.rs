@@ -625,6 +625,7 @@ pub(crate) fn status(tx: &Transaction<'_>, path: &Path) -> Result<SetupStatus, E
         running: progress.running,
         notes: Vec::new(),
         version: versioned::current(tx, &versioned::default_pack_item())?.version,
+        refused_tool: crate::setup::RefusedTool::default(),
     })
 }
 

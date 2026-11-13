@@ -291,7 +291,7 @@ fn pack_word(state: &PackState) -> &'static str {
 fn tool_word(state: &DependencyState) -> String {
     match state {
         DependencyState::Checking => "Checking".into(),
-        DependencyState::Missing { .. } => "Not installed".into(),
+        DependencyState::Missing { .. } | DependencyState::Refused { .. } => "Not installed".into(),
         DependencyState::Found { version } => format!("Found {}", version.as_str()),
         DependencyState::Bundled { version } => {
             format!("Bundled with CrazyAgent {}", version.as_str())

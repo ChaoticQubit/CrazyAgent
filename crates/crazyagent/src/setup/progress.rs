@@ -13,7 +13,9 @@ pub const RECHECK_AFTER: Duration = Duration::from_secs(30);
 /// graphify command (only while the code graph entry is ticked or on), the dependencies it
 /// touched with their states, the pack entries still installing or failed with a reason,
 /// and the plain reason each entry's last hooks seeding was refused. It also keeps the last
-/// background version check, so a status read never waits.
+/// background version check, so a status read never waits, with the permission fix target
+/// that check found for each refused tool, and why the owner's last fix of a tool did not
+/// help (DEC-162), kept apart so the refused row and its command stay.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
     pub running: bool,
@@ -23,6 +25,8 @@ pub struct Progress {
     pub hooks: BTreeMap<String, String>,
     pub checking: bool,
     pub checked: Option<Checked>,
+    pub fixes: BTreeMap<Dependency, crate::tools::permission_fix::Target>,
+    pub fix_failed: BTreeMap<Dependency, String>,
 }
 
 /// What the last background version check found for each dependency, when it ended, and
@@ -416,5 +420,135 @@ mod tests {
             DependencyState::Missing { line: needs.line() }
         );
         assert!(needs.line().contains("python3"), "{}", needs.line());
+    }
+
+    /// DEC-162: a tool the resolver found and passed over reads Refused, never Missing: the
+    /// resolver's line, the file, the part others can change and the permission fix the
+    /// check found, and after a fix that did not help, why; a refusal no permission change
+    /// can fix has no part or fix. A tool not found still reads Missing.
+    #[test]
+    fn a_found_but_refused_tool_reads_refused_with_its_file_part_and_fix_not_missing() {
+        let refused = |why| crate::tools::Missing {
+            tool: "graphify".into(),
+            reason: crate::tools::Reason::Refused,
+            needs: None,
+            looked: Vec::new(),
+            refused: Some(Box::new(crate::tools::Refused {
+                file: PathBuf::from("/Users/me/.local/share/uv/tools/graphifyy/bin/python3"),
+                why,
+            })),
+        };
+        let part = PathBuf::from("/Users/me/.local/share/uv/python/cpython-3.13.1/bin/python3.13");
+        let others = refused(crate::tools::Refusal::OthersCanChange(part.clone()));
+        let target = crate::tools::permission_fix::Target {
+            path: PathBuf::from("/Users/me/.local/share/uv/python/cpython-3.13.1"),
+            recursive: true,
+        };
+        let progress = |graphify: crate::tools::Missing| Progress {
+            checked: Some(Checked {
+                at: Instant::now(),
+                found: vec![
+                    (Dependency::Tmux, Ok(Err(Dependency::Tmux.not_found()))),
+                    (Dependency::Graphify, Ok(Err(graphify))),
+                ],
+                probe: settled(),
+            }),
+            fixes: BTreeMap::from([(Dependency::Graphify, target.clone())]),
+            ..Progress::default()
+        };
+        let row = |progress: &Progress| {
+            dependency_rows(progress)
+                .into_iter()
+                .find(|row| row.name == Dependency::Graphify)
+                .unwrap()
+                .state
+        };
+        let expected = DependencyState::Refused {
+            line: others.line(),
+            file: "/Users/me/.local/share/uv/tools/graphifyy/bin/python3".into(),
+            part: Some(part.display().to_string()),
+            fix: Some(crate::setup::ToolFix {
+                tree: "/Users/me/.local/share/uv/python/cpython-3.13.1".into(),
+                recursive: true,
+                command: "chmod -R go-w '/Users/me/.local/share/uv/python/cpython-3.13.1'".into(),
+            }),
+            fix_failed: None,
+        };
+        assert_eq!(row(&progress(others.clone())), expected);
+        assert!(matches!(
+            dependency_rows(&progress(others.clone()))[0].state,
+            DependencyState::Missing { .. }
+        ));
+
+        let mut failed = progress(others.clone());
+        failed.fix_failed.insert(
+            Dependency::Graphify,
+            "That folder is not yours to change.".into(),
+        );
+        let DependencyState::Refused {
+            fix_failed, fix, ..
+        } = row(&failed)
+        else {
+            panic!("refused row expected");
+        };
+        assert_eq!(
+            fix_failed.as_deref(),
+            Some("That folder is not yours to change.")
+        );
+        assert!(fix.is_some());
+
+        let mut agents = progress(refused(crate::tools::Refusal::AgentsCanWrite));
+        agents.fixes.clear();
+        let DependencyState::Refused {
+            part, fix, line, ..
+        } = row(&agents)
+        else {
+            panic!("refused row expected");
+        };
+        assert_eq!((part, fix), (None, None));
+        assert!(line.contains("agents can change it"), "{line}");
+    }
+
+    /// DEC-162: the refused state's wire shape, which both clients read: `state` refused,
+    /// the line, file and part, and the fix with its tree, whether it is walked whole and
+    /// the command; empty optional fields are left out.
+    #[test]
+    fn the_refused_state_has_one_wire_shape() {
+        let state = DependencyState::Refused {
+            line: "graphify can't start".into(),
+            file: "/h/f".into(),
+            part: Some("/h/p".into()),
+            fix: Some(crate::setup::ToolFix {
+                tree: "/h/t".into(),
+                recursive: true,
+                command: "chmod -R go-w '/h/t'".into(),
+            }),
+            fix_failed: None,
+        };
+        let wire = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "state": "refused",
+                "line": "graphify can't start",
+                "file": "/h/f",
+                "part": "/h/p",
+                "fix": {"tree": "/h/t", "recursive": true, "command": "chmod -R go-w '/h/t'"}
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DependencyState>(wire).unwrap(),
+            state
+        );
+        let bare = serde_json::json!({"state": "refused", "line": "l", "file": "f"});
+        assert!(matches!(
+            serde_json::from_value::<DependencyState>(bare).unwrap(),
+            DependencyState::Refused {
+                part: None,
+                fix: None,
+                fix_failed: None,
+                ..
+            }
+        ));
     }
 }

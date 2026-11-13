@@ -248,6 +248,9 @@ pub enum Pin {
 /// is still running in the background; the screen reads the status again to see it.
 /// `Missing` carries the tool resolver's owner line for why the tool cannot run
 /// ([`crate::tools::Missing::line`]), the same words a launch that needs it says.
+/// `Refused` is a tool the resolver found and passed over (DEC-162): its line, the file, the
+/// part another user or group can change, the permission fix when one can help, and why the
+/// owner's last fix did not, never counted as missing.
 /// `Unsupported` means setup cannot install it on this system, so no Install is offered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
@@ -256,6 +259,16 @@ pub enum DependencyState {
     Missing {
         #[serde(default)]
         line: String,
+    },
+    Refused {
+        line: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fix: Option<ToolFix>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fix_failed: Option<String>,
     },
     Found {
         version: Version,
@@ -289,6 +302,37 @@ impl DependencyState {
             reason: plain_reason(code).to_owned(),
         }
     }
+}
+
+/// The permission fix a refused tool's row offers (DEC-162): the folder or file it changes,
+/// whether that folder changes as a whole tree, and the command that makes the same change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolFix {
+    pub tree: String,
+    pub recursive: bool,
+    pub command: String,
+}
+
+impl From<&crate::tools::permission_fix::Target> for ToolFix {
+    fn from(target: &crate::tools::permission_fix::Target) -> Self {
+        Self {
+            tree: target.path.to_string_lossy().into_owned(),
+            recursive: target.recursive,
+            command: target.command(),
+        }
+    }
+}
+
+/// The owner's choice for a tool found but not used (DEC-162 Q1): offer the permission fix
+/// with its command, or show only the command, which the engine then enforces by refusing
+/// the fix (`tool_fix_off`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusedTool {
+    #[default]
+    FixButton,
+    CommandOnly,
 }
 
 /// One dependency as the setup screen lists it: which tool, its plain name and its state.
@@ -330,7 +374,8 @@ pub struct PackEntry {
 }
 
 /// Everything the setup screen shows: each dependency, each pack entry, whether a setup
-/// run is going on now, and the pack's version that a switch or removal names.
+/// run is going on now, the pack's version that a switch or removal names, and the owner's
+/// choice for a tool found but not used ([`RefusedTool`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetupStatus {
@@ -340,6 +385,8 @@ pub struct SetupStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
     pub version: u64,
+    #[serde(default)]
+    pub refused_tool: RefusedTool,
 }
 
 /// One Python tool setup installs only from its bundled lock: the package, its version,

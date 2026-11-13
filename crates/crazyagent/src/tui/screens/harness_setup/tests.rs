@@ -127,6 +127,7 @@ fn setup(state: DependencyState, running: bool) -> Arrival {
             running,
             notes: Vec::new(),
             version: 1,
+            refused_tool: Default::default(),
         },
     ))))
 }

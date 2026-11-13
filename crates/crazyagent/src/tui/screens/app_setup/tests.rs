@@ -128,6 +128,7 @@ fn first_run_status() -> SetupStatus {
         running: false,
         notes: Vec::new(),
         version: 4,
+        refused_tool: Default::default(),
     }
 }
 

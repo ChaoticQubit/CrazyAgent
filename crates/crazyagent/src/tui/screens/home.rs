@@ -1485,6 +1485,7 @@ pub(in crate::tui) mod tests {
             running: false,
             notes: Vec::new(),
             version: 0,
+            refused_tool: Default::default(),
         }
     }
 
