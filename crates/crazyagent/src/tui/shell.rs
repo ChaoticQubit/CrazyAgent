@@ -11,6 +11,7 @@ use super::frame::{
     HINT_ROWS_MAX, Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, hint,
     strip_bidi, too_small, wrapped_footer,
 };
+use super::glyphs::Glyphs;
 use super::keys::{Global, Key, global};
 use super::screens::intake::not_ready;
 use super::screens::new_project_page::kept_draft;
@@ -41,6 +42,7 @@ const GO_TO_WIDTH: u16 = 58;
 const GO_TO_TOP: u16 = 5;
 const QUIT_WIDTH: u16 = 46;
 const QUIET: Duration = Duration::from_millis(150);
+const JOB_NOTE_CELLS_MAX: usize = 64;
 
 /// One Go to destination.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1000,7 +1002,7 @@ impl Shell {
         let top = self.stack.last().expect("the stack is never empty");
         let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
         let status = with_waiting(waiting, top.status(&self.ctx), &theme);
-        let status = with_intake(self.ctx.store.intake.as_ref(), status, &theme);
+        let status = with_intake(self.ctx.store.intake.as_ref(), status, &theme, glyphs);
         let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
@@ -1088,7 +1090,13 @@ fn with_waiting(waiting: Option<String>, status: Line<'static>, theme: &Theme) -
 /// The header status with the running intake job's line in front, so a folder being added
 /// shows on every screen; with no running job the status is unchanged. Inputs: the job, if
 /// any, the status and the theme. Output: the line.
-fn with_intake(job: Option<&JobView>, status: Line<'static>, theme: &Theme) -> Line<'static> {
+fn with_intake(
+    job: Option<&JobView>,
+    status: Line<'static>,
+    theme: &Theme,
+    glyphs: &Glyphs,
+) -> Line<'static> {
+    let _ = glyphs;
     let Some(job) = job.filter(|job| intake_job::running(job)) else {
         return status;
     };
@@ -1955,7 +1963,8 @@ mod tests {
             },
         });
         let shown = |job: Option<&JobView>, status: &str| {
-            crate::tui::text::plain(&with_intake(job, Line::raw(status.to_owned()), &theme))
+            let status = Line::raw(status.to_owned());
+            crate::tui::text::plain(&with_intake(job, status, &theme, &UNICODE))
         };
         assert_eq!(
             shown(Some(&running), "Ready"),
@@ -1968,5 +1977,17 @@ mod tests {
         assert_eq!(shown(Some(&shop(JobState::Done)), "Ready"), "Ready");
         assert_eq!(shown(None, "Ready"), "Ready");
         assert_eq!(shown(None, ""), "");
+        let long = JobView {
+            source: format!("/Users/mira/{}", "a".repeat(200)),
+            ..running.clone()
+        };
+        let note = shown(Some(&long), "");
+        assert!(
+            crate::tui::text::width(&note) <= JOB_NOTE_CELLS_MAX,
+            "{note}"
+        );
+        assert!(note.starts_with("Downloading aaa"), "{note}");
+        assert!(note.ends_with(UNICODE.ellipsis), "{note}");
+        assert!(shown(Some(&long), "Ready").ends_with("  Ready"));
     }
 }

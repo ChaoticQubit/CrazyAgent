@@ -2871,3 +2871,45 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
     assert!(shows(&rows, "No projects yet."), "{rows:#?}");
     assert!(!shows(&rows, "shop"), "{rows:#?}");
 }
+
+/// The picked card stays the same when the job card comes first or goes: a project picked
+/// before a job starts is still the one Enter opens, and still picked after the job is
+/// dismissed.
+#[test]
+fn home_keeps_the_picked_project_when_the_job_card_comes_and_goes() {
+    let mut ctx = ctx(120, 30);
+    let alpha = crate::tui::seam::ProjectCard {
+        id: ProjectId::new("project-alpha").unwrap(),
+        name: "alpha".into(),
+        about: String::new(),
+        platforms: Vec::new(),
+        pool: None,
+        pool_id: None,
+        research: Default::default(),
+        created_ms: None,
+        activity: Default::default(),
+    };
+    ctx.store.projects = Load::Ready(vec![alpha]);
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    job_read(&mut shell, None);
+    assert!(shows(&render(&mut shell, 120, 30), "Enter Open"));
+    let running = shop_job(JobState::Copying {
+        copied: 1,
+        checked: 0,
+    });
+    job_read(&mut shell, Some(running));
+    let rows = render(&mut shell, 120, 30);
+    assert!(shows(&rows, "Enter Open"), "{rows:#?}");
+    assert!(!shows(&rows, "Enter Stop"), "{rows:#?}");
+    job_read(&mut shell, None);
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: ProjectId::new("project-alpha").unwrap(),
+            name: "alpha".into(),
+            tab: ProjectTab::Overview,
+        })
+    );
+}
