@@ -1087,7 +1087,7 @@ fn with_waiting(waiting: Option<String>, status: Line<'static>, theme: &Theme) -
     join([note, Line::raw("  "), status])
 }
 
-/// The header status with the running intake job's line in front, cut to a bounded width so
+/// The header status with the running intake job's brief in front, cut to a bounded width so
 /// a long folder name never hides the crumbs, so a folder being added shows on every screen;
 /// with no running job the status is unchanged. Inputs: the job, if any, the status, the
 /// theme and the glyphs. Output: the line.
@@ -1100,7 +1100,8 @@ fn with_intake(
     let Some(job) = job.filter(|job| intake_job::running(job)) else {
         return status;
     };
-    let text = cut(&intake_job::line(job), JOB_NOTE_CELLS_MAX, glyphs.ellipsis);
+    let brief = intake_job::brief(job, glyphs.ellipsis);
+    let text = cut(&brief, JOB_NOTE_CELLS_MAX, glyphs.ellipsis);
     assert!(super::text::width(&text) <= JOB_NOTE_CELLS_MAX);
     let note = Line::from(Span::styled(text, theme.accent));
     if status.width() == 0 {

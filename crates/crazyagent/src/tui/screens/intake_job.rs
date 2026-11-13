@@ -2,6 +2,7 @@ use super::intake::copy;
 use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobState, JobView, Phase};
 use crate::tui::glyphs::Status;
+use crate::tui::text::cut;
 
 const BRIEF_NAME_CELLS_MAX: usize = 16;
 
@@ -118,8 +119,26 @@ pub(in crate::tui) fn end_line(
 /// with the folder's name cut short so the crumbs keep their place. Takes a running job and
 /// the ellipsis. Returns the words.
 pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
-    let _ = ellipsis;
-    line(job)
+    assert!(running(job), "an ended job has no brief: {:?}", job.state);
+    let name = cut(&name(job), BRIEF_NAME_CELLS_MAX, ellipsis);
+    let brief = match &job.state {
+        _ if job.stopping => format!("Stopping {name}..."),
+        JobState::Downloading { progress } if progress.total > 0 => {
+            format!(
+                "Downloading {name}: {} of {}",
+                progress.done, progress.total
+            )
+        }
+        JobState::Downloading { .. } => format!("Downloading {name}..."),
+        JobState::Copying { checked, .. } if *checked > 0 => {
+            format!("Checking {name}: {checked} files")
+        }
+        JobState::Copying { copied, .. } if *copied > 0 => format!("Adding {name}: {copied} files"),
+        JobState::Copying { .. } => format!("Adding {name}..."),
+        _ => format!("Finishing {name}..."),
+    };
+    assert!(brief.contains(&name));
+    brief
 }
 
 /// The word Home's job card shows beside the folder's name, in the desktop's words, with the
