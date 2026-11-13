@@ -509,6 +509,29 @@ pub trait Installer: Send + Sync {
         let _ = name;
         None
     }
+
+    /// The permission fix target for a tool found and passed over, by this installer's
+    /// places (DEC-162). Input: why the tool cannot run. Output: the target, or none.
+    fn fix_target(
+        &self,
+        missing: &crate::tools::Missing,
+    ) -> Option<crate::tools::permission_fix::Target> {
+        let _ = missing;
+        None
+    }
+
+    /// Removes group and other write from the target this installer resolves for a refused
+    /// dependency, only when it is the one the owner confirmed (DEC-162). Inputs: the
+    /// dependency and the confirmed target as the row showed it. Output: what changed, or the
+    /// `tool_fix_*` code.
+    fn fix_permissions(
+        &self,
+        dep: Dependency,
+        confirmed: &str,
+    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+        let _ = (dep, confirmed);
+        Err(crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE)
+    }
 }
 
 /// The code every setup step reports on a system setup has no installer for yet.

@@ -71,8 +71,8 @@ pub fn snapshot(root: &Path) -> Progress {
 /// Lists each dependency for the setup screen: the state a run gave it, else what the
 /// last version check found, else checking while no check has finished yet. A tool the
 /// check did not find reads checking while the probes' first run had not ended, since the
-/// login shell's PATH may still hold it. Input: the progress. Output: one row per
-/// dependency in install order.
+/// login shell's PATH may still hold it. A tool found and passed over reads Refused
+/// ([`refused_row`]). Input: the progress. Output: one row per dependency in install order.
 pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
     let found = progress
         .checked
@@ -111,9 +111,10 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
                 },
                 (None, Some(Some(Err(code)))) => DependencyState::refused(code.0),
                 (None, Some(Some(Ok(Err(_))))) if probing => DependencyState::Checking,
-                (None, Some(Some(Ok(Err(missing))))) => DependencyState::Missing {
-                    line: missing.line(),
-                },
+                (None, Some(Some(Ok(Err(missing))))) => refused_row(*dep, missing, progress)
+                    .unwrap_or_else(|| DependencyState::Missing {
+                        line: missing.line(),
+                    }),
                 (None, Some(None)) => DependencyState::Missing {
                     line: dep.not_found().line(),
                 },
@@ -127,6 +128,35 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
         .collect();
     assert_eq!(rows.len(), Dependency::ALL.len());
     rows
+}
+
+/// The row of a tool the resolver found and passed over (DEC-162): its line and file, and
+/// for a part another user or group can change, that part, the permission fix the last
+/// check found and why the owner's last fix did not help. Inputs: the dependency, why it
+/// cannot run and the progress. Output: the Refused state, or none for another reason.
+fn refused_row(
+    dep: Dependency,
+    missing: &crate::tools::Missing,
+    progress: &Progress,
+) -> Option<DependencyState> {
+    if missing.reason != crate::tools::Reason::Refused {
+        return None;
+    }
+    let refused = missing.refused.as_deref()?;
+    let part = match &refused.why {
+        crate::tools::Refusal::OthersCanChange(part) => Some(part.display().to_string()),
+        _ => None,
+    };
+    Some(DependencyState::Refused {
+        line: missing.line(),
+        file: refused.file.display().to_string(),
+        fix: part
+            .as_ref()
+            .and(progress.fixes.get(&dep))
+            .map(super::ToolFix::from),
+        part,
+        fix_failed: progress.fix_failed.get(&dep).cloned(),
+    })
 }
 
 /// Lists each default-pack entry for the setup screen: installing while a run works on

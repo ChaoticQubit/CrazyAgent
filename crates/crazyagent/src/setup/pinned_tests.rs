@@ -544,3 +544,74 @@ fn a_locked_tool_install_leaves_its_python_and_environment_writable_only_by_this
     }
     assert_eq!(installer.program("demo-tool"), Some(program));
 }
+
+/// DEC-162: the permission fix acts only on what the installer resolves itself, in a
+/// fixture HOME with a uv-like graphify whose Python is group writable: the refused lookup
+/// names the Python's prefix as the fix target, a fix confirmed for another folder changes
+/// nothing (`tool_fix_changed`), the confirmed one removes go-w from that tree only, the
+/// tool then resolves, and a second fix is not needed.
+#[test]
+fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirmed() {
+    let scratch = private_root();
+    let home = scratch.path().join("home");
+    let prefix = home.join(".local/share/uv/python/cpython-9.9.9-dummy");
+    let python = prefix.join("bin/python3");
+    std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+    std::fs::write(&python, "#!/bin/sh\nexit 0\n").unwrap();
+    for path in [&python, &prefix.join("bin"), &prefix] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o775)).unwrap();
+    }
+    let venv = home.join(".local/share/uv/tools/graphifyy/bin");
+    std::fs::create_dir_all(&venv).unwrap();
+    std::os::unix::fs::symlink(&python, venv.join("python3")).unwrap();
+    std::fs::write(
+        venv.join("graphify"),
+        format!("#!{}\nprint('graphify')\n", venv.join("python3").display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        venv.join("graphify"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let local_bin = home.join(".local/bin");
+    std::fs::create_dir_all(&local_bin).unwrap();
+    std::os::unix::fs::symlink(venv.join("graphify"), local_bin.join("graphify")).unwrap();
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let root = scratch.path().join("engine");
+    let places = crate::tools::Places::new(vec![local_bin.clone()], Some(home.clone()));
+    let installer = PinnedInstaller::with_places(&root, vec![local_bin], places);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+
+    let Ok(Err(missing)) = installer.lookup(Dependency::Graphify) else {
+        panic!("graphify should be found and refused");
+    };
+    assert_eq!(missing.reason, crate::tools::Reason::Refused);
+    let target = installer.fix_target(&missing).unwrap();
+    assert!(target.recursive);
+    assert_eq!(target.path, prefix.canonicalize().unwrap());
+
+    assert_eq!(
+        installer.fix_permissions(Dependency::Graphify, &elsewhere.display().to_string()),
+        Err(crate::tools::permission_fix::TOOL_FIX_CHANGED)
+    );
+    assert_eq!(mode(&python), 0o775);
+    assert_eq!(mode(&elsewhere), 0o777);
+
+    let confirmed = target.path.display().to_string();
+    let report = installer
+        .fix_permissions(Dependency::Graphify, &confirmed)
+        .unwrap();
+    assert_eq!(report.changed, 3);
+    for path in [&python, &prefix.join("bin"), &prefix] {
+        assert_eq!(mode(path), 0o755, "{}", path.display());
+    }
+    assert_eq!(mode(&elsewhere), 0o777);
+    assert!(crate::tools::resolve("graphify", &installer.places).is_ok());
+    assert_eq!(
+        installer.fix_permissions(Dependency::Graphify, &confirmed),
+        Err(crate::tools::permission_fix::TOOL_FIX_NOT_NEEDED)
+    );
+}

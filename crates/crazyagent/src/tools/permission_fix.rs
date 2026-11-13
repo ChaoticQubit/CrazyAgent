@@ -6,6 +6,10 @@ use std::path::{Component, Path, PathBuf};
 pub const TOOL_FIX_REFUSED: &str = "tool_fix_refused";
 pub const TOOL_FIX_TOO_LARGE: &str = "tool_fix_too_large";
 pub const TOOL_FIX_FAILED: &str = "tool_fix_failed";
+pub const TOOL_FIX_NOT_NEEDED: &str = "tool_fix_not_needed";
+pub const TOOL_FIX_UNAVAILABLE: &str = "tool_fix_unavailable";
+pub const TOOL_FIX_CHANGED: &str = "tool_fix_changed";
+pub const TOOL_FIX_OFF: &str = "tool_fix_off";
 /// The most entries one fix looks at before it stops.
 pub const ENTRIES_MAX: u64 = 200_000;
 /// The deepest folder below the target one fix walks into.
