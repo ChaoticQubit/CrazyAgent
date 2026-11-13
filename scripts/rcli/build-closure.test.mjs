@@ -114,8 +114,8 @@ test("actual executable source entry and contract pins remain incomplete and non
     executable: true,
     contract: {
       path: "scripts/rcli/host.entry.test.mjs",
-      sha256: "3b7ea0b7230dc5f1430ff35b2b70b92cfbe118e748192eb3d982051f7855b48d",
-      bytes: 10195,
+      sha256: "45efbcd55ba99b0105a90fa51a8f4a2f2028e0180fc246dbfd5f5d7b7334b768",
+      bytes: 11618,
     },
   });
   assert.equal(lock.closure.complete, false);
@@ -133,7 +133,7 @@ test("actual executable source entry and contract pins remain incomplete and non
     complete: false,
     execution_allowed: false,
     counts: { files: 2, assets: 0, licenses: 0 },
-    bytes: 10684,
+    bytes: 12107,
     missing: [
       "complete Bun compiler import/asset resolution proof",
       "complete version-bound Bun linked/embedded component notices and LGPL redistribution/relinking materials",
