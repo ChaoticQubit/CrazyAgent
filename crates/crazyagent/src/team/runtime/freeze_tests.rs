@@ -333,10 +333,11 @@ struct NativeLead {
 }
 
 /// A stand-in Claude Code that, run as a native lead, starts one process in a session of
-/// its own, as [`LEAVING_CLAUDE`] does, which then adds a line to `beats` in the lead's
-/// folder every 50 ms, so a row sees whether it ran at all.
+/// its own, as [`LEAVING_CLAUDE`] does, which opens `beats` in the lead's folder before it
+/// names itself and then adds a line to that open file every 50 ms, so a row sees whether
+/// it ran at all, even once the lead's folder is gone.
 const BEATING_CLAUDE: &str = r#"#!/bin/sh
-/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; while (1) { open(my $beat, ">>", $ARGV[1]) or die; print $beat "x\n"; close($beat); select(undef, undef, undef, 0.05) }' "$PWD/left.pid" "$PWD/beats" &
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $beat, ">>", $ARGV[1]) or die; select((select($beat), $| = 1)[0]); open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; while (1) { print $beat "x\n"; select(undef, undef, undef, 0.05) }' "$PWD/left.pid" "$PWD/beats" &
 exec /bin/sleep 300
 "#;
 
@@ -447,7 +448,11 @@ impl NativeLead {
         assert_eq!(record.freeze, Some(true));
         fixture.keep(id, &record);
         session.leave();
-        let beats = plan.working_dir.join("beats");
+        let beating = plan.working_dir.join("beats");
+        let beats = fixture.base.join(format!("beats-{id}"));
+        if beating.exists() {
+            std::fs::hard_link(&beating, &beats).unwrap();
+        }
         Self {
             fixture,
             runtime,
@@ -460,7 +465,9 @@ impl NativeLead {
         }
     }
 
-    /// How many beats a [`BEATING_CLAUDE`] lead's process wrote so far.
+    /// How many beats a [`BEATING_CLAUDE`] lead's process wrote so far, read through the
+    /// row's own link to its beats file in the fixture base, outside the lead's folders, so
+    /// the count stays once the engine removes the lead's folder.
     fn beats(&self) -> usize {
         std::fs::read_to_string(&self.beats).map_or(0, |text| text.lines().count())
     }
@@ -788,6 +795,10 @@ fn a_frozen_native_lead_the_next_engine_refuses_ends_without_running_again() {
     );
     lead.fixture.access = access;
     let before = lead.beats();
+    assert!(
+        before >= 1,
+        "the lead's process never beat before its freeze"
+    );
 
     let mut next = standin_claude_runtime(&lead.fixture, BEATING_CLAUDE)
         .with_terminal(lead.host.clone())
