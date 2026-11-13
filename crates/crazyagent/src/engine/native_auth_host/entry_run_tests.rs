@@ -41,7 +41,7 @@ async fn native_auth_custodian_entry_codex_digest_mismatch_never_retires_without
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let before = case.snapshot();
         let error = crate::engine::native_auth_host::entry::run_with_codex(
-            &case.root, bootstrap_input(&case.token()), &executable, &"0".repeat(64),
+            &case.root, bootstrap_input(&case.token()), &executable, &"0".repeat(64), &[],
         ).await.unwrap_err();
         assert_eq!(error.0, "native_auth_host_executable_changed");
         let after = case.snapshot();

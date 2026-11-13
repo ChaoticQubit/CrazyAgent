@@ -204,11 +204,13 @@ impl Renewal {
 /// Builds a harness command that runs in the managed home with nothing of the engine's
 /// own environment, the way the sign-in custodian runs it, in its own process group.
 /// Inputs: the harness entry and the managed home. Output: the command for the install
-/// the entry leads to now, or the error when the harness is not installed.
+/// the entry leads to now, the error when the harness is not installed, or
+/// `native_profile_renewal_failed` when the tool resolver refuses to start it.
 fn managed_command(executable: &Path, managed: &Path) -> Result<Command, EngineError> {
     let program = crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())
         .map_err(crate::engine::io_error)?;
-    let mut command = crate::engine::native_auth_host::sign_in_command(&program)?;
+    let mut command = crate::engine::native_auth_host::sign_in_command(&program)
+        .map_err(|_| failure("native_profile_renewal_failed"))?;
     command
         .env_clear()
         .env("HOME", managed)
@@ -502,3 +504,6 @@ fn keep(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

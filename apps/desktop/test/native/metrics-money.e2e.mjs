@@ -266,9 +266,8 @@ test("CB-E7 by model, by activity and the first-try rate show on the page", OPTI
     assert.equal(await handOff(me, page, projects[0], runtime), "done");
     editingTurn(runtime, "cb-a");
     await me.click("Metrics", ".app-nav a.nav-item");
-    const panelText = () => page.evaluate(`document.querySelector(".mx-page").innerText`);
-    await eventually("the activity panel", async () => (await panelText()).includes("By activity"));
-    const text = await panelText();
+    await eventually("the activity panel", async () => (await metricsText(page)).includes("By activity"));
+    const text = await metricsText(page);
     assert.match(text, /By model/u);
     assert.match(text, /gpt-5/u);
     assert.match(text, /Feature/u);

@@ -20,11 +20,16 @@ static REQUESTS: AtomicUsize = AtomicUsize::new(0);
 /// registered stand-in for the Codex CLI: by default one whose interpreter is missing, so
 /// it never starts, or one that answers the app-server sign-in requests on stdio and then
 /// ends as `codex-mode` in the root says, noting each login start and logout it gets in
-/// `codex-requests`. Dropping it kills the engine and every login it started.
+/// `codex-requests`. The stand-ins live in their own folder outside the engine's data
+/// folder, whose files the engine never starts. Dropping it kills the engine and every
+/// login it started.
 struct Case {
     engine: Option<Child>,
     root: tempfile::TempDir,
+    bin: tempfile::TempDir,
     codex: &'static str,
+    claude: &'static str,
+    home: tempfile::TempDir,
 }
 
 impl Case {
@@ -35,11 +40,72 @@ impl Case {
     /// Starts the engine with the named Codex stand-in, `codex-unstartable` or
     /// `codex-app-server`. Input: the stand-in's file name. Output: the case.
     fn with_codex(codex: &'static str) -> Self {
-        let root = tempfile::Builder::new()
-            .prefix("ca-nar-")
-            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        Self::started(codex, "claude-login", None)
+    }
+
+    /// Starts the engine with a scratch HOME, never the owner's, and PATH /usr/bin:/bin, and
+    /// with Codex and Claude Code stand-ins whose first line asks `env` for
+    /// `crazyagent-test-shell`, an interpreter that exists only in the scratch HOME's
+    /// `.local/bin`, as nvm, fnm or volta keep node under HOME. Output: the case.
+    fn with_interpreter_in_home() -> Self {
+        let home = scratch("ca-nar-home-");
+        let bin = home.path().join(".local").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("crazyagent-test-shell"),
+            "#!/bin/sh\nexec /bin/sh \"$@\"\n",
+        )
+        .unwrap();
+        private(&bin.join("crazyagent-test-shell"), 0o700);
+        Self::started("codex-by-name", "claude-by-name", Some(home))
+    }
+
+    /// Starts the engine with a scratch HOME in this user's own temp folder, which no other
+    /// user can change, and a Codex stand-in whose first line asks `env` for
+    /// `crazyagent-test-login-shell`, an interpreter only the login shell's PATH names: the
+    /// scratch login files wait 5 s, then add its folder, so the engine's first probe run is
+    /// still going when the first sign-in starts. Output: the case.
+    #[cfg(target_os = "macos")]
+    fn with_interpreter_on_login_path() -> Self {
+        let temp = crazyagent::spawn_gate::output(
+            Command::new("/usr/bin/getconf")
+                .arg("DARWIN_USER_TEMP_DIR")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        let temp = std::fs::canonicalize(String::from_utf8(temp.stdout).unwrap().trim()).unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("ca-nar-login-")
+            .tempdir_in(temp)
             .unwrap();
-        private(root.path(), 0o700);
+        private(home.path(), 0o700);
+        let bin = home.path().join("login-only").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("crazyagent-test-login-shell"),
+            "#!/bin/sh\nexec /bin/sh \"$@\"\n",
+        )
+        .unwrap();
+        private(&bin.join("crazyagent-test-login-shell"), 0o700);
+        for login in [".zprofile", ".bash_profile", ".profile"] {
+            std::fs::write(
+                home.path().join(login),
+                "/bin/sleep 5\nPATH=\"$HOME/login-only/bin:$PATH\"\nexport PATH\n",
+            )
+            .unwrap();
+        }
+        Self::started("codex-by-login-name", "claude-login", Some(home))
+    }
+
+    /// Writes every stand-in and starts the engine with the named ones and a scratch HOME,
+    /// a fresh empty one unless given, never the owner's. Inputs: the Codex and Claude Code
+    /// stand-ins' file names and the scratch HOME, if any. Output: the case.
+    fn started(codex: &'static str, claude: &'static str, home: Option<tempfile::TempDir>) -> Self {
+        let home = home.unwrap_or_else(|| scratch("ca-nar-home-"));
+        let root = scratch("ca-nar-");
+        let bin = scratch("ca-nar-bin-");
         std::fs::write(
             root.path().join("global.toml"),
             "version = 1\ntimeout_ms = 5000\n",
@@ -50,14 +116,17 @@ impl Case {
             "#!/bin/sh\necho $$ >> '{}'\nprintf '%s\\n' \"If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=fixture\"\nexec /bin/sleep 120\n",
             root.path().join("login-pids").display()
         );
-        std::fs::write(root.path().join("claude-login"), login).unwrap();
-        private(&root.path().join("claude-login"), 0o700);
-        std::fs::write(
-            root.path().join("codex-unstartable"),
+        stand_in(bin.path(), "claude-login", &login);
+        stand_in(
+            bin.path(),
+            "claude-by-name",
+            &login.replacen("#!/bin/sh", "#!/usr/bin/env crazyagent-test-shell", 1),
+        );
+        stand_in(
+            bin.path(),
+            "codex-unstartable",
             "#!/nonexistent/crazyagent-test-interpreter\n",
-        )
-        .unwrap();
-        private(&root.path().join("codex-unstartable"), 0o700);
+        );
         let server = format!(
             r#"#!/bin/sh
 echo $$ >> '{root}/login-pids'
@@ -88,13 +157,25 @@ done
 "#,
             root = root.path().display()
         );
-        std::fs::write(root.path().join("codex-app-server"), server).unwrap();
-        private(&root.path().join("codex-app-server"), 0o700);
+        stand_in(bin.path(), "codex-app-server", &server);
+        stand_in(
+            bin.path(),
+            "codex-by-name",
+            &server.replacen("#!/bin/sh", "#!/usr/bin/env crazyagent-test-shell", 1),
+        );
+        stand_in(
+            bin.path(),
+            "codex-by-login-name",
+            &server.replacen("#!/bin/sh", "#!/usr/bin/env crazyagent-test-login-shell", 1),
+        );
         std::fs::write(root.path().join("codex-mode"), "wait\n").unwrap();
         let mut case = Self {
             engine: None,
             root,
+            bin,
             codex,
+            claude,
+            home,
         };
         case.launch("first.sock");
         case
@@ -111,24 +192,25 @@ done
             .append(true)
             .open(self.root().join("engine.log"))
             .unwrap();
-        let mut child = crazyagent::spawn_gate::spawn(
-            Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-                .arg("engine")
-                .arg(self.root())
-                .arg(self.root().join("global.toml"))
-                .arg(self.root().join("project.toml"))
-                .arg(socket)
-                .arg("--writable-settings")
-                .arg("--claude-executable")
-                .arg(self.root().join("claude-login"))
-                .arg("--codex-executable")
-                .arg(self.root().join(self.codex))
-                .env("CRAZYAGENT_DEBUG_CUSTODIAN", "1")
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::from(log)),
-        )
-        .unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_crazyagent"));
+        command
+            .arg("engine")
+            .arg(self.root())
+            .arg(self.root().join("global.toml"))
+            .arg(self.root().join("project.toml"))
+            .arg(socket)
+            .arg("--writable-settings")
+            .arg("--claude-executable")
+            .arg(self.bin.path().join(self.claude))
+            .arg("--codex-executable")
+            .arg(self.bin.path().join(self.codex))
+            .env("CRAZYAGENT_DEBUG_CUSTODIAN", "1")
+            .env("HOME", self.home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(log));
+        let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
         let stdout = child.stdout.take().unwrap();
         self.engine = Some(child);
         let (send, receive) = std::sync::mpsc::sync_channel(1);
@@ -261,6 +343,24 @@ impl Drop for Case {
             let _ = rustix::process::kill_process(login, Signal::KILL);
         }
     }
+}
+
+/// A private scratch folder under the real /tmp, removed when dropped. Input: its name's
+/// prefix. Output: the folder.
+fn scratch(prefix: &str) -> tempfile::TempDir {
+    let folder = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    private(folder.path(), 0o700);
+    folder
+}
+
+/// Writes one stand-in program only its owner can run or change. Inputs: its folder, its
+/// name and its text.
+fn stand_in(folder: &Path, name: &str, text: &str) {
+    std::fs::write(folder.join(name), text).unwrap();
+    private(&folder.join(name), 0o700);
 }
 
 fn private(path: &Path, mode: u32) {
@@ -427,6 +527,10 @@ fn shown(phase: NativeAuthPhase) -> bool {
     phase != NativeAuthPhase::Starting
 }
 
+/// Whether a sign-in has settled, read as both clients read it: Uncertain is still moving,
+/// since a killed custodian's lost channel can show it before the engine reaps the custodian
+/// and settles the attempt, and an attempt that stays Uncertain fails at the settle bound.
+/// Input: the phase. Output: the answer.
 fn ended(phase: NativeAuthPhase) -> bool {
     !matches!(
         phase,
@@ -434,6 +538,7 @@ fn ended(phase: NativeAuthPhase) -> bool {
             | NativeAuthPhase::AwaitingOwner
             | NativeAuthPhase::CheckingAccount
             | NativeAuthPhase::Cancelling
+            | NativeAuthPhase::Uncertain
     )
 }
 
@@ -697,6 +802,102 @@ async fn a_codex_sign_in_whose_harness_cannot_start_settles_unavailable_and_free
         );
         case.no_fence().await;
     }
+}
+
+/// A harness whose first line asks `env` for an interpreter found only in a folder under
+/// the engine's HOME, as nvm, fnm or volta keep node, signs in: the engine resolves and pins
+/// the words, and the custodian, which has no HOME and no PATH, starts them as handed. Codex
+/// and Claude Code both reach the owner's step, then cancel and free the account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_harness_whose_interpreter_is_found_only_under_home_signs_in() {
+    let case = Case::with_interpreter_in_home();
+    let (client, database) = owner(case.root()).await;
+    for (provider, name, method) in [
+        (
+            Provider::Chatgpt,
+            "Work ChatGPT",
+            NativeAuthMethod::CodexBrowser,
+        ),
+        (
+            Provider::Claude,
+            "Work Claude",
+            NativeAuthMethod::ClaudeOfficial,
+        ),
+    ] {
+        let account = subscription(&client, provider, name).await;
+        let (scope, _) = scope(&client, &database, &account).await;
+        let begun = start(&client, &scope, method).await.unwrap();
+        let challenge = settle(&client, &scope, &begun, shown).await;
+        assert_eq!(
+            (challenge.phase, challenge.code.as_deref()),
+            (NativeAuthPhase::AwaitingOwner, None),
+            "{name}: {}",
+            case.log()
+        );
+        cancel(&client, &scope, &challenge).await;
+        let finished = settle(&client, &scope, &challenge, ended).await;
+        assert_eq!(
+            finished.phase,
+            NativeAuthPhase::Cancelled,
+            "{name}: {}",
+            case.log()
+        );
+        case.no_fence().await;
+    }
+}
+
+/// The first sign-in right after the engine starts, as in onboarding, finds a harness whose
+/// interpreter only the login shell's PATH names: the engine's first probe run is still
+/// going, so the engine waits for it, resolves once more and starts the harness, never
+/// settling Unavailable while the answer is on its way.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_interpreter() {
+    let case = Case::with_interpreter_on_login_path();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
+        .await
+        .unwrap();
+    let challenge = settle(&client, &scope, &begun, shown).await;
+    assert_eq!(
+        (challenge.phase, challenge.code.as_deref()),
+        (NativeAuthPhase::AwaitingOwner, None),
+        "{}",
+        case.log()
+    );
+    cancel(&client, &scope, &challenge).await;
+    let finished = settle(&client, &scope, &challenge, ended).await;
+    assert_eq!(finished.phase, NativeAuthPhase::Cancelled, "{}", case.log());
+    case.no_fence().await;
+}
+
+/// Cancelling the first sign-in while the engine still waits for its first probe run settles
+/// Cancelled and frees the account, as a cancel before the harness starts does.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_a_sign_in_while_the_engine_waits_for_its_first_probe_run_settles_cancelled() {
+    let case = Case::with_interpreter_on_login_path();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&client, &scope, &begun).await.phase,
+        NativeAuthPhase::Starting
+    );
+    cancel(&client, &scope, &begun).await;
+    let finished = settle(&client, &scope, &begun, ended).await;
+    assert_eq!(
+        (finished.phase, finished.code.as_deref()),
+        (NativeAuthPhase::Cancelled, None),
+        "{}",
+        case.log()
+    );
+    case.no_fence().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

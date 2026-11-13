@@ -1,6 +1,7 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setTimeout as pause } from "node:timers/promises";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { bundle, withPage } from "./browser.mjs";
@@ -13,6 +14,9 @@ const NAME = ".sidebar-foot .me";
 const USER_ITEMS = [["profile", "Profile"], ["updates", "Updates"], ["github", "GitHub"], ["home", "Projects folder"]];
 const ALL = [...USER_ITEMS.map(([, label]) => label), "Restart engine"];
 const TABS_MAX = 12;
+const WAIT_MS = 2000;
+const POLL_MS = 25;
+const ESC_ROUNDS = 5;
 const WORDS = "This stops the live master and every running agent. The engine comes back in a few seconds. Your projects, conversations and settings are kept.";
 const forbidden = () => { throw new Error("static rendering must not restart the engine"); };
 
@@ -48,8 +52,16 @@ function onSidebar(options, steps) {
       }
       assert.fail(`Tab never reached ${focus}`);
     };
+    const until = async (done, what) => {
+      const deadline = Date.now() + WAIT_MS;
+      while (!done(await evaluate("Fixture.shown()"))) {
+        assert.ok(Date.now() < deadline, `${what} within ${WAIT_MS} ms`);
+        await pause(POLL_MS);
+      }
+    };
     const update = (next) => evaluate(`Fixture.update(${JSON.stringify(next)})`);
-    return steps({ shown, hover, away, click, key, tabTo, update });
+    const escapeOnShow = () => evaluate("Fixture.escapeOnShow()");
+    return steps({ shown, hover, away, click, key, tabTo, update, until, escapeOnShow });
   });
 }
 
@@ -83,6 +95,18 @@ test("keyboard focus opens the same menu, Tab reaches its first item, and Esc cl
     assert.equal(closed.menu, false);
     assert.equal(closed.focus, "me", "focus goes back to the profile name, not to nothing");
     assert.deepEqual(closed.events, []);
+  });
+});
+
+test("Esc pressed the moment the hovered menu shows closes it, every time", async () => {
+  await onSidebar({}, async ({ hover, away, until, escapeOnShow }) => {
+    for (let round = 1; round <= ESC_ROUNDS; round += 1) {
+      await escapeOnShow();
+      await hover(FOOT);
+      await until((now) => now.events.length === round, `Esc at the menu's show, round ${round}`);
+      await until((now) => !now.menu, `the menu closed by the Esc pressed as it showed, round ${round}`);
+      await away();
+    }
   });
 });
 
@@ -226,8 +250,9 @@ test("without a restart control the block keeps its words and has no menu", () =
 });
 
 test("a click on the name opens the menu and never leaves the page", async () => {
-  await onSidebar({}, async ({ shown, hover, click, key }) => {
+  await onSidebar({}, async ({ shown, hover, click, key, until }) => {
     await hover(FOOT);
+    await until((now) => now.menu, "the hovered menu");
     await key("Escape", 27);
     assert.equal((await shown()).menu, false, "Esc closed the hovered menu");
     await click(NAME);

@@ -33,7 +33,7 @@ pub mod owner;
 
 #[cfg(unix)]
 pub use native_auth_host::{
-    run_native_auth_custodian, run_native_auth_custodian_with_claude,
+    HandedWord, handed_words, run_native_auth_custodian, run_native_auth_custodian_with_claude,
     run_native_auth_custodian_with_codex,
 };
 

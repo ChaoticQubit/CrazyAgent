@@ -252,7 +252,7 @@ pub(super) async fn run_child(
     if session.profile_path()? != home {
         return Err(failure("native_auth_claude_profile_mismatch"));
     }
-    let command = auth_command(executable.verified_path()?, home, action)?;
+    let command = auth_command(&executable.launch_words()?, home, action)?;
     let mut command = command;
     let child = crate::spawn_gate::spawn(&mut command)
         .map_err(|_| failure("native_auth_claude_launch_failed"))?;

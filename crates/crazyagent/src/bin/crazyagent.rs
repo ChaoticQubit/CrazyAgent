@@ -313,8 +313,10 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
     let usage = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
     let codex = match args.len() {
         2 => None,
-        6 if (args[2] == "--codex-executable" && args[4] == "--codex-sha256")
-            || (args[2] == "--claude-executable" && args[4] == "--claude-sha256") =>
+        count
+            if count >= 6
+                && ((args[2] == "--codex-executable" && args[4] == "--codex-sha256")
+                    || (args[2] == "--claude-executable" && args[4] == "--claude-sha256")) =>
         {
             let executable = Path::new(&args[3]);
             if !executable.is_absolute() {
@@ -333,6 +335,8 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
         }
         _ => return Err(usage.into()),
     };
+    let launch = crazyagent::engine::handed_words(args.get(6..).unwrap_or_default())
+        .map_err(|error| error.to_string())?;
     let input = rustix::io::fcntl_dupfd_cloexec(io::stdin(), 3)
         .map(std::fs::File::from)
         .map_err(|_| "native_auth_bootstrap_stdin_unavailable".to_owned())?;
@@ -357,6 +361,7 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
                         input.into(),
                         executable,
                         digest,
+                        &launch,
                     )
                     .await;
                 }
@@ -365,6 +370,7 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
                     input.into(),
                     executable,
                     digest,
+                    &launch,
                 )
                 .await
             } else {

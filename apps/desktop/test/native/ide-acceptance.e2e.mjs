@@ -280,7 +280,6 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await keys.key("P", PRIMARY);
         await ide.until("quick open", ide.rows);
         await keys.text("notes.md");
-        await pause(SETTLE_MS);
         await ide.pick("notes.md", FOLDER);
         await ide.until("notes.md open in an editor", `(() => [...document.querySelectorAll(".tabs-container .tab.active")].some((tab) => (tab.getAttribute("aria-label") ?? tab.textContent).includes("notes.md")))()`);
         await ide.until("the editor focused", `document.activeElement?.closest(".monaco-editor") !== null`);
@@ -432,11 +431,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       };
 
       await t.test("the project's terminal reads git but cannot stage or commit", async () => {
+        const workspace = JSON.parse(readFileSync(join(runtime, "ide", project, "crazyagent.code-workspace"), "utf8"));
+        assert.deepEqual(workspace.folders.map((folder) => folder.name), [FOLDER], "Accept closed the stopped agent's change set, so its folder left the workspace and a new terminal asks for no folder");
+        const terminals = `document.querySelectorAll(".part.panel .xterm").length`;
+        const before = await page.evaluate(terminals);
+        assert.ok(before >= 1, "the terminal the Settings row opened is still in the panel");
         await keys.key("Escape");
         await ide.run("Terminal: Create New Terminal");
-        await pause(SETTLE_MS);
-        await ide.pick(FOLDER);
-        await ide.until("the project's terminal in the panel", `document.querySelectorAll(".part.panel .xterm").length > 0`);
+        await ide.until("the project's new terminal in the panel", `${terminals} > ${before}`);
         await me.capture("sandboxed-terminal");
         assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the open terminal shows no AI hint");
         const started = await ran("sandboxed-terminal-started.txt", "echo started");

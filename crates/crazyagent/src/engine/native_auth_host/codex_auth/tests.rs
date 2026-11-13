@@ -224,8 +224,12 @@ fn native_auth_codex_error_cleanup_reaps_the_real_owned_group_before_releasing_p
 #[test]
 fn native_auth_codex_launch_uses_official_stdio_and_only_explicit_environment() {
     let case = Case::new();
-    let command = super::command(std::path::Path::new("/qualified/codex"), &case.home).unwrap();
-    assert_eq!(command.get_program(), "/qualified/codex");
+    let temp = tempfile::tempdir().unwrap();
+    let codex = std::fs::canonicalize(temp.path()).unwrap().join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let command = super::command(&[codex.clone().into_os_string()], &case.home).unwrap();
+    assert_eq!(command.get_program(), codex.as_os_str());
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
         [
@@ -249,10 +253,11 @@ fn native_auth_codex_launch_uses_official_stdio_and_only_explicit_environment() 
     assert_eq!(command.get_current_dir(), Some(case.home.as_path()));
 }
 
-/// An npm-built Codex is a script whose first line asks `env` for its interpreter. Its
-/// sign-in child starts that interpreter as the tool resolver finds it, by its absolute file,
-/// then the script, with PATH /usr/bin:/bin and no folder added; a native program starts as
-/// itself. The stand-in asks for `sh`, which the resolver finds on every Mac.
+/// An npm-built Codex is a script whose first line asks `env` for its interpreter. The engine
+/// resolves that interpreter with its own places and pins it, and the sign-in child starts
+/// it by its absolute file, then the script, with PATH /usr/bin:/bin and no folder added; a
+/// native program starts as itself. The stand-in asks for `sh`, which the resolver finds on
+/// every Mac.
 #[test]
 fn native_auth_sign_in_child_starts_an_env_script_through_its_resolved_interpreter() {
     let temp = tempfile::tempdir().unwrap();
@@ -266,7 +271,11 @@ fn native_auth_sign_in_child_starts_an_env_script_through_its_resolved_interpret
     std::fs::create_dir_all(prefix.join("bin")).unwrap();
     std::fs::write(prefix.join("bin/node"), "node").unwrap();
     let case = Case::new();
-    let command = super::command(&script, &case.home).unwrap();
+    let harness = super::super::RegisteredNativeAuthHost::capture(&script).unwrap();
+    let launch = super::super::launch::resolved(&harness).unwrap();
+    assert_eq!(launch.len(), 2);
+    let harness = harness.with_launch(launch);
+    let command = super::command(&harness.launch_words().unwrap(), &case.home).unwrap();
     let interpreter =
         crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
     assert_eq!(command.get_program(), interpreter.program.as_os_str());
@@ -280,16 +289,22 @@ fn native_auth_sign_in_child_starts_an_env_script_through_its_resolved_interpret
     let native = prefix.join("codex-native");
     std::fs::write(&native, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let native = super::super::RegisteredNativeAuthHost::capture(&native).unwrap();
+    assert!(super::super::launch::resolved(&native).unwrap().is_empty());
+    let words = native.launch_words().unwrap();
     assert_eq!(
-        super::command(&native, &case.home).unwrap().get_program(),
-        native.as_os_str()
+        super::command(&words, &case.home).unwrap().get_program(),
+        native.verified_path().unwrap().as_os_str()
     );
 }
 
 #[test]
 fn native_auth_codex_launch_rejects_relative_executable_or_profile() {
-    assert!(super::command(std::path::Path::new("codex"), std::path::Path::new("/home")).is_err());
-    assert!(super::command(std::path::Path::new("/codex"), std::path::Path::new("home")).is_err());
+    let home = std::path::Path::new("/home");
+    assert!(super::command(&["codex".into()], home).is_err());
+    assert!(super::command(&["/sh".into(), "codex".into()], home).is_err());
+    assert!(super::command(&[], home).is_err());
+    assert!(super::command(&["/codex".into()], std::path::Path::new("home")).is_err());
 }
 
 #[test]

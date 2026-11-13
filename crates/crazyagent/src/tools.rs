@@ -207,6 +207,7 @@ impl Places {
     /// probes keep only folders [`probe::kept`] passes, which also drops shared temp folders
     /// others can change. Input: the probed folders. Output: the places.
     pub fn with_probed(self, probed: Vec<PathBuf>) -> Self {
+        let probed = probed_kept(probed, gate_root().as_deref(), self.home.as_deref());
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
         let (last, mut folders): (Vec<PathBuf>, Vec<PathBuf>) = self
             .folders
@@ -690,6 +691,26 @@ pub(crate) fn homebrew_folders() -> Vec<PathBuf> {
         .map(|folder| match &root {
             Some(root) => below(root, folder.trim_start_matches('/')),
             None => PathBuf::from(folder),
+        })
+        .collect()
+}
+
+/// The probed folders a build looks in: every one in a release; under the clean-Mac
+/// gate's stand-in system root, only those inside that root or HOME, since the login
+/// shell also reads this computer's own /etc files and can name its real Homebrew.
+/// Inputs: the probed folders, the gate's root and HOME. Output: the folders kept.
+fn probed_kept(
+    probed: Vec<PathBuf>,
+    gate_root: Option<&Path>,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
+    let Some(root) = gate_root else {
+        return probed;
+    };
+    probed
+        .into_iter()
+        .filter(|folder| {
+            folder.starts_with(root) || home.is_some_and(|home| folder.starts_with(home))
         })
         .collect()
 }
