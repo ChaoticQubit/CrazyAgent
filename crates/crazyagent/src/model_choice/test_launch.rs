@@ -213,6 +213,21 @@ pub fn rcli_not_started(provider: &str, why: NotStarted) -> String {
     reason
 }
 
+/// Picks the account an RCLI test launch runs on (DEC-150 addendum 9e, leader 19:01): the
+/// pool's first RCLI account of the id's keyed provider that account setup finished and no
+/// limit paused. Inputs: the pool's member accounts in pool order, the RCLI provider id,
+/// whether an account is set up and whether it is paused. Output: the account, or why none
+/// runs: `Paused` when every set-up one is paused, else `NoAccount`.
+pub fn rcli_pick<'a>(
+    members: &[&'a crate::config::ModelConnection],
+    provider: &str,
+    set_up: impl Fn(&crate::config::ModelConnection) -> bool,
+    paused: impl Fn(&crate::config::ModelConnection) -> bool,
+) -> Result<&'a crate::config::ModelConnection, NotStarted> {
+    let _ = (members, provider, &set_up, &paused);
+    Err(NotStarted::NoAccount)
+}
+
 /// One test launch to run: the engine's data folder, the two settings files, the
 /// installed harness executables, the harness, the owner's id and the pool to run it on.
 pub struct Request<'a> {

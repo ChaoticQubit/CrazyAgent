@@ -82,10 +82,12 @@ fn every_run_that_never_started_says_why_by_the_harness_name() {
     }
 }
 
+/// DEC-150 addendum 9e (leader 18:58): RCLI gets a test launch beside Claude Code and
+/// Codex, so an owner's RCLI id can be verified; no other harness has one.
 #[test]
-fn only_claude_code_and_codex_have_a_test_launch() {
-    assert!(supported("claude-code") && supported("codex"));
-    for harness in ["rcli", "opencode", "claude", ""] {
+fn claude_code_codex_and_rcli_have_a_test_launch() {
+    assert!(supported("claude-code") && supported("codex") && supported("rcli"));
+    for harness in ["opencode", "claude", ""] {
         assert!(!supported(harness), "{harness}");
     }
 }
@@ -170,4 +172,96 @@ fn an_rcli_test_that_never_started_says_why_by_the_provider_name() {
         distinct.dedup();
         assert_eq!(distinct.len(), reasons.len());
     }
+}
+
+/// One pool member account for the RCLI pick rows: a connection of a harness, provider and
+/// protocol, keyed or not. Inputs: the id, harness, provider, protocol and whether it holds
+/// a key. Output: the connection.
+fn member(
+    id: &str,
+    harness: &str,
+    provider: &str,
+    protocol: &str,
+    keyed: bool,
+) -> crate::config::ModelConnection {
+    use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
+    let reference = |text: &str| CredentialRef::new(text).unwrap();
+    ModelConnection {
+        id: reference(id),
+        provider: reference(provider),
+        harness: reference(harness),
+        protocol: reference(protocol),
+        account_ref: reference(&format!("{id}-account")),
+        endpoint: ModelEndpoint::Http {
+            url: "https://llm.example.com/v1".into(),
+        },
+        model: ModelReference {
+            id: "own-model".into(),
+            author: reference(provider),
+        },
+        auth: if keyed {
+            ModelAuthentication::ApiKey {
+                credential_ref: reference(&format!("{id}-key")),
+            }
+        } else {
+            ModelAuthentication::None {}
+        },
+    }
+}
+
+/// DEC-150 addendum 9e (leader 19:01): an RCLI test runs on the pool's first account of the
+/// id's keyed provider that is set up and not paused. A subscription or URL account never
+/// runs it; with every set-up one paused it says so, and with none it says no account.
+#[test]
+fn an_rcli_test_runs_on_the_pool_s_first_set_up_account_of_the_id_s_provider() {
+    let openai = member("openai-a", "rcli", "openai", "openai-chat", true);
+    let router_unset = member("router-a", "rcli", "openrouter", "openai-chat", true);
+    let router = member("router-b", "rcli", "openrouter", "openai-chat", true);
+    let anthropic = member(
+        "anthropic-a",
+        "rcli",
+        "anthropic",
+        "anthropic-messages",
+        true,
+    );
+    let url = member("url-a", "rcli", "openai-compatible", "openai-chat", true);
+    let codex = member("codex-a", "codex", "openai", "native", false);
+    let members = [&codex, &url, &openai, &router_unset, &router, &anthropic];
+    let set_up = |connection: &crate::config::ModelConnection| connection.id != router_unset.id;
+    let never = |_: &crate::config::ModelConnection| false;
+    let picked = |provider: &str| {
+        rcli_pick(&members, provider, set_up, never).map(|connection| connection.id.as_str())
+    };
+    assert_eq!(picked("openrouter"), Ok("router-b"));
+    assert_eq!(picked("openai"), Ok("openai-a"));
+    assert_eq!(picked("anthropic"), Ok("anthropic-a"));
+    let only_url = [&codex, &url];
+    assert_eq!(
+        rcli_pick(&only_url, "openai", set_up, never).map(|c| c.id.as_str()),
+        Err(NotStarted::NoAccount)
+    );
+    let routers = [&router_unset, &router];
+    assert_eq!(
+        rcli_pick(&routers, "openrouter", |_| false, never).map(|c| c.id.as_str()),
+        Err(NotStarted::NoAccount)
+    );
+    assert_eq!(
+        rcli_pick(
+            &routers,
+            "openrouter",
+            |_| true,
+            |c| c.id == router_unset.id
+        )
+        .map(|c| c.id.as_str()),
+        Ok("router-b")
+    );
+    assert_eq!(
+        rcli_pick(&routers, "openrouter", |_| true, |_| true).map(|c| c.id.as_str()),
+        Err(NotStarted::Paused)
+    );
+    let unkeyed = member("router-c", "rcli", "openrouter", "openai-chat", false);
+    assert_eq!(
+        rcli_pick(&[&unkeyed], "openrouter", |_| true, never).map(|c| c.id.as_str()),
+        Err(NotStarted::NoAccount)
+    );
 }

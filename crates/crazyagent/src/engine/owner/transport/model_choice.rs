@@ -78,6 +78,8 @@ enum Action {
     Add {
         harness: String,
         model: String,
+        #[serde(default)]
+        provider: Option<String>,
     },
     Remove {
         harness: String,
@@ -474,7 +476,7 @@ async fn handle(
             } => {
                 let (settings, codex, claude) =
                     harnesses.ok_or_else(|| failure("model_choice_unavailable"))?;
-                let launch: Launch<'_> = Box::new(|pool| {
+                let launch: Launch<'_> = Box::new(|pool, _| {
                     let (global, local) = settings.as_ref().ok_or("model_choice_unavailable")?;
                     let path = |host: &Option<Arc<RegisteredNativeAuthHost>>| match host {
                         Some(host) => host.verified_path().map(|path| Some(path.to_path_buf())),
@@ -575,7 +577,11 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
             version,
         )?
         .into()),
-        Action::Add { harness, model } => {
+        Action::Add {
+            harness,
+            model,
+            provider: _,
+        } => {
             let begun = store::custom_begin(
                 &db,
                 &harness,
@@ -606,10 +612,12 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
     }
 }
 
-/// The launch a test hands its checked pool to: one read-only run on that pool's account,
-/// answering the decision and its pending reason, or a plain refusal code.
-type Launch<'a> =
-    Box<dyn FnOnce(&CredentialRef) -> Result<(Tested, Option<String>), &'static str> + 'a>;
+/// The launch a test hands its checked pool and, for an RCLI id, the provider it is tested
+/// on: one run on that pool's account, answering the decision and its pending reason, or a
+/// plain refusal code.
+type Launch<'a> = Box<
+    dyn FnOnce(&CredentialRef, Option<&str>) -> Result<(Tested, Option<String>), &'static str> + 'a,
+>;
 
 /// Runs one owner id's test launch once it may run (DEC-150 addendum 7): a supported
 /// harness, a named pool and an id that waits for its test, so no run is spent otherwise.
@@ -634,7 +642,7 @@ fn tested(
     if !store::custom_pending(&db, harness, model)? {
         return Err(failure("model_choice_custom_not_pending"));
     }
-    let (mut tested, mut reason) = launch(pool).map_err(failure)?;
+    let (mut tested, mut reason) = launch(pool, None).map_err(failure)?;
     if tested != Tested::Pending {
         match store::custom_checked(&db, harness, model, tested == Tested::Verified) {
             Ok(()) => {}
