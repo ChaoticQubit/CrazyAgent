@@ -1075,12 +1075,6 @@ impl Lineage {
         assert!(kept.len() <= rows.len());
         self.known = kept;
     }
-
-    /// Refuses where no process table is read. Input: unused. Output: uncertain.
-    #[cfg(not(unix))]
-    fn refresh(&mut self) -> Result<(), Unstopped> {
-        Err(Unstopped::Uncertain)
-    }
 }
 
 /// Where a [`Follower`]'s lineage stands: its first read still running, read, or taken by the
