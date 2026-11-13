@@ -1502,3 +1502,91 @@ async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
     );
     engine.stop().await;
 }
+
+/// How many files and folders [`same_files`] walks at most.
+const WALK_ENTRIES_MAX: usize = 20_000;
+
+/// Compares every file under `original` with the file at the same place under `copy`, byte
+/// for byte, walking at most [`WALK_ENTRIES_MAX`] entries. Input: the two folders. Output:
+/// how many files matched; any file missing or different fails the row.
+fn same_files(original: &Path, copy: &Path) -> usize {
+    assert!(original.is_dir(), "{original:?}");
+    assert!(copy.is_dir(), "{copy:?}");
+    let mut folders = vec![PathBuf::new()];
+    let (mut walked, mut files) = (0, 0);
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(original.join(&folder)).unwrap() {
+            let entry = entry.unwrap();
+            walked += 1;
+            assert!(
+                walked <= WALK_ENTRIES_MAX,
+                "more entries than a scratch folder holds"
+            );
+            let place = folder.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                folders.push(place);
+                continue;
+            }
+            let bytes = fs::read(original.join(&place)).unwrap();
+            assert!(
+                fs::read(copy.join(&place)).unwrap() == bytes,
+                "{place:?} differs"
+            );
+            files += 1;
+        }
+    }
+    assert!(files <= walked);
+    files
+}
+
+/// Adds a real evicted iCloud Drive folder through the engine's intake job: the job reads
+/// downloading with a count that moves as files land, then copies every file byte for byte
+/// and leaves the folder in place. The folder is named in `CRAZYAGENT_ICLOUD_SCRATCH` and
+/// must be evicted first; run by hand only, it downloads the whole folder.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an evicted folder of iCloud Drive named in CRAZYAGENT_ICLOUD_SCRATCH"]
+async fn an_intake_job_downloads_a_real_icloud_folder_with_moving_counts_and_copies_it() {
+    let source = PathBuf::from(std::env::var_os("CRAZYAGENT_ICLOUD_SCRATCH").unwrap());
+    let name = source.file_name().unwrap().to_owned();
+    let disk = tempfile::tempdir().unwrap();
+    let home = disk.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(
+            id("intake-icloud"),
+            text(&source),
+            AddMode::Copy,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let mut counts = std::collections::BTreeSet::new();
+    let ended = loop {
+        let job = client.intake_status().await.unwrap().expect("a job");
+        match &job.state {
+            JobState::Downloading { progress } => {
+                counts.insert(progress.done);
+            }
+            JobState::Copying { .. } | JobState::Clearing => {}
+            _ => break job,
+        }
+        assert!(start.elapsed() < Duration::from_secs(1800), "{job:?}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    assert_eq!(ended.state, JobState::Done, "{ended:?}");
+    assert!(
+        counts.len() >= 3,
+        "the count moved as files landed: {counts:?}"
+    );
+    let files = same_files(&source, &home.join(&name));
+    println!(
+        "downloaded and copied {files} files in {:?}, counts {counts:?}",
+        start.elapsed()
+    );
+    assert!(files > 0);
+    engine.stop().await;
+}
