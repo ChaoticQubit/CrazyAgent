@@ -183,7 +183,7 @@ fn the_engine_looks_in_homebrew_on_both_macs_and_the_system_folders_last() {
         [setup_bin.clone(), prefix_bin.clone()],
         "the app's own installs are the fallback after every folder of the owner"
     );
-    let probed = home.join("probed/bin");
+    let probed = PathBuf::from("/probed/bin");
     let with_probed = places
         .clone()
         .with_probed(vec![probed.clone(), setup_bin.clone()]);
