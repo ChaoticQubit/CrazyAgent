@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { harnessCatalog, type HarnessAccountKind, type HarnessEntry, type Result } from "../../api";
 import { openLink } from "../../api-projects";
 import {
@@ -9,6 +9,7 @@ import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode,
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
 import { SettingRow } from "../../ui/setting";
+import { ProviderRetrySettings } from "./provider-retry";
 import "../project/projects.css";
 
 const KIND_LABEL: Record<HarnessAccountKind, string> = {
@@ -363,11 +364,11 @@ function UpdateSettingsRows({ settings, onSaved }: { settings: UpdateSettings; o
 
 /** The harness list as a pure view of the catalog read, with a Check again action, and the update
  * settings when the engine has them. Inputs: the catalog read, when it was checked, the recheck
- * action, the update settings (null when this engine has none), what to do once one is saved, and
- * a failed settings read to say with its retry. Output: the page. */
-export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, onSettings, settingsError }: {
+ * action, the update settings (null when this engine has none), what to do once one is saved, a
+ * failed settings read to say with its retry, and the retry setting's section. Output: the page. */
+export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, onSettings, settingsError, retry = null }: {
   catalog: Loaded<HarnessEntry[]>; checkedAt?: string; onCheck: () => void; settings?: UpdateSettings | null; onSettings?: (settings: UpdateSettings) => void;
-  settingsError?: { message: string; onRetry: () => void };
+  settingsError?: { message: string; onRetry: () => void }; retry?: ReactNode;
 }) {
   return <div className="stack">
     <div className="settings-top">
@@ -377,6 +378,7 @@ export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, on
     </div>
     {settingsError && <LoadError message={settingsError.message} onRetry={settingsError.onRetry} />}
     {settings !== null && onSettings && <UpdateSettingsRows settings={settings} onSaved={onSettings} />}
+    {retry}
     {catalog.kind === "loading" ? <Skeleton shape="row" count={8} />
       : catalog.kind === "not_ready" ? <NotReady what="The harness list" />
       : catalog.kind === "error" ? <LoadError message="Couldn't check harnesses." onRetry={onCheck} />
@@ -396,5 +398,5 @@ export function Harnesses() {
   useEffect(() => { if (loaded.kind === "ok") setSettings(loaded.value); }, [loaded]);
   const settingsError = loaded.kind === "error" ? { message: failureCopy(loaded) ?? updateCopy("harness_update_settings_unreadable"), onRetry: reloadSettings } : undefined;
   return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)} settings={settings} onSettings={setSettings} settingsError={settingsError}
-    onCheck={() => { reload(); setCheckedAt(`at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`); }} />;
+    retry={<ProviderRetrySettings />} onCheck={() => { reload(); setCheckedAt(`at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`); }} />;
 }
