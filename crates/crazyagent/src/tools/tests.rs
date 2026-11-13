@@ -383,6 +383,42 @@ fn a_link_into_a_project_is_refused() {
     );
 }
 
+/// Removes a folder a row made outside its scratch folder when the row ends, passed or not.
+struct Removed(PathBuf);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// 2.4.1 R4: an agent's short temp folder (`ca-` and 16 hex digits in `/private/tmp`, `/tmp`
+/// off macOS), which the agent writes, counts as a place agents can write though this user
+/// owns it, so a file there is refused even when an owner link in a trusted folder names it.
+#[test]
+fn a_file_in_an_agent_short_temp_folder_is_refused_even_through_an_owner_link() {
+    let (_folder, home) = scratch();
+    let agent_temp = crate::sandbox::toolchains::tmp_path(&home);
+    std::fs::create_dir(&agent_temp).unwrap();
+    let _removed = Removed(agent_temp.clone());
+    let planted = program(&agent_temp.join("bin/tmux"), NODE);
+    assert!(
+        Places::new(Vec::new(), None).agent_writable(&planted),
+        "{planted:?}"
+    );
+    std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+    std::os::unix::fs::symlink(&planted, home.join(".local/bin/tmux")).unwrap();
+    let missing = resolve("tmux", &home_only(&home)).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    let line = missing.line();
+    assert!(line.contains("an agent's temp folder"), "{line}");
+    assert!(!line.contains("outside your projects"), "{line}");
+    assert_eq!(
+        missing.refused.map(|refused| refused.why),
+        Some(Refusal::AgentsCanWrite)
+    );
+}
+
 /// R-L1 and F2: an interpreter named by path goes through the same checks as a tool found by
 /// name: one inside a project's `.crazyagent` folder, or inside a project, is reported as
 /// refused with its own file and why, never as a missing interpreter, and a pinned entry
@@ -475,6 +511,53 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
     }
 }
 
+/// 2.4.1 R3: an engine data folder inside a project, as a dev layout inside a repo has it,
+/// keeps its `setup/bin` refused, since agents of any engine that has the project may write
+/// there, and a tool found there is named in a plain refusal, never reported as missing.
+#[test]
+fn a_tool_in_the_setup_folder_of_an_engine_folder_inside_a_project_is_refused_by_name() {
+    let (_folder, home) = scratch();
+    let root = project(&home.join("work/repo")).join(".local-state/engine");
+    let planted = program(&root.join("setup/bin/crazyagent-dev-tool"), NODE);
+    let engine = Places::engine(Some(&root), None, Some(home), Some(OsStr::new("")));
+    assert!(
+        !engine.folders().contains(&root.join("setup/bin")),
+        "{:?}",
+        engine.folders()
+    );
+    let missing = resolve("crazyagent-dev-tool", &engine).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+    assert_eq!(
+        missing.refused,
+        Some(Box::new(Refused {
+            file: planted,
+            why: Refusal::AgentsCanWrite
+        }))
+    );
+}
+
+/// 2.4.1 R3: a script found in a trusted folder whose `env` interpreter sits only in the
+/// set-aside setup folder of an engine data folder inside a project is refused by the
+/// interpreter's file, never reported as needing an interpreter with an install hint.
+#[test]
+fn a_script_whose_interpreter_is_only_in_a_refused_setup_folder_names_that_file() {
+    let (_folder, home) = scratch();
+    let root = project(&home.join("work/repo")).join(".local-state/engine");
+    let interpreter = program(&root.join("setup/bin/crazyagent-dev-node"), NODE);
+    program(
+        &home.join(".local/bin/crazyagent-dev-script"),
+        "#!/usr/bin/env crazyagent-dev-node\n",
+    );
+    let engine = Places::engine(Some(&root), None, Some(home), Some(OsStr::new("")));
+    let missing = resolve("crazyagent-dev-script", &engine).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+    assert_eq!(missing.tool, "crazyagent-dev-script");
+    assert_eq!(
+        missing.refused.map(|refused| refused.file),
+        Some(interpreter)
+    );
+}
+
 /// R-M1: the engine's data folder holds the agents' HOMEs, worktrees and team state, which
 /// agents write. A PATH folder there is refused while the engine's own `setup/bin` is kept,
 /// and a file found in `setup/bin` whose real file sits in an agent's HOME is passed over.
@@ -504,7 +587,7 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
 
 /// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
 /// that sits in a temp folder, which agents with the temp folder grant and other users
-/// write, is refused. Probed folders pass the probes' own rule instead (`probe::kept`).
+/// write, is refused. Probed folders meet the same rule on the engine's places (2.4.1 R1).
 #[test]
 fn a_path_folder_in_a_temp_folder_is_refused() {
     let (_folder, home) = scratch();
@@ -522,6 +605,136 @@ fn a_path_folder_in_a_temp_folder_is_refused() {
         "{:?}",
         engine.folders()
     );
+}
+
+/// 2.4.1 R1: a folder the probes found, a login shell PATH folder or npm's global prefix,
+/// that sits in this user's temp folder or a shared one is refused on the engine's places,
+/// as written and by its real path: agents with the owner's temp folder grant write the one
+/// and other users the other, and the engine runs what it finds there outside any sandbox.
+#[test]
+fn a_probed_folder_in_a_temp_folder_is_refused_on_the_engine_places() {
+    let (_folder, home) = scratch();
+    let owner_temp = tempfile::Builder::new()
+        .prefix("tools-probed-")
+        .tempdir()
+        .unwrap();
+    let written = owner_temp.path().join("bin");
+    std::fs::create_dir_all(&written).unwrap();
+    let real = written.canonicalize().unwrap();
+    let shared = PathBuf::from("/private/tmp/tools-planted/bin");
+    let engine = Places::engine(None, None, Some(home), Some(OsStr::new("")));
+    let probed = engine.with_probed(vec![written.clone(), real.clone(), shared.clone()]);
+    for folder in [&written, &real, &shared] {
+        assert!(
+            !probed.folders().contains(folder),
+            "{folder:?} in {:?}",
+            probed.folders()
+        );
+    }
+}
+
+/// 2.4.1 r1 F1: a tool only in a temp folder the engine's places refuse, on the inherited
+/// PATH or found by the probes, is refused by its file with the temp folder line, never
+/// reported missing with an install hint, and so is a script whose `env` interpreter sits
+/// only there.
+#[test]
+fn a_tool_only_in_a_refused_temp_folder_is_named_as_refused_not_missing() {
+    let (_folder, home) = scratch();
+    let owner_temp = tempfile::Builder::new()
+        .prefix("tools-temp-")
+        .tempdir()
+        .unwrap();
+    let on_path = owner_temp.path().join("path/bin");
+    let probed = owner_temp.path().join("probed/bin");
+    let listed = program(&on_path.join("crazyagent-temp-tool"), NODE);
+    let found = program(&probed.join("crazyagent-probed-tool"), NODE);
+    let interpreter = program(&on_path.join("crazyagent-temp-node"), NODE);
+    program(
+        &home.join(".local/bin/crazyagent-temp-script"),
+        "#!/usr/bin/env crazyagent-temp-node\n",
+    );
+    let path = std::env::join_paths([&on_path]).unwrap();
+    let engine =
+        Places::engine(None, None, Some(home), Some(&path)).with_probed(vec![probed.clone()]);
+    for (tool, file) in [
+        ("crazyagent-temp-tool", &listed),
+        ("crazyagent-probed-tool", &found),
+        ("crazyagent-temp-script", &interpreter),
+    ] {
+        let missing = resolve(tool, &engine).unwrap_err();
+        assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+        assert_eq!(missing.tool, tool);
+        assert_eq!(
+            missing.refused,
+            Some(Box::new(Refused {
+                file: file.clone(),
+                why: Refusal::InTemp,
+            }))
+        );
+        assert!(
+            missing.line().contains("in a temp folder"),
+            "{}",
+            missing.line()
+        );
+    }
+}
+
+/// 2.4.1 r2 RH2-L1: a file found through a place outside every temp folder whose real file
+/// lies in one, such as an owner link in `~/.local/bin` into the temp folder, leads into
+/// temp; one whose place is itself in a temp folder, or whose real file is not, does not.
+#[test]
+fn a_link_from_a_place_outside_temp_into_a_temp_folder_leads_into_temp() {
+    let temps = [
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/private/var/folders/xy/T"),
+    ];
+    let link = Path::new("/Users/ana/.local/bin/tool");
+    assert!(leads_into_temp(
+        link,
+        Path::new("/private/var/folders/xy/T/x/tool"),
+        &temps
+    ));
+    assert!(leads_into_temp(
+        link,
+        Path::new("/private/tmp/x/tool"),
+        &temps
+    ));
+    assert!(!leads_into_temp(link, Path::new("/opt/tools/tool"), &temps));
+    assert!(
+        !leads_into_temp(
+            Path::new("/private/tmp/home/.local/bin/tool"),
+            Path::new("/private/tmp/other/tool"),
+            &temps
+        ),
+        "a place itself in a temp folder"
+    );
+    assert!(!leads_into_temp(
+        Path::new("/private/var/folders/xy/T/home/bin/tool"),
+        Path::new("/private/tmp/x/tool"),
+        &temps
+    ));
+}
+
+/// 2.4.1 r2 RH2-L1: a kept place that is itself in a temp folder, as a test HOME is, still
+/// gives its tools on the engine's places, a link from it into another temp folder included,
+/// and an entry written there passes the launch check.
+#[test]
+fn a_tool_in_a_kept_place_inside_a_temp_folder_still_resolves() {
+    let (_folder, home) = scratch();
+    let other = tempfile::Builder::new()
+        .prefix("tools-other-")
+        .tempdir()
+        .unwrap();
+    let real = program(&other.path().join("crazyagent-linked-tool"), NODE);
+    let plain = program(&home.join(".local/bin/crazyagent-plain-tool"), NODE);
+    std::os::unix::fs::symlink(&real, home.join(".local/bin/crazyagent-linked-tool")).unwrap();
+    let engine = Places::engine(None, None, Some(home.clone()), Some(OsStr::new("")));
+    assert_eq!(
+        resolve("crazyagent-plain-tool", &engine).unwrap().program,
+        plain
+    );
+    assert!(resolve("crazyagent-linked-tool", &engine).is_ok());
+    assert!(resolve_entry(&plain, &engine).is_ok());
 }
 
 /// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
