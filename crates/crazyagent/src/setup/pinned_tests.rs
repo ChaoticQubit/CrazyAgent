@@ -478,3 +478,69 @@ fn a_tool_the_previous_build_installed_with_uv_tool_install_updates_to_its_lock(
         0o700
     );
 }
+
+/// Setup leaves no group or other write on the Python and the tool environment it
+/// installed (DEC-162 R2), as uv writes them 0775 under a umask of 002: a stand-in uv,
+/// never a real one, writes both that way, and after the locked install every folder and
+/// file of both is writable only by this user, so the resolver runs the tool.
+#[test]
+fn a_locked_tool_install_leaves_its_python_and_environment_writable_only_by_this_user() {
+    let root = private_root();
+    let work = private_root();
+    let fake = work.path().join("bin");
+    std::fs::create_dir(&fake).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let uv = fake.join("uv");
+    std::fs::write(
+        &uv,
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+         --version) echo 'uv 0.13.5' ;;\n\
+         venv)\n\
+           py=\"$UV_PYTHON_INSTALL_DIR/cpython-9.9.9-dummy\"\n\
+           /bin/mkdir -p \"$py/bin\" \"$6/bin\"\n\
+           printf '#!/bin/sh\\nexit 0\\n' > \"$py/bin/python3\"\n\
+           /bin/chmod 775 \"$py\" \"$py/bin\" \"$py/bin/python3\" \"$6\" \"$6/bin\"\n\
+           /bin/ln -s \"$py/bin/python3\" \"$6/bin/python\" ;;\n\
+         pip)\n\
+           bin=\"${5%/python}\"\n\
+           printf '#!/bin/sh\\necho demo-tool 1.0\\n' > \"$bin/demo-tool\"\n\
+           /bin/chmod 775 \"$bin/demo-tool\" ;;\n\
+         *) exit 1 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let installer = PinnedInstaller::with_paths(root.path(), vec![fake.clone()]);
+    let lock = ToolLock {
+        package: "demo-tool",
+        version: "1.0",
+        programs: &["demo-tool"],
+        requirements: "demo-tool==1.0 --hash=sha256:0000\n",
+    };
+
+    assert_eq!(installer.install_locked(&lock, "3"), Ok(()));
+
+    let mode = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    let python = root.path().join("setup/uv/python/cpython-9.9.9-dummy");
+    for path in [
+        python.clone(),
+        python.join("bin"),
+        python.join("bin/python3"),
+    ] {
+        assert_eq!(mode(&path), 0o755, "{}", path.display());
+    }
+    let program = root.path().join("setup/bin/demo-tool");
+    let entry = std::fs::read_link(&program).unwrap();
+    let venv = entry.parent().unwrap().parent().unwrap();
+    for path in [venv.to_path_buf(), venv.join("bin"), entry.clone()] {
+        assert_eq!(mode(&path), 0o755, "{}", path.display());
+    }
+    assert_eq!(installer.program("demo-tool"), Some(program));
+}
