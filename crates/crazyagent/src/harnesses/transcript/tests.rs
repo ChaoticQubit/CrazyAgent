@@ -1810,7 +1810,9 @@ fn a_refusal_code_written_in_a_transcript_never_marks_the_model_refused() {
 /// its task is not done with no reply. Codex 0.167.1 writes no `error` line to its rollout,
 /// only a `task_complete` carrying the turn's error; an older rollout's error line that was
 /// no rate limit fails the `task_complete` after it. A `stream_error` is a retry notice and
-/// fails nothing, a rate-limited error keeps its own path, and the next turn starts clean.
+/// fails nothing, a rate-limited error line keeps its own path, a `task_complete` whose
+/// error is a usage or rate limit by its `codex_error_info` ends rate limited, and the next
+/// turn starts clean.
 #[test]
 fn a_codex_turn_that_ended_on_an_error_is_failed_never_an_empty_success() {
     let case = Case::new();
@@ -1842,6 +1844,8 @@ fn a_codex_turn_that_ended_on_an_error_is_failed_never_an_empty_success() {
             r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"4","last_agent_message":null}}"#,
             r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
             r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"5","last_agent_message":null}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"6","last_agent_message":null,"error":{"message":"Try again at 9:00 PM.","codex_error_info":"usage_limit_exceeded"}}}"#,
         ],
     );
     let refused = TranscriptEvent::TurnError {
@@ -1867,6 +1871,9 @@ fn a_codex_turn_that_ended_on_an_error_is_failed_never_an_empty_success() {
             TranscriptEvent::TurnFinished { success: true },
             TranscriptEvent::TurnStarted,
             TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::TurnError { rate_limited: true },
+            TranscriptEvent::TurnFinished { success: false },
         ]
     );
 }
