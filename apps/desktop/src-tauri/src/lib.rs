@@ -4584,7 +4584,7 @@ async fn desktop_add_model(
     model: String,
 ) -> Result<ModelAdded, BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.add_model(harness, model)?;
+    let call = lock(&state).await?.add_model(harness, model, None)?;
     call.await
 }
 

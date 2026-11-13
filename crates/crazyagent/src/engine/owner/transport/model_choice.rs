@@ -245,16 +245,20 @@ impl OwnerClient {
     }
 
     /// Adds a model id the owner typed for a harness; it waits for its test launch before
-    /// it can be chosen. Inputs: the harness and the id. Output: what was done with the
+    /// it can be chosen. An RCLI id names the keyed provider it runs on (DEC-150 addendum
+    /// 9e). Inputs: the harness, the id and the provider. Output: what was done with the
     /// harness's app-wide section, or a refusal.
     pub async fn model_choice_add(
         &self,
         harness: &str,
         model: &str,
+        provider: Option<&str>,
     ) -> Result<(Added, Models), EngineError> {
+        let _ = provider;
         let action = Action::Add {
             harness: harness.into(),
             model: model.into(),
+            provider: None,
         };
         match self.model_choice_exchange(action).await? {
             Reply::Added { added, models } => Ok((added, models)),

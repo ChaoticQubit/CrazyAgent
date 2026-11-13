@@ -57,15 +57,16 @@ impl OwnerController {
     }
 
     /// Adds a model id the owner typed for a harness, which waits for its test launch.
-    /// Inputs: the harness and the id. Output: what was done with the app-wide section,
-    /// or a refusal.
+    /// Inputs: the harness, the id and, for RCLI, the provider it runs on. Output: what was
+    /// done with the app-wide section, or a refusal.
     pub async fn model_choice_add(
         &self,
         harness: &str,
         model: &str,
+        provider: Option<&str>,
     ) -> Result<(ModelAdded, Models), EngineError> {
         self.model_choice_client()?
-            .model_choice_add(harness, model)
+            .model_choice_add(harness, model, provider)
             .await
     }
 

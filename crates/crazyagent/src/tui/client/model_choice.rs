@@ -35,6 +35,7 @@ pub(in crate::tui) enum ModelChoiceQuery {
     Add {
         harness: String,
         model: String,
+        provider: Option<String>,
     },
     Remove {
         harness: String,
@@ -140,8 +141,12 @@ async fn run(
             .model_choice_reset(harness, project.clone(), *slot, *version)
             .await
             .map(ModelChoiceReply::Written),
-        ModelChoiceQuery::Add { harness, model } => controller
-            .model_choice_add(harness, model)
+        ModelChoiceQuery::Add {
+            harness,
+            model,
+            provider,
+        } => controller
+            .model_choice_add(harness, model, provider.as_deref())
             .await
             .map(|(added, models)| ModelChoiceReply::Added(added, models)),
         ModelChoiceQuery::Remove { harness, model } => controller

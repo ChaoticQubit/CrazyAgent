@@ -111,7 +111,7 @@ fn the_window_passes_only_the_harness_project_slot_value_model_rule_and_version(
     );
     assert_eq!(
         parameters("desktop_add_model"),
-        [&window[..], &model[..]].concat()
+        [&window[..], &model[..], &["provider: Option<String>,"]].concat()
     );
     assert_eq!(
         parameters("desktop_remove_model"),
@@ -274,9 +274,17 @@ async fn app_flow(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
     );
 
     let added = bridge
-        .add_model(HARNESS.into(), "my-model-1".into())?
+        .add_model(HARNESS.into(), "my-model-1".into(), None)?
         .await?;
     assert_eq!(added, ModelAdded::Pending);
+    let rcli = bridge
+        .add_model(
+            "rcli".into(),
+            "my-model-2".into(),
+            Some("openrouter".into()),
+        )?
+        .await?;
+    assert_eq!(rcli, ModelAdded::Pending);
     let page = read(&bridge, None).await?;
     let mine = page
         .models

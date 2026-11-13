@@ -3895,7 +3895,11 @@ exit 0
             long_lived_codex_auth(&case.guard.as_ref().unwrap().profile_path().unwrap());
             case.complete_sign_in().await;
         }
-        let (added, models) = case.client.model_choice_add("codex", model).await.unwrap();
+        let (added, models) = case
+            .client
+            .model_choice_add("codex", model, None)
+            .await
+            .unwrap();
         assert_eq!(added, crate::engine::owner::ModelAdded::Pending);
         assert_eq!(
             origin_of(&models, model),

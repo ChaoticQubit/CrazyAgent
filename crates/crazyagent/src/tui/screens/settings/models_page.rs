@@ -794,6 +794,7 @@ impl ModelsPage {
                     Step::Send(ModelChoiceQuery::Add {
                         harness: self.harness.clone(),
                         model: id,
+                        provider: None,
                     })
                 }
             }

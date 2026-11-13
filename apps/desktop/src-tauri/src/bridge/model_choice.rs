@@ -263,13 +263,15 @@ impl NativeBridge {
         &self,
         harness: String,
         model: String,
+        provider: Option<String>,
     ) -> Result<Unlocked<ModelAdded>, BridgeError> {
         let harness = window_harness(harness)?;
         let model = window_model(model)?;
+        let _ = provider;
         let client = self.model_choice_client()?;
         Ok(Box::pin(async move {
             let (added, _) = client
-                .model_choice_add(&harness, &model)
+                .model_choice_add(&harness, &model, None)
                 .await
                 .map_err(model_choice_error)?;
             Ok(added)
