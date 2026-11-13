@@ -91,22 +91,15 @@ const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
 /// The variable that caps the output tokens of each Claude Code request.
 const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
 const CLAUDE_ARGUMENTS: [&str; 4] = ["--print", "--strict-mcp-config", "--setting-sources", ""];
-const CLAUDE_TEXT: [&str; 2] = ["--output-format", "text"];
-#[cfg(unix)]
+/// What every Claude Code research run prints: one JSON event per line, from which the
+/// engine joins the whole answer the run ends with, where `--print` text keeps only the
+/// last part of an answer Claude Code continued past the output cap (DEC-160).
 const CLAUDE_EVENTS: [&str; 3] = ["--output-format", "stream-json", "--verbose"];
 /// The stdout log of a run that prints one JSON event per line.
-#[cfg(unix)]
 const EVENTS_LOG: &str = "events.jsonl";
-
-/// What a Claude Code research run prints: its last message as plain text, which a run
-/// with tools takes as its report, or one JSON event per line, from which a read-only run
-/// joins its whole answer (DEC-160).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClaudeOutput {
-    Text,
-    #[cfg(unix)]
-    Events,
-}
+/// The longest Claude Code event line the engine reads: one line holds one message, tool
+/// call or tool result, which Claude Code keeps far below it.
+const CLAUDE_LINE_BYTES_MAX: usize = 8 * 1024 * 1024;
 /// The model name Claude Code gives the messages it writes itself, such as its API errors.
 const CLAUDE_OWN_MODEL: &str = "<synthetic>";
 /// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
@@ -1169,24 +1162,16 @@ impl ResearchRunner {
         let words = harness_words(&program)?;
         let mut launch = Command::new(&words[0]);
         launch.args(&words[1..]);
-        let (output, stdout_log) = match harness {
+        let output = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
                 codex_arguments(&mut launch, &worktree, &output, &home, job.tools, account)?;
-                (output, "events.jsonl")
+                output
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(
-                    &mut launch,
-                    &home,
-                    &tmp,
-                    job.tools,
-                    None,
-                    ClaudeOutput::Text,
-                    account,
-                )?;
+                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account)?;
                 launch.args(installed.arguments());
-                (agent.join("output.md"), "output.md")
+                agent.join("output.md")
             }
         };
         launch.current_dir(&worktree);
@@ -1221,15 +1206,18 @@ impl ResearchRunner {
         let counted = Arc::new(AtomicU64::new(0));
         let limited = Arc::new(AtomicBool::new(false));
         let mut drains = Vec::new();
-        for (stream, name, watch) in [
+        let follow = (harness == ResearchHarness::ClaudeCode)
+            .then(|| ClaudeStream::new(report_bound(self.limits.report_bytes_max)));
+        for (stream, name, watch, follow) in [
             (
                 running
                     .child
                     .stdout
                     .take()
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
-                stdout_log,
+                EVENTS_LOG,
                 None,
+                follow,
             ),
             (
                 running
@@ -1239,6 +1227,7 @@ impl ResearchRunner {
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
                 "stderr.log",
                 (harness == ResearchHarness::Codex).then(|| limited.clone()),
+                None,
             ),
         ] {
             let Some(stream) = stream else { continue };
@@ -1246,7 +1235,7 @@ impl ResearchRunner {
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
             drains.push(std::thread::spawn(move || {
-                drain_watching(stream, &counted, log, log_max, watch.as_deref())
+                drain_watching(stream, &counted, log, log_max, watch.as_deref(), follow)
             }));
         }
         if let Some(mut stdin) = running.child.stdin.take() {
@@ -1260,10 +1249,18 @@ impl ResearchRunner {
         while drains.iter().any(|drain| !drain.is_finished()) && draining.elapsed() < DRAIN_WAIT {
             std::thread::sleep(POLL);
         }
-        #[cfg(unix)]
+        let followed = drains
+            .into_iter()
+            .filter(JoinHandle::is_finished)
+            .find_map(|drain| drain.join().ok().flatten());
+        assert!(followed.is_none() || harness == ResearchHarness::ClaudeCode);
         let ending = if matches!(ending, Ending::Exited(false))
-            && refused_for_limit(harness, &agent, &output, self.limits.output_bytes_max)
-        {
+            && refused_for_limit(
+                harness,
+                &agent,
+                followed.as_ref(),
+                self.limits.output_bytes_max,
+            ) {
             Ending::RateLimited
         } else {
             ending
@@ -1278,6 +1275,10 @@ impl ResearchRunner {
         }
         drop(credential);
         drop(lease);
+        if let Some(answer) = followed.as_ref().and_then(ClaudeStream::answer) {
+            assert!(answer.len() as u64 <= self.limits.report_bytes_max);
+            write_private(&agent, &output, answer.as_bytes())?;
+        }
         Ok((ending, group, output))
     }
 
@@ -1776,15 +1777,7 @@ impl ResearchRunner {
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(
-                    &mut command,
-                    &home,
-                    &tmp,
-                    false,
-                    run.output_tokens,
-                    ClaudeOutput::Events,
-                    account,
-                )?;
+                claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
                 (agent.join(EVENTS_LOG), EVENTS_LOG)
             }
         };
@@ -2260,16 +2253,14 @@ fn codex_arguments(
 /// either a managed config directory or a keyless Anthropic endpoint in bare
 /// mode that never reads the keychain.
 /// Takes the command, the agent home and temp dir, the tools switch, the most
-/// output tokens of each request (`None` for Claude Code's own limit), what the
-/// run prints and the account. Returns an error for an account that does not
-/// fit Claude Code.
+/// output tokens of each request (`None` for Claude Code's own limit) and the
+/// account. Returns an error for an account that does not fit Claude Code.
 fn claude_arguments(
     command: &mut Command,
     home: &Path,
     tmp: &Path,
     tools: bool,
     output_tokens: Option<u32>,
-    output: ClaudeOutput,
     account: &ResearchAccount,
 ) -> Result<(), RunError> {
     let key_file = match account {
@@ -2289,14 +2280,9 @@ fn claude_arguments(
         }
         None => CLAUDE_SETTINGS.to_owned(),
     };
-    let printed: &[&str] = match output {
-        ClaudeOutput::Text => &CLAUDE_TEXT,
-        #[cfg(unix)]
-        ClaudeOutput::Events => &CLAUDE_EVENTS,
-    };
     command
         .args(CLAUDE_ARGUMENTS)
-        .args(printed)
+        .args(CLAUDE_EVENTS)
         .arg("--settings")
         .arg(settings)
         .env("CLAUDE_CONFIG_DIR", home)
@@ -3280,19 +3266,22 @@ impl Drop for Lifeline {
 /// at most `log_max` bytes, until the stream ends.
 #[cfg(unix)]
 pub(crate) fn drain(stream: Box<dyn Read + Send>, counted: &AtomicU64, log: File, log_max: u64) {
-    drain_watching(stream, counted, log, log_max, None);
+    assert!(drain_watching(stream, counted, log, log_max, None, None).is_none());
 }
 
 /// Drains like [`drain`]. With `limited`, it sets the flag once a line shows
 /// Codex waiting to retry a request refused for a rate or usage limit; a line
-/// is checked on at most its first 16 KiB.
+/// is checked on at most its first 16 KiB. With `follow`, it reads every byte
+/// into that Claude Code stream, also past the log bound, and returns it.
 fn drain_watching(
     mut stream: Box<dyn Read + Send>,
     counted: &AtomicU64,
     mut log: File,
     log_max: u64,
     limited: Option<&AtomicBool>,
-) {
+    mut follow: Option<ClaudeStream>,
+) -> Option<ClaudeStream> {
+    assert!(limited.is_none() || follow.is_none());
     let mut buffer = [0_u8; 8192];
     let mut logged = 0_u64;
     let mut line = Vec::new();
@@ -3306,6 +3295,9 @@ fn drain_watching(
             logged += room as u64;
         }
         assert!(logged <= log_max);
+        if let Some(follow) = follow.as_mut() {
+            follow.read(&buffer[..read]);
+        }
         let Some(limited) = limited else { continue };
         for &byte in &buffer[..read] {
             if byte == b'\n' {
@@ -3319,6 +3311,10 @@ fn drain_watching(
         }
         assert!(line.len() <= LOG_LINE_BYTES_MAX);
     }
+    if let Some(follow) = follow.as_mut() {
+        follow.close();
+    }
+    follow
 }
 
 /// Tells whether one Codex log line is Codex waiting to retry a request the provider
@@ -3348,20 +3344,21 @@ fn endpoint_keychain(state: &Path, harness: ResearchHarness, home: &Path) -> Res
 }
 
 /// Tells whether a research agent that exited failing was refused for a rate or usage
-/// limit: Codex's own failure message in its stdout log, or the first line of Claude
-/// Code's printed reply. Takes the harness, the agent state folder, the report path and
-/// the log bound; both are read bounded and never through a link.
-#[cfg(unix)]
-fn refused_for_limit(harness: ResearchHarness, agent: &Path, output: &Path, max: u64) -> bool {
+/// limit: Codex's own failure message in its stdout log, read bounded and never through
+/// a link, or a limit line Claude Code ended its stream with. Takes the harness, the agent
+/// state folder, the Claude Code stream the run was read into, if any, and the log bound.
+fn refused_for_limit(
+    harness: ResearchHarness,
+    agent: &Path,
+    followed: Option<&ClaudeStream>,
+    max: u64,
+) -> bool {
     match harness {
         ResearchHarness::Codex => {
-            rate_limited(&agent_failure(&agent.join("events.jsonl"), harness, max))
+            assert!(followed.is_none());
+            rate_limited(&agent_failure(&agent.join(EVENTS_LOG), harness, max))
         }
-        ResearchHarness::ClaudeCode => read_bounded(agent, output, max).is_ok_and(|text| {
-            text.lines()
-                .find(|line| !line.trim().is_empty())
-                .is_some_and(rate_limited)
-        }),
+        ResearchHarness::ClaudeCode => followed.is_some_and(ClaudeStream::limited),
     }
 }
 
@@ -3389,31 +3386,189 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-/// The reply a research agent ends its turn with, kept as its words arrive.
+/// The reply a research agent ends its turn with, kept as its words arrive: for Claude Code
+/// every part it said since its last tool call, joined, as it goes on with an answer cut at
+/// the output cap in a new message; for Codex its last message. A reply that outgrows
+/// `bytes_max` is none, as a report that long is refused, until a tool call starts over.
 struct Reply {
+    harness: ResearchHarness,
     text: String,
+    bytes_max: usize,
+    over: bool,
 }
 
 impl Reply {
     /// An empty reply. Inputs: the harness and the most bytes it may hold. Output: the reply.
-    fn new(_harness: ResearchHarness, _bytes_max: usize) -> Self {
+    fn new(harness: ResearchHarness, bytes_max: usize) -> Self {
         Self {
+            harness,
             text: String::new(),
+            bytes_max,
+            over: false,
         }
     }
 
     /// Takes words the agent said. Input: the words. Output: none.
     fn said(&mut self, words: &str) {
-        self.text = words.to_owned();
+        if self.harness == ResearchHarness::Codex {
+            self.start_over();
+        }
+        if !self.over && self.text.len().saturating_add(words.len()) > self.bytes_max {
+            self.over = true;
+            self.text = String::new();
+        }
+        if !self.over {
+            self.text.push_str(words);
+        }
+        assert!(self.text.len() <= self.bytes_max);
+        assert!(!self.over || self.text.is_empty());
     }
 
-    /// Takes a tool call the agent made. Output: none.
-    fn tool(&mut self) {}
-
-    /// The reply. Output: its text.
-    fn text(self) -> Option<String> {
-        Some(self.text)
+    /// Takes a tool call the agent made: a Claude Code reply starts over. Output: none.
+    fn tool(&mut self) {
+        if self.harness == ResearchHarness::ClaudeCode {
+            self.start_over();
+        }
+        assert!(self.text.len() <= self.bytes_max);
     }
+
+    /// Empties the reply. Output: none.
+    fn start_over(&mut self) {
+        self.text.clear();
+        self.over = false;
+        assert!(self.text.is_empty());
+    }
+
+    /// The reply. Output: its text, or `None` once it outgrew its bound.
+    fn text(&self) -> Option<&str> {
+        assert!(self.text.len() <= self.bytes_max);
+        assert!(!self.over || self.text.is_empty());
+        (!self.over).then_some(self.text.as_str())
+    }
+}
+
+/// A Claude Code run's JSON event lines, read as they arrive into the [`Reply`] its main
+/// thread ends with: a sub-agent's events are skipped, and Claude Code's own error messages
+/// are kept apart from the model's words. A line past [`CLAUDE_LINE_BYTES_MAX`] leaves the
+/// run with no answer, as what it held is unknown.
+struct ClaudeStream {
+    reply: Reply,
+    line: Vec<u8>,
+    long: bool,
+    unread: bool,
+    finished: bool,
+    limited: bool,
+}
+
+impl ClaudeStream {
+    /// An empty stream. Input: the most bytes its reply may hold. Output: the stream.
+    fn new(bytes_max: usize) -> Self {
+        Self {
+            reply: Reply::new(ResearchHarness::ClaudeCode, bytes_max),
+            line: Vec::new(),
+            long: false,
+            unread: false,
+            finished: false,
+            limited: false,
+        }
+    }
+
+    /// Reads bytes the run printed, any part of a line or many lines. Input: the bytes.
+    /// Output: none.
+    fn read(&mut self, bytes: &[u8]) {
+        for part in bytes.split_inclusive(|&byte| byte == b'\n') {
+            let (body, ended) = match part.strip_suffix(b"\n") {
+                Some(body) => (body, true),
+                None => (part, false),
+            };
+            if self.line.len().saturating_add(body.len()) > CLAUDE_LINE_BYTES_MAX {
+                self.long = true;
+                self.line = Vec::new();
+            }
+            if !self.long {
+                self.line.extend_from_slice(body);
+            }
+            if ended {
+                self.end_line();
+            }
+        }
+        assert!(self.line.len() <= CLAUDE_LINE_BYTES_MAX);
+        assert!(!self.long || self.line.is_empty());
+    }
+
+    /// Reads the last line of a stream that ended without a line break. Output: none.
+    fn close(&mut self) {
+        if self.long || !self.line.is_empty() {
+            self.end_line();
+        }
+        assert!(self.line.is_empty());
+        assert!(!self.long);
+    }
+
+    /// Takes the line read so far as one event. Output: none.
+    fn end_line(&mut self) {
+        if self.long {
+            self.unread = true;
+        } else if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&self.line) {
+            self.event(&event);
+        }
+        self.line.clear();
+        self.long = false;
+    }
+
+    /// Takes one event of the run. Input: the event. Output: none.
+    fn event(&mut self, event: &serde_json::Value) {
+        if !event["parent_tool_use_id"].is_null() {
+            return;
+        }
+        let blocks = || event["message"]["content"].as_array().into_iter().flatten();
+        match event["type"].as_str() {
+            Some("assistant") if claude_error(event) => {
+                let said = blocks().filter_map(|block| block["text"].as_str());
+                self.limited |= said.chain(event["error"].as_str()).any(limit_line);
+            }
+            Some("assistant") => {
+                for block in blocks().filter(|block| block["type"] == "text") {
+                    self.reply.said(block["text"].as_str().unwrap_or_default());
+                }
+            }
+            Some("user") if blocks().any(|block| block["type"] == "tool_result") => {
+                self.reply.tool();
+            }
+            Some("result") => {
+                self.finished = event["subtype"] == "success" && event["is_error"] == false;
+                self.limited |=
+                    event["is_error"] == true && event["result"].as_str().is_some_and(limit_line);
+            }
+            _ => {}
+        }
+    }
+
+    /// The answer the run ended with. Output: the reply, or `None` while the stream holds
+    /// no successful result, a line it could not read, or a reply past its bound.
+    fn answer(&self) -> Option<&str> {
+        assert!(self.line.is_empty());
+        if self.finished && !self.unread {
+            self.reply.text()
+        } else {
+            None
+        }
+    }
+
+    /// Whether Claude Code ended the run on a rate or usage limit. Output: the answer.
+    fn limited(&self) -> bool {
+        assert!(self.line.is_empty());
+        self.limited
+    }
+}
+
+/// Whether a message's first line that holds words names a rate or usage limit. Input:
+/// the message. Output: the answer.
+fn limit_line(message: &str) -> bool {
+    message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(rate_limited)
 }
 
 /// The report bound as a byte count a [`Reply`] can hold. Input: the bound. Output: the count.
@@ -3421,44 +3576,28 @@ fn report_bound(bytes_max: u64) -> usize {
     usize::try_from(bytes_max).unwrap_or(usize::MAX)
 }
 
-/// The whole answer of a tools-off Claude Code run, read from its stream of JSON events:
-/// the text of every assistant message joined in order, so an answer Claude Code continued
-/// past the output cap comes back whole, where `--print` text keeps only the last part
-/// (DEC-160). Thinking and Claude Code's own error messages are left out. Input: the event
-/// lines. Output: the answer, or `None` while the stream ends in no successful result, such
-/// as a log cut at its bound or a run Claude Code ended on an error.
+/// The whole answer of a Claude Code run in its JSON event lines, read by [`ClaudeStream`],
+/// so an answer Claude Code continued past the output cap comes back whole, where `--print`
+/// text keeps only the last part (DEC-160). Input: the event lines. Output: the answer, or
+/// `None` while the stream ends in no successful result, such as a log cut at its bound or
+/// a run Claude Code ended on an error.
 #[cfg(unix)]
 fn claude_answer(events: &str) -> Option<String> {
-    let mut answer = String::new();
-    let mut finished = false;
-    for line in events.lines() {
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        match event["type"].as_str() {
-            Some("assistant") if !claude_error(&event) => {
-                for block in event["message"]["content"].as_array().into_iter().flatten() {
-                    if block["type"] == "text"
-                        && let Some(text) = block["text"].as_str()
-                    {
-                        answer.push_str(text);
-                    }
-                }
-            }
-            Some("result") => {
-                finished = event["subtype"] == "success" && event["is_error"] == false;
-            }
-            _ => {}
-        }
-    }
-    assert!(answer.len() <= events.len());
-    finished.then_some(answer)
+    let mut stream = ClaudeStream::new(events.len());
+    stream.read(events.as_bytes());
+    stream.close();
+    let answer = stream.answer().map(str::to_owned);
+    assert!(
+        answer
+            .as_ref()
+            .is_none_or(|answer| answer.len() <= events.len())
+    );
+    answer
 }
 
 /// Whether one assistant event of a Claude Code stream is Claude Code's own error message,
 /// such as the one it ends a run with when an answer is cut once more after its last
 /// continue request, rather than the model's words. Input: the event. Output: the answer.
-#[cfg(unix)]
 fn claude_error(event: &serde_json::Value) -> bool {
     assert!(event["type"] == "assistant");
     event["is_api_error_message"] == true || event["message"]["model"] == CLAUDE_OWN_MODEL
@@ -3469,7 +3608,6 @@ fn claude_error(event: &serde_json::Value) -> bool {
 /// else the generic reason; a message that is a provider's JSON error body
 /// gives its inner message. Takes the agent's stdout log, its harness and
 /// the log bound; the log is read bounded and never through a link.
-#[cfg(unix)]
 fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     const GENERIC: &str = "Agent stopped with an error";
     if harness != ResearchHarness::Codex {
@@ -5821,18 +5959,12 @@ mod tests {
         };
         let launch = |tools: bool, output_tokens: Option<u32>| {
             let mut command = Command::new("/usr/bin/true");
-            let output = if tools {
-                ClaudeOutput::Text
-            } else {
-                ClaudeOutput::Events
-            };
             claude_arguments(
                 &mut command,
                 Path::new("/agent/home"),
                 Path::new("/agent/tmp"),
                 tools,
                 output_tokens,
-                output,
                 &account,
             )
             .unwrap();
@@ -5866,7 +5998,8 @@ mod tests {
         assert!(CLAUDE_NO_TOOLS_PROMPT.contains("no tools"));
         let (on, cap) = launch(true, None);
         assert!(has(&on, ["--tools", "default"]), "{on:?}");
-        assert!(has(&on, ["--output-format", "text"]), "{on:?}");
+        assert!(has(&on, ["--output-format", "stream-json"]), "{on:?}");
+        assert!(!has(&on, ["--output-format", "text"]), "{on:?}");
         assert!(
             !on.iter()
                 .any(|argument| argument == "--system-prompt" || argument == "--max-turns")
@@ -6051,6 +6184,57 @@ mod tests {
         again.tool();
         again.said("1234");
         assert_eq!(again.text().as_deref(), Some("1234"));
+    }
+
+    /// A Claude Code stream is read as its bytes arrive, lines split over reads and a last
+    /// line with no break included; a line past the line bound leaves the run with no
+    /// answer rather than a guess; a limit line Claude Code ends on is told from other errors.
+    #[test]
+    fn a_claude_stream_read_in_pieces_keeps_its_answer_and_never_guesses_past_a_long_line() {
+        let whole = [
+            STREAM_START,
+            STREAM_FIRST,
+            STREAM_CONTINUE,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]
+        .concat();
+        let read = |bytes: &[u8], piece: usize| {
+            let mut stream = ClaudeStream::new(1024);
+            for part in bytes.chunks(piece) {
+                stream.read(part);
+            }
+            stream.close();
+            stream
+        };
+        let numbers = Some("## Numbers\n\n1. one\n2. two\n3. three\n");
+        assert_eq!(read(whole.as_bytes(), 7).answer(), numbers);
+        assert_eq!(read(whole.trim_end().as_bytes(), 1).answer(), numbers);
+        assert_eq!(read(whole.as_bytes(), whole.len()).answer(), numbers);
+        let mut long = ClaudeStream::new(1024);
+        long.read(STREAM_FIRST.as_bytes());
+        long.read(&vec![b'x'; CLAUDE_LINE_BYTES_MAX + 1]);
+        long.read(
+            [STREAM_CONTINUE, STREAM_SECOND, STREAM_DONE]
+                .concat()
+                .as_bytes(),
+        );
+        long.close();
+        assert_eq!(long.answer(), None);
+        let failed = [STREAM_START, STREAM_FIRST, STREAM_OWN_ERROR, STREAM_FAILED].concat();
+        let failed = read(failed.as_bytes(), 64);
+        assert_eq!(failed.answer(), None);
+        assert!(!failed.limited());
+        let limited = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"content\":[{",
+            "\"type\":\"text\",\"text\":\"Claude AI usage limit reached\"}]},",
+            "\"is_api_error_message\":true}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,",
+            "\"result\":\"Claude AI usage limit reached\"}\n",
+        );
+        let limited = read(limited.as_bytes(), 64);
+        assert_eq!(limited.answer(), None);
+        assert!(limited.limited());
     }
 }
 
