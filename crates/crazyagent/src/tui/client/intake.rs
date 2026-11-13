@@ -277,10 +277,25 @@ impl NativeOwner {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }
             IntakeQuery::IcloudDownload { .. } => return Err("icloud_download_needs_job".into()),
-            IntakeQuery::JobStart { .. }
-            | IntakeQuery::JobStatus
-            | IntakeQuery::JobStop { .. }
-            | IntakeQuery::JobDismiss { .. } => return Err("intake_job_not_ready".into()),
+            IntakeQuery::JobStart {
+                source,
+                mode,
+                overrides,
+            } => IntakeView::Job(Some(
+                controller
+                    .intake_start(source, mode, overrides)
+                    .await
+                    .map_err(problem)?,
+            )),
+            IntakeQuery::JobStatus => {
+                IntakeView::Job(controller.intake_status().await.map_err(problem)?)
+            }
+            IntakeQuery::JobStop { id } => {
+                IntakeView::JobStopped(controller.intake_stop(id).await.map_err(problem)?)
+            }
+            IntakeQuery::JobDismiss { id } => {
+                IntakeView::JobDismissed(controller.intake_dismiss(id).await.map_err(problem)?)
+            }
         })
     }
 }
