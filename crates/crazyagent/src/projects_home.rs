@@ -10,7 +10,7 @@ mod watch;
 
 pub use intake::{
     AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, OldSource, Placed,
-    Tally, copy_tree, folder_size, move_by_copy, verify_tree,
+    Tally, add_left, copy_tree, folder_size, move_by_copy, sweep_staging, verify_tree,
 };
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS projects_home_project_move (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     mode TEXT NOT NULL CHECK(mode IN ('move', 'copy'))
+);
+CREATE TABLE IF NOT EXISTS projects_home_add (
+    request TEXT PRIMARY KEY CHECK(length(request) BETWEEN 1 AND 128),
+    owner TEXT NOT NULL CHECK(length(owner) BETWEEN 1 AND 256),
+    source TEXT NOT NULL CHECK(length(CAST(source AS BLOB)) BETWEEN 1 AND 1024),
+    destination TEXT NOT NULL CHECK(length(CAST(destination AS BLOB)) BETWEEN 1 AND 1024),
+    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy')),
+    ended TEXT CHECK(ended IS NULL OR length(ended) BETWEEN 1 AND 64)
 );
 CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
@@ -1106,8 +1114,10 @@ pub fn found(
 }
 
 /// Creates the projects home table, the table that holds a home move recorded
-/// before its folders move and the table that holds each Delete everything planned
-/// and not yet settled, when the engine database opens.
+/// before its folders move, the table that holds each add from its plan until its record
+/// (or, after an engine stop cut it short, how it ended until the owner dismisses it) and
+/// the table that holds each Delete everything planned and not yet settled, when the
+/// engine database opens; a database from before gains the tables it lacks.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {

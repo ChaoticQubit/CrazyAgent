@@ -94,6 +94,35 @@ impl IntakeJob {
         }
     }
 
+    /// A job an engine stop cut short, as the engine start found it on disk. Inputs: as
+    /// [`IntakeJob::new`] without overrides, and the code it ended with: `done`,
+    /// `home_move_source_left` (landed, part of the old folder left) or another failure,
+    /// read as failed while copying. Output: the ended job.
+    pub fn restored(
+        id: RequestId,
+        owner_id: String,
+        source: String,
+        mode: AddMode,
+        ended: &str,
+    ) -> Self {
+        assert!(!ended.is_empty());
+        let job = Self::new(id, owner_id, source, mode, Vec::new());
+        let state = match ended {
+            "done" => JobState::Done,
+            "home_move_source_left" => JobState::Failed {
+                code: ended.to_owned(),
+                phase: Phase::Clearing,
+            },
+            code => JobState::Failed {
+                code: code.to_owned(),
+                phase: Phase::Copying,
+            },
+        };
+        *job.stage.lock().unwrap_or_else(PoisonError::into_inner) = Stage::Ended(state);
+        assert!(job.ended());
+        job
+    }
+
     /// The add's request id, which names the job.
     pub fn id(&self) -> &RequestId {
         &self.id

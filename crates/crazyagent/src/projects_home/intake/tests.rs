@@ -271,3 +271,45 @@ fn a_move_on_one_disk_stopped_before_it_starts_ends_cancelled_and_moves_nothing(
     );
     assert!(!tally.clearing());
 }
+
+#[test]
+fn the_staging_sweep_removes_only_add_staging_folders_and_follows_no_link() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(root.path()).unwrap();
+    let home = base.join("home");
+    let staging = home.join(".crazyagent-adding-0123456789abcdef");
+    fs::create_dir_all(staging.join("deep")).unwrap();
+    fs::write(staging.join("deep/a.txt"), "a\n").unwrap();
+    fs::set_permissions(staging.join("deep"), fs::Permissions::from_mode(0o500)).unwrap();
+    fs::create_dir_all(home.join("site")).unwrap();
+    fs::write(home.join(".crazyagent-adding-file"), "not a folder\n").unwrap();
+    let outside = base.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep.txt"), "keep\n").unwrap();
+    std::os::unix::fs::symlink(&outside, home.join(".crazyagent-adding-link")).unwrap();
+    assert_eq!(sweep_staging(&home), 1);
+    assert!(!staging.exists());
+    assert!(home.join("site").is_dir());
+    assert!(home.join(".crazyagent-adding-file").is_file());
+    assert_eq!(
+        fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    assert_eq!(sweep_staging(&base.join("missing")), 0);
+}
+
+#[test]
+fn an_add_cut_short_reads_from_disk_whether_it_landed_and_what_it_left() {
+    let root = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(root.path()).unwrap();
+    let (source, landed) = (base.join("source"), base.join("home/source"));
+    fs::create_dir_all(&source).unwrap();
+    assert_eq!(add_left(&source, &landed, true), "home_add_interrupted");
+    assert_eq!(add_left(&source, &landed, false), "home_add_interrupted");
+    fs::create_dir_all(&landed).unwrap();
+    assert_eq!(add_left(&source, &landed, true), "home_move_source_left");
+    assert_eq!(add_left(&source, &landed, false), "done");
+    fs::remove_dir(&source).unwrap();
+    assert_eq!(add_left(&source, &landed, true), "done");
+}

@@ -613,6 +613,61 @@ fn still_in_icloud(step: &str) -> EngineError {
     refused("home_icloud_not_downloaded")
 }
 
+/// The most entries of one folder the staging sweep reads.
+const STAGING_SCAN_MAX: usize = 65_536;
+
+/// Removes the staging folders that adds cut short by an engine stop left in a folder,
+/// links never followed. Run at engine start, before any add plans, so none is live.
+/// Input: the folder, the projects home an add copied into. Output: how many were removed.
+pub fn sweep_staging(folder: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.take(STAGING_SCAN_MAX).flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".crazyagent-adding-")
+        {
+            continue;
+        }
+        let path = entry.path();
+        let real = fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+        if !real {
+            continue;
+        }
+        let _ = make_writable(&path);
+        match fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => eprintln!(
+                "home_staging_not_removed errno={}",
+                e.raw_os_error().unwrap_or(0)
+            ),
+        }
+    }
+    assert!(removed <= STAGING_SCAN_MAX);
+    removed
+}
+
+/// Where an add an engine stop cut short stands on disk, read without changing anything:
+/// `done` once the folder is a real folder at its destination (and, for a move, gone from
+/// its old place), `home_move_source_left` for a move that landed while part of the old
+/// folder is still there, else `home_add_interrupted`, nothing moved. Inputs: the source,
+/// the destination and whether it was a move. Output: the code.
+pub fn add_left(source: &Path, destination: &Path, moving: bool) -> &'static str {
+    assert!(source.is_absolute() && destination.is_absolute());
+    let landed = fs::symlink_metadata(destination)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    let left = fs::symlink_metadata(source).is_ok();
+    match (landed, moving && left) {
+        (false, _) => "home_add_interrupted",
+        (true, true) => "home_move_source_left",
+        (true, false) => "done",
+    }
+}
+
 fn make_writable(root: &Path) -> std::io::Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(folder) = stack.pop() {

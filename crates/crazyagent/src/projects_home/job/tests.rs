@@ -130,3 +130,29 @@ fn a_view_crosses_the_wire_as_tagged_json() {
     let back: JobView = serde_json::from_str(&text).unwrap();
     assert_eq!(back, job.view());
 }
+
+#[test]
+fn a_job_an_engine_stop_cut_short_restores_as_the_disk_read_it() {
+    let restored = |ended: &str| {
+        let site = "/Users/someone/site".to_owned();
+        IntakeJob::restored(id_of("add-9"), "owner".into(), site, AddMode::Move, ended)
+    };
+    assert_eq!(restored("done").view().state, JobState::Done);
+    let left = JobState::Failed {
+        code: "home_move_source_left".into(),
+        phase: Phase::Clearing,
+    };
+    assert_eq!(restored("home_move_source_left").view().state, left);
+    let interrupted = JobState::Failed {
+        code: "home_add_interrupted".into(),
+        phase: Phase::Copying,
+    };
+    let job = restored("home_add_interrupted");
+    assert_eq!(job.view().state, interrupted);
+    assert!(job.ended());
+    assert!(!job.view().stopping);
+}
+
+fn id_of(text: &str) -> RequestId {
+    RequestId::new(text).unwrap()
+}
