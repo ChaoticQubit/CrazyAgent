@@ -194,6 +194,7 @@ pub enum MasterReason {
     ProtocolFault,
     FrameLimit,
     WorktreeUncertain,
+    ModelRefused,
     Cancelled,
     Unknown,
 }

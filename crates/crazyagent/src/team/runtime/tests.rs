@@ -2437,6 +2437,7 @@ fn an_owner_stop_ends_an_agent_whose_harness_has_not_drawn_its_screen_yet() {
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("codex".into()),
                 prompt: "Write page.md".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -2526,6 +2527,7 @@ fn an_owner_stop_ends_every_process_the_pane_agent_left_in_its_group() {
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("codex".into()),
                 prompt: "Start the dev server".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -3564,6 +3566,7 @@ fn page_writer(fixture: &Fixture) -> (TeamRuntime, i64, Arc<Agents>) {
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("codex".into()),
                 prompt: "Write page.md".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -4132,6 +4135,7 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("codex".into()),
                 prompt: "Write page.md".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -8059,6 +8063,7 @@ fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
         project_id: fixture.setup.project_id.clone(),
         harness: Some("codex".into()),
         prompt: prompt.into(),
+        model: None,
     }
 }
 
@@ -9317,6 +9322,7 @@ fn delegate_page(fixture: &Fixture) {
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("codex".into()),
                 prompt: "Write page.md".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -10150,6 +10156,7 @@ fn delegate_claude(fixture: &Fixture, prompt: &str) {
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("claude-code".into()),
                 prompt: prompt.into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -11487,6 +11494,7 @@ fn check_runtime(
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("claude-code".into()),
                 prompt: "Run the compile check.".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -11815,6 +11823,7 @@ fn a_message_is_not_typed_into_the_running_turn_after_a_held_turn_ended() {
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("claude-code".into()),
                 prompt: "Run the second check.".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -14780,6 +14789,7 @@ fn delegated_run(
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("codex".into()),
                 prompt: "Write page.md".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -16275,6 +16285,7 @@ fn the_owners_wake_without_a_conversation_hands_the_last_result_to_the_next_task
                 project_id: fixture.setup.project_id.clone(),
                 harness: Some("codex".into()),
                 prompt: "Check page.md.".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -16483,6 +16494,7 @@ fn lead_with_owner_stopped_worker(fixture: &Fixture, team: &mut TeamRuntime) -> 
                     project_id: fixture.setup.project_id.clone(),
                     harness: Some("codex".into()),
                     prompt: prompt.into(),
+                    model: None,
                 },
             )
             .unwrap(),
@@ -26262,6 +26274,7 @@ fn done_and_idle_on(fixture: &Fixture, team: &mut TeamRuntime, harness: &str, pr
             project_id: fixture.setup.project_id.clone(),
             harness: Some(harness.into()),
             prompt: prompt.into(),
+            model: None,
         }],
     );
     fixture.until(team, "the task is done", |f| task_of(f, prompt).0 == "done");
@@ -28968,6 +28981,7 @@ fn lead_worker_change_set(lands: Option<&str>) -> (Vec<String>, bool) {
                     project_id: fixture.setup.project_id.clone(),
                     harness: Some("codex".into()),
                     prompt: prompt.into(),
+                    model: None,
                 },
             )
             .unwrap(),

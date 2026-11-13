@@ -249,6 +249,7 @@ fn commands_patterns_urls_text_and_unknown_tools_become_fixed_phrases() {
             EventKind::TurnError {
                 message: "abc123".into(),
                 will_retry: true,
+                model_refused: false,
             },
             "Retrying after an error",
         ),
@@ -310,6 +311,7 @@ fn codex_methods_and_claude_thinking_map_to_fixed_phrases_and_bookkeeping_to_non
         EventKind::TurnError {
             message: "abc123".into(),
             will_retry: false,
+            model_refused: false,
         },
     ] {
         assert_eq!(screen.label(&event), None, "{event:?}");

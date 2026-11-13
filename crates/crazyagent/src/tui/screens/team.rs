@@ -241,9 +241,10 @@ impl Team {
         self.pump_settings(ctx);
     }
 
-    /// Sends the open team settings' next read once one is due, and the harness catalog
-    /// read once their master harness picker asks for it; a read the full queue refuses is
-    /// forgotten so the next key asks again.
+    /// Sends the open team settings' next read once one is due, the harness catalog read
+    /// once their master harness picker asks for it, and the composer's Models read once a
+    /// harness is picked for a task; a team read the full queue refuses is forgotten so the
+    /// next key asks again.
     /// Input: the context. Output: none; a Setup or a Settings request may be queued.
     fn pump_settings(&mut self, ctx: &mut Ctx) {
         let Some(view) = self.settings.as_mut() else {
@@ -251,6 +252,11 @@ impl Team {
         };
         if view.wants_catalog() {
             ctx.request(Request::Settings(Box::new(SettingsJob::Harnesses)));
+        }
+        if let Some(query) = view.wants_models() {
+            ctx.request(Request::Settings(Box::new(SettingsJob::ModelChoice(
+                Box::new(query),
+            ))));
         }
         if let Some(query) = view.next_query(now_ms())
             && !ctx.try_request(Request::Setup(query))
@@ -1686,13 +1692,11 @@ impl Screen for Team {
                         view.apply(&event.query, event.result.clone());
                     }
                 }
-                OwnerEvent::Settings(event) => {
-                    if let (SettingsEvent::Harnesses(result), Some(view)) =
-                        (event.as_ref(), self.settings.as_mut())
-                    {
-                        view.take_catalog(result);
-                    }
-                }
+                OwnerEvent::Settings(event) => match (event.as_ref(), self.settings.as_mut()) {
+                    (SettingsEvent::Harnesses(result), Some(view)) => view.take_catalog(result),
+                    (SettingsEvent::ModelChoice(event), Some(view)) => view.take_models(event),
+                    _ => {}
+                },
                 _ => {}
             },
             Arrival::Disconnected(_) => {

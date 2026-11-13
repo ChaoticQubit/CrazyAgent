@@ -302,10 +302,45 @@ fn retryable_turn_error_preserves_native_retry_fact_and_does_not_complete_turn()
         observed.kind,
         EventKind::TurnError {
             message: "observed retry".into(),
-            will_retry: true
+            will_retry: true,
+            model_refused: false,
         }
     );
     assert_eq!(protocol.state(), State::Active);
+}
+
+/// A Codex turn error whose structured code says the model does not exist keeps that fact
+/// on the unified event, so an owner-host master turn can tell a refused model from any
+/// other failure (DEC-150 M-10); its message alone never does.
+#[test]
+fn a_turn_error_naming_a_missing_model_is_a_model_refusal_and_its_text_is_not() {
+    for (info, refused) in [
+        (json!("modelNotFound"), true),
+        (json!("other"), false),
+        (serde_json::Value::Null, false),
+    ] {
+        let (mut protocol, mut bridge, request) = active();
+        let events = notice(
+            &mut protocol,
+            "error",
+            json!({
+                "threadId":"native-thread","turnId":"native-turn",
+                "error":{"message":"modelNotFound","codexErrorInfo":info},"willRetry":false
+            }),
+        );
+        let observed = bridge
+            .translate(events.into_iter().next().unwrap(), Some(request))
+            .unwrap();
+        assert_eq!(
+            observed.kind,
+            EventKind::TurnError {
+                message: "modelNotFound".into(),
+                will_retry: false,
+                model_refused: refused,
+            },
+            "{info}"
+        );
+    }
 }
 
 #[test]

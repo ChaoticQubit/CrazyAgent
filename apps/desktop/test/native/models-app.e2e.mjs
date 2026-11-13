@@ -165,6 +165,8 @@ describe("Settings, Harnesses, Claude Code: the Models section on the real deskt
     const words = await text("main");
     assert((words.match(/Not supported by this harness/g) ?? []).length >= 3, "each slot gives the reason");
     assert.equal(await $("#models-master").isExisting(), false, "no master choice");
+    assert.equal(await $("#models-add-id").isExisting(), false, "no Add field where no test launch runs");
+    assert(words.includes("An id you add needs a test launch, and this harness has none."), "Add says why");
     assert.equal(await $('button[aria-label="Save Allowed models"]').isExisting(), false, "no Save");
     await shot("models-app-not-supported");
   });

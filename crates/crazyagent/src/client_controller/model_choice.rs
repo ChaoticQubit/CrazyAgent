@@ -1,8 +1,9 @@
 use super::*;
 use crate::engine::owner::ModelAdded;
 use crate::model_choice::rules::{Rule, RuleWritten, Rules};
+use crate::model_choice::test_launch::Tested;
 use crate::model_choice::{Models, Slot, Written};
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId};
 use serde_json::Value;
 
 impl OwnerController {
@@ -79,6 +80,21 @@ impl OwnerController {
     ) -> Result<(bool, Models), EngineError> {
         self.model_choice_client()?
             .model_choice_remove(harness, model)
+            .await
+    }
+
+    /// Runs the test launch of one pending owner id on the pool the owner picked (DEC-150
+    /// M-6). Waits until the engine decides, up to about two and a half minutes. Inputs: the
+    /// harness, the id and the pool. Output: the decision, its pending reason and the
+    /// app-wide section, or a refusal.
+    pub async fn model_choice_test(
+        &self,
+        harness: &str,
+        model: &str,
+        pool: CredentialRef,
+    ) -> Result<(Tested, Option<String>, Models), EngineError> {
+        self.model_choice_client()?
+            .model_choice_test(harness, model, pool)
             .await
     }
 

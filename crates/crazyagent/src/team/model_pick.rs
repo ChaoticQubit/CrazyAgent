@@ -11,6 +11,10 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_task_models (
     reason TEXT NOT NULL
 );";
 
+/// The reason an owner's own delegate pins with its model (DEC-150 addendum 7), shown on
+/// the task where a master's pick shows the reason it gave.
+pub(crate) const OWNER_PICK_REASON: &str = "Picked by the owner.";
+
 /// Checks the model a spawn picked for a new task against the owner's choices and pick
 /// rule for its harness (DEC-150) and pins an allowed pick with its reason to the task, in
 /// the caller's transaction, so a refusal rolls the task back. No pick, or one the rule
@@ -25,6 +29,32 @@ pub(crate) fn pin(
     harness: &str,
     pick: Option<&ModelPick>,
 ) -> Result<Result<String, String>, EngineError> {
+    Ok(
+        pin_or_refuse(tx, project, task, harness, pick)?.map_err(|refused| {
+            assert!(refused.sentence.ends_with(&format!("({}).", refused.code)));
+            refused.sentence
+        }),
+    )
+}
+
+/// A pick the owner's choices refused: the code an owner action answers with and the
+/// sentence a master reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refused {
+    pub(crate) code: &'static str,
+    pub(crate) sentence: String,
+}
+
+/// Checks and pins a pick as [`pin`] does, keeping the refusal's code beside its sentence
+/// for an owner action (DEC-150 addendum 7). Takes what [`pin`] takes. Returns the text a
+/// reply adds after the harness, or the refusal, or a SQLite failure.
+pub(crate) fn pin_or_refuse(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    task: i64,
+    harness: &str,
+    pick: Option<&ModelPick>,
+) -> Result<Result<String, Refused>, EngineError> {
     assert!(task > 0);
     let catalog = store::catalog(tx, harness)?;
     let picked = pick.map(|pick| pick.model.as_str());
@@ -41,9 +71,12 @@ pub(crate) fn pin(
             )));
         }
         Pick::Unsupported => {
-            return Ok(Err(format!(
-                "CrazyAgent does not choose the model of a {shown} agent; leave model out (model_not_supported)."
-            )));
+            return Ok(Err(Refused {
+                code: "model_not_supported",
+                sentence: format!(
+                    "CrazyAgent does not choose the model of a {shown} agent; leave model out (model_not_supported)."
+                ),
+            }));
         }
         Pick::Refused { allowed, default } => {
             let fallback = match default {
@@ -51,7 +84,7 @@ pub(crate) fn pin(
                 None => "the account's own model".to_owned(),
             };
             let model = picked.expect("only a pick is refused");
-            return Ok(Err(if allowed.is_empty() {
+            let sentence = if allowed.is_empty() {
                 format!(
                     "the owner allows no other model for {shown} agents than {fallback}; leave model out (model_not_allowed)."
                 )
@@ -60,6 +93,10 @@ pub(crate) fn pin(
                     "{model} is not on the owner's list for {shown} agents: pick one of {}, or leave model out to run {fallback} (model_not_allowed).",
                     allowed.join(", ")
                 )
+            };
+            return Ok(Err(Refused {
+                code: "model_not_allowed",
+                sentence,
             }));
         }
     };
@@ -103,6 +140,38 @@ pub(crate) fn pinned(db: &Connection, task: i64) -> Result<Option<ModelPick>, En
     )
     .optional()
     .map_err(super::error)
+}
+
+/// Reads the models spawns pinned, with their reasons, for a project's tasks from `first` on
+/// (DEC-150 M-7), so the team status tells each task view which model was picked and why.
+/// Takes the database, the project and the lowest task id the status lists. Returns the
+/// picks by task, empty before the first pin, or a SQLite failure.
+pub(crate) fn pinned_from(
+    db: &Connection,
+    project: &ProjectId,
+    first: i64,
+) -> Result<std::collections::BTreeMap<i64, ModelPick>, EngineError> {
+    if !table(db, "team_task_models")? {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let mut statement = db
+        .prepare("SELECT task,model,reason FROM team_task_models WHERE project=?1 AND task>=?2")
+        .map_err(super::error)?;
+    let picks = statement
+        .query_map(params![project.as_str(), first], |row| {
+            Ok((
+                row.get(0)?,
+                ModelPick {
+                    model: row.get(1)?,
+                    reason: row.get(2)?,
+                },
+            ))
+        })
+        .map_err(super::error)?
+        .collect::<Result<std::collections::BTreeMap<i64, ModelPick>, _>>()
+        .map_err(super::error)?;
+    assert!(picks.keys().all(|task| *task >= first));
+    Ok(picks)
 }
 
 const RUN_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_agent_models (
@@ -321,20 +390,21 @@ pub(crate) fn agent_model(db: &Connection, agent: i64) -> Result<Option<String>,
 }
 
 /// Who runs on the default model after a fallback (DEC-150): a task's agent, an agent
-/// that starts again with no task, or the master.
+/// that starts again with no task, the master, or an owner-host master whose own account
+/// refused the model (M-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fallen {
     Task(i64),
     Agent,
     Master,
+    HostMaster,
 }
 
-/// Tells the owner and the master once that no pool account could run a model chosen for
-/// a harness's agents or master, so a start runs on the default (DEC-150): one owner Pool
-/// failover notification (DEC-136a) and one engine message to the master, then nothing
-/// more for that project, harness and model until it runs again (`ran`). Takes the
-/// transaction, the project, the harness, the model, who falls back and the time. Returns
-/// whether this call told them.
+/// Tells the owner once that no pool account, or an owner-host master's own (M-10), could
+/// run a model chosen for a harness, so a start runs on the default (DEC-150): one Pool
+/// failover notice (DEC-136a), plus one engine message to a team master but never for an
+/// owner-host master, then nothing until the model runs again (`ran`). Takes the
+/// transaction, project, harness, model, who falls back and time. Returns whether it told.
 pub(crate) fn fell_back(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -359,16 +429,24 @@ pub(crate) fn fell_back(
         return Ok(false);
     }
     let harness = super::bound_text(harness, 64);
+    let host = who == Fallen::HostMaster;
     let (whom, who) = match who {
         Fallen::Task(task) => (format!("{harness} agents"), format!("task {task}")),
         Fallen::Agent => (
             format!("{harness} agents"),
             "an agent starting again".to_owned(),
         ),
-        Fallen::Master => (format!("the {harness} master"), "the master".to_owned()),
+        Fallen::Master | Fallen::HostMaster => {
+            (format!("the {harness} master"), "the master".to_owned())
+        }
+    };
+    let lead = if host {
+        format!("The account {whom} runs on refused {model}")
+    } else {
+        format!("No account in this project's pool can run {model} for {whom} now")
     };
     let text = format!(
-        "No account in this project's pool can run {model} for {whom} now, so {who} runs on the default model. You are told again only after {model} runs once more."
+        "{lead}, so {who} runs on the default model. You are told again only after {model} runs once more."
     );
     let prefix = format!("model_fallback:{}:{harness}:{now}:", project.as_str());
     let room = crate::notifications::SUBJECT_BYTES_MAX.saturating_sub(prefix.len());
@@ -393,19 +471,22 @@ pub(crate) fn fell_back(
         },
         now,
     );
-    let _ = super::append_message(
-        tx,
-        project,
-        super::MessageAuthor::Engine,
-        &format!("{text} (model_fallback)"),
-        super::MessageState::Pending,
-        now,
-    )?;
+    if !host {
+        let _ = super::append_message(
+            tx,
+            project,
+            super::MessageAuthor::Engine,
+            &format!("{text} (model_fallback)"),
+            super::MessageState::Pending,
+            now,
+        )?;
+    }
     Ok(true)
 }
 
-/// Forgets a told fallback once a model runs again, so a later fallback is told anew.
-/// Takes the database, the project, the harness and the model. Returns a SQLite failure.
+/// Forgets a told fallback once a model runs again, so a later fallback is told anew; with
+/// none told it only reads, so a start takes no write lock. Takes the database, the
+/// project, the harness and the model. Returns a SQLite failure.
 pub(crate) fn ran(
     db: &Connection,
     project: &ProjectId,
@@ -413,6 +494,16 @@ pub(crate) fn ran(
     model: &str,
 ) -> Result<(), EngineError> {
     if !table(db, "team_model_fallbacks")? {
+        return Ok(());
+    }
+    let told: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_model_fallbacks WHERE project=?1 AND harness=?2 AND model=?3)",
+            params![project.as_str(), harness, model],
+            |row| row.get(0),
+        )
+        .map_err(super::error)?;
+    if !told {
         return Ok(());
     }
     db.execute(

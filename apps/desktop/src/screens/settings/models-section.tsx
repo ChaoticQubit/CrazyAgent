@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import type { Result } from "../../api";
+import { poolSummaries, type Result } from "../../api";
 import type { SettingScope } from "../../api-harness-settings";
 import {
-  ALLOWED_MAX, FALLBACK_HELP, FALLBACK_OPTIONS, MODEL_BYTES_MAX, MODEL_STALE_LINE, PICK_HELP, PICK_OPTIONS, SLOT_HELP, SLOT_LABELS,
-  addModel, addedLine, allowedChange, allowedDraft, canResetModel, catalogLine, choiceChange, choiceDraft, choiceOptions,
-  loadModelRules, loadModels, modelChoiceRefusal, modelSourceLine, modelsNotReady, modelsStale, originWord, passedOverLine,
-  liveLine, removeModel, removedLine, resetModelChoice, resetModelLabel, setModelChoice, setModelRule, tickable, toggleAllowed, uncheckedLine,
-  valueText,
+  ALLOWED_MAX, FALLBACK_HELP, FALLBACK_OPTIONS, MODEL_BYTES_MAX, MODEL_STALE_LINE, NOT_SUPPORTED, NO_TEST_LAUNCH, PICK_HELP, PICK_OPTIONS,
+  SLOT_HELP, SLOT_LABELS, addModel, addedLine, allowedChange, allowedDraft, canResetModel, catalogLine, choiceChange, choiceDraft, choiceOptions,
+  liveLine, loadModelRules, loadModels, modelChoiceRefusal, modelSourceLine, modelsNotReady, modelsStale, originWord, ownWord, passedOverLine,
+  removeModel, removedLine, resetModelChoice, resetModelLabel, setModelChoice, setModelRule, testModel, tickable,
+  toggleAllowed, uncheckedLine, valueText,
 } from "../../api-model-choice";
-import type { FallbackRule, ModelCandidate, ModelRow, ModelRules, ModelSlot, ModelsPage, PickRule } from "../../api-model-choice";
+import type { FallbackRule, ModelCandidate, ModelRow, ModelRules, ModelSlot, ModelTested, ModelsPage, PickRule } from "../../api-model-choice";
 import { useLoad, type Loaded } from "../../state";
-import { Button, Checkbox, LoadError, NotReady, Segmented, Select, SettingLine, SettingSection, Skeleton } from "../../ui";
+import { Button, Checkbox, LoadError, NotReady, Notice, Segmented, Select, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import "./models-section.css";
 
@@ -136,25 +136,73 @@ export function ModelsView(props: ModelsViewProps) {
   </SettingSection>;
 }
 
+/** The line beside an owner id while its test launch runs. */
+export const TESTING_LINE = "Testing. This can take up to 2 minutes.";
+
+/** The note after a test launch, in the TUI's words: what it decided, with the reason an id
+ * still waits as the engine gave it, or why nothing was tested. Inputs: the id and the
+ * result. Output: the line. */
+export function testNote(model: string, result: Result<ModelTested>): string {
+  const id = displayText(model);
+  if (result.kind !== "ok") return `Could not test ${id}. ${modelNote(result)}`;
+  switch (result.value.tested) {
+    case "verified": return `${id} passed its test launch. You can now choose it, tick it and launch it.`;
+    case "failed": return `${id} failed its test launch. The provider refused this model. It stays listed and can't be used.`;
+    case "pending": return [`${id} still waits for its test launch.`, displayText(result.value.reason ?? "")].filter(Boolean).join(" ");
+  }
+}
+
+/** The pool question of one id's test launch, without engine calls: every pool as a radio,
+ * Run test once one is picked, or the line that there is no pool yet. Input: the props.
+ * Output: the question. */
+export function TestPoolView({ model, pools, picked, busy, onPick, onRun, onCancel }: {
+  model: string; pools: readonly { id: string; name: string }[]; picked: string | null; busy: boolean;
+  onPick: (pool: string) => void; onRun: () => void; onCancel: () => void;
+}) {
+  return <div className="stack-small">
+    <fieldset className="pr-ai-pools">
+      <legend>{`Which pool runs the test launch of ${displayText(model)}?`}</legend>
+      <p className="small muted">One short run of a fixed prompt on an account of the pool you pick, with this id as its model.</p>
+      {pools.length === 0 && <Notice>No pool yet. Add one under Pools, then try again.</Notice>}
+      {pools.map((pool) => <label key={pool.id} className="pr-ai-pool">
+        <input type="radio" name="models-test-pool" value={pool.id} checked={picked === pool.id} disabled={busy} onChange={() => onPick(pool.id)} />
+        <span>{displayText(pool.name)}</span>
+      </label>)}
+    </fieldset>
+    <span className="row">
+      <Button variant="primary" disabled={picked === null} pending={busy} pendingLabel="Testing..." onClick={onRun}>Run test</Button>
+      <Button disabled={busy} onClick={onCancel}>Cancel</Button>
+    </span>
+  </div>;
+}
+
 /** The owner's own model ids for one harness and the field to add one, without engine
- * calls: each id with its state and a remove; an empty field adds nothing. Input: the props.
- * Output: the section. */
-export function OwnIdsView({ candidates, field, busy, note, onField, onAdd, onRemove }: {
+ * calls: each id with its state, a Test for a pending id, and a remove; an empty field adds
+ * nothing. Where the engine says the harness has no test launch, Add and a pending id say
+ * Not supported, as the TUI does (MUG2-L1). Input: the props. Output: the section. */
+export function OwnIdsView({ candidates, field, busy, note, onField, onAdd, onRemove, testable, testing = null, onTest = () => {} }: {
   candidates: readonly ModelCandidate[]; field: string; busy: string | null; note: string;
   onField: (field: string) => void; onAdd: () => void; onRemove: (id: string) => void;
+  testable: boolean; testing?: string | null; onTest?: (id: string) => void;
 }) {
   const own = candidates.filter((candidate) => candidate.origin !== "catalog");
   return <SettingSection title="Your model ids" about="Add a model id this harness's list doesn't have yet. It waits for a test launch and can be chosen once that passes.">
-    <SettingLine label="Model id" htmlFor="models-add-id" help="Letters, digits and - _ . : / @ +, starting with a letter or digit.">
-      <span className="models-add">
-        <input id="models-add-id" className="input mono" value={field} maxLength={MODEL_BYTES_MAX} autoComplete="off" spellCheck={false}
-          onChange={(event) => onField(event.target.value)} />
-        <Button variant="secondary" size="small" pending={busy === "add"} pendingLabel="Adding..." disabled={field.trim() === ""} onClick={onAdd}>Add</Button>
-      </span>
-    </SettingLine>
+    {testable
+      ? <SettingLine label="Model id" htmlFor="models-add-id" help="Letters, digits and - _ . : / @ +, starting with a letter or digit.">
+        <span className="models-add">
+          <input id="models-add-id" className="input mono" value={field} maxLength={MODEL_BYTES_MAX} autoComplete="off" spellCheck={false}
+            onChange={(event) => onField(event.target.value)} />
+          <Button variant="secondary" size="small" pending={busy === "add"} pendingLabel="Adding..." disabled={field.trim() === ""} onClick={onAdd}>Add</Button>
+        </span>
+      </SettingLine>
+      : <SettingLine label="Model id" help={NO_TEST_LAUNCH}><span className="muted">{`${NOT_SUPPORTED}.`}</span></SettingLine>}
     {own.length === 0 && <p className="small muted">You haven't added a model id to this harness.</p>}
-    {own.map((candidate) => <SettingLine key={candidate.id} label={displayText(candidate.id)} help={originWord(candidate.origin)}>
-      <Button variant="quiet" size="small" pending={busy === candidate.id} pendingLabel="Removing..." aria-label={`Remove ${candidate.id}`} onClick={() => onRemove(candidate.id)}>Remove</Button>
+    {own.map((candidate) => <SettingLine key={candidate.id} label={displayText(candidate.id)} help={testing === candidate.id ? TESTING_LINE : ownWord(candidate.origin, testable)}>
+      <span className="row">
+        {testable && candidate.origin === "pending" && <Button variant="secondary" size="small" pending={testing === candidate.id} pendingLabel="Testing..."
+          disabled={testing !== null} aria-label={`Test ${candidate.id}`} onClick={() => onTest(candidate.id)}>Test</Button>}
+        <Button variant="quiet" size="small" pending={busy === candidate.id} pendingLabel="Removing..." disabled={testing === candidate.id} aria-label={`Remove ${candidate.id}`} onClick={() => onRemove(candidate.id)}>Remove</Button>
+      </span>
     </SettingLine>)}
     {note && <p className="helper" role="status">{note}</p>}
   </SettingSection>;
@@ -197,6 +245,29 @@ function AppOnly({ harness, page, onChanged }: { harness: string; page: Loaded<M
   const [note, setNote] = useState("");
   const [ruleBusy, setRuleBusy] = useState<"pick" | "fallback" | null>(null);
   const [ruleNote, setRuleNote] = useState("");
+  const [asking, setAsking] = useState<{ model: string; pools: { id: string; name: string }[]; picked: string | null } | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
+
+  async function askPool(model: string) {
+    const pools = await poolSummaries();
+    if (pools.kind !== "ok") {
+      setNote("The pools couldn't be read. Try again.");
+      return;
+    }
+    setNote("");
+    setAsking({ model, pools: pools.value.map(({ id, name }) => ({ id, name })), picked: null });
+  }
+
+  async function runTest() {
+    if (asking === null || asking.picked === null) return;
+    const { model, picked } = asking;
+    setTesting(model);
+    const result = await testModel(harness, model, picked);
+    setTesting(null);
+    setAsking(null);
+    setNote(testNote(model, result));
+    if (result.kind === "ok") onChanged();
+  }
 
   async function add() {
     const id = field.trim();
@@ -229,7 +300,10 @@ function AppOnly({ harness, page, onChanged }: { harness: string; page: Loaded<M
 
   return <>
     {page.kind === "ok" && <OwnIdsView candidates={page.value.models.candidates} field={field} busy={busy} note={note}
-      onField={setField} onAdd={() => void add()} onRemove={(id) => void remove(id)} />}
+      onField={setField} onAdd={() => void add()} onRemove={(id) => void remove(id)}
+      testable={page.value.models.testable} testing={testing} onTest={(id) => void askPool(id)} />}
+    {asking !== null && <TestPoolView model={asking.model} pools={asking.pools} picked={asking.picked} busy={testing !== null}
+      onPick={(pool) => setAsking({ ...asking, picked: pool })} onRun={() => void runTest()} onCancel={() => setAsking(null)} />}
     <ModelRulesView rules={rules} busy={ruleBusy} note={ruleNote} onRule={(name, value) => void rule(name, value)} onRetry={reloadRules} />
   </>;
 }
