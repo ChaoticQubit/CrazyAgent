@@ -1,6 +1,7 @@
 use super::*;
 use crate::harnesses::terminal_session::end_left_pane;
 use std::net::TcpListener;
+use std::os::unix::fs::DirBuilderExt;
 
 /// A sandbox profile that allows everything but signals to processes outside the sandbox,
 /// so the pane's warden is armed as under an agent profile.
@@ -62,7 +63,11 @@ impl Proxied {
             dir = folder.display(),
         );
         let state = agent_pane_state(&fixture.base.join("team"), id);
-        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(state.parent().unwrap())
+            .unwrap();
         let argv = crate::sandbox::kept_pane(
             vec![
                 crate::sandbox::SANDBOX_EXEC.to_owned(),
