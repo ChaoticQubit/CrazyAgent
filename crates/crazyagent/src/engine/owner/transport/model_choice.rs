@@ -489,11 +489,16 @@ async fn handle(
                 )
             });
         }
+        let backoff = if retry {
+            std::time::Duration::ZERO
+        } else {
+            crate::model_choice::live::BACKOFF
+        };
         let installed = executable.as_deref().and_then(|path| {
             installed::version_for_models(
                 path,
                 installed::LIMIT,
-                crate::model_choice::live::BACKOFF,
+                backoff,
                 std::time::Instant::now(),
             )
         });

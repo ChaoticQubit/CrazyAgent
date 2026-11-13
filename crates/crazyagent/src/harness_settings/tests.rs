@@ -1116,21 +1116,29 @@ fn a_failed_version_ask_for_models_is_kept_for_the_backoff_and_a_launch_asks_aga
     assert_eq!(models(Duration::from_secs(1)), None);
     assert_eq!(models(backoff - Duration::from_millis(1)), None);
     assert_eq!(asked(), 1, "a Models read inside the backoff asks nothing");
+    let again = start + Duration::from_secs(2);
+    assert_eq!(
+        installed::version_for_models(&path, limit, Duration::ZERO, again),
+        None
+    );
+    assert_eq!(asked(), 2, "the owner asking again asks with no backoff");
     assert_eq!(installed::version_cached(&path, limit), None);
-    assert_eq!(asked(), 2, "a launch asks again");
+    assert_eq!(asked(), 3, "a launch asks again");
     assert_eq!(models(backoff), None);
-    assert_eq!(asked(), 3, "the backoff ends");
+    assert_eq!(asked(), 3, "the backoff counts from the last failed ask");
+    assert_eq!(models(backoff + Duration::from_secs(2)), None);
+    assert_eq!(asked(), 4, "the backoff ends");
     write("echo \"tool 3.4.5\"");
     assert_eq!(
-        models(backoff + Duration::from_secs(1)).as_deref(),
+        models(backoff + Duration::from_secs(3)).as_deref(),
         Some("3.4.5")
     );
-    assert_eq!(asked(), 4, "a changed file is a new identity");
+    assert_eq!(asked(), 5, "a changed file is a new identity");
     assert_eq!(
-        models(backoff + Duration::from_secs(2)).as_deref(),
+        models(backoff + Duration::from_secs(4)).as_deref(),
         Some("3.4.5")
     );
-    assert_eq!(asked(), 4);
+    assert_eq!(asked(), 5);
     assert_eq!(
         installed::version_for_models(&tmp.path().join("missing"), limit, backoff, start),
         None
