@@ -335,7 +335,7 @@ test("Harness updates Off: no Check or Update button, and a direct bridge call a
     assert.deepEqual(npmCalls(fakes.codex.log), [], "npm never ran");
   }));
 
-test("A found harness the tool resolver can't run reads Can't run with the resolver's line and Try again, never Ready, and Try again reads it once it runs", { timeout: 600000 }, (t) =>
+test("A found harness the tool resolver can't run is listed and grouped Can't run with the resolver's line and Try again, never Ready, and Try again reads it and moves it back to Ready once it runs", { timeout: 600000 }, (t) =>
   onEngine(t, "ca-harness-cant-run-", async ({ bridge, me, page, open, name, rowShows, buttons, fakes }) => {
     const line = "codex needs ca-e2e-missing-runtime, which is missing. Install it, or run setup again from Settings. Then try again.";
     script(fakes.codex.harness, "#!/usr/bin/env ca-e2e-missing-runtime\n");
@@ -345,6 +345,9 @@ test("A found harness the tool resolver can't run reads Can't run with the resol
     assert.doesNotMatch(blocked, /Ready|Version/, "a harness that can't run never reads Ready or a version");
     assert.deepEqual(await buttons("codex"), [`Try again: ${name("codex")}`], "Try again is its only button");
     assert.equal((await versions(bridge, "codex")).needs?.line, line, "the row shows the engine's needs line");
+    const listed = (await value(bridge, "desktop_harness_catalog", { check: false })).find((item) => item.id === "codex");
+    assert.deepEqual(listed?.status, { kind: "cant_run", reason: line }, "the engine lists it Can't run, never Ready");
+    assert.match(await page.evaluate("document.body.innerText"), /can't run \(1\)/i, "the page groups it under Can't run");
     assert.doesNotMatch(await page.evaluate("document.body.innerText"), /Install Node\.js/, "a need other than Node offers no Node.js install");
     await me.capture("cant-run");
     script(fakes.codex.harness, "#!/bin/sh\necho \"codex-cli 0.0.1\"\n");
@@ -353,6 +356,9 @@ test("A found harness the tool resolver can't run reads Can't run with the resol
     assert.match(runs, /Ready/);
     assert.doesNotMatch(runs, /Can't run/);
     assert.deepEqual(npmCalls(fakes.codex.log), [], "Try again asked npm nothing");
+    await until("Codex leaves the Can't run group once it runs", false, async () => /can't run \(1\)/i.test(await page.evaluate("document.body.innerText")));
+    const back = (await value(bridge, "desktop_harness_catalog", { check: false })).find((item) => item.id === "codex");
+    assert.deepEqual(back?.status, { kind: "ready" }, "the engine lists it Ready once it runs");
     await me.capture("runs-again");
   }));
 
