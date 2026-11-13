@@ -2004,8 +2004,9 @@ fn onboarding_created_ms(root: &Path) -> i64 {
 async fn a_step_that_cannot_start_records_its_cause_code() {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
+    let provider = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let account = ResearchAccount::Endpoint {
-        base_url: "http://127.0.0.1:9/v1".into(),
+        base_url: format!("http://127.0.0.1:{}/v1", provider.local_addr().unwrap().port()),
         model: "never-asked-model".into(),
         key: None,
     };
@@ -2027,6 +2028,7 @@ async fn a_step_that_cannot_start_records_its_cause_code() {
     );
     let view = bench.settle(&project, Duration::from_secs(60)).await;
     stop_service(service).await;
+    drop(provider);
     assert_eq!(
         view.graph,
         failed("Graph build could not start (run_name_used)"),
