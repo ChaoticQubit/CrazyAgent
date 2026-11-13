@@ -34,8 +34,9 @@ export interface ModelCandidate {
 /** A harness's Models section from the engine: its three slots in page order, every
  * candidate, the harness's list first, then the owner's ids, whether the list was checked
  * on the installed harness version, with the reason when it was not, whether a test launch
- * runs on the harness, so the owner can add and test an id, and the engine's line while the
- * harness reported no live list of its own. */
+ * runs on the harness, so the owner can add and test an id, the engine's line while the
+ * harness reported no live list of its own, and whether the owner can ask the harness for
+ * its list again now. */
 export interface Models {
   harness: string;
   rows: ModelRow[];
@@ -44,6 +45,7 @@ export interface Models {
   reason: string | null;
   testable: boolean;
   live_note: string | null;
+  live_retry: boolean;
 }
 
 /** The Models page: the section, the project it was read for (null on the app page) and the
@@ -377,10 +379,11 @@ export function removedLine(removed: boolean, id: string): string {
 }
 
 /** Reads one harness's Models section; fresh marks the section opening, which reads the
- * harness's own model list once first. Inputs: the harness id, the project id, or null for
- * the app, and fresh. Output: the page. */
-export function loadModels(harness: string, projectId: string | null, fresh: boolean): Promise<Result<ModelsPage>> {
-  return call<ModelsPage>("desktop_model_choice", { harness, projectId, fresh });
+ * harness's own model list first unless its last read came back unreported within the
+ * engine's backoff, and retry marks Retry or Check again, which reads it anyway. Inputs: the
+ * harness id, the project id, or null for the app, fresh and retry. Output: the page. */
+export function loadModels(harness: string, projectId: string | null, fresh: boolean, retry = false): Promise<Result<ModelsPage>> {
+  return call<ModelsPage>("desktop_model_choice", { harness, projectId, fresh, retry });
 }
 
 /** Sets one slot at the page's scope. Inputs: the harness, the project or null, the slot, the

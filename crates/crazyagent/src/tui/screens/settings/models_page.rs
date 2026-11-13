@@ -477,7 +477,10 @@ impl ModelsPage {
         send(ctx, SettingsJob::ModelChoice(Box::new(query)));
     }
 
-    fn read_again(&mut self, ctx: &mut Ctx) {
+    /// Reads the section and the harness's own list again: the page opening keeps the
+    /// list's backoff, r asks the harness again past it. Inputs: the context and whether
+    /// the owner asked again.
+    fn read_again(&mut self, ctx: &mut Ctx, retry: bool) {
         if self.pending.is_some() {
             return;
         }
@@ -488,7 +491,7 @@ impl ModelsPage {
             harness: self.harness.clone(),
             project: self.project(),
             fresh: true,
-            retry: false,
+            retry,
         };
         self.ask(query, ctx);
     }
@@ -1614,7 +1617,7 @@ impl Screen for ModelsPage {
             return self.edit_key(key, ctx);
         }
         match key {
-            Key::Char('r') => self.read_again(ctx),
+            Key::Char('r') => self.read_again(ctx, true),
             Key::Up => self.move_by(-1),
             Key::Down => self.move_by(1),
             Key::PageUp => self.move_by(-PAGE_STEP),
@@ -1638,7 +1641,7 @@ impl Screen for ModelsPage {
 
     fn shown(&mut self, ctx: &mut Ctx) {
         if self.state == State::Loading {
-            self.read_again(ctx);
+            self.read_again(ctx, false);
         }
     }
 

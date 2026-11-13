@@ -16,6 +16,7 @@ const OUTPUT_BYTES_MAX: u64 = 4096;
 const POLL: Duration = Duration::from_millis(20);
 
 static KNOWN: Mutex<BTreeMap<Identity, String>> = Mutex::new(BTreeMap::new());
+static FAILED: Mutex<BTreeMap<Identity, Instant>> = Mutex::new(BTreeMap::new());
 
 /// One executable file as the engine last saw it: its path, size, modification time
 /// and, on Unix, its device, inode and status change time, so a replaced or rewritten
@@ -50,20 +51,45 @@ pub fn version_cached(executable: &Path, limit: Duration) -> Option<String> {
     Some(version)
 }
 
-/// Asks an executable for its version for a Models read. Inputs: the executable, the
-/// limit, the backoff and the time now. Output: the version, or none.
+/// Asks an executable for its version for a Models read, as `version_cached` does, but
+/// keeps a failed ask of one file identity for `backoff`, so a `--version` that hangs
+/// stalls one Models open, not each; a launch calls `version_cached`, which asks again.
+/// Inputs: the executable, the limit, the backoff and the time now. Output: the version,
+/// or none.
 pub fn version_for_models(
     executable: &Path,
     limit: Duration,
     backoff: Duration,
     now: Instant,
 ) -> Option<String> {
-    let _ = (backoff, now);
-    version_cached(executable, limit)
+    let before = identity(executable)?;
+    let failed_at = failed().get(&before).copied();
+    if failed_at.is_some_and(|at| {
+        now.checked_duration_since(at)
+            .is_some_and(|since| since < backoff)
+    }) {
+        return None;
+    }
+    let version = version_cached(executable, limit);
+    let mut failed = failed();
+    if version.is_some() {
+        failed.remove(&before);
+    } else {
+        if failed.len() >= KNOWN_MAX {
+            failed.clear();
+        }
+        failed.insert(before, now);
+    }
+    assert!(failed.len() <= KNOWN_MAX);
+    version
 }
 
 fn known() -> MutexGuard<'static, BTreeMap<Identity, String>> {
     KNOWN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn failed() -> MutexGuard<'static, BTreeMap<Identity, Instant>> {
+    FAILED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn identity(executable: &Path) -> Option<Identity> {

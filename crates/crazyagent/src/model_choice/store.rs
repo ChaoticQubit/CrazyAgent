@@ -173,6 +173,31 @@ pub fn live_record(
     tx.commit().map_err(unavailable)
 }
 
+/// Says whether a harness's last live read came back unreported less than `live::BACKOFF`
+/// before now, so a plain Models open does not start it again; a read time after now, from
+/// a clock set back, does not hold. Inputs: the engine database, the harness name and the
+/// time now in ms. Output: the flag, or `model_choice_harness_unknown` or
+/// `model_choice_unavailable`.
+pub fn live_backoff(db: &Connection, harness: &str, now_ms: i64) -> Result<bool, EngineError> {
+    let harness = known(harness)?;
+    if !table(db, "model_live")? {
+        return Ok(false);
+    }
+    let last: Option<(bool, i64)> = db
+        .query_row(
+            "SELECT reported, read_ms FROM model_live WHERE harness = ?1",
+            [harness],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    let backoff = i64::try_from(super::live::BACKOFF.as_millis()).map_err(unavailable)?;
+    assert!(backoff > 0);
+    Ok(last.is_some_and(|(reported, read_ms)| {
+        !reported && read_ms <= now_ms && now_ms.saturating_sub(read_ms) < backoff
+    }))
+}
+
 /// Reads the live list kept for a harness and whether its last read reported it. Inputs:
 /// the engine database and the harness id. Output: the ids and the flag, none when no
 /// read was kept, or `model_choice_unavailable` for a row out of contract.

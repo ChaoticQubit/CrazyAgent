@@ -48,9 +48,10 @@ pub enum Shape {
     CodexCatalog,
     /// One model id per line, nothing else on any line.
     Lines,
-    /// pi's table: a `provider  model ...` header, then one row per model.
+    /// pi's table: a `provider  model ...` header, then one row per model, each word of a
+    /// row starting where a header word starts.
     PiTable,
-    /// aider's list: `- <id>` lines under its banner.
+    /// aider's list: a `Models which match "...":` line, then only `- <id>` lines.
     Dashed,
     /// JSON: an array, or an object's `models` array, of ids or objects naming one.
     JsonIds,
@@ -215,24 +216,44 @@ fn line_ids(harness: &str, text: &str) -> Option<Vec<String>> {
 
 fn pi_ids(harness: &str, text: &str) -> Option<Vec<String>> {
     let mut lines = text.lines().filter(|line| !line.trim().is_empty());
-    let mut header = lines.next()?.split_whitespace();
-    if header.next() != Some("provider") || header.next() != Some("model") {
+    let header = lines.next()?;
+    let columns = word_starts(header);
+    let mut words = header.split_whitespace();
+    if words.next() != Some("provider") || words.next() != Some("model") {
         return None;
     }
     lines
         .map(|line| {
-            let mut columns = line.split_whitespace();
-            let provider = columns.next()?;
-            let model = columns.next()?;
+            if word_starts(line) != columns {
+                return None;
+            }
+            let mut cells = line.split_whitespace();
+            let provider = cells.next()?;
+            let model = cells.next()?;
             one_id(harness, &format!("{provider}/{model}"))
         })
         .collect()
 }
 
+/// Finds where each word of one line starts, as pi pads every column to one width.
+/// Input: the line. Output: the byte offsets.
+fn word_starts(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    (0..bytes.len())
+        .filter(|&at| {
+            !bytes[at].is_ascii_whitespace() && (at == 0 || bytes[at - 1].is_ascii_whitespace())
+        })
+        .collect()
+}
+
 fn dashed_ids(harness: &str, text: &str) -> Option<Vec<String>> {
-    text.lines()
-        .filter_map(|line| line.strip_prefix("- "))
-        .map(|rest| one_id(harness, rest.trim()))
+    let mut lines = text.lines();
+    lines
+        .by_ref()
+        .find(|line| line.starts_with("Models which match ") && line.trim_end().ends_with(':'))?;
+    lines
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| one_id(harness, line.strip_prefix("- ")?.trim()))
         .collect()
 }
 
@@ -282,8 +303,11 @@ pub fn merged(harness: &str, shipped: &[String], live: &[String]) -> Vec<String>
     joined
 }
 
-/// Reads one harness's list for a Models open and keeps what it found. Inputs: the engine
-/// database, the harness id, its registered executable, whether the owner asked again, the
+/// Reads one harness's list for a Models open and keeps what it found. A harness with no
+/// list command or no registered executable is neither read nor kept, so no backoff begins
+/// before it can report; a plain open reads nothing while its last read came back
+/// unreported less than `BACKOFF` ago, and the owner asking again reads at once. Inputs:
+/// the engine database, the harness id, its executable, whether the owner asked again, the
 /// time now in ms and the read. Output: whether the read ran, or the store's refusal.
 pub(crate) fn refresh(
     db: &rusqlite::Connection,
@@ -293,11 +317,13 @@ pub(crate) fn refresh(
     now_ms: i64,
     read: impl FnOnce(&Path) -> Option<Vec<String>>,
 ) -> Result<bool, crate::engine::EngineError> {
-    let _ = (retry, now_ms);
-    if reader(harness).is_none() {
+    let Some(executable) = executable.filter(|_| reader(harness).is_some()) else {
+        return Ok(false);
+    };
+    if !retry && super::store::live_backoff(db, harness, now_ms)? {
         return Ok(false);
     }
-    let found = executable.and_then(read);
+    let found = read(executable);
     super::store::live_record(db, harness, found.as_deref())?;
     Ok(true)
 }

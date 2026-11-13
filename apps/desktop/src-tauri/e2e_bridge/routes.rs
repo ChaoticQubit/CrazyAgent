@@ -3783,12 +3783,13 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 harness: String,
                 project_id: Option<String>,
                 fresh: bool,
+                retry: bool,
             }
-            let Args { harness, project_id, fresh } = match parse(args) {
+            let Args { harness, project_id, fresh, retry } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = read(state) .await? .model_choice(harness, project_id, fresh)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = read(state) .await? .model_choice(harness, project_id, fresh, retry)?; call.await }.await;
             routed(result)
         }
         "desktop_set_model_choice" => {

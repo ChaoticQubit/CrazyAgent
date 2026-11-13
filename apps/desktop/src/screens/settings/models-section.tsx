@@ -129,7 +129,10 @@ export function ModelsView(props: ModelsViewProps) {
   const about = scope === "project" ? "A model set here wins over the app value for this project only." : "Changes apply the next time the master or an agent starts with this harness.";
   const unchecked = uncheckedLine(value.models);
   const live = liveLine(value.models);
-  return <SettingSection title="Models" about={<>{catalogLine(value, name)} {unchecked ? `${unchecked} ` : ""}{live ? `${live} ` : ""}{about}</>}>
+  const checkAgain = live && value.models.live_retry
+    ? <><Button variant="quiet" size="small" onClick={props.onRetry}>Check again</Button>{" "}</>
+    : null;
+  return <SettingSection title="Models" about={<>{catalogLine(value, name)} {unchecked ? `${unchecked} ` : ""}{live ? `${live} ` : ""}{checkAgain}{about}</>}>
     {value.models.rows.map((row) => <SlotLine key={row.slot} row={row} candidates={value.models.candidates} scope={scope}
       draft={drafts[row.slot]} busy={busy === row.slot} note={notes[row.slot] ?? ""}
       onDraft={(draft) => props.onDraft(row.slot, draft)} onSave={() => props.onSave(row)} onReset={() => props.onReset(row)} />)}
@@ -309,12 +312,14 @@ function AppOnly({ harness, page, onChanged }: { harness: string; page: Loaded<M
 }
 
 /** One harness's Models block, app-wide or for one project: reads the section, the harness's
- * live list only on opening and Retry, keeps each slot's draft and sends a set or reset with
+ * live list only on opening, Retry and Check again, the last two past the engine's backoff,
+ * keeps each slot's draft and sends a set or reset with
  * the version it read, reading again after a stale refusal. The app page also lists the
  * owner's model ids and the model rules. Inputs: the harness id, its name and the project
  * id, or null for the app. */
 export function ModelsSection({ harness, name, projectId }: { harness: string; name: string; projectId: string | null }) {
   const fresh = useRef(false);
+  const again = useRef(false);
   const opened = useRef("");
   const [page, reload] = useLoad(() => {
     const shown = `${harness}\n${projectId ?? ""}`;
@@ -324,7 +329,9 @@ export function ModelsSection({ harness, name, projectId }: { harness: string; n
     }
     const live = fresh.current;
     fresh.current = false;
-    return loadModels(harness, projectId, live);
+    const forced = again.current;
+    again.current = false;
+    return loadModels(harness, projectId, live, forced);
   }, [harness, projectId]);
   const [drafts, setDrafts] = useState<ModelDrafts>({});
   const [notes, setNotes] = useState<Partial<Record<ModelSlot, string>>>({});
@@ -363,6 +370,7 @@ export function ModelsSection({ harness, name, projectId }: { harness: string; n
 
   function retry() {
     fresh.current = true;
+    again.current = true;
     reload();
   }
 

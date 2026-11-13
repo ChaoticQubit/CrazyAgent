@@ -463,6 +463,8 @@ async fn handle(
     let live = live_due(&action)
         .and_then(crate::model_choice::harness_id)
         .filter(|harness| crate::model_choice::live::reader(harness).is_some());
+    let retry = retried(&action);
+    let registered = executable.is_some();
     let harnesses = match &action {
         Action::Test { .. } => {
             let (codex, claude) = authority
@@ -476,16 +478,26 @@ async fn handle(
     };
     tokio::task::spawn_blocking(move || {
         if let Some(harness) = live {
-            let read = executable
-                .as_deref()
-                .and_then(|path| crate::model_choice::live::read(harness, path, &root));
-            let _ = versioned::open(&root)
-                .and_then(|db| store::live_record(&db, harness, read.as_deref()));
+            let _ = versioned::open(&root).and_then(|db| {
+                crate::model_choice::live::refresh(
+                    &db,
+                    harness,
+                    executable.as_deref(),
+                    retry,
+                    crate::team::now_ms(),
+                    |path| crate::model_choice::live::read(harness, path, &root),
+                )
+            });
         }
-        let installed = executable
-            .as_deref()
-            .and_then(|path| installed::version_cached(path, installed::LIMIT));
-        match action {
+        let installed = executable.as_deref().and_then(|path| {
+            installed::version_for_models(
+                path,
+                installed::LIMIT,
+                crate::model_choice::live::BACKOFF,
+                std::time::Instant::now(),
+            )
+        });
+        let reply = match action {
             Action::Test {
                 harness,
                 model,
@@ -521,7 +533,8 @@ async fn handle(
                 )
             }
             action => run(&root, action, installed.as_deref()),
-        }
+        };
+        reply.map(|reply| readable(reply, registered))
     })
     .await
     .map_err(|_| failure("model_choice_unavailable"))?
@@ -541,17 +554,28 @@ fn live_due(action: &Action) -> Option<&str> {
     }
 }
 
-/// Says whether a Models open asked for the harness's list again. Input: the action.
-/// Output: the flag.
+/// Says whether a Models open asked for the harness's list again past its backoff: the
+/// owner's Check again in the desktop or r in the TUI. Input: the action. Output: the flag.
 fn retried(action: &Action) -> bool {
-    let _ = action;
-    false
+    matches!(action, Action::Values { retry: true, .. })
 }
 
-/// Says on a Models reply whether its harness's list can be read again. Inputs: the reply
-/// and whether an executable is registered. Output: the reply.
-fn readable(reply: Reply, executable: bool) -> Reply {
-    let _ = executable;
+/// Says on a Models reply whether the owner can ask its harness for the list again now: a
+/// list command and a registered executable. A harness with a list command but no
+/// executable shows the not-reported line, since nothing can report its list. Inputs: the
+/// reply and whether an executable is registered. Output: the reply.
+fn readable(mut reply: Reply, executable: bool) -> Reply {
+    if let Reply::Values { models }
+    | Reply::Added { models, .. }
+    | Reply::Removed { models, .. }
+    | Reply::Tested { models, .. } = &mut reply
+    {
+        let reader = crate::model_choice::live::reader(&models.harness).is_some();
+        models.live_retry = reader && executable;
+        if reader && !executable {
+            models.live_note = Some(crate::model_choice::live::not_reported(&models.harness));
+        }
+    }
     reply
 }
 
