@@ -1088,8 +1088,12 @@ async fn a_resend_or_a_check_of_an_add_still_copying_answers_in_progress_and_cop
         }
     }
     let engine = Engine::start().await;
+    let slow_client = Duration::from_secs(30);
+    let kind = OwnerClientKind::Desktop;
     let mut owner = Owner {
-        controller: engine.owner().await,
+        controller: OwnerController::attach(engine.root.path(), kind, slow_client)
+            .await
+            .unwrap(),
         generation: 0,
     };
     let home_text = home.to_str().unwrap().to_owned();
