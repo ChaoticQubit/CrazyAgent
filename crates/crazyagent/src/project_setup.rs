@@ -1009,7 +1009,7 @@ fn now_ms() -> i64 {
 }
 
 const DEFAULT_TEAM_HARNESS: &str = "codex";
-const SIGNED_IN_TEAM_HARNESSES: [&str; 3] = ["codex", "claude", "claude-code"];
+const LEAD_HARNESSES: [&str; 3] = ["codex", "claude", "claude-code"];
 const TEAM_NEEDS_POOL: &str = "Needs a pool";
 const TEAM_NEEDS_SIGN_IN: &str = "Needs a signed-in account";
 
@@ -1159,15 +1159,15 @@ pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
 
 /// Builds the smart team defaults for the New Project Team step (DEC-147.1).
 /// Takes the configuration, the chosen pool and the signed-in connections.
-/// Returns the pool's best signed-in harness, Codex before Claude Code, as master with tools
-/// on; Codex when the pool has no signed-in harness, never RCLI. No sub-agent harness is
+/// Returns the harness `lead_harness` picks as master with tools on; Codex when no account
+/// of the pool can run one, never RCLI. No sub-agent harness is
 /// named and the team maximum is `TEAM_AGENTS_MAX`, so any harness runs with no limit.
 pub fn default_team(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
     signed_in: &BTreeSet<CredentialRef>,
 ) -> TeamPlan {
-    let master = best_signed_in_harness(config, pool, signed_in)
+    let master = lead_harness(config, pool, signed_in)
         .unwrap_or(DEFAULT_TEAM_HARNESS)
         .to_owned();
     assert!(master != "rcli" && harness_valid(&master));
@@ -1202,13 +1202,33 @@ fn best_signed_in_harness<'a>(
                 && matches!(c.auth, ModelAuthentication::NativeManaged { .. })
         })
         .filter_map(|c| {
-            SIGNED_IN_TEAM_HARNESSES
+            LEAD_HARNESSES
                 .iter()
                 .position(|harness| *harness == c.harness.as_str())
                 .map(|rank| (rank, c.harness.as_str()))
         })
         .min()
         .map(|(_, harness)| harness)
+}
+
+/// Finds the harness the default team leads with (DEC-161): the best signed-in managed
+/// harness, else the first of Codex and Claude Code a pool member can run by the one account
+/// rule, such as an Anthropic API key for Claude Code. Takes the configuration, the chosen
+/// pool and the signed-in connections. Returns the harness id, or none when none can run.
+fn lead_harness<'a>(
+    config: &'a EffectiveConfig,
+    pool: Option<&CredentialRef>,
+    signed_in: &BTreeSet<CredentialRef>,
+) -> Option<&'a str> {
+    best_signed_in_harness(config, pool, signed_in).or_else(|| {
+        let access = config.settings.model_access.as_ref()?;
+        let chosen = access.pools.iter().find(|p| Some(&p.id) == pool)?;
+        let ready =
+            |connection: &crate::config::ModelConnection| signed_in.contains(&connection.id);
+        LEAD_HARNESSES.into_iter().find(|harness| {
+            crate::research::accounts::pool_account(access, chosen, harness, &ready).is_some()
+        })
+    })
 }
 
 /// Says in plain words why the default team cannot start yet.
@@ -1229,7 +1249,7 @@ pub fn default_team_status(
     else {
         return Some(TEAM_NEEDS_POOL);
     };
-    let harness = best_signed_in_harness(config, pool, signed_in).unwrap_or(DEFAULT_TEAM_HARNESS);
+    let harness = lead_harness(config, pool, signed_in).unwrap_or(DEFAULT_TEAM_HARNESS);
     let ready = |connection: &crate::config::ModelConnection| signed_in.contains(&connection.id);
     match crate::research::accounts::pool_account(access, chosen, harness, &ready) {
         Some(_) => None,
