@@ -53,6 +53,7 @@ pub struct Servers {
     pins: Mutex<BTreeMap<AgentId, Arc<ServerPin>>>,
     keepers: Mutex<BTreeMap<AgentId, Child>>,
     mates_keepers: Mutex<BTreeMap<AgentId, Child>>,
+    renewed: Mutex<Option<SystemTime>>,
     deadline_checks: (u32, u32),
 }
 
@@ -171,6 +172,7 @@ impl Servers {
             pins: Mutex::new(BTreeMap::new()),
             keepers: Mutex::new(BTreeMap::new()),
             mates_keepers: Mutex::new(BTreeMap::new()),
+            renewed: Mutex::new(None),
             deadline_checks: (super::DEADLINE_CHECK_LOOPS, super::DEADLINE_LATE_CHECKS),
         }
     }
@@ -196,7 +198,10 @@ impl Servers {
     /// server left is never served again. A later start of the same lead ends that lead's
     /// earlier keeper first; an earlier teammates' keeper that does not confirm, as after a
     /// teammate killed its warden, is killed rather than refusing the start, since its server
-    /// listens at another socket. Takes the lead, its socket and which server. Returns whether a
+    /// listens at another socket. The lead's record gets the last renewed deadline before the
+    /// keeper starts, so a server started after the last renewal pass still ends (QL-L1);
+    /// before the first pass, which runs at once as the engine starts, it keeps what it holds.
+    /// Takes the lead, its socket and which server. Returns whether a
     /// keeper started now, `terminal_folder_unsafe` for a socket path that is not this user's
     /// socket, or `terminal_unavailable`.
     #[cfg(target_os = "macos")]
@@ -258,6 +263,13 @@ impl Servers {
         keepers.retain(|_, keeper| keeper_runs(keeper));
         if keepers.len() >= LEADS_KEPT_MAX {
             return Err(failure("terminal_unavailable"));
+        }
+        let renewed = *self
+            .renewed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(until) = renewed {
+            keep_servers_deadline(&self.root, lead, until)?;
         }
         let mut keeper = crate::spawn_gate::spawn(
             std::process::Command::new(crate::sandbox::KEEPER[0])
@@ -840,6 +852,10 @@ impl Host for Servers {
     }
 
     fn renew(&self, until: SystemTime) -> Result<(), HostError> {
+        *self
+            .renewed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(until);
         let mut first = self.engine.renew(until).err();
         for lead in self.leads_listening() {
             if let Err(problem) = keep_servers_deadline(&self.root, &lead, until) {
