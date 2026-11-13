@@ -121,17 +121,16 @@ fn claude_code_gets_its_retry_cap_only_under_stop_at_once() {
     assert_eq!(CLAUDE_MAX_RETRIES, "CLAUDE_CODE_MAX_RETRIES");
 }
 
-/// RCLI's requests go through the engine's model gateway: one try under Stop at once and
-/// Harness default (its behaviour today), two retries under Retry briefly.
+/// RCLI's requests go through the engine's model gateway, which sends each one exactly once
+/// so no reply is sent twice (DEC-163 addendum 5): every option shows the same RCLI line.
 #[test]
-fn rcli_gets_its_gateway_retry_count_per_option() {
-    assert_eq!(ProviderRetry::StopAtOnce.rcli_retries(), 0);
-    assert_eq!(
-        ProviderRetry::RetryBriefly.rcli_retries(),
-        RCLI_BRIEF_RETRIES
-    );
-    assert_eq!(ProviderRetry::HarnessDefault.rcli_retries(), 0);
-    assert_eq!(RCLI_BRIEF_RETRIES, 2);
+fn rcli_keeps_one_try_under_every_option() {
+    for choice in ProviderRetry::ALL {
+        assert_eq!(
+            choice.harness_line(HarnessKind::Rcli),
+            "RCLI: one try. The engine never repeats an RCLI request."
+        );
+    }
 }
 
 /// DEC-141 parity: every harness has a line for every option, naming the harness, and the
