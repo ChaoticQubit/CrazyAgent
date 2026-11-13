@@ -2872,7 +2872,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
         mode: AddMode::Move,
         overrides: vec![AddOverride::TooLarge],
     };
-    assert_eq!(job_asks(&mut shell), [start.clone()]);
+    assert_eq!(job_asks(&mut shell), std::slice::from_ref(&start));
     shell.arrive(intake(start, Err("intake_busy".into())));
     let said = shell.ctx.message().expect("a refused start is said");
     assert_eq!(
@@ -2888,7 +2888,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
     let dismiss = IntakeQuery::JobDismiss {
         id: failed.id.clone(),
     };
-    assert_eq!(job_asks(&mut shell), [dismiss.clone()]);
+    assert_eq!(job_asks(&mut shell), std::slice::from_ref(&dismiss));
     shell.arrive(intake(dismiss, Ok(IntakeView::JobDismissed(true))));
     assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus]);
     job_read(&mut shell, None);
