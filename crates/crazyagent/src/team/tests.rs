@@ -1063,6 +1063,7 @@ fn an_empty_plan_runs_more_than_one_sub_agent_at_once() {
                     project_id: setup.project_id.clone(),
                     harness: None,
                     prompt: prompt.into(),
+                    model: None,
                 }
             )
             .unwrap(),
@@ -1375,11 +1376,13 @@ fn owner_actions_queue_messages_cancel_tasks_and_keep_agents_warm() {
             project_id: project.clone(),
             harness: None,
             prompt: "Write login.md".into(),
+            model: None,
         },
         TeamAction::Delegate {
             project_id: project.clone(),
             harness: Some("codex".into()),
             prompt: "Write signup.md".into(),
+            model: None,
         },
         TeamAction::KeepWarm {
             project_id: project.clone(),
@@ -1976,6 +1979,7 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
             project_id: project.clone(),
             harness: None,
             prompt: "Write page.md".into(),
+            model: None,
         },
     ] {
         assert_eq!(
@@ -2155,6 +2159,7 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
             project_id: project.clone(),
             harness: None,
             prompt: "Write page.md".into(),
+            model: None,
         },
         TeamAction::KeepWarm {
             project_id: project.clone(),
@@ -2640,6 +2645,7 @@ fn a_managed_pool_member_without_a_sign_in_never_starts_an_agent() {
             project_id: project.clone(),
             harness: None,
             prompt: "Write page.md".into(),
+            model: None,
         },
     ] {
         assert_eq!(
@@ -7170,6 +7176,7 @@ fn pause_all_and_a_one_task_cancel_each_keep_their_reason_and_an_owner_action_ro
                     project_id: project.clone(),
                     harness: None,
                     prompt: prompt.into(),
+                    model: None,
                 },
             )
             .unwrap(),
@@ -7431,6 +7438,7 @@ fn the_runtime_stores_why_a_queued_task_waits_and_the_team_status_shows_it() {
                 project_id: project.clone(),
                 harness: None,
                 prompt: "Write page.md".into(),
+                model: None,
             },
         )
         .unwrap(),
@@ -7514,11 +7522,13 @@ fn the_master_reads_the_owner_s_agent_limits_and_each_waiting_task() {
             project_id: project.clone(),
             harness: None,
             prompt: "Write login.md".into(),
+            model: None,
         },
         TeamAction::Delegate {
             project_id: project.clone(),
             harness: None,
             prompt: "Write signup.md".into(),
+            model: None,
         },
     ] {
         assert_eq!(
@@ -7555,4 +7565,141 @@ fn the_master_reads_the_owner_s_agent_limits_and_each_waiting_task() {
     let text = read.text();
     assert!(text.contains(read.limits.as_deref().unwrap()), "{text}");
     assert!(text.contains(&read.queued[1].line), "{text}");
+}
+
+/// Stores the owner's Codex allowed list at app scope for the owner delegate rows.
+/// Takes the database and the ticked catalog ids.
+fn codex_allowed(db: &Connection, allowed: &[&str]) {
+    let catalog = crate::model_choice::catalog("codex");
+    let written = crate::model_choice::store::set(
+        db,
+        "codex",
+        &catalog,
+        &crate::harness_settings::Scope::App,
+        crate::model_choice::Slot::Allowed,
+        &serde_json::json!(allowed),
+        0,
+    )
+    .unwrap();
+    assert!(
+        matches!(written, crate::model_choice::Written::Saved { .. }),
+        "{written:?}"
+    );
+}
+
+#[test]
+fn an_owner_delegate_pins_an_allowed_model_and_a_refused_one_writes_nothing() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-owner-model",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let catalog = crate::model_choice::catalog("codex");
+    let (allowed, other) = (catalog[0].clone(), catalog[1].clone());
+    codex_allowed(&connection, &[allowed.as_str()]);
+    let pool = access("team-owner-model", &["local-a"]);
+    let project = setup.project_id.clone();
+    let delegate = |prompt: &str, model: Option<&str>| TeamAction::Delegate {
+        project_id: project.clone(),
+        harness: Some("codex".into()),
+        prompt: prompt.into(),
+        model: model.map(str::to_owned),
+    };
+    let tasks = |tx: &Transaction<'_>| -> Vec<i64> {
+        let mut statement = tx
+            .prepare("SELECT id FROM team_tasks WHERE project=?1 ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([project.as_str()], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let tx = connection.transaction().unwrap();
+
+    assert_eq!(
+        execute(&tx, &pool, &delegate("Write other.md", Some(&other))).unwrap(),
+        Outcome::Rejected {
+            code: "team_model_not_allowed".into()
+        }
+    );
+    assert!(tasks(&tx).is_empty(), "a refused pick writes no task");
+
+    assert_eq!(
+        execute(&tx, &pool, &delegate("Write login.md", Some(&allowed))).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        execute(&tx, &pool, &delegate("Write signup.md", None)).unwrap(),
+        Outcome::Applied
+    );
+    let admitted = tasks(&tx);
+    assert_eq!(admitted.len(), 2);
+    assert_eq!(
+        model_pick::pinned(&tx, admitted[0]).unwrap(),
+        Some(tool::ModelPick {
+            model: allowed.clone(),
+            reason: model_pick::OWNER_PICK_REASON.into(),
+        })
+    );
+    assert_eq!(model_pick::pinned(&tx, admitted[1]).unwrap(), None);
+    assert_eq!(
+        model_pick::wanted(&tx, admitted[0], &project, "codex").unwrap(),
+        Some(allowed)
+    );
+}
+
+#[test]
+fn an_owner_delegate_model_of_the_wrong_shape_is_refused_before_admission() {
+    let project = ProjectId::new("team-owner-model").unwrap();
+    for (harness, model) in [
+        (Some("codex"), "has space"),
+        (Some("codex"), "opus[1m]"),
+        (None, ""),
+        (None, "-leading-dash"),
+    ] {
+        let action = TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: harness.map(str::to_owned),
+            prompt: "Write login.md".into(),
+            model: Some(model.into()),
+        };
+        assert_eq!(
+            action.validate().unwrap_err().0,
+            "team_model_invalid",
+            "{harness:?} {model}"
+        );
+    }
+    let fine = TeamAction::Delegate {
+        project_id: project.clone(),
+        harness: Some("claude-code".into()),
+        prompt: "Write login.md".into(),
+        model: Some("opus[1m]".into()),
+    };
+    fine.validate().unwrap();
+}
+
+#[test]
+fn an_owner_delegate_without_a_model_field_still_parses() {
+    let action: TeamAction = serde_json::from_value(serde_json::json!({
+        "kind": "Delegate",
+        "project_id": "team-owner-model",
+        "harness": "codex",
+        "prompt": "Write login.md",
+    }))
+    .unwrap();
+    assert!(matches!(action, TeamAction::Delegate { model: None, .. }));
 }

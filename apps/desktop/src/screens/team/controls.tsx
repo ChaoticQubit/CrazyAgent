@@ -1,6 +1,8 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
 import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setLeftovers, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandingMode, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMasterRounds, setMasterRunTime, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setDoneQuiet, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
+import { ALLOWED_MAX, ACCOUNT_MODEL, loadModels, usableIds } from "../../api-model-choice";
+import type { ModelSlot, Models } from "../../api-model-choice";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, LeftoverMode, BranchMode, ChildLanding, IntentReceipt, LandingMode, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
@@ -31,6 +33,31 @@ export const TEAM_SETTINGS_STALE = "Team settings changed since the controls rea
 export function delegateOptions(status: Pick<TeamStatus, "harnesses">, harness: (id: string) => string = (id) => id): SelectOption[] {
   const subs = [...new Set(status.harnesses.filter((item) => item.role === "sub").map((item) => item.harness))];
   return [{ value: ANY_HARNESS, label: "Any sub-agent" }, ...subs.map((id) => ({ value: id, label: harness(id) }))];
+}
+
+/** The Model choice's words for the harness's agent default before its models are read, and
+ * for any sub-agent, which runs each harness's own default. */
+export const DEFAULT_MODEL = "Default";
+
+/** The models a handed task may run on one harness (DEC-150 M-8), in the TUI's words:
+ * Default first, naming the agent default, or the account's own model when none is set or
+ * the harness takes no model from CrazyAgent, then each allowed id the harness offers, in list
+ * order, once, without the default's own id. Input: the harness's Models section at the
+ * project's scope, or null for any sub-agent and before or without a read. Output: options
+ * whose value is the id, or "" for Default. */
+export function delegateModelOptions(models: Pick<Models, "rows" | "candidates"> | null): SelectOption[] {
+  if (models === null) return [{ value: "", label: DEFAULT_MODEL }];
+  const applied = (slot: ModelSlot) => models.rows.find((row) => row.slot === slot && row.source !== "not_applied");
+  const value = applied("agent")?.effective;
+  const agent = typeof value === "string" ? value : null;
+  const listed = applied("allowed")?.effective;
+  const usable = usableIds(models.candidates);
+  const ids: string[] = [];
+  for (const id of Array.isArray(listed) ? listed : []) {
+    if (ids.length < ALLOWED_MAX && id !== agent && usable.includes(id) && !ids.includes(id)) ids.push(id);
+  }
+  const named = agent === null ? ACCOUNT_MODEL : displayText(agent);
+  return [{ value: "", label: `${DEFAULT_MODEL} (${named})` }, ...ids.map((id) => ({ value: id, label: displayText(id) }))];
 }
 
 /** Names a time limit the way the engine's notes do: whole hours as "1 h", whole minutes as
@@ -496,7 +523,9 @@ export function StopAll({ projectId, status, reload }: { projectId: string; stat
 
 /** The team's actions in the Agents tab's Agents and tasks fold: Stop all while the team runs
  * (a stopped team's line and Start all again sit above the graph), and hand one task straight
- * to a sub-agent when the master should not plan it. A team view the engine shortened says so. Inputs: the project id, the latest team status, a harness name lookup
+ * to a sub-agent when the master should not plan it, on the harness's default model or one
+ * the owner picks from the harness's Models section (DEC-150 M-8). A team view the engine
+ * shortened says so. Inputs: the project id, the latest team status, a harness name lookup
  * and a reload. Output: the actions. */
 export function TeamActions({ projectId, status, harness, reload }: {
   projectId: string;
@@ -505,18 +534,32 @@ export function TeamActions({ projectId, status, harness, reload }: {
   reload: () => void;
 }) {
   const [target, setTarget] = useState(ANY_HARNESS);
+  const [model, setModel] = useState("");
+  const [models, setModels] = useState<Models | null>(null);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [sent, setSent] = useState("");
   const options = delegateOptions(status, harness);
+  const modelOptions = delegateModelOptions(models);
   const check = taskInput(text);
   const subs = options.length > 1;
+
+  useEffect(() => {
+    setModel("");
+    setModels(null);
+    if (target === ANY_HARNESS) return;
+    let current = true;
+    void loadModels(target, projectId, false).then((result) => {
+      if (current && result.kind === "ok") setModels(result.value.models);
+    });
+    return () => { current = false; };
+  }, [projectId, target]);
 
   async function hand() {
     if (check.kind !== "ok" || busy) return;
     setBusy(true);
-    const message = changeNote(await delegateTeamTask(projectId, target || null, check.prompt), "handing tasks to sub-agents");
+    const message = changeNote(await delegateTeamTask(projectId, target || null, check.prompt, model || null), "handing tasks to sub-agents");
     setBusy(false);
     setNote(message);
     if (!message) {
@@ -532,6 +575,7 @@ export function TeamActions({ projectId, status, harness, reload }: {
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />
+      <Select id={`tg-hand-model-${projectId}`} label="Model" value={model} options={modelOptions} onValue={setModel} />
       <label htmlFor={`tg-hand-text-${projectId}`}>Task</label>
       <textarea id={`tg-hand-text-${projectId}`} className="pj-input" rows={3} value={text} onChange={(event) => { setText(event.target.value); setSent(""); }}
         aria-describedby={`tg-hand-help-${projectId}`} onKeyDown={(event) => { if (event.key === "Enter" && shortcutKey(event)) { event.preventDefault(); void hand(); } }} />

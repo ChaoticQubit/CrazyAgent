@@ -1088,3 +1088,54 @@ fn a_damaged_native_sub_agent_model_value_is_passed_over_for_follow() {
         NativeModel::Follow
     );
 }
+
+#[test]
+fn only_an_owner_id_waiting_for_its_test_launch_is_pending() {
+    let (_tmp, db) = engine();
+    let ids = crate::model_choice::catalog("codex");
+    assert!(!store::custom_pending(&db, "codex", "my-model").unwrap());
+    assert_eq!(
+        store::custom_begin(&db, "codex", &ids, "my-model").unwrap(),
+        Begun::Pending
+    );
+    assert!(store::custom_pending(&db, "codex", "my-model").unwrap());
+    assert!(!store::custom_pending(&db, "claude-code", "my-model").unwrap());
+    assert!(!store::custom_pending(&db, "codex", &ids[0]).unwrap());
+    store::custom_checked(&db, "codex", "my-model", false).unwrap();
+    assert!(!store::custom_pending(&db, "codex", "my-model").unwrap());
+    assert_eq!(
+        store::custom_pending(&db, "no-such-harness", "my-model")
+            .unwrap_err()
+            .0,
+        "model_choice_harness_unknown"
+    );
+}
+
+/// An owner id is added only where a test launch can run, and the section tells both
+/// clients so (MUG2-L1): Claude Code and Codex take one, while RCLI answers
+/// `model_choice_not_supported` and keeps no id that would wait forever.
+#[test]
+fn an_owner_id_is_added_only_where_a_test_launch_can_run_and_the_section_says_so() {
+    let (_tmp, db) = engine();
+    for harness in ["codex", "claude-code"] {
+        let models = store::values(&db, harness, &[], &Scope::App, None).unwrap();
+        assert!(models.testable, "{harness}");
+    }
+    let ids = catalog(&["local"]);
+    assert_eq!(
+        store::custom_begin(&db, "rcli", &ids, "my-model")
+            .unwrap_err()
+            .0,
+        "model_choice_not_supported"
+    );
+    let models = store::values(&db, "rcli", &ids, &Scope::App, None).unwrap();
+    assert!(!models.testable);
+    assert!(
+        models
+            .candidates
+            .iter()
+            .all(|candidate| candidate.id != "my-model"),
+        "{:?}",
+        models.candidates
+    );
+}

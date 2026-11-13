@@ -1466,7 +1466,9 @@ pub(in crate::tui) mod tests {
                     name: *name,
                     label: name.label().into(),
                     state: if missing.contains(name) {
-                        DependencyState::Missing
+                        DependencyState::Missing {
+                            line: name.not_found().line(),
+                        }
                     } else {
                         DependencyState::Found {
                             version: Version::parse("1.0.0").unwrap(),

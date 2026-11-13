@@ -54,6 +54,7 @@ fn task(id: i64, harness: &str, status: TaskStatus, agent: Option<i64>) -> TeamT
         finished_ms: None,
         parent: None,
         wait: None,
+        pick: None,
     }
 }
 

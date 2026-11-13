@@ -88,6 +88,7 @@ pub mod spawn_gate;
 pub mod storage;
 pub mod team;
 pub mod terminal;
+pub mod tools;
 pub mod tracker;
 pub mod trust;
 pub mod tui;

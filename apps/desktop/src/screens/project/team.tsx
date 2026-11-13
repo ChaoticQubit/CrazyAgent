@@ -170,6 +170,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
       </span>
       <strong>{displayText(row.prompt)}</strong>
       {row.summary && <span className="pj-secondary">{displayText(row.summary)}</span>}
+      {row.pick && <span className="pj-small pj-muted">{displayText(row.pick)}</span>}
       {row.result !== null && <span>
         <button type="button" className="btn quiet small" aria-expanded={shown === row.key} aria-controls={`pj-result-${row.key}`}
           onClick={() => setShown(shown === row.key ? null : row.key)}>{shown === row.key ? "Hide result" : "Show result"}</button>

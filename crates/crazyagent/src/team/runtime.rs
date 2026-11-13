@@ -742,6 +742,11 @@ impl Worker {
 /// Reads the live model access on every tick; none means no pool is configured.
 pub type AccessSource = Box<dyn Fn() -> Option<ModelAccess> + Send>;
 
+/// Looks for the engine's terminal host again, as tmux found now, for a runtime that started
+/// with none, such as an engine that started before setup installed tmux on a fresh Mac.
+/// Returns the host, or none while no terminal program is found.
+pub type TerminalProbe = Box<dyn Fn() -> Option<Arc<dyn Host>> + Send>;
+
 /// Runs each project's team: the master on the team plan's master harness and
 /// sub-agents on its sub-harnesses, each in the project sandbox, sub-agents in
 /// their own git worktrees. The engine admits every task; agents only propose.
@@ -759,6 +764,9 @@ pub struct TeamRuntime {
     delegation_tool: Option<RegisteredNativeAuthHost>,
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
+    terminal_probe: Option<TerminalProbe>,
+    tools_refresh: fn(),
+    live_switched_on: BTreeSet<ProjectId>,
     swept: Option<Instant>,
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
@@ -1104,6 +1112,9 @@ impl TeamRuntime {
             delegation_tool: None,
             agents: None,
             terminal: None,
+            terminal_probe: None,
+            tools_refresh: crate::tools::probe::refresh_now,
+            live_switched_on: BTreeSet::new(),
             swept: None,
             events: None,
             watch: super::events::Watch::default(),
@@ -1214,11 +1225,20 @@ impl TeamRuntime {
     /// account, so the agent goes on without a relaunch; every other team pane ends and its
     /// project hears why. Takes the host. Returns the runtime, or the host's plain code.
     pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, EngineError> {
+        self.attach_terminal(host)?;
+        Ok(self)
+    }
+
+    /// Makes `host` the terminal team agents run in, at engine start or when a live master
+    /// start finds one the engine started without, and takes over or ends the panes an
+    /// earlier engine left there ([`TeamRuntime::with_terminal`]). Takes the host. Returns
+    /// the host's plain code when it cannot list its panes, with no host kept.
+    fn attach_terminal(&mut self, host: Arc<dyn Host>) -> Result<(), EngineError> {
         let records = self.pane_records()?;
+        let alive = host.alive()?;
         self.terminal = Some(host.clone());
         let access = (self.access)().unwrap_or_default();
-        let panes: BTreeMap<i64, AgentId> = host
-            .alive()?
+        let panes: BTreeMap<i64, AgentId> = alive
             .into_iter()
             .filter_map(|agent| agent.team_agent().map(|id| (id, agent)))
             .collect();
@@ -1240,7 +1260,24 @@ impl TeamRuntime {
                 self.closed_note(id, &reason)?;
             }
         }
-        Ok(self)
+        assert!(self.terminal.is_some());
+        Ok(())
+    }
+
+    /// Lets a runtime with no terminal host look for one again each time a live master is
+    /// to start, so tmux installed after the engine started is used without a restart.
+    /// Takes the probe. Returns the runtime.
+    pub fn with_terminal_probe(mut self, probe: TerminalProbe) -> Self {
+        self.terminal_probe = Some(probe);
+        self
+    }
+
+    /// Replaces what the runtime runs to look for tools again when the owner switches a live
+    /// master on, for a row that counts those looks. Takes the function. Returns the runtime.
+    #[cfg(test)]
+    fn with_tools_refresh(mut self, refresh: fn()) -> Self {
+        self.tools_refresh = refresh;
+        self
     }
 
     /// Reads and forgets the pane records an earlier engine kept, so each is used once.
@@ -1543,6 +1580,8 @@ impl TeamRuntime {
     /// the questions masters' harnesses ask the owner in their own terminals, asks the
     /// scorecard's daily question when it is due, alerts the owner to new questions and
     /// terminal waits by severity, then brings the notification store in step (DEC-136a).
+    /// A project no longer active has its live switch off, so its next switch-on counts as
+    /// a new start.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.settle()?;
         self.collect()?;
@@ -1551,7 +1590,10 @@ impl TeamRuntime {
         let access = (self.access)().unwrap_or_default();
         self.owner_restarts(&access)?;
         self.owner_wakes(&access)?;
-        for project in self.active_projects()? {
+        let active = self.active_projects()?;
+        self.live_switched_on
+            .retain(|project| active.contains(project));
+        for project in active {
             self.step(&project, &access)?;
         }
         self.collect()?;
@@ -3790,7 +3832,7 @@ impl TeamRuntime {
         harness: &str,
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<Result<Option<TeamAccount>, String>, EngineError> {
-        let catalog = crate::model_choice::catalog(harness);
+        let catalog = crate::model_choice::store::catalog(&self.connection, harness)?;
         let wanted = crate::model_choice::store::launch_model(
             &self.connection,
             harness,
@@ -4463,8 +4505,9 @@ impl TeamRuntime {
     /// once no turn is open and the owner is not typing, and clears those starts, so switching
     /// it off and on never counts as a crash. With no master running and a saved master
     /// harness that has no live terminal, such as RCLI, it turns the live master off with one
-    /// note, so the one-turn master answers (F06). Takes the setup, live access and paused
-    /// accounts.
+    /// note, so the one-turn master answers (F06). Each time the owner switches it on, as
+    /// Start or Try again, the tool probes look again at once, so a tool the owner just
+    /// installed is found. Takes the setup, live access and paused accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -4473,6 +4516,11 @@ impl TeamRuntime {
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let on = super::master::live(&self.connection, project)?;
+        if !on {
+            self.live_switched_on.remove(project);
+        } else if self.live_switched_on.insert(project.clone()) {
+            (self.tools_refresh)();
+        }
         if self.workers.values().any(|w| {
             &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
         }) {
@@ -4509,8 +4557,6 @@ impl TeamRuntime {
             return self.move_when_idle(stored, access, paused, id);
         }
         let harness = stored.team.master.clone();
-        let live_capable = launch_harness(&harness)
-            .is_some_and(|launch| self.live_master(project, AgentRole::Master, launch));
         let planned = self.master_restarts.remove(project);
         let left = self.master_moves.remove(project);
         assert!(left.is_none() || planned, "a move is a planned restart");
@@ -4524,6 +4570,22 @@ impl TeamRuntime {
             crate::notifications::events::master_off(&self.connection, project, &line, now_ms());
             return self.note(project, &line);
         }
+        if on && self.terminal.is_none() {
+            let Some(host) = self.terminal_probe.as_ref().and_then(|probe| probe()) else {
+                return self.live_ended(project, super::master::TERMINAL_MISSING);
+            };
+            if let Err(problem) = self.attach_terminal(host) {
+                return self.live_off(
+                    project,
+                    &format!(
+                        "its terminal could not open: {}",
+                        bound_text(&problem.0, 300)
+                    ),
+                );
+            }
+        }
+        let live_capable = launch_harness(&harness)
+            .is_some_and(|launch| self.live_master(project, AgentRole::Master, launch));
         if !on || !live_capable || self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
         }
@@ -6856,7 +6918,7 @@ impl TeamRuntime {
             let own = crate::model_choice::store::launch_model(
                 &self.connection,
                 &slot.harness,
-                &crate::model_choice::catalog(&slot.harness),
+                &crate::model_choice::store::catalog(&self.connection, &slot.harness)?,
                 Some(project),
                 crate::model_choice::Slot::Agent,
             )?;
@@ -9306,10 +9368,16 @@ impl TeamRuntime {
             .parent()
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
+        let resolved =
+            crate::tools::resolve_entry(&program, &crate::tools::Places::from_environment(None));
         sandbox = sandbox
             .allow_read(&install)
             .and_then(|sandbox| sandbox.allow_exec(&program))
             .and_then(|sandbox| sandbox.allow_node_for(&program))
+            .and_then(|sandbox| match &resolved {
+                Ok(resolved) => sandbox.allow_interpreters(resolved),
+                Err(_) => Ok(sandbox),
+            })
             .map_err(sandboxed)?;
         if let Some(engine) = &self.delegation_tool {
             let engine = engine
@@ -13958,8 +14026,9 @@ pub fn agent_teammates_server_pid(state: &Path, id: i64) -> PathBuf {
 /// Takes the runtime folder, both settings files, the launch executables by harness, the
 /// engine executable that serves masters their `delegate` tool, the engine's agent register
 /// that lists every team agent with its owner controls, the terminal host agents run in,
-/// the engine-start re-proof's flag, so agents wait for its sign-in re-checks (DEC-108),
-/// and the engine's lookup of a harness it pinned after it started.
+/// the look for that host again when the engine started without one, the engine-start
+/// re-proof's flag, so agents wait for its sign-in re-checks (DEC-108), and the engine's
+/// lookup of a harness it pinned after it started.
 /// Returns the service, or a plain reason.
 #[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
@@ -13970,6 +14039,7 @@ pub fn start_for_engine(
     engine: Option<&Path>,
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
+    probe: Option<TerminalProbe>,
     reproving: Option<Arc<AtomicBool>>,
     lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<TeamService, String> {
@@ -14014,6 +14084,10 @@ pub fn start_for_engine(
     };
     let runtime = match terminal {
         Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
+        None => runtime,
+    };
+    let runtime = match probe {
+        Some(probe) => runtime.with_terminal_probe(probe),
         None => runtime,
     };
     let runtime = runtime.with_events(super::events::HANDLERS);

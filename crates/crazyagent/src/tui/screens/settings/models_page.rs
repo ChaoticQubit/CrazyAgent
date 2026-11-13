@@ -3,6 +3,7 @@ use super::harness_page::shown;
 use crate::engine::owner::ModelAdded;
 use crate::harness_settings::{Access, Source};
 use crate::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
+use crate::model_choice::test_launch::Tested;
 use crate::model_choice::{
     ALLOWED_MAX, Candidate, MODEL_BYTES_MAX, Models, NOT_SUPPORTED, NativeModel, Origin, Row, Slot,
     UNQUALIFIED_REASON_BYTES_MAX, Written, model_valid, shipped,
@@ -10,15 +11,15 @@ use crate::model_choice::{
 use crate::protocol::ProjectId;
 use crate::tui::client::model_choice::{ModelChoiceEvent, ModelChoiceQuery, ModelChoiceReply};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
-use crate::tui::ctx::Ctx;
+use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::process::Scope;
 use crate::tui::screens::settings_accounts::{plain, send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
-use crate::tui::seam::Arrival;
+use crate::tui::seam::{Arrival, Request};
 use crate::tui::text::{
-    cells, indent, join, list_row, restyle, row, styled, thumb, with_bar, wrap,
+    cells, cut, indent, join, list_row, restyle, row, styled, thumb, with_bar, wrap,
 };
 use crate::tui::theme::Role;
 use crate::tui::widgets::TextField;
@@ -31,8 +32,13 @@ use serde_json::Value;
 mod tests;
 
 const DETAIL_ROWS: usize = 4;
+const POOL_ROWS: usize = DETAIL_ROWS - 1;
+const TESTING: &str = "Testing. This can take up to 2 minutes.";
+/// Why the owner cannot add a model id on a harness the engine says has no test launch,
+/// word for word on the desktop (MUG2-L1).
+const NO_TEST_LAUNCH: &str = "An id you add needs a test launch, and this harness has none.";
 const PAGE_STEP: isize = 10;
-const ACCOUNT_MODEL: &str = "Account's own model";
+pub(in crate::tui) const ACCOUNT_MODEL: &str = "Account's own model";
 const APP_VALUE: &str = "Use the app value";
 const ID_RULE: &str = "Use letters, digits and - _ . : / @ +, starting with a letter or digit.";
 const OUT_OF_SHAPE: &str = "The engine's answer does not fit this page. Press r to read again.";
@@ -111,7 +117,8 @@ enum Item {
 
 /// A change the owner is making to the selected row: a model for the master or agent slot
 /// (index 0 is no model), a Native sub-agent model option (index 0 is the app value on a
-/// project page), the ticks of the allowed list, a rule option, or a typed id. `from` is
+/// project page), the ticks of the allowed list, a rule option, a typed id, or the pool
+/// that runs the test launch of the owner id at `index` in the candidates. `from` is
 /// where the change started, so an unchanged choice sends nothing.
 #[derive(Debug)]
 enum Edit {
@@ -134,6 +141,10 @@ enum Edit {
         from: usize,
     },
     Field(TextField),
+    Pool {
+        at: usize,
+        index: usize,
+    },
 }
 
 enum Step {
@@ -155,6 +166,15 @@ fn message(code: &str) -> String {
         }
         "model_choice_harness_unknown" => "CrazyAgent doesn't know this harness.",
         "model_choice_not_supported" => return format!("{NOT_SUPPORTED}."),
+        "model_choice_pool_needed" => {
+            "Pick a pool with at least one account to run the test launch."
+        }
+        "model_choice_pool_unknown" => {
+            "That pool no longer exists, so nothing was tested. Pick another one."
+        }
+        "model_choice_test_busy" => {
+            "A test launch for this harness is already running. Try again when it ends."
+        }
         "model_choice_outcome_unknown" => {
             "CrazyAgent couldn't confirm what happened. Press r to read the page before you try again."
         }
@@ -244,6 +264,16 @@ fn origin_word(origin: Origin) -> &'static str {
         Origin::Verified => "Your id, tested",
         Origin::Failed => "Test launch failed",
     }
+}
+
+/// The state words beside an owner id: a pending id on a harness the engine says has no
+/// test launch is not supported, as nothing will test it (MUG2-L1). Inputs: the id's
+/// origin and whether the harness has a test launch. Output: the words.
+fn own_word(origin: Origin, testable: bool) -> String {
+    if origin == Origin::Pending && !testable {
+        return format!("{NOT_SUPPORTED}.");
+    }
+    origin_word(origin).to_owned()
 }
 
 fn source_word(source: Source) -> &'static str {
@@ -553,6 +583,7 @@ impl ModelsPage {
         let query = ModelChoiceQuery::Read {
             harness: self.harness.clone(),
             project: self.project(),
+            fresh: true,
         };
         self.ask(query, ctx);
     }
@@ -566,6 +597,10 @@ impl ModelsPage {
                 .reason
                 .as_ref()
                 .is_none_or(|reason| reason.len() <= UNQUALIFIED_REASON_BYTES_MAX)
+            && models
+                .live_note
+                .as_ref()
+                .is_none_or(|note| note.len() <= crate::model_choice::live::NOTE_BYTES_MAX)
     }
 
     fn items(&self) -> Vec<Item> {
@@ -579,9 +614,7 @@ impl ModelsPage {
         if rules.is_some() {
             items.extend([Item::Pick, Item::Fallback]);
         }
-        if row_of(models, Slot::Allowed).is_some_and(|row| row.access == Access::Editable) {
-            items.push(Item::Add);
-        }
+        items.push(Item::Add);
         items.extend(
             models
                 .candidates
@@ -663,6 +696,13 @@ impl ModelsPage {
                     .unwrap_or(0);
                 Edit::Rule { at, from: at }
             }
+            Item::Add if !models.testable => {
+                ctx.say(Message::warning(
+                    &format!("{NOT_SUPPORTED}."),
+                    NO_TEST_LAUNCH,
+                ));
+                return;
+            }
             Item::Add => Edit::Field(TextField::new("Model id", MODEL_BYTES_MAX)),
             Item::Own(_) => return,
         };
@@ -710,6 +750,42 @@ impl ModelsPage {
         self.ask(query, ctx);
     }
 
+    /// Tells whether the test launch of one owner id is running. Input: the id. Output:
+    /// true while the page waits for its answer.
+    fn testing(&self, id: &str) -> bool {
+        matches!(&self.pending, Some(ModelChoiceQuery::Test { model, .. }) if model == id)
+    }
+
+    /// Tells whether an owner id can be tested now: it waits for its test launch, this
+    /// harness has one and the id is not being tested. Input: the candidate. Output: true
+    /// when t offers the test.
+    fn testable(&self, candidate: &Candidate) -> bool {
+        let State::Ready { models, .. } = &self.state else {
+            return false;
+        };
+        candidate.origin == Origin::Pending && models.testable && !self.testing(&candidate.id)
+    }
+
+    /// Opens the pool choice of the selected owner id's test launch and reads the pools,
+    /// when the id can be tested. Input: the context. Output: unit.
+    fn test(&mut self, ctx: &mut Ctx) {
+        let Some(Item::Own(index)) = self.current() else {
+            return;
+        };
+        let State::Ready { models, .. } = &self.state else {
+            return;
+        };
+        if !models
+            .candidates
+            .get(index)
+            .is_some_and(|candidate| self.testable(candidate))
+        {
+            return;
+        }
+        ctx.request(Request::Pools);
+        self.edit = Some(Edit::Pool { at: 0, index });
+    }
+
     fn edit_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let item = self.current();
         let project = self.project();
@@ -733,6 +809,10 @@ impl ModelsPage {
         let native = NATIVE_OPTIONS.len() + usize::from(project.is_some());
         let options = PICK_OPTIONS.len();
         let last = models.candidates.len().saturating_sub(1);
+        let pools: Vec<_> = match &ctx.store.pools {
+            Load::Ready(pools) => pools.iter().map(|pool| pool.id.clone()).collect(),
+            _ => Vec::new(),
+        };
         let step = match (edit, key) {
             (_, Key::Esc) => Step::Close,
             (Edit::Choice { at, .. }, Key::Left) => {
@@ -853,6 +933,26 @@ impl ModelsPage {
                     field.error = None;
                 }
                 Step::Stay
+            }
+            (Edit::Pool { at, .. }, Key::Up) => {
+                *at = at.saturating_sub(1);
+                Step::Stay
+            }
+            (Edit::Pool { at, .. }, Key::Down) => {
+                *at = (*at + 1).min(pools.len().saturating_sub(1));
+                Step::Stay
+            }
+            (Edit::Pool { at, index }, Key::Enter) => {
+                match (models.candidates.get(*index), pools.get(*at)) {
+                    (Some(candidate), Some(pool)) if candidate.origin == Origin::Pending => {
+                        Step::Send(ModelChoiceQuery::Test {
+                            harness: self.harness.clone(),
+                            model: candidate.id.clone(),
+                            pool: pool.clone(),
+                        })
+                    }
+                    _ => Step::Stay,
+                }
             }
             _ => Step::Stay,
         };
@@ -1003,6 +1103,33 @@ impl ModelsPage {
                     Message::warning(&format!("{id} was already gone."), "")
                 });
             }
+            (
+                ModelChoiceQuery::Test { model, .. },
+                Ok(ModelChoiceReply::Tested(tested, reason, models)),
+            ) => {
+                if !self.take_models(models, ctx) {
+                    return;
+                }
+                let id = printable(model);
+                ctx.say(match tested {
+                    Tested::Verified => Message::success(
+                        &format!("{id} passed its test launch."),
+                        "You can now choose it, tick it and launch it.",
+                    ),
+                    Tested::Failed => Message::warning(
+                        &format!("{id} failed its test launch."),
+                        "The provider refused this model. It stays listed and can't be used.",
+                    ),
+                    Tested::Pending => Message::warning(
+                        &format!("{id} still waits for its test launch."),
+                        &reason.as_deref().map(printable).unwrap_or_default(),
+                    ),
+                });
+            }
+            (ModelChoiceQuery::Test { model, .. }, Err(code)) => ctx.say(Message::error(
+                &format!("Could not test {}.", printable(model)),
+                &message(code),
+            )),
             (_, Ok(ModelChoiceReply::RuleWritten(written))) => {
                 let (rules, saved) = match written {
                     RuleWritten::Saved { rules } => (rules, true),
@@ -1145,13 +1272,21 @@ impl ModelsPage {
             }
             Item::Add => vec![
                 Line::raw("Add a model id"),
-                muted("Enter to type one"),
+                if models.testable {
+                    muted("Enter to type one")
+                } else {
+                    muted(&format!("{NOT_SUPPORTED}."))
+                },
                 Line::default(),
             ],
             Item::Own(index) => match models.candidates.get(index) {
                 Some(candidate) => vec![
                     Line::raw(printable(&candidate.id)),
-                    muted(origin_word(candidate.origin)),
+                    if self.testing(&candidate.id) {
+                        styled("Testing".to_owned(), Role::Accent, &ctx.theme)
+                    } else {
+                        muted(&own_word(candidate.origin, models.testable))
+                    },
                     Line::raw("Yours"),
                 ],
                 None => vec![Line::default(), Line::default(), Line::default()],
@@ -1226,6 +1361,10 @@ impl ModelsPage {
                     cursor = at;
                     out.extend(field_lines);
                 }
+                _ if !models.testable => {
+                    out.extend(lines(&format!("{NOT_SUPPORTED}."), None));
+                    out.extend(lines(NO_TEST_LAUNCH, Some(Role::Muted)));
+                }
                 _ => out.extend(lines(
                     &format!(
                         "Type an id {} takes. It waits for a test launch before it can be ticked.",
@@ -1235,24 +1374,87 @@ impl ModelsPage {
                 )),
             },
             Item::Own(index) => {
-                let state = match models
-                    .candidates
-                    .get(index)
-                    .map(|candidate| candidate.origin)
-                {
-                    Some(Origin::Pending) => {
-                        "It waits for its test launch before it can be ticked."
-                    }
-                    Some(Origin::Verified) => "It passed its test launch and can be ticked.",
-                    Some(Origin::Failed) => "Its test launch failed, so it can't be ticked.",
-                    _ => "",
+                let Some(candidate) = models.candidates.get(index) else {
+                    return (out, cursor);
+                };
+                if let Some(Edit::Pool { at, .. }) = &self.edit {
+                    out.extend(lines(
+                        &format!(
+                            "Which pool runs the test launch of {}?",
+                            printable(&candidate.id)
+                        ),
+                        None,
+                    ));
+                    out.extend(self.pool_lines(*at, limit, ctx));
+                    out.truncate(DETAIL_ROWS);
+                    return (out, cursor);
+                }
+                if self.testing(&candidate.id) {
+                    out.extend(lines(TESTING, Some(Role::Accent)));
+                    return (out, cursor);
+                }
+                if candidate.origin == Origin::Pending && !models.testable {
+                    out.extend(lines(&format!("{NOT_SUPPORTED}."), None));
+                    out.extend(lines(NO_TEST_LAUNCH, Some(Role::Muted)));
+                    return (out, cursor);
+                }
+                let state = match candidate.origin {
+                    Origin::Pending => "It waits for its test launch before it can be ticked.",
+                    Origin::Verified => "It passed its test launch and can be ticked.",
+                    Origin::Failed => "Its test launch failed, so it can't be ticked.",
+                    Origin::Catalog => "",
                 };
                 out.extend(lines(state, None));
+                if self.testable(candidate) {
+                    out.extend(lines("t tests it on a pool you pick.", Some(Role::Muted)));
+                }
                 out.extend(lines("x removes it.", Some(Role::Muted)));
             }
         }
         out.truncate(DETAIL_ROWS);
         (out, cursor)
+    }
+
+    /// The pools the owner picks from for a test launch, a window of at most `POOL_ROWS`
+    /// around the one at `at`, or why there is none to pick. Inputs: the picked index, the
+    /// width and the context. Output: the lines.
+    fn pool_lines(&self, at: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        let theme = &ctx.theme;
+        let say = |text: &str, role: Role| styled(text.to_owned(), role, theme);
+        match &ctx.store.pools {
+            Load::Ready(pools) if pools.is_empty() => vec![say(
+                "No pool yet. Add one under Pools, then try again.",
+                Role::Warning,
+            )],
+            Load::Ready(pools) => {
+                let at = at.min(pools.len() - 1);
+                let first = at.saturating_sub(POOL_ROWS - 1);
+                pools
+                    .iter()
+                    .enumerate()
+                    .skip(first)
+                    .take(POOL_ROWS)
+                    .map(|(index, pool)| {
+                        let marker = if index == at { ">" } else { " " };
+                        let role = if index == at {
+                            Role::Accent
+                        } else {
+                            Role::Muted
+                        };
+                        let name = printable(&pool.name);
+                        say(
+                            &cut(&format!("{marker} {name}"), limit, ctx.glyphs.ellipsis),
+                            role,
+                        )
+                    })
+                    .collect()
+            }
+            Load::Failed(_) | Load::NotReady => vec![say(
+                "The pools couldn't be read. Press Esc, then try again.",
+                Role::Error,
+            )],
+            _ => vec![say("Reading the pools.", Role::Muted)],
+        }
     }
 
     /// The tick list of the allowed models while it is open: every candidate with its tick
@@ -1400,6 +1602,13 @@ impl ModelsPage {
                 .map(|part| styled(part, Role::Warning, theme)),
             );
         }
+        if let Some(note) = &models.live_note {
+            lines.extend(
+                wrap(&format!("{}.", printable(note)), limit)
+                    .into_iter()
+                    .map(|part| styled(part, Role::Muted, theme)),
+            );
+        }
         if matches!(self.edit, Some(Edit::Ticks { .. })) {
             return (self.tick_lines(lines, &models, limit, height, ctx), None);
         }
@@ -1498,6 +1707,13 @@ impl Screen for ModelsPage {
                 ];
             }
             Some(Edit::Field(_)) => return vec![hint("Enter", "Add"), hint("Esc", "Cancel")],
+            Some(Edit::Pool { .. }) => {
+                return vec![
+                    hint(&moves, "Pick"),
+                    hint("Enter", "Test"),
+                    hint("Esc", "Cancel"),
+                ];
+            }
             None => {}
         }
         match self.state {
@@ -1521,8 +1737,18 @@ impl Screen for ModelsPage {
                 }
             }
             Some(Item::Pick | Item::Fallback) => hints.push(hint("Enter", "Choose")),
-            Some(Item::Add) => hints.push(hint("Enter", "Type an id")),
-            Some(Item::Own(_)) => hints.push(hint("x", "Remove")),
+            Some(Item::Add) if models.testable => hints.push(hint("Enter", "Type an id")),
+            Some(Item::Add) => {}
+            Some(Item::Own(index)) => {
+                if models
+                    .candidates
+                    .get(index)
+                    .is_some_and(|candidate| self.testable(candidate))
+                {
+                    hints.push(hint("t", "Test"));
+                }
+                hints.push(hint("x", "Remove"));
+            }
             None => {}
         }
         hints.push(hint(&moves, "Move"));
@@ -1549,6 +1775,7 @@ impl Screen for ModelsPage {
             Key::End => self.move_by(isize::MAX / 2),
             Key::Enter => self.enter(ctx),
             Key::Char('x') => self.reset(ctx),
+            Key::Char('t') => self.test(ctx),
             _ => return Flow::Ignored,
         }
         Flow::Handled

@@ -11,6 +11,7 @@ fn main() {
         "desktop_reset_model_choice",
         "desktop_add_model",
         "desktop_remove_model",
+        "desktop_test_model",
         "desktop_model_rules",
         "desktop_set_model_rule",
         "desktop_harness_versions",

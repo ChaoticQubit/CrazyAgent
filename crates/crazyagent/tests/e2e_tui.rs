@@ -2254,7 +2254,29 @@ mod models {
         engine: Engine,
         pty: Pty,
         runtime: tokio::runtime::Runtime,
+        lists: PathBuf,
         _disk: tempfile::TempDir,
+    }
+
+    /// Writes a Codex stand-in that prints its version and, asked for its bundled model
+    /// catalog, one listed and one hidden model, adding a line to `lists` each time.
+    /// Inputs: the path and the count file.
+    fn codex_stand_in(path: &Path, lists: &Path) {
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"$1 $2 $3\" = 'debug models --bundled' ]; then\n  echo run >> '{}'\n  echo '{{\"models\": [{{\"slug\": \"gpt-e2e-live\", \"visibility\": \"list\"}}, {{\"slug\": \"gpt-e2e-hidden\", \"visibility\": \"hide\"}}]}}'\n  exit 0\nfi\necho 'codex-cli 0.167.1'\n",
+                lists.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// How many times the Codex stand-in printed its model list. Input: the count file.
+    /// Output: the count, 0 before the first.
+    fn list_runs(lists: &Path) -> usize {
+        std::fs::read_to_string(lists).map_or(0, |text| text.lines().count())
     }
 
     /// The Claude Code versions the shipped model catalog lists; the stand-in answers the
@@ -2313,15 +2335,8 @@ mod models {
                 &format!("{} (Claude Code)", qualified_versions()[0]),
             );
             stand_in(&bin.join("opencode"), "1.0.0");
-            stand_in(
-                &bin.join("codex"),
-                &format!(
-                    "codex-cli {}",
-                    crazyagent::model_choice::shipped("codex")
-                        .expect("Codex ships a model catalog")
-                        .qualified_versions[0]
-                ),
-            );
+            let lists = disk.path().join("codex-lists");
+            codex_stand_in(&bin.join("codex"), &lists);
             stand_in(&bin.join("crazyagent-rcli"), "crazyagent-rcli 0.1.0");
             let inherited = std::env::var_os("PATH").unwrap_or_default();
             let mut engine = Engine::new(prefix);
@@ -2353,6 +2368,7 @@ mod models {
                 engine,
                 pty,
                 runtime,
+                lists,
                 _disk: disk,
             }
         }
@@ -2377,7 +2393,7 @@ mod models {
             self.owner(move |controller| {
                 Box::pin(async move {
                     controller
-                        .model_choice_values(harness, project.then(project_id))
+                        .model_choice_values(harness, project.then(project_id), false)
                         .await
                         .unwrap()
                 })
@@ -3020,6 +3036,53 @@ mod models {
         assert_eq!(
             (native.here, native.effective, native.source),
             (None, json!("harness"), Source::App)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn the_codex_models_page_lists_what_codex_reports_and_reads_it_once_per_open_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m23-");
+        assert_eq!(
+            list_runs(&tui.lists),
+            0,
+            "nothing reads the list before the page opens"
+        );
+        tui.app_page("Codex", "Codex models");
+        let screen = tui.says("Master model");
+        assert!(
+            !screen.contains("live list not reported by Codex"),
+            "{screen}"
+        );
+        assert_eq!(list_runs(&tui.lists), 1, "one read for the open");
+        let models = tui.models("codex", false);
+        let ids: Vec<&str> = models
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect();
+        assert!(ids.contains(&"gpt-e2e-live"), "{ids:?}");
+        assert!(!ids.contains(&"gpt-e2e-hidden"), "{ids:?}");
+        assert_eq!(models.live_note, None);
+        assert_eq!(
+            list_runs(&tui.lists),
+            1,
+            "a read that is not an open starts no harness"
+        );
+        tui.pty.keys(&["r"]);
+        tui.pty
+            .until("r reads the list again", |_| list_runs(&tui.lists) == 2);
+        tui.finish();
+    }
+
+    #[test]
+    fn a_harness_with_no_list_command_says_live_list_not_reported_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m24-");
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        let screen = tui.says("live list not reported by Claude Code.");
+        assert!(
+            screen.contains("Checked against"),
+            "the shipped list stays: {screen}"
         );
         tui.finish();
     }

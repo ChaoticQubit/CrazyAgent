@@ -273,7 +273,7 @@ async fn observe_model_choice(harness: &str, project: Option<&str>) -> FixtureRe
     let project = project
         .map(|id| ProjectId::new(id.to_owned()))
         .transpose()?;
-    let models = owner.model_choice_values(harness, project).await?;
+    let models = owner.model_choice_values(harness, project, false).await?;
     let rules = owner.model_choice_rules().await?;
     let rows: Vec<_> = models
         .rows

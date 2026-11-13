@@ -806,6 +806,7 @@ export interface TeamTask {
   finished_ms: number | null;
   parent?: number | null;
   wait?: string | null;
+  pick?: { model: string; reason: string } | null;
 }
 
 export interface TeamMessage {
@@ -1536,7 +1537,7 @@ export type DependencyName = "tmux" | "uv" | "graphify";
 
 export type DependencyState =
   | { state: "checking" }
-  | { state: "missing" }
+  | { state: "missing"; line?: string }
   | { state: "found"; version: string }
   | { state: "installing" }
   | { state: "installed"; version: string }

@@ -1,7 +1,9 @@
 use super::*;
+use crate::engine::native_auth_host::RegisteredNativeAuthHost;
 use crate::harness_settings::{Scope, installed};
 use crate::model_choice::rules::{self, Rule, RuleWritten, Rules};
 use crate::model_choice::store::{self, Begun};
+use crate::model_choice::test_launch::{self, Tested};
 use crate::model_choice::{MODEL_BYTES_MAX, Models, Row, Slot, VALUE_JSON_MAX, Written};
 use crate::protocol::encode_frame;
 use crate::storage::versioned;
@@ -10,6 +12,12 @@ use serde_json::Value;
 
 const REQUEST_BYTES_MAX: usize = 16 * 1024;
 pub(super) const MODEL_CHOICE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest a model choice request may take on either side: a test launch's run bound
+/// and the time to pick its account, record its decision and reply (DEC-150 addendum 7).
+pub(super) const MODEL_CHOICE_TEST_TIMEOUT: Duration =
+    Duration::from_secs(test_launch::WALL_TIME.as_secs() + 30);
+
+const _: () = assert!(MODEL_CHOICE_TEST_TIMEOUT.as_secs() > MODEL_CHOICE_TIMEOUT.as_secs());
 
 const _: () = assert!(VALUE_JSON_MAX + MODEL_BYTES_MAX + 1024 <= REQUEST_BYTES_MAX);
 const _: () = assert!(REQUEST_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
@@ -22,10 +30,13 @@ pub const MODEL_CHOICE_PROTOCOL_CODES: &[&str] = &[
     "model_choice_harness_unknown",
     "model_choice_not_supported",
     "model_choice_outcome_unknown",
+    "model_choice_pool_needed",
+    "model_choice_pool_unknown",
     "model_choice_project_unknown",
     "model_choice_reply_bounds",
     "model_choice_request_bounds",
     "model_choice_request_invalid",
+    "model_choice_test_busy",
     "model_choice_unavailable",
     "model_choice_value_invalid",
     "owner_authentication_failed",
@@ -48,6 +59,8 @@ enum Action {
     Values {
         harness: String,
         project: Option<ProjectId>,
+        #[serde(default)]
+        fresh: bool,
     },
     Set {
         harness: String,
@@ -69,6 +82,11 @@ enum Action {
     Remove {
         harness: String,
         model: String,
+    },
+    Test {
+        harness: String,
+        model: String,
+        pool: Option<CredentialRef>,
     },
     Rules {},
     SetRule {
@@ -106,16 +124,44 @@ impl From<Begun> for Added {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Values { models: Models },
-    Saved { row: Row },
-    Stale { row: Row },
-    Refused { code: String, row: Row },
-    Added { added: Added, models: Models },
-    Removed { removed: bool, models: Models },
-    Rules { rules: Rules },
-    RuleSaved { rules: Rules },
-    RuleStale { rules: Rules },
-    Rejected { code: String },
+    Values {
+        models: Models,
+    },
+    Saved {
+        row: Row,
+    },
+    Stale {
+        row: Row,
+    },
+    Refused {
+        code: String,
+        row: Row,
+    },
+    Added {
+        added: Added,
+        models: Models,
+    },
+    Removed {
+        removed: bool,
+        models: Models,
+    },
+    Tested {
+        tested: Tested,
+        reason: Option<String>,
+        models: Models,
+    },
+    Rules {
+        rules: Rules,
+    },
+    RuleSaved {
+        rules: Rules,
+    },
+    RuleStale {
+        rules: Rules,
+    },
+    Rejected {
+        code: String,
+    },
 }
 
 impl From<Written> for Reply {
@@ -138,17 +184,20 @@ fn scope(project: Option<ProjectId>) -> Scope {
 
 impl OwnerClient {
     /// Reads a harness's Models section app-wide or for one project (DEC-150): the master,
-    /// agent and allowed slots with their versions, and every candidate id. Inputs: the
-    /// harness and the project, none for the app. Output: the section, or a
+    /// agent and allowed slots with their versions, and every candidate id. `fresh` marks a
+    /// Models view opening, which reads the harness's own list once first. Inputs: the
+    /// harness, the project, none for the app, and `fresh`. Output: the section, or a
     /// `MODEL_CHOICE_PROTOCOL_CODES` refusal.
     pub async fn model_choice_values(
         &self,
         harness: &str,
         project: Option<ProjectId>,
+        fresh: bool,
     ) -> Result<Models, EngineError> {
         let action = Action::Values {
             harness: harness.into(),
             project,
+            fresh,
         };
         match self.model_choice_exchange(action).await? {
             Reply::Values { models } => Ok(models),
@@ -231,6 +280,42 @@ impl OwnerClient {
         }
     }
 
+    /// Runs the test launch of one pending owner id (DEC-150 addendum 7): one tools-off run
+    /// of a fixed prompt on an account of the pool the owner picked, with the id as its
+    /// model. An answer verifies it, the provider's refusal code fails it, anything else
+    /// leaves it pending with the reason. Waits up to `MODEL_CHOICE_TEST_TIMEOUT`. Inputs:
+    /// the harness, the id and the pool. Output: the decision, its pending reason and the
+    /// harness's app-wide section, or a refusal.
+    pub async fn model_choice_test(
+        &self,
+        harness: &str,
+        model: &str,
+        pool: CredentialRef,
+    ) -> Result<(Tested, Option<String>, Models), EngineError> {
+        let action = Action::Test {
+            harness: harness.into(),
+            model: model.into(),
+            pool: Some(pool),
+        };
+        match self
+            .model_choice_send(action, MODEL_CHOICE_TEST_TIMEOUT)
+            .await?
+        {
+            Reply::Tested {
+                tested,
+                reason,
+                models,
+            } if (tested == Tested::Pending) == reason.is_some()
+                && reason
+                    .as_ref()
+                    .is_none_or(|reason| reason.len() <= test_launch::REASON_BYTES_MAX) =>
+            {
+                Ok((tested, reason, models))
+            }
+            _ => Err(unknown()),
+        }
+    }
+
     /// Reads the owner's two model rules (DEC-150 Q2): how a master's model pick is
     /// treated and what a start does when no pool account can run its model, each with
     /// its version. Output: the rules, or a `MODEL_CHOICE_PROTOCOL_CODES` refusal.
@@ -269,7 +354,15 @@ impl OwnerClient {
     }
 
     async fn model_choice_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(MODEL_CHOICE_TIMEOUT), async {
+        self.model_choice_send(action, MODEL_CHOICE_TIMEOUT).await
+    }
+
+    async fn model_choice_send(
+        &self,
+        action: Action,
+        limit: Duration,
+    ) -> Result<Reply, EngineError> {
+        tokio::time::timeout(self.timeout.max(limit), async {
             let frame = encode_frame(&Envelope {
                 model_choice: action,
             })
@@ -357,17 +450,90 @@ async fn handle(
     let executable = match &action {
         Action::Values { harness, .. }
         | Action::Add { harness, .. }
-        | Action::Remove { harness, .. } => crate::model_choice::harness_id(harness)
+        | Action::Remove { harness, .. }
+        | Action::Test { harness, .. } => crate::model_choice::harness_id(harness)
             .and_then(|id| super::harness_settings::registered(engine, authority, id)),
         _ => None,
     };
+    let live = live_due(&action)
+        .and_then(crate::model_choice::harness_id)
+        .filter(|harness| crate::model_choice::live::reader(harness).is_some());
+    let harnesses = match &action {
+        Action::Test { .. } => {
+            let (codex, claude) = authority
+                .native_auth_host
+                .lock()
+                .map_err(|_| failure("model_choice_unavailable"))?
+                .model_harnesses();
+            Some((engine.settings_files(), codex, claude))
+        }
+        _ => None,
+    };
     tokio::task::spawn_blocking(move || {
-        let installed =
-            executable.and_then(|path| installed::version_cached(&path, installed::LIMIT));
-        run(&root, action, installed.as_deref())
+        if let Some(harness) = live {
+            let read = executable
+                .as_deref()
+                .and_then(|path| crate::model_choice::live::read(harness, path, &root));
+            let _ = versioned::open(&root)
+                .and_then(|db| store::live_record(&db, harness, read.as_deref()));
+        }
+        let installed = executable
+            .as_deref()
+            .and_then(|path| installed::version_cached(path, installed::LIMIT));
+        match action {
+            Action::Test {
+                harness,
+                model,
+                pool,
+            } => {
+                let (settings, codex, claude) =
+                    harnesses.ok_or_else(|| failure("model_choice_unavailable"))?;
+                let launch: Launch<'_> = Box::new(|pool| {
+                    let (global, local) = settings.as_ref().ok_or("model_choice_unavailable")?;
+                    let path = |host: &Option<Arc<RegisteredNativeAuthHost>>| match host {
+                        Some(host) => host.verified_path().map(|path| Some(path.to_path_buf())),
+                        None => Ok(None),
+                    };
+                    let codex = path(&codex).map_err(|_| "model_choice_unavailable")?;
+                    let claude = path(&claude).map_err(|_| "model_choice_unavailable")?;
+                    test_launch::run(&test_launch::Request {
+                        root: &root,
+                        settings: (global, local),
+                        codex: codex.as_deref(),
+                        claude: claude.as_deref(),
+                        harness: &harness,
+                        model: &model,
+                        pool,
+                    })
+                });
+                tested(
+                    &root,
+                    &harness,
+                    &model,
+                    pool.as_ref(),
+                    installed.as_deref(),
+                    launch,
+                )
+            }
+            action => run(&root, action, installed.as_deref()),
+        }
     })
     .await
     .map_err(|_| failure("model_choice_unavailable"))?
+}
+
+/// Names the harness whose model list one request reads live: only a Models view open
+/// (`fresh`, DEC-150 addendum 11), never a re-read, a change or a rule. Input: the action.
+/// Output: the harness, or none.
+fn live_due(action: &Action) -> Option<&str> {
+    match action {
+        Action::Values {
+            harness,
+            fresh: true,
+            ..
+        } => Some(harness),
+        _ => None,
+    }
 }
 
 /// Reads one model choice request from an owner frame body, at most `REQUEST_BYTES_MAX`
@@ -392,17 +558,19 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
         store::values(
             &db,
             harness,
-            &crate::model_choice::catalog(harness),
+            &store::catalog(&db, harness)?,
             &Scope::App,
             installed,
         )
     };
     match action {
-        Action::Values { harness, project } => Ok(Reply::Values {
+        Action::Values {
+            harness, project, ..
+        } => Ok(Reply::Values {
             models: store::values(
                 &db,
                 &harness,
-                &crate::model_choice::catalog(&harness),
+                &store::catalog(&db, &harness)?,
                 &scope(project),
                 installed,
             )?,
@@ -416,7 +584,7 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
         } => Ok(store::set(
             &db,
             &harness,
-            &crate::model_choice::catalog(&harness),
+            &store::catalog(&db, &harness)?,
             &scope(project),
             slot,
             &value,
@@ -431,19 +599,15 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
         } => Ok(store::reset(
             &db,
             &harness,
-            &crate::model_choice::catalog(&harness),
+            &store::catalog(&db, &harness)?,
             &scope(project),
             slot,
             version,
         )?
         .into()),
         Action::Add { harness, model } => {
-            let begun = store::custom_begin(
-                &db,
-                &harness,
-                &crate::model_choice::catalog(&harness),
-                &model,
-            )?;
+            let begun =
+                store::custom_begin(&db, &harness, &store::catalog(&db, &harness)?, &model)?;
             Ok(Reply::Added {
                 added: begun.into(),
                 models: app(&harness)?,
@@ -463,7 +627,67 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
             RuleWritten::Saved { rules } => Reply::RuleSaved { rules },
             RuleWritten::Stale { rules } => Reply::RuleStale { rules },
         }),
+        Action::Test { .. } => Err(failure("model_choice_unavailable")),
     }
+}
+
+/// The launch a test hands its checked pool to: one read-only run on that pool's account,
+/// answering the decision and its pending reason, or a plain refusal code.
+type Launch<'a> =
+    Box<dyn FnOnce(&CredentialRef) -> Result<(Tested, Option<String>), &'static str> + 'a>;
+
+/// Runs one owner id's test launch once it may run (DEC-150 addendum 7): a supported
+/// harness, a named pool and an id that waits for its test, so no run is spent otherwise.
+/// A verified or failed decision is recorded; a pending one leaves the id as it was.
+/// Inputs: the engine root, the harness, the id, the pool, the installed version and the
+/// launch. Output: the decision, its reason and the harness's app section, or a refusal.
+fn tested(
+    root: &Path,
+    harness: &str,
+    model: &str,
+    pool: Option<&CredentialRef>,
+    installed: Option<&str>,
+    launch: Launch<'_>,
+) -> Result<Reply, EngineError> {
+    if !test_launch::supported(harness) {
+        return Err(failure("model_choice_not_supported"));
+    }
+    let Some(pool) = pool else {
+        return Err(failure(test_launch::POOL_NEEDED));
+    };
+    let db = versioned::open(root)?;
+    if !store::custom_pending(&db, harness, model)? {
+        return Err(failure("model_choice_custom_not_pending"));
+    }
+    let (mut tested, mut reason) = launch(pool).map_err(failure)?;
+    if tested != Tested::Pending {
+        match store::custom_checked(&db, harness, model, tested == Tested::Verified) {
+            Ok(()) => {}
+            Err(error) if error.0 == "model_choice_custom_not_pending" => {
+                tested = Tested::Pending;
+                reason =
+                    Some("The id changed while it was tested; add it again to test it.".to_owned());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    assert_eq!(tested == Tested::Pending, reason.is_some());
+    assert!(
+        reason
+            .as_ref()
+            .is_none_or(|reason| reason.len() <= test_launch::REASON_BYTES_MAX)
+    );
+    Ok(Reply::Tested {
+        tested,
+        reason,
+        models: store::values(
+            &db,
+            harness,
+            &store::catalog(&db, harness)?,
+            &Scope::App,
+            installed,
+        )?,
+    })
 }
 
 #[cfg(all(test, unix))]

@@ -11,7 +11,7 @@ use bridge::checks::TestsReply;
 use bridge::harness_settings::HarnessSettingsPage;
 use bridge::intake::FolderSize;
 use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
-use bridge::model_choice::ModelsPage;
+use bridge::model_choice::{ModelTested, ModelsPage};
 use bridge::notify::Notices;
 use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
@@ -1063,12 +1063,13 @@ async fn desktop_team_delegate(
     id: String,
     harness: Option<String>,
     prompt: String,
+    model: Option<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .team_delegate(&id, harness, prompt, generation)
+        .team_delegate(&id, harness, prompt, model, generation)
         .await
 }
 
@@ -4536,9 +4537,12 @@ async fn desktop_model_choice(
     state: State<'_, NativeState>,
     harness: String,
     project_id: Option<String>,
+    fresh: bool,
 ) -> Result<ModelsPage, BridgeError> {
     main_window(&webview)?;
-    let call = read(&state).await?.model_choice(harness, project_id)?;
+    let call = read(&state)
+        .await?
+        .model_choice(harness, project_id, fresh)?;
     call.await
 }
 
@@ -4596,6 +4600,19 @@ async fn desktop_remove_model(
 ) -> Result<bool, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.remove_model(harness, model)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_test_model(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    harness: String,
+    model: String,
+    pool: String,
+) -> Result<ModelTested, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.test_model(harness, model, pool)?;
     call.await
 }
 
@@ -5350,6 +5367,7 @@ native_commands! {
     desktop_reset_model_choice,
     desktop_add_model,
     desktop_remove_model,
+    desktop_test_model,
     desktop_model_rules,
     desktop_set_model_rule,
     desktop_harness_versions,

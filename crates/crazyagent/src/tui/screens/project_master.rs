@@ -410,6 +410,9 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::WorktreeUncertain) => {
             "its copy of the project could not be checked. Close the master and open it again, then send again."
         }
+        Some(MasterReason::ModelRefused) => {
+            "the harness refused the master model on this account. Send again to fall back as your model fallback setting says, or pick another master model in Settings, Harnesses."
+        }
         Some(MasterReason::Cancelled) => "you stopped this turn.",
         Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
             if turn.phase == MasterTurnPhase::Cancelled {
@@ -1011,6 +1014,10 @@ mod tests {
                 MasterReason::WorktreeUncertain,
                 "Codex stopped: its copy of the project could not be checked. Close the master and open it again, then send again. (worktree_uncertain) Press r to try again.",
             ),
+            (
+                MasterReason::ModelRefused,
+                "Codex stopped: the harness refused the master model on this account. Send again to fall back as your model fallback setting says, or pick another master model in Settings, Harnesses. (model_refused) Press r to try again.",
+            ),
         ] {
             let transcript = build(
                 configured,
@@ -1057,6 +1064,7 @@ mod tests {
             (MasterReason::ProtocolFault, "protocol_fault"),
             (MasterReason::FrameLimit, "frame_limit"),
             (MasterReason::WorktreeUncertain, "worktree_uncertain"),
+            (MasterReason::ModelRefused, "model_refused"),
             (MasterReason::Cancelled, "cancelled"),
         ];
         for (reason, code) in named {

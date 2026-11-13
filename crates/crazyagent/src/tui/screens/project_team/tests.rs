@@ -8,6 +8,7 @@ use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
 use crate::project_setup::{HarnessSlot, Platform, ProjectSetup, TeamPlan};
 use crate::protocol::{CredentialRef, ProjectSpec};
+use crate::tui::client::model_choice::{ModelChoiceEvent, ModelChoiceQuery, ModelChoiceReply};
 use crate::tui::screens::new_project_frames::compose;
 use crate::tui::screens::new_project_view::{Screen, tab_strip};
 use crate::tui::screens::project::Tab;
@@ -109,6 +110,7 @@ fn task(id: i64, source: TaskSource, prompt: &str, status: TaskStatus) -> TeamTa
         finished_ms: None,
         parent: None,
         wait: None,
+        pick: None,
     }
 }
 
@@ -531,6 +533,41 @@ fn the_panel_follows_the_focused_task() {
     assert!(find(&rows, "Result").contains("Created the Next.js app"));
     view.key(press(KeyCode::Down));
     assert_eq!(view.task_cursor, 2, "the cursor stops at the last task");
+}
+
+#[test]
+fn the_task_panel_says_which_model_the_master_picked_and_why() {
+    let mut status = team();
+    let pick = crate::team::tool::ModelPick {
+        model: "claude-opus-4-5".into(),
+        reason: "the charts need careful layout work".into(),
+    };
+    let charts = status.tasks.iter_mut().find(|task| task.id == 11).unwrap();
+    charts.pick = Some(pick.clone());
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    view.key(press(KeyCode::Tab));
+    assert_eq!(view.focus, TeamFocus::Tasks);
+    let rows = frame(&view, 120, 36);
+    let line = crate::team::pick_line(&pick);
+    assert_eq!(
+        line,
+        "Model: claude-opus-4-5. Why: the charts need careful layout work"
+    );
+    assert!(find(&rows, "Task from the master").contains("running 6 min"));
+    assert!(
+        rows.iter().any(|row| row.contains(&line)),
+        "{}",
+        rows.join("\n")
+    );
+    view.key(press(KeyCode::Down));
+    let rows = frame(&view, 120, 36);
+    assert!(
+        !rows.iter().any(|row| row.contains("Why: ")),
+        "a task with no pick runs the default and says nothing: {}",
+        rows.join("\n")
+    );
 }
 
 #[test]
@@ -1181,6 +1218,7 @@ fn a_new_task_goes_to_the_chosen_sub_agent() {
             project_id: project(),
             harness: Some("claude-code".into()),
             prompt: "Fix the chart legend\nKeep the colours the same.".into(),
+            model: None,
         }
     );
     assert!(view.busy());
@@ -1251,6 +1289,7 @@ fn a_refused_task_keeps_its_text_and_shows_why() {
             project_id: project(),
             harness: None,
             prompt: "Write the alerts page".into(),
+            model: None,
         }
     );
     view.apply(
@@ -1421,6 +1460,467 @@ async fn a_real_engine_takes_a_task_from_the_owner() {
     let row = find(&frame(&view, 120, 36), "Needs a pool").to_owned();
     assert!(row.contains("Write the readings API") && row.contains("You"));
     assert!(find(&frame(&view, 80, 24), "Needs a pool").contains("Write the readings API"));
+}
+
+/// A harness's Models section for the composer rows, as a project page reads it: the agent
+/// default and the allowed list given, the catalog's opus and sonnet, an owner id that
+/// passed its test launch and one that waits for it. Inputs: the harness, the agent
+/// default, the allowed list and whether the harness takes a model. Output: the section.
+fn composer_models(
+    harness: &str,
+    agent: serde_json::Value,
+    allowed: serde_json::Value,
+    applied: bool,
+) -> crate::model_choice::Models {
+    use crate::harness_settings::{Access, Source};
+    use crate::model_choice::{Candidate, Models, Origin, Slot};
+    let source = if applied {
+        Source::App
+    } else {
+        Source::NotApplied
+    };
+    let row = |slot, effective| crate::model_choice::Row {
+        slot,
+        here: None,
+        effective,
+        source,
+        version: 1,
+        access: Access::Editable,
+    };
+    Models {
+        harness: harness.into(),
+        rows: vec![
+            row(Slot::Master, serde_json::Value::Null),
+            row(Slot::Agent, agent),
+            row(Slot::Allowed, allowed),
+        ],
+        candidates: [
+            ("opus", Origin::Catalog),
+            ("sonnet", Origin::Catalog),
+            ("team-haiku", Origin::Verified),
+            ("my-draft", Origin::Pending),
+        ]
+        .into_iter()
+        .map(|(id, origin)| Candidate {
+            id: id.into(),
+            origin,
+        })
+        .collect(),
+        qualified: true,
+        reason: None,
+        testable: true,
+        live_note: None,
+    }
+}
+
+fn models_answer(
+    query: &ModelChoiceQuery,
+    models: crate::model_choice::Models,
+) -> ModelChoiceEvent {
+    ModelChoiceEvent {
+        query: query.clone(),
+        result: Ok(ModelChoiceReply::Read {
+            models,
+            rules: None,
+        }),
+    }
+}
+
+/// The composer's Models read: never fresh, so picking a harness starts no harness for its
+/// live list; only a Models page opening does (DEC-150 addendum 11).
+fn claude_read() -> ModelChoiceQuery {
+    ModelChoiceQuery::Read {
+        harness: "claude-code".into(),
+        project: Some(project()),
+        fresh: false,
+    }
+}
+
+fn draft_model(view: &TeamView) -> Option<String> {
+    view.draft.as_ref().unwrap().model.clone()
+}
+
+#[test]
+fn the_composer_offers_the_harness_default_and_its_allowed_models_and_sends_the_pick() {
+    let mut view = loaded();
+    view.key(press(KeyCode::Char('+')));
+    assert_eq!(
+        view.wants_models(),
+        None,
+        "any sub-agent runs each harness's own default"
+    );
+    let wide = frame(&view, 120, 36);
+    assert!(find(&wide, "Model  <").contains("< Default >"));
+    assert!(
+        wide.last().unwrap().contains("\u{2191}\u{2193} Model"),
+        "{:?}",
+        wide.last()
+    );
+
+    view.key(press(KeyCode::Tab));
+    assert_eq!(view.wants_models(), Some(claude_read()));
+    assert_eq!(view.wants_models(), None, "one read per harness pick");
+    assert!(
+        find(&frame(&view, 120, 36), "Model  <").contains("< Default >"),
+        "Default shows while the read runs"
+    );
+    view.take_models(&models_answer(
+        &claude_read(),
+        composer_models(
+            "claude-code",
+            serde_json::json!("sonnet"),
+            serde_json::json!([
+                "sonnet",
+                "opus",
+                "team-haiku",
+                "my-draft",
+                "gone-model",
+                "opus"
+            ]),
+            true,
+        ),
+    ));
+    assert!(find(&frame(&view, 120, 36), "Model  <").contains("< Default (sonnet) >"));
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        view.key(press(KeyCode::Down));
+        seen.push(draft_model(&view));
+    }
+    assert_eq!(
+        seen,
+        [Some("opus".to_owned()), Some("team-haiku".to_owned()), None],
+        "the allowed ids the harness offers, once each and without the default's own id, then round to Default"
+    );
+    view.key(press(KeyCode::Up));
+    assert_eq!(draft_model(&view).as_deref(), Some("team-haiku"));
+    assert!(find(&frame(&view, 80, 24), "Model  <").contains("< team-haiku >"));
+
+    typed(&mut view, "Draw the charts");
+    let TeamReply::Change(action) = view.key(press(KeyCode::Enter)) else {
+        panic!("a delegate change expected");
+    };
+    assert_eq!(
+        action,
+        TeamAction::Delegate {
+            project_id: project(),
+            harness: Some("claude-code".into()),
+            prompt: "Draw the charts".into(),
+            model: Some("team-haiku".into()),
+        }
+    );
+}
+
+#[test]
+fn the_composer_keeps_default_without_a_usable_read_and_a_new_harness_starts_from_default() {
+    let mut view = loaded();
+    view.key(press(KeyCode::Char('+')));
+    view.key(press(KeyCode::Down));
+    assert_eq!(
+        draft_model(&view),
+        None,
+        "any sub-agent offers only Default"
+    );
+    view.key(press(KeyCode::Tab));
+    assert_eq!(view.wants_models(), Some(claude_read()));
+    view.key(press(KeyCode::Down));
+    assert_eq!(
+        draft_model(&view),
+        None,
+        "nothing to pick before the read answers"
+    );
+
+    let allowed = serde_json::json!(["opus"]);
+    let codex = ModelChoiceQuery::Read {
+        harness: "codex".into(),
+        project: Some(project()),
+        fresh: false,
+    };
+    let other = ModelChoiceQuery::Read {
+        harness: "claude-code".into(),
+        project: Some(ProjectId::new("other-project").unwrap()),
+        fresh: false,
+    };
+    for query in [&codex, &other] {
+        view.take_models(&models_answer(
+            query,
+            composer_models(
+                "claude-code",
+                serde_json::Value::Null,
+                allowed.clone(),
+                true,
+            ),
+        ));
+        view.key(press(KeyCode::Down));
+        assert_eq!(
+            draft_model(&view),
+            None,
+            "an answer for another harness or project is not this composer's: {query:?}"
+        );
+    }
+
+    view.take_models(&ModelChoiceEvent {
+        query: claude_read(),
+        result: Err("model_choice_unavailable".into()),
+    });
+    view.key(press(KeyCode::Down));
+    assert_eq!(draft_model(&view), None);
+    assert_eq!(view.notice, None, "a failed read never stops the hand-off");
+    assert!(find(&frame(&view, 120, 36), "Model  <").contains("< Default >"));
+
+    view.take_models(&models_answer(
+        &claude_read(),
+        composer_models(
+            "claude-code",
+            serde_json::Value::Null,
+            allowed.clone(),
+            false,
+        ),
+    ));
+    view.key(press(KeyCode::Down));
+    assert_eq!(
+        draft_model(&view),
+        None,
+        "a harness that takes no model from CrazyAgent offers only Default"
+    );
+    assert!(find(&frame(&view, 120, 36), "Model  <").contains("< Default (Account's own model) >"));
+
+    view.take_models(&models_answer(
+        &claude_read(),
+        composer_models("claude-code", serde_json::Value::Null, allowed, true),
+    ));
+    view.key(press(KeyCode::Down));
+    assert_eq!(draft_model(&view).as_deref(), Some("opus"));
+    view.key(press(KeyCode::Tab));
+    assert_eq!(
+        draft_model(&view),
+        None,
+        "a new harness starts from Default"
+    );
+    assert_eq!(view.wants_models(), None);
+    view.key(press(KeyCode::BackTab));
+    assert_eq!(
+        view.wants_models(),
+        Some(claude_read()),
+        "each pick of a harness reads its models again"
+    );
+    view.key(press(KeyCode::Down));
+    assert_eq!(draft_model(&view), None, "the earlier read is not reused");
+}
+
+#[test]
+fn a_refused_model_pick_says_why_in_the_desktop_s_words() {
+    assert_eq!(
+        team_plain("team_model_invalid"),
+        "That model id isn't valid. Pick a model from the list."
+    );
+    assert_eq!(
+        team_plain("team_model_not_allowed"),
+        "That model isn't on this harness's allowed list. Pick another model, or Default."
+    );
+    assert_eq!(
+        team_plain("team_model_not_supported"),
+        "This harness doesn't take a model from CrazyAgent. Hand the task over with Default."
+    );
+}
+
+/// Starts a real engine with one project whose team runs a Codex master and one Claude
+/// Code sub-agent harness, and sets the app-wide Claude Code agent default to sonnet and
+/// the allowed list to opus and sonnet. Input: the scratch prefix. Output: the scratch
+/// folder, the engine's stop switch and service, and an owner controller on it.
+async fn engine_with_claude_models(
+    prefix: &str,
+) -> (
+    tempfile::TempDir,
+    tokio::sync::watch::Sender<bool>,
+    EngineService,
+    OwnerController,
+) {
+    use crate::model_choice::{Slot, Written};
+    let root = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    let created = controller
+        .setup_project(
+            project(),
+            ProjectSpec {
+                name: "Tidepool".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Live dashboard for sensor buoys.".into(),
+                tech_stack: vec![],
+                platforms: vec![Platform::Website],
+                research: vec![],
+                pool: None,
+                team: Some(TeamPlan {
+                    master: "codex".into(),
+                    master_tools: true,
+                    sub_harnesses: vec![HarnessSlot {
+                        harness: "claude-code".into(),
+                        agents: 1,
+                        tools: true,
+                    }],
+                    min_agents: 1,
+                    max_agents: 2,
+                }),
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        created,
+        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+    ));
+    for (slot, value) in [
+        (Slot::Agent, serde_json::json!("sonnet")),
+        (Slot::Allowed, serde_json::json!(["opus", "sonnet"])),
+    ] {
+        let version = controller
+            .model_choice_values("claude-code", None, false)
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .find(|row| row.slot == slot)
+            .expect("the engine lists every slot")
+            .version;
+        let written = controller
+            .model_choice_set("claude-code", None, slot, value, version)
+            .await
+            .unwrap();
+        assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    }
+    (root, stop, service, controller)
+}
+
+/// Hands one task to Claude Code through the composer on a real engine: Tab to Claude
+/// Code, the Models read a host sends for it, `downs` presses of Down, Enter, the change
+/// and a team read after it. Inputs: the controller, the view, the task and the presses.
+/// Output: none; the view holds the team read after the change.
+async fn hand_over_on_engine(
+    controller: &mut OwnerController,
+    view: &mut TeamView,
+    prompt: &str,
+    downs: usize,
+) {
+    read_team(controller, view, NOW).await;
+    view.key(press(KeyCode::Char('+')));
+    assert!(view.typing(), "{:?}", view.notice);
+    assert!(view.paste(prompt));
+    view.key(press(KeyCode::Tab));
+    let query = view
+        .wants_models()
+        .expect("picking Claude Code reads its models");
+    let ModelChoiceQuery::Read {
+        harness,
+        project,
+        fresh,
+    } = &query
+    else {
+        panic!("the composer only reads models: {query:?}");
+    };
+    assert!(!fresh, "the composer starts no harness for its live list");
+    let result = controller
+        .model_choice_values(harness, project.clone(), *fresh)
+        .await
+        .map(|models| ModelChoiceReply::Read {
+            models,
+            rules: None,
+        })
+        .map_err(|error| error.0);
+    view.take_models(&ModelChoiceEvent {
+        query: query.clone(),
+        result,
+    });
+    assert!(
+        find(&frame(view, 120, 36), "Model  <").contains("< Default (sonnet) >"),
+        "the project page's agent default names Default"
+    );
+    for _ in 0..downs {
+        view.key(press(KeyCode::Down));
+    }
+    let TeamReply::Change(action) = view.key(press(KeyCode::Enter)) else {
+        panic!("a delegate change expected");
+    };
+    let response = controller.team_action(action.clone(), 2).await.unwrap();
+    let result = match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            SetupView::Changed(operation.result)
+        }
+        other => panic!("team change not applied: {other:?}"),
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 2,
+        },
+        Ok(result),
+    );
+    assert!(!view.typing(), "{:?}", view.notice);
+    read_team(controller, view, NOW + 1).await;
+}
+
+#[tokio::test]
+async fn a_real_engine_runs_a_handed_task_on_the_harness_default_when_the_owner_keeps_default() {
+    let (_root, _stop, _service, mut controller) =
+        engine_with_claude_models("ca-tui-team-model-default-").await;
+    let mut view = TeamView::new(project());
+    hand_over_on_engine(&mut controller, &mut view, "Write the readings API", 0).await;
+    let tasks = view.tasks();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].harness, "claude-code");
+    assert!(
+        tasks[0].pick.is_none(),
+        "no pick is pinned, so the harness's agent default runs"
+    );
+    view.key(press(KeyCode::Tab));
+    let rows = frame(&view, 120, 36);
+    assert!(
+        rows.iter().all(|row| !row.contains("Why: ")),
+        "{}",
+        rows.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn a_real_engine_pins_the_model_the_owner_picks_in_the_composer() {
+    let (_root, _stop, _service, mut controller) =
+        engine_with_claude_models("ca-tui-team-model-pick-").await;
+    let mut view = TeamView::new(project());
+    hand_over_on_engine(&mut controller, &mut view, "Draw the charts", 1).await;
+    let tasks = view.tasks();
+    assert_eq!(tasks.len(), 1);
+    let pick = tasks[0].pick.clone().expect("the owner's pick is pinned");
+    assert_eq!(
+        (pick.model.as_str(), pick.reason.as_str()),
+        ("opus", "Picked by the owner.")
+    );
+    view.key(press(KeyCode::Tab));
+    let rows = frame(&view, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Model: opus. Why: Picked by the owner.")),
+        "{}",
+        rows.join("\n")
+    );
 }
 
 #[test]

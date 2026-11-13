@@ -69,6 +69,8 @@ fn with_native(rows: [Row; 3], native: Row, owned: &[(&str, Origin)]) -> Models 
         candidates,
         qualified: true,
         reason: None,
+        testable: true,
+        live_note: None,
     }
 }
 
@@ -113,10 +115,12 @@ fn requests(shell: &mut Shell) -> Vec<ModelChoiceQuery> {
     sent
 }
 
+/// The page's read: fresh, as a Models page opening or `r` reads the harness's own list.
 fn read_query(project: Option<ProjectId>) -> ModelChoiceQuery {
     ModelChoiceQuery::Read {
         harness: HARNESS.into(),
         project,
+        fresh: true,
     }
 }
 
@@ -590,12 +594,15 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
         candidates: vec![],
         qualified: true,
         reason: None,
+        testable: false,
+        live_note: None,
     };
     let page = ModelsPage::new("opencode".into(), "OpenCode".into(), Scope::App);
     let mut shell = Shell::with(ctx(80, 24), Box::new(page));
     let first = ModelChoiceQuery::Read {
         harness: "opencode".into(),
         project: None,
+        fresh: true,
     };
     assert_eq!(requests(&mut shell), vec![first.clone()]);
     shell.arrive(arrival(
@@ -855,4 +862,226 @@ fn a_harness_without_native_sub_agents_shows_the_native_row_not_supported() {
     shell.key(Key::Enter);
     assert_eq!(lead(&shell), "Not supported by this harness.");
     assert_eq!(requests(&mut shell), vec![]);
+}
+
+#[test]
+fn the_engines_live_list_note_shows_word_for_word_under_the_catalog_line() {
+    let mut shell = app_page(Models {
+        live_note: Some("live list not reported by Claude Code".into()),
+        ..plain_models()
+    });
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("live list not reported by Claude Code."),
+        "{text}"
+    );
+    assert!(
+        text.contains("Add a model id"),
+        "the shipped ids stay: {text}"
+    );
+    let mut shell = app_page(plain_models());
+    let text = screen(&mut shell);
+    assert!(!text.contains("live list not reported"), "{text}");
+}
+
+fn pool(name: &str) -> crate::pools::PoolSummary {
+    crate::pools::PoolSummary {
+        id: crate::protocol::CredentialRef::new(name).unwrap(),
+        name: name.to_owned(),
+        summary: "1 Claude".into(),
+        members: Vec::new(),
+        project_count: 0,
+        provider_quota_policy: Default::default(),
+    }
+}
+
+fn with_own(origin: Origin) -> Models {
+    models(
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
+        &[("my-model", origin)],
+    )
+}
+
+fn test_query(pool: &str) -> ModelChoiceQuery {
+    ModelChoiceQuery::Test {
+        harness: HARNESS.into(),
+        model: "my-model".into(),
+        pool: crate::protocol::CredentialRef::new(pool).unwrap(),
+    }
+}
+
+/// Opens the app page with one pending owner id, the pools main and spare, and the cursor
+/// on the id. Output: the shell.
+fn on_pending_id() -> Shell {
+    let mut shell = app_page(with_own(Origin::Pending));
+    shell.ctx.store.pools = crate::tui::ctx::Load::Ready(vec![pool("main"), pool("spare")]);
+    press(&mut shell, &[Key::End]);
+    shell
+}
+
+fn rest(shell: &Shell) -> String {
+    shell
+        .ctx
+        .message()
+        .map(|message| message.rest.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn t_on_a_pending_id_asks_which_pool_runs_its_test_launch_and_enter_sends_it_there() {
+    let mut shell = on_pending_id();
+    let text = screen(&mut shell);
+    assert!(text.contains("t Test"), "{text}");
+    assert!(text.contains("t tests it on a pool you pick."), "{text}");
+    press(&mut shell, &[Key::Char('t')]);
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("Which pool runs the test launch of my-model?"),
+        "{text}"
+    );
+    assert!(text.contains("main") && text.contains("spare"), "{text}");
+    assert_eq!(requests(&mut shell), vec![]);
+    press(&mut shell, &[Key::Down, Key::Enter]);
+    assert_eq!(requests(&mut shell), vec![test_query("spare")]);
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("Testing. This can take up to 2 minutes."),
+        "the row shows the test is running: {text}"
+    );
+}
+
+#[test]
+fn a_test_launch_answer_replaces_the_list_and_says_what_it_decided_in_the_desktop_s_words() {
+    let cases = [
+        (
+            Tested::Verified,
+            None,
+            Origin::Verified,
+            "my-model passed its test launch.",
+            "You can now choose it, tick it and launch it.",
+        ),
+        (
+            Tested::Failed,
+            None,
+            Origin::Failed,
+            "my-model failed its test launch.",
+            "The provider refused this model. It stays listed and can't be used.",
+        ),
+        (
+            Tested::Pending,
+            Some("No signed-in Claude Code account in this pool."),
+            Origin::Pending,
+            "my-model still waits for its test launch.",
+            "No signed-in Claude Code account in this pool.",
+        ),
+    ];
+    for (tested, reason, origin, lead_words, rest_words) in cases {
+        let mut shell = on_pending_id();
+        press(&mut shell, &[Key::Char('t'), Key::Enter]);
+        assert_eq!(requests(&mut shell), vec![test_query("main")]);
+        shell.arrive(arrival(
+            test_query("main"),
+            Ok(ModelChoiceReply::Tested(
+                tested,
+                reason.map(str::to_owned),
+                with_own(origin),
+            )),
+        ));
+        assert_eq!(lead(&shell), lead_words);
+        assert_eq!(rest(&shell), rest_words, "a pending reason shows as given");
+        let text = screen(&mut shell);
+        assert!(text.contains(origin_word(origin)), "{text}");
+        assert_eq!(
+            text.contains("t Test"),
+            tested == Tested::Pending,
+            "Test stays open while the id still waits: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_test_launch_says_why_and_no_pool_yet_sends_nothing() {
+    let mut shell = on_pending_id();
+    press(&mut shell, &[Key::Char('t'), Key::Enter]);
+    assert_eq!(requests(&mut shell), vec![test_query("main")]);
+    shell.arrive(arrival(test_query("main"), Err("model_choice_test_busy")));
+    assert_eq!(lead(&shell), "Could not test my-model.");
+    assert_eq!(
+        rest(&shell),
+        "A test launch for this harness is already running. Try again when it ends."
+    );
+    assert_eq!(
+        message("model_choice_pool_unknown"),
+        "That pool no longer exists, so nothing was tested. Pick another one."
+    );
+    assert_eq!(
+        message("model_choice_pool_needed"),
+        "Pick a pool with at least one account to run the test launch."
+    );
+
+    let mut empty = on_pending_id();
+    empty.ctx.store.pools = crate::tui::ctx::Load::Ready(Vec::new());
+    press(&mut empty, &[Key::Char('t')]);
+    let text = screen(&mut empty);
+    assert!(
+        text.contains("No pool yet. Add one under Pools, then try again."),
+        "{text}"
+    );
+    press(&mut empty, &[Key::Enter]);
+    assert_eq!(requests(&mut empty), vec![]);
+}
+
+#[test]
+fn only_a_pending_id_offers_a_test_launch() {
+    for origin in [Origin::Verified, Origin::Failed] {
+        let mut shell = app_page(with_own(origin));
+        shell.ctx.store.pools = crate::tui::ctx::Load::Ready(vec![pool("main")]);
+        press(&mut shell, &[Key::End]);
+        assert!(!screen(&mut shell).contains("t Test"));
+        press(&mut shell, &[Key::Char('t'), Key::Enter]);
+        assert_eq!(requests(&mut shell), vec![], "{origin:?}");
+        assert!(!screen(&mut shell).contains("Which pool runs"));
+    }
+}
+
+/// A harness the engine says has no test launch keeps the Add row and the owner's ids, and
+/// both say "Not supported by this harness" in the desktop's words, so no id waits forever
+/// (MUG2-L1). The TUI follows the engine's `testable`, not a harness list of its own.
+#[test]
+fn a_harness_without_a_test_launch_says_not_supported_on_add_and_on_a_pending_id() {
+    let mut shell = app_page(Models {
+        testable: false,
+        ..with_own(Origin::Pending)
+    });
+    shell.ctx.store.pools = crate::tui::ctx::Load::Ready(vec![pool("main")]);
+    let text = screen(&mut shell);
+    assert!(text.contains("Add a model id"), "{text}");
+    assert!(!text.contains("Enter to type one"), "{text}");
+    assert!(!text.contains("Waiting for its test launch"), "{text}");
+    press(&mut shell, &[Key::End]);
+    let text = screen(&mut shell);
+    assert!(text.contains(&format!("{NOT_SUPPORTED}.")), "{text}");
+    assert!(text.contains("An id you add needs"), "{text}");
+    assert!(!text.contains("t Test"), "{text}");
+    press(&mut shell, &[Key::Char('t'), Key::Enter]);
+    assert_eq!(requests(&mut shell), vec![]);
+    assert!(!screen(&mut shell).contains("Which pool runs"));
+
+    press(&mut shell, &[Key::Up]);
+    let text = screen(&mut shell);
+    assert!(text.contains("An id you add needs"), "{text}");
+    assert!(!text.contains("Type an id"), "{text}");
+    press(&mut shell, &[Key::Enter]);
+    assert!(!screen(&mut shell).contains("Model id"), "no field opens");
+    assert_eq!(requests(&mut shell), vec![], "no id is sent");
+    assert_eq!(lead(&shell), "Not supported by this harness.");
+    assert_eq!(rest(&shell), NO_TEST_LAUNCH);
+    assert_eq!(
+        NO_TEST_LAUNCH,
+        "An id you add needs a test launch, and this harness has none."
+    );
 }

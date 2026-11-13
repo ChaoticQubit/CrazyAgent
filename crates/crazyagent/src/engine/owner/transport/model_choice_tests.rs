@@ -327,6 +327,8 @@ fn the_largest_models_section_fits_one_owner_frame() {
         candidates,
         qualified: false,
         reason: Some("r".repeat(crate::model_choice::UNQUALIFIED_REASON_BYTES_MAX)),
+        testable: true,
+        live_note: Some(crate::model_choice::live::not_reported("claude-code")),
     };
     for reply in [
         Reply::Values {
@@ -340,4 +342,208 @@ fn the_largest_models_section_fits_one_owner_frame() {
         let frame = encode_frame(&reply).unwrap();
         assert!(frame.len() <= crate::protocol::FRAME_BYTES_MAX + 4);
     }
+}
+
+#[test]
+fn only_a_models_view_open_reads_the_live_list() {
+    let action = |body: Value| parse(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let open = action(
+        json!({"model_choice": {"kind": "values", "harness": "codex", "project": null, "fresh": true}}),
+    );
+    assert_eq!(live_due(&open), Some("codex"));
+    let again = action(
+        json!({"model_choice": {"kind": "values", "harness": "codex", "project": null, "fresh": false}}),
+    );
+    assert_eq!(
+        live_due(&again),
+        None,
+        "a re-read after a change starts no harness"
+    );
+    let old_client =
+        action(json!({"model_choice": {"kind": "values", "harness": "codex", "project": null}}));
+    assert_eq!(live_due(&old_client), None);
+    let add =
+        action(json!({"model_choice": {"kind": "add", "harness": "codex", "model": "gpt-x"}}));
+    assert_eq!(live_due(&add), None);
+    assert_eq!(
+        live_due(&action(json!({"model_choice": {"kind": "rules"}}))),
+        None
+    );
+}
+
+#[test]
+fn the_models_reply_carries_the_live_note_and_a_reported_list() {
+    let (_tmp, root) = engine();
+    assert_eq!(
+        values(&root, None).live_note.as_deref(),
+        Some("live list not reported by Codex")
+    );
+    let db = versioned::open(&root).unwrap();
+    store::live_record(&db, "codex", Some(&["gpt-live".to_owned()])).unwrap();
+    let models = values(&root, None);
+    assert_eq!(models.live_note, None);
+    assert!(
+        models
+            .candidates
+            .iter()
+            .any(|candidate| candidate.id == "gpt-live"
+                && candidate.origin == crate::model_choice::Origin::Catalog),
+        "{models:?}"
+    );
+}
+
+fn pool() -> CredentialRef {
+    CredentialRef::new("pool-main").unwrap()
+}
+
+/// A launch that must not run: the checks before it refused the test.
+fn never<'a>() -> Launch<'a> {
+    Box::new(|_| panic!("a refused test spends no run"))
+}
+
+/// A launch that answers the given decision once, recording the pool it was handed.
+fn answers<'a>(
+    decision: (Tested, Option<String>),
+    handed: &'a std::cell::RefCell<Option<CredentialRef>>,
+) -> Launch<'a> {
+    Box::new(move |pool| {
+        *handed.borrow_mut() = Some(pool.clone());
+        Ok(decision)
+    })
+}
+
+fn origin(models: &Models, id: &str) -> crate::model_choice::Origin {
+    models
+        .candidates
+        .iter()
+        .find(|c| c.id == id)
+        .unwrap()
+        .origin
+}
+
+#[test]
+fn a_test_request_names_the_harness_the_id_and_the_pool() {
+    let bytes = serde_json::to_vec(&json!({"model_choice": {
+        "kind": "test", "harness": "codex", "model": "my-model", "pool": "pool-main"
+    }}))
+    .unwrap();
+    assert!(matches!(
+        super::super::protocol(&bytes).unwrap(),
+        super::super::Protocol::ModelChoice
+    ));
+    match parse(&bytes).unwrap() {
+        Action::Test {
+            harness,
+            model,
+            pool: picked,
+        } => {
+            assert_eq!((harness.as_str(), model.as_str()), ("codex", "my-model"));
+            assert_eq!(picked, Some(pool()));
+        }
+        other => panic!("not a test: {other:?}"),
+    }
+}
+
+#[test]
+fn a_test_spends_no_run_without_a_supported_harness_a_pool_or_a_pending_id() {
+    let (_tmp, root) = engine();
+    let (state, _) = added(&root, "gpt-a");
+    assert_eq!(state, Added::Pending);
+    let refused = |harness: &str, model: &str, pool: Option<&CredentialRef>| {
+        tested(&root, harness, model, pool, None, never())
+            .unwrap_err()
+            .0
+    };
+    assert_eq!(
+        refused("opencode", "gpt-a", Some(&pool())),
+        "model_choice_not_supported"
+    );
+    assert_eq!(refused("codex", "gpt-a", None), test_launch::POOL_NEEDED);
+    assert_eq!(
+        refused("codex", "never-added", Some(&pool())),
+        "model_choice_custom_not_pending"
+    );
+    verified(&root, "gpt-a");
+    assert_eq!(
+        refused("codex", "gpt-a", Some(&pool())),
+        "model_choice_custom_not_pending"
+    );
+}
+
+#[test]
+fn a_test_records_verified_and_failed_and_leaves_a_pending_id_pending_with_its_reason() {
+    let (_tmp, root) = engine();
+    let handed = std::cell::RefCell::new(None);
+    for (id, decision, after) in [
+        (
+            "gpt-a",
+            (Tested::Verified, None),
+            crate::model_choice::Origin::Verified,
+        ),
+        (
+            "gpt-b",
+            (Tested::Failed, None),
+            crate::model_choice::Origin::Failed,
+        ),
+        (
+            "gpt-c",
+            (
+                Tested::Pending,
+                Some("The test launch timed out.".to_owned()),
+            ),
+            crate::model_choice::Origin::Pending,
+        ),
+    ] {
+        added(&root, id);
+        let reply = tested(
+            &root,
+            "codex",
+            id,
+            Some(&pool()),
+            None,
+            answers(decision.clone(), &handed),
+        )
+        .unwrap();
+        let Reply::Tested {
+            tested: outcome,
+            reason,
+            models,
+        } = reply
+        else {
+            panic!("not tested: {reply:?}");
+        };
+        assert_eq!((outcome, reason), decision, "{id}");
+        assert_eq!(origin(&models, id), after, "{id}");
+        assert_eq!(handed.borrow_mut().take(), Some(pool()));
+    }
+}
+
+#[test]
+fn a_test_whose_id_was_removed_while_it_ran_stays_undecided_and_a_busy_test_is_refused() {
+    let (_tmp, root) = engine();
+    added(&root, "gpt-a");
+    let removing: Launch<'_> = Box::new(|_| {
+        let db = versioned::open(&root).unwrap();
+        assert!(store::custom_remove(&db, "codex", "gpt-a").unwrap());
+        Ok((Tested::Verified, None))
+    });
+    let Reply::Tested {
+        tested: outcome,
+        reason,
+        ..
+    } = tested(&root, "codex", "gpt-a", Some(&pool()), None, removing).unwrap()
+    else {
+        panic!("not tested");
+    };
+    assert_eq!(outcome, Tested::Pending);
+    assert!(reason.unwrap().contains("changed"));
+
+    added(&root, "gpt-b");
+    let busy: Launch<'_> = Box::new(|_| Err(test_launch::BUSY));
+    assert_eq!(
+        tested(&root, "codex", "gpt-b", Some(&pool()), None, busy)
+            .unwrap_err()
+            .0,
+        test_launch::BUSY
+    );
 }

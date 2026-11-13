@@ -17,6 +17,29 @@ fn install(folder: &Path) {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// A clean-Mac gate build maps Homebrew's folders for every search the tool resolver makes
+/// ([`crate::tools::homebrew_folders`]); the catalog's built-in folders come from there too,
+/// so the catalog and the pin never find this Mac's own Homebrew harness under the gate.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn the_catalog_looks_in_homebrew_where_the_tool_resolver_does() {
+    let homebrew = crate::tools::homebrew_folders();
+    let directories = Search::from_environment().directories;
+    for folder in &homebrew {
+        assert!(
+            directories.contains(folder) || crate::service::changeable_by_others(folder).is_some(),
+            "{}",
+            folder.display()
+        );
+    }
+    for fixed in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        assert!(
+            homebrew.contains(&PathBuf::from(fixed)) || !SYSTEM_DIRECTORIES.contains(&fixed),
+            "{fixed} is a built-in folder though the resolver maps it"
+        );
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn the_built_in_search_skips_linux_only_folders_under_the_home_automount() {

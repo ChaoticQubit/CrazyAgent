@@ -77,6 +77,11 @@ describe("Settings, Harnesses, Claude Code: the Models section on the real deskt
     await shot("models-app-open");
   });
 
+  it("says the live list was not reported by Claude Code, which has no list command, and keeps the shipped ids", async () => {
+    await until(async () => (await text("main")).includes("live list not reported by Claude Code."), UI_MS, "the engine's live list note did not show");
+    assert(await (await $('#models-master option[value="opus"]')).isExisting(), "the shipped ids stay");
+  });
+
   it("choosing a master model and Save stores it app-wide", async () => {
     await choose("#models-master", "opus");
     await click('button[aria-label="Save Master model"]');
@@ -241,6 +246,8 @@ describe("Settings, Harnesses, Claude Code: the Models section on the real deskt
     assert((words.match(/Not supported by this harness/g) ?? []).length >= 4, "each slot gives the reason");
     assert.equal(await $("#models-native").isExisting(), false, "no native choice");
     assert.equal(await $("#models-master").isExisting(), false, "no master choice");
+    assert.equal(await $("#models-add-id").isExisting(), false, "no Add field where no test launch runs");
+    assert(words.includes("An id you add needs a test launch, and this harness has none."), "Add says why");
     assert.equal(await $('button[aria-label="Save Allowed models"]').isExisting(), false, "no Save");
     await shot("models-app-not-supported");
   });

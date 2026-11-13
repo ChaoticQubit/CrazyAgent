@@ -2662,6 +2662,14 @@ fallback_allowed = false
         }
 
         async fn open_with(catalog: &str, action: NativeAuthAction) -> Self {
+            Self::open_registered(catalog, action, false).await
+        }
+
+        /// Opens a case like `open_with`; with `codex`, first registers `TEST_LAUNCH_CODEX`
+        /// in the case folder, before sign-in freezes the registrations, so a master launch
+        /// gets past the harness lookup and a test launch runs it. Inputs: the catalog, the
+        /// sign-in action and whether to register the stand-in. Output: the case.
+        async fn open_registered(catalog: &str, action: NativeAuthAction, codex: bool) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-auth-observe-")
                 .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -2673,7 +2681,7 @@ fallback_allowed = false
             let project = root.path().join("p.toml");
             let config = crate::config::resolve_config(&global, &project).unwrap();
             let (_stop, stopped) = tokio::sync::watch::channel(false);
-            let service = EngineService::start_with_settings_sources(
+            let mut service = EngineService::start_with_settings_sources(
                 root.path(),
                 "e.sock",
                 &global,
@@ -2682,6 +2690,13 @@ fallback_allowed = false
             )
             .await
             .unwrap();
+            if codex {
+                let stand_in = root.path().join("codex");
+                std::fs::write(&stand_in, TEST_LAUNCH_CODEX).unwrap();
+                std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                service.register_codex_executable(&stand_in).unwrap();
+            }
             let host = service.owner_runtime().unwrap();
             let client = OwnerClient::attach(
                 &host.authority.root.path,
@@ -3420,7 +3435,10 @@ fallback_allowed = false
             .await;
         }
 
-        async fn prepare_next_turn(&self, request_id: &str) -> crate::storage::MasterRuntimeResult {
+        /// Sends one owner message to the case's master through the owner's Submit, as the
+        /// clients send it. Input: the request id, which becomes the turn's id. Output: the
+        /// master session's id.
+        async fn submit_turn(&self, request_id: &str) -> crate::protocol::SessionId {
             let state = self
                 .owner_state(OwnerRead::ProjectMaster {
                     project_id: master_project(),
@@ -3444,10 +3462,40 @@ fallback_allowed = false
                 },
             )
             .await;
+            session.session_id
+        }
+
+        async fn prepare_next_turn(&self, request_id: &str) -> crate::storage::MasterRuntimeResult {
+            let session_id = self.submit_turn(request_id).await;
             let host = self.service.owner_runtime().unwrap();
-            host.prepare_master_turn(&session.project_id, &session.session_id, &id(request_id))
+            host.prepare_master_turn(&master_project(), &session_id, &id(request_id))
                 .await
                 .unwrap()
+        }
+
+        /// One master turn as the owner's clients read it from the engine. Inputs: the
+        /// session and the turn's request id. Output: the stored turn.
+        #[cfg(target_os = "macos")]
+        async fn master_turn(
+            &self,
+            session_id: &crate::protocol::SessionId,
+            request_id: &str,
+        ) -> crate::master_session::MasterTurnView {
+            let state = self
+                .owner_state(OwnerRead::ProjectMasterTurns {
+                    project_id: master_project(),
+                    session_id: session_id.clone(),
+                    cursor: None,
+                    limit: 16,
+                })
+                .await;
+            let OwnerData::ProjectMasterTurns { page } = state.data else {
+                panic!("actual master turn page missing")
+            };
+            page.turns
+                .into_iter()
+                .find(|turn| turn.id == id(request_id))
+                .expect("the turn is stored")
         }
     }
 
@@ -3633,6 +3681,489 @@ fallback_allowed = false
             );
             drop(held);
             assert!(agents.holders(&account).is_empty());
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Every argument of a launch command as text. Input: the command. Output: the args.
+    fn arguments(command: &ProcessCommand) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Writes a synthetic Codex `auth.json` into a managed profile whose access token lapses
+    /// in eight hours, with placeholder values only, so a master turn reads a long-lived
+    /// sign-in. Input: the managed profile's folder. Output: none.
+    fn long_lived_codex_auth(managed: &std::path::Path) {
+        use base64::Engine as _;
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 8 * 3600;
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json!({"exp": expires})).unwrap());
+        let record = json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": format!("unit-header.{claims}.unit-identity-signature"),
+                "access_token": format!("unit-header.{claims}.unit-signature"),
+                "refresh_token": "unit-refresh-placeholder",
+                "account_id": "unit-account"
+            },
+            "last_refresh": "2026-11-12T00:00:00Z"
+        });
+        let path = managed.join("auth.json");
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// DEC-150 F7, the S9 row: a signed-in Codex master's launch runs the owner's master
+    /// model, read by `master_settings` and swapped into the turn's connection by
+    /// `prepare_master_host`, and the account's own model while no master model is set.
+    #[tokio::test]
+    async fn a_signed_in_master_launch_runs_the_owner_s_master_model_and_the_account_s_without_one()
+    {
+        use crate::harness_settings::Scope;
+        use crate::model_choice::{Slot, Written, store};
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut case = Case::open_registered(
+                MASTER_CATALOG,
+                NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::CodexBrowser,
+                },
+                true,
+            )
+            .await;
+            case.complete_sign_in().await;
+            case.open_master().await;
+            let prepared = admitted(case.prepare_next_turn("master-model-turn").await);
+            let host = case.service.owner_runtime().unwrap();
+            let catalog = crate::model_choice::catalog("codex");
+            let master = catalog[0].clone();
+            assert_ne!(
+                master, "model-a",
+                "the master model differs from the account's"
+            );
+            let pair = |model: &str| format!("model=\"{model}\"");
+            let (profile, _) = host
+                .acquire_master_profile(&prepared, &id("master-model-turn"))
+                .await
+                .unwrap();
+            long_lived_codex_auth(&profile.profile_path().unwrap());
+
+            let (settings, model) = host.master_settings(&prepared).await.unwrap();
+            assert_eq!(model, None, "no master model is set yet");
+            let launch = host
+                .prepare_master_host(&prepared, &profile, settings, model.as_deref())
+                .unwrap();
+            let own = arguments(&launch.command);
+            drop(launch);
+            assert!(
+                own.windows(2)
+                    .any(|pair_of| pair_of[0] == "-c" && pair_of[1] == pair("model-a")),
+                "the account's own model runs: {own:?}"
+            );
+            assert!(!own.contains(&pair(&master)), "{own:?}");
+
+            let root = super::super::changes::engine_root(&host.authority).unwrap();
+            let db = crate::storage::versioned::open(&root).unwrap();
+            let version = store::values(&db, "codex", &catalog, &Scope::App, None)
+                .unwrap()
+                .rows
+                .iter()
+                .find(|row| row.slot == Slot::Master)
+                .unwrap()
+                .version;
+            let written = store::set(
+                &db,
+                "codex",
+                &catalog,
+                &Scope::App,
+                Slot::Master,
+                &json!(master),
+                version,
+            )
+            .unwrap();
+            assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+            drop(db);
+
+            let (settings, model) = host.master_settings(&prepared).await.unwrap();
+            assert_eq!(model.as_deref(), Some(master.as_str()));
+            let launch = host
+                .prepare_master_host(&prepared, &profile, settings, model.as_deref())
+                .unwrap();
+            let chosen = arguments(&launch.command);
+            drop(launch);
+            assert!(
+                chosen
+                    .windows(2)
+                    .any(|pair_of| pair_of[0] == "-c" && pair_of[1] == pair(&master)),
+                "the owner's master model runs: {chosen:?}"
+            );
+            assert!(!chosen.contains(&pair("model-a")), "{chosen:?}");
+            drop(profile);
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// The stand-in Codex of the case folder (DEC-150 M-6, M-10). `exec` writes an answer
+    /// where `-o` names for `good-model`, prints the provider's refusal code and fails for
+    /// `bad-model`, and fails for any other. `app-server` with a `-c model=` pair, as a
+    /// master turn starts it, runs one thread and turn in Codex 0.164's shapes: `modelNotFound`
+    /// for any model but the account's `model-a`, another turn error for that one, then exits
+    /// once its input closes. Any other call exits at once.
+    const TEST_LAUNCH_CODEX: &str = r#"#!/bin/sh
+mode=
+out=
+model=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    exec) mode=exec ;;
+    app-server) mode=server ;;
+    -o) out=$2; shift ;;
+    -m) model=$2; shift ;;
+    -c)
+      case "$2" in
+        model=*) model=${2#model=}; model=${model#\"}; model=${model%\"} ;;
+      esac
+      shift ;;
+  esac
+  shift
+done
+case "$mode" in
+  exec)
+    case "$model" in
+      good-model) printf 'OK\n' > "$out"; exit 0 ;;
+      bad-model) printf '%s\n' '{"type":"error","message":"model_not_found"}'; exit 1 ;;
+    esac
+    exit 1 ;;
+  server) [ -n "$model" ] || exit 0 ;;
+  *) exit 0 ;;
+esac
+IFS= read -r line
+printf '%s\n' "{\"id\":1,\"result\":{\"userAgent\":\"stand-in\",\"codexHome\":\"$CODEX_HOME\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}"
+IFS= read -r line
+IFS= read -r line
+case "$line" in
+  *'"sandbox":"danger-full-access"'*) approval=never; sandbox='{"type":"dangerFullAccess"}' ;;
+  *) approval=on-request; sandbox='{"type":"readOnly","networkAccess":false}' ;;
+esac
+cwd=$(pwd -P)
+printf '%s\n' "{\"id\":2,\"result\":{\"thread\":{\"id\":\"stand-in-thread\",\"cwd\":\"$cwd\",\"turns\":[],\"status\":{\"type\":\"idle\"}},\"cwd\":\"$cwd\",\"model\":\"stand-in-model\",\"modelProvider\":\"openai\",\"approvalPolicy\":\"$approval\",\"approvalsReviewer\":\"user\",\"sandbox\":$sandbox}}"
+IFS= read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"stand-in-turn","items":[],"status":"inProgress"}}}'
+info=modelNotFound
+[ "$model" = model-a ] && info=badRequest
+printf '%s\n' "{\"method\":\"error\",\"params\":{\"threadId\":\"stand-in-thread\",\"turnId\":\"stand-in-turn\",\"willRetry\":false,\"error\":{\"message\":\"The turn failed.\",\"codexErrorInfo\":\"$info\"}}}"
+/bin/cat > /dev/null
+exit 0
+"#;
+
+    /// The origin of one id in a harness's section. Inputs: the section and the id.
+    /// Output: its origin, or none when the section does not list it.
+    fn origin_of(
+        models: &crate::model_choice::Models,
+        id: &str,
+    ) -> Option<crate::model_choice::Origin> {
+        models
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .map(|candidate| candidate.origin)
+    }
+
+    /// Adds one owner id to Codex and runs its test launch on pool-a through the real owner
+    /// socket and `test_launch::run` (DEC-150 M-6), the pool's account signed in first, or
+    /// still signing in. Inputs: the id and whether the sign-in completes. Output: what the
+    /// test launch decided, its pending reason and the Codex section after it.
+    async fn test_launch_on_pool(
+        model: &str,
+        signed_in: bool,
+    ) -> (
+        crate::model_choice::test_launch::Tested,
+        Option<String>,
+        crate::model_choice::Models,
+    ) {
+        let mut case = Case::open_registered(
+            MASTER_CATALOG,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            },
+            true,
+        )
+        .await;
+        if signed_in {
+            long_lived_codex_auth(&case.guard.as_ref().unwrap().profile_path().unwrap());
+            case.complete_sign_in().await;
+        }
+        let (added, models) = case.client.model_choice_add("codex", model).await.unwrap();
+        assert_eq!(added, crate::engine::owner::ModelAdded::Pending);
+        assert_eq!(
+            origin_of(&models, model),
+            Some(crate::model_choice::Origin::Pending)
+        );
+        let tested = case
+            .client
+            .model_choice_test("codex", model, CredentialRef::new("pool-a").unwrap())
+            .await
+            .unwrap();
+        case.close().await;
+        tested
+    }
+
+    /// DEC-150 M-6, verified: a test launch on a signed-in pool whose Codex answers on the
+    /// owner's id verifies it, so the id can be chosen.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_test_launch_the_harness_answers_on_verifies_the_owner_s_id() {
+        use crate::model_choice::{Origin, test_launch::Tested};
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (tested, reason, models) = test_launch_on_pool("good-model", true).await;
+            assert_eq!((tested, reason), (Tested::Verified, None));
+            assert_eq!(origin_of(&models, "good-model"), Some(Origin::Verified));
+        })
+        .await
+        .unwrap();
+    }
+
+    /// DEC-150 M-6, failed: a test launch whose Codex prints the provider's refusal code
+    /// fails the owner's id, which stays listed and can't be used.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_test_launch_the_provider_refuses_fails_the_owner_s_id() {
+        use crate::model_choice::{Origin, test_launch::Tested};
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (tested, reason, models) = test_launch_on_pool("bad-model", true).await;
+            assert_eq!((tested, reason), (Tested::Failed, None));
+            assert_eq!(origin_of(&models, "bad-model"), Some(Origin::Failed));
+        })
+        .await
+        .unwrap();
+    }
+
+    /// DEC-150 M-6, pending: a test launch on a pool whose account has not signed in runs
+    /// nothing, and the id keeps waiting with the reason the clients show as given.
+    #[tokio::test]
+    async fn a_test_launch_on_a_pool_without_a_signed_in_account_leaves_the_id_pending_with_why() {
+        use crate::model_choice::{Origin, test_launch::Tested};
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (tested, reason, models) = test_launch_on_pool("good-model", false).await;
+            assert_eq!(tested, Tested::Pending);
+            assert_eq!(
+                reason.as_deref(),
+                Some("No signed-in Codex account in this pool.")
+            );
+            assert_eq!(origin_of(&models, "good-model"), Some(Origin::Pending));
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Checks a stored master turn ended as the provider's refusal of the master model, in
+    /// the reason and cause the desktop's `turnLine` and the TUI's `turn_lines` word, with
+    /// no reply from another model. Input: the turn as the clients read it.
+    #[cfg(target_os = "macos")]
+    fn assert_model_refused(turn: &crate::master_session::MasterTurnView) {
+        use crate::master_session::{MasterReason, MasterTurnPhase};
+        assert_eq!(turn.phase, MasterTurnPhase::Failed);
+        assert_eq!(turn.reason, Some(MasterReason::ModelRefused));
+        assert_eq!(turn.cause.as_deref(), Some("master_model_refused"));
+        assert!(turn.reply.is_none(), "no reply from another model");
+        let wire = serde_json::to_value(turn).unwrap();
+        assert_eq!(wire["reason"], "model_refused");
+        assert_eq!(wire["cause"], "master_model_refused");
+    }
+
+    /// Counts the model fallback notices the owner was given for the case's Codex master.
+    /// Input: the engine database. Output: the count.
+    #[cfg(target_os = "macos")]
+    fn fallback_notices(db: &rusqlite::Connection) -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM owner_notices WHERE kind='pool_failover' AND subject LIKE 'model_fallback:project-a:codex:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Opens a signed-in Codex master whose owner picked a master model the provider
+    /// refuses, saves the owner's fallback rule, and drives the first turn through the
+    /// real owner runtime and the case's Codex (DEC-150 M-10). Input: the rule. Output: the
+    /// case, the master session, the refused model and the engine database.
+    #[cfg(target_os = "macos")]
+    async fn refused_master_turn(
+        rule: crate::model_choice::rules::FallbackRule,
+    ) -> (
+        Case,
+        crate::protocol::SessionId,
+        String,
+        rusqlite::Connection,
+    ) {
+        use crate::harness_settings::Scope;
+        use crate::model_choice::rules::{Rule, RuleWritten, rules, set_rule};
+        use crate::model_choice::{Slot, Written, store};
+        let mut case = Case::open_registered(
+            MASTER_CATALOG,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            },
+            true,
+        )
+        .await;
+        long_lived_codex_auth(&case.guard.as_ref().unwrap().profile_path().unwrap());
+        case.complete_sign_in().await;
+        case.open_master().await;
+        let host = case.service.owner_runtime().unwrap();
+        let root = super::super::changes::engine_root(&host.authority).unwrap();
+        let db = crate::storage::versioned::open(&root).unwrap();
+        let catalog = crate::model_choice::catalog("codex");
+        let model = catalog[0].clone();
+        assert_ne!(
+            model, "model-a",
+            "the master model differs from the account's"
+        );
+        let version = store::values(&db, "codex", &catalog, &Scope::App, None)
+            .unwrap()
+            .rows
+            .iter()
+            .find(|row| row.slot == Slot::Master)
+            .unwrap()
+            .version;
+        let written = store::set(
+            &db,
+            "codex",
+            &catalog,
+            &Scope::App,
+            Slot::Master,
+            &json!(model),
+            version,
+        )
+        .unwrap();
+        assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+        let version = rules(&db).unwrap().fallback_version;
+        let written = set_rule(&db, Rule::Fallback(rule), version).unwrap();
+        assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+
+        let session = case.submit_turn("refused-turn").await;
+        let refused = host
+            .drive_master_turn(&master_project(), &session, &id("refused-turn"))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "master_model_refused");
+        assert_model_refused(&case.master_turn(&session, "refused-turn").await);
+        assert!(
+            crate::team::model_pick::refused(
+                &db,
+                &master_project(),
+                &CredentialRef::new("connection-a").unwrap(),
+                &model,
+                crate::team::now_ms(),
+            )
+            .unwrap(),
+            "the launch recorded the refusal for the turn's account"
+        );
+        assert_eq!(
+            fallback_notices(&db),
+            0,
+            "the refused turn itself tells no fallback"
+        );
+        (case, session, model, db)
+    }
+
+    /// DEC-150 M-10 under Stop: a master model the provider refuses ends the turn with the
+    /// refusal's words, and the owner's next message stops the same way while the refusal
+    /// holds, never falling back to the account's model or telling a fallback.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_refused_master_model_stops_the_master_with_its_words_and_no_fallback_under_stop() {
+        use crate::model_choice::rules::FallbackRule;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (case, session, model, db) = refused_master_turn(FallbackRule::Stop).await;
+            let host = case.service.owner_runtime().unwrap();
+            assert_eq!(case.submit_turn("stopped-turn").await, session);
+            let stopped = host
+                .drive_master_turn(&master_project(), &session, &id("stopped-turn"))
+                .await
+                .unwrap_err();
+            assert_eq!(stopped.0, "master_model_refused");
+            assert_model_refused(&case.master_turn(&session, "stopped-turn").await);
+            assert_eq!(fallback_notices(&db), 0, "Stop tells no fallback");
+            assert!(
+                crate::team::model_pick::refused(
+                    &db,
+                    &master_project(),
+                    &CredentialRef::new("connection-a").unwrap(),
+                    &model,
+                    crate::team::now_ms(),
+                )
+                .unwrap()
+            );
+            drop(db);
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// DEC-150 M-10 under Notice: after the provider refused the master model, the owner's
+    /// next message runs on the account's own model and the owner is told once, in a Pool
+    /// failover notice naming the refused model, with no team message left behind.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_refused_master_model_runs_the_account_s_model_next_and_tells_the_owner_once_under_notice()
+     {
+        use crate::model_choice::rules::FallbackRule;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (case, _session, model, db) = refused_master_turn(FallbackRule::Notice).await;
+            let prepared = admitted(case.prepare_next_turn("fallback-turn").await);
+            let host = case.service.owner_runtime().unwrap();
+            let (_, chosen) = host.master_settings(&prepared).await.unwrap();
+            assert_eq!(chosen, None, "the account's own model runs");
+            assert_eq!(fallback_notices(&db), 1, "the owner is told");
+            let (settings, chosen) = host.master_settings(&prepared).await.unwrap();
+            assert_eq!(chosen, None);
+            assert_eq!(fallback_notices(&db), 1, "the owner is told once");
+            let told: String = db
+                .query_row(
+                    "SELECT text FROM owner_notices WHERE subject LIKE 'model_fallback:project-a:codex:%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(told.contains(&model), "{told}");
+
+            let (profile, _) = host
+                .acquire_master_profile(&prepared, &id("fallback-turn"))
+                .await
+                .unwrap();
+            let launch = host
+                .prepare_master_host(&prepared, &profile, settings, None)
+                .unwrap();
+            let args = arguments(&launch.command);
+            drop(launch);
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == "model=\"model-a\""),
+                "the account's own model runs: {args:?}"
+            );
+            assert!(!args.contains(&format!("model=\"{model}\"")), "{args:?}");
+            let team: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM team_messages WHERE project='project-a'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(team, 0, "an owner-host fallback leaves no team message");
+            drop(profile);
+            drop(db);
             case.close().await;
         })
         .await

@@ -445,3 +445,115 @@ fn the_master_is_told_each_harness_s_models_as_the_pick_rule_offers_them() {
     );
     assert_eq!(master_lines(&db, &project(), &["rcli"]).unwrap(), "");
 }
+
+/// The project's stored setup for a status read: Codex master, no sub-agent slots.
+fn setup() -> crate::project_setup::StoredSetup {
+    crate::project_setup::StoredSetup {
+        project_id: project(),
+        name: "Models".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 4,
+        },
+        documents: vec![],
+        folder: "/private/tmp/unused".into(),
+        created_ms: 1,
+        revision: 1,
+    }
+}
+
+#[test]
+fn the_team_status_shows_each_task_s_picked_model_and_reason_and_none_for_the_default() {
+    let (_tmp, mut db) = engine();
+    crate::project_setup::initialize(&db).unwrap();
+    crate::coord::ensure(&db).unwrap();
+    let setup = setup();
+    db.execute(
+        "INSERT INTO project_setups VALUES (?1,?2)",
+        params![PROJECT, serde_json::to_string(&setup).unwrap()],
+    )
+    .unwrap();
+    owner_models(&db, &["gpt-a"], &["gpt-a"], None);
+    let plain = task(&db, "Plain");
+    let picked = task(&db, "Picked");
+    let tx = db.transaction().unwrap();
+    assert_eq!(
+        pin(&tx, &project(), picked, "codex", Some(&pick("gpt-a"))).unwrap(),
+        Ok(" on gpt-a".to_owned())
+    );
+    tx.commit().unwrap();
+
+    let read = crate::team::status(&db, &setup).unwrap();
+
+    let picks = read
+        .tasks
+        .iter()
+        .map(|task| (task.id, task.pick.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(picks, vec![(plain, None), (picked, Some(pick("gpt-a")))]);
+    assert_eq!(
+        crate::team::pick_line(&pick("gpt-a")),
+        "Model: gpt-a. Why: gpt-a fits"
+    );
+    assert_eq!(
+        crate::team::pick_line(&ModelPick {
+            model: "gpt-a".into(),
+            reason: String::new(),
+        }),
+        "Model: gpt-a"
+    );
+    let long = ModelPick {
+        model: "gpt-a".into(),
+        reason: format!("{}\nsecond line", "r".repeat(400)),
+    };
+    let line = crate::team::pick_line(&long);
+    assert!(!line.contains('\n'), "{line}");
+    assert!(
+        line.len() <= "Model: gpt-a. Why: ".len() + crate::team::tool::MODEL_REASON_BYTES_MAX + 3,
+        "{}",
+        line.len()
+    );
+}
+
+#[test]
+fn a_hundred_tasks_with_the_longest_picks_still_fit_one_owner_reply_without_dropping_a_task() {
+    let (_tmp, db) = engine();
+    crate::project_setup::initialize(&db).unwrap();
+    crate::coord::ensure(&db).unwrap();
+    let setup = setup();
+    db.execute_batch(SCHEMA).unwrap();
+    let model = format!("gpt-{}", "a".repeat(120));
+    let reason = "r".repeat(crate::team::tool::MODEL_REASON_BYTES_MAX);
+    for index in 0..crate::team::STATUS_TASKS_MAX {
+        let id = task(&db, &format!("Task {index}"));
+        db.execute(
+            "INSERT INTO team_task_models(task,project,model,reason) VALUES (?1,?2,?3,?4)",
+            params![id, PROJECT, model, reason],
+        )
+        .unwrap();
+    }
+    let full = crate::team::status(&db, &setup).unwrap();
+    assert!(
+        serde_json::to_vec(&full).unwrap().len() > crate::team::STATUS_REPLY_BYTES_MAX,
+        "the row needs picks that overflow one reply"
+    );
+
+    let read = crate::team::owner_status(&db, &setup, None).unwrap();
+
+    assert!(serde_json::to_vec(&read).unwrap().len() <= crate::team::STATUS_REPLY_BYTES_MAX);
+    assert!(!read.partial, "picks are cut before any task is left out");
+    assert_eq!(read.tasks.len(), full.tasks.len());
+    for task in &read.tasks {
+        let pick = task.pick.as_ref().unwrap();
+        assert_eq!(pick.model, model);
+        assert!(pick.reason.ends_with(" more bytes]"), "{}", pick.reason);
+    }
+}
