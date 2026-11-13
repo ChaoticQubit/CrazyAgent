@@ -677,10 +677,15 @@ fn codex_facts(value: &Value, exec: bool) -> Vec<TranscriptEvent> {
         (Some("event_msg"), Some("task_started")) => vec![TranscriptEvent::TurnStarted],
         (Some("event_msg"), Some("task_complete")) if payload["error"].is_object() => {
             let error = &payload["error"];
+            let limit = matches!(
+                error["codex_error_info"].as_str(),
+                Some("usage_limit_exceeded" | "rate_limit_exceeded")
+            );
             let mut facts = codex_refusal_said(error);
             facts.extend([
                 TranscriptEvent::TurnError {
-                    rate_limited: rate_limited(error["message"].as_str().unwrap_or_default()),
+                    rate_limited: limit
+                        || rate_limited(error["message"].as_str().unwrap_or_default()),
                 },
                 TranscriptEvent::TurnFinished { success: false },
             ]);
