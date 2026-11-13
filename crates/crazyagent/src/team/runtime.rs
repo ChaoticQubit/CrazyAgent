@@ -29,6 +29,7 @@ use crate::harnesses::terminal_session::{
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
 use crate::master_sessions::ResumePlan;
+use crate::model_choice::test_launch::Tested;
 use crate::model_gateway::relay::Relay;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
@@ -10679,6 +10680,15 @@ impl TeamRuntime {
     /// account and model, so no start counts that account as able to run it until the
     /// refusal expires, and stops the agent so its next start picks again; a master starts
     /// again at once. Nothing is recorded for an account's own model. Takes the agent.
+    /// Claims the engine's own check of a model refusal agent `id`'s pane said (DEC-150
+    /// addendum 9g, 9h), for a profile account with an explicit model on a harness with a
+    /// test launch; a check that already refused marks the project from its own time.
+    /// Takes the agent. Returns the check to run off this thread, none when none runs.
+    fn said_check(&self, id: i64) -> Result<Option<Check>, EngineError> {
+        let _ = id;
+        Ok(None)
+    }
+
     fn model_refused(&mut self, id: i64) -> Result<(), EngineError> {
         let worker = &self.workers[&id];
         let Some(model) = worker.model.clone() else {
@@ -12392,6 +12402,34 @@ fn refusal_said_line(harness: &str, model: Option<&str>, master: bool) -> String
             "{name} reported that its account cannot run {model}, so the task stopped and was not tried again. Pick another agent model in Settings, Harnesses."
         )
     }
+}
+
+/// One engine check of a model refusal a pane's transcript said (DEC-150 addendum 9g): the
+/// engine folder, both settings files, the harness and its executable, the account and the
+/// model the said turn ran on, and the project it ran for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Check {
+    root: PathBuf,
+    settings: (PathBuf, PathBuf),
+    harness: String,
+    executable: PathBuf,
+    connection: CredentialRef,
+    model: String,
+    project: ProjectId,
+}
+
+/// Records what the engine's check of a said refusal decided (DEC-150 addendum 9g): only a
+/// refusal the engine read itself marks the account's model, for the check's project and,
+/// through its claim, for every other project; an answer or a pending test marks nothing.
+/// Takes the database, the check, the decision and the time. Returns a SQLite failure.
+fn check_ended(
+    db: &Connection,
+    check: &Check,
+    tested: Tested,
+    now: i64,
+) -> Result<(), EngineError> {
+    let _ = (db, check, tested, now);
+    Ok(())
 }
 
 /// The problem a sub-agent's turn leaves on its agent: the closed process with the turn's

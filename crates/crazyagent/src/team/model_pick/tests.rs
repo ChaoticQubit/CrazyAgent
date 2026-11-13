@@ -415,6 +415,74 @@ fn a_model_refusal_holds_for_its_project_connection_and_model_until_it_expires()
     assert!(!refused(&db, &project(), &a, "m-0", 3_000).unwrap());
 }
 
+/// The engine's check of a model refusal a pane said runs at most once per account and
+/// model in `MODEL_REFUSAL_MS` (DEC-150 addendum 9g, 9h): the first claim runs, a later one
+/// is held, one whose check refused answers refused with the check's own time, and a
+/// claim runs again once the last one ended.
+#[test]
+fn a_model_check_runs_once_per_account_and_model_in_its_window() {
+    let (_tmp, db) = engine();
+    let a = CredentialRef::new("account-a").unwrap();
+    let b = CredentialRef::new("account-b").unwrap();
+    let other = ProjectId::new("other").unwrap();
+    assert_eq!(claim_check(&db, &a, "gpt-a", 1_000).unwrap(), Claim::Run);
+    assert_eq!(claim_check(&db, &a, "gpt-a", 1_001).unwrap(), Claim::Held);
+    assert_eq!(claim_check(&db, &a, "gpt-b", 1_001).unwrap(), Claim::Run);
+    assert_eq!(claim_check(&db, &b, "gpt-a", 1_001).unwrap(), Claim::Run);
+    check_refused(&db, &other, &a, "gpt-a", 2_000).unwrap();
+    assert!(refused(&db, &other, &a, "gpt-a", 2_001).unwrap());
+    assert!(!refused(&db, &project(), &a, "gpt-a", 2_001).unwrap());
+    assert_eq!(
+        claim_check(&db, &a, "gpt-a", 3_000).unwrap(),
+        Claim::Refused { checked_ms: 1_000 }
+    );
+    assert_eq!(
+        claim_check(&db, &a, "gpt-b", 3_000).unwrap(),
+        Claim::Held,
+        "only the refused model answers refused"
+    );
+    assert_eq!(
+        claim_check(&db, &a, "gpt-a", 1_000 + MODEL_REFUSAL_MS).unwrap(),
+        Claim::Run
+    );
+    assert_eq!(
+        claim_check(&db, &a, "gpt-a", 1_001 + MODEL_REFUSAL_MS).unwrap(),
+        Claim::Held,
+        "a new claim starts unrefused"
+    );
+}
+
+/// Live model checks are never dropped (DEC-150 addendum 9h): with `CHECKS_MAX` live
+/// claims a new account and model is held with no row, the oldest live claim still
+/// holds, and a claim past its end makes room.
+#[test]
+fn a_full_table_of_live_model_checks_holds_a_new_one_and_drops_none() {
+    let (_tmp, db) = engine();
+    let a = CredentialRef::new("account-a").unwrap();
+    for n in 0..CHECKS_MAX {
+        let model = format!("m-{n}");
+        assert_eq!(
+            claim_check(&db, &a, &model, 1_000 + n as i64).unwrap(),
+            Claim::Run
+        );
+    }
+    let rows = || -> i64 {
+        db.query_row("SELECT COUNT(*) FROM team_model_checks", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(claim_check(&db, &a, "m-new", 2_000).unwrap(), Claim::Held);
+    assert_eq!(rows(), CHECKS_MAX as i64);
+    assert_eq!(claim_check(&db, &a, "m-0", 2_000).unwrap(), Claim::Held);
+    assert_eq!(
+        claim_check(&db, &a, "m-new", 1_000 + MODEL_REFUSAL_MS).unwrap(),
+        Claim::Run,
+        "the claim on m-0 ended and made room"
+    );
+    assert_eq!(rows(), CHECKS_MAX as i64);
+}
+
 #[test]
 fn the_master_is_told_each_harness_s_models_as_the_pick_rule_offers_them() {
     use crate::model_choice::rules::{self, PickRule, Rule, RuleWritten};

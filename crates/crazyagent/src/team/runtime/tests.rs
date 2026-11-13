@@ -29883,6 +29883,202 @@ fn a_pane_master_turn_whose_refusal_was_said_notes_harness_and_model() {
     team.workers.clear();
 }
 
+/// Lists the engine's model check claims in the fixture's database, none before the first.
+/// Takes the fixture. Returns each claim's account, model, time and refused flag.
+fn model_checks(fixture: &Fixture) -> Vec<(String, String, i64, bool)> {
+    let made: bool = fixture
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_model_checks')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if !made {
+        return Vec::new();
+    }
+    let mut statement = fixture
+        .connection
+        .prepare("SELECT connection,model,checked_ms,refused FROM team_model_checks ORDER BY connection,model")
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A model refusal a pane said claims one engine check per account and model (DEC-150
+/// addendum 9g, 9h): the first said turn gets the check to run, a second on the same
+/// account and model gets none; a runtime without settings, a worker on its account's
+/// default model and one on a URL account claim nothing.
+#[test]
+fn a_said_refusal_claims_one_engine_check_per_account_and_model() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    let said = |model: Option<&str>, managed: bool| {
+        let mut worker = between_turns(&project, AgentRole::Sub, managed, false);
+        worker.model = model.map(str::to_owned);
+        worker
+    };
+    let first = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers.insert(first, said(Some("gpt-a"), true));
+    assert_eq!(team.said_check(first).unwrap(), None, "no settings");
+    let settings = (
+        fixture.base.join("global.toml"),
+        fixture.base.join("project.toml"),
+    );
+    team.settings = Some(settings.clone());
+    let default = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers.insert(default, said(None, true));
+    let url = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers.insert(url, said(Some("gpt-a"), false));
+    assert_eq!(team.said_check(default).unwrap(), None, "default model");
+    assert_eq!(team.said_check(url).unwrap(), None, "URL account");
+    assert_eq!(model_checks(&fixture), Vec::new());
+
+    assert_eq!(
+        team.said_check(first).unwrap(),
+        Some(Check {
+            root: fixture.base.clone(),
+            settings,
+            harness: "codex".into(),
+            executable: fixture.base.join("codex"),
+            connection: reference(ENDPOINT),
+            model: "gpt-a".into(),
+            project: project.clone(),
+        })
+    );
+    let second = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers.insert(second, said(Some("gpt-a"), true));
+    assert_eq!(team.said_check(second).unwrap(), None, "held");
+    let checks = model_checks(&fixture);
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    assert_eq!(
+        (checks[0].0.as_str(), checks[0].1.as_str(), checks[0].3),
+        (ENDPOINT, "gpt-a", false)
+    );
+    assert_eq!(recorded_refusals(&fixture), 0);
+    team.workers.clear();
+}
+
+/// A said refusal whose account and model the engine's check already refused for another
+/// project marks this project at once, from that check's time, with no new check
+/// (DEC-150 addendum 9g, 9h), through the pane turn's end.
+#[test]
+fn a_said_refusal_an_engine_check_already_refused_marks_the_project_with_no_new_check() {
+    let fixture = Fixture::new(1);
+    ledger::initialize(&fixture.connection).unwrap();
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    team.settings = Some((
+        fixture.base.join("global.toml"),
+        fixture.base.join("project.toml"),
+    ));
+    let account = reference(ENDPOINT);
+    let checked = now_ms() - 60_000;
+    assert_eq!(
+        super::super::model_pick::claim_check(&fixture.connection, &account, "gpt-a", checked)
+            .unwrap(),
+        super::super::model_pick::Claim::Run
+    );
+    super::super::model_pick::check_refused(
+        &fixture.connection,
+        &ProjectId::new("other").unwrap(),
+        &account,
+        "gpt-a",
+        checked,
+    )
+    .unwrap();
+    let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mut worker = between_turns(&project, AgentRole::Sub, true, false);
+    worker.model = Some("gpt-a".to_owned());
+    team.workers.insert(sub, worker);
+
+    team.apply(
+        sub,
+        Report::Finished {
+            text: String::new(),
+            end: TurnEnd::ModelRefusalSaid,
+            cause: None,
+        },
+    )
+    .unwrap();
+
+    let until: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT until_ms FROM team_model_refusals WHERE project=?1 AND connection=?2 AND model='gpt-a'",
+            params![PROJECT, ENDPOINT],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert_eq!(
+        until,
+        Some(checked + super::super::model_pick::MODEL_REFUSAL_MS)
+    );
+    assert_eq!(
+        model_checks(&fixture),
+        vec![(ENDPOINT.to_owned(), "gpt-a".to_owned(), checked, true)],
+        "no new check"
+    );
+    team.workers.clear();
+}
+
+/// Only a refusal the engine's own check read marks the account's model (DEC-150 addendum
+/// 9g): an answer and a pending test leave the model unmarked and the claim held, a refused
+/// test marks the check's project and makes its claim answer refused.
+#[test]
+fn only_a_refused_engine_check_marks_the_account_s_model() {
+    use super::super::model_pick::{Claim, claim_check, refused};
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let account = reference(ENDPOINT);
+    for (n, tested) in [Tested::Verified, Tested::Pending, Tested::Failed]
+        .into_iter()
+        .enumerate()
+    {
+        let model = format!("gpt-{n}");
+        assert_eq!(
+            claim_check(&fixture.connection, &account, &model, 1_000).unwrap(),
+            Claim::Run
+        );
+        let check = Check {
+            root: fixture.base.clone(),
+            settings: (
+                fixture.base.join("global.toml"),
+                fixture.base.join("project.toml"),
+            ),
+            harness: "codex".into(),
+            executable: fixture.base.join("codex"),
+            connection: account.clone(),
+            model: model.clone(),
+            project: project.clone(),
+        };
+        check_ended(&fixture.connection, &check, tested, 2_000).unwrap();
+        let failed = tested == Tested::Failed;
+        assert_eq!(
+            refused(&fixture.connection, &project, &account, &model, 2_001).unwrap(),
+            failed,
+            "{tested:?}"
+        );
+        let claim = if failed {
+            Claim::Refused { checked_ms: 1_000 }
+        } else {
+            Claim::Held
+        };
+        assert_eq!(
+            claim_check(&fixture.connection, &account, &model, 3_000).unwrap(),
+            claim,
+            "{tested:?}"
+        );
+    }
+}
+
 /// With idle agents kept for reuse, a task whose model no idle agent of its harness runs
 /// does not wait behind them forever (DEC-150 F3): when the harness slot is full, dispatch
 /// stops one idle agent on another model, so the task can start on its own model.

@@ -411,6 +411,21 @@ impl SettingsResolver {
         waiting
     }
 
+    /// The account one named member gives the first of `harnesses` for `project`, with the
+    /// same sign-in check, account pauses, project holds and schedule rules as
+    /// [`Self::pool_pick`], read over every pool that names it (DEC-150 addendum 9h).
+    /// Rereads the settings. Returns [`AccountPick::NeedsPool`] for unreadable settings and
+    /// [`AccountPick::NoUsableAccount`] for an account no pool names or no harness can use.
+    pub fn connection_pick(
+        &self,
+        project: &str,
+        connection: &CredentialRef,
+        harnesses: &[ResearchHarness],
+    ) -> AccountPick {
+        let _ = (project, connection, harnesses);
+        AccountPick::NeedsPool
+    }
+
     /// Opens the engine database for one resolve, or `None` when it cannot be
     /// opened, so managed accounts are then treated as signed out.
     fn engine(&self) -> Option<Connection> {

@@ -118,3 +118,69 @@ fn research_runs_on_endpoint_accounts_with_or_without_a_key_by_wire_format() {
     );
     assert_eq!(picked("local", "claude-code"), AccountPick::NoUsableAccount);
 }
+
+/// A check of one account (DEC-150 addendum 9h) runs only on that account, though another
+/// member of its pool comes first in a pool pick, and finds no usable account for one no
+/// pool names, one not in the settings or one the harness cannot use.
+#[cfg(unix)]
+#[test]
+fn a_connection_pick_takes_only_the_named_member_of_a_pool() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-connection-pick-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    crate::storage::initialize_authority_schemas(&Connection::open(&database).unwrap()).unwrap();
+    let projects = base.join("projects");
+    std::fs::create_dir(&projects).unwrap();
+    let global = base.join("global.toml");
+    let connection = |id: &str, port: u16| {
+        format!(
+            r#"{{ id = "{id}", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "http://127.0.0.1:{port}/v1" }}, model = {{ id = "qwen2.5:0.5b", author = "openai-compatible" }}, auth = {{ method = "none" }} }}"#
+        )
+    };
+    std::fs::write(
+        &global,
+        format!(
+            "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\nconnections = [{}, {}, {}]\npools = [{{ id = \"local-pool\", members = [\"first\", \"second\"], projects = [], roles = [], fallback_allowed = false }}]\n",
+            connection("first", 11434),
+            connection("second", 11435),
+            connection("loose", 11436),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let resolver =
+        SettingsResolver::new(&global, &base.join("project.toml"), &projects, &database).unwrap();
+    let endpoint = |id: &str, port: u16| AccountPick::Account {
+        connection: reference(id),
+        account: Box::new(ResearchAccount::Endpoint {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        }),
+    };
+    let codex = [ResearchHarness::Codex];
+    assert_eq!(
+        resolver.pool_pick("", &reference("local-pool"), &codex),
+        endpoint("first", 11434)
+    );
+    assert_eq!(
+        resolver.connection_pick("", &reference("second"), &codex),
+        endpoint("second", 11435)
+    );
+    assert_eq!(
+        resolver.connection_pick("", &reference("loose"), &codex),
+        AccountPick::NoUsableAccount
+    );
+    assert_eq!(
+        resolver.connection_pick("", &reference("absent"), &codex),
+        AccountPick::NoUsableAccount
+    );
+    assert_eq!(
+        resolver.connection_pick("", &reference("second"), &[ResearchHarness::ClaudeCode]),
+        AccountPick::NoUsableAccount
+    );
+}

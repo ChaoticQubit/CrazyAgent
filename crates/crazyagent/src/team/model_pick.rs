@@ -552,6 +552,56 @@ pub(crate) fn refused(
     .map_err(super::error)
 }
 
+const CHECK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_model_checks (
+    connection TEXT NOT NULL,
+    model TEXT NOT NULL,
+    checked_ms INTEGER NOT NULL,
+    refused INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (connection, model)
+) WITHOUT ROWID;";
+
+/// The most live engine checks of said model refusals (DEC-150 addendum 9h): a live claim
+/// is never dropped, so past this many a new account and model is held with no launch.
+pub(crate) const CHECKS_MAX: usize = 64;
+
+/// What a claim on the engine's own check of a model refusal a pane said answered
+/// (DEC-150 addendum 9g, 9h): run the check now, the check already refused at
+/// `checked_ms`, or hold, as a live check exists or the table is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Claim {
+    Run,
+    Refused { checked_ms: i64 },
+    Held,
+}
+
+/// Claims the engine's check of an account's model, at most one per `MODEL_REFUSAL_MS`
+/// (DEC-150 addendum 9g, 9h), in one immediate transaction. Takes the database, outside a
+/// transaction, the account, the model and the time. Returns the claim, or a SQLite failure.
+pub(crate) fn claim_check(
+    db: &Connection,
+    connection: &CredentialRef,
+    model: &str,
+    now: i64,
+) -> Result<Claim, EngineError> {
+    let _ = (db, connection, model, now, CHECK_SCHEMA);
+    Ok(Claim::Held)
+}
+
+/// Records that the engine's check of an account's model was refused (DEC-150 addendum
+/// 9g): its claim answers refused until it ends, and the project's refusal is recorded
+/// from `now`. Takes the database, outside a transaction, the project, the account, the
+/// model and the time. Returns a SQLite failure.
+pub(crate) fn check_refused(
+    db: &Connection,
+    project: &ProjectId,
+    connection: &CredentialRef,
+    model: &str,
+    now: i64,
+) -> Result<(), EngineError> {
+    let _ = (db, project, connection, model, now);
+    Ok(())
+}
+
 /// Drops a removed project's model records (DEC-150 F6): its tasks' pinned picks, its
 /// agents' started models, its told fallbacks and its accounts' model refusals, so a
 /// project added again under the same id starts from none. Takes the removal's
