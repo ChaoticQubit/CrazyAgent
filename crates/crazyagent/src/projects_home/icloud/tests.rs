@@ -113,6 +113,130 @@ fn brctl_runs_by_absolute_path_with_each_placeholder_as_its_own_argument() {
     assert_eq!(command.get_envs().count(), 0);
 }
 
+/// Stands in for iCloud: `count` placeholders under /icloud, each landing the moment its ask
+/// ends, with every ask taking `ask_time`.
+struct FakeIcloud {
+    paths: Vec<PathBuf>,
+    landed: std::sync::atomic::AtomicUsize,
+    asks: std::sync::atomic::AtomicUsize,
+    ask_time: Duration,
+}
+
+impl FakeIcloud {
+    fn new(count: usize, ask_time: Duration) -> Self {
+        assert!(count > 0);
+        Self {
+            paths: (0..count)
+                .map(|n| PathBuf::from(format!("/icloud/f{n:05}")))
+                .collect(),
+            landed: Default::default(),
+            asks: Default::default(),
+            ask_time,
+        }
+    }
+
+    fn ask(&self, batch: &[PathBuf]) -> Result<(), EngineError> {
+        assert!(!batch.is_empty() && batch.len() <= BATCH_PATHS_MAX);
+        self.asks.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.ask_time);
+        let landed = self.landed.fetch_add(batch.len(), Ordering::SeqCst);
+        assert_eq!(
+            batch.first(),
+            self.paths.get(landed),
+            "batches are asked in order"
+        );
+        Ok(())
+    }
+
+    fn list(&self) -> Result<Placeholders, EngineError> {
+        let landed = self.landed.load(Ordering::SeqCst);
+        assert!(landed <= self.paths.len());
+        Ok(Placeholders {
+            paths: self.paths[landed..].to_vec(),
+            largest_bytes: 0,
+        })
+    }
+}
+
+#[test]
+fn files_that_land_while_slow_asks_still_go_are_counted_before_the_last_ask_ends() {
+    let batches = 6;
+    let icloud = FakeIcloud::new(BATCH_PATHS_MAX * batches, Duration::from_millis(80));
+    let download = Download::default();
+    let seen = AtomicU64::new(0);
+    let ask = |batch: &[PathBuf], _stop: &dyn Fn() -> bool| {
+        seen.fetch_max(download.progress().done, Ordering::SeqCst);
+        icloud.ask(batch)
+    };
+    let list = |_: &Path| icloud.list();
+    let poll = Duration::from_millis(10);
+    let files = run(Path::new("/icloud"), &download, &ask, &list, poll).unwrap();
+    let total = (BATCH_PATHS_MAX * batches) as u64;
+    assert_eq!(files, total);
+    assert_eq!(download.progress(), Progress { total, done: total });
+    assert_eq!(icloud.asks.load(Ordering::SeqCst), batches);
+    let counted = seen.load(Ordering::SeqCst);
+    assert!(
+        counted >= BATCH_PATHS_MAX as u64,
+        "progress read {counted} while later asks still waited"
+    );
+    assert!(counted < total);
+}
+
+#[test]
+fn a_failed_ask_ends_the_download_with_its_code_and_asks_nothing_more() {
+    let icloud = FakeIcloud::new(BATCH_PATHS_MAX * 4, Duration::from_millis(20));
+    let download = Download::default();
+    let ask = |batch: &[PathBuf], _stop: &dyn Fn() -> bool| {
+        if icloud.asks.load(Ordering::SeqCst) == 1 {
+            icloud.asks.fetch_add(1, Ordering::SeqCst);
+            return Err(refused(NOT_DOWNLOADED));
+        }
+        icloud.ask(batch)
+    };
+    let list = |_: &Path| icloud.list();
+    let started = Instant::now();
+    let failed = run(
+        Path::new("/icloud"),
+        &download,
+        &ask,
+        &list,
+        Duration::from_millis(10),
+    );
+    assert_eq!(failed.unwrap_err().0, NOT_DOWNLOADED);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(icloud.asks.load(Ordering::SeqCst), 2);
+    assert!(download.progress().done < download.progress().total);
+}
+
+#[test]
+fn a_cancel_during_slow_asks_stops_the_ask_and_the_download_within_one_check() {
+    let icloud = FakeIcloud::new(BATCH_PATHS_MAX * 4, Duration::from_millis(10));
+    let download = Download::default();
+    let ask = |_: &[PathBuf], stop: &dyn Fn() -> bool| {
+        icloud.asks.fetch_add(1, Ordering::SeqCst);
+        download.cancel();
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until && !stop() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(stop(), "the ask sees the cancel");
+        Err(stopped("stopped"))
+    };
+    let list = |_: &Path| icloud.list();
+    let started = Instant::now();
+    let cancelled = run(
+        Path::new("/icloud"),
+        &download,
+        &ask,
+        &list,
+        Duration::from_millis(10),
+    );
+    assert_eq!(cancelled.unwrap_err().0, NOT_DOWNLOADED);
+    assert!(started.elapsed() < CANCEL_EVERY * 5);
+    assert_eq!(icloud.asks.load(Ordering::SeqCst), 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_folder_with_no_placeholders_downloads_nothing_and_never_runs_brctl() {
