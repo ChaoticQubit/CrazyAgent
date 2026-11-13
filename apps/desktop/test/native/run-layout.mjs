@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -69,8 +69,9 @@ const LOCK_RETRIES_MAX = 16;
 
 /** Takes the one native run lock of a home for this process, so two native suites never run
  * side by side on one home: a held home is waited on for waitMs, then refused naming the
- * holder; a lock whose pid is dead is taken over; this process frees it on exit. Inputs: the
- * home and { label, waitMs, pollMs }. Output: the lock, whose release() frees it. */
+ * holder; a lock whose pid is dead is taken over, one taker at a time; this process frees it
+ * on exit. Inputs: the home and { label, waitMs, pollMs }. Output: the lock, whose release()
+ * frees it. */
 export async function lockHome(home, { label, waitMs = LOCK_WAIT_MS, pollMs = LOCK_POLL_MS } = {}) {
   assert(isAbsolute(home), "the home is an absolute path");
   assert(typeof label === "string" && label !== "", "the lock names its suite");
@@ -93,10 +94,7 @@ export async function lockHome(home, { label, waitMs = LOCK_WAIT_MS, pollMs = LO
       }
       const holder = readLock(lock);
       if (holder === undefined) continue;
-      if (holder !== null && !alive(holder.pid)) {
-        takeOver(lock, holder, mine.token);
-        continue;
-      }
+      if (holder !== null && !alive(holder.pid) && takeOver(lock, holder, draft, mine.token)) continue;
       if (Date.now() >= deadline) throw new Error(heldMessage(home, lock, holder, waitMs));
       await pause(pollMs);
     }
@@ -144,25 +142,36 @@ function alive(pid) {
   }
 }
 
-/** Removes a lock whose holder is dead: moves it to a private name, then removes it when it is
- * still that holder's, or puts back a newer lock another suite made in the meantime. Inputs:
- * the lock file, the dead holder and this taker's token. Output: nothing. */
-function takeOver(lock, holder, token) {
-  const moved = `${lock}.stale.${token}`;
+/** Removes a lock whose holder is dead, one taker at a time: the taker links its draft as the
+ * home's takeover lock, then removes the lock only while it is still the dead holder's, so a
+ * taker that read an old holder never removes a lock a faster taker made. A takeover lock left
+ * by a dead taker is refused, as no taker can remove it safely. Inputs: the lock, the dead
+ * holder, this taker's draft and token. Output: whether this taker did the takeover. */
+function takeOver(lock, holder, draft, token) {
+  const takeover = `${lock}.takeover`;
   try {
-    renameSync(lock, moved);
+    linkSync(draft, takeover);
   } catch (error) {
-    if (error.code === "ENOENT") return;
-    throw error;
+    if (error.code !== "EEXIST") throw error;
+    const taker = readLock(takeover);
+    if (taker === null || (taker !== undefined && !alive(taker.pid))) throw new Error(deadTakeoverMessage(takeover, taker));
+    return false;
   }
-  if (readLock(moved)?.token !== holder.token) {
-    try {
-      linkSync(moved, lock);
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-    }
+  try {
+    if (readLock(lock)?.token === holder.token) rmSync(lock, { force: true });
+  } finally {
+    if (readLock(takeover)?.token === token) rmSync(takeover, { force: true });
   }
-  rmSync(moved, { force: true });
+  assert.notEqual(readLock(takeover)?.token, token, "this taker leaves no takeover lock");
+  return true;
+}
+
+/** The plain refusal for a takeover lock whose taker died midway: who left it and that it may be
+ * removed by hand once no native run starts on the home. Inputs: the takeover lock and its
+ * taker, null when unreadable. Output: the message. */
+function deadTakeoverMessage(takeover, taker) {
+  const who = taker ? `pid ${taker.pid} (${taker.label}), started ${taker.started}, which has ended` : "a file that cannot be read";
+  return `The native test home's takeover lock ${takeover} was left by ${who}. No suite removes it, as a half-done takeover cannot be told from a live one. Remove ${takeover} if no native run is starting on this home.`;
 }
 
 /** The plain refusal for a held home: who holds it, since when, how long this suite waited,
