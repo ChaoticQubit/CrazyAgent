@@ -2434,3 +2434,19 @@ fn an_imported_project_memory_is_recalled_in_its_project_only() {
     );
     assert!(recalled(&mut db, &beta, "").is_empty());
 }
+
+/// P-14: a hybrid ranking note shown with recall speaks of the saved memories, not of a
+/// history; notes that name no history stay as they are.
+#[test]
+fn a_recall_ranking_note_speaks_of_the_saved_memories() {
+    use crate::semantic::vectors::{NOTE_MODEL_MISSING, NOTE_NEWEST, NOTE_NO_VECTORS};
+    assert_eq!(
+        recall_note(NOTE_NO_VECTORS),
+        "Ranked by words only: the search plugin has not read the saved memories yet."
+    );
+    assert_eq!(
+        recall_note(NOTE_NEWEST),
+        "Ranked by words and by meaning over the newest part of the saved memories; older parts rank by words only."
+    );
+    assert_eq!(recall_note(NOTE_MODEL_MISSING), NOTE_MODEL_MISSING);
+}

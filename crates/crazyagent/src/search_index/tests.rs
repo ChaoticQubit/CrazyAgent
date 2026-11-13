@@ -605,6 +605,45 @@ fn memory_sync_indexes_only_readable_memories_and_follows_every_change() {
     assert!(memories_ready(&db));
 }
 
+/// P-14: recall answered from the synced index carries the hybrid ranking note, as history
+/// search does: on a database on disk with the built-in model chosen and not downloaded, it
+/// says the ranking is words only and why; the scan ranks nothing and carries no note.
+#[cfg(unix)]
+#[test]
+fn recall_from_the_synced_index_carries_the_ranking_note() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().canonicalize().unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut db = Connection::open(root.join("engine.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY); INSERT INTO projects(id) VALUES ('alpha');",
+    )
+    .unwrap();
+    crate::memory::library::initialize(&db).unwrap();
+    initialize(&db).unwrap();
+    crate::semantic::vectors::initialize(&db).unwrap();
+    remember(&db, "m1", Some("alpha"), WRITTEN, "okapi project rule");
+    indexer::sync_memories(&mut db, NOW).unwrap();
+    let alpha = project("alpha");
+    let (found, note) = crate::memory::library::recall_ranked(&mut db, &alpha, "okapi")
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        note.as_deref(),
+        Some(crate::semantic::vectors::NOTE_MODEL_MISSING)
+    );
+    let (scanned, none) = crate::memory::library::recall_ranked(&mut db, &alpha, "kapi")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (scanned.len(), none),
+        (1, None),
+        "the scan ranks nothing, so it carries no note"
+    );
+}
+
 /// DEC-105 D2 and D3: recall reads the index once it is synced, best first, and shows only
 /// this project's and app-wide memories no one waits on; a query the index cannot match, or
 /// an index not synced yet, is answered by the scan as before.
