@@ -717,18 +717,45 @@ async fn pane_run(owner: &mut Owner, team: &TeamStatus) -> Option<Vec<u8>> {
     ran.then_some(seen)
 }
 
-/// The folder the stand-in named on its pane for its marker. Input: the pane bytes.
-/// Output: the absolute folder, or none.
+/// The folder the stand-in named on its pane for its marker: the text from the folder key
+/// up to its ran line, read whole whether the pane streamed the line raw or an attach's
+/// screen split it into pane rows. Input: the pane bytes. Output: the absolute folder, or
+/// none when no ran line follows the key.
 fn pane_folder(seen: &[u8]) -> Option<PathBuf> {
     let key = FOLDER_KEY.as_bytes();
     let start = seen.windows(key.len()).position(|window| window == key)? + key.len();
     let rest = &seen[start..];
     let end = rest
-        .iter()
-        .position(|byte| matches!(byte, b'\r' | b'\n' | 0x1b))
-        .unwrap_or(rest.len());
-    let folder = PathBuf::from(std::str::from_utf8(&rest[..end]).ok()?.trim());
+        .windows(MARKER_LINE.len())
+        .position(|window| window == MARKER_LINE)?;
+    let text = printed(&rest[..end]);
+    let folder = PathBuf::from(std::str::from_utf8(&text).ok()?.trim());
     folder.is_absolute().then_some(folder)
+}
+
+/// The printed text of pane bytes: every byte except carriage returns, line feeds and
+/// escape sequences, a CSI sequence up to its final byte and any other escape with the one
+/// byte after it, which is what an attach's screen puts where a row wrapped. Input: the
+/// bytes. Output: the text bytes.
+fn printed(bytes: &[u8]) -> Vec<u8> {
+    let mut text = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        index += match byte {
+            b'\r' | b'\n' => 1,
+            0x1b if bytes.get(index + 1) == Some(&b'[') => bytes[index + 2..]
+                .iter()
+                .position(|byte| (0x40..=0x7e).contains(byte))
+                .map_or(bytes.len() - index, |end| end + 3),
+            0x1b => 2,
+            _ => {
+                text.push(byte);
+                1
+            }
+        };
+    }
+    assert!(text.len() <= bytes.len());
+    text
 }
 
 /// Reads and removes the stand-in's marker in the folder its pane named, which may be the
