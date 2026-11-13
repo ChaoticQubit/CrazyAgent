@@ -3,11 +3,12 @@
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
-    OwnerClientKind, OwnerData, OwnerMutation, OwnerRead, OwnerResponse, OwnerResult,
+    OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerRead, OwnerRequest,
+    OwnerResponse, OwnerResult,
 };
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, FoundState, ProjectsHome};
-use crazyagent::protocol::{ProjectId, ProjectSpec};
+use crazyagent::protocol::{Cursor, PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1055,5 +1056,102 @@ async fn a_project_kept_outside_the_home_moves_into_it_through_the_owner_transpo
         rejected("move_project_already_home")
     );
     assert!(target.join("notes.txt").is_file());
+    engine.stop().await;
+}
+
+/// True while a copy into the projects home is still staged under its hidden name.
+fn staging(home: &Path) -> bool {
+    fs::read_dir(home).unwrap().flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".crazyagent-adding-")
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resend_or_a_check_of_an_add_still_copying_answers_in_progress_and_copies_once() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let source = place.join("sources/slow");
+    fs::create_dir(&home).unwrap();
+    for part in 0..40 {
+        let folder = source.join(format!("p{part}"));
+        fs::create_dir_all(&folder).unwrap();
+        for file in 0..100 {
+            fs::write(
+                folder.join(format!("f{file}.txt")),
+                format!("{part} {file}\n"),
+            )
+            .unwrap();
+        }
+    }
+    let engine = Engine::start().await;
+    let mut owner = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    let home_text = home.to_str().unwrap().to_owned();
+    let set = OwnerMutation::SetProjectsHome { path: home_text };
+    assert_eq!(owner.apply(set).await, OwnerResult::Applied);
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    let pending = owner
+        .controller
+        .begin_mutation(add(&source, AddMode::Copy), owner.generation + 1)
+        .unwrap();
+    let (sent, hash) = (pending.request().clone(), pending.hash().to_owned());
+    let mut first = owner.controller;
+    let running = tokio::spawn(async move { first.send_pending().await });
+    let started = Instant::now();
+    while !staging(&home) {
+        assert!(!running.is_finished(), "the copy ended before it was seen");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the copy never started"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let second = engine.owner().await;
+    let client = second.owner_client().unwrap();
+    let resent = client.request(sent.clone()).await.unwrap().response;
+    let check = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new("check-running-add").unwrap(),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Reconcile {
+            operation_id: sent.request_id.clone(),
+            expected_hash: Some(hash),
+        },
+    };
+    let checked = client.request(check).await.unwrap().response;
+    let still = OwnerResponse::InProgress {
+        operation_id: sent.request_id.clone(),
+    };
+    assert_eq!(resent, still, "a resend while the copy runs");
+    assert_eq!(checked, still, "a check while the copy runs");
+    let answered = running.await.unwrap().unwrap();
+    assert!(
+        matches!(&answered, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied && !operation.historical_replay),
+        "{answered:?}"
+    );
+    let replayed = client.request(sent).await.unwrap().response;
+    assert!(
+        matches!(&replayed, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied && operation.historical_replay),
+        "{replayed:?}"
+    );
+    let copied = fs::read_to_string(home.join("slow/p39/f99.txt")).unwrap();
+    assert_eq!(copied, "39 99\n");
+    assert_eq!(
+        fs::read_to_string(source.join("p0/f0.txt")).unwrap(),
+        "0 0\n"
+    );
+    assert!(!staging(&home), "one copy, renamed into place");
     engine.stop().await;
 }
