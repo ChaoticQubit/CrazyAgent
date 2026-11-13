@@ -17,6 +17,7 @@ const SETUP_MS = 120000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const QUESTION = "Which page should the menu open on?";
+const NO_QUESTIONS = "No questions here. Agents' questions wait on the Questions page.";
 
 /** Runs git in a folder with no system or user config. Inputs: the folder and git's
  * arguments. Output: git's trimmed stdout. */
@@ -89,7 +90,7 @@ async function openCard(page, label, settle = true) {
   if (settle) await settled(page, label);
 }
 
-test("on the Agents tab one terminal panel follows the clicked agent, from Open terminal and from the graph", { timeout: 600000 }, async (t) => {
+test("on the Agents tab one terminal panel follows the clicked agent, and an agent's question waits on the Questions tab, not in the drawer", { timeout: 600000 }, async (t) => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -184,19 +185,25 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
 
         const asked = spawnSync(bridgeBinary, ["ask-owner", runtime, project, String(agents[0]), "normal", QUESTION], { encoding: "utf8", env: { ...env } });
         assert.equal(asked.status, 0, `the agent's question reaches the engine: ${asked.stderr}`);
-        await me.asks();
-        await me.waitFor("the question in the inbox", (text) => text.includes(QUESTION), STEP_MS);
-        await me.click("Open terminal", "li.tg-question button");
         for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
-          const shown = await panels(page);
-          if (shown.includes(`${labels[0]} terminal`)) break;
-          assert.ok(Date.now() < deadline, `Open terminal never showed ${labels[0]}: ${JSON.stringify(shown)}`);
+          const chips = await page.evaluate(`document.querySelector(".pj-head-chips")?.innerText ?? ""`);
+          if (/\b1 question\b/.test(chips)) break;
+          assert.ok(Date.now() < deadline, `the project head never counted the question, so the engine never linked it to the Questions tab (F12): ${JSON.stringify(chips)}`);
         }
-        await settled(page, labels[0]);
-        assert.deepEqual(await panels(page), [`${labels[0]} terminal`], "Open terminal on a question replaces the graph's panel, it opens no second one");
-        await openCard(page, labels[1]);
-        assert.deepEqual(await panels(page), [`${labels[1]} terminal`], "a graph click after Open terminal still leaves one panel");
+        await me.asks();
+        const drawer = `document.querySelector("dialog[open] section[aria-label='Questions for you']")`;
+        for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
+          const text = await page.evaluate(`${drawer}?.innerText ?? ""`);
+          if (text.includes(NO_QUESTIONS)) break;
+          assert.ok(Date.now() < deadline, `the drawer never pointed to the Questions page: ${JSON.stringify(text)}`);
+        }
+        assert.equal(await page.evaluate(`${drawer}.querySelectorAll("li.tg-question").length`), 0, "a team question linked to the Questions tab waits there, not in the drawer (F12)");
         await me.capture("one-terminal-question");
+        await me.click("Close", "dialog[open] button");
+        await openCard(page, labels[0]);
+        assert.deepEqual(await panels(page), [`${labels[0]} terminal`], "a graph click after the drawer closes replaces the panel, it opens no second one");
+        await openCard(page, labels[1]);
+        assert.deepEqual(await panels(page), [`${labels[1]} terminal`], "the next graph click still leaves one panel");
 
         assert.deepEqual(attached(), [...agents, agents[0], agents[1]].map((agent) => `team-${agent}`), "each open asks to attach the clicked agent's own terminal, once");
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
