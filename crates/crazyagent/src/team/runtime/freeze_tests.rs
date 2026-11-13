@@ -599,6 +599,151 @@ fn admissible(lead: &NativeLead) -> ModelAccess {
     access
 }
 
+/// DEC-158: a frozen native lead on its signed-in account that every takeover check
+/// admits, its native teammates checked against the engine's terminal host, is thawed
+/// before the next engine lists its panes and is taken over: its process runs again.
+#[test]
+fn a_frozen_native_lead_the_next_engine_admits_runs_again() {
+    let mut lead = NativeLead::start_with(BEATING_CLAUDE);
+    let deadline = Instant::now() + WAIT;
+    while lead.beats() == 0 {
+        assert!(Instant::now() < deadline, "the lead's process never beat");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let frozen = lead
+        .runtime
+        .freeze_kept(&lead.host, lead.id, &lead.record)
+        .expect("the native lead froze");
+    lead.fixture
+        .connection
+        .execute(
+            "UPDATE team_panes SET record=?2 WHERE agent=?1",
+            params![lead.id, frozen.encode().unwrap()],
+        )
+        .unwrap();
+    let mut setup = lead.fixture.setup.clone();
+    setup.team.sub_harnesses = vec![HarnessSlot {
+        harness: "claude-code".into(),
+        agents: 1,
+        tools: false,
+    }];
+    lead.fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    let managed = ModelConnection {
+        id: reference("managed-connection"),
+        provider: reference("anthropic"),
+        harness: reference("claude-code"),
+        protocol: reference("native"),
+        account_ref: reference("managed-account"),
+        endpoint: ModelEndpoint::Native {},
+        model: ModelReference {
+            id: "native-default".into(),
+            author: reference("anthropic"),
+        },
+        auth: ModelAuthentication::NativeManaged {
+            profile_ref: reference("managed-profile"),
+        },
+    };
+    lead.fixture
+        .access
+        .accounts
+        .push(managed.account_ref.clone());
+    lead.fixture.access.pools[0]
+        .members
+        .push(managed.id.clone());
+    lead.fixture.access.connections.push(managed);
+    lead.fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET connection='managed-connection' WHERE id=?1",
+            [lead.id],
+        )
+        .unwrap();
+    let before = lead.beats();
+
+    let mut next = standin_claude_runtime(&lead.fixture, BEATING_CLAUDE)
+        .with_terminal(lead.host.clone())
+        .unwrap();
+    assert!(
+        next.workers.contains_key(&lead.id),
+        "the admitted frozen lead was not taken over: {:#?}",
+        lead.fixture.status()
+    );
+    let deadline = Instant::now() + WAIT;
+    while lead.beats() == before {
+        assert!(
+            Instant::now() < deadline,
+            "the taken-over lead never ran again"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = next.shutdown();
+    lead.end(&frozen);
+}
+
+/// A terminal host that cannot list its panes, as a tmux server that does not answer;
+/// every other call goes to the real host.
+struct ListFails(Arc<dyn Host>);
+
+impl Host for ListFails {
+    fn spawn(
+        &self,
+        agent: &AgentId,
+        command: &InteractiveCommand,
+    ) -> Result<crate::terminal::PaneRef, crate::terminal::HostError> {
+        self.0.spawn(agent, command)
+    }
+
+    fn attach(
+        &self,
+        agent: &AgentId,
+    ) -> Result<crate::terminal::TerminalStream, crate::terminal::HostError> {
+        self.0.attach(agent)
+    }
+
+    fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), crate::terminal::HostError> {
+        self.0.input(agent, bytes)
+    }
+
+    fn resize(
+        &self,
+        agent: &AgentId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), crate::terminal::HostError> {
+        self.0.resize(agent, cols, rows)
+    }
+
+    fn kill(&self, agent: &AgentId) -> Result<(), crate::terminal::HostError> {
+        self.0.kill(agent)
+    }
+
+    fn alive(&self) -> Result<Vec<AgentId>, crate::terminal::HostError> {
+        Err(crate::terminal::HostError("terminal_list_failed".into()))
+    }
+}
+
+/// A host found for a runtime that started without one but that cannot list its panes is
+/// not kept, now that frozen native leads thaw against the host before the listing, so the
+/// next live master start looks for a host again.
+#[test]
+fn a_host_that_cannot_list_its_panes_is_not_kept() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    assert!(team.terminal.is_none());
+    let failing: Arc<dyn Host> = Arc::new(ListFails(fixture.host()));
+    assert!(team.attach_terminal(failing).is_err());
+    assert!(
+        team.terminal.is_none(),
+        "a host that cannot list its panes was kept"
+    );
+}
+
 /// DEC-158: a frozen native lead that the next engine refuses, here because its team was
 /// paused while no engine ran, is ended while still frozen: no process of it runs again,
 /// not even for the moment before the refusal, so it never runs with its proxy port free.
