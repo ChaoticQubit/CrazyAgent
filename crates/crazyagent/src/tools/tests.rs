@@ -662,3 +662,26 @@ fn a_launch_looks_in_the_engine_setup_folder_like_setup_does() {
     let started = crate::harnesses::interactive::launch_tool(&codex, &launch).unwrap();
     assert_eq!(started.argv()[0], node.into_os_string());
 }
+
+/// rv-v3sec M16-S1: an engine started with a non-default `--home`, `CRAZYAGENT_HOME` unset,
+/// refuses a harness file agents can write under that root, such as one in an agent's
+/// home: a launch takes the root the engine recorded, given here explicitly.
+#[test]
+fn a_harness_in_an_agent_home_under_a_custom_engine_root_is_refused() {
+    let (_folder, home) = scratch();
+    let root = home.join("custom-engine");
+    let entry = program(
+        &root.join("team/agents/agent-1/home/.local/bin/codex"),
+        NODE,
+    );
+    let launch = Places::at_roots(None, Some(&root));
+    let missing = resolve_entry(&entry, &launch).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused.map(|refused| refused.why),
+        Some(Refusal::AgentsCanWrite)
+    );
+    let crate::harnesses::launch::LaunchError(line, _) =
+        crate::harnesses::interactive::launch_tool(&entry, &launch).unwrap_err();
+    assert!(line.contains(&entry.display().to_string()), "{line}");
+}
