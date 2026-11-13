@@ -30037,8 +30037,14 @@ fn a_said_refusal_an_engine_check_already_refused_marks_the_project_with_no_new_
     let account = reference(ENDPOINT);
     let checked = now_ms() - 60_000;
     assert_eq!(
-        super::super::model_pick::claim_check(&fixture.connection, &account, "gpt-a", checked)
-            .unwrap(),
+        super::super::model_pick::claim_check(
+            &fixture.connection,
+            &account,
+            "gpt-a",
+            checked,
+            false
+        )
+        .unwrap(),
         super::super::model_pick::Claim::Run
     );
     super::super::model_pick::check_refused(
@@ -30119,8 +30125,14 @@ fn a_said_refusal_on_an_account_the_project_holds_claims_no_check_and_a_refused_
 
     let checked = now_ms() - 60_000;
     assert_eq!(
-        super::super::model_pick::claim_check(&fixture.connection, &account, "gpt-b", checked)
-            .unwrap(),
+        super::super::model_pick::claim_check(
+            &fixture.connection,
+            &account,
+            "gpt-b",
+            checked,
+            false
+        )
+        .unwrap(),
         super::super::model_pick::Claim::Run
     );
     super::super::model_pick::check_refused(
@@ -30169,7 +30181,7 @@ fn only_a_refused_engine_check_marks_the_account_s_model() {
     {
         let model = format!("gpt-{n}");
         assert_eq!(
-            claim_check(&fixture.connection, &account, &model, 1_000).unwrap(),
+            claim_check(&fixture.connection, &account, &model, 1_000, false).unwrap(),
             Claim::Run
         );
         let check = Check {
@@ -30197,7 +30209,7 @@ fn only_a_refused_engine_check_marks_the_account_s_model() {
             Claim::Held
         };
         assert_eq!(
-            claim_check(&fixture.connection, &account, &model, 3_000).unwrap(),
+            claim_check(&fixture.connection, &account, &model, 3_000, false).unwrap(),
             claim,
             "{tested:?}"
         );

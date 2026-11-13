@@ -565,8 +565,8 @@ const CHECK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_model_checks (
 pub(crate) const CHECKS_MAX: usize = 64;
 
 /// What a claim on the engine's own check of a model refusal a pane said answered
-/// (DEC-150 addendum 9g, 9h): run the check now, the check already refused at
-/// `checked_ms`, or hold, as a live check exists or the table is full.
+/// (DEC-150 addendum 9g, 9h, 9i): run the check now, the check already refused at
+/// `checked_ms`, or hold, as a live check exists, the table is full or the account is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Claim {
     Run,
@@ -575,13 +575,16 @@ pub(crate) enum Claim {
 }
 
 /// Claims the engine's check of an account's model, at most one per `MODEL_REFUSAL_MS`
-/// (DEC-150 addendum 9g, 9h), in one immediate transaction. Takes the database, outside a
-/// transaction, the account, the model and the time. Returns the claim, or a SQLite failure.
+/// (DEC-150 addendum 9g, 9h, 9i), in one immediate transaction; an account the said
+/// project holds gets no new claim, since its test would start no run. Takes the database,
+/// outside a transaction, the account, the model, the time and whether the account is held.
+/// Returns the claim, or a SQLite failure.
 pub(crate) fn claim_check(
     db: &Connection,
     connection: &CredentialRef,
     model: &str,
     now: i64,
+    held: bool,
 ) -> Result<Claim, EngineError> {
     assert!(!model.is_empty() && model.len() <= crate::model_choice::MODEL_BYTES_MAX);
     let tx =
@@ -610,7 +613,7 @@ pub(crate) fn claim_check(
     let claim = match live {
         Some((checked_ms, true)) => Claim::Refused { checked_ms },
         Some(_) => Claim::Held,
-        None if full => Claim::Held,
+        None if held || full => Claim::Held,
         None => {
             tx.execute(
                 "INSERT INTO team_model_checks(connection,model,checked_ms,refused) VALUES (?1,?2,?3,0)",

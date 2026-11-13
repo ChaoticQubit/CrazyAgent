@@ -268,9 +268,10 @@ mod run {
             .map_err(|_| UNAVAILABLE)?;
         let picked = match request.target {
             Target::Pool(pool) => resolver.pool_pick("", pool, &[harness]),
-            Target::Connection { connection, .. } => {
-                resolver.connection_pick("", connection, &[harness])
-            }
+            Target::Connection {
+                connection,
+                project,
+            } => resolver.connection_pick(project, connection, &[harness]),
         };
         let account = match picked {
             AccountPick::NeedsPool => return Err(POOL_UNKNOWN),
