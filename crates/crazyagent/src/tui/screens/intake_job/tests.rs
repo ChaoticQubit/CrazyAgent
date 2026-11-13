@@ -219,3 +219,38 @@ fn home_s_job_card_names_the_state_in_the_desktop_s_words_and_says_what_its_keys
     .map(label);
     assert_eq!(labels, ["Stop", "Try again", "Answer", "Dismiss"]);
 }
+
+#[test]
+fn the_header_brief_says_what_a_running_job_does_with_its_count_and_a_short_name() {
+    let downloading = |done, total| JobState::Downloading {
+        progress: Progress { total, done },
+    };
+    let briefs = [
+        (job(downloading(0, 0)), "Downloading shop..."),
+        (job(downloading(12, 3000)), "Downloading shop: 12 of 3000"),
+        (job(copying(0, 0)), "Adding shop..."),
+        (job(copying(18, 0)), "Adding shop: 18 files"),
+        (job(copying(18, 5)), "Checking shop: 5 files"),
+        (job(JobState::Clearing), "Finishing shop..."),
+    ];
+    for (shown, words) in briefs {
+        assert_eq!(brief(&shown, "~"), words, "{:?}", shown.state);
+    }
+    let stopping = JobView {
+        stopping: true,
+        ..job(copying(18, 0))
+    };
+    assert_eq!(brief(&stopping, "~"), "Stopping shop...");
+    let long = JobView {
+        source: format!("/Users/mira/{}", "b".repeat(40)),
+        ..job(downloading(1, 2))
+    };
+    assert_eq!(
+        brief(&long, "~"),
+        format!(
+            "Downloading {}~: 1 of 2",
+            "b".repeat(BRIEF_NAME_CELLS_MAX - 1)
+        )
+    );
+    assert!(std::panic::catch_unwind(|| brief(&job(JobState::Done), "~")).is_err());
+}

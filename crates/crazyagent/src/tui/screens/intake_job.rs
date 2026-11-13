@@ -3,6 +3,8 @@ use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobState, JobView, Phase};
 use crate::tui::glyphs::Status;
 
+const BRIEF_NAME_CELLS_MAX: usize = 16;
+
 #[cfg(test)]
 mod tests;
 
@@ -110,6 +112,14 @@ pub(in crate::tui) fn end_line(
     let said = ended.then(|| line(after));
     assert!(said.as_ref().is_none_or(|text| !text.is_empty()));
     said
+}
+
+/// The running job's few words for the header on every screen: what it does and its count,
+/// with the folder's name cut short so the crumbs keep their place. Takes a running job and
+/// the ellipsis. Returns the words.
+pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
+    let _ = ellipsis;
+    line(job)
 }
 
 /// The word Home's job card shows beside the folder's name, in the desktop's words, with the

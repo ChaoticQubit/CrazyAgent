@@ -1970,12 +1970,9 @@ mod tests {
         };
         assert_eq!(
             shown(Some(&running), "Ready"),
-            "Downloading shop from iCloud: 12 of 3000 files  Ready"
+            "Downloading shop: 12 of 3000  Ready"
         );
-        assert_eq!(
-            shown(Some(&running), ""),
-            "Downloading shop from iCloud: 12 of 3000 files"
-        );
+        assert_eq!(shown(Some(&running), ""), "Downloading shop: 12 of 3000");
         assert_eq!(shown(Some(&shop(JobState::Done)), "Ready"), "Ready");
         assert_eq!(shown(None, "Ready"), "Ready");
         assert_eq!(shown(None, ""), "");
@@ -1989,7 +1986,8 @@ mod tests {
             "{note}"
         );
         assert!(note.starts_with("Downloading aaa"), "{note}");
-        assert!(note.ends_with(UNICODE.ellipsis), "{note}");
+        assert!(note.ends_with(": 12 of 3000"), "{note}");
+        assert!(note.contains(UNICODE.ellipsis), "{note}");
         assert!(shown(Some(&long), "Ready").ends_with("  Ready"));
     }
 }
