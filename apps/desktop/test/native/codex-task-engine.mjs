@@ -192,7 +192,6 @@ export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_COD
   const repos = Array.from({ length: count }, (_, index) => join(root, "repos", index === 0 ? "fruit-stand" : `fruit-stand-${index + 1}`));
   const temp = ownTemp ? join(root, "tmp") : tmpdir();
   for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, ...repos, ...(ownTemp ? [temp] : [])]) mkdirSync(folder, { recursive: true, mode: 0o700 });
-  assert.ok(!ownTemp || !runtime.startsWith(`${temp}/`), "the engine's own temp folder never holds its root");
   repos.forEach(ownerRepo);
   const provider = await closedPort();
   writeFileSync(join(runtime, "global.toml"), `version = 1

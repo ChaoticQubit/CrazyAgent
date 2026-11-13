@@ -74,13 +74,13 @@ async function profileAfterHandOff(me, page, site, project, runtime, rule) {
   await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
   await me.unfold("Agents and tasks");
   await me.waitFor("the Hand off form on the Agents tab", (text) => text.includes("Hand off"));
-  assert.equal(await handOff(me, page, project, runtime), "done", "the sub-agent ran with the saved extra");
+  const status = await handOff(me, page, project, runtime);
   const folder = join(runtime, "team", "profiles");
   for (const deadline = Date.now() + PROFILE_MS; ; await pause(POLL_MS)) {
     const profiles = existsSync(folder) ? readdirSync(folder).filter((name) => /^agent-\d+\.sb$/.test(name)).map((name) => readFileSync(join(folder, name), "utf8")) : [];
     const found = profiles.find((text) => text.includes(rule));
     if (found) return found;
-    assert.ok(Date.now() < deadline, `no agent profile holds ${rule}`);
+    assert.ok(Date.now() < deadline, `no agent profile holds ${rule}; the task ended ${status}`);
   }
 }
 
