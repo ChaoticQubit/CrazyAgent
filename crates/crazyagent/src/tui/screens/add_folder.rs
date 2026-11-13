@@ -1,15 +1,17 @@
 use super::intake::{AddWarning, COPY_WARN_BYTES, ask, copy, event};
+use super::intake_job;
 use super::new_project::{complete, expand, size_label};
 use super::{Flow, Place, Screen, open};
-use crate::engine::owner::OwnerResult;
-use crate::projects_home::icloud::Progress;
-use crate::projects_home::{AddMode, AddOverride, GitLink, Measured, PATH_BYTES_MAX};
+use crate::projects_home::job::JobState;
+use crate::projects_home::{
+    ADD_OVERRIDES_MAX, AddMode, AddOverride, GitLink, Measured, PATH_BYTES_MAX,
+};
 use crate::protocol::RequestId;
-use crate::tui::client::intake::{IntakeJob, IntakeQuery, IntakeView};
+use crate::tui::client::intake::{IntakeQuery, IntakeView};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::{Arrival, Request};
+use crate::tui::seam::Arrival;
 use crate::tui::text::{join, styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons, radio};
@@ -17,8 +19,6 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const FIELD_WIDTH: usize = 72;
 const WORKTREE_PATHS_MAX: usize = 16;
@@ -28,7 +28,12 @@ const SOFT_SIZE_CODES: [&str; 3] = [
     "folder_size_unreadable",
 ];
 const ICLOUD_CHOICES: [&str; 3] = ["Download and move", "Download and copy", "Cancel"];
-const ICLOUD_STOPPED: &str = "The download stopped. Nothing was moved or copied.";
+const GONE: &str = "This folder no longer waits for an answer. See Home.";
+const OVERRIDE_ORDER: [AddOverride; ADD_OVERRIDES_MAX] = [
+    AddOverride::Worktrees,
+    AddOverride::LinkedCheckout,
+    AddOverride::TooLarge,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -103,23 +108,12 @@ struct Question {
 
 /// The open iCloud question for a folder whose files are not all on this Mac: the folder, how
 /// many of its files the read found only in iCloud (none when only the engine's refusal said
-/// so), the selected answer (Download and move, Download and copy, Cancel) and, once the owner
-/// chose, the running download.
+/// so) and the selected answer (Download and move, Download and copy, Cancel).
 #[derive(Clone, Debug)]
 struct Icloud {
     source: String,
     placeholders: Option<u64>,
     choice: usize,
-    download: Option<Downloading>,
-}
-
-/// One running iCloud download: the way the folder is added after it, the flag Esc sets to
-/// stop it and the last progress the engine reported.
-#[derive(Clone, Debug)]
-struct Downloading {
-    mode: AddMode,
-    cancel: Arc<AtomicBool>,
-    progress: Option<Progress>,
 }
 
 /// The Existing folder page: sets up a folder on this computer where it is
@@ -129,8 +123,9 @@ struct Downloading {
 /// the original. A Move or Copy with issues asks "Move anyway?" first, data loss
 /// first: yes sends an override for exactly those issues, Use where it is sets the
 /// folder up in place. A folder with files only in iCloud asks first whether to download
-/// them and then move or copy, shows the download's progress, stops it on Esc, and goes on
-/// with the chosen way once every file is on this Mac. The folder then opens its setup.
+/// them and then move or copy. A Move or Copy starts the engine's intake job, which downloads,
+/// moves or copies apart from this page, and the page goes Home, where the job is followed.
+/// Answering a job's soft refusal opens this page on the job's folder with that question.
 pub struct AddFolder {
     field: TextField,
     way: Way,
@@ -141,8 +136,13 @@ pub struct AddFolder {
     worktrees: usize,
     question: Option<Question>,
     icloud: Option<Icloud>,
-    downloaded: Option<String>,
+    agreed: Option<String>,
+    kept: Option<(String, AddMode, Vec<AddOverride>)>,
+    answering: Option<RequestId>,
+    pending: Option<String>,
     sent: Option<String>,
+    before: Option<RequestId>,
+    refused: Option<String>,
     problem: Option<String>,
 }
 
@@ -161,17 +161,66 @@ impl AddFolder {
             worktrees: 0,
             question: None,
             icloud: None,
-            downloaded: None,
+            agreed: None,
+            kept: None,
+            answering: None,
+            pending: None,
             sent: None,
+            before: None,
+            refused: None,
             problem: None,
         }
     }
 
-    /// The Existing folder page answering the engine's intake job that waits for an answer.
+    /// The Existing folder page answering the engine's intake job that waits for an answer:
+    /// the job's folder, way and overrides are kept and the question for its refusal opens
+    /// once the projects folder is read. A job that no longer waits says so.
     /// Takes the context and the job's id. Returns the screen.
     pub fn answering(ctx: &Ctx, job: &RequestId) -> Self {
-        let _ = job;
-        Self::new(ctx)
+        let mut page = Self::new(ctx);
+        page.answering = Some(job.clone());
+        let waiting = ctx.store.intake.as_ref().filter(|view| &view.id == job);
+        let refused = waiting.and_then(|view| match &view.state {
+            JobState::NeedsAnswer { code } => Some((view, code.clone())),
+            _ => None,
+        });
+        match refused {
+            Some((view, code)) => {
+                page.field.set(&view.source);
+                page.way = Way::Into(view.mode);
+                page.kept = Some((view.source.clone(), view.mode, view.overrides.clone()));
+                page.pending = Some(code);
+                page.focus = Focus::Add;
+            }
+            None => page.problem = Some(GONE.into()),
+        }
+        assert!(page.pending.is_some() != page.problem.is_some());
+        page
+    }
+
+    /// The overrides the answered job already goes past, kept for its own folder and way only,
+    /// since another way may not take them. Takes the folder and the way. Returns them.
+    fn kept_for(&self, source: &str, mode: AddMode) -> &[AddOverride] {
+        let kept: &[AddOverride] = match &self.kept {
+            Some((folder, way, overrides)) if folder == source && *way == mode => overrides,
+            _ => &[],
+        };
+        assert!(kept.len() <= ADD_OVERRIDES_MAX);
+        kept
+    }
+
+    /// Opens the question for the answered job's refusal once the projects folder is read; a
+    /// refusal the question has no issue for shows its sentence. Takes the refusal and the
+    /// context. Returns nothing.
+    fn open_answer(&mut self, code: &str, ctx: &Ctx) {
+        assert!(self.answering.is_some());
+        let (Ok(source), Way::Into(mode)) = (self.source(ctx), self.way) else {
+            self.problem = Some(GONE.into());
+            return;
+        };
+        if !self.ask_anyway(&source, mode, Some(code)) {
+            self.problem = Some(copy(code));
+        }
     }
 
     fn user_home(ctx: &Ctx) -> Option<&Path> {
@@ -251,7 +300,10 @@ impl AddFolder {
         self.question = Some(Question {
             source: source.to_owned(),
             mode,
-            overrides: overrides(mode, &issues, &facts),
+            overrides: union(
+                self.kept_for(source, mode),
+                &overrides(mode, &issues, &facts),
+            ),
             blocks: warnings(mode, &issues, &facts),
             choice: 0,
         });
@@ -342,7 +394,7 @@ impl AddFolder {
             Some(Load::Ready(measured)) if measured.placeholders > 0 => Some(measured.placeholders),
             _ => None,
         };
-        let fetched = self.downloaded.as_deref() == Some(source.as_str());
+        let fetched = self.agreed.as_deref() == Some(source.as_str());
         if !self.confirming && placeholders.is_some() && !fetched {
             self.ask_icloud(&source, mode, placeholders);
             return Flow::Handled;
@@ -354,14 +406,15 @@ impl AddFolder {
             self.confirming = true;
             return Flow::Handled;
         }
-        self.send(source, mode, Vec::new(), ctx)
+        let kept = union(self.kept_for(&source, mode), &[]);
+        self.send(source, mode, kept, ctx)
     }
 
     /// Opens the iCloud question for `source` with the owner's way selected. Takes the folder,
     /// the way and how many files the read found only in iCloud, if it counted them.
     fn ask_icloud(&mut self, source: &str, mode: AddMode, placeholders: Option<u64>) {
         assert!(placeholders != Some(0));
-        assert!(self.downloaded.as_deref() != Some(source));
+        assert!(self.agreed.as_deref() != Some(source));
         self.icloud = Some(Icloud {
             source: source.to_owned(),
             placeholders,
@@ -369,109 +422,49 @@ impl AddFolder {
                 AddMode::Move => 0,
                 AddMode::Copy => 1,
             },
-            download: None,
         });
         self.question = None;
         self.confirming = false;
     }
 
-    /// Starts the download the owner chose; the folder is moved or copied only after it.
-    /// Takes the way and the context. Returns Handled; progress and the end arrive later.
-    fn download(&mut self, mode: AddMode, ctx: &mut Ctx) -> Flow {
-        let Some(icloud) = &mut self.icloud else {
-            return Flow::Ignored;
-        };
-        assert!(icloud.download.is_none());
-        let cancel = Arc::new(AtomicBool::new(false));
-        icloud.download = Some(Downloading {
-            mode,
-            cancel: Arc::clone(&cancel),
-            progress: None,
-        });
-        let path = icloud.source.clone();
-        self.way = Way::Into(mode);
-        self.problem = None;
-        ctx.request(Request::Intake(Box::new(IntakeJob::IcloudDownload {
-            path,
-            cancel,
-        })));
-        Flow::Handled
-    }
-
-    /// Takes one key while the iCloud question is open: arrows and Tab pick the answer,
-    /// Enter gives it and Esc closes it. While the download runs, Esc stops it and every
-    /// other key waits. Takes the key and the context. Returns the flow.
+    /// Takes one key while the iCloud question is open: arrows and Tab pick the answer, Enter
+    /// gives it and Esc closes it. Download and move or copy goes on with that way; the
+    /// engine's job downloads the folder's files before it moves or copies them.
+    /// Takes the key and the context. Returns the flow.
     fn answer_icloud(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(icloud) = &mut self.icloud else {
             return Flow::Ignored;
         };
         let count = ICLOUD_CHOICES.len();
         assert!(icloud.choice < count);
-        if let Some(download) = &icloud.download {
-            if *key == Key::Esc {
-                download.cancel.store(true, Ordering::Relaxed);
-            }
-            return Flow::Handled;
-        }
         match key {
             Key::Right | Key::Tab => icloud.choice = (icloud.choice + 1) % count,
             Key::Left | Key::BackTab => icloud.choice = (icloud.choice + count - 1) % count,
             Key::Esc => self.icloud = None,
             Key::Enter => {
-                return match icloud.choice {
-                    0 => self.download(AddMode::Move, ctx),
-                    1 => self.download(AddMode::Copy, ctx),
+                let mode = match icloud.choice {
+                    0 => AddMode::Move,
+                    1 => AddMode::Copy,
                     _ => {
                         self.icloud = None;
-                        Flow::Handled
+                        return Flow::Handled;
                     }
                 };
+                let source = icloud.source.clone();
+                self.icloud = None;
+                self.agreed = Some(source.clone());
+                self.way = Way::Into(mode);
+                self.problem = None;
+                return self.proceed(source, mode, ctx);
             }
             _ => {}
         }
         Flow::Handled
     }
 
-    /// Applies one download reply: progress updates the line, the end goes on with the chosen
-    /// way, and a failure or the owner's stop closes the question with its sentence. Takes the
-    /// folder the reply is for, the result and the context. Returns the flow.
-    fn download_reply(
-        &mut self,
-        path: &str,
-        result: &Result<IntakeView, String>,
-        ctx: &mut Ctx,
-    ) -> Flow {
-        let Some(icloud) = self.icloud.as_mut().filter(|icloud| icloud.source == path) else {
-            return Flow::Handled;
-        };
-        let Some(download) = &mut icloud.download else {
-            return Flow::Handled;
-        };
-        let (mode, stopped) = (download.mode, download.cancel.load(Ordering::Relaxed));
-        match result {
-            Ok(IntakeView::IcloudProgress(progress)) => {
-                assert!(progress.done <= progress.total);
-                download.progress = Some(*progress);
-                return Flow::Handled;
-            }
-            Ok(IntakeView::IcloudDownloaded(_)) if !stopped => {
-                self.icloud = None;
-                self.downloaded = Some(path.to_owned());
-                return self.proceed(path.to_owned(), mode, ctx);
-            }
-            Ok(IntakeView::IcloudDownloaded(_)) => self.problem = Some(ICLOUD_STOPPED.into()),
-            Err(code) if stopped && code == "home_icloud_not_downloaded" => {
-                self.problem = Some(ICLOUD_STOPPED.into());
-            }
-            Err(code) => self.problem = Some(copy(code)),
-            Ok(_) => self.problem = Some(copy("icloud_outcome_unknown")),
-        }
-        self.icloud = None;
-        Flow::Handled
-    }
-
-    /// Sends the add with the overrides the owner agreed to. Takes the folder, the way, the
-    /// overrides and the context. Returns Handled; the reply arrives later.
+    /// Starts the engine's intake job with the overrides the owner agreed to, keeping the job
+    /// the store showed before so a failed start can tell a new job from it. Takes the folder,
+    /// the way, the overrides and the context. Returns Handled; the reply arrives later.
     fn send(
         &mut self,
         source: String,
@@ -479,19 +472,70 @@ impl AddFolder {
         overrides: Vec<AddOverride>,
         ctx: &mut Ctx,
     ) -> Flow {
+        assert!(overrides.len() <= ADD_OVERRIDES_MAX);
         self.confirming = false;
         self.question = None;
         self.sent = Some(source.clone());
-        let generation = ctx.next_generation();
+        self.before = ctx.store.intake.as_ref().map(|job| job.id.clone());
         ask(
             ctx,
-            IntakeQuery::AddExisting {
+            IntakeQuery::JobStart {
                 source,
                 mode,
                 overrides,
-                generation,
             },
         );
+        assert!(self.sent.is_some());
+        Flow::Handled
+    }
+
+    /// The job started: says so and goes Home, where the job is followed. Takes the folder
+    /// and the context. Returns the flow.
+    fn started(&mut self, source: &str, ctx: &mut Ctx) -> Flow {
+        assert!(!source.is_empty());
+        let name = Self::name(source);
+        ctx.say(Message::success(
+            &format!("Adding {name}."),
+            "Follow it on Home; you can keep working.",
+        ));
+        self.sent = None;
+        self.refused = None;
+        self.before = None;
+        Flow::Go(Place::Home)
+    }
+
+    /// A start that failed or whose reply is unknown: reads the job again before saying why,
+    /// since the start may have reached the engine. Takes the code and the context. Returns
+    /// the flow.
+    fn check_start(&mut self, code: &str, ctx: &mut Ctx) -> Flow {
+        assert!(self.sent.is_some());
+        assert!(self.refused.is_none());
+        self.refused = Some(code.to_owned());
+        ask(ctx, IntakeQuery::JobStatus);
+        Flow::Handled
+    }
+
+    /// Decides a failed start from the read after it: a job for the same folder that runs,
+    /// or ended done and is not the job the store showed before the start, is the started one
+    /// whose reply was lost; anything else shows the start's refusal. Takes the read and the
+    /// context. Returns the flow.
+    fn checked(&mut self, result: &Result<IntakeView, String>, ctx: &mut Ctx) -> Flow {
+        let (Some(source), Some(code)) = (self.sent.take(), self.refused.take()) else {
+            return Flow::Handled;
+        };
+        let before = self.before.take();
+        let attached = match result {
+            Ok(IntakeView::Job(Some(job))) if job.source == source => {
+                intake_job::running(job)
+                    || (job.state == JobState::Done && before.as_ref() != Some(&job.id))
+            }
+            _ => false,
+        };
+        if attached {
+            return self.started(&source, ctx);
+        }
+        self.problem = Some(copy(&code));
+        assert!(self.sent.is_none());
         Flow::Handled
     }
 
@@ -530,35 +574,9 @@ impl AddFolder {
         }
     }
 
-    fn added(&self, source: &str, mode: AddMode, ctx: &mut Ctx) -> Flow {
-        let name = Self::name(source);
-        let verb = match mode {
-            AddMode::Move => "Moved",
-            AddMode::Copy => "Copied",
-        };
-        ctx.say(Message::success(
-            &format!("{verb} {name}."),
-            "Now set it up.",
-        ));
-        match &self.home {
-            Some(home) if !name.is_empty() => Flow::Replace(open(
-                &Place::Onboarding {
-                    path: format!("{home}/{name}"),
-                    name,
-                    project: None,
-                },
-                ctx,
-            )),
-            _ => Flow::Back,
-        }
-    }
-
     fn button(&self, ctx: &Ctx) -> &'static str {
         if let Some(icloud) = &self.icloud {
-            return match icloud.download {
-                Some(_) => "Wait",
-                None => ICLOUD_CHOICES[icloud.choice],
-            };
+            return ICLOUD_CHOICES[icloud.choice];
         }
         if let Some(question) = &self.question {
             return match (question.choice, question.mode) {
@@ -598,18 +616,7 @@ impl Screen for AddFolder {
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
-        match self.icloud.as_ref().map(|icloud| icloud.download.is_some()) {
-            Some(true) => return vec![hint("Esc", "Stop the download")],
-            Some(false) => {
-                return vec![
-                    hint(&arrows, "Choose"),
-                    hint("Enter", self.button(ctx)),
-                    hint("Esc", "Close the question"),
-                ];
-            }
-            None => {}
-        }
-        if self.question.is_some() {
+        if self.icloud.is_some() || self.question.is_some() {
             return vec![
                 hint(&arrows, "Choose"),
                 hint("Enter", self.button(ctx)),
@@ -697,8 +704,13 @@ impl Screen for AddFolder {
             return Flow::Handled;
         };
         match (&reply.query, &reply.result) {
-            (IntakeQuery::Home, Ok(IntakeView::Home(home))) => {
-                self.home = home.path.clone();
+            (IntakeQuery::Home, result) => {
+                if let Ok(IntakeView::Home(home)) = result {
+                    self.home = home.path.clone();
+                }
+                if let Some(code) = self.pending.take() {
+                    self.open_answer(&code, ctx);
+                }
                 Flow::Handled
             }
             (IntakeQuery::FolderSize { path }, result) => {
@@ -714,42 +726,16 @@ impl Screen for AddFolder {
                 }
                 Flow::Handled
             }
-            (
-                IntakeQuery::AddExisting {
-                    source,
-                    mode,
-                    overrides,
-                    ..
-                },
-                result,
-            ) if self.sent.as_ref() == Some(source) => {
-                self.sent = None;
+            (IntakeQuery::JobStart { source, .. }, result)
+                if self.sent.as_ref() == Some(source) && self.refused.is_none() =>
+            {
                 match result {
-                    Ok(IntakeView::Changed(OwnerResult::Applied)) => self.added(source, *mode, ctx),
-                    Ok(_) => {
-                        self.problem = Some(copy("intake_change_outcome_unknown"));
-                        Flow::Handled
-                    }
-                    Err(code) if asks_again(code, overrides) => {
-                        self.ask_anyway(source, *mode, Some(code));
-                        Flow::Handled
-                    }
-                    Err(code)
-                        if code == "home_icloud_not_downloaded"
-                            && self.downloaded.as_ref() != Some(source) =>
-                    {
-                        self.ask_icloud(source, *mode, None);
-                        Flow::Handled
-                    }
-                    Err(code) => {
-                        self.problem = Some(copy(code));
-                        Flow::Handled
-                    }
+                    Ok(IntakeView::Job(Some(view))) => self.started(&view.source, ctx),
+                    Ok(_) => self.check_start("intake_change_outcome_unknown", ctx),
+                    Err(code) => self.check_start(code, ctx),
                 }
             }
-            (IntakeQuery::IcloudDownload { path }, result) => {
-                self.download_reply(path, result, ctx)
-            }
+            (IntakeQuery::JobStatus, result) if self.refused.is_some() => self.checked(result, ctx),
             _ => Flow::Handled,
         }
     }
@@ -896,10 +882,7 @@ impl Screen for AddFolder {
         } else if let Some(question) = &self.question {
             question_lines(question, limit, theme, &mut lines);
         } else if self.sent.is_some() {
-            lines.push(ctx.loading(match self.way {
-                Way::Into(AddMode::Copy) => "Copying the folder",
-                _ => "Moving the folder",
-            }));
+            lines.push(ctx.loading("Starting"));
         } else {
             lines.push(buttons(
                 &[self.button(ctx)],
@@ -918,24 +901,15 @@ impl Screen for AddFolder {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.sent.is_some()
-            || matches!(&self.size, Some((_, Load::Loading)))
-            || self
-                .icloud
-                .as_ref()
-                .is_some_and(|icloud| icloud.download.is_some())
-    }
-
-    fn draft(&self) -> bool {
-        self.sent.is_some()
-    }
-
-    fn loss(&self) -> &'static str {
-        "The folder is still being added. Quitting may leave it half copied."
+        self.sent.is_some() || matches!(&self.size, Some((_, Load::Loading)))
     }
 
     fn place(&self) -> Option<Place> {
-        Some(Place::AddFolder)
+        Some(
+            self.answering
+                .clone()
+                .map_or(Place::AddFolder, |job| Place::AnswerAdd { job }),
+        )
     }
 }
 
@@ -1114,16 +1088,17 @@ fn warnings(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<Block> {
     blocks
 }
 
-/// Whether an engine refusal turns into the question for that issue: only a soft refusal
-/// whose override was not already sent. Takes the code and the overrides sent. Returns true
-/// to ask.
-fn asks_again(code: &str, sent: &[AddOverride]) -> bool {
-    match code {
-        "home_move_worktrees" => !sent.contains(&AddOverride::Worktrees),
-        "home_copy_linked_checkout" => !sent.contains(&AddOverride::LinkedCheckout),
-        "home_copy_too_large" => !sent.contains(&AddOverride::TooLarge),
-        _ => false,
-    }
+/// The overrides a question's yes sends: the ones the answered job already goes past and the
+/// new ones, each once and in the engine's order, since the engine refuses a repeated one.
+/// Takes both lists. Returns the union.
+fn union(kept: &[AddOverride], new: &[AddOverride]) -> Vec<AddOverride> {
+    let all: Vec<AddOverride> = OVERRIDE_ORDER
+        .into_iter()
+        .filter(|choice| kept.contains(choice) || new.contains(choice))
+        .collect();
+    assert!(all.len() <= ADD_OVERRIDES_MAX);
+    assert!(new.iter().chain(kept).all(|choice| all.contains(choice)));
+    all
 }
 
 /// Draws the question: its title, each warning block (data loss as warnings) with the
@@ -1168,9 +1143,8 @@ fn question_lines(
 }
 
 /// Draws the iCloud question: how many files are only in iCloud, that a move takes the folder
-/// out of iCloud on the owner's other Macs, and the three answers; while the download runs,
-/// its progress instead of the answers. Takes the question, the width, the context and the
-/// lines to add to.
+/// out of iCloud on the owner's other Macs, and the three answers. Takes the question, the
+/// width, the context and the lines to add to.
 fn icloud_lines(icloud: &Icloud, limit: usize, ctx: &Ctx, lines: &mut Vec<Line<'static>>) {
     let theme = &ctx.theme;
     let name = AddFolder::name(&icloud.source);
@@ -1187,20 +1161,7 @@ fn icloud_lines(icloud: &Icloud, limit: usize, ctx: &Ctx, lines: &mut Vec<Line<'
         lines.extend(wrap(&text, limit).into_iter().map(Line::raw));
     }
     lines.push(Line::default());
-    let Some(download) = &icloud.download else {
-        lines.push(buttons(&ICLOUD_CHOICES, Some(icloud.choice), theme));
-        return;
-    };
-    if download.cancel.load(Ordering::Relaxed) {
-        lines.push(ctx.loading("Stopping the download"));
-        return;
-    }
-    lines.push(ctx.loading(&match download.progress {
-        Some(Progress { total, done }) if total > 0 => {
-            format!("Downloading from iCloud: {done} of {total} files")
-        }
-        _ => "Downloading from iCloud".to_owned(),
-    }));
+    lines.push(buttons(&ICLOUD_CHOICES, Some(icloud.choice), theme));
 }
 
 /// Says how many of a folder's files are only in iCloud and that CrazyAgent downloads them

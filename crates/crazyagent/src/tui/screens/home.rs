@@ -481,7 +481,8 @@ impl Home {
     }
 
     /// Does what Enter or d asks of the engine's intake job: stop it, start it again with its
-    /// folder, mode and overrides, or forget it. The request is kept so a failure is said.
+    /// folder, mode and overrides, answer its soft refusal in Add folder, or forget it. The
+    /// request is kept so a failure is said.
     /// Inputs: the job, an action it offers and the context. Output: the flow.
     fn job_action(&mut self, job: &JobView, action: JobAction, ctx: &mut Ctx) -> Flow {
         assert!(intake_job::actions(job).contains(&action));
@@ -493,7 +494,11 @@ impl Home {
                 overrides: job.overrides.clone(),
             },
             JobAction::Dismiss => IntakeQuery::JobDismiss { id: job.id.clone() },
-            JobAction::Answer => return Flow::Handled,
+            JobAction::Answer => {
+                return Flow::Open(Place::AnswerAdd {
+                    job: job.id.clone(),
+                });
+            }
         };
         self.sent = Some(query.clone());
         ask(ctx, query);
