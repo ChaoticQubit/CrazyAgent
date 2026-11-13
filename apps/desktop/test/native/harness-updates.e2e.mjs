@@ -53,12 +53,11 @@ function quoted(path) {
   return `'${path}'`;
 }
 
-/** Puts a fake Codex 0.0.1 in an npm prefix inside the test folder, with a fake npm that logs
- * every call, answers 0.0.2 to `view` and turns the harness into 0.0.2 on `install`. The engine
- * runs these with a cleared environment, so the log path is written into the script.
- * Input: the test folder. Output: the prefix's bin folder, the harness and the npm log. */
-function npmCodex(root) {
-  const prefix = join(root, "npm");
+/** Puts a fake Codex 0.0.1 in an npm prefix, with a fake npm that logs every call, answers
+ * 0.0.2 to `view` and turns the harness into 0.0.2 on `install`. The engine runs these with a
+ * cleared environment, so the log path is written into the script. Inputs: the test folder and
+ * the prefix. Output: the prefix, its bin folder, the harness and the npm log. */
+function npmCodex(root, prefix) {
   const harness = join(prefix, "lib", "node_modules", "@openai", "codex", "bin", "codex");
   const log = join(root, "npm.log");
   mkdirSync(join(prefix, "bin"), { recursive: true, mode: 0o700 });
@@ -74,7 +73,7 @@ case "$1" in
   *) exit 2 ;;
 esac
 `);
-  return { bin: join(prefix, "bin"), harness, log };
+  return { prefix, bin: join(prefix, "bin"), harness, log };
 }
 
 /** Puts a fake self-updating Claude Code 0.0.1 where its own installer would, under the test
@@ -95,10 +94,10 @@ esac
   return bin;
 }
 
-/** Puts a fake OpenCode in a plain folder no installer owns, so the engine can't tell how it
- * was installed. Input: the test folder. Output: the bin folder. */
-function plainOpencode(root) {
-  const bin = join(root, "plain", "bin");
+/** Puts a fake OpenCode in the test HOME's own `bin` folder, which no installer owns, so the
+ * engine can't tell how it was installed. Input: the test HOME. Output: the bin folder. */
+function plainOpencode(home) {
+  const bin = join(home, "bin");
   mkdirSync(bin, { recursive: true, mode: 0o700 });
   script(join(bin, "opencode"), "#!/bin/sh\necho \"opencode 0.0.1\"\n");
   return bin;
@@ -142,11 +141,12 @@ async function until(what, wanted, read, ms = STEP_MS) {
   }
 }
 
-/** Starts the real engine and the bridge with fake harnesses first on the engine's PATH, makes
- * one project, serves the built app to a browser page, runs the steps and stops everything.
- * Inputs: the test context, the folder prefix, the steps, whether HTTPS goes through a refusing
- * proxy, whether the fake Codex is on PATH at start, and the page's local answers. The steps get
- * the bridge, the owner, the page and its helpers, the fakes, the proxy and the engine. */
+/** Starts the real engine and the bridge with fake harnesses in the test HOME's harness folders,
+ * also first on its PATH, makes one project, serves the built app to a browser page, runs the
+ * steps and stops everything. Inputs: the test context, the folder prefix, the steps, whether
+ * HTTPS goes through a refusing proxy, whether the fake Codex is installed at start, and the
+ * page's local answers. The steps get the bridge, the owner, the page and its helpers, the
+ * fakes, the proxy and the engine. */
 async function onEngine(t, prefix, steps, { offline = false, codexAtStart = true, local = {} } = {}) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -160,8 +160,8 @@ async function onEngine(t, prefix, steps, { offline = false, codexAtStart = true
   const repo = join(root, "repos", "tool-shop");
   for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, repo]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   ownerRepo(repo);
-  const codex = npmCodex(root);
-  const fakes = { codex, claude: selfUpdatingClaude(home), opencode: plainOpencode(root), root };
+  const codex = npmCodex(root, codexAtStart ? join(home, ".npm-global") : join(root, "npm"));
+  const fakes = { codex, claude: selfUpdatingClaude(home), opencode: plainOpencode(home), root };
   const proxy = await refusingProxy();
   const provider = await closedPort();
   writeFileSync(join(runtime, "global.toml"), `version = 1
@@ -202,7 +202,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     assert.deepEqual(await value(bridge, "desktop_harness_update_settings"), DEFAULTS, "a new engine starts with the default update settings");
     const catalog = await value(bridge, "desktop_harness_catalog", { check: true });
     const named = new Map(catalog.map((entry) => [entry.id, entry]));
-    for (const id of ["codex", "claude-code", "opencode"].filter((id) => codexAtStart || id !== "codex")) assert.notEqual(named.get(id)?.status.kind, "not_installed", `the engine finds the fake ${id} on its PATH`);
+    for (const id of ["codex", "claude-code", "opencode"].filter((id) => codexAtStart || id !== "codex")) assert.notEqual(named.get(id)?.status.kind, "not_installed", `the engine finds the fake ${id} in a test HOME folder`);
     if (!codexAtStart) assert.equal(named.get("codex")?.status.kind, "not_installed", "the engine starts with no Codex");
     const name = (id) => {
       assert.ok(named.has(id), `the catalog lists ${id}`);
@@ -293,7 +293,7 @@ test("Harness updates Check and update: Check shows the newer version, and Updat
     await me.waitFor("the Update confirm", (text) => text.includes(`Update ${name("codex")}?`));
     const asked = await dialog();
     assert.equal(asked.title, `Update ${name("codex")}?`);
-    assert.equal(asked.line, `${fakes.root}/npm/bin/npm install -g @openai/codex`, "the confirm shows exactly the line the engine runs");
+    assert.equal(asked.line, `${fakes.codex.prefix}/bin/npm install -g @openai/codex`, "the confirm shows exactly the line the engine runs");
     assert.match(asked.text, /Installed with npm \(@openai\/codex\)\./);
     assert.match(asked.text, /When it finishes, new agents use the new version with no restart\./);
     await me.capture("update-confirm");
