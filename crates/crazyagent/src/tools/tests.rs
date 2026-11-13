@@ -410,7 +410,10 @@ fn a_file_in_an_agent_short_temp_folder_is_refused_even_through_an_owner_link() 
     std::os::unix::fs::symlink(&planted, home.join(".local/bin/tmux")).unwrap();
     let missing = resolve("tmux", &home_only(&home)).unwrap_err();
     assert_eq!(missing.reason, Reason::Refused);
-    assert_eq!(missing.refused.unwrap().why, Refusal::AgentsCanWrite);
+    assert_eq!(
+        missing.refused.map(|refused| refused.why),
+        Some(Refusal::AgentsCanWrite)
+    );
 }
 
 /// R-L1 and F2: an interpreter named by path goes through the same checks as a tool found by
@@ -520,10 +523,10 @@ fn a_tool_in_the_setup_folder_of_an_engine_folder_inside_a_project_is_refused_by
     assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
     assert_eq!(
         missing.refused,
-        Some(Refused {
+        Some(Box::new(Refused {
             file: planted,
             why: Refusal::AgentsCanWrite
-        })
+        }))
     );
 }
 
