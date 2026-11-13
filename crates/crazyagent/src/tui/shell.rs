@@ -1779,4 +1779,165 @@ mod tests {
         shell.tick();
         assert_eq!(watch_asks(&mut shell), (0, 0));
     }
+
+    fn shop(state: JobState) -> JobView {
+        JobView {
+            id: crate::protocol::RequestId::new("add-1").unwrap(),
+            source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
+            mode: crate::projects_home::AddMode::Move,
+            overrides: Vec::new(),
+            stopping: false,
+            state,
+        }
+    }
+
+    fn intake_arrival(query: IntakeQuery, result: Result<IntakeView, String>) -> Arrival {
+        Arrival::Owner(Box::new(OwnerEvent::Intake(Box::new(IntakeEvent {
+            query,
+            result,
+        }))))
+    }
+
+    fn status_arrival(job: Option<JobView>) -> Arrival {
+        intake_arrival(IntakeQuery::JobStatus, Ok(IntakeView::Job(job)))
+    }
+
+    fn intake_asks(shell: &mut Shell) -> Vec<String> {
+        drain(shell)
+            .into_iter()
+            .filter(|request| request.starts_with("Intake("))
+            .collect()
+    }
+
+    /// DEC-159 S7: the tick reads the engine's intake job, the store keeps the last view
+    /// through a failed read, and a running job's end is said once, in its tone, with the
+    /// found folders read again so Home lists the folder that landed.
+    #[test]
+    fn the_shell_keeps_the_intake_job_and_says_its_end_once_then_reads_found_again() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        drain(&mut shell);
+        shell.tick();
+        let asks = intake_asks(&mut shell);
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert!(asks[0].contains("JobStatus"), "{asks:?}");
+
+        let running = shop(JobState::Copying {
+            copied: 3,
+            checked: 0,
+        });
+        shell.ctx.say(Message::success("Saved.", ""));
+        shell.arrive(status_arrival(Some(running.clone())));
+        assert_eq!(shell.ctx.store.intake.as_ref(), Some(&running));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("Saved.")
+        );
+        assert!(intake_asks(&mut shell).is_empty());
+
+        let done = shop(JobState::Done);
+        shell.arrive(status_arrival(Some(done.clone())));
+        let said = shell.ctx.message().expect("the end is said");
+        assert_eq!(
+            (said.tone, said.lead.as_str()),
+            (
+                super::super::frame::Tone::Success,
+                "shop is in your projects folder. Set it up from Home."
+            )
+        );
+        let asks = intake_asks(&mut shell);
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert!(asks[0].contains("Found"), "{asks:?}");
+
+        shell.ctx.say(Message::success("Saved.", ""));
+        shell.arrive(status_arrival(Some(done.clone())));
+        shell.arrive(intake_arrival(
+            IntakeQuery::JobStatus,
+            Err("owner_timeout".into()),
+        ));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("Saved.")
+        );
+        assert_eq!(
+            shell.ctx.store.intake.as_ref(),
+            Some(&done),
+            "a failed read keeps it"
+        );
+        assert!(intake_asks(&mut shell).is_empty());
+
+        shell.arrive(intake_arrival(
+            IntakeQuery::JobDismiss {
+                id: done.id.clone(),
+            },
+            Ok(IntakeView::JobDismissed(true)),
+        ));
+        let asks = intake_asks(&mut shell);
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert!(asks[0].contains("JobStatus"), "{asks:?}");
+        shell.arrive(status_arrival(None));
+        assert_eq!(shell.ctx.store.intake, None);
+    }
+
+    /// A job that ends failed, stopped or asking for an answer is said as a warning, and a
+    /// stop asked from any screen reads the job again at once.
+    #[test]
+    fn an_intake_job_that_did_not_land_is_said_as_a_warning_and_a_stop_reads_it_again() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        let running = shop(JobState::Downloading {
+            progress: crate::projects_home::icloud::Progress { total: 3, done: 1 },
+        });
+        shell.arrive(status_arrival(Some(running.clone())));
+        shell.arrive(intake_arrival(
+            IntakeQuery::JobStop {
+                id: running.id.clone(),
+            },
+            Ok(IntakeView::JobStopped(true)),
+        ));
+        drain(&mut shell);
+        let ended = [
+            JobState::Cancelled {
+                phase: crate::projects_home::job::Phase::Downloading,
+            },
+            JobState::NeedsAnswer {
+                code: "home_move_worktrees".into(),
+            },
+            JobState::Failed {
+                code: "home_move_source_left".into(),
+                phase: crate::projects_home::job::Phase::Clearing,
+            },
+        ];
+        for state in ended {
+            shell.arrive(status_arrival(Some(running.clone())));
+            shell.arrive(status_arrival(Some(shop(state.clone()))));
+            let said = shell.ctx.message().expect("the end is said");
+            assert_eq!(said.tone, super::super::frame::Tone::Warning, "{state:?}");
+        }
+    }
+
+    /// The header shows the running intake job's line in front of the screen's status on
+    /// every screen, and is left unchanged once the job ended or with none.
+    #[test]
+    fn the_header_shows_the_running_intake_job_and_nothing_once_it_ended() {
+        let theme = ctx().theme.clone();
+        let running = shop(JobState::Downloading {
+            progress: crate::projects_home::icloud::Progress {
+                total: 3000,
+                done: 12,
+            },
+        });
+        let shown = |job: Option<&JobView>, status: &str| {
+            crate::tui::text::plain(&with_intake(job, Line::raw(status.to_owned()), &theme))
+        };
+        assert_eq!(
+            shown(Some(&running), "Ready"),
+            "Downloading shop from iCloud: 12 of 3000 files  Ready"
+        );
+        assert_eq!(
+            shown(Some(&running), ""),
+            "Downloading shop from iCloud: 12 of 3000 files"
+        );
+        assert_eq!(shown(Some(&shop(JobState::Done)), "Ready"), "Ready");
+        assert_eq!(shown(None, "Ready"), "Ready");
+        assert_eq!(shown(None, ""), "");
+    }
 }
