@@ -28,12 +28,25 @@ test("Add account passes with one OpenAI and one Anthropic tile and fails on OP-
   assert.throws(() => providerVerdict({ tiles: ["OpenRouter"], methods: {} }), { message: "Add account shows no OpenAI tile" });
 });
 
-test("Home shows one sign-in row for the signed-out account and fails on OP-46 duplicates", () => {
+test("the bell holds one sign-in for the signed-out account and fails on OP-46 duplicates, inside its fold or as a second row", () => {
   const name = "ca-trial-4 home k1";
-  const rows = [`${name} isn't signed in.`, "Tidepool 2 new team notifications."];
-  assert.equal(signInRowsVerdict({ name, rows }), `one Needs you row for ${name}: "${name} isn't signed in."`);
-  assert.throws(() => signInRowsVerdict({ name, rows: [...rows, `${name} isn't signed in.`] }), { message: `OP-46: Home shows 2 rows for ${name}` });
-  assert.throws(() => signInRowsVerdict({ name, rows: ["Tidepool 2 new team notifications."] }), { message: `Home shows no sign-in row for ${name}` });
+  const sign = (id, account, who) => ({ id, kind: "account_sign_in", text: `${who} isn't signed in.`, target: { page: "account_sign_in", account } });
+  const items = [sign(7, "acct-home", name), sign(5, "acct-other", "Owner")];
+  const row = `Account sign-in ${name} isn't signed in. 2 like this, 2 unread`;
+  assert.equal(signInRowsVerdict({ name, account: "acct-home", items, rows: [row] }),
+    `one sign-in for ${name} ("${name} isn't signed in."); the bell's one Account sign-in row folds 2 for 2 signed-out accounts: "${row}"`);
+  assert.equal(signInRowsVerdict({ name, account: "acct-home", items: [items[0]], rows: [`Account sign-in ${name} isn't signed in.`] }),
+    `one sign-in for ${name} ("${name} isn't signed in."); the bell's one Account sign-in row folds 1 for 1 signed-out accounts: "Account sign-in ${name} isn't signed in."`);
+  assert.throws(() => signInRowsVerdict({ name, account: "acct-home", items, rows: [row, row] }),
+    { message: "OP-46: the bell shows 2 Account sign-in rows" });
+  assert.throws(() => signInRowsVerdict({ name, account: "acct-home", items, rows: [] }), { message: "the bell shows no Account sign-in row" });
+  assert.throws(() => signInRowsVerdict({ name, account: "acct-home", items: [...items, sign(8, "acct-home", name)], rows: [row] }),
+    { message: `OP-46: the bell holds 2 sign-ins for ${name}` });
+  assert.throws(() => signInRowsVerdict({ name, account: "acct-home", items, rows: [`Account sign-in ${name} isn't signed in. 3 like this`] }),
+    { message: "OP-46: the bell's Account sign-in row folds 3 sign-ins for 2 signed-out accounts" });
+  assert.throws(() => signInRowsVerdict({ name, account: "acct-home", items: [items[1]], rows: [row] }), { message: `the bell holds no sign-in for ${name}` });
+  assert.throws(() => signInRowsVerdict({ name, account: "acct-home", items: [sign(7, "acct-home", "Someone else")], rows: [row] }),
+    { message: `the sign-in for ${name} reads "Someone else isn't signed in."` });
 });
 
 test("Add an account is done only with an account ready for agents (OP-47)", () => {
