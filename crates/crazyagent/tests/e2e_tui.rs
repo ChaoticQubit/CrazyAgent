@@ -1959,3 +1959,214 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
     drop(pty);
     engine.stop();
 }
+
+/// Makes a graphify in `home` that the resolver finds and passes over (DEC-162), laid out as
+/// uv lays out a tool: `.local/bin/graphify` links to the tool's script, whose Python links
+/// into an installation whose folders the group can change (0775) and whose `python3.9`
+/// leads to `/bin/bash`; a link in the installation points out to a 0777 file elsewhere in
+/// the home. Input: the home. Output: the installation folder and the file outside it.
+fn refused_graphify(home: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let mode = std::fs::Permissions::from_mode;
+    let prefix = home.join(".local/share/uv/python/cpython-9.9.9-dummy");
+    let real = prefix.join("bin");
+    let tool = home.join(".local/share/uv/tools/graphifyy/bin");
+    let bin = home.join(".local/bin");
+    for folder in [&real, &tool, &bin] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    symlink("/bin/bash", real.join("python3.9")).unwrap();
+    symlink(real.join("python3.9"), tool.join("python")).unwrap();
+    let script = tool.join("graphify");
+    let text = format!(
+        "#!{}\necho 'graphify 0.9.9'\n",
+        tool.join("python").display()
+    );
+    std::fs::write(&script, text).unwrap();
+    std::fs::set_permissions(&script, mode(0o755)).unwrap();
+    symlink(&script, bin.join("graphify")).unwrap();
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let outside = elsewhere.join("kept");
+    std::fs::write(&outside, "kept").unwrap();
+    std::fs::set_permissions(&outside, mode(0o777)).unwrap();
+    symlink(&outside, prefix.join("outside")).unwrap();
+    for folder in [&real, &prefix] {
+        std::fs::set_permissions(folder, mode(0o775)).unwrap();
+    }
+    (prefix, outside)
+}
+
+/// A first-run home for the refused-tool rows: a Projects folder and the Shift-Enter
+/// preference saved, as the Node row makes it. Input: a scratch prefix. Output: the home.
+fn first_run_home(prefix: &str) -> tempfile::TempDir {
+    let home = scratch(prefix);
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    home
+}
+
+/// Starts a clean-Mac engine on `home`: the system PATH and an empty gate root, so the only
+/// graphify it can find is the one in the home. Inputs: a scratch prefix, the home and the
+/// gate root. Output: the running engine.
+fn clean_engine(prefix: &str, home: &Path, gate: &Path) -> Engine {
+    let mut engine = Engine::new(prefix);
+    engine.home = Some(home.to_path_buf());
+    engine.env.push(("PATH", SYSTEM_PATH.into()));
+    engine
+        .env
+        .push(("CRAZYAGENT_GATE_SYSTEM_ROOT", gate.into()));
+    engine.launch();
+    engine
+}
+
+/// Goes through first run to the Setup page, where the tools check shows. Inputs: the
+/// engine and the home. Output: the TUI on the Setup page.
+fn first_run_setup_page(engine: &Engine, home: &Path) -> ScriptPty {
+    let mut pty = ScriptPty::launch(&engine.socket(), home);
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("the Setup page opens", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty
+}
+
+fn folder_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// DEC-162, Unused tools on Fix button (the default): first run's Setup page reads the
+/// graphify the resolver passed over as Found, not used with its line; p names the tree and
+/// the command, nothing changes before y, y removes group and other write from that tree
+/// alone, a link out of the tree leaves its file as it was, the row then reads Found and the
+/// engine logs the tree and counts. Needs the clean-Mac gate build.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate: the gate root hides this machine's own graphify"
+)]
+fn first_run_fixes_a_refused_graphify_only_after_the_confirm_names_its_tree() {
+    let home = first_run_home("ca-e2e-fix-home-");
+    let (prefix, outside) = refused_graphify(home.path());
+    let gate = scratch("ca-e2e-fix-gate-");
+    let mut engine = clean_engine("ca-e2e-fix-", home.path(), gate.path());
+    let mut pty = first_run_setup_page(&engine, home.path());
+    pty.until_within(
+        "the Graphify command row reads Found, not used with its line and the Setup page offers p",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found, not used")
+                && screen.contains("graphify can't start")
+                && screen.contains("p Fix permissions")
+        },
+    );
+    pty.type_bytes(b"p");
+    pty.until(
+        "the confirm names the tool, the tree and the command",
+        |screen| {
+            screen.contains("Fix permissions for Graphify command?")
+                && screen.contains("cpython-9.9.9-dummy")
+                && screen.contains("chmod -R go-w")
+                && screen.contains("y Fix")
+        },
+    );
+    assert_eq!(folder_mode(&prefix), 0o775, "nothing changes before y");
+    pty.type_bytes(b"y");
+    pty.until_within(
+        "the fix ends and the Graphify command row reads Found",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found 0.9.9")
+                && !screen.contains("Found, not used")
+                && !screen.contains("p Fix permissions")
+        },
+    );
+    for folder in [&prefix, &prefix.join("bin")] {
+        assert_eq!(folder_mode(folder), 0o755, "{}", folder.display());
+    }
+    assert_eq!(
+        folder_mode(&outside),
+        0o777,
+        "a link out of the tree leaves its file as it was"
+    );
+    drop(pty);
+    let log = engine.stop();
+    assert!(
+        log.contains("tool_fix_done tool=graphify") && log.contains("changed="),
+        "the engine logs the fix with its tree and counts:\n{log}"
+    );
+}
+
+/// DEC-162, Unused tools on Show the command only: first run's Setup page shows the command
+/// for the graphify the resolver passed over and no fix key, p says fixing is turned off,
+/// and the engine itself refuses a fix request with `tool_fix_off`, changing nothing. Needs
+/// the clean-Mac gate build.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate: the gate root hides this machine's own graphify"
+)]
+fn first_run_shows_only_the_command_for_a_refused_graphify_when_unused_tools_is_command_only() {
+    let home = first_run_home("ca-e2e-fixoff-home-");
+    let (prefix, _) = refused_graphify(home.path());
+    let gate = scratch("ca-e2e-fixoff-gate-");
+    let mut engine = clean_engine("ca-e2e-fixoff-", home.path(), gate.path());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let saved = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let reply = owner
+            .controller
+            .set_refused_tool(crazyagent::setup::RefusedTool::CommandOnly, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(saved, OwnerResult::Applied);
+    let mut pty = first_run_setup_page(&engine, home.path());
+    pty.until_within(
+        "the Graphify command row shows the command and the page offers no fix key",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found, not used")
+                && screen.contains("To fix it, run in Terminal: chmod -R go-w")
+                && !screen.contains("p Fix permissions")
+        },
+    );
+    pty.type_bytes(b"p");
+    pty.until("p says fixing permissions is turned off", |screen| {
+        screen.contains("Fixing permissions from CrazyAgent is turned off in Settings.")
+    });
+    let answer = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let tree = prefix.canonicalize().unwrap().display().to_string();
+        let reply = owner
+            .controller
+            .fix_tool_permissions(Dependency::Graphify, tree, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(answer, e2e_support::rejected("tool_fix_off"));
+    assert_eq!(folder_mode(&prefix), 0o775, "a refused fix changes nothing");
+    drop(pty);
+    engine.stop();
+}
