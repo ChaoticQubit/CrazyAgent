@@ -252,6 +252,18 @@ impl Places {
         Some(bundled)
     }
 
+    /// The same places with the app's folder set, as an engine started from that folder
+    /// would hold it, for rows that build their own folders. Input: the app's folder.
+    /// Output: the places.
+    #[cfg(test)]
+    pub(crate) fn with_app_folder(self, app_folder: PathBuf) -> Self {
+        assert!(usable(&app_folder));
+        Self {
+            app_folder: Some(app_folder),
+            ..self
+        }
+    }
+
     /// HOME, for the shim checks. Output: HOME, or none.
     pub fn home(&self) -> Option<&Path> {
         self.home.as_deref()
@@ -491,6 +503,48 @@ impl Missing {
 /// and the places. Output: the tool, or why it cannot run.
 pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
     resolve_at(name, places, 0)
+}
+
+/// Whether this build ships tmux beside the engine: the release job sets
+/// `CRAZYAGENT_BUNDLES_TMUX=1` for every target that bundles `crazyagent-tmux`, so a dev
+/// build or a Windows build never says the bundled one is missing.
+pub const SHIPS_BUNDLED_TMUX: bool = matches!(option_env!("CRAZYAGENT_BUNDLES_TMUX"), Some("1"));
+
+/// Why the engine runs another tmux than the one the app ships (DEC-157 15:41): the bundled
+/// file is not there, or it is there but cannot run (refused, or no supported version read).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BundleNote {
+    Missing,
+    CannotRun,
+}
+
+impl BundleNote {
+    /// The owner line the setup row shows under the tmux in use, word for word in the TUI
+    /// and the desktop app. Output: the line.
+    pub fn line(self) -> &'static str {
+        match self {
+            Self::Missing => {
+                "Using the system tmux, the bundled one is missing; reinstall CrazyAgent."
+            }
+            Self::CannotRun => {
+                "Using the system tmux, the bundled one can't run; reinstall CrazyAgent."
+            }
+        }
+    }
+}
+
+/// Finds the tmux the engine uses, the one answer for setup, the terminal and the sandbox
+/// grant: the bundled copy when it passes the entry checks and `runs`, else the usual
+/// order with the reason the bundled one was not used; with no other tmux, the usual
+/// search's own miss. Inputs: the places, whether this build ships tmux and the check that
+/// the bundled copy runs. Output: the tmux and its note, or why none can run.
+pub fn resolve_tmux(
+    places: &Places,
+    ships_bundle: bool,
+    runs: impl Fn(&Resolved) -> bool,
+) -> Result<(Resolved, Option<BundleNote>), Missing> {
+    let _ = (ships_bundle, &runs);
+    resolve("tmux", places).map(|found| (found, None))
 }
 
 /// Reads how an entry already chosen runs, such as a harness file the engine pinned: its

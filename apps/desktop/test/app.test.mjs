@@ -291,6 +291,14 @@ test("Install tools counts a tmux bundled with CrazyAgent as installed, so a 2.4
     "graphify isn't installed. Live terminals and the team graph need tmux; setting up a project needs graphify.");
 });
 
+test("Install tools counts a system tmux used in place of the bundled one as installed (leader 20:08)", () => {
+  const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
+  const item = (tools) => setupSteps(ok([account({})]), ok([pool]), ok([]), tools).items.find((entry) => entry.id === "tools");
+  const system = { state: "system", version: "3.5a", note: "Using the system tmux, the bundled one is missing; reinstall CrazyAgent." };
+  assert.equal(item(toolsRead(system, found, found)).done, true);
+  assert.equal(item(toolsRead(system, found, found)).body, "tmux, uv and graphify are installed.");
+});
+
 test("Home keeps the Get set up panel with Set up tools after a skipped tools step", () => {
   const props = { projects: ok([{ id: "p1", name: "Harbor", repository_count: 0 }]), accounts: ok([account({})]),
     pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]), harnesses: ok([]), onRetryProjects: () => {} };

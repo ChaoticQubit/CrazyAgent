@@ -296,6 +296,7 @@ fn tool_word(state: &DependencyState) -> String {
         DependencyState::Bundled { version } => {
             format!("Bundled with CrazyAgent {}", version.as_str())
         }
+        DependencyState::System { version, .. } => format!("Found {}", version.as_str()),
         DependencyState::Installing => "Installing".into(),
         DependencyState::Installed { version } => format!("Installed {}", version.as_str()),
         DependencyState::Failed { .. } => "Failed".into(),

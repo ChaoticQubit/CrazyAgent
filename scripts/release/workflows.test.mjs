@@ -926,3 +926,12 @@ test("the hdiutil retry runs every other hdiutil command, and a create over an e
   assert.equal(over.kept, "kept", "an image that was there before is never deleted");
   assert.deepEqual(over.sleeps, []);
 });
+
+test("the release job marks every engine it builds for a target that ships crazyagent-tmux, at job level so no later cargo step rebuilds it unmarked, and the engine reads that exact mark (leader 20:15)", async () => {
+  const text = await workflow("release.yml");
+  const env = block(block(text, 2, "build").join("\n"), 4, "env");
+  assert(env.includes("      CRAZYAGENT_BUNDLES_TMUX: ${{ matrix.os != 'windows' && '1' || '0' }}"), env.join("\n"));
+  assert.equal(text.split("CRAZYAGENT_BUNDLES_TMUX").length - 1, 1, "no step sets the mark again");
+  const tools = readFileSync(fileURLToPath(new URL("../../crates/crazyagent/src/tools.rs", import.meta.url)), "utf8");
+  assert.match(tools, /pub const SHIPS_BUNDLED_TMUX: bool = matches!\(option_env!\("CRAZYAGENT_BUNDLES_TMUX"\), Some\("1"\)\);/);
+});

@@ -764,3 +764,96 @@ fn a_bundled_tmux_others_can_change_or_that_cannot_run_is_passed_over_for_the_us
     std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(resolve("tmux", &places).unwrap().entry, sidecar);
 }
+
+/// Leader 20:08: a bundled tmux whose version read fails is passed over for the usual order,
+/// which says the bundled one can't run; only the bundled copy is ever asked whether it runs.
+#[test]
+fn a_bundled_tmux_that_cannot_run_falls_back_to_the_usual_order_and_says_so() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    let asked = std::cell::RefCell::new(Vec::new());
+    let (found, note) = resolve_tmux(&places, true, |tmux| {
+        asked.borrow_mut().push(tmux.entry.clone());
+        false
+    })
+    .unwrap();
+    assert_eq!(found.entry, brew);
+    assert_eq!(note, Some(BundleNote::CannotRun));
+    assert_eq!(asked.into_inner(), vec![sidecar]);
+}
+
+/// A bundled tmux that runs is the one used, with no note, whether or not the build is
+/// marked as shipping one.
+#[test]
+fn a_bundled_tmux_that_runs_is_used_with_no_note() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, _brew) = bundled_layout(&home);
+    for ships in [true, false] {
+        let (found, note) = resolve_tmux(&places, ships, |_| true).unwrap();
+        assert_eq!(found.entry, sidecar);
+        assert_eq!(note, None);
+    }
+}
+
+/// A build that ships tmux and has lost it uses the usual order and says the bundled one is
+/// missing; a build that ships none, such as a dev build, says nothing.
+#[test]
+fn a_lost_bundled_tmux_says_it_is_missing_only_in_a_build_that_ships_one() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::remove_file(&sidecar).unwrap();
+    let never = |_: &Resolved| -> bool { panic!("nothing to run") };
+    assert_eq!(
+        resolve_tmux(&places, true, never).unwrap(),
+        (resolve("tmux", &places).unwrap(), Some(BundleNote::Missing))
+    );
+    let (found, note) = resolve_tmux(&places, false, never).unwrap();
+    assert_eq!((found.entry, note), (brew, None));
+}
+
+/// A bundled file the entry checks pass over, one others can change or one that is not
+/// executable, is there but cannot run: the usual order runs and says so.
+#[test]
+fn a_refused_bundled_tmux_says_it_cannot_run() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    for mode in [0o757, 0o644] {
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (found, note) = resolve_tmux(&places, false, |_| true).unwrap();
+        assert_eq!(found.entry, brew, "mode {mode:o}");
+        assert_eq!(note, Some(BundleNote::CannotRun), "mode {mode:o}");
+    }
+}
+
+/// Leader 20:08: with no other tmux, a bundled one that cannot run or is refused ends in
+/// today's install offer, the plain tmux-missing line, never the refused file's line.
+#[test]
+fn with_no_other_tmux_a_bundled_one_that_cannot_run_ends_in_the_install_offer() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::remove_file(&brew).unwrap();
+    let missing = resolve_tmux(&places, true, |_| false).unwrap_err();
+    assert_eq!(
+        (missing.reason, missing.line()),
+        (Reason::NotFound, TMUX_MISSING.to_owned())
+    );
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o757)).unwrap();
+    let missing = resolve_tmux(&places, true, |_| true).unwrap_err();
+    assert_eq!(
+        (missing.reason, missing.line()),
+        (Reason::NotFound, TMUX_MISSING.to_owned())
+    );
+}
+
+/// The two notes, word for word as the TUI and the desktop app show them.
+#[test]
+fn the_bundle_notes_name_the_system_tmux_and_the_reinstall() {
+    assert_eq!(
+        BundleNote::Missing.line(),
+        "Using the system tmux, the bundled one is missing; reinstall CrazyAgent."
+    );
+    assert_eq!(
+        BundleNote::CannotRun.line(),
+        "Using the system tmux, the bundled one can't run; reinstall CrazyAgent."
+    );
+}

@@ -718,7 +718,7 @@ fn persistable_runs_an_engine_outside_the_mount_in_place_and_copies_one_from_the
         bundled
     );
     assert!(!layout.root().exists());
-    let copies = layout.root().join("bin");
+    let copies = layout.root().join("setup").join("bin");
     let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
     assert_eq!(installed, copies.join("crazyagent"));
     assert_eq!(changeable_by_others(&installed), None);
@@ -787,6 +787,80 @@ fn persistable_runs_an_engine_outside_the_mount_in_place_and_copies_one_from_the
     assert_eq!(listed(), names);
     let stranger = mount.join("usr").join("bin").join("notes.txt");
     assert!(persistable(&stranger, &layout, Some(&mount)).is_err());
+}
+
+/// Leader 20:15: the AppImage's persisted copy lives in `<data root>/setup/bin`, which the
+/// tool resolver trusts, so the engine run from there finds the `crazyagent-tmux` beside it
+/// and never refuses it as a file agents can write, as it did in `<data root>/bin`.
+#[cfg(unix)]
+#[test]
+fn an_appimage_persisted_tmux_is_found_beside_the_engine_not_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mount = root.join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(root.join("data").join("engine")).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    let app = installed.parent().unwrap();
+    assert_eq!(app, layout.root().join("setup").join("bin"));
+    let places = crate::tools::Places::engine(Some(layout.root()), Some(app), None, None);
+    let tmux = crate::tools::resolve("tmux", &places).unwrap();
+    assert_eq!(tmux.entry, app.join("crazyagent-tmux"));
+}
+
+/// Leader 20:15: the first start after the move retires the old `<data root>/bin` copy: the
+/// command line link that named it names the new copy, every release file there is removed,
+/// a file CrazyAgent did not put there stays, and the folder goes once it is empty.
+#[cfg(unix)]
+#[test]
+fn a_first_start_retires_the_old_appimage_copy_and_repoints_the_command_line_link() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = layout.root().join("bin");
+    bundle(&old);
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::os::unix::fs::symlink(old.join("crazyagent"), cli.join("crazyagent")).unwrap();
+    let installed = persistable_with(&bundled, &layout, Some(&mount), Some(&cli)).unwrap();
+    assert_eq!(
+        installed,
+        layout.root().join("setup").join("bin").join("crazyagent")
+    );
+    assert_eq!(
+        std::fs::read_link(cli.join("crazyagent")).unwrap(),
+        installed
+    );
+    for name in crate::update::BINARIES {
+        assert!(
+            std::fs::symlink_metadata(old.join(name)).is_err(),
+            "{name} is retired"
+        );
+    }
+    assert!(old.join("notes.txt").is_file(), "a stranger file stays");
+    std::fs::remove_file(old.join("notes.txt")).unwrap();
+    persistable_with(&bundled, &layout, Some(&mount), Some(&cli)).unwrap();
+    assert!(!old.exists(), "the empty old folder goes");
+}
+
+/// A command line link that names anything but the old copy is never touched.
+#[cfg(unix)]
+#[test]
+fn retiring_the_old_appimage_copy_leaves_a_link_to_another_engine_alone() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    bundle(&layout.root().join("bin"));
+    let other = bundle(&temp.path().join("other"));
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::os::unix::fs::symlink(&other, cli.join("crazyagent")).unwrap();
+    persistable_with(&bundled, &layout, Some(&mount), Some(&cli)).unwrap();
+    assert_eq!(std::fs::read_link(cli.join("crazyagent")).unwrap(), other);
 }
 
 #[cfg(unix)]

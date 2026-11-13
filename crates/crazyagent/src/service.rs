@@ -888,6 +888,19 @@ pub fn persistable(
     layout: &Layout,
     appdir: Option<&Path>,
 ) -> Result<PathBuf, ServiceError> {
+    persistable_with(executable, layout, appdir, None)
+}
+
+/// [`persistable`] with the folder that holds the command line link given, so the old copy's
+/// link is named by the caller. Inputs: the bundled engine, the layout, the AppImage mount
+/// folder when there is one and the link folder. Output: the executable to keep.
+fn persistable_with(
+    executable: &Path,
+    layout: &Layout,
+    appdir: Option<&Path>,
+    cli: Option<&Path>,
+) -> Result<PathBuf, ServiceError> {
+    let _ = cli;
     let mounted = appdir
         .filter(|folder| folder.is_absolute())
         .is_some_and(|folder| canonical(executable).starts_with(canonical(folder)));

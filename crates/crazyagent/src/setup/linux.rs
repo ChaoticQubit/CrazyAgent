@@ -249,6 +249,7 @@ mod tests {
             Ok(crate::setup::Located {
                 version: Version::parse("3.5a").unwrap(),
                 bundled: false,
+                note: None,
             })
         );
         assert_eq!(

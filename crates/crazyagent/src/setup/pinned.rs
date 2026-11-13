@@ -421,6 +421,7 @@ impl Installer for PinnedInstaller {
         Ok(self.resolved(dep)?.map(|(entry, version)| super::Located {
             bundled: bundled.as_ref() == Some(&entry),
             version,
+            note: None,
         }))
     }
 

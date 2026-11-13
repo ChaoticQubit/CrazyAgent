@@ -199,8 +199,13 @@ enum Pending {
 /// the app's folder, `<root>/setup/bin`, then everywhere [`crate::tools::Places`] looks.
 /// Takes the engine root. Returns the real program, or none when tmux is not installed.
 pub fn installed(engine_root: &Path) -> Option<PathBuf> {
-    let places = crate::tools::Places::from_environment(Some(engine_root));
-    crate::tools::resolve("tmux", &places)
+    installed_at(&crate::tools::Places::from_environment(Some(engine_root)))
+}
+
+/// Finds the tmux program the engine uses in the given places, the answer setup shows.
+/// Takes the places. Returns the real program, or none when tmux is not installed.
+pub fn installed_at(places: &crate::tools::Places) -> Option<PathBuf> {
+    crate::tools::resolve("tmux", places)
         .ok()
         .map(|tmux| tmux.program)
 }

@@ -156,6 +156,7 @@ mod tests {
             Ok(Ok(Located {
                 version: Version::parse("3.8").unwrap(),
                 bundled,
+                note: None,
             }))
         };
         let progress = Progress {
@@ -181,6 +182,41 @@ mod tests {
             serde_json::to_value(&rows[0].state).unwrap(),
             serde_json::json!({"state": "bundled", "version": "3.8"})
         );
+    }
+
+    /// Leader 20:08: a system tmux used in place of the bundled one is found with the note
+    /// that says why, which clients read as `{"state":"system","version":...,"note":...}`.
+    #[test]
+    fn a_system_tmux_used_in_place_of_the_bundled_one_carries_its_note_on_the_wire() {
+        use crate::tools::BundleNote;
+        for note in [BundleNote::Missing, BundleNote::CannotRun] {
+            let progress = Progress {
+                checked: Some(Checked {
+                    at: Instant::now(),
+                    found: vec![(
+                        Dependency::Tmux,
+                        Ok(Ok(Located {
+                            version: Version::parse("3.5a").unwrap(),
+                            bundled: false,
+                            note: Some(note),
+                        })),
+                    )],
+                }),
+                ..Progress::default()
+            };
+            let rows = dependency_rows(&progress);
+            assert_eq!(
+                rows[0].state,
+                DependencyState::System {
+                    version: Version::parse("3.5a").unwrap(),
+                    note: note.line().to_owned(),
+                }
+            );
+            assert_eq!(
+                serde_json::to_value(&rows[0].state).unwrap(),
+                serde_json::json!({"state": "system", "version": "3.5a", "note": note.line()})
+            );
+        }
     }
 
     #[test]
@@ -226,6 +262,7 @@ mod tests {
                         Ok(Ok(Located {
                             version: Version::parse("0.13.5").unwrap(),
                             bundled: false,
+                            note: None,
                         })),
                     ),
                     (Dependency::Graphify, Ok(Err(needs.clone()))),

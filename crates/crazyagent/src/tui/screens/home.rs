@@ -1679,6 +1679,18 @@ pub(in crate::tui) mod tests {
         assert_eq!(missing_tools(&status), Vec::<String>::new());
     }
 
+    /// Leader 20:08: a system tmux used in place of the bundled one is a working tmux, so it
+    /// counts as installed like the desktop's Install tools step.
+    #[test]
+    fn a_system_tmux_in_place_of_the_bundled_one_counts_as_installed() {
+        let mut status = tools(&[]);
+        status.dependencies[0].state = DependencyState::System {
+            version: Version::parse("3.5a").unwrap(),
+            note: crate::tools::BundleNote::Missing.line().to_owned(),
+        };
+        assert_eq!(missing_tools(&status), Vec::<String>::new());
+    }
+
     #[test]
     fn get_set_up_stays_until_tools_are_found_and_opens_setup() {
         let mut ctx = ctx(80, 24);
