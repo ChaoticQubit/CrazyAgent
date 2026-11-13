@@ -1005,3 +1005,39 @@ fn the_gate_starts_the_engine_with_the_login_service_arguments_and_environment()
     );
     assert_eq!(plist_keys(&text, "EnvironmentVariables"), ["PATH"]);
 }
+
+/// The stand-in's folder line reads whole however the pane hands it over: as the raw
+/// stream, or inside the screen an attach sends after the line was printed, where tmux
+/// split it into pane rows joined by row breaks and style sequences. A folder line with no
+/// ran line after it names no folder.
+#[test]
+fn the_marker_folder_reads_whole_from_the_raw_stream_and_from_a_screen_that_wrapped_it() {
+    let folder = "/private/var/folders/_c/xkqxv9g95_10s31wrrbg0ts80000gn/T/cm-NiVDim/engine/team/agents/agent-1/home";
+    let line = format!("{FOLDER_KEY}{folder}");
+    assert!(line.len() > 80, "the line is longer than the engine's pane");
+    let ran = std::str::from_utf8(MARKER_LINE).unwrap();
+    let raw = format!("$ codex\r\n{line}\r\n{ran}\r\n");
+    assert_eq!(
+        pane_folder(raw.as_bytes()),
+        Some(PathBuf::from(folder)),
+        "the raw stream"
+    );
+    for width in [24, 80, 132] {
+        let rows: Vec<&str> = line
+            .as_bytes()
+            .chunks(width)
+            .map(|row| std::str::from_utf8(row).unwrap())
+            .collect();
+        assert_eq!(rows.len(), line.len().div_ceil(width));
+        let screen = format!(
+            "\x1b[0m\x1b[H\x1b[2J{}\x1b[39m\r\n{ran}\x1b[0m\x1b[3;23H",
+            rows.join("\x1b[0m\r\n")
+        );
+        assert_eq!(
+            pane_folder(screen.as_bytes()),
+            Some(PathBuf::from(folder)),
+            "a screen {width} columns wide"
+        );
+    }
+    assert_eq!(pane_folder(format!("{line}\r\n").as_bytes()), None);
+}
