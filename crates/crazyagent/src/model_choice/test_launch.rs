@@ -59,7 +59,7 @@ pub fn supported(harness: &str) -> bool {
 /// Tells whether a harness's test launch is a read-only research run: Claude Code and
 /// Codex; RCLI's is decided by `rcli_outcome`. Input: the catalog harness id. Output: the
 /// answer.
-fn read_only(harness: &str) -> bool {
+pub(crate) fn read_only(harness: &str) -> bool {
     matches!(harness, "claude-code" | "codex")
 }
 

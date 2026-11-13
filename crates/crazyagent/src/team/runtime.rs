@@ -10783,14 +10783,14 @@ impl TeamRuntime {
     /// again at once. Nothing is recorded for an account's own model. Takes the agent.
     /// Claims the engine's own check of a model refusal agent `id`'s pane said (DEC-150
     /// addendum 9g, 9h), for a profile account with an explicit model on a harness with a
-    /// test launch; a check that already refused marks the project from its own time.
+    /// read-only test launch; a check that already refused marks the project from its own time.
     /// Takes the agent. Returns the check to run off this thread, none when none runs.
     fn said_check(&self, id: i64) -> Result<Option<Check>, EngineError> {
         let worker = &self.workers[&id];
         let (Some(model), Some((global, local))) = (worker.model.as_deref(), &self.settings) else {
             return Ok(None);
         };
-        if !worker.managed || !test_launch::supported(&worker.harness) {
+        if !worker.managed || !test_launch::read_only(&worker.harness) {
             return Ok(None);
         }
         let Some(executable) = self.harness(&worker.harness) else {
