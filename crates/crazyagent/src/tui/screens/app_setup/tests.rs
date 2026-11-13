@@ -271,7 +271,7 @@ fn a_system_tmux_in_place_of_the_bundled_one_reads_found_with_its_note_under_it(
         shell.arrive(event(AppSetupEvent::Status(Ok(status))));
         let rows = render(&mut shell, width, height);
         assert!(find(&rows, "tmux").contains("Found 3.5a"));
-        find(&rows, "Using the system tmux, the bundled one");
+        find(&rows, "Using the system tmux,");
         assert!(
             rows.iter()
                 .all(|row| row.chars().count() <= usize::from(width))

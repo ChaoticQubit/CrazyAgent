@@ -933,5 +933,5 @@ test("the release job marks every engine it builds for a target that ships crazy
   assert(env.includes("      CRAZYAGENT_BUNDLES_TMUX: ${{ matrix.os != 'windows' && '1' || '0' }}"), env.join("\n"));
   assert.equal(text.split("CRAZYAGENT_BUNDLES_TMUX").length - 1, 1, "no step sets the mark again");
   const tools = readFileSync(fileURLToPath(new URL("../../crates/crazyagent/src/tools.rs", import.meta.url)), "utf8");
-  assert.match(tools, /pub const SHIPS_BUNDLED_TMUX: bool = matches!\(option_env!\("CRAZYAGENT_BUNDLES_TMUX"\), Some\("1"\)\);/);
+  assert.match(tools, /pub const SHIPS_BUNDLED_TMUX: bool = match option_env!\("CRAZYAGENT_BUNDLES_TMUX"\) \{\n {4}Some\(mark\) => matches!\(mark\.as_bytes\(\), \[b'1'\]\),\n {4}None => false,\n\};/);
 });
