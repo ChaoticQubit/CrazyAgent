@@ -3,6 +3,8 @@ import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SevereServiceError } from "webdriverio";
+import { lockHome } from "./run-layout.mjs";
 import { managedCodexHome, returnSignIn } from "./v1-flow-auth.mjs";
 
 process.umask(0o077);
@@ -13,9 +15,10 @@ const root = process.env.V1_ROOT;
 const evidence = process.env.V1_EVIDENCE;
 const codex = process.env.V1_CODEX;
 const port = Number(process.env.WD_PORT);
+const home = process.env.HOME;
 const ollama = process.env.V1_OLLAMA_URL ?? "http://127.0.0.1:11434/v1";
 const ollamaModel = process.env.V1_OLLAMA_MODEL ?? "qwen2.5:0.5b";
-for (const [name, path] of [["WD_APP", app], ["V1_ENGINE", engineBinary], ["V1_ROOT", root], ["V1_EVIDENCE", evidence], ["V1_CODEX", codex]]) {
+for (const [name, path] of [["WD_APP", app], ["V1_ENGINE", engineBinary], ["V1_ROOT", root], ["V1_EVIDENCE", evidence], ["V1_CODEX", codex], ["HOME", home]]) {
   assert(path && isAbsolute(path), `${name} must be an absolute path`);
 }
 for (const name of ["V1_CLAUDE", "V1_RCLI"]) assert(!process.env[name] || isAbsolute(process.env[name]), `${name} must be an absolute path when set`);
@@ -26,6 +29,7 @@ const ledger = join(evidence, "borrowed-sign-in.json");
 const ENGINE_READY_MS = 60000;
 const ENGINE_STOP_MS = 20000;
 let engine;
+let homeLock = null;
 
 async function ollamaReady() {
   const blocked = `BLOCKED: start Ollama at ${ollama} with ${ollamaModel} pulled`;
@@ -93,6 +97,11 @@ export const config = {
   mochaOpts: { timeout: 1800000, retries: 0 },
   onPrepare: async function () {
     mkdirSync(evidence, { recursive: true, mode: 0o700 });
+    try {
+      homeLock = await lockHome(home, { label: `wdio v1-flow ${evidence}` });
+    } catch (failure) {
+      throw new SevereServiceError(String(failure.message));
+    }
     await ollamaReady();
     try {
       mkdirSync(root, { mode: 0o700 });
@@ -116,5 +125,6 @@ export const config = {
   onComplete: async function () {
     await stopEngine();
     if (returnSignIn(ledger)) console.log("v1-flow: the managed Codex sign-in is back in CRAZYAGENT_MANAGED_CODEX_HOME");
+    homeLock?.release();
   },
 };
