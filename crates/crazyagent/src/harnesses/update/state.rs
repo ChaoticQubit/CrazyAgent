@@ -507,13 +507,11 @@ impl Updates {
         }
     }
 
-    /// The versions row of an installed harness. With updates off nothing is started and
-    /// nothing is checked. The harness is asked for its version only when the table
-    /// recognizes its install or CrazyAgent starts that harness itself, so a look-alike
-    /// program with a catalog name is never run, and only once it `runs`: one that still
-    /// needs a program is neither asked nor checked. Inputs: the catalog spec, the executable,
-    /// the roots, the settings, whether to check now and whether it runs. Output: the row
-    /// without the job fields.
+    /// The versions row of an installed harness: with updates on, asked for its version only
+    /// when the table knows its install or CrazyAgent starts it (never a look-alike), and only
+    /// once it `runs`, so one that still needs a program is neither asked nor checked.
+    /// Inputs: the spec, executable, roots, settings, whether to check now and whether it runs.
+    /// Output: the row without the job fields.
     fn present(
         &self,
         spec: &'static harnesses::HarnessSpec,
