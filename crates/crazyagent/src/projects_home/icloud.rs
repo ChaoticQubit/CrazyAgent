@@ -225,12 +225,36 @@ pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
     if holds_owner_home(&root, &owner_home()?) {
         return Err(refused("icloud_folder_unsafe"));
     }
+    run(&root, download, &request, &placeholders, POLL_EVERY)
+}
+
+/// Asks macOS for one batch of placeholders. Inputs: the batch and a stop check that ends
+/// the wait for the asking process. Output: Ok once macOS took the batch, else the code.
+type Ask = dyn Fn(&[PathBuf], &dyn Fn() -> bool) -> Result<(), EngineError> + Sync;
+
+/// Lists the placeholders still under a folder. Input: the real folder. Output: as
+/// [`placeholders`].
+type List = dyn Fn(&Path) -> Result<Placeholders, EngineError> + Sync;
+
+/// The download loop behind [`download`], with its ask, its listing and its poll given so a
+/// test can stand in for iCloud. Inputs: the real folder, the download, the ask, the listing
+/// and the time between listings. Output: as [`download`].
+fn run(
+    root: &Path,
+    download: &Download,
+    ask: &Ask,
+    list: &List,
+    poll: Duration,
+) -> Result<u64, EngineError> {
+    assert!(root.is_absolute());
+    assert!(poll > Duration::ZERO && poll <= POLL_EVERY);
     let started = Instant::now();
     let mut watch = Watch::new(started, started + DOWNLOAD_TIME_MAX);
     let mut asked: HashSet<u64> = HashSet::new();
     let hasher = BuildHasherDefault::<DefaultHasher>::default();
+    let stop = || download.cancelled();
     for _ in 0..PASSES_MAX {
-        let left = placeholders(&root)?;
+        let left = list(root)?;
         let fresh: Vec<PathBuf> = left
             .paths
             .iter()
@@ -247,10 +271,10 @@ pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
             return Err(stopped("cancelled"));
         }
         for batch in fresh.chunks(BATCH_PATHS_MAX) {
-            request(batch, download)?;
+            ask(batch, &stop)?;
         }
         match watch.observe(done, left.largest_bytes, Instant::now()) {
-            Verdict::Wait => pause(download, POLL_EVERY)?,
+            Verdict::Wait => pause(download, poll)?,
             Verdict::Stalled => return Err(stopped("stalled")),
             Verdict::TimedOut => return Err(stopped("timed_out")),
         }
@@ -275,10 +299,11 @@ pub fn brctl(batch: &[PathBuf]) -> Command {
     command
 }
 
-/// Asks macOS to download one batch. brctl hands the batch to iCloud and returns at once,
-/// so it gets `BRCTL_TIME_MAX` before it is stopped. Inputs: the batch and the download,
-/// whose cancel ends the wait. Output: Ok once brctl took the batch.
-fn request(batch: &[PathBuf], download: &Download) -> Result<(), EngineError> {
+/// Asks macOS to download one batch. brctl hands the batch to iCloud and returns; from a
+/// launchd agent, which runs at utility priority, that takes seconds per batch, so it gets
+/// `BRCTL_TIME_MAX` before it is stopped. Inputs: the batch and the stop check, which ends
+/// the wait. Output: Ok once brctl took the batch.
+fn request(batch: &[PathBuf], stop: &dyn Fn() -> bool) -> Result<(), EngineError> {
     let mut child = crate::spawn_gate::spawn(&mut brctl(batch)).map_err(|error| {
         eprintln!(
             "icloud_download_failed cause=brctl_spawn errno={}",
@@ -297,17 +322,13 @@ fn request(batch: &[PathBuf], download: &Download) -> Result<(), EngineError> {
                 );
                 return Err(refused(NOT_DOWNLOADED));
             }
-            Ok(None) if started.elapsed() < BRCTL_TIME_MAX && !download.cancelled() => {
+            Ok(None) if started.elapsed() < BRCTL_TIME_MAX && !stop() => {
                 std::thread::sleep(CANCEL_EVERY);
             }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let cause = if download.cancelled() {
-                    "cancelled"
-                } else {
-                    "brctl_wait"
-                };
+                let cause = if stop() { "stopped" } else { "brctl_wait" };
                 return Err(stopped(cause));
             }
         }
