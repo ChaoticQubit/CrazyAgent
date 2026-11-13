@@ -343,26 +343,44 @@ pub fn custom_begin(
     Ok(Begun::Pending)
 }
 
-/// Records the test launch of one pending owner id: passed makes it usable, failed keeps
-/// it shown as failed and never usable. Inputs: the engine database, the harness name,
-/// the id and whether the launch passed. Output: Ok, or `model_choice_custom_not_pending`
-/// for an id that is not waiting, `model_choice_harness_unknown` or
-/// `model_choice_unavailable`.
+/// Records a pending owner id as tested, on whatever provider it waits on, for rows that
+/// set up a verified or failed id. Inputs: the engine database, the harness name, the id
+/// and whether it passed. Output: as `custom_tested`.
+#[cfg(test)]
 pub fn custom_checked(
     db: &Connection,
     harness: &str,
     model: &str,
     passed: bool,
 ) -> Result<(), EngineError> {
+    let provider = pending_provider(db, harness, model)?;
+    custom_tested(db, harness, model, provider.as_deref(), passed)
+}
+
+/// Records the test launch of one pending owner id: passed makes it usable, failed keeps
+/// it shown as failed and never usable. The id must still wait on the provider it was
+/// tested on, so one added again under another provider meanwhile is never recorded
+/// (DEC-150 addendum 9e). Inputs: the engine database, the harness name, the id, the
+/// provider it was tested on, none for a harness that names none, and whether the launch
+/// passed. Output: Ok, or `model_choice_custom_not_pending` for an id that is not waiting
+/// on that provider, `model_choice_harness_unknown` or `model_choice_unavailable`.
+pub fn custom_tested(
+    db: &Connection,
+    harness: &str,
+    model: &str,
+    provider: Option<&str>,
+    passed: bool,
+) -> Result<(), EngineError> {
     let harness = known(harness)?;
+    assert_eq!(provider.is_some(), harness == "rcli");
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)?;
     ready(&tx)?;
     let state = if passed { "verified" } else { "failed" };
     let changed = tx
         .execute(
             "UPDATE model_custom SET state = ?3, checked_ms = ?4
-             WHERE harness = ?1 AND model = ?2 AND state = 'pending'",
-            params![harness, model, state, crate::team::now_ms()],
+             WHERE harness = ?1 AND model = ?2 AND state = 'pending' AND provider IS ?5",
+            params![harness, model, state, crate::team::now_ms(), provider],
         )
         .map_err(unavailable)?;
     assert!(changed <= 1);

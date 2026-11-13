@@ -663,7 +663,13 @@ fn tested(
     }
     let (mut tested, mut reason) = launch(pool, provider.as_deref()).map_err(failure)?;
     if tested != Tested::Pending {
-        match store::custom_checked(&db, harness, model, tested == Tested::Verified) {
+        match store::custom_tested(
+            &db,
+            harness,
+            model,
+            provider.as_deref(),
+            tested == Tested::Verified,
+        ) {
             Ok(()) => {}
             Err(error) if error.0 == "model_choice_custom_not_pending" => {
                 tested = Tested::Pending;
