@@ -1249,7 +1249,7 @@ impl Screen for Home {
             self.hiding = None;
             if let Err(code) = &reply.result {
                 ctx.say(Message::error(
-                    "Your Learn CrazyAgent progress was not saved.",
+                    "Your learning progress was not saved.",
                     plain(code),
                 ));
             }
