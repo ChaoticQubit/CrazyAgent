@@ -1023,3 +1023,18 @@ fn a_screen_with_the_node_offer_reads_again_while_node_installs_or_the_step_wait
         );
     }
 }
+
+#[test]
+fn a_node_setup_cannot_install_on_this_system_is_never_offered_or_read_again_for() {
+    for busy in [false, true] {
+        assert_eq!(
+            node_offer(true, Some(&DependencyState::Unsupported), busy),
+            NodeOffer::None,
+            "busy {busy}"
+        );
+        assert!(
+            !node_reads_again(true, Some(&DependencyState::Unsupported), busy),
+            "busy {busy}"
+        );
+    }
+}
