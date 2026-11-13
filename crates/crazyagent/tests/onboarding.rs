@@ -2022,7 +2022,10 @@ async fn a_step_that_cannot_start_records_its_cause_code() {
     let project = bench.start_onboarding().await;
     let provider = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let account = ResearchAccount::Endpoint {
-        base_url: format!("http://127.0.0.1:{}/v1", provider.local_addr().unwrap().port()),
+        base_url: format!(
+            "http://127.0.0.1:{}/v1",
+            provider.local_addr().unwrap().port()
+        ),
         model: "never-asked-model".into(),
         key: None,
     };
