@@ -10041,7 +10041,14 @@ impl TeamRuntime {
                 worker.background_held = false;
                 let cut =
                     (end == TurnEnd::TimedOut).then(|| limit_note(cause.as_deref(), worker.bound));
-                let cause = cut.or(cause);
+                let said = (end == TurnEnd::ModelRefusalSaid).then(|| {
+                    refusal_said_line(
+                        &worker.harness,
+                        worker.model.as_deref(),
+                        worker.role == AgentRole::Master,
+                    )
+                });
+                let cause = cut.or(said).or(cause);
                 worker.bound = None;
                 if let Some(hosted) = &worker.hosted {
                     hosted.text(&text);
@@ -10073,7 +10080,11 @@ impl TeamRuntime {
                     return Ok(false);
                 }
                 match busy {
-                    Some(busy) if held && end != TurnEnd::Success => self.release(pin, busy)?,
+                    Some(busy)
+                        if held && !matches!(end, TurnEnd::Success | TurnEnd::ModelRefusalSaid) =>
+                    {
+                        self.release(pin, busy)?
+                    }
                     Some(Busy::Task(task)) => {
                         self.finish_task(task, &text, end, cause.as_deref())?
                     }
@@ -10745,13 +10756,17 @@ impl TeamRuntime {
                 Some("The account hit its rate limit"),
             ),
             TurnEnd::TimedOut => (TaskStatus::Failed, Some(timed.as_str())),
-            TurnEnd::Failed | TurnEnd::ModelRefusalSaid => (
+            TurnEnd::Failed => (
                 if retry {
                     TaskStatus::Queued
                 } else {
                     TaskStatus::Failed
                 },
                 Some("The sub-agent could not finish the task"),
+            ),
+            TurnEnd::ModelRefusalSaid => (
+                TaskStatus::Failed,
+                Some(cause.unwrap_or("The sub-agent could not finish the task")),
             ),
             TurnEnd::Closed => (
                 if retry {
@@ -10832,6 +10847,8 @@ impl TeamRuntime {
             if state == "failed" && self.stored(project)?.is_some() {
                 let why = if end == TurnEnd::Interrupted {
                     "You interrupted the master before it replied.".to_owned()
+                } else if let (TurnEnd::ModelRefusalSaid, Some(line)) = (end, cause) {
+                    line.to_owned()
                 } else if end == TurnEnd::TimedOut {
                     format!(
                         "The master stopped before it replied: {}.",
@@ -12340,11 +12357,12 @@ const PROCESS_CLOSED: &str = "The agent process closed";
 /// success, whether it was interrupted, whether a refusal was said and whether it was
 /// rate limited. Returns the end.
 fn finished_end(success: bool, interrupted: bool, said: bool, limited: bool) -> TurnEnd {
-    let _ = said;
     if success {
         TurnEnd::Success
     } else if interrupted {
         TurnEnd::Interrupted
+    } else if said {
+        TurnEnd::ModelRefusalSaid
     } else if limited {
         TurnEnd::RateLimited
     } else {
@@ -13477,6 +13495,7 @@ fn turn(
     let mut text = String::new();
     let mut limited = false;
     let mut interrupted = false;
+    let mut said = false;
     let mut progress = Instant::now();
     let mut cause = None;
     let mut held_since = None;
@@ -13531,13 +13550,15 @@ fn turn(
             Ok(Some(LaunchEvent::ModelRefused)) => {
                 let _ = reports.send(Report::ModelRefused);
             }
+            Ok(Some(LaunchEvent::ModelRefusalSaid)) => said = true,
             Ok(Some(LaunchEvent::Usage { tokens })) => {
                 let _ = reports.send(Report::Usage { tokens });
             }
             Ok(Some(LaunchEvent::Interrupted)) => interrupted = true,
             Ok(Some(LaunchEvent::TurnFinished { success })) => {
-                break finished_end(success, interrupted, false, limited);
+                break finished_end(success, interrupted, said, limited);
             }
+            Ok(Some(LaunchEvent::Exited { .. })) if said => break TurnEnd::ModelRefusalSaid,
             Ok(Some(LaunchEvent::Exited { .. })) => break TurnEnd::Closed,
             Err(problem) => {
                 let (end, code) = launch_end(problem);
