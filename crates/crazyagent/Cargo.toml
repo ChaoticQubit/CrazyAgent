@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [features]
 clean-mac-gate = []
+e2e-model-source = []
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }

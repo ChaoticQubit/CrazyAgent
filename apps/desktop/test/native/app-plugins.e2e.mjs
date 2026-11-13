@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -99,19 +99,50 @@ async function embedListener() {
 
 /** Polls a read until it equals what is wanted, failing with the last value after one step's
  * time. Inputs: what is awaited, the wanted value and the read. Output: none. */
-async function until(what, wanted, read) {
-  for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
+async function until(what, wanted, read, ms = STEP_MS) {
+  for (const deadline = Date.now() + ms; ; await pause(POLL_MS)) {
     const seen = await read();
     if (JSON.stringify(seen) === JSON.stringify(wanted)) return;
     assert.ok(Date.now() < deadline, `${what} never came: ${JSON.stringify(seen)}, wanted ${JSON.stringify(wanted)}`);
   }
 }
 
-/** The model-source seam the engine reads in tests so a download row never reaches the
- * internet. Output: the seam's environment, or null while the engine has none (DEC-156
- * addendum 4: the download rows refuse to click Download without it). */
-function modelSeam() {
-  return null;
+/** The local model's folder under the engine root and its pinned files' real sizes, so the
+ * confirm and the Ready line still say 126 MB with the test model source. */
+const MODEL_RUNTIME = "static-retrieval-mrl-en-v1";
+const MODEL_FILES = [["tokenizer.json", 711_396], ["model.safetensors", 125_018_208]];
+const MODEL_SOURCE_ON = "e2e model source on";
+const DOWNLOAD_MS = 180000;
+const BUILD_WITH_SOURCE = "build the engine with cargo build -p crazyagent --features e2e-model-source";
+
+/** The stand-in curl of the test model source: it reads the pinned URL from its config on
+ * stdin and, by the mode file beside it, serves the named file from its own folder, sends
+ * 1 MiB of the matrix and then waits to be killed, or fails as curl does on an HTTP error. */
+const STAND_IN_CURL = [
+  "#!/bin/sh",
+  'here=$(/usr/bin/dirname "$0")',
+  "url=$(/usr/bin/sed -n 's/^url = \"\\(.*\\)\"$/\\1/p')",
+  "name=${url##*/}",
+  'case "$(/bin/cat "$here/mode")" in',
+  'serve) exec /bin/cat "$here/$name" ;;',
+  'slow) [ "$name" = model.safetensors ] || exec /bin/cat "$here/$name"; /usr/bin/head -c 1048576 "$here/$name"; exec /bin/sleep 300 ;;',
+  "esac",
+  "exit 22",
+  "",
+].join("\n");
+
+/** Writes the test model source the engine downloads from instead of huggingface.co
+ * (CRAZYAGENT_E2E_MODEL_SOURCE, read only by an engine built with the e2e-model-source
+ * feature): the stand-in curl and both pinned files at their real sizes. Input: the test
+ * root. Output: the folder and a setter for the stand-in's mode (serve, slow or fail). */
+function modelSource(root) {
+  const folder = join(root, "model-source");
+  mkdirSync(folder, { mode: 0o700 });
+  for (const [name, bytes] of MODEL_FILES) writeFileSync(join(folder, name), Buffer.alloc(bytes, 1), { mode: 0o600 });
+  writeFileSync(join(folder, "curl"), STAND_IN_CURL, { mode: 0o700 });
+  const mode = (value_) => writeFileSync(join(folder, "mode"), `${value_}\n`, { mode: 0o600 });
+  mode("serve");
+  return { folder, mode };
 }
 
 /** Starts the real engine and the bridge on a fresh root with an owner profile and projects
@@ -120,7 +151,7 @@ function modelSeam() {
  * the steps, given the bridge, the owner on the page, the page, a route opener, a page
  * reload, the engine root, the listener and the call log. Output: none. */
 async function onEngine(t, prefix, drops, steps) {
-  const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
+  const engineBinary = required("E2E_ENGINE", "crazyagent engine binary built with --features e2e-model-source");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
   process.umask(0o077);
@@ -133,14 +164,19 @@ async function onEngine(t, prefix, drops, steps) {
   const listener = await embedListener();
   for (const [file, text] of drops(listener.port)) dropIn(runtime, file, text);
   writeFileSync(join(runtime, "global.toml"), "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n", { mode: 0o600 });
-  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8", ...(modelSeam() ?? {}) };
+  const source = modelSource(root);
+  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8", CRAZYAGENT_E2E_MODEL_SOURCE: source.folder };
   const log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
   const picks = [];
   let engine;
   let bridgeProcess;
   let site;
+  let seam = { on: false, mode: source.mode };
   try {
-    ({ child: engine } = await launch(engineBinary, ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"], { ...env }, evidence, "engine", /^ready$/m));
+    const ready = new RegExp(`^(?:(${MODEL_SOURCE_ON})\\n)?ready$`, "m");
+    const startedEngine = await launch(engineBinary, ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"], { ...env }, evidence, "engine", ready);
+    engine = startedEngine.child;
+    seam = { on: startedEngine.match[1] === MODEL_SOURCE_ON, mode: source.mode };
     const started = await launch(bridgeBinary, [join(runtime, "engine.sock")], { ...env }, evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
     bridgeProcess = started.child;
     const bridge = { port: Number(started.match[1]), token: started.match[2] };
@@ -168,7 +204,7 @@ async function onEngine(t, prefix, drops, steps) {
           await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/?visit=${visits}${hash}` });
           await me.waitFor(what, check);
         };
-        await steps({ bridge, me, page, open, runtime, listener, picks, log });
+        await steps({ bridge, me, page, open, runtime, listener, picks, log, seam });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -178,7 +214,7 @@ async function onEngine(t, prefix, drops, steps) {
     const native = new Set(commands(readFileSync(LIB, "utf8")).filter((command) => plan(command).skip).map((command) => command.name));
     assert.deepEqual([...log.unrouted].filter((command) => !native.has(command)), [], "every plain command the page sent reached the bridge");
     assert.deepEqual(log.invalid, [], "the bridge accepted every argument the page sent");
-    t.diagnostic(`model download rows: ${modelSeam() ? "seam present" : "no model-source seam, download rows skipped"}`);
+    t.diagnostic(`model download rows: ${seam.on ? "test model source on" : `no test model source, the download rows failed before any click (${BUILD_WITH_SOURCE})`}`);
   } finally {
     log.closing = true;
     writeFileSync(join(evidence, "calls.json"), JSON.stringify(log.calls, null, 1));
@@ -338,7 +374,7 @@ test("App plugins: every option is saved in the engine and the page shows it aft
 test("Search: every option is saved in the engine, an HTTP plugin only after its confirm, and the model only after its own", { timeout: 900000 }, (t) => onEngine(t, "ca-search-", (port) => [
   ["pier.yaml", loopback("pier", "Pier embeddings", port)],
   ["harbor.yaml", keyed()],
-], async ({ bridge, me, page, open }) => {
+], async ({ bridge, me, page, open, runtime, seam }) => {
   for (const name of ["pier", "harbor"]) {
     const preview = await value(bridge, "desktop_app_plugin_review", { name });
     assert.equal(preview.kind, "ready", `${name} reads ready: ${JSON.stringify(preview)}`);
@@ -411,9 +447,64 @@ test("Search: every option is saved in the engine, an HTTP plugin only after its
     assert.equal((await value(bridge, "desktop_search_settings")).model.state, "not_downloaded");
   });
 
-  for (const row of ["S5 Download with the confirm runs to ready", "S7 Cancel download stops a running download", "S8 a failed download shows its problem and Download again", "S9 Delete model deletes the downloaded model after a confirm"]) {
-    await t.test(row, { skip: modelSeam() === null && "no model-source seam in the engine yet (asked w-v3-plugins 14:22 and 14:29)" }, async () => {
-      assert.fail("written once the engine names its model-source seam");
-    });
-  }
+  const modelFolder = join(runtime, "models", MODEL_RUNTIME);
+  const model = async () => (await value(bridge, "desktop_search_settings")).model;
+  const modelState = async () => (await model()).state;
+  const sourceOn = () => assert.ok(seam.on, `the engine reads no test model source, so Download would reach huggingface.co; ${BUILD_WITH_SOURCE}`);
+  const confirmDownload = async () => {
+    await me.click("Download");
+    await me.waitFor("the download confirm", (text) => text.includes("Download the built-in model?") && text.includes("126 MB"));
+    await me.click("Download", "dialog[open] button");
+  };
+
+  await t.test("S5 Download with the confirm runs to ready", async () => {
+    sourceOn();
+    seam.mode("serve");
+    await searchPage();
+    assert.equal(await modelState(), "not_downloaded");
+    await confirmDownload();
+    await until("the model ready", "ready", modelState, DOWNLOAD_MS);
+    await me.waitFor("the Ready line", (text) => text.includes("Ready: 126 MB on this computer."));
+    for (const [name, bytes] of MODEL_FILES) assert.equal(statSync(join(modelFolder, name)).size, bytes, `${name} landed at its pinned size`);
+  });
+
+  await t.test("S9 Delete model deletes the downloaded model after a confirm", async () => {
+    sourceOn();
+    assert.equal(await modelState(), "ready");
+    await me.click("Delete model");
+    await me.waitFor("the delete confirm", (text) => text.includes("Delete the built-in model?") && text.includes("Frees 126 MB."));
+    await me.click("Delete model", "dialog[open] button");
+    await until("the model deleted", "not_downloaded", modelState);
+    await me.waitFor("the not downloaded line", (text) => text.includes("Not on this computer. A 126 MB download, once; it then works offline."));
+    for (const [name] of MODEL_FILES) assert.equal(existsSync(join(modelFolder, name)), false, `${name} is deleted`);
+  });
+
+  await t.test("S7 Cancel download stops a running download", async () => {
+    sourceOn();
+    seam.mode("slow");
+    await confirmDownload();
+    await until("the download running", "downloading", modelState);
+    await me.waitFor("the Downloading line", (text) => text.includes("Downloading:") && text.includes("of 126 MB"));
+    await me.capture("search-model-downloading");
+    await me.click("Cancel download");
+    await until("the download stopped", "not_downloaded", modelState);
+    await me.waitFor("Download offered again", (text) => text.includes("Not on this computer. A 126 MB download, once; it then works offline."));
+    assert.equal(existsSync(join(modelFolder, "model.safetensors")), false, "a cancelled download leaves no model file");
+  });
+
+  await t.test("S8 a failed download shows its problem and Download again", async () => {
+    sourceOn();
+    seam.mode("fail");
+    await confirmDownload();
+    await until("the download failed", "failed", modelState);
+    const { problem } = await model();
+    assert.equal(problem.code, "search_model_download_failed");
+    await me.waitFor("the problem and Download again", (text) => text.includes(problem.message) && text.includes("(search_model_download_failed") && text.includes("Download again"));
+    seam.mode("serve");
+    await me.click("Download again");
+    await me.waitFor("the download confirm", (text) => text.includes("Download the built-in model?") && text.includes("126 MB"));
+    await me.click("Download", "dialog[open] button");
+    await until("the model ready after Download again", "ready", modelState, DOWNLOAD_MS);
+    await me.waitFor("the Ready line", (text) => text.includes("Ready: 126 MB on this computer."));
+  });
 }));

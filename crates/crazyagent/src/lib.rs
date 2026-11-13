@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "e2e-model-source", not(debug_assertions)))]
+compile_error!(
+    "the e2e-model-source feature is for debug end-to-end engines only; a release engine never reads a test model source"
+);
+
 pub mod accounts;
 pub mod activity;
 pub mod adapters;

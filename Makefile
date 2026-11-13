@@ -25,6 +25,7 @@ fmt-check:
 
 lint: desktop-dist
 	cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+	cargo clippy -p crazyagent --all-targets --features e2e-model-source --locked --offline -- -D warnings
 
 test: desktop-dist engine-bins
 	cargo test --workspace --locked --offline

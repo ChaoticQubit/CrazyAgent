@@ -854,11 +854,16 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                 })
                 .and_then(|(research, onboarding, team)| {
                     let mut output = io::stdout().lock();
-                    match writeln!(output, "ready").and_then(|()| output.flush()) {
+                    let said = say_model_source(&mut output).and_then(|()| {
+                        writeln!(output, "ready")
+                            .and_then(|()| output.flush())
+                            .map_err(|error| error.to_string())
+                    });
+                    match said {
                         Ok(()) => Ok((research, onboarding, team)),
                         Err(error) => {
                             stop_background(research, onboarding);
-                            Err(error.to_string())
+                            Err(error)
                         }
                     }
                 });
@@ -1194,6 +1199,25 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
         }
         _ => return Err(usage.into()),
     }
+    Ok(())
+}
+
+/// Prints the line an engine built with the `e2e-model-source` feature gives before
+/// `ready` when CRAZYAGENT_E2E_MODEL_SOURCE names a usable test model source; a named
+/// source it cannot use stops the start. Input: stdout. Output: unit or why it stops.
+#[cfg(feature = "e2e-model-source")]
+fn say_model_source(output: &mut impl Write) -> Result<(), String> {
+    if crazyagent::semantic::local::download::e2e_source()? {
+        writeln!(output, "e2e model source on").map_err(|error| error.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// An engine built without the `e2e-model-source` feature never reads a test model source
+/// and prints nothing before `ready`. Input: stdout. Output: unit.
+#[cfg(not(feature = "e2e-model-source"))]
+fn say_model_source(_output: &mut impl Write) -> Result<(), String> {
     Ok(())
 }
 

@@ -1,4 +1,5 @@
-use super::{Value, parse};
+use super::{BYTES_MAX, Value, YamlError, parse, parse_bytes};
+use std::collections::BTreeSet;
 
 fn map(value: &Value) -> &[(String, Value)] {
     match value {
@@ -196,4 +197,114 @@ fn values_convert_to_json_with_their_types() {
         value.to_json(),
         serde_json::json!({"a": 1, "b": ["x", 2], "c": {"d": false, "e": 1.5, "f": null}})
     );
+}
+
+/// The fenced blocks of a markdown page in order. Input: the page. Output: each block's
+/// info string and its text, every line ending in a newline.
+fn fenced_blocks(page: &str) -> Vec<(String, String)> {
+    let mut blocks = Vec::new();
+    let mut open: Option<(String, String)> = None;
+    for line in page.lines() {
+        match (open.take(), line.strip_prefix("```")) {
+            (None, Some(info)) => open = Some((info.to_owned(), String::new())),
+            (Some(block), Some("")) => blocks.push(block),
+            (Some((info, mut text)), _) => {
+                text.push_str(line);
+                text.push('\n');
+                open = Some((info, text));
+            }
+            (None, None) => {}
+        }
+    }
+    assert!(open.is_none(), "every fenced block on the page closes");
+    blocks
+}
+
+/// The YAML subset page beside the crate matches the reader rule by rule: every `yaml`
+/// block parses, every `yaml refused <code> line <n>` block is refused with that code on
+/// that line, a `yaml` block followed by a `json` block parses to that JSON, each rule
+/// holds an example that parses, and every refusal code the reader has is on the page.
+#[test]
+fn the_yaml_subset_page_matches_the_reader_rule_by_rule() {
+    let page = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/app-plugins.md"))
+        .expect("the YAML subset page is at crates/crazyagent/docs/app-plugins.md");
+    let reader = include_str!("yaml.rs");
+    let codes: BTreeSet<&str> = reader
+        .split('"')
+        .filter(|part| part.starts_with("app_plugin_yaml_"))
+        .collect();
+    assert!(codes.len() > 20, "the reader's codes are read: {codes:?}");
+    let blocks = fenced_blocks(&page);
+    let mut shown = BTreeSet::new();
+    for (index, (info, text)) in blocks.iter().enumerate() {
+        match info.split(' ').collect::<Vec<_>>().as_slice() {
+            ["yaml"] => {
+                let value =
+                    parse(text).unwrap_or_else(|error| panic!("{text:?} is refused: {error:?}"));
+                if let Some((next, json)) = blocks.get(index + 1)
+                    && next == "json"
+                {
+                    let wanted: serde_json::Value = serde_json::from_str(json).unwrap();
+                    assert_eq!(value.to_json(), wanted, "{text}");
+                }
+            }
+            ["yaml", "refused", code, "line", line] => {
+                let error = parse(text).expect_err(text);
+                assert_eq!(
+                    (error.code, error.line.to_string()),
+                    (*code, (*line).to_owned()),
+                    "{text}"
+                );
+                shown.insert(error.code);
+            }
+            ["json"] => assert!(
+                index > 0 && blocks[index - 1].0 == "yaml",
+                "a json block follows a yaml block that parses"
+            ),
+            other => panic!("an example block the page check does not know: {other:?}"),
+        }
+    }
+    let mut file = b"name: pier\n".to_vec();
+    file.resize(BYTES_MAX, b' ');
+    assert!(parse_bytes(&file).is_ok());
+    file.push(b' ');
+    assert!(page.contains(&format!("A file of up to {BYTES_MAX} bytes is read")));
+    assert!(page.contains(&format!("{} bytes or more", BYTES_MAX + 1)));
+    let built = [
+        ("app_plugin_yaml_too_large", parse_bytes(&file)),
+        ("app_plugin_yaml_encoding", parse_bytes(b"name: caf\xe9")),
+    ];
+    for (code, result) in built {
+        assert_eq!(result, Err(YamlError { code, line: 0 }));
+        assert!(page.contains(&format!("`{code}`, line 0")), "{code}");
+        shown.insert(code);
+    }
+    assert!(page.contains("a control character other than a line end"));
+    assert_eq!(
+        parse("name: pier\ntitle: a\u{7}b"),
+        Err(YamlError {
+            code: "app_plugin_yaml_syntax",
+            line: 2
+        })
+    );
+    assert!(page.contains("One leading byte order mark is dropped"));
+    assert_eq!(
+        parse_bytes(b"\xef\xbb\xbfname: pier\r\ntitle: Pier\r\n"),
+        parse("name: pier\ntitle: Pier")
+    );
+    assert_eq!(
+        shown, codes,
+        "every refusal code has its example on the page"
+    );
+    let (_, rules) = page
+        .split_once("\n## Rules\n")
+        .expect("the page has its Rules section");
+    let sections: Vec<&str> = rules.split("\n### ").skip(1).collect();
+    assert_eq!(sections.len(), codes.len(), "one rule per refusal code");
+    for section in sections {
+        assert!(
+            section.contains("```yaml\n"),
+            "the rule holds an example that parses: {section}"
+        );
+    }
 }
