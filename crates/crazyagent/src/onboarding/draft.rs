@@ -200,7 +200,9 @@ pub(crate) struct Evidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FoundKind {
     Roadmap,
+    #[cfg_attr(not(unix), allow(dead_code))]
     Research,
+    #[cfg_attr(not(unix), allow(dead_code))]
     Other,
 }
 

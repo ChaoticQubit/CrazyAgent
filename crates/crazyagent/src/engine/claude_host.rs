@@ -16,6 +16,7 @@ use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
 /// The code a Claude master stops with when it has not started by its start bound: the
 /// run clock's end when the owner's time limit bounds it, as the other masters stop, else
 /// the start bound's own. Input: whether a run clock bounds the start. Output: the code.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn start_end_code(clocked: bool) -> &'static str {
     if clocked {
         "claude_host_deadline"
