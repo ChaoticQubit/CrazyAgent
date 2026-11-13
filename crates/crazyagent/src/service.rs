@@ -1062,35 +1062,61 @@ fn trusted_group(group: u32) -> bool {
     group == 0 || (group == rustix::process::getegid().as_raw() && own_group_private())
 }
 
+/// The largest local account file read to find a group's primary accounts.
+#[cfg(all(unix, not(target_os = "macos")))]
+const ACCOUNTS_BYTES_MAX: u64 = 4 * 1024 * 1024;
+
 /// Whether this process's own group is this user's private group ([`private_group`]), read
-/// once through the system's user and group lookup, which may ask a directory server; a
-/// failed lookup counts as not private, so its folders fall to the stricter rule.
+/// once through the system's user and group lookup, which may ask a directory server, and
+/// the local account file for the accounts whose primary group it is ([`primary_users`]);
+/// a failed lookup or read counts as not private, so its folders fall to the stricter rule.
 /// Output: the answer.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn own_group_private() -> bool {
     static PRIVATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PRIVATE.get_or_init(|| {
+        let gid = nix::unistd::getegid();
         let user = nix::unistd::User::from_uid(nix::unistd::getuid())
             .ok()
             .flatten();
-        let group = nix::unistd::Group::from_gid(nix::unistd::getegid())
-            .ok()
-            .flatten();
-        match (user, group) {
-            (Some(user), Some(group)) => private_group(&group.name, &group.mem, &[], &user.name),
+        let group = nix::unistd::Group::from_gid(gid).ok().flatten();
+        let primary = local_accounts().and_then(|text| primary_users(&text, gid.as_raw()));
+        match (user, group, primary) {
+            (Some(user), Some(group), Some(primary)) => {
+                private_group(&group.name, &group.mem, &primary, &user.name)
+            }
             _ => false,
         }
     })
 }
 
+/// Reads the local account file, `/etc/passwd`, at most [`ACCOUNTS_BYTES_MAX`]; a larger or
+/// unreadable file gives none. Output: the text, or none.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn local_accounts() -> Option<String> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::fs::File::open("/etc/passwd")
+        .ok()?
+        .take(ACCOUNTS_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= ACCOUNTS_BYTES_MAX).then_some(text)
+}
+
 /// Whether a group named `name`, listing `members`, is the user private group of the user
-/// named `user`: it bears the user's name and lists no other member, as Debian, Ubuntu and
-/// Fedora make one per user; a shared primary group such as openSUSE's `users` is not.
-/// Inputs: the group's name, its listed members, the accounts whose primary group it is and
-/// the user's name. Output: the answer.
+/// named `user`: it bears the user's name, lists no other member and is the primary group of
+/// this user's account alone, as Debian, Ubuntu and Fedora make one per user; a shared
+/// primary group such as openSUSE's `users` is not, and neither is one whose user the local
+/// account file does not list. Inputs: the group's name, its listed members, the accounts
+/// whose primary group it is and the user's name. Output: the answer.
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
-fn private_group(name: &str, members: &[String], _primary: &[String], user: &str) -> bool {
-    !user.is_empty() && name == user && members.iter().all(|member| member == user)
+fn private_group(name: &str, members: &[String], primary: &[String], user: &str) -> bool {
+    !user.is_empty()
+        && name == user
+        && members.iter().all(|member| member == user)
+        && primary.iter().any(|account| account == user)
+        && primary.iter().all(|account| account == user)
 }
 
 /// The accounts in a local account file (`/etc/passwd` lines) whose primary group is `gid`,
@@ -1098,8 +1124,24 @@ fn private_group(name: &str, members: &[String], _primary: &[String], user: &str
 /// Output: the account names, or none when a line cannot be read or names accounts kept
 /// elsewhere.
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
-fn primary_users(_passwd: &str, _gid: u32) -> Option<Vec<String>> {
-    Some(Vec::new())
+fn primary_users(passwd: &str, gid: u32) -> Option<Vec<String>> {
+    let mut accounts = Vec::new();
+    for line in passwd.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('+') || line.starts_with('-') {
+            return None;
+        }
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let primary: u32 = fields.nth(2)?.parse().ok()?;
+        if primary == gid {
+            accounts.push(name.to_owned());
+        }
+    }
+    assert!(accounts.len() <= passwd.len());
+    Some(accounts)
 }
 
 /// Names no user id where launchd domains do not exist. Output: zero, unused off macOS.
