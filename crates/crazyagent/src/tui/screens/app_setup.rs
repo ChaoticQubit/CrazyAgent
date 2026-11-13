@@ -13,7 +13,10 @@ use crate::quit_settings::{
 use crate::sandbox::LinuxSockets;
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::pack::entry_title;
-use crate::setup::{DependencyState, PackEntry, PackKind, PackState, SetupStatus, known_reason};
+use crate::setup::{
+    Dependency, DependencyState, PackEntry, PackKind, PackState, RefusedTool, SetupStatus, ToolFix,
+    known_reason,
+};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob, PackChange};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
@@ -46,6 +49,10 @@ const NOT_READY_TEXT: &str =
 const FIRST_RUN_TEXT: &str = "CrazyAgent needs a few tools on this computer and starts every project with the skills and plugins below. Untick anything you don't want.";
 const SETTINGS_TEXT: &str = "The tools CrazyAgent needs on this computer, the skills and plugins every project starts with, the projects home folder and your GitHub account.";
 const SOCKETS_TEXT: &str = "Linux limited-network sockets: how an agent limited to its model reaches the network when CrazyAgent runs on Linux.";
+const REFUSED_TEXT: &str = "Unused tools: what setup offers when it finds a tool it does not use because others can change its files.";
+const REFUSED_CHOICES: [RefusedTool; 2] = [RefusedTool::FixButton, RefusedTool::CommandOnly];
+const FIX_NOTE: &str =
+    "Files another user owns and links stay as they are. Nothing outside it changes.";
 const SOCKETS_CHOICES: [LinuxSockets; 3] = [
     LinuxSockets::TcpOnly,
     LinuxSockets::Refuse,
@@ -187,6 +194,21 @@ pub(in crate::tui) fn frame_size_words(limit: FrameSize) -> (&'static str, &'sta
     }
 }
 
+/// The plain title and explanation of one unused tools option, as Settings shows it
+/// (DEC-162). Input: the option. Output: the title and the sentence naming what it does.
+pub(in crate::tui) fn refused_tool_words(choice: RefusedTool) -> (&'static str, &'static str) {
+    match choice {
+        RefusedTool::FixButton => (
+            "Show a fix button (recommended)",
+            "Setup offers to remove write access for others from the folder that blocks the tool, after you confirm the folder.",
+        ),
+        RefusedTool::CommandOnly => (
+            "Show the command only",
+            "Setup shows the command to run yourself and never changes permissions.",
+        ),
+    }
+}
+
 /// The plain title and explanation of one Linux sockets option, as Settings shows it.
 /// Input: the option. Output: the title and the sentence naming what it allows and risks.
 pub(in crate::tui) fn sockets_words(sockets: LinuxSockets) -> (&'static str, &'static str) {
@@ -288,10 +310,28 @@ fn pack_word(state: &PackState) -> &'static str {
     }
 }
 
+/// What a refused tool's row offers to fix it: the fix key and the folder it changes, or
+/// the command to run when the setting asks for the command only. Inputs: the fix and the
+/// setting. Output: the sentence.
+fn fix_offer(fix: &ToolFix, choice: RefusedTool) -> String {
+    let printable = super::new_project_view::printable;
+    match choice {
+        RefusedTool::FixButton => format!(
+            "Press p to remove write access for others from {}.",
+            printable(fix.tree.clone())
+        ),
+        RefusedTool::CommandOnly => format!(
+            "To fix it, run in Terminal: {}",
+            printable(fix.command.clone())
+        ),
+    }
+}
+
 fn tool_word(state: &DependencyState) -> String {
     match state {
         DependencyState::Checking => "Checking".into(),
-        DependencyState::Missing { .. } | DependencyState::Refused { .. } => "Not installed".into(),
+        DependencyState::Missing { .. } => "Not installed".into(),
+        DependencyState::Refused { .. } => "Found, not used".into(),
         DependencyState::Found { version } => format!("Found {}", version.as_str()),
         DependencyState::Bundled { version } => {
             format!("Bundled with CrazyAgent {}", version.as_str())
@@ -368,11 +408,20 @@ enum Ask {
     Frames {
         choice: usize,
     },
+    Fix {
+        name: Dependency,
+        label: String,
+        fix: ToolFix,
+    },
+    RefusedTool {
+        choice: usize,
+    },
 }
 
 enum Sent {
     Run,
     Done(String),
+    Fix { done: String, name: Dependency },
 }
 
 /// The setup page: the tools CrazyAgent needs on this machine and the default
@@ -401,6 +450,7 @@ pub struct AppSetup {
     started: bool,
     finished_with_problems: bool,
     ask: Option<Ask>,
+    fixing: Option<Dependency>,
 }
 
 impl AppSetup {
@@ -429,6 +479,7 @@ impl AppSetup {
             started: false,
             finished_with_problems: false,
             ask: None,
+            fixing: None,
         }
     }
 
@@ -575,7 +626,7 @@ impl AppSetup {
             Load::Ready(status) => status.running,
             _ => return Flow::Handled,
         };
-        if running || self.started || self.sent.is_some() {
+        if running || self.started || self.sent.is_some() || self.fixing.is_some() {
             ctx.say(Message::warning(&setup_plain("setup_busy"), ""));
             return Flow::Handled;
         }
@@ -637,6 +688,10 @@ impl AppSetup {
         };
         self.setup = Load::Ready(status.clone());
         self.selected = self.selected.min(status.pack.len().saturating_sub(1));
+        if let Some(name) = self.fixing {
+            self.fixed(name, status, ctx);
+            return Flow::Handled;
+        }
         if status.running {
             self.started = true;
             return Flow::Handled;
@@ -680,8 +735,9 @@ impl AppSetup {
     }
 
     fn changed(&mut self, result: &Result<(), String>, ctx: &mut Ctx) {
-        let done = match self.sent.take() {
-            Some(Sent::Done(done)) => done,
+        let (done, fixing) = match self.sent.take() {
+            Some(Sent::Done(done)) => (done, None),
+            Some(Sent::Fix { done, name }) => (done, Some(name)),
             other => {
                 self.sent = other;
                 return;
@@ -689,6 +745,7 @@ impl AppSetup {
         };
         match result {
             Ok(()) => {
+                self.fixing = fixing;
                 ctx.say(Message::success(&done, ""));
                 self.reload(ctx);
             }
@@ -699,6 +756,137 @@ impl AppSetup {
                 }
             }
         }
+    }
+
+    /// Ends a permission fix once a status read shows it finished and the tool checked
+    /// again, saying how the tool's row reads now. Inputs: the tool, the status read and the
+    /// context.
+    fn fixed(&mut self, name: Dependency, status: &SetupStatus, ctx: &mut Ctx) {
+        if status.running {
+            return;
+        }
+        let Some(row) = status.dependencies.iter().find(|tool| tool.name == name) else {
+            self.fixing = None;
+            return;
+        };
+        match &row.state {
+            DependencyState::Checking => return,
+            DependencyState::Refused {
+                fix_failed: Some(failed),
+                ..
+            } => ctx.say(Message::error(
+                &super::new_project_view::printable(failed.clone()),
+                "",
+            )),
+            DependencyState::Refused { .. }
+            | DependencyState::Missing { .. }
+            | DependencyState::Failed { .. }
+            | DependencyState::Unsupported => ctx.say(Message::warning(
+                &format!("Permissions changed, but {} is still not used.", row.label),
+                "See the reason below.",
+            )),
+            _ => ctx.say(Message::success(
+                &format!("Permissions fixed. {} can run now.", row.label),
+                "",
+            )),
+        }
+        self.fixing = None;
+    }
+
+    /// The first tool found and passed over whose row offers a permission fix, with its
+    /// label and the fix. Output: the tool, or none.
+    fn fixable(&self) -> Option<(Dependency, String, ToolFix)> {
+        let Load::Ready(status) = &self.setup else {
+            return None;
+        };
+        status
+            .dependencies
+            .iter()
+            .find_map(|tool| match &tool.state {
+                DependencyState::Refused { fix: Some(fix), .. } => {
+                    Some((tool.name, tool.label.clone(), fix.clone()))
+                }
+                _ => None,
+            })
+    }
+
+    fn refused_tool(&self) -> Option<RefusedTool> {
+        match &self.setup {
+            Load::Ready(status) => Some(status.refused_tool),
+            _ => None,
+        }
+    }
+
+    fn ask_fix(&mut self, ctx: &mut Ctx) {
+        if self.refused_tool() == Some(RefusedTool::CommandOnly) {
+            let off = crate::setup::plain_reason(crate::tools::permission_fix::TOOL_FIX_OFF);
+            ctx.say(Message::warning(off, ""));
+            return;
+        }
+        match self.fixable() {
+            Some((name, label, fix)) => self.ask = Some(Ask::Fix { name, label, fix }),
+            None => ctx.say(Message::warning(
+                "No tool here can be fixed by changing permissions.",
+                "",
+            )),
+        }
+    }
+
+    fn ask_refused_tool(&mut self, ctx: &mut Ctx) {
+        let Some(current) = self.refused_tool() else {
+            ctx.say(Message::warning(
+                "Setup has not checked this computer yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = REFUSED_CHOICES
+            .iter()
+            .position(|option| *option == current)
+            .expect("every option is listed");
+        self.ask = Some(Ask::RefusedTool { choice });
+    }
+
+    fn set_refused_tool(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < REFUSED_CHOICES.len());
+        let picked = REFUSED_CHOICES[choice];
+        let Some(current) = self.refused_tool() else {
+            ctx.say(Message::warning(
+                "Setup has not checked this computer yet.",
+                "",
+            ));
+            return;
+        };
+        if current == picked {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!("Unused tools: {}.", refused_tool_words(picked).0);
+        let job = AppSetupJob::SetRefusedTool {
+            choice: picked,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn refused_rows(&self, choice: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        assert!(choice < REFUSED_CHOICES.len());
+        let theme = &ctx.theme;
+        let muted = |text: &str, inset: usize| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(inset).max(1))
+                .into_iter()
+                .map(|part| styled(format!("{}{part}", " ".repeat(inset)), Role::Muted, theme))
+                .collect()
+        };
+        let mut lines = muted(REFUSED_TEXT, 0);
+        for (index, option) in REFUSED_CHOICES.iter().enumerate() {
+            let (title, detail) = refused_tool_words(*option);
+            let mark = if index == choice { "> " } else { "  " };
+            lines.push(join([Line::raw(mark), styled(title, Role::Heading, theme)]));
+            lines.extend(muted(detail, 4));
+        }
+        assert!(lines.len() > 2 * REFUSED_CHOICES.len());
+        lines
     }
 
     fn ask_remove(&mut self, ctx: &mut Ctx) {
@@ -1323,6 +1511,37 @@ impl AppSetup {
                 Key::Char('n') | Key::Esc => {}
                 _ => self.ask = Some(Ask::Remove { id }),
             },
+            Ask::Fix { name, label, fix } => match key {
+                Key::Char('y') => {
+                    let done = format!(
+                        "Fixing permissions on {}.",
+                        super::new_project_view::printable(fix.tree.clone())
+                    );
+                    let job = AppSetupJob::FixPermissions {
+                        name,
+                        tree: fix.tree,
+                        generation: ctx.next_generation(),
+                    };
+                    self.change(job, Sent::Fix { done, name }, ctx);
+                }
+                Key::Char('n') | Key::Esc => {}
+                _ => self.ask = Some(Ask::Fix { name, label, fix }),
+            },
+            Ask::RefusedTool { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::RefusedTool {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::RefusedTool {
+                        choice: (choice + 1).min(REFUSED_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_refused_tool(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::RefusedTool { choice }),
+            },
             Ask::SignOut => match key {
                 Key::Char('y') => {
                     let done = "Signed out of GitHub.".to_owned();
@@ -1466,7 +1685,7 @@ impl AppSetup {
     /// True when no setup run is going and no change waits for the engine.
     /// Input: none. Output: whether first run may leave for its Harnesses step.
     fn quiet(&self) -> bool {
-        !self.started && self.sent.is_none()
+        !self.started && self.sent.is_none() && self.fixing.is_none()
     }
 
     fn space_label(&self) -> &'static str {
@@ -1501,22 +1720,40 @@ impl AppSetup {
                     glyphs,
                 ),
             ]));
-            let detail = match &tool.state {
-                DependencyState::Failed { reason } => Some(setup_reason(reason)),
+            let printable = super::new_project_view::printable;
+            let mut details = Vec::new();
+            match &tool.state {
+                DependencyState::Failed { reason } => {
+                    details.push((setup_reason(reason), Role::Muted));
+                }
                 DependencyState::Missing { line } if !line.is_empty() => {
-                    Some(super::new_project_view::printable(line.clone()))
+                    details.push((printable(line.clone()), Role::Muted));
                 }
                 DependencyState::System { note, .. } => {
-                    Some(super::new_project_view::printable(note.clone()))
+                    details.push((printable(note.clone()), Role::Muted));
                 }
-                _ => None,
-            };
-            if let Some(detail) = detail {
-                let gap = " ".repeat(2 + TOOL_WIDTH + 2);
+                DependencyState::Refused {
+                    line,
+                    fix,
+                    fix_failed,
+                    ..
+                } => {
+                    details.push((printable(line.clone()), Role::Muted));
+                    if let Some(failed) = fix_failed {
+                        details.push((printable(failed.clone()), Role::Warning));
+                    }
+                    if let Some(fix) = fix {
+                        details.push((fix_offer(fix, setup.refused_tool), Role::Muted));
+                    }
+                }
+                _ => {}
+            }
+            let gap = " ".repeat(2 + TOOL_WIDTH + 2);
+            for (detail, role) in details {
                 lines.extend(
-                    wrap(&detail, rest).into_iter().map(|part| {
-                        join([Line::raw(gap.clone()), styled(part, Role::Muted, theme)])
-                    }),
+                    wrap(&detail, rest)
+                        .into_iter()
+                        .map(|part| join([Line::raw(gap.clone()), styled(part, role, theme)])),
                 );
             }
         }
@@ -1776,6 +2013,11 @@ impl AppSetup {
         if matches!(self.frames, Load::Ready(_)) {
             lines.extend(note(FRAMES_NOTE));
         }
+        if let Some(choice) = self.refused_tool() {
+            let (title, detail) = refused_tool_words(choice);
+            lines.push(label("Unused tools", Line::raw(title)));
+            lines.extend(note(detail));
+        }
         lines
     }
 
@@ -1792,6 +2034,23 @@ impl AppSetup {
                 "Remove {}? Agents in every project stop getting it.",
                 entry_title(id)
             ))),
+            Some(Ask::Fix { label, fix, .. }) => {
+                let printable = super::new_project_view::printable;
+                let scope = if fix.recursive {
+                    " and everything in it"
+                } else {
+                    ""
+                };
+                lines.extend(sentence(&format!(
+                    "Fix permissions for {label}? CrazyAgent removes write access for group and others from {}{scope}, the same as running this command:",
+                    printable(fix.tree.clone())
+                )));
+                lines.push(Line::raw(format!("  {}", printable(fix.command.clone()))));
+                lines.extend(sentence(FIX_NOTE));
+            }
+            Some(Ask::RefusedTool { choice }) => {
+                lines.extend(self.refused_rows(*choice, limit, ctx))
+            }
             Some(Ask::SignOut) => lines.extend(sentence(
                 "Sign out of GitHub? CrazyAgent deletes the GitHub token it keeps. Cloned projects stay.",
             )),
@@ -2009,6 +2268,7 @@ impl Screen for AppSetup {
             }
             Some(Ask::Remove { .. }) => return vec![hint("y", "Remove"), hint("n", "Keep")],
             Some(Ask::SignOut) => return vec![hint("y", "Sign out"), hint("n", "Stay signed in")],
+            Some(Ask::Fix { .. }) => return vec![hint("y", "Fix"), hint("n", "Cancel")],
             Some(Ask::CleanupDays(_) | Ask::QuitHours { .. }) => {
                 return vec![hint("Enter", "Save"), hint("Esc", "Cancel")];
             }
@@ -2019,7 +2279,8 @@ impl Screen for AppSetup {
                 | Ask::QuitLimit { .. }
                 | Ask::Steps { .. }
                 | Ask::Time { .. }
-                | Ask::Frames { .. }),
+                | Ask::Frames { .. }
+                | Ask::RefusedTool { .. }),
             ) => {
                 let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
                 let enter = if matches!(ask, Ask::QuitChoice { .. }) {
@@ -2068,6 +2329,9 @@ impl Screen for AppSetup {
             }
             _ => {}
         }
+        if self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton) {
+            hints.push(hint("p", "Fix permissions"));
+        }
         if !self.first_run {
             hints.push(hint("h", "Change home"));
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
@@ -2079,6 +2343,7 @@ impl Screen for AppSetup {
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
             hints.push(hint("z", "Master frame"));
+            hints.push(hint("u", "Unused tools"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -2156,6 +2421,14 @@ impl Screen for AppSetup {
                 self.ask_frames(ctx);
                 Flow::Handled
             }
+            Key::Char('u') if !self.first_run => {
+                self.ask_refused_tool(ctx);
+                Flow::Handled
+            }
+            Key::Char('p') => {
+                self.ask_fix(ctx);
+                Flow::Handled
+            }
             _ => Flow::Ignored,
         }
     }
@@ -2180,7 +2453,9 @@ impl Screen for AppSetup {
             | AppSetupEvent::QuitSet(result)
             | AppSetupEvent::MasterStepsSet(result)
             | AppSetupEvent::MasterTimeSet(result)
-            | AppSetupEvent::MasterFramesSet(result) => self.changed(result, ctx),
+            | AppSetupEvent::MasterFramesSet(result)
+            | AppSetupEvent::FixSet(result)
+            | AppSetupEvent::RefusedToolSet(result) => self.changed(result, ctx),
             AppSetupEvent::Sandbox(result) => {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
@@ -2248,6 +2523,7 @@ impl Screen for AppSetup {
     fn busy(&self, _ctx: &Ctx) -> bool {
         self.started
             || self.sent.is_some()
+            || self.fixing.is_some()
             || matches!(self.setup, Load::Loading)
             || matches!(self.home, Load::Loading)
             || matches!(self.github, Load::Loading)
