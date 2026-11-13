@@ -550,7 +550,7 @@ export function TeamActions({ projectId, status, harness, reload }: {
     setModels(null);
     if (target === ANY_HARNESS) return;
     let current = true;
-    void loadModels(target, projectId).then((result) => {
+    void loadModels(target, projectId, false).then((result) => {
       if (current && result.kind === "ok") setModels(result.value.models);
     });
     return () => { current = false; };
