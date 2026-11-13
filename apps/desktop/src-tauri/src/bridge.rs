@@ -863,8 +863,9 @@ impl NativeBridge {
     /// Sends or reconciles the kept owner change and reports what the engine settled.
     /// A send the engine answers with an unknown outcome, or whose answer did not come in
     /// time, is checked once right away by the same identity, as the TUI does; a check that
-    /// settles nothing keeps the unknown answer. Only a failed connection lets go of the
-    /// engine: a slow answer keeps it, so the window never reads it as not running.
+    /// settles nothing keeps the unknown answer. Only a failed connection, or a check that
+    /// goes unanswered too, lets go of the engine: a slow answer keeps it, so the window never
+    /// reads it as not running.
     /// Input: whether to reconcile instead of send. Output: the receipt for the kept change.
     async fn deliver_intent(&mut self, reconcile: bool) -> Result<IntentReceipt, BridgeError> {
         let intent = self
@@ -922,8 +923,11 @@ impl NativeBridge {
 
     /// Checks the kept change once by the same identity after a send whose outcome is
     /// unknown, its answer lost or late, and takes the check's answer when it settles the
-    /// change, finds it still running or names a failed connection. Input: the send's answer.
-    /// Output: the answer to report.
+    /// change, finds it still running or names a failed connection. A live engine answers
+    /// that check at once, still running included (DEC-159 D1), so a check that goes
+    /// unanswered too means the connection or its grant is gone: a revoked client's stream
+    /// closes unanswered, just as a late answer reads. Input: the send's answer. Output: the
+    /// answer to report, `owner_check_unanswered` when neither was answered.
     async fn checked_once(
         &mut self,
         sent: Result<OwnerResponse, EngineError>,
@@ -941,16 +945,19 @@ impl NativeBridge {
             "an unknown send keeps its change"
         );
         let checked = self.controller()?.reconcile_pending().await;
-        let settled = match &checked {
-            Ok(
-                OwnerResponse::Applied { .. }
+        if matches!(&checked, Err(error) if outcome_unknown(error)) {
+            let unanswered = EngineError(CHECK_UNANSWERED.to_owned());
+            assert!(!outcome_unknown(&unanswered), "an unanswered check lets go");
+            return Ok(Err(unanswered));
+        }
+        let settled = matches!(
+            &checked,
+            Ok(OwnerResponse::Applied { .. }
                 | OwnerResponse::Committed { .. }
                 | OwnerResponse::InProgress { .. }
-                | OwnerResponse::NotRecordedAtBarrier { .. },
-            ) => true,
-            Err(error) => !outcome_unknown(error),
-            Ok(_) => false,
-        };
+                | OwnerResponse::NotRecordedAtBarrier { .. })
+                | Err(_)
+        );
         Ok(if settled { checked } else { sent })
     }
 
@@ -1269,6 +1276,10 @@ fn conversation_row(entry: ConversationEntry) -> ConversationRow {
 fn rejection_code(code: &str) -> String {
     crazyagent::protocol::plain_code(code).to_owned()
 }
+
+/// The code for a change whose send and whose check by the same identity both went
+/// unanswered: the connection or its grant is gone, so the bridge lets go of the engine.
+const CHECK_UNANSWERED: &str = "owner_check_unanswered";
 
 /// True for an owner send whose answer did not come back in time or could not be read: the
 /// engine may still be running it, so the connection is kept and the change checked, never
