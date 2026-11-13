@@ -877,14 +877,11 @@ fn delegate_servers(
     Ok(setting)
 }
 
-/// Builds and installs the Seatbelt boundary for one master turn with its tools off. The
-/// master writes only in its leased worktree, the account's managed home, the turn's own
-/// temp folder and, on macOS, the tool cache its policy gives a linked worktree (T8); it
-/// reads the project repository, never writing its refs, reflogs or other worktrees' admin
-/// folders, since the engine makes every ref move, and it reads the harness install folder
-/// and the turn directory, and reaches only its model endpoint's port, on loopback for a
-/// local model, otherwise on any host (443 for a native account). Output: the installed
-/// sandbox, or `master_sandbox_unavailable` on a refusal.
+/// Builds and installs the Seatbelt boundary of one tools-off master turn. The master writes
+/// only in its leased worktree, its turn home that holds a copy of the account's sign-in (an
+/// rcli master: its profile's home), its temp folder and, on macOS, its tool cache (T8); it
+/// reads the repository without writing refs or admin folders, the harness install and the
+/// turn folder, and reaches only its model endpoint. Output: the sandbox, or the refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
