@@ -8,17 +8,16 @@ import { readTerminalInput } from "../../state";
 import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
-import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, selectNote, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
+import { connectingLine, copyKey, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, selectNote, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const COPIED_MS = 2000;
 const COPY_REFUSED = "The clipboard refused the copy.";
 const FOLLOW_MS = 1000;
-const FOLLOW_TRIES = 30;
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
 const STOPPED_TYPING = "Typing stopped reaching this agent. Open the terminal again to reconnect.";
 
-type View = { kind: "connecting" } | { kind: "live" } | { kind: "ended"; copy: string } | { kind: "not_ready" };
+type View = { kind: "connecting"; reason?: string; tries?: number } | { kind: "live" } | { kind: "ended"; copy: string } | { kind: "not_ready" };
 
 function token(name: string, fallback: string): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -438,7 +437,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   useEffect(() => {
     const element = screen.current;
     if (!name || !element) return;
-    setView({ kind: "connecting" });
+    setView((prior) => prior.kind === "connecting" ? prior : { kind: "connecting" });
     setMenu(null);
     let disposed = false;
     let serial: number | null = null;
@@ -457,16 +456,18 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
       terminal.loadAddon(fit);
       terminal.open(element);
       let live = false;
+      let openedAt: number | null = null;
       let fitted = false;
       let timer = 0;
       let frame = 0;
       const end = (copy: string) => {
         live = false;
         if (disposed) return;
-        if (following.current && tries.current < FOLLOW_TRIES) {
-          tries.current += 1;
+        const next = following.current ? followTry(tries.current, openedAt, Date.now()) : null;
+        if (next !== null) {
+          tries.current = next;
           terminal.reset();
-          setView({ kind: "connecting" });
+          setView({ kind: "connecting", reason: copy, tries: next });
           window.clearTimeout(again);
           again = window.setTimeout(() => setRound((value) => value + 1), FOLLOW_MS);
           return;
@@ -521,7 +522,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
         } else if (event.kind === "attached") {
           const size = terminalSize(event.cols, event.rows);
           if (size) terminal.resize(size.cols, size.rows);
-          tries.current = 0;
+          openedAt = Date.now();
           live = true;
           setView({ kind: "live" });
           terminal.focus();
@@ -568,7 +569,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
       onStop={onStop} onClose={onClose} reported={reported} swaps={swaps} />}
     {!name && <p className="tg-terminal-state" role="status">This agent has no terminal yet. It opens once the agent starts.</p>}
     {view.kind === "not_ready" && <NotReady what="Agent terminals" compact />}
-    {view.kind === "connecting" && name && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Connecting to the terminal...</p>}
+    {view.kind === "connecting" && name && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(connectingLine(view.reason ?? null, view.tries ?? 0))}</p>}
     {view.kind === "ended" && <div className="tg-terminal-state" role="alert">
       <span>{view.copy}</span>
       <Button size="small" icon="refresh-cw" onClick={() => { tries.current = 0; setRound((value) => value + 1); }}>Open again</Button>

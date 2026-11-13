@@ -1097,4 +1097,23 @@ mod tests {
             assert_eq!(wall_title_name(title), "Project", "{title:?}");
         }
     }
+
+    /// An attach the engine or the tmux server did not answer in time keeps its own code,
+    /// so a view that tries again says the terminal was slow to open, not only that it
+    /// closed; every other engine code still reads as a failed attach.
+    #[test]
+    fn an_attach_that_timed_out_keeps_its_code_for_the_view() {
+        for slow in [
+            "terminal_attach_timeout",
+            "terminal_outcome_unknown",
+            "terminal_not_answering",
+        ] {
+            assert_eq!(attach_failure(slow).code, slow);
+        }
+        assert_eq!(
+            attach_failure("terminal_reply_cut").code,
+            "terminal_attach_failed"
+        );
+        assert_eq!(attach_failure("Not A Code").code, "terminal_attach_failed");
+    }
 }

@@ -303,6 +303,28 @@ export function endCopy(code: string): string {
   return END_COPY[code] ?? "This terminal closed.";
 }
 
+/** The most times in a row a view that follows its agent opens the terminal again. */
+export const FOLLOW_TRIES = 30;
+
+/** Counts one more try for a following view whose terminal ended or would not open.
+ * Inputs: the tries so far, when the view that just ended opened (null when it never
+ * opened) and now, in milliseconds. Output: the count for the next try, or null once
+ * `FOLLOW_TRIES` are spent and the view should stop and say why. */
+export function followTry(tries: number, opened: number | null, now: number): number | null {
+  assert(tries >= 0 && tries <= FOLLOW_TRIES, "follow tries out of bounds");
+  assert(opened === null || opened <= now, "a view cannot open after now");
+  const counted = opened === null ? tries : 0;
+  return counted < FOLLOW_TRIES ? counted + 1 : null;
+}
+
+/** The line a view shows while it opens its terminal. Inputs: why the last try ended, or
+ * null on the first try, and the count of the try under way. Output: the line. */
+export function connectingLine(reason: string | null, tries: number): string {
+  assert(tries >= 0 && tries <= FOLLOW_TRIES, "follow tries out of bounds");
+  assert(reason === null || reason.length > 0, "a reason is plain words");
+  return "Connecting to the terminal...";
+}
+
 /** Reads one message from an attached terminal channel. Input: the message, raw bytes or a
  * control frame. Output: output bytes, the attached size, or the end with plain words. */
 export function terminalEvent(message: TerminalMessage): TerminalEvent {
