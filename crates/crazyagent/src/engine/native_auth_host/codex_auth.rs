@@ -636,6 +636,10 @@ fn dropped_name(method: &str, code: Option<&str>) -> String {
     }
 }
 
+/// Runs one Codex sign-in action in the profile the session holds. A harness that cannot
+/// start, whether the tool resolver refuses its file or interpreter or the start itself
+/// fails, ends the session without effect, so the sign-in settles unavailable and frees the
+/// account. Inputs: the session, its channel and the harness file. Output: the retirement.
 pub(in crate::engine) async fn run(
     mut session: CustodySession,
     channel: &mut NativeAuthCustodyChannel,
@@ -650,7 +654,10 @@ pub(in crate::engine) async fn run(
         return session.seal_without_effect();
     }
     let home = session.profile_path()?;
-    let Ok(child) = crate::spawn_gate::spawn(&mut command(executable, &home)?) else {
+    let Ok(mut launch) = command(executable, &home) else {
+        return session.seal_without_effect();
+    };
+    let Ok(child) = crate::spawn_gate::spawn(&mut launch) else {
         return session.seal_without_effect();
     };
     let group = Pid::from_raw(i32::try_from(child.id()).map_err(io_error)?)

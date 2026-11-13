@@ -42,6 +42,26 @@ fn imp1035_claude_commands_use_only_official_auth_subcommands() {
     }
 }
 
+/// A Claude Code file the tool resolver refuses to start, here a script whose interpreter
+/// is missing, fails as a launch that could not start, with `native_auth_claude_launch_failed`
+/// that the sign-in settles as LaunchFailed, never the resolver's sentence as its code.
+#[test]
+fn a_claude_harness_that_cannot_start_fails_as_a_launch_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let claude = std::fs::canonicalize(temp.path()).unwrap().join("claude");
+    std::fs::write(&claude, "#!/nonexistent/crazyagent-test-interpreter\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = Path::new("/private/tmp/imp1035-profile");
+    for action in [
+        ClaudeAuthCommand::Login,
+        ClaudeAuthCommand::Status,
+        ClaudeAuthCommand::Logout,
+    ] {
+        let failed = auth_command(&claude, home, action).unwrap_err();
+        assert_eq!(failed.0, "native_auth_claude_launch_failed");
+    }
+}
+
 #[test]
 fn imp1035_claude_command_rejects_relative_executable_and_profile() {
     assert!(
