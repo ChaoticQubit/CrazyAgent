@@ -901,7 +901,7 @@ fn link_cli_refuses_an_engine_other_users_can_change_and_links_the_private_copy(
     let link = link_cli(&copy, &bin).unwrap();
     assert_eq!(
         std::fs::read_link(&link).unwrap(),
-        layout.root().join("bin").join("crazyagent")
+        layout.root().join("setup").join("bin").join("crazyagent")
     );
 }
 
