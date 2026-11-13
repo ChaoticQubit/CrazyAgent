@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { chooseHome, clearWebStore, createRunDirectories, runProjects } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, refusedGraphifyPaths, refusedToolHome, runProjects } from "./run-layout.mjs";
 import { createNavigationReader } from "./refresh-barrier.mjs";
 
 const source = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
@@ -156,5 +156,34 @@ test("shared runner refuses an existing permissive webdriver directory without r
   } finally {
     process.umask(mask);
     rmSync(evidence, { recursive: true });
+  }
+});
+
+test("the refused-tool suite's home lies outside the checkout, holds a uv graphify whose installation the group can change and whose link leads out to a 0777 file, and is never a prepared home", () => {
+  const mask = process.umask(0o022);
+  const parent = mkdtempSync(join(tmpdir(), "ca-refused-"));
+  try {
+    assert.throws(() => refusedToolHome({ CRAZYAGENT_E2E_HOME: parent }, parent), /needs a fresh one: unset CRAZYAGENT_E2E_HOME/);
+    assert.deepEqual(readdirSync(parent), [], "a refused prepared home plants nothing");
+    const { home, prepared } = refusedToolHome({}, parent);
+    assert.equal(prepared, false);
+    assert.equal(home, realpathSync(home), "the home is real, so the fix tree lies strictly below it as the engine sees it");
+    assert.equal(dirname(home), realpathSync(parent));
+    const { prefix, outside } = refusedGraphifyPaths(home);
+    const tool = join(home, ".local/share/uv/tools/graphifyy/bin");
+    for (const folder of [prefix, join(prefix, "bin")]) assert.equal(statSync(folder).mode & 0o777, 0o775, folder);
+    assert.equal(statSync(outside).mode & 0o777, 0o777);
+    assert.equal(lstatSync(join(prefix, "outside")).isSymbolicLink(), true);
+    assert.equal(realpathSync(join(prefix, "outside")), outside);
+    assert.equal(realpathSync(join(home, ".local/bin/graphify")), join(tool, "graphify"));
+    assert.equal(realpathSync(join(tool, "python")), realpathSync("/bin/bash"));
+    assert.equal(statSync(join(tool, "graphify")).mode & 0o777, 0o755);
+    assert.equal(readFileSync(join(tool, "graphify"), "utf8"), `#!${join(tool, "python")}\necho 'graphify 0.9.9'\n`);
+    const runner = source("./run.mjs");
+    assert.match(runner, /suite === "refused-tool" \? refusedToolHome\(\) : chooseHome\(join\(evidence, "home"\)\)/);
+    assert.match(source("./model-access.wdio.conf.mjs"), /"refused-tool": "refused-tool\.e2e\.mjs"/);
+  } finally {
+    process.umask(mask);
+    rmSync(parent, { recursive: true });
   }
 });
