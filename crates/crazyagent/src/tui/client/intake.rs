@@ -4,8 +4,9 @@ use crate::engine::owner::{AccountSecret, OwnerResult};
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::icloud::Progress;
+use crate::projects_home::job::JobView;
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
-use crate::protocol::CredentialRef;
+use crate::protocol::{CredentialRef, RequestId};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -53,6 +54,18 @@ pub(in crate::tui) enum IntakeQuery {
     IcloudDownload {
         path: String,
     },
+    JobStart {
+        source: String,
+        mode: AddMode,
+        overrides: Vec<AddOverride>,
+    },
+    JobStatus,
+    JobStop {
+        id: RequestId,
+    },
+    JobDismiss {
+        id: RequestId,
+    },
 }
 
 /// One intake job for the owner worker: a plain query, a pasted GitHub token, or an iCloud
@@ -85,6 +98,9 @@ pub(in crate::tui) enum IntakeView {
     Changed(OwnerResult),
     IcloudProgress(Progress),
     IcloudDownloaded(u64),
+    Job(Option<JobView>),
+    JobStopped(bool),
+    JobDismissed(bool),
 }
 
 /// One intake reply for the screens.
@@ -261,6 +277,10 @@ impl NativeOwner {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }
             IntakeQuery::IcloudDownload { .. } => return Err("icloud_download_needs_job".into()),
+            IntakeQuery::JobStart { .. }
+            | IntakeQuery::JobStatus
+            | IntakeQuery::JobStop { .. }
+            | IntakeQuery::JobDismiss { .. } => return Err("intake_job_not_ready".into()),
         })
     }
 }
