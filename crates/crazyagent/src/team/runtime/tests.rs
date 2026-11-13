@@ -29753,6 +29753,62 @@ fn a_finished_turn_reads_a_said_refusal_after_an_interrupt_and_before_a_rate_lim
     }
 }
 
+/// A pane turn reads a model refusal its transcript said from the harness's events in any
+/// order before the turn's end (DEC-150 r2 item 2, Q6R2-L1): said then a failed finish, a
+/// failed finish after a turn error, and an exit end the turn as said; without the said
+/// event the same events end it failed or closed, and a success stays a success.
+#[test]
+fn a_pane_turn_reads_a_said_refusal_from_its_events_before_the_end() {
+    use crate::harnesses::launch::LaunchEvent::{
+        Exited, Interrupted, ModelRefusalSaid, Text, TurnError, TurnFinished,
+    };
+    let said = |events: &[LaunchEvent]| {
+        let mut read = TurnRead::default();
+        let mut ends = events.iter().filter_map(|event| read.fold(event));
+        let end = ends.next();
+        assert_eq!(ends.next(), None, "{events:?}");
+        end
+    };
+    let refused = TurnError {
+        rate_limited: false,
+    };
+    let failed = TurnFinished { success: false };
+    let exited = Exited { code: Some(1) };
+    let text = Text { text: "x".into() };
+    for (events, end) in [
+        (
+            vec![ModelRefusalSaid, refused.clone(), failed.clone()],
+            TurnEnd::ModelRefusalSaid,
+        ),
+        (
+            vec![
+                refused.clone(),
+                text.clone(),
+                ModelRefusalSaid,
+                failed.clone(),
+            ],
+            TurnEnd::ModelRefusalSaid,
+        ),
+        (
+            vec![ModelRefusalSaid, exited.clone()],
+            TurnEnd::ModelRefusalSaid,
+        ),
+        (vec![refused.clone(), failed.clone()], TurnEnd::Failed),
+        (vec![refused.clone(), exited.clone()], TurnEnd::Closed),
+        (
+            vec![ModelRefusalSaid, Interrupted, failed.clone()],
+            TurnEnd::Interrupted,
+        ),
+        (
+            vec![ModelRefusalSaid, TurnFinished { success: true }],
+            TurnEnd::Success,
+        ),
+    ] {
+        assert_eq!(said(&events), Some(end), "{events:?}");
+    }
+    assert_eq!(said(&[ModelRefusalSaid, refused, text]), None, "no end yet");
+}
+
 /// Counts the model refusals recorded in the fixture's database. Takes the fixture.
 /// Returns the count.
 fn recorded_refusals(fixture: &Fixture) -> i64 {
