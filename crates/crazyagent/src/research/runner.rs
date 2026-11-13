@@ -76,6 +76,8 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
+/// How long [`unreached_provider`] waits for a loopback model provider to take a connection.
+const PROVIDER_REACH_TIME: Duration = Duration::from_secs(2);
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 /// The `RunError::Invalid` text of a run whose agent state folder already exists,
@@ -2078,6 +2080,50 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
             })
         }
     }
+}
+
+/// Tells whether a loopback endpoint account's model provider refuses every connect, so a
+/// caller can fail at once with a plain line in place of a harness retrying it for minutes.
+/// Managed accounts, remote endpoints and any other connect error are not named. Input: the
+/// account. Output: the owner's line naming the provider's host and port, else none.
+pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
+    let (ResearchAccount::Endpoint { base_url, .. }
+    | ResearchAccount::AnthropicEndpoint { base_url, .. }) = account
+    else {
+        return None;
+    };
+    let Ok(SandboxRemote::Loopback(port)) = model_remote(account) else {
+        return None;
+    };
+    let url = endpoint_url(base_url).ok()?;
+    let addresses: Vec<std::net::SocketAddr> = match url.host()? {
+        url::Host::Ipv4(address) => vec![(address, port).into()],
+        url::Host::Ipv6(address) => vec![(address, port).into()],
+        url::Host::Domain(_) => vec![
+            (std::net::Ipv4Addr::LOCALHOST, port).into(),
+            (std::net::Ipv6Addr::LOCALHOST, port).into(),
+        ],
+    };
+    assert!(
+        !addresses.is_empty() && addresses.iter().all(|address| address.ip().is_loopback()),
+        "a loopback endpoint is checked on loopback addresses only"
+    );
+    let unreached = addresses.iter().all(|address| {
+        refused(crate::spawn_gate::connect_tcp_std_timeout(address, PROVIDER_REACH_TIME).map(drop))
+    });
+    let host = url.host_str()?;
+    unreached.then(|| {
+        format!(
+            "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then retry setup."
+        )
+    })
+}
+
+/// Tells whether one connect to a loopback model provider proves nothing listens there:
+/// only a refused connect does, never a success, a timeout or another error such as too
+/// many open files. Input: the connect's outcome. Output: true only for a refusal.
+fn refused(outcome: std::io::Result<()>) -> bool {
+    matches!(outcome, Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused)
 }
 
 /// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
@@ -4243,6 +4289,74 @@ mod tests {
         assert!(runner.can_run(ResearchHarness::Codex));
         assert_eq!(runner.harness(ResearchHarness::Codex), Some(codex));
         assert!(!runner.can_run(ResearchHarness::ClaudeCode));
+    }
+
+    /// A loopback provider that refuses connections is named at once with its host and port
+    /// and the way out, for either endpoint kind; one that listens and a remote endpoint are
+    /// never named, and no check waits on a remote host.
+    #[test]
+    fn a_loopback_provider_that_refuses_connections_is_named_at_once_and_a_listening_one_is_not() {
+        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let open = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let listening = open.local_addr().unwrap().port();
+        let codex = |base_url: String| ResearchAccount::Endpoint {
+            base_url,
+            model: "local-model".into(),
+            key: None,
+        };
+        let claude = |base_url: String| ResearchAccount::AnthropicEndpoint {
+            base_url,
+            model: "local-model".into(),
+            key: None,
+        };
+        let line = format!(
+            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then retry setup."
+        );
+        let started = Instant::now();
+        assert_eq!(
+            unreached_provider(&codex(format!("http://127.0.0.1:{port}/v1"))),
+            Some(line.clone())
+        );
+        assert_eq!(
+            unreached_provider(&claude(format!("http://127.0.0.1:{port}"))),
+            Some(line)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            unreached_provider(&codex(format!("http://127.0.0.1:{listening}/v1"))),
+            None
+        );
+        assert_eq!(
+            unreached_provider(&claude(format!("http://localhost:{listening}"))),
+            None
+        );
+        let started = Instant::now();
+        assert_eq!(
+            unreached_provider(&codex("https://models.example.test/v1".into())),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drop(open);
+    }
+
+    /// MR-L1: only a refused connect proves nothing listens on a loopback provider. A
+    /// success, a connect that ran out of time, too many open files or any other error never
+    /// does, so such a mapping step still runs its try as before.
+    #[test]
+    fn only_a_refused_connect_counts_as_an_unreached_provider() {
+        use std::io::{Error, ErrorKind};
+        assert!(refused(Err(Error::from(ErrorKind::ConnectionRefused))));
+        assert!(!refused(Ok(())));
+        assert!(!refused(Err(Error::from(ErrorKind::TimedOut))));
+        assert!(!refused(Err(Error::from_raw_os_error(libc::EMFILE))));
+        assert!(!refused(Err(Error::from(ErrorKind::AddrNotAvailable))));
+        assert!(!refused(Err(Error::from(ErrorKind::PermissionDenied))));
     }
 
     #[test]

@@ -428,8 +428,8 @@ impl OwnerRuntimeHandle {
             return Ok(());
         };
         let refused = || failure(crate::master_session::RCLI_KEY_SETUP_CAUSE);
-        let root = &self.authority.root.path;
-        if !crate::engine::bootstrap::generated_home_needs_key(root, credential_ref)
+        let root = super::changes::engine_root(&self.authority).map_err(|_| refused())?;
+        if !crate::engine::bootstrap::generated_home_needs_key(&root, credential_ref)
             .map_err(|_| refused())?
         {
             return Ok(());
@@ -437,7 +437,7 @@ impl OwnerRuntimeHandle {
         let written = self.configure_saved_key(prepared).await;
         match (
             written,
-            crate::engine::bootstrap::generated_home_needs_key(root, credential_ref),
+            crate::engine::bootstrap::generated_home_needs_key(&root, credential_ref),
         ) {
             (Ok(()), Ok(false)) => Ok(()),
             _ => Err(refused()),

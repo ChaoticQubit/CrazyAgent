@@ -33,6 +33,16 @@ export async function closedPort() {
   return port;
 }
 
+/** Opens a local port that takes connections but answers no request, for the provider of an
+ * engine whose runs a stand-in harness serves: the engine's reach check finds it listening,
+ * and a request that does reach it has its connection closed unanswered. Input: none.
+ * Output: the server, to close, and its port. */
+export async function silentProvider() {
+  const server = createServer((request) => request.socket.destroy());
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  return { server, port: server.address().port };
+}
+
 /** Starts a child with its output kept as evidence and waits for its ready line.
  * Input: the binary, its arguments, environment, evidence folder, name and ready pattern.
  * Output: the child and the ready line's match. */
@@ -232,7 +242,7 @@ export const INTERNALS = `(() => {
  * opening a fold by its label, and opening the Agents toolbar's questions drawer. Input: the
  * page's evaluate and send. Output: the helpers. */
 export function owner({ evaluate, send }, evidence) {
-  const seen = () => evaluate("document.body.innerText");
+  const seen = () => evaluate("document.body?.innerText ?? \"\"");
   let shots = 0;
   const capture = async (label) => {
     shots += 1;
