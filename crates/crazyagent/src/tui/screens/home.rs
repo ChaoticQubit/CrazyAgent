@@ -279,7 +279,7 @@ pub struct Home {
     folder: Load<ProjectsHome>,
     found: Load<Vec<FoundProject>>,
     sent: Option<IntakeQuery>,
-    job_card: bool,
+    job_shown: bool,
 }
 
 impl Default for Home {
@@ -305,7 +305,7 @@ impl Home {
             folder: Load::Idle,
             found: Load::Idle,
             sent: None,
-            job_card: false,
+            job_shown: false,
         }
     }
 
@@ -522,17 +522,17 @@ impl Home {
     /// the first card. Input: the context with the intake job read. Output: none.
     fn follow_job_card(&mut self, ctx: &Ctx) {
         let card = ctx.store.intake.is_some();
-        if card == self.job_card {
+        if card == self.job_shown {
             return;
         }
-        self.job_card = card;
+        self.job_shown = card;
         self.selected = if card {
             self.selected + 1
         } else {
             self.selected.saturating_sub(1)
         };
         self.keep_in_range(ctx);
-        assert_eq!(self.job_card, ctx.store.intake.is_some());
+        assert_eq!(self.job_shown, ctx.store.intake.is_some());
     }
 
     /// Keeps the picked card inside the list after it changed, and in view. Input: the
@@ -1448,7 +1448,7 @@ impl Screen for Home {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
-        self.job_card = ctx.store.intake.is_some();
+        self.job_shown = ctx.store.intake.is_some();
         ctx.request(Request::Projects);
         ctx.request(Request::Pools);
         let ready = ctx
