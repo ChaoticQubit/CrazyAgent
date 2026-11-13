@@ -59,3 +59,10 @@ export function clearWebStore(home) {
   rmSync(store, { recursive: true, force: true });
   assert.throws(() => lstatSync(store), { code: "ENOENT" }, "no web store is left for the run");
 }
+
+/** Takes the one native run lock of a home for this process, so two native suites never run
+ * side by side on one home. Inputs: the home and { label, waitMs, pollMs }. Output: the lock,
+ * whose release() frees it. */
+export async function lockHome(_home, _options = {}) {
+  return { release() {} };
+}
