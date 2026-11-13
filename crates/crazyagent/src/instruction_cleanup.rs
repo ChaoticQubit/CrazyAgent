@@ -206,12 +206,13 @@ pub struct Request<'a> {
 mod run {
     use super::{
         BUSY, CleanupPool, FAILED, NO_ACCOUNT, OUTPUT_TOKENS_MAX, PAUSED, POOL_UNKNOWN,
-        PROJECT_POOL_MISSING, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE, WALL_TIME,
+        PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
+        WALL_TIME,
     };
     use crate::research::accounts::{AccountPick, SettingsResolver};
     use crate::research::runner::{
         ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchLimits,
-        ResearchRunner,
+        ResearchRunner, unreached_provider_here,
     };
     use std::os::unix::fs::DirBuilderExt;
     use std::path::{Path, PathBuf};
@@ -388,6 +389,10 @@ mod run {
                 Err(code) if number == 1 => return Err(code),
                 Err(_) => return Err(cause),
             };
+            if let Some(line) = unreached_provider_here(&account) {
+                eprintln!("{PROVIDER_UNREACHABLE} try={number} {line}");
+                return Err(PROVIDER_UNREACHABLE);
+            }
             let name = run_name(started_ms, number);
             let run = ReadOnlyRun {
                 name: &name,

@@ -6,7 +6,7 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links;
 use crate::protocol::ProjectId;
 use crate::research::runner::{
-    ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError,
+    ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError, unreached_provider_here,
 };
 use crate::roadmap_status::Claim;
 use rusqlite::Connection;
@@ -125,6 +125,9 @@ pub(super) fn answer(
     let failed = |words: &str| Unwritten::Failed(words.to_owned());
     if needs_home(root) {
         return Err(Unwritten::Skipped);
+    }
+    if let Some(line) = unreached_provider_here(account) {
+        return Err(Unwritten::Failed(line));
     }
     let hidden = crate::sandbox::hidden_paths::load(db, project.as_str())
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;

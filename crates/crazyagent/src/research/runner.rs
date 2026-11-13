@@ -2114,7 +2114,7 @@ pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
     let host = url.host_str()?;
     unreached.then(|| {
         format!(
-            "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then retry setup."
+            "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then try again."
         )
     })
 }
@@ -2122,8 +2122,11 @@ pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
 /// [`unreached_provider`] where this OS runs confined model runs, else none, so a run's own
 /// line that confined runs are unavailable here keeps its place. Every read-only run's caller
 /// asks it before the run. Input: the account. Output: the owner's line, or none.
-pub(crate) fn unreached_provider_here(_account: &ResearchAccount) -> Option<String> {
-    None
+pub(crate) fn unreached_provider_here(account: &ResearchAccount) -> Option<String> {
+    if confined_unavailable(std::env::consts::OS).is_some() {
+        return None;
+    }
+    unreached_provider(account)
 }
 
 /// Tells whether one connect to a loopback model provider proves nothing listens there:

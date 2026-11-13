@@ -1,6 +1,6 @@
 use super::*;
 use crate::research::runner::{
-    ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError,
+    ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError, unreached_provider_here,
 };
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -126,6 +126,9 @@ pub(super) fn answer(
     left: &mut Option<RunLeft>,
 ) -> Result<(Vec<ItemState>, String), Unchecked> {
     assert!(left.is_none());
+    if let Some(line) = unreached_provider_here(account) {
+        return Err(Unchecked::Failed(line));
+    }
     let failed = |words: &str| Unchecked::Failed(words.to_owned());
     let hidden = crate::sandbox::hidden_paths::load(db, project.as_str())
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;
