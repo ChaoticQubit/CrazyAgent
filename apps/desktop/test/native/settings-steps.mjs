@@ -96,14 +96,51 @@ export async function until(condition, timeout, label) {
   }
 }
 
-/** Clicks a control with a WebDriver element click once the owner could reach it.
- * Inputs: the step selector and the time limit in ms. */
+/** What kept the owner from a control a click waited for: how many elements the selector
+ * matches, whether WebDriver calls the first displayed and clickable, its disabled and
+ * aria-disabled, its rect against the viewport, and the element on top at its middle and that
+ * element's parent (tag, class, data-*). Input: the step selector. Output: one line. */
+async function blocker(selector) {
+  const path = locator(selector);
+  const matches = await $$(path);
+  if (matches.length === 0) return "no element matches";
+  const first = matches[0];
+  const page = await browser.execute((path) => {
+    const node = /^[(/]/.test(path)
+      ? document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
+      : document.querySelector(path);
+    if (!node) return "the page finds no element";
+    const name = (element) => element
+      ? `${element.tagName.toLowerCase()} class="${element.getAttribute("class") ?? ""}"${[...element.attributes].filter((item) => item.name.startsWith("data-")).map((item) => ` ${item.name}="${item.value}"`).join("")}`
+      : "nothing";
+    const box = node.getBoundingClientRect();
+    const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return {
+      disabled: node.disabled === true,
+      ariaDisabled: node.getAttribute("aria-disabled"),
+      rect: [box.left, box.top, box.width, box.height].map(Math.round),
+      viewport: [window.innerWidth, window.innerHeight],
+      top: name(top),
+      topParent: name(top?.parentElement ?? null),
+      topIsIt: Boolean(top && (top === node || node.contains(top))),
+    };
+  }, path);
+  return `${matches.length} match; first displayed=${await first.isDisplayed()} clickable=${await first.isClickable()} ${JSON.stringify(page)}`;
+}
+
+/** Clicks a control with a WebDriver element click once the owner could reach it, and names
+ * what stood in the way ([`blocker`]) when it never could. Inputs: the step selector and the
+ * time limit in ms. */
 export async function click(selector, timeout = 15000) {
   let target = null;
-  await until(async () => {
-    target = await find(selector);
-    return Boolean(target) && await reachable(target);
-  }, timeout, `${selector} was never shown, enabled and on top`);
+  try {
+    await until(async () => {
+      target = await find(selector);
+      return Boolean(target) && await reachable(target);
+    }, timeout, `${selector} was never shown, enabled and on top`);
+  } catch (failure) {
+    throw new Error(`${failure.message}; in the way: ${await blocker(selector)}`);
+  }
   await target.click();
 }
 
