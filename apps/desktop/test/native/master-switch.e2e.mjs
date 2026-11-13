@@ -159,16 +159,18 @@ async function saveInput(option) {
 }
 
 /** Starts one sub-agent through the app's own command, opens its terminal from its card and
- * reads what the owner is offered there. Input: the project id. Output: { label, boxes }. */
+ * reads what the owner is offered there. The engine names a sub-agent "Ada" until it holds
+ * its job and "Ada (@task-1)" after, so its card is looked up by the name it keeps once its
+ * job is on it. Input: the project id. Output: { label, boxes }. */
 async function subAgentOffers(id) {
   const receipt = await invoke("desktop_team_delegate", { id, harness: "claude-code", prompt: "Stand by.", generation: ++generation });
   assert.equal(receipt.outcome, "applied", `the sub-agent is asked for: ${JSON.stringify(receipt)}`);
   let agent;
   await waitFor(async () => {
     const nodes = await teamNodes(id);
-    agent = nodes.find((node) => node.kind !== "master" && node.terminal);
+    agent = nodes.find((node) => node.kind !== "master" && node.terminal && node.label.includes("(@"));
     return { done: agent !== undefined, seen: JSON.stringify(nodes).slice(0, 400) };
-  }, SWITCH_MS, "no sub-agent terminal ever started");
+  }, SWITCH_MS, "no sub-agent terminal ever started under its job's name");
   await tab("agents");
   await shownView(kit, agent.label);
   const boxes = await browser.execute((label) => {
