@@ -3,6 +3,7 @@ use super::{
     Dependency, GRAPHIFY_PYTHON, InstallError, Installer, LOCK_FILE, Pin, ToolLock, Version,
     keep_only,
 };
+use crate::tools::permission_fix;
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -513,6 +514,31 @@ impl Installer for PinnedInstaller {
         crate::tools::resolve(name, &self.places)
             .ok()
             .map(|found| found.entry)
+    }
+
+    fn fix_target(&self, missing: &crate::tools::Missing) -> Option<permission_fix::Target> {
+        if missing.reason != crate::tools::Reason::Refused {
+            return None;
+        }
+        permission_fix::target(missing.refused.as_deref()?, &self.places)
+    }
+
+    fn fix_permissions(
+        &self,
+        dep: Dependency,
+        confirmed: &str,
+    ) -> Result<permission_fix::Report, &'static str> {
+        let missing = match crate::tools::resolve(dep.program(), &self.places) {
+            Ok(_) => return Err(permission_fix::TOOL_FIX_NOT_NEEDED),
+            Err(missing) => missing,
+        };
+        let target = self
+            .fix_target(&missing)
+            .ok_or(permission_fix::TOOL_FIX_UNAVAILABLE)?;
+        if target.path.to_string_lossy() != confirmed {
+            return Err(permission_fix::TOOL_FIX_CHANGED);
+        }
+        permission_fix::fix(&target, &self.places)
     }
 
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {
