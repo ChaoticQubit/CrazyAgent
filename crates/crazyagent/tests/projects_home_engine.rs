@@ -7,6 +7,7 @@ use crazyagent::engine::owner::{
     OwnerResponse, OwnerResult,
 };
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
+use crazyagent::projects_home::job::{JobState, JobView, Phase};
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, FoundState, ProjectsHome};
 use crazyagent::protocol::{Cursor, PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId};
 use std::fs;
@@ -1157,5 +1158,245 @@ async fn a_resend_or_a_check_of_an_add_still_copying_answers_in_progress_and_cop
         "0 0\n"
     );
     assert!(!staging(&home), "one copy, renamed into place");
+    engine.stop().await;
+}
+
+/// Writes `parts` folders of `files` small files each under `source`.
+fn tree(source: &Path, parts: usize, files: usize) {
+    for part in 0..parts {
+        let folder = source.join(format!("p{part}"));
+        fs::create_dir_all(&folder).unwrap();
+        for file in 0..files {
+            let text = format!("{part} {file}\n");
+            fs::write(folder.join(format!("f{file}.txt")), text).unwrap();
+        }
+    }
+}
+
+/// An owner whose projects home is `home`, attached with a 30 s client.
+async fn homed(engine: &Engine, home: &Path) -> Owner {
+    let kind = OwnerClientKind::Desktop;
+    let controller = OwnerController::attach(engine.root.path(), kind, Duration::from_secs(30))
+        .await
+        .unwrap();
+    let mut owner = Owner {
+        controller,
+        generation: 0,
+    };
+    let set = OwnerMutation::SetProjectsHome {
+        path: home.to_str().unwrap().into(),
+    };
+    assert_eq!(owner.apply(set).await, OwnerResult::Applied);
+    owner
+}
+
+/// Reads the intake job until `want` holds, failing at once when it ended otherwise.
+async fn job_until(owner: &OwnerController, want: impl Fn(&JobView) -> bool) -> JobView {
+    let client = owner.owner_client().unwrap();
+    let start = Instant::now();
+    loop {
+        let job = client.intake_status().await.unwrap().expect("a job");
+        if want(&job) {
+            return job;
+        }
+        let ended = matches!(
+            job.state,
+            JobState::Done
+                | JobState::Failed { .. }
+                | JobState::Cancelled { .. }
+                | JobState::NeedsAnswer { .. }
+        );
+        assert!(!ended, "the job ended otherwise: {job:?}");
+        assert!(start.elapsed() < Duration::from_secs(30), "{job:?}");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+fn copying(job: &JobView) -> bool {
+    matches!(job.state, JobState::Copying { copied, .. } if copied > 0)
+}
+
+fn text(path: &Path) -> String {
+    path.to_str().unwrap().to_owned()
+}
+
+fn id(text: &str) -> RequestId {
+    RequestId::new(text).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_adds_a_folder_apart_from_its_client_and_records_the_add() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources/site"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 3, 5);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    let started = client
+        .intake_start(id("intake-copy"), text(&source), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(started.id, id("intake-copy"));
+    assert_eq!(started.mode, AddMode::Copy);
+    let done = job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    assert!(!done.stopping);
+    assert_eq!(
+        fs::read_to_string(home.join("site/p2/f4.txt")).unwrap(),
+        "2 4\n"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("p2/f4.txt")).unwrap(),
+        "2 4\n"
+    );
+    let check = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: id("check-intake-copy"),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Reconcile {
+            operation_id: id("intake-copy"),
+            expected_hash: None,
+        },
+    };
+    let recorded = client.request(check).await.unwrap().response;
+    assert!(
+        matches!(&recorded, OwnerResponse::Committed { operation }
+            if operation.result == OwnerResult::Applied),
+        "{recorded:?}"
+    );
+    assert!(client.intake_dismiss(id("intake-copy")).await.unwrap());
+    assert_eq!(client.intake_status().await.unwrap(), None);
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_intake_job_ends_cancelled_with_no_copy_and_the_source_whole() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources/big"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 100, 100);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(id("intake-stop"), text(&source), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    assert!(client.intake_stop(id("intake-stop")).await.unwrap());
+    let ended = job_until(&owner.controller, |job| {
+        matches!(job.state, JobState::Cancelled { .. })
+    })
+    .await;
+    assert!(ended.stopping);
+    let cancelled = JobState::Cancelled {
+        phase: Phase::Copying,
+    };
+    assert_eq!(ended.state, cancelled);
+    assert!(!home.join("big").exists(), "no copy");
+    assert!(!staging(&home), "no staging");
+    assert_eq!(
+        fs::read_to_string(source.join("p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    assert!(!client.intake_stop(id("intake-stop")).await.unwrap());
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_start_attaches_to_the_running_job_and_another_folder_waits_for_it() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let (big, small) = (place.join("sources/big"), place.join("sources/small"));
+    fs::create_dir(&home).unwrap();
+    tree(&big, 100, 100);
+    tree(&small, 2, 2);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    let copy = AddMode::Copy;
+    client
+        .intake_start(id("intake-first"), text(&big), copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    let again = client
+        .intake_start(id("intake-again"), text(&big), copy, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(again.id, id("intake-first"), "the same folder attaches");
+    let other = client
+        .intake_start(id("intake-other"), text(&small), copy, Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(other.0, "intake_busy");
+    let check = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: id("check-intake-first"),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Reconcile {
+            operation_id: id("intake-first"),
+            expected_hash: None,
+        },
+    };
+    let checked = client.request(check).await.unwrap().response;
+    let still = OwnerResponse::InProgress {
+        operation_id: id("intake-first"),
+    };
+    assert_eq!(checked, still, "a check of the running job");
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    let next = client
+        .intake_start(id("intake-other"), text(&small), copy, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(next.id, id("intake-other"), "an ended job makes room");
+    job_until(&owner.controller, |job| {
+        job.id == id("intake-other") && job.state == JobState::Done
+    })
+    .await;
+    assert_eq!(
+        fs::read_to_string(home.join("big/p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("small/p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_stop_ends_a_running_intake_job_with_no_copy_left() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources/big"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 100, 100);
+    let mut engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(
+            id("intake-restart"),
+            text(&source),
+            AddMode::Copy,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    engine.restart().await;
+    assert!(!home.join("big").exists(), "no copy");
+    assert!(!staging(&home), "no staging");
+    assert_eq!(
+        fs::read_to_string(source.join("p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    let after = engine.owner().await;
+    let status = after.owner_client().unwrap().intake_status().await.unwrap();
+    assert_eq!(status, None, "a new engine has no job");
     engine.stop().await;
 }
