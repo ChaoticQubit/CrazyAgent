@@ -28,6 +28,7 @@ env:
   RUST_STD_DARWIN_X64_SHA256: 48b9835058a8baa4ff5e4387f3772c572a017a2b13393c46e151615c54e322e9
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
+  DEV_BUILDS_KEPT: "15"
 
 defaults:
   run:
@@ -43,6 +44,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       channel: ${{ steps.version.outputs.channel }}
       tag: ${{ steps.version.outputs.tag }}
+      asset_tag: ${{ steps.version.outputs.asset_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -62,15 +64,19 @@ jobs:
             version="$(node scripts/release/version.mjs stable "$REF_NAME")"
             channel=stable
             tag="$REF_NAME"
+            asset_tag="$REF_NAME"
           else
             version="$(node scripts/release/version.mjs dev)"
             channel=dev
             tag=dev
+            asset_tag="build-$version"
+            [[ "$asset_tag" =~ ^build-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-dev\.[0-9]{12}$ ]] || { echo "::error::the dev build tag '$asset_tag' is not build-X.Y.Z-dev.<yyyymmddHHMM>"; exit 1; }
           fi
           {
             echo "version=$version"
             echo "channel=$channel"
             echo "tag=$tag"
+            echo "asset_tag=$asset_tag"
           } >> "$GITHUB_OUTPUT"
           echo "Release $version on channel $channel"
 
@@ -546,10 +552,13 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+    outputs:
+      pointer: ${{ steps.pointer.outputs.pointer }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       CHANNEL: ${{ needs.prepare.outputs.channel }}
       TAG: ${{ needs.prepare.outputs.tag }}
+      ASSET_TAG: ${{ needs.prepare.outputs.asset_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -583,13 +592,94 @@ jobs:
           done
           cat notes.txt
       - name: Write update manifests and checksums
-        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" --notes "$(cat notes.txt)" --targets aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-gnu
-      - name: Publish dev prerelease
+        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$ASSET_TAG" --notes "$(cat notes.txt)" --targets aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-gnu
+      - name: Publish dev build
         if: needs.prepare.outputs.channel == 'dev'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          releases="$RUNNER_TEMP/releases.json"
+          read_releases() { gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases"; }
+          made=""
+          drop_made_draft() {
+            local status=$?
+            trap - EXIT
+            if [ "$status" -ne 0 ] && [ -n "$made" ]; then
+              if gh api "repos/$GITHUB_REPOSITORY/releases/$made" > "$RUNNER_TEMP/made.json" && jq -e --arg tag "$ASSET_TAG" --argjson id "$made" '.draft == true and .tag_name == $tag and .id == $id' "$RUNNER_TEMP/made.json" > /dev/null; then
+                if gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$made" > /dev/null; then
+                  echo "deleted the draft $ASSET_TAG ($made) this step made"
+                else
+                  echo "::warning::could not delete the draft $ASSET_TAG ($made) this step made; delete it on the releases page"
+                fi
+              else
+                echo "::warning::left the draft $ASSET_TAG ($made): its re-read failed or no longer shows this step's draft"
+              fi
+            fi
+            exit "$status"
+          }
+          trap drop_made_draft EXIT
+          read_releases
+          found="$(node scripts/release/dev-builds.mjs find "$releases" "$ASSET_TAG" "$GITHUB_SHA")"
+          draft=""
+          case "$found" in
+            none)
+              made="$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$ASSET_TAG" -f target_commitish="$GITHUB_SHA" -f name="Dev build $VERSION" -F body=@notes.txt -F draft=true -F prerelease=true -f make_latest=false --jq .id)"
+              [[ "$made" =~ ^[1-9][0-9]*$ ]] || { echo "::error::creating the draft $ASSET_TAG gave the id '$made'"; exit 1; }
+              draft="$made"
+              ;;
+            "draft "*)
+              draft="${found#draft }"
+              echo "finishing the draft $ASSET_TAG ($draft) an earlier attempt of this run left"
+              ;;
+            "published "*)
+              node scripts/release/dev-builds.mjs check "$releases" "$ASSET_TAG" "$GITHUB_SHA" dist reused > /dev/null
+              echo "$ASSET_TAG is already published from this commit with these files; nothing is uploaded"
+              ;;
+            *) echo "::error::finding $ASSET_TAG gave '$found'"; exit 1 ;;
+          esac
+          if [ -n "$draft" ]; then
+            gh release upload "$ASSET_TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+            read_releases
+            checked="$(node scripts/release/dev-builds.mjs check "$releases" "$ASSET_TAG" "$GITHUB_SHA" dist draft)"
+            [ "$checked" = "$draft" ] || { echo "::error::the draft $ASSET_TAG read back as release '$checked', not $draft"; exit 1; }
+            published="$(gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$draft" -F draft=false -F prerelease=true -f make_latest=false --jq .draft)"
+            [ "$published" = false ] || { echo "::error::publishing $ASSET_TAG left draft '$published'"; exit 1; }
+            made=""
+            trap - EXIT
+            read_releases
+            node scripts/release/dev-builds.mjs check "$releases" "$ASSET_TAG" "$GITHUB_SHA" dist published > /dev/null
+          fi
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$ASSET_TAG/latest.json"
+          tries=5
+          for try in $(seq 1 "$tries"); do
+            if curl -fsSL -r 0-0 -o /dev/null "$url"; then break; fi
+            if [ "$try" = "$tries" ]; then echo "::error::$url did not answer after $tries tries; dev still names the build before it"; exit 1; fi
+            sleep $((try * 2))
+          done
+      - name: Point dev at the new build
+        id: pointer
+        if: needs.prepare.outputs.channel == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          releases="$RUNNER_TEMP/releases.json"
+          pointer="$RUNNER_TEMP/pointer"
+          rm -rf "$pointer"
+          mkdir "$pointer"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases"
+          gh release download "$ASSET_TAG" --repo "$GITHUB_REPOSITORY" --dir "$pointer" --pattern latest.json --pattern cli-latest.json --pattern SHA256SUMS
+          decision="$(node scripts/release/dev-builds.mjs pointer "$releases" "$ASSET_TAG" "$GITHUB_REPOSITORY" "$pointer")"
+          case "$decision" in
+            move) ;;
+            "keep build-"*)
+              echo "::notice::$ASSET_TAG is published, but ${decision#keep } is newer, so dev keeps naming it and no build is pruned"
+              echo "pointer=kept" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            *) echo "::error::the dev pointer check gave '$decision'"; exit 1 ;;
+          esac
           if gh release view dev --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release delete dev --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           fi
@@ -603,7 +693,9 @@ jobs:
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev" > /dev/null || echo "deleting the dev tag failed, it may be gone already; checking again"
             sleep $((try * 2))
           done
-          gh release create dev --repo "$GITHUB_REPOSITORY" --prerelease --latest=false --target "$GITHUB_SHA" --title "Dev build $VERSION" --notes-file notes.txt dist/*
+          { printf 'Download this build from https://github.com/%s/releases/tag/%s\n\n' "$GITHUB_REPOSITORY" "$ASSET_TAG"; cat notes.txt; } > "$RUNNER_TEMP/pointer-notes.txt"
+          gh release create dev --repo "$GITHUB_REPOSITORY" --prerelease --latest=false --target "$GITHUB_SHA" --title "Dev build $VERSION" --notes-file "$RUNNER_TEMP/pointer-notes.txt" "$pointer/latest.json" "$pointer/cli-latest.json" "$pointer/SHA256SUMS"
+          echo "pointer=moved" >> "$GITHUB_OUTPUT"
       - name: Publish stable release
         if: needs.prepare.outputs.channel == 'stable'
         env:
@@ -613,3 +705,47 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "CrazyAgent $VERSION" --notes-file notes.txt
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" dist/*
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+  prune-dev-builds:
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.channel == 'dev' && needs.publish.outputs.pointer == 'moved'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      ASSET_TAG: ${{ needs.prepare.outputs.asset_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Read dev builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/build-?per_page=100" > "$RUNNER_TEMP/tags.json"
+      - name: Select old dev builds
+        run: |
+          set -euo pipefail
+          node scripts/release/dev-builds.mjs select "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/tags.json" "$DEV_BUILDS_KEPT" "$ASSET_TAG" > "$RUNNER_TEMP/selected.txt"
+          cat "$RUNNER_TEMP/selected.txt"
+      - name: Delete old dev builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pattern='^build-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-dev\.[0-9]{12}$'
+          while read -r kind name rest; do
+            if [ -n "$rest" ] || ! [[ "$name" =~ $pattern ]] || [ "$name" = "$ASSET_TAG" ]; then echo "::error::refusing to delete '$kind $name $rest'"; exit 1; fi
+            case "$kind" in
+              release) gh release delete "$name" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag ;;
+              tag) gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$name" > /dev/null ;;
+              *) echo "::error::refusing to delete '$kind $name'"; exit 1 ;;
+            esac
+            echo "deleted $kind $name"
+          done < "$RUNNER_TEMP/selected.txt"

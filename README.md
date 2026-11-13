@@ -23,7 +23,7 @@ A Rust engine owns all state and policy. You drive it from a terminal UI or a de
 Download from GitHub Releases:
 
 - Stable: [latest release](https://github.com/ChaoticQubit/CrazyAgent/releases/latest)
-- Dev, rebuilt from every merge to `master`: [dev prerelease](https://github.com/ChaoticQubit/CrazyAgent/releases/tag/dev)
+- Dev, rebuilt from every merge to `master`: the [dev prerelease](https://github.com/ChaoticQubit/CrazyAgent/releases/tag/dev) links the newest build. Each dev build has its own `build-<version>` prerelease with every download, and the newest 15 are kept.
 
 Each release lists a `SHA256SUMS` file. Check a download against it before you open it:
 
