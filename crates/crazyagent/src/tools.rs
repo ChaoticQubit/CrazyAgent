@@ -357,22 +357,36 @@ fn in_project(home: Option<&Path>, path: &Path) -> bool {
 /// temp folder grant can replace; a file whose place is itself in a temp folder (a test HOME,
 /// an engine root, a mounted app) does not. Inputs: the file as written, its real path and
 /// the temp folders. Output: the answer.
-fn leads_into_temp(_written: &Path, _real: &Path, _temps: &[PathBuf]) -> bool {
-    false
+fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
+    let inside = |path: &Path| temps.iter().any(|temp| path.starts_with(temp));
+    !inside(written) && inside(real)
+}
+
+/// The temp folders: the shared ones and this user's own, as given and with its links
+/// resolved, so a path matches however it is written; an owner temp folder of `/` is
+/// dropped. Output: the absolute folders.
+fn temp_roots() -> Vec<PathBuf> {
+    let owner = std::env::temp_dir();
+    let real = owner.canonicalize().ok();
+    let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
+    roots.extend(
+        std::iter::once(owner)
+            .chain(real)
+            .filter(|root| root.is_absolute() && root.parent().is_some()),
+    );
+    assert!(roots.len() <= TEMP_FOLDERS.len() + 2);
+    roots
 }
 
 /// Whether a folder is in a temp folder, which other users, or agents with the temp folder
 /// grant, can write: this user's temp folder or a shared one, as written and with its links
 /// resolved. Input: the folder. Output: the answer.
 fn in_temp(folder: &Path) -> bool {
-    let owner = std::env::temp_dir();
+    let temps = temp_roots();
     let real = folder.canonicalize().ok();
     std::iter::once(folder)
         .chain(real.as_deref())
-        .any(|folder| {
-            (owner.is_absolute() && folder.starts_with(&owner))
-                || TEMP_FOLDERS.iter().any(|temp| folder.starts_with(temp))
-        })
+        .any(|folder| temps.iter().any(|temp| folder.starts_with(temp)))
 }
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
@@ -473,7 +487,8 @@ impl Reason {
 /// Why the resolver passed over a file it found: a part another user or group can change,
 /// named so the owner knows what to fix, a file agents can write, a version-manager shim
 /// with no real install found behind it, or a file in a temp folder the engine's places
-/// refuse, which agents with the owner's temp folder grant or other users write.
+/// refuse or reached through a link into one, which agents with the owner's temp folder
+/// grant or other users write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     OthersCanChange(PathBuf),
@@ -872,7 +887,7 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             "{tool} can't start: {file} is a version manager shim with no install found behind it. Add a version with that version manager, then try again."
         ),
         Refusal::InTemp => format!(
-            "{tool} can't start: {file} is not used because it is in a temp folder, which agents or other users can change. Install it outside temp folders, then try again."
+            "{tool} can't start: {file} is not used because it is in a temp folder or links to one, which agents or other users can change. Install it outside temp folders, then try again."
         ),
     }
 }
@@ -893,19 +908,23 @@ fn install_hint(tool: &str) -> &'static str {
 
 /// Checks a found file: none when it is not an executable file whose links resolve, else
 /// passed, or passed over as a version-manager shim, as a file agents can write, as found or
-/// through its links ([`Places::agent_writable`]), or with the part another user or group
-/// can change ([`crate::service::changeable_past_sticky`]). Inputs: the places and the
-/// file. Output: the check.
+/// through its links ([`Places::agent_writable`]), with the part another user or group can
+/// change ([`crate::service::changeable_past_sticky`]), or, on the engine's places, as a file
+/// that leads into a temp folder ([`leads_into_temp`]). Inputs: the places and the file.
+/// Output: the check.
 fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
-    if !executable_file(candidate) || candidate.canonicalize().is_err() {
+    if !executable_file(candidate) {
         return None;
     }
+    let real = candidate.canonicalize().ok()?;
     Some(if crate::harnesses::is_shim(places.home(), candidate) {
         Err(Refusal::Shim)
     } else if places.agent_writable(candidate) {
         Err(Refusal::AgentsCanWrite)
     } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
         Err(Refusal::OthersCanChange(part))
+    } else if places.temp_refused && leads_into_temp(candidate, &real, &temp_roots()) {
+        Err(Refusal::InTemp)
     } else {
         Ok(())
     })
