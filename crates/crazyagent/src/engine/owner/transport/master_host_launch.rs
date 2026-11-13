@@ -1408,9 +1408,9 @@ mod tests {
         let older = engine.join("o0badc0de");
         private_directory(&older);
         let _sockets = [
-            std::os::unix::net::UnixListener::bind(engine.join("e.sock")).unwrap(),
-            std::os::unix::net::UnixListener::bind(older.join("owner.sock")).unwrap(),
-            std::os::unix::net::UnixListener::bind(base.join("owner.sock")).unwrap(),
+            crate::spawn_gate::bind_unix_std(engine.join("e.sock")).unwrap(),
+            crate::spawn_gate::bind_unix_std(older.join("owner.sock")).unwrap(),
+            crate::spawn_gate::bind_unix_std(base.join("owner.sock")).unwrap(),
         ];
         let sandbox = master_in_generation(&base).unwrap();
         let secrets = sandbox.sandbox().secret_paths();
@@ -1928,7 +1928,7 @@ mod tests {
             std::fs::symlink_metadata(&tmp).unwrap().mode() & 0o7777,
             0o700
         );
-        let caches = default_master_tool_caches(&root.path, &repository);
+        let caches = default_master_tool_caches(root.engine_root().unwrap(), &repository);
         assert_eq!(
             sandbox
                 .sandbox()
@@ -2652,7 +2652,7 @@ mod tests {
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
         let tmp = turn.join(MASTER_TMP);
-        let caches = default_master_tool_caches(&root.path, &repository);
+        let caches = default_master_tool_caches(root.engine_root().unwrap(), &repository);
         assert_eq!(
             sandbox
                 .sandbox()
