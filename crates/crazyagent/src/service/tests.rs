@@ -1235,15 +1235,60 @@ fn a_file_an_untrusted_group_can_write_is_changeable_like_a_folder() {
 fn only_a_user_private_group_counts_as_the_user_own_group() {
     let listed =
         |names: &[&str]| -> Vec<String> { names.iter().map(|name| (*name).to_owned()).collect() };
-    assert!(private_group("ana", &listed(&[]), "ana"));
-    assert!(private_group("ana", &listed(&["ana"]), "ana"));
+    let own = listed(&["ana"]);
+    assert!(private_group("ana", &listed(&[]), &own, "ana"));
+    assert!(private_group("ana", &listed(&["ana"]), &own, "ana"));
     assert!(
-        !private_group("users", &listed(&[]), "ana"),
+        !private_group("users", &listed(&[]), &own, "ana"),
         "a shared primary group"
     );
     assert!(
-        !private_group("ana", &listed(&["ana", "bo"]), "ana"),
+        !private_group("ana", &listed(&["ana", "bo"]), &own, "ana"),
         "a group listing another user"
     );
-    assert!(!private_group("", &listed(&[]), ""), "no names at all");
+    assert!(
+        !private_group("", &listed(&[]), &listed(&[""]), ""),
+        "no names at all"
+    );
+}
+
+/// 2.4.1 r1 F3: a group's member list leaves out the accounts whose primary group it is, so
+/// a group named as the user that another account has as its primary group is not private,
+/// and neither is one whose own account the local account file does not list, such as a
+/// directory account, whose other primary users cannot be seen.
+#[test]
+fn a_group_another_account_has_as_its_primary_group_is_not_private() {
+    let listed =
+        |names: &[&str]| -> Vec<String> { names.iter().map(|name| (*name).to_owned()).collect() };
+    assert!(private_group("ana", &[], &listed(&["ana"]), "ana"));
+    assert!(
+        !private_group("ana", &[], &listed(&["ana", "svc"]), "ana"),
+        "another account's primary group"
+    );
+    assert!(
+        !private_group("ana", &[], &listed(&[]), "ana"),
+        "the user's own account is not in the file"
+    );
+}
+
+/// 2.4.1 r1 F3: the accounts whose primary group is a gid are read from the local account
+/// file's fourth field; comments and blank lines are skipped, and a line that cannot be read
+/// or that pulls accounts in from elsewhere (`+` or `-`) gives none, the stricter rule.
+#[test]
+fn the_accounts_with_a_primary_group_are_read_from_the_local_account_file() {
+    let passwd = "root:x:0:0:root:/root:/bin/bash\n# kept by hand\n\nana:x:1000:1000:Ana:/home/ana:/bin/bash\nsvc:x:998:1000::/srv:/usr/sbin/nologin\nbo:x:1001:1001::/home/bo:/bin/sh\n";
+    assert_eq!(
+        primary_users(passwd, 1000),
+        Some(vec!["ana".to_owned(), "svc".to_owned()])
+    );
+    assert_eq!(primary_users(passwd, 1001), Some(vec!["bo".to_owned()]));
+    assert_eq!(primary_users(passwd, 4242), Some(Vec::new()));
+    assert_eq!(primary_users("+::::::\n", 1000), None, "a NIS include");
+    assert_eq!(primary_users("-bo::::::\n", 1000), None, "a NIS exclude");
+    assert_eq!(primary_users("ana:x:1000\n", 1000), None, "too few fields");
+    assert_eq!(
+        primary_users("ana:x:1000:staff:::\n", 1000),
+        None,
+        "a group that is not a number"
+    );
 }

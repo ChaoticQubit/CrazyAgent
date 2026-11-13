@@ -1077,7 +1077,7 @@ fn own_group_private() -> bool {
             .ok()
             .flatten();
         match (user, group) {
-            (Some(user), Some(group)) => private_group(&group.name, &group.mem, &user.name),
+            (Some(user), Some(group)) => private_group(&group.name, &group.mem, &[], &user.name),
             _ => false,
         }
     })
@@ -1086,10 +1086,20 @@ fn own_group_private() -> bool {
 /// Whether a group named `name`, listing `members`, is the user private group of the user
 /// named `user`: it bears the user's name and lists no other member, as Debian, Ubuntu and
 /// Fedora make one per user; a shared primary group such as openSUSE's `users` is not.
-/// Inputs: the group's name, its listed members and the user's name. Output: the answer.
+/// Inputs: the group's name, its listed members, the accounts whose primary group it is and
+/// the user's name. Output: the answer.
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
-fn private_group(name: &str, members: &[String], user: &str) -> bool {
+fn private_group(name: &str, members: &[String], _primary: &[String], user: &str) -> bool {
     !user.is_empty() && name == user && members.iter().all(|member| member == user)
+}
+
+/// The accounts in a local account file (`/etc/passwd` lines) whose primary group is `gid`,
+/// which the group's member list leaves out. Inputs: the file's text and the group id.
+/// Output: the account names, or none when a line cannot be read or names accounts kept
+/// elsewhere.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn primary_users(_passwd: &str, _gid: u32) -> Option<Vec<String>> {
+    Some(Vec::new())
 }
 
 /// Names no user id where launchd domains do not exist. Output: zero, unused off macOS.
