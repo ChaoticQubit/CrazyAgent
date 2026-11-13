@@ -70,6 +70,15 @@ impl Tally {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
     }
+
+    /// Ok while no stop was asked, else `home_add_cancelled`, logged without a path.
+    fn go_on(&self) -> Result<(), EngineError> {
+        if !self.stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        eprintln!("home_add_cancelled");
+        Err(refused("home_add_cancelled"))
+    }
 }
 
 /// A checked plan to bring one folder into the projects home.
@@ -129,7 +138,10 @@ impl AddPlan {
     pub fn run_tallied(self, tally: &Tally) -> Result<(), EngineError> {
         match self.place(tally)? {
             Placed::Whole => Ok(()),
-            Placed::Copied(old) => old.clear(),
+            Placed::Copied(old) => {
+                tally.clearing.store(true, Ordering::SeqCst);
+                old.clear()
+            }
         }
     }
 
@@ -712,6 +724,8 @@ fn copy_entries(
     if super::icloud::dataless(&root) {
         return Err(still_in_icloud("copy"));
     }
+    tally.go_on()?;
+    let mut copied = 0u64;
     fs::create_dir(target).map_err(failed)?;
     private_folder(target).map_err(failed)?;
     let mut folders = vec![(target.to_path_buf(), root.permissions())];
@@ -723,6 +737,7 @@ fn copy_entries(
             if entries > bounds.entries {
                 return Err(refused("home_copy_too_large"));
             }
+            tally.go_on()?;
             let entry = entry.map_err(failed)?;
             let path = entry.path();
             let copy = to.join(entry.file_name());
@@ -751,12 +766,15 @@ fn copy_entries(
             } else {
                 return Err(refused("home_copy_special_file"));
             }
+            copied += 1;
+            tally.copied.fetch_add(1, Ordering::SeqCst);
         }
     }
     for (folder, permissions) in folders.into_iter().rev() {
         fs::set_permissions(&folder, permissions).map_err(failed)?;
     }
     assert!(entries <= bounds.entries);
+    assert!(copied <= entries);
     Ok(())
 }
 
@@ -781,7 +799,11 @@ fn verify_within(
     let mut verified = Verified::default();
     let mut stack = vec![(source.to_path_buf(), copy.to_path_buf(), 0usize)];
     let mut entries = 0u64;
+    let mut checked = 0u64;
     while let Some((left, right, depth)) = stack.pop() {
+        tally.go_on()?;
+        checked += 1;
+        tally.checked.fetch_add(1, Ordering::SeqCst);
         let a = fs::symlink_metadata(&left).map_err(|_| differs())?;
         let b = fs::symlink_metadata(&right).map_err(|_| differs())?;
         if super::icloud::dataless(&a) {
@@ -834,6 +856,7 @@ fn verify_within(
         }
     }
     assert!(verified.0.len() as u64 <= entries + 1);
+    assert_eq!(checked, entries + 1);
     Ok(verified)
 }
 
