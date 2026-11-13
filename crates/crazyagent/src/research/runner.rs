@@ -5820,7 +5820,10 @@ mod tests {
         );
         assert!(has(&off, ["--max-turns", "1"]), "{off:?}");
         assert!(has(&off, ["--output-format", "stream-json"]), "{off:?}");
-        assert!(off.iter().any(|argument| argument == "--verbose"), "{off:?}");
+        assert!(
+            off.iter().any(|argument| argument == "--verbose"),
+            "{off:?}"
+        );
         assert!(!has(&off, ["--output-format", "text"]), "{off:?}");
         assert_eq!(cap.as_deref(), Some("16000"));
         assert!(CLAUDE_NO_TOOLS_PROMPT.contains("no tools"));
