@@ -25,6 +25,7 @@ const KIND_LABEL: Record<HarnessAccountKind, string> = {
 const GROUPS: { kind: HarnessEntry["status"]["kind"]; title: string }[] = [
   { kind: "ready", title: "Ready" },
   { kind: "limited", title: "Limited control" },
+  { kind: "cant_run", title: "Can't run" },
   { kind: "not_installed", title: "Not installed" },
 ];
 
@@ -61,8 +62,9 @@ export function homePath(path: string): string {
   return path.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
 }
 
-/** Groups the harness catalog Ready, then Limited control, then Not installed, keeping catalog
- * order inside each group. Input: the catalog. Output: non-empty groups with titles. */
+/** Groups the harness catalog Ready, then Limited control, then Can't run, then Not installed,
+ * keeping catalog order inside each group. Input: the catalog. Output: non-empty groups with
+ * titles. */
 export function harnessGroups(entries: HarnessEntry[]): { title: string; entries: HarnessEntry[] }[] {
   return GROUPS.map((group) => ({ title: group.title, entries: entries.filter((entry) => entry.status.kind === group.kind) }))
     .filter((group) => group.entries.length > 0);
@@ -97,7 +99,12 @@ export function pageNode(ids: readonly string[], reads: Reads, setup: SetupStatu
 }
 
 function statusWord(entry: HarnessEntry): string {
-  return entry.status.kind === "ready" ? "Ready" : entry.status.kind === "not_installed" ? "Not installed" : `Limited control: ${entry.status.reason}`;
+  switch (entry.status.kind) {
+    case "ready": return "Ready";
+    case "not_installed": return "Not installed";
+    case "cant_run": return rowBadge({ kind: "blocked", line: entry.status.reason }).word;
+    case "limited": return `Limited control: ${entry.status.reason}`;
+  }
 }
 
 function lastLine(versions: HarnessVersions, name: string): string | null {
@@ -118,17 +125,20 @@ function refusalLine(versions: HarnessVersions): string | null {
 
 /** One harness line: what it is, its version, and Check for updates and Update when the settings
  * and the install allow them, Install for one that is not on this Mac, or Can't run with the
- * resolver's line and Try again for a found one it can't run. Inputs: the catalog entry, its
- * versions (null until read), the update mode, a failure to show, whether a read runs, and the
- * actions. Output: the row. */
+ * resolver's line and Try again for a found one it can't run, from the versions read or, until
+ * it arrives, the catalog's. Inputs: the catalog entry, its versions (null until read), the
+ * update mode, a failure to show, whether a read runs, and the actions. Output: the row. */
 export function HarnessRowView({ entry, versions, mode, problem, checking = false, onCheck, onUpdate, onInstall, onGuide, onRetry }: {
   entry: HarnessEntry; versions: HarnessVersions | null; mode: UpdateMode; problem?: string; checking?: boolean;
   onCheck: () => void; onUpdate: () => void; onInstall: () => void; onGuide: (url: string) => void; onRetry?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const missing = entry.status.kind === "not_installed";
-  const blocked = !missing && versions?.needs && !versions.running ? displayText(versions.needs.line) : null;
-  const badge = blocked === null ? { word: statusWord(entry), tone: undefined } : rowBadge({ kind: "blocked", line: blocked });
+  const listed = versions === null && entry.status.kind === "cant_run" ? entry.status.reason : null;
+  const line = versions?.needs && !versions.running ? versions.needs.line : listed;
+  const blocked = !missing && line !== null ? displayText(line) : null;
+  const word = entry.status.kind === "cant_run" && versions !== null ? "Ready" : statusWord(entry);
+  const badge = blocked === null ? { word, tone: undefined } : rowBadge({ kind: "blocked", line: blocked });
   const shown = !missing && blocked === null && versions !== null && mode !== "off" ? versions : null;
   const absent = missing ? versions : null;
   const checkable = shown !== null && shown.method.kind !== "with_app" && shown.method.kind !== "unknown";
@@ -367,6 +377,7 @@ function HarnessRow({ entry, settings, again, onCatalog, onRead }: {
     setChecking(true);
     take(await harnessVersions(entry.id, false));
     setChecking(false);
+    if (alive.current) onCatalog();
   };
   const ask = async (job: HarnessJob) => {
     setChecking(true);
@@ -505,6 +516,7 @@ export function Harnesses() {
   const [checkedAt, setCheckedAt] = useState<string>();
   const offer = useNodeOffer(catalog);
   useEffect(() => { if (loaded.kind === "ok") setSettings(loaded.value); }, [loaded]);
+  useEffect(() => { if (offer.again > 0) reload(); }, [offer.again]);
   const settingsError = loaded.kind === "error" ? { message: failureCopy(loaded) ?? updateCopy("harness_update_settings_unreadable"), onRetry: reloadSettings } : undefined;
   return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)} settings={settings} onSettings={setSettings} settingsError={settingsError}
     node={offer.node} nodeBusy={offer.busy} nodeProblem={offer.problem} onInstallNode={() => void offer.install()} again={offer.again} onRead={offer.onRead}

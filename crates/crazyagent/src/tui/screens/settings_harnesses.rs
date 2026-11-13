@@ -369,24 +369,31 @@ fn refusal(versions: &HarnessVersions) -> Option<String> {
 }
 
 /// The resolver's line for a found harness it can't run, made safe to show, the first-run
-/// step's line; a running update or install wins, as on the first-run step. Inputs: the catalog
-/// entry and its versions, none while unread. Output: the line, or none when the harness is
-/// missing, unread, busy or runs.
+/// step's line: the versions read's, else the catalog's until that read arrives; a running
+/// update or install wins, as on the first-run step. Inputs: the catalog entry and its
+/// versions, none while unread. Output: the line, or none when the harness is missing, busy
+/// or runs.
 fn needs_line(entry: &HarnessEntry, versions: Option<&HarnessVersions>) -> Option<String> {
-    let needs = versions
-        .filter(|versions| !versions.running)?
-        .needs
-        .as_ref()?;
     entry.executable.as_ref()?;
-    Some(sanitize(&needs.line))
+    let line = match (versions, &entry.status) {
+        (Some(versions), _) if versions.running => return None,
+        (Some(versions), _) => &versions.needs.as_ref()?.line,
+        (None, HarnessStatus::CantRun { reason }) => reason,
+        (None, _) => return None,
+    };
+    Some(sanitize(line))
 }
 
 /// The Status cell word of a harness row: Can't run, the first-run step's word, for a found
-/// harness the resolver can't run, else the catalog's word. Inputs: the catalog entry and its
-/// versions. Output: the word.
+/// harness the resolver can't run, Ready when a read newer than the catalog's Can't run says
+/// it runs, else the catalog's word. Inputs: the catalog entry and its versions. Output: the
+/// word.
 fn row_word(entry: &HarnessEntry, versions: Option<&HarnessVersions>) -> &'static str {
     if needs_line(entry, versions).is_some() {
         return CANT_RUN;
+    }
+    if matches!(entry.status, HarnessStatus::CantRun { .. }) && versions.is_some() {
+        return "Ready";
     }
     status_word(entry)
 }
@@ -631,8 +638,9 @@ impl Harnesses {
     }
 
     /// Takes setup's Node row; once a Node.js install the page waited on settles, the harnesses
-    /// that needed Node are read again. A failed read keeps what the page knew and the next
-    /// refresh reads again. Inputs: the read and the context. Output: none.
+    /// that needed Node and the catalog are read again, so the rows, the catalog's Can't run
+    /// and the Home count follow. A failed read keeps what the page knew and the next refresh
+    /// reads again. Inputs: the read and the context. Output: none.
     fn arrive_setup(&mut self, result: &Result<SetupStatus, String>, ctx: &mut Ctx) {
         if !std::mem::take(&mut self.setup_asked) {
             return;
@@ -653,6 +661,7 @@ impl Harnesses {
         );
         if waited && settled {
             self.read_where(|_, versions| node_needed(versions), ctx);
+            self.reload(ctx);
         }
     }
 

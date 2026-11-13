@@ -214,21 +214,23 @@ pub(in crate::tui) fn pool_choices(config: &EffectiveConfig) -> Vec<PoolChoice> 
 }
 
 /// States whether a harness is on this machine and CrazyAgent can start it.
-/// CantStart is installed but cannot run team agents yet; MasterOnly runs only as the
-/// project master; Unknown is used until the engine's catalog arrives.
-/// The catalog's own words decide; the wizard never guesses.
+/// CantStart is installed but cannot run team agents yet; CantRun is found but the tool
+/// resolver can't start it; MasterOnly runs only as the project master; Unknown is used until
+/// the engine's catalog arrives. The catalog's own words decide; the wizard never guesses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum HarnessState {
     Ready,
     NotInstalled,
     CantStart,
+    CantRun,
     MasterOnly,
     Unknown,
 }
 
 /// One harness the Team step can pick.
 /// Holds the engine id, the plain name, its state and the engine's limited-control sentence, if any.
-/// Harnesses that are not installed or cannot run team agents are listed but cannot be picked.
+/// Harnesses that are not installed, can't run or cannot run team agents are listed but cannot
+/// be picked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct HarnessChoice {
     pub id: String,
@@ -440,7 +442,9 @@ impl Wizard {
             harnesses.iter().any(|h| {
                 same_harness(&h.id, id)
                     && match h.state {
-                        HarnessState::NotInstalled | HarnessState::CantStart => true,
+                        HarnessState::NotInstalled
+                        | HarnessState::CantStart
+                        | HarnessState::CantRun => true,
                         HarnessState::MasterOnly => !master,
                         HarnessState::Ready | HarnessState::Unknown => false,
                     }
@@ -807,6 +811,7 @@ impl Wizard {
                     let problem = match state {
                         HarnessState::NotInstalled => "is not installed",
                         HarnessState::CantStart => "can't run team agents yet",
+                        HarnessState::CantRun => "can't run on this Mac",
                         HarnessState::MasterOnly if !master => "runs only as the master",
                         HarnessState::MasterOnly | HarnessState::Ready | HarnessState::Unknown => {
                             return None;
@@ -1585,7 +1590,9 @@ impl Wizard {
                     return Reply::Handled;
                 };
                 let refused = match choice.state {
-                    HarnessState::NotInstalled | HarnessState::CantStart => true,
+                    HarnessState::NotInstalled
+                    | HarnessState::CantStart
+                    | HarnessState::CantRun => true,
                     HarnessState::MasterOnly => picker.target != PickFor::Master,
                     HarnessState::Ready | HarnessState::Unknown => false,
                 };

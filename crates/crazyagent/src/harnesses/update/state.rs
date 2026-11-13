@@ -260,7 +260,7 @@ fn tool_check(id: &str, method: &Method, real: &Path, roots: &Roots, installed: 
 /// its first line asks for when the tool resolver finds none, with the resolver's owner line.
 /// Any other read leaves the file to run as it is. Nothing is run. Inputs: the catalog's file
 /// and the resolver's places. Output: the need, or none.
-fn needs(executable: &Path, places: &crate::tools::Places) -> Option<HarnessNeeds> {
+pub(crate) fn needs(executable: &Path, places: &crate::tools::Places) -> Option<HarnessNeeds> {
     let missing = crate::tools::resolve_entry(executable, places).err()?;
     (missing.reason == crate::tools::Reason::NeedsInterpreter).then(|| HarnessNeeds {
         line: missing.line(),
