@@ -292,9 +292,8 @@ impl PinnedInstaller {
     /// under `setup/uv/tools/<package>`, into which uv installs only wheels whose SHA-256
     /// the lock lists, then, with group and other write removed from setup's Pythons and the
     /// environment (uv writes under the umask, DEC-162 R2), links to its programs in
-    /// `setup/bin`. A tool already linked
-    /// from the same lock is kept. A failed install removes its environment and leaves
-    /// the old links. Inputs: the lock and the Python version. Output: `setup_install_failed`
+    /// `setup/bin`. A tool already linked from the same lock is kept. A failed install
+    /// removes its environment and leaves the old links. Inputs: the lock and the Python version. Output: `setup_install_failed`
     /// when uv refuses a file or a program is missing, or another setup code.
     pub(super) fn install_locked(
         &self,
