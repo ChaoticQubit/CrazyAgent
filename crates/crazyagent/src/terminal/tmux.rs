@@ -213,13 +213,18 @@ pub fn installed_at(places: &crate::tools::Places) -> Option<PathBuf> {
         .map(|(tmux, _)| tmux.program)
 }
 
-/// The file a tmux last ran from, as (path, device, inode, size, change seconds and
-/// nanoseconds), so a file replaced in place is read again.
+/// A tmux file as (path, device, inode, size, change seconds and nanoseconds), so a file
+/// replaced in place is read again.
 type RanFile = (PathBuf, u64, u64, u64, i64, i64);
 
-/// The last tmux file whose version read passed, so setup and every terminal start do not
-/// each run it again. Only a pass is kept: a failed or slow read is asked again next time.
-static RAN: Mutex<Option<RanFile>> = Mutex::new(None);
+/// How many tmux files [`RAN`] keeps, one per path: the bundled one, with room for tests
+/// that each read their own at the same time.
+const RAN_MAX: usize = 4;
+
+/// The tmux files that answered as running, a pass or a read that ran out of time, so
+/// setup and every terminal start do not each wait on them again. A failed read is not
+/// kept: a fix outside the file, such as a library installed, counts on the next ask.
+static RAN: Mutex<Vec<RanFile>> = Mutex::new(Vec::new());
 
 /// Whether a tmux runs: `-V` reports a version within the bound and that version is one the
 /// terminal supports (3.2 or later). A read that runs out of time counts as running, since a
@@ -248,7 +253,7 @@ fn read(tmux: &crate::tools::Resolved, time: Duration) -> bool {
         RAN.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     };
-    if last().as_ref() == Some(&file) {
+    if last().contains(&file) {
         return true;
     }
     let words = tmux.argv();
@@ -257,23 +262,29 @@ fn read(tmux: &crate::tools::Resolved, time: Duration) -> bool {
     };
     let mut arguments = rest.to_vec();
     arguments.push("-V".into());
-    let read = crate::setup::process::run(
+    let version = crate::setup::process::run(
         Path::new(program),
         &arguments,
         &[],
         &std::env::temp_dir(),
         time,
     );
-    let passed = match read {
-        Err(crate::setup::InstallError(code)) => return code == "setup_timeout",
+    let running = match version {
+        Err(crate::setup::InstallError(code)) => code == "setup_timeout",
         Ok((false, _)) => false,
         Ok((true, output)) => crate::setup::process::version_from(&output)
-            .is_ok_and(|version| supported(version.as_str()) == Some(true)),
+            .is_ok_and(|found| supported(found.as_str()) == Some(true)),
     };
-    if passed {
-        *last() = Some(file);
+    if running {
+        let mut kept = last();
+        kept.retain(|(path, ..)| *path != file.0);
+        if kept.len() == RAN_MAX {
+            kept.remove(0);
+        }
+        kept.push(file);
+        assert!(kept.len() <= RAN_MAX);
     }
-    passed
+    running
 }
 
 impl Tmux {
