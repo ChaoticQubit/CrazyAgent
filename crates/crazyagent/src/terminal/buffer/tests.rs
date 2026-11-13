@@ -27,7 +27,10 @@ fn a_viewer_past_the_byte_bound_reads_behind_once_and_then_its_end() {
     let (feed, mut chunks) = buffer();
     let chunk = vec![b'a'; CHUNK_BYTES_MAX];
     for _ in 0..VIEWER_BUFFER_BYTES_MAX / CHUNK_BYTES_MAX + 10 {
-        assert!(feed.push(&chunk), "a slow viewer is never dropped by the host");
+        assert!(
+            feed.push(&chunk),
+            "a slow viewer is never dropped by the host"
+        );
     }
     assert!(feed.push(b"newest"));
     assert_eq!(chunks.try_recv(), Ok(Chunk::Behind));

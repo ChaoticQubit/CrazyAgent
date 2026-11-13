@@ -445,8 +445,14 @@ fn a_viewer_that_falls_behind_reads_behind_and_a_fresh_view_draws_the_screen_now
         !contains(&seen, b"bytes of output skipped"),
         "no viewer ever reads a skipped-output line"
     );
-    assert!(seen.len() < flood, "the output the viewer could not keep was not read");
-    assert!(ended(&mut stream), "a viewer that read Behind reads its end next");
+    assert!(
+        seen.len() < flood,
+        "the output the viewer could not keep was not read"
+    );
+    assert!(
+        ended(&mut stream),
+        "a viewer that read Behind reads its end next"
+    );
     let fresh = host.attach(&agent).unwrap();
     assert!(
         contains(&fresh.redraw(), b"flood-42-done"),

@@ -231,7 +231,10 @@ impl TerminalStream {
 /// the view goes on from the screen as it is now with nothing lost or repeated after it.
 /// Takes the host the old viewer came from and the terminal name. Returns the new stream,
 /// whose `redraw` the view writes first, or the host's code, such as `terminal_agent_unknown`.
-pub async fn attach_again(host: Arc<dyn Host>, agent: AgentId) -> Result<TerminalStream, HostError> {
+pub async fn attach_again(
+    host: Arc<dyn Host>,
+    agent: AgentId,
+) -> Result<TerminalStream, HostError> {
     tokio::task::spawn_blocking(move || host.attach(&agent))
         .await
         .map_err(|_| failure("terminal_unavailable"))?

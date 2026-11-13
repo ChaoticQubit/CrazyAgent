@@ -1,12 +1,12 @@
 use super::*;
 use crate::platform::unix_socket::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
+#[cfg(unix)]
+use crate::terminal::buffer::Chunk;
 use crate::terminal::{
     AgentId, Host, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, TerminalFrame, TerminalRequest,
     TerminalStream,
 };
-#[cfg(unix)]
-use crate::terminal::buffer::Chunk;
 #[cfg(unix)]
 use crate::terminal::{CHUNK_BYTES_MAX, HostError, attach_again, type_prompt};
 use tokio::io::AsyncWrite;
