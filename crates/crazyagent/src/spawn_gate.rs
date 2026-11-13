@@ -330,26 +330,20 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
     bind_tcp_std(address)
 }
 
-/// Holds a free loopback TCP port with a close-on-exec socket that is bound but never
-/// listens, as a model provider that is down: while the socket is kept no other socket is
-/// given the port and every connect to it is refused. Input: none. Output: the socket,
-/// which frees the port when dropped, and the port.
+/// Holds a free loopback TCP port that refuses every connect, as a model provider that is
+/// down: a listener takes one connection from this process and is closed, so the port stays
+/// in use by that connection with nothing listening on it. The system then gives the port to
+/// no port-0 bind and refuses a bind that names it without `SO_REUSEADDR`. Input: none.
+/// Output: the connection's two ends, which free the port when dropped, and the port.
 #[cfg(unix)]
-pub fn refusing_tcp_port() -> io::Result<(std::os::fd::OwnedFd, u16)> {
-    use nix::sys::socket::{
-        AddressFamily, SockFlag, SockType, SockaddrIn, bind, getsockname, socket,
-    };
-    use std::os::fd::AsRawFd;
-    let socket = guarded(|| -> io::Result<std::os::fd::OwnedFd> {
-        let socket = socket(AddressFamily::Inet, SockType::Stream, SockFlag::empty(), None)?;
-        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
-        Ok(socket)
-    })?;
-    let any = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
-    bind(socket.as_raw_fd(), &SockaddrIn::from(any))?;
-    let port = getsockname::<SockaddrIn>(socket.as_raw_fd())?.port();
-    assert!(port != 0, "a bound socket holds a port");
-    Ok((socket, port))
+pub fn refusing_tcp_port() -> io::Result<([std::net::TcpStream; 2], u16)> {
+    let listener = bind_tcp_std("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let near = connect_tcp_std(address)?;
+    let (far, _) = accept_tcp_std(&listener)?;
+    drop(listener);
+    assert_eq!(far.local_addr()?, address, "the kept end holds the port");
+    Ok(([near, far], address.port()))
 }
 
 /// Binds a blocking UDP socket inside the gate.
