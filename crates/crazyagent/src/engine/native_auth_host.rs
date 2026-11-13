@@ -9,13 +9,18 @@ use std::sync::Arc;
 
 const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 /// The PATH every sign-in or token renewal child runs with, no folder added: a script
-/// harness starts through its resolved interpreter instead ([`sign_in_command`]).
+/// harness starts through its resolved interpreter instead ([`launch::handed_command`],
+/// [`sign_in_command`]).
 pub(crate) const SIGN_IN_PATH: &str = "/usr/bin:/bin";
 
-/// Starts a sign-in or token renewal child with no search path: the harness file itself, or
-/// for a script that asks `env` for its interpreter, such as an npm-built Codex asking for
-/// `node`, that interpreter's absolute file and then the script
-/// ([`crate::harnesses::interactive::launch_words`]). Input: the harness's real file.
+pub use launch::{HandedWord, handed_words};
+pub(crate) use launch::{LaunchWord, handed_command};
+
+/// Starts a token renewal child in the engine with no search path: the harness file itself,
+/// or for a script that asks `env` for its interpreter, such as an npm-built Codex asking
+/// for `node`, that interpreter's absolute file and then the script
+/// ([`crate::harnesses::interactive::launch_words`]). A sign-in custodian never resolves:
+/// it runs the words the engine handed it ([`launch`]). Input: the harness's real file.
 /// Output: the command with those words, or the tool resolver's owner line.
 pub(crate) fn sign_in_command(executable: &Path) -> Result<std::process::Command, EngineError> {
     let words = crate::harnesses::interactive::launch_words(executable)
@@ -72,8 +77,9 @@ pub async fn run_native_auth_custodian_with_codex(
     input: OwnedFd,
     executable: &Path,
     expected_sha256: &str,
+    launch: &[HandedWord<'_>],
 ) -> Result<(), EngineError> {
-    entry::run_with_codex(runtime_dir, input, executable, expected_sha256)
+    entry::run_with_codex(runtime_dir, input, executable, expected_sha256, launch)
         .await
         .map(|_| ())
 }
@@ -83,8 +89,9 @@ pub async fn run_native_auth_custodian_with_claude(
     input: OwnedFd,
     executable: &Path,
     expected_sha256: &str,
+    launch: &[HandedWord<'_>],
 ) -> Result<(), EngineError> {
-    entry::run_with_claude(runtime_dir, input, executable, expected_sha256)
+    entry::run_with_claude(runtime_dir, input, executable, expected_sha256, launch)
         .await
         .map(|_| ())
 }
@@ -140,6 +147,7 @@ pub(crate) struct RegisteredNativeAuthHost {
     identity: ExecutableIdentity,
     digest: [u8; 32],
     entry: Option<PathBuf>,
+    launch: Vec<LaunchWord>,
     #[cfg(not(target_os = "macos"))]
     seen: std::time::Instant,
     #[cfg(not(target_os = "macos"))]
@@ -202,6 +210,7 @@ impl RegisteredNativeAuthHost {
             identity,
             digest,
             entry: None,
+            launch: Vec::new(),
             #[cfg(not(target_os = "macos"))]
             seen,
             #[cfg(not(target_os = "macos"))]
@@ -313,21 +322,22 @@ impl RegisteredNativeAuthHost {
     }
 }
 
+/// Builds the sign-in custodian's command with a cleared environment: this engine's own
+/// file, the runtime folder and, for a Codex or Claude Code sign-in, the pinned harness and
+/// the launch the engine resolved for it ([`launch::hand_over`]). Inputs: the engine file,
+/// the runtime folder and the harness kind, file and words. Output: the command, or the pin
+/// error of a file that changed.
 fn custodian_command(
     executable: &Path,
     runtime_dir: &Path,
-    codex: Option<&RegisteredNativeAuthHost>,
+    harness: Option<(&str, &RegisteredNativeAuthHost, &[LaunchWord])>,
 ) -> Result<std::process::Command, EngineError> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let mut command = Command::new(executable);
     command.arg("native-auth-custodian").arg(runtime_dir);
-    if let Some(codex) = codex {
-        command
-            .arg("--codex-executable")
-            .arg(codex.verified_path()?)
-            .arg("--codex-sha256")
-            .arg(codex.verified_sha256()?);
+    if let Some((kind, harness, launch)) = harness {
+        launch::hand_over(&mut command, kind, harness, launch)?;
     }
     command
         .env_clear()
@@ -398,33 +408,53 @@ impl CustodianCause {
     }
 }
 
+/// The harness a custodian gets with the launch the engine resolved for it, a sign-in
+/// waiting for the first probe run when that is still going ([`launch::resolved_after_probe`]),
+/// or none when it cannot start, so the custodian ends the action without effect and it
+/// settles unavailable. Inputs: the pinned harness, its kind and the action. Output: both,
+/// or none.
+async fn handed(
+    harness: Arc<RegisteredNativeAuthHost>,
+    kind: &str,
+    action: &crate::engine::owner::NativeAuthAction,
+) -> Option<(Arc<RegisteredNativeAuthHost>, Vec<LaunchWord>)> {
+    let may_wait = matches!(
+        action,
+        crate::engine::owner::NativeAuthAction::SignIn { .. }
+    );
+    match launch::resolved_after_probe(&harness, may_wait).await {
+        Some(words) => Some((harness, words)),
+        None => {
+            eprintln!("native_auth_harness_unresolved harness={kind}");
+            None
+        }
+    }
+}
+
 pub(in crate::engine) async fn dispatch(
     work: crate::storage::NativeAuthWork,
     host: crate::engine::owner::transport::NativeAuthDispatchHost,
 ) -> Result<(), EngineError> {
     let executable = host.registered_executable()?;
-    let harness = work.fact().binding.connection.harness.as_str();
-    let codex = if harness == "codex" {
-        host.registered_codex_executable()?
-    } else {
-        None
+    let kind = work.fact().binding.connection.harness.as_str().to_owned();
+    let registered = match kind.as_str() {
+        "codex" => host.registered_codex_executable()?,
+        "claude" => host.registered_claude_executable()?,
+        _ => None,
     };
-    let claude = if harness == "claude" {
-        host.registered_claude_executable()?
-    } else {
-        None
+    let harness = match registered {
+        Some(harness) => handed(harness, &kind, &work.fact().action).await,
+        None => None,
     };
     let runtime_dir = host.owner_runtime_dir()?;
     let launch = host.prepare_native_auth_custody(work).await?;
-    let mut command =
-        custodian_command(executable.verified_path()?, &runtime_dir, codex.as_deref())?;
-    if let Some(claude) = claude.as_ref() {
-        command
-            .arg("--claude-executable")
-            .arg(claude.verified_path()?)
-            .arg("--claude-sha256")
-            .arg(claude.verified_sha256()?);
-    }
+    let mut command = custodian_command(
+        executable.verified_path()?,
+        &runtime_dir,
+        harness
+            .as_ref()
+            .map(|(harness, words)| (kind.as_str(), harness.as_ref(), words.as_slice())),
+    )?;
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(io_error)?;
     let cause = child.stderr.take().map(CustodianCause::new).transpose();
     let streams = match (child.stdin.take(), cause) {
@@ -499,3 +529,4 @@ mod entry_tests;
 mod executable_tests;
 #[cfg(test)]
 mod hash_backend_tests;
+mod launch;

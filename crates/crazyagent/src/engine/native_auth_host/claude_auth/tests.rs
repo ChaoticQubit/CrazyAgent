@@ -14,7 +14,7 @@ fn imp1035_claude_commands_use_only_official_auth_subcommands() {
         (ClaudeAuthCommand::Status, "status"),
         (ClaudeAuthCommand::Logout, "logout"),
     ] {
-        let command = auth_command(&claude, home, action).unwrap();
+        let command = auth_command(&[claude.clone().into_os_string()], home, action).unwrap();
         let args = command
             .get_args()
             .map(|value| value.to_str().unwrap())
@@ -42,39 +42,44 @@ fn imp1035_claude_commands_use_only_official_auth_subcommands() {
     }
 }
 
-/// A Claude Code file the tool resolver refuses to start, here a script whose interpreter
-/// is missing, fails as a launch that could not start, with `native_auth_claude_launch_failed`
-/// that the sign-in settles as LaunchFailed, never the resolver's sentence as its code.
+/// Every Claude Code auth child starts the launch words its custodian was handed, an
+/// interpreter and its first-line words before the script, never resolving a name itself.
 #[test]
-fn a_claude_harness_that_cannot_start_fails_as_a_launch_failure() {
-    let temp = tempfile::tempdir().unwrap();
-    let claude = std::fs::canonicalize(temp.path()).unwrap().join("claude");
-    std::fs::write(&claude, "#!/nonexistent/crazyagent-test-interpreter\n").unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+fn a_claude_auth_child_starts_the_handed_words_as_given() {
     let home = Path::new("/private/tmp/imp1035-profile");
+    let words: Vec<std::ffi::OsString> = vec![
+        "/bin/sh".into(),
+        "--flag".into(),
+        "/private/tmp/cli.js".into(),
+    ];
     for action in [
         ClaudeAuthCommand::Login,
         ClaudeAuthCommand::Status,
         ClaudeAuthCommand::Logout,
+        ClaudeAuthCommand::Renew,
     ] {
-        let failed = auth_command(&claude, home, action).unwrap_err();
-        assert_eq!(failed.0, "native_auth_claude_launch_failed");
+        let command = auth_command(&words, home, action).unwrap();
+        assert_eq!(command.get_program(), "/bin/sh");
+        let args: Vec<_> = command.get_args().take(2).collect();
+        assert_eq!(args, ["--flag", "/private/tmp/cli.js"]);
     }
 }
 
 #[test]
 fn imp1035_claude_command_rejects_relative_executable_and_profile() {
+    let profile = Path::new("/private/tmp/profile");
+    assert!(auth_command(&["claude".into()], profile, ClaudeAuthCommand::Login).is_err());
     assert!(
         auth_command(
-            Path::new("claude"),
-            Path::new("/private/tmp/profile"),
+            &["/bin/sh".into(), "cli.js".into()],
+            profile,
             ClaudeAuthCommand::Login
         )
         .is_err()
     );
     assert!(
         auth_command(
-            Path::new("/private/tmp/claude"),
+            &["/private/tmp/claude".into()],
             Path::new("profile"),
             ClaudeAuthCommand::Login
         )

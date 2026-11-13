@@ -306,6 +306,32 @@ fn native_auth_custodian_cli_explicit_codex_rejects_invalid_pin_before_bootstrap
     }
 }
 
+/// A custodian refuses launch words of any shape the engine never writes before it reads its
+/// bootstrap or touches a file.
+#[test]
+fn native_auth_custodian_cli_rejects_malformed_launch_words_before_bootstrap() {
+    let root = private_root();
+    for launch in [
+        vec!["--launch-argument", "x"],
+        vec!["--launch-file", "relative", "--launch-sha256"],
+        vec!["--launch-other"],
+    ] {
+        let mut args = arguments(root.path());
+        args.extend([
+            OsString::from("--codex-executable"),
+            root.path().join("codex-not-opened").into_os_string(),
+            OsString::from("--codex-sha256"),
+            OsString::from("0".repeat(64)),
+        ]);
+        args.extend(launch.into_iter().map(OsString::from));
+        assert_rejection(
+            observe(root.path(), &args, &[], true),
+            "native_auth_host_launch_invalid",
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
 #[test]
 fn native_auth_custodian_cli_whose_error_stream_nobody_reads_still_exits_with_its_failure() {
     let root = private_root();
