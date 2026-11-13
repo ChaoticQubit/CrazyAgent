@@ -13,6 +13,7 @@ const NEWER = `${OWN}- Ask before a force push.\n`;
 const CODEX = answering(`Here is the cleaned file.\n\n~~~\n${PROPOSAL}~~~`);
 const QUESTION = "Which pool runs this edit?";
 const PROPOSED = "Proposed instructions";
+const DOWN = "Can't reach this pool's model provider, so nothing was sent. Start it or pick another account, then try again.";
 const POOL = "local-pool";
 
 /** Saves instructions through the bridge the way the editor does. Inputs: the bridge, null
@@ -134,6 +135,23 @@ test("Edit with AI: On, a project's editor proposes on the project's pool with n
     await me.waitFor("the editor after Accept", (seen) => !seen.includes(PROPOSED));
     await me.capture("project-accepted");
     assert.equal(await text(bridge, null), APP, "Accept saves the project's file only");
+  }, 1, CODEX);
+});
+
+test("Edit with AI: a pool whose model provider refuses connections says nothing was sent and to start it, and the file stays", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-edit-ai-down-", async ({ project, me, page, site, bridge, provider }) => {
+    await write(bridge, project, OWN);
+    const closed = new Promise((done) => provider.server.close(done));
+    provider.server.closeAllConnections();
+    await closed;
+    assert.equal(await refused(bridge, project, null), "instructions_cleanup_provider_unreachable", "the engine names the stopped provider before any run");
+    await openProject(page, site, me, project);
+    await offers(page, true);
+    await me.click("Edit with AI", "button");
+    const shown = await me.waitFor("the stopped provider line", (seen) => seen.includes(DOWN), STEP_MS);
+    await me.capture("project-provider-down");
+    assert.ok(!shown.includes(PROPOSED), "no proposal shows");
+    assert.equal(await text(bridge, project), OWN, "the file stays as it was");
   }, 1, CODEX);
 });
 

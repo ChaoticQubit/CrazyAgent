@@ -173,7 +173,7 @@ async function addProject(bridge, repo, generation) {
  * the owner's repositories, serves the built app to a browser page on the first project's
  * Agents tab, runs the steps and stops everything. Inputs: the test context, the temporary
  * folder prefix, the steps (given the first project, every project, the engine root, the
- * owner on the page, the page, the served app and the bridge), how many projects, one to
+ * owner on the page, the page, the served app, the bridge and the listening model provider), how many projects, one to
  * four, the stand-in Codex script and whether the engine gets its own private temp folder
  * beside its root, as the owner's engine does, instead of the one holding it. Output: none. */
 export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_CODEX, { ownTemp = false } = {}) {
@@ -237,7 +237,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
         await me.unfold("Agents and tasks");
         await me.waitFor("the Hand off form on the Agents tab", (text) => text.includes("Hand off"));
-        await steps({ project, projects: ids, runtime, me, page, site, bridge });
+        await steps({ project, projects: ids, runtime, me, page, site, bridge, provider });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
