@@ -1,7 +1,9 @@
 use super::*;
-use crate::harnesses::update::{LastUpdate, Latest, Method};
+use crate::harnesses::update::{HarnessNeeds, LastUpdate, Latest, Method};
 use crate::harnesses::{Search, catalog};
+use crate::setup::{Dependency, DependencyStatus, SetupStatus, Version};
 use crate::tui::client::OwnerEvent;
+use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::screens::settings_accounts::tests::{bar_rows, ctx, render};
 use crate::tui::screens::settings_harnesses::update_copy;
@@ -11,13 +13,17 @@ use std::os::unix::fs::PermissionsExt;
 
 const LINE: &str = "/opt/homebrew/bin/npm install -g @openai/codex";
 const NEEDS_NODE: &str = "harness_install_needs_node";
+const NEEDS_LINE: &str = "codex needs node, which is missing. Install Node.js from nodejs.org, or run brew install node in Terminal. Then try again.";
+const NODE_FAILED: &str = "Node.js didn't download. Check the connection, then try again.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Sent {
     Catalog,
     Queue,
+    Setup,
     Versions(String),
     InstallMany(Vec<String>),
+    InstallNode,
     Other,
 }
 
@@ -30,6 +36,11 @@ fn sent(shell: &mut Shell) -> Vec<Sent> {
                 SettingsJob::HarnessQueued => Sent::Queue,
                 SettingsJob::HarnessVersions { id, look: false } => Sent::Versions(id),
                 SettingsJob::HarnessInstallMany { ids } => Sent::InstallMany(ids),
+                SettingsJob::AppSetup(AppSetupJob::Status) => Sent::Setup,
+                SettingsJob::AppSetup(AppSetupJob::Install {
+                    name: Dependency::Node,
+                    ..
+                }) => Sent::InstallNode,
                 _ => Sent::Other,
             });
         }
@@ -41,6 +52,7 @@ fn reads() -> Vec<Sent> {
     vec![
         Sent::Catalog,
         Sent::Queue,
+        Sent::Setup,
         Sent::Versions("codex".into()),
         Sent::Versions("claude-code".into()),
     ]
@@ -85,7 +97,38 @@ fn versions(id: &str, install: Option<&str>, refusal: Option<&str>) -> HarnessVe
         guide: Some(format!("https://example.test/{id}")),
         running: false,
         last: None,
+        needs: None,
     }
+}
+
+fn needs_node(id: &str) -> HarnessVersions {
+    HarnessVersions {
+        needs: Some(HarnessNeeds {
+            program: Some("node".into()),
+            line: NEEDS_LINE.into(),
+        }),
+        ..versions(id, None, None)
+    }
+}
+
+fn node(state: DependencyState) -> Arrival {
+    setup(state, false)
+}
+
+fn setup(state: DependencyState, running: bool) -> Arrival {
+    arrival(SettingsEvent::AppSetup(AppSetupEvent::Status(Ok(
+        SetupStatus {
+            dependencies: vec![DependencyStatus {
+                name: Dependency::Node,
+                label: "Node.js".into(),
+                state,
+            }],
+            pack: Vec::new(),
+            running,
+            notes: Vec::new(),
+            version: 1,
+        },
+    ))))
 }
 
 fn ended(ok: bool, code: Option<&str>, to: Option<&str>) -> LastUpdate {
@@ -114,6 +157,24 @@ fn answer(
     claude: HarnessVersions,
     queued: &[&str],
 ) {
+    answer_with(
+        shell,
+        catalog,
+        codex,
+        claude,
+        queued,
+        DependencyState::Missing,
+    );
+}
+
+fn answer_with(
+    shell: &mut Shell,
+    catalog: &Entries,
+    codex: HarnessVersions,
+    claude: HarnessVersions,
+    queued: &[&str],
+    state: DependencyState,
+) {
     shell.arrive(arrival(SettingsEvent::Harnesses(Ok(catalog.all.clone()))));
     shell.arrive(arrival(SettingsEvent::HarnessQueue(Ok(queued
         .iter()
@@ -127,6 +188,7 @@ fn answer(
         "claude-code".into(),
         Ok(claude),
     )));
+    shell.arrive(node(state));
 }
 
 fn read_step(width: u16, height: u16) -> (Shell, Entries) {
@@ -559,4 +621,405 @@ fn the_worst_case_rows_keep_the_problem_and_buttons_in_an_80_by_24_frame() {
         rows.iter().all(|row| row.chars().count() <= 80),
         "{rows:#?}"
     );
+}
+
+#[test]
+fn a_found_codex_the_resolver_cannot_run_reads_needs_node_and_never_installed() {
+    let found = entries(&["codex"]);
+    let blocked = Row::Blocked {
+        line: NEEDS_LINE.into(),
+    };
+    assert_eq!(
+        harness_row(
+            "codex",
+            Some(entry(&found, "codex")),
+            Some(&needs_node("codex")),
+            &[]
+        ),
+        blocked
+    );
+    let fresh = HarnessVersions {
+        last: Some(ended(true, None, Some("0.52.0"))),
+        ..needs_node("codex")
+    };
+    assert_eq!(
+        harness_row("codex", Some(entry(&found, "codex")), Some(&fresh), &[]),
+        blocked,
+        "a fresh install that cannot run is not Installed"
+    );
+    assert_eq!(blocked.badge(), "Can't run");
+    assert_eq!(blocked.line(), NEEDS_LINE);
+    assert!(blocked.retry() && blocked.ended() && !blocked.tickable());
+}
+
+#[test]
+fn the_node_offer_follows_the_node_setup_row_while_a_harness_needs_node() {
+    let version = || Version::parse("26.13.1").unwrap();
+    let failed = || DependencyState::Failed {
+        reason: NODE_FAILED.into(),
+    };
+    let cases = [
+        (
+            false,
+            Some(DependencyState::Missing),
+            false,
+            NodeOffer::None,
+        ),
+        (
+            true,
+            Some(DependencyState::Missing),
+            false,
+            NodeOffer::Offer,
+        ),
+        (true, None, false, NodeOffer::Offer),
+        (
+            true,
+            Some(DependencyState::Installing),
+            false,
+            NodeOffer::Installing,
+        ),
+        (
+            true,
+            Some(failed()),
+            false,
+            NodeOffer::Failed {
+                reason: NODE_FAILED.into(),
+            },
+        ),
+        (
+            true,
+            Some(DependencyState::Checking),
+            false,
+            NodeOffer::None,
+        ),
+        (
+            true,
+            Some(DependencyState::Found { version: version() }),
+            false,
+            NodeOffer::None,
+        ),
+        (
+            true,
+            Some(DependencyState::Installed { version: version() }),
+            false,
+            NodeOffer::None,
+        ),
+        (
+            true,
+            Some(DependencyState::Missing),
+            true,
+            NodeOffer::Installing,
+        ),
+        (
+            true,
+            Some(DependencyState::Checking),
+            true,
+            NodeOffer::Installing,
+        ),
+        (true, None, true, NodeOffer::Installing),
+        (
+            true,
+            Some(DependencyState::Found { version: version() }),
+            true,
+            NodeOffer::None,
+        ),
+        (false, Some(DependencyState::Missing), true, NodeOffer::None),
+    ];
+    for (needed, node, busy, offer) in cases {
+        assert_eq!(
+            node_offer(needed, node.as_ref(), busy),
+            offer,
+            "needed {needed}, {node:?}, setup running {busy}"
+        );
+    }
+}
+
+#[test]
+fn n_installs_node_for_a_harness_that_needs_it_and_shows_its_progress_and_failure() {
+    let mut shell = step(120, 36);
+    assert_eq!(sent(&mut shell), reads());
+    let found = entries(&["codex"]);
+    let claude = || versions("claude-code", None, Some(NEEDS_NODE));
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.key(Key::Down);
+    let rows = render(&mut shell, 120, 36);
+    assert!(words(&rows).contains(NEEDS_LINE), "{rows:#?}");
+    assert!(shows(&rows, "Can't run"), "{rows:#?}");
+    assert!(!shows(&rows, INSTALLED), "{rows:#?}");
+    let help = bar(&rows);
+    assert!(help.contains(&format!("n {INSTALL_NODE}")), "{help}");
+    assert!(help.contains("r Try again"), "{help}");
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    assert_eq!(sent(&mut shell), reads());
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.arrive(node(DependencyState::Installing));
+    let rows = render(&mut shell, 120, 36);
+    assert!(shows(&rows, INSTALLING_NODE), "{rows:#?}");
+    assert!(!bar(&rows).contains(INSTALL_NODE), "{rows:#?}");
+    shell.refresh();
+    assert_eq!(sent(&mut shell), reads(), "reads again while Node installs");
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.arrive(node(DependencyState::Failed {
+        reason: NODE_FAILED.into(),
+    }));
+    let rows = render(&mut shell, 120, 36);
+    assert!(shows(&rows, NODE_FAILED), "{rows:#?}");
+    assert!(
+        bar(&rows).contains(&format!("n {INSTALL_NODE}")),
+        "{rows:#?}"
+    );
+    shell.refresh();
+    assert!(
+        sent(&mut shell).is_empty(),
+        "a failed Node install waits for n"
+    );
+}
+
+#[test]
+fn n_does_nothing_when_no_offered_harness_needs_node() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let none = entries(&[]);
+    answer(
+        &mut shell,
+        &none,
+        versions("codex", Some(LINE), Some("harness_update_not_installed")),
+        versions(
+            "claude-code",
+            Some(LINE),
+            Some("harness_update_not_installed"),
+        ),
+        &[],
+    );
+    assert!(!bar(&render(&mut shell, 120, 36)).contains(INSTALL_NODE));
+    shell.key(Key::Char('n'));
+    assert!(sent(&mut shell).is_empty());
+}
+
+#[test]
+fn a_sent_pick_that_ends_unable_to_run_counts_as_ended_and_failed() {
+    let found = entries(&["codex"]);
+    let mut setup = HarnessSetup::new();
+    setup.entries = found.all.clone();
+    setup.picks = vec!["codex"];
+    setup.versions.insert("codex", Ok(needs_node("codex")));
+    assert_eq!(
+        setup.progress(),
+        Progress {
+            done: 1,
+            total: 1,
+            failed: 1,
+            running: false
+        }
+    );
+}
+
+#[test]
+fn a_running_setup_keeps_the_node_install_shown_and_read_until_its_row_settles() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let found = entries(&["codex"]);
+    let claude = || versions("claude-code", None, Some(NEEDS_NODE));
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    assert_eq!(sent(&mut shell), reads());
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.arrive(setup(DependencyState::Missing, true));
+    let rows = render(&mut shell, 120, 36);
+    assert!(shows(&rows, INSTALLING_NODE), "{rows:#?}");
+    assert!(!bar(&rows).contains(INSTALL_NODE), "{rows:#?}");
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell),
+        reads(),
+        "the row reads missing until the install begins"
+    );
+}
+
+#[test]
+fn a_node_install_begun_while_reads_are_out_reads_again_once_they_land() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let found = entries(&["codex"]);
+    let claude = || versions("claude-code", None, Some(NEEDS_NODE));
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.key(Key::Down);
+    shell.key(Key::Char('r'));
+    assert_eq!(sent(&mut shell), reads());
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    assert!(
+        sent(&mut shell).is_empty(),
+        "the earlier reads are still out"
+    );
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    assert_eq!(
+        sent(&mut shell),
+        reads(),
+        "reads from before the install began are read again"
+    );
+}
+
+#[test]
+fn the_step_reads_again_while_the_node_row_is_checked_or_settled_but_a_harness_still_needs_node() {
+    let version = || Version::parse("26.13.1").unwrap();
+    for (needed, node, waits) in [
+        (true, Some(DependencyState::Checking), true),
+        (
+            true,
+            Some(DependencyState::Found { version: version() }),
+            true,
+        ),
+        (
+            true,
+            Some(DependencyState::Installed { version: version() }),
+            true,
+        ),
+        (true, Some(DependencyState::Missing), false),
+        (
+            true,
+            Some(DependencyState::Failed {
+                reason: NODE_FAILED.into(),
+            }),
+            false,
+        ),
+        (true, None, false),
+        (false, Some(DependencyState::Checking), false),
+        (
+            false,
+            Some(DependencyState::Installed { version: version() }),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            node_waits(needed, node.as_ref()),
+            waits,
+            "needed {needed}, {node:?}"
+        );
+    }
+}
+
+#[test]
+fn on_a_fresh_engine_whose_node_row_is_still_checked_the_offer_shows_once_the_check_ends() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let found = entries(&["codex"]);
+    let claude = || versions("claude-code", None, Some(NEEDS_NODE));
+    answer_with(
+        &mut shell,
+        &found,
+        needs_node("codex"),
+        claude(),
+        &[],
+        DependencyState::Checking,
+    );
+    assert!(!bar(&render(&mut shell, 120, 36)).contains(INSTALL_NODE));
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell),
+        reads(),
+        "a Node row still checked is read again"
+    );
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    let rows = render(&mut shell, 120, 36);
+    assert!(
+        bar(&rows).contains(&format!("n {INSTALL_NODE}")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn node_read_installed_before_the_harness_saw_it_reads_again_until_the_row_leaves_cant_run() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let found = entries(&["codex"]);
+    let claude = || versions("claude-code", None, Some(NEEDS_NODE));
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    assert_eq!(sent(&mut shell), reads());
+    let installed = || DependencyState::Installed {
+        version: Version::parse("26.13.1").unwrap(),
+    };
+    answer_with(
+        &mut shell,
+        &found,
+        needs_node("codex"),
+        claude(),
+        &[],
+        installed(),
+    );
+    assert!(shows(&render(&mut shell, 120, 36), "Can't run"));
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell),
+        reads(),
+        "Node is in but the Codex read came before it: read again"
+    );
+    let runs = HarnessVersions {
+        installed: Some("0.52.0".into()),
+        ..versions("codex", None, None)
+    };
+    answer_with(
+        &mut shell,
+        &found,
+        runs,
+        versions(
+            "claude-code",
+            Some(LINE),
+            Some("harness_update_not_installed"),
+        ),
+        &[],
+        installed(),
+    );
+    let rows = render(&mut shell, 120, 36);
+    assert!(shows(&rows, INSTALLED), "{rows:#?}");
+    assert!(!shows(&rows, "Can't run"), "{rows:#?}");
+    shell.refresh();
+    assert!(sent(&mut shell).is_empty(), "nothing needs Node any more");
+}
+
+#[test]
+fn a_screen_with_the_node_offer_reads_again_while_node_installs_or_the_step_waits_for_node() {
+    let version = || Version::parse("26.13.1").unwrap();
+    let failed = || DependencyState::Failed {
+        reason: NODE_FAILED.into(),
+    };
+    for (needed, node, busy, again) in [
+        (true, Some(DependencyState::Installing), false, true),
+        (true, Some(DependencyState::Missing), true, true),
+        (true, None, true, true),
+        (true, Some(DependencyState::Checking), false, true),
+        (
+            true,
+            Some(DependencyState::Installed { version: version() }),
+            false,
+            true,
+        ),
+        (true, Some(DependencyState::Missing), false, false),
+        (true, None, false, false),
+        (true, Some(failed()), true, false),
+        (false, Some(DependencyState::Installing), true, false),
+        (false, Some(DependencyState::Checking), false, false),
+    ] {
+        assert_eq!(
+            node_reads_again(needed, node.as_ref(), busy),
+            again,
+            "needed {needed}, {node:?}, busy {busy}"
+        );
+    }
 }

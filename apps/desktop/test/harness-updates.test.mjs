@@ -292,3 +292,114 @@ test("a failed settings read says why above the list and offers to try again, wi
   assert.doesNotMatch(html, />Install</);
   assert.doesNotMatch(markup(createElement(view.HarnessesView, { catalog, onCheck: quiet, settings: null })), /Try again/);
 });
+
+const NEEDS_LINE = "codex needs node, which is missing. Install Node.js from nodejs.org, or run brew install node in Terminal. Then try again.";
+const NODE_FAILED = "Node.js didn't download. Check the connection, then try again.";
+const codexNeeds = { id: "codex", method: { kind: "npm", package: "@openai/codex" }, installed: null, latest: { kind: "not_checked" }, command: "/opt/homebrew/bin/npm install -g @openai/codex@latest", install: null, refusal: null, guide: null, running: false, last: null, needs: { program: "node", line: NEEDS_LINE } };
+const setupWith = (state, running = false) => ({ dependencies: [{ name: "node", label: "Node.js", state }], pack: [], running, version: 1 });
+
+test("a found harness the tool resolver can't run reads Can't run with the resolver's line and Try again, never Ready or a version", () => {
+  const html = row({ entry: ready("codex", "Codex"), versions: codexNeeds, mode: "check_and_update", onRetry: quiet });
+  assert.match(html, />Can't run</);
+  assert.match(html, /<span class="[^"]*pj-error[^"]*">codex needs node, which is missing\. Install Node\.js from nodejs\.org, or run brew install node in Terminal\. Then try again\.<\/span>/);
+  assert.match(html, /<button[^>]*aria-label="Try again: Codex"[^>]*>Try again<\/button>/);
+  assert.doesNotMatch(html, />Ready</);
+  assert.doesNotMatch(html, /Version/);
+  assert.doesNotMatch(html, />Check for updates</);
+  assert.doesNotMatch(html, />Update</);
+  assert.doesNotMatch(html, />Install Node\.js</, "the Node.js offer is the page's, once, not each row's");
+});
+
+test("with harness updates off a harness that can't run still reads Can't run, and one that runs shows no version", () => {
+  const html = row({ entry: ready("codex", "Codex"), versions: codexNeeds, mode: "off", onRetry: quiet });
+  assert.match(html, />Can't run</);
+  assert.match(html, /codex needs node, which is missing\./);
+  assert.match(html, /<button[^>]*>Try again<\/button>/);
+  const runs = row({ entry: ready("codex", "Codex"), versions: { ...codexNeeds, needs: null }, mode: "off", onRetry: quiet });
+  assert.match(runs, />Ready</);
+  assert.doesNotMatch(runs, /Version unknown\./);
+  assert.doesNotMatch(runs, /Try again/);
+});
+
+test("a harness the engine lists as Can't run is grouped under Can't run, never Ready, and reads the engine's line and Try again before its versions arrive", () => {
+  const blocked = entry("codex", "Codex", { kind: "cant_run", reason: NEEDS_LINE });
+  const groups = view.harnessGroups([ready("claude-code", "Claude Code"), blocked, limited("cursor", "Cursor CLI"), missing("gemini-cli", "Gemini CLI")]);
+  assert.deepEqual(groups.map((group) => [group.title, group.entries.map((item) => item.id)]), [
+    ["Ready", ["claude-code"]],
+    ["Limited control", ["cursor"]],
+    ["Can't run", ["codex"]],
+    ["Not installed", ["gemini-cli"]],
+  ]);
+  const html = row({ entry: blocked, versions: null, mode: "check_and_update", onRetry: quiet });
+  assert.match(html, />Can't run</);
+  assert.match(html, /<span class="[^"]*pj-error[^"]*">codex needs node, which is missing\./);
+  assert.match(html, /<button[^>]*aria-label="Try again: Codex"[^>]*>Try again<\/button>/);
+  assert.doesNotMatch(html, />Ready</);
+  assert.doesNotMatch(html, /Limited control/);
+  const runs = row({ entry: blocked, versions: { ...codexNeeds, needs: null, installed: "0.167.1" }, mode: "check_and_update", onRetry: quiet });
+  assert.match(runs, />Ready</, "a fresh read that runs wins over the catalog's older word");
+  assert.doesNotMatch(runs, /Can't run|Try again/);
+});
+
+test("a read that stops needing a program on a row the catalog lists as Can't run reads the catalog again, so a Limited harness shows Limited, and a read that agrees with the catalog reads nothing more", () => {
+  const blocked = entry("codex", "Codex", { kind: "cant_run", reason: NEEDS_LINE });
+  const runs = { ...codexNeeds, needs: null, installed: "0.167.1" };
+  assert.equal(view.catalogReadAgain(blocked, runs), true, "the settle that clears needs reads the catalog again");
+  assert.equal(view.catalogReadAgain(blocked, codexNeeds), false, "a row that still needs its program agrees with the catalog");
+  assert.equal(view.catalogReadAgain(limited("codex", "Codex"), runs), false, "once the catalog lists it Limited, a clean read reads nothing more");
+  assert.equal(view.catalogReadAgain(ready("codex", "Codex"), runs), false);
+  assert.equal(view.catalogReadAgain(ready("codex", "Codex"), codexNeeds), true, "a row the catalog lists Ready that now needs a program reads the catalog again");
+  assert.equal(view.catalogReadAgain(blocked, { ...runs, running: true }), false, "an update that runs is followed first");
+  assert.equal(view.catalogReadAgain(missing("codex", "Codex"), codexNeeds), false, "a harness that is not installed never moves on a needs read");
+});
+
+test("a harness that is not installed never reads Can't run", () => {
+  const html = row({ entry: missing("codex", "Codex"), versions: { ...codexNeeds, install: "/opt/homebrew/bin/npm install -g @openai/codex" }, mode: "check_and_update", onRetry: quiet });
+  assert.match(html, />Not installed</);
+  assert.doesNotMatch(html, /Can't run|Try again/);
+});
+
+test("the page reads every harness with updates off too, and looks for a newer version only for an installed one when the settings say so", () => {
+  assert.equal(view.openLook(true, "check_and_update", true), true);
+  assert.equal(view.openLook(true, "check_only", true), true);
+  assert.equal(view.openLook(true, "off", true), false);
+  assert.equal(view.openLook(true, "check_and_update", false), false);
+  assert.equal(view.openLook(false, "check_and_update", true), false);
+});
+
+test("the page offers one Install Node.js while a harness needs Node, says it installs, and says why it failed", () => {
+  const catalog = { kind: "ok", value: [ready("codex", "Codex"), ready("claude-code", "Claude Code")] };
+  const shown = (node) => markup(createElement(view.HarnessesView, { catalog, onCheck: quiet, settings: api.UPDATE_SETTINGS_DEFAULT, onSettings: quiet, node, onInstallNode: quiet }));
+  assert.equal(shown({ kind: "offer" }).match(/>Install Node\.js<\/button>/g)?.length, 1);
+  const installing = shown({ kind: "installing" });
+  assert.match(installing, /Installing Node\.js\./);
+  assert.doesNotMatch(installing, />Install Node\.js<\/button>/);
+  const failed = shown({ kind: "failed", reason: NODE_FAILED });
+  assert.match(failed, /Node\.js didn't download\. Check the connection, then try again\./);
+  assert.equal(failed.match(/>Install Node\.js<\/button>/g)?.length, 1);
+  assert.doesNotMatch(shown({ kind: "none" }), /Node\.js/);
+});
+
+test("the page's Node.js offer follows the listed harnesses that need Node and setup's Node row", () => {
+  const reads = { codex: codexNeeds };
+  assert.deepEqual(view.pageNode(["codex"], reads, null), { kind: "offer" });
+  assert.deepEqual(view.pageNode(["codex"], reads, setupWith({ state: "missing" })), { kind: "offer" });
+  assert.deepEqual(view.pageNode([], reads, null), { kind: "none" }, "a harness gone from the list offers nothing");
+  assert.deepEqual(view.pageNode(["codex"], { codex: { ...codexNeeds, needs: { program: "ca-missing-runtime", line: "x" } } }, null), { kind: "none" });
+  assert.deepEqual(view.pageNode(["codex"], reads, setupWith({ state: "installing" })), { kind: "installing" });
+  assert.deepEqual(view.pageNode(["codex"], reads, setupWith({ state: "missing" }, true)), { kind: "installing" });
+  assert.deepEqual(view.pageNode(["codex"], reads, setupWith({ state: "failed", reason: NODE_FAILED })), { kind: "failed", reason: NODE_FAILED });
+  assert.deepEqual(view.pageNode(["codex"], reads, setupWith({ state: "installed", version: "26.13.1" })), { kind: "none" });
+});
+
+test("the page reads setup again while a listed harness needs Node and the Node row is checking, installing, or settled while a read still needs Node, and stops on a settled offer", () => {
+  const reads = { codex: codexNeeds };
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "checking" })), true, "a Node row still checking is read again");
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "installing" })), true);
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "missing" }, true)), true, "a setup run that goes on is read until it ends");
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "installed", version: "26.13.1" })), true, "Node is there but a read still needs it");
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "missing" })), false, "a settled Missing row shows the offer and is not read again");
+  assert.equal(view.pageNodeReads(["codex"], reads, setupWith({ state: "failed", reason: NODE_FAILED })), false);
+  assert.equal(view.pageNodeReads(["codex"], { codex: { ...codexNeeds, needs: null } }, setupWith({ state: "checking" })), false, "nothing listed needs Node");
+  assert.equal(view.pageNodeReads([], reads, setupWith({ state: "checking" })), false, "a harness gone from the list needs nothing");
+});

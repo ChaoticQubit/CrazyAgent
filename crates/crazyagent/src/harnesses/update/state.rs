@@ -1,10 +1,10 @@
 use super::run::run_raw;
 use super::{
-    BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessVersions, InstallFromApp,
-    LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots, START_FAILED,
-    UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide, install_command,
-    installed_version, latest, latest_from_pointer, lookup, method, pointer, run, shown,
-    update_command,
+    BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessNeeds, HarnessVersions,
+    InstallFromApp, LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots,
+    START_FAILED, UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide,
+    install_command, installed_version, latest, latest_from_pointer, lookup, method, pointer, run,
+    shown, update_command,
 };
 use crate::engine::EngineError;
 use crate::harnesses::{self, HarnessEntry};
@@ -116,9 +116,16 @@ pub fn set_settings(db: &Connection, settings: UpdateSettings) -> Result<(), Eng
 
 impl Roots {
     /// The roots of this machine: the engine's own HOME, the same one the harness search
-    /// uses, the usual Homebrew prefixes, and casks only on macOS.
-    /// Output: the roots; an unset or relative HOME is an empty home that matches nothing.
+    /// uses, the usual Homebrew prefixes, casks only on macOS and the resolver's places with
+    /// no engine root. Output: the roots; an unset or relative HOME is an empty home.
     pub fn system() -> Self {
+        Self::on(crate::tools::Places::from_environment(None))
+    }
+
+    /// The roots of this machine with the given resolver places: the engine's HOME, the
+    /// usual Homebrew prefixes, casks only on macOS and no npm yet. Input: the places.
+    /// Output: the roots; an unset or relative HOME is an empty home that matches nothing.
+    fn on(places: crate::tools::Places) -> Self {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|home| home.is_absolute())
@@ -128,6 +135,7 @@ impl Roots {
             brew_prefixes: BREW_PREFIXES.iter().map(PathBuf::from).collect(),
             casks: cfg!(target_os = "macos"),
             npm: None,
+            places,
         }
     }
 
@@ -136,21 +144,18 @@ impl Roots {
     /// places, and the engine's own prefix `<engine root>/setup/harnesses`. Nothing is run.
     /// Input: the engine root. Output: the roots; no npm when no usable Node is found.
     pub fn engine(engine_root: &Path) -> Self {
-        Self {
-            npm: engine_npm(engine_root),
-            ..Self::system()
-        }
+        let mut roots = Self::on(crate::tools::Places::from_environment(Some(engine_root)));
+        roots.npm = engine_npm(engine_root, &roots.places);
+        roots
     }
 }
 
 /// Finds the npm an npm harness installs with for one engine on the engine's own resolver
-/// places. Input: the engine root. Output: the npm, or none with no usable Node.
+/// places. Inputs: the engine root and those places. Output: the npm, or none with no
+/// usable Node.
 #[cfg(unix)]
-fn engine_npm(engine_root: &Path) -> Option<super::NpmInstall> {
-    engine_npm_at(
-        engine_root,
-        &crate::tools::Places::from_environment(Some(engine_root)),
-    )
+fn engine_npm(engine_root: &Path, places: &crate::tools::Places) -> Option<super::NpmInstall> {
+    engine_npm_at(engine_root, places)
 }
 
 /// Finds the npm an npm harness installs with: the Node setup's one test finds on the places
@@ -174,9 +179,10 @@ pub(crate) fn engine_npm_at(
     })
 }
 
-/// Finds no npm where setup has no Node. Input: the engine root, unused. Output: none.
+/// Finds no npm where setup has no Node. Inputs: the engine root and the places, unused.
+/// Output: none.
 #[cfg(not(unix))]
-fn engine_npm(_engine_root: &Path) -> Option<super::NpmInstall> {
+fn engine_npm(_engine_root: &Path, _places: &crate::tools::Places) -> Option<super::NpmInstall> {
     None
 }
 
@@ -251,6 +257,18 @@ fn tool_check(id: &str, method: &Method, real: &Path, roots: &Roots, installed: 
     }
 }
 
+/// What an installed harness lacks before it can run, read as a launch reads it: the program
+/// its first line asks for when the tool resolver finds none, with the resolver's owner line.
+/// Any other read leaves the file to run as it is. Nothing is run. Inputs: the catalog's file
+/// and the resolver's places. Output: the need, or none.
+pub(crate) fn needs(executable: &Path, places: &crate::tools::Places) -> Option<HarnessNeeds> {
+    let missing = crate::tools::resolve_entry(executable, places).err()?;
+    (missing.reason == crate::tools::Reason::NeedsInterpreter).then(|| HarnessNeeds {
+        line: missing.line(),
+        program: missing.needs,
+    })
+}
+
 /// The versions row of a harness that is not installed: the exact install line when the
 /// setting offers Install and a trusted tool can install it, the reason when not, and
 /// always the vendor's guide. No process is started.
@@ -275,6 +293,7 @@ fn missing(id: &str, roots: &Roots, settings: UpdateSettings) -> HarnessVersions
         guide: guide(id).map(str::to_owned),
         running: false,
         last: None,
+        needs: None,
     }
 }
 
@@ -489,11 +508,11 @@ impl Updates {
         }
     }
 
-    /// The versions row of an installed harness. With updates off nothing is started and
-    /// nothing is checked. The harness is asked for its version only when the table
-    /// recognizes its install or CrazyAgent starts that harness itself, so a look-alike
-    /// program with a catalog name is never run. Inputs: the catalog spec, the executable,
-    /// the roots, the settings and whether to check now. Output: the row without the job fields.
+    /// The versions row of an installed harness: with updates on, asked for its version only
+    /// when the table knows its install or CrazyAgent starts it (never a look-alike), and only
+    /// once it `runs`, so one that still needs a program is neither asked nor checked.
+    /// Inputs: the spec, executable, roots, settings, whether to check now and whether it runs.
+    /// Output: the row without the job fields.
     fn present(
         &self,
         spec: &'static harnesses::HarnessSpec,
@@ -501,6 +520,7 @@ impl Updates {
         roots: &Roots,
         settings: UpdateSettings,
         look: bool,
+        runs: bool,
     ) -> HarnessVersions {
         let id = spec.id;
         let real = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
@@ -512,14 +532,14 @@ impl Updates {
             Method::Unknown => spec.launch.is_none(),
             _ => true,
         };
-        let installed = if off || !asked {
+        let installed = if off || !asked || !runs {
             None
         } else {
             version_of(executable, &roots.home)
         };
         let latest = if off {
             Latest::NotChecked
-        } else if look {
+        } else if look && runs {
             let version = installed.as_deref().unwrap_or(NO_VERSION);
             let found = self.looked(id, &method, &real, roots, settings, version);
             let mut state = self.state();
@@ -545,13 +565,15 @@ impl Updates {
             install: None,
             running: false,
             last: None,
+            needs: None,
         }
     }
 
     /// Everything a client shows about one harness's versions. A check for a newer version
     /// runs only with `look`, and a vendor pointer is read only then, only for a
-    /// self-updating install and only with online lookups on. Inputs: the engine database,
-    /// the catalog entry, the roots and whether to check now. Output: the row.
+    /// self-updating install and only with online lookups on. A harness that still needs a
+    /// program is never run, so the reads that wait on Node start nothing. Inputs: the engine
+    /// database, the catalog entry, the roots and whether to check now. Output: the row.
     pub fn versions(
         &self,
         db: &Connection,
@@ -566,9 +588,18 @@ impl Updates {
             return unknown;
         };
         let mut versions = match &entry.executable {
-            Some(executable) => self.present(spec, executable, roots, settings, look),
+            Some(executable) => {
+                let needs = needs(executable, &roots.places);
+                let runs = needs.is_none();
+                HarnessVersions {
+                    needs,
+                    ..self.present(spec, executable, roots, settings, look, runs)
+                }
+            }
             None => missing(spec.id, roots, settings),
         };
+        assert!(versions.needs.is_none() || versions.installed.is_none());
+        assert!(versions.needs.is_none() || entry.executable.is_some());
         let state = self.state();
         versions.running = state.running == Some(spec.id);
         versions.last = state.last.get(spec.id).cloned();

@@ -23,7 +23,7 @@ test("the TUI Harnesses step uses the desktop step's words", () => {
     ...Object.values(model.HARNESS_WORDS),
   ];
   for (const word of single) assert.ok(STEP.includes(word), word);
-  for (const kind of ["bundled", "installed", "offer", "refused", "reading", "waiting", "installing", "done", "failed"]) {
+  for (const kind of ["bundled", "installed", "offer", "refused", "reading", "waiting", "installing", "done", "failed", "blocked"]) {
     const badge = model.rowBadge({ kind, version: null, line: "", reason: "", guide: null });
     assert.ok(STEP.includes(badge.word), `${kind}: ${badge.word}`);
   }

@@ -10,16 +10,20 @@ use crate::quit_settings::QuitSettings;
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::SetupStatus;
 
-/// One request from the setup page: setup status and runs, default-pack changes,
-/// the projects home folder, the GitHub account, the sandbox settings, when finished
-/// agents' worktrees go, what quitting does to team agents and the master step, time and
-/// frame size limits.
+/// One request from the setup page: setup status and runs, one tool installed alone,
+/// default-pack changes, the projects home folder, the GitHub account, the sandbox settings,
+/// when finished agents' worktrees go, what quitting does to team agents and the master
+/// step, time and frame size limits.
 /// Input: built by the setup page. Output: run on the owner worker; the reply
 /// arrives as `SettingsEvent::AppSetup`.
 pub(in crate::tui) enum AppSetupJob {
     Status,
     Run {
         pack: Vec<String>,
+        generation: u64,
+    },
+    Install {
+        name: crate::setup::Dependency,
         generation: u64,
     },
     Pack {
@@ -81,6 +85,7 @@ pub(in crate::tui) enum PackChange {
 pub(in crate::tui) enum AppSetupEvent {
     Status(Result<SetupStatus, String>),
     Ran(Result<(), String>),
+    Installed(Result<(), String>),
     PackChanged(Result<(), String>),
     Home(Result<ProjectsHome, String>),
     HomeSet(Result<(), String>),
@@ -108,6 +113,7 @@ impl AppSetupJob {
         match self {
             Self::Status => "Status",
             Self::Run { .. } => "Run",
+            Self::Install { .. } => "Install",
             Self::Pack { .. } => "Pack",
             Self::Home => "Home",
             Self::SetHome { .. } => "SetHome",
@@ -137,6 +143,7 @@ impl AppSetupEvent {
         match job {
             AppSetupJob::Status => Self::Status(Err(problem)),
             AppSetupJob::Run { .. } => Self::Ran(Err(problem)),
+            AppSetupJob::Install { .. } => Self::Installed(Err(problem)),
             AppSetupJob::Pack { .. } => Self::PackChanged(Err(problem)),
             AppSetupJob::Home => Self::Home(Err(problem)),
             AppSetupJob::SetHome { .. } => Self::HomeSet(Err(problem)),
@@ -177,6 +184,11 @@ impl NativeOwner {
             ),
             AppSetupJob::Run { pack, generation } => AppSetupEvent::Ran(applied(
                 controller.run_setup(pack, generation).await,
+                "setup_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::Install { name, generation } => AppSetupEvent::Installed(applied(
+                controller.install_dependency(name, generation).await,
                 "setup_outcome_unknown",
                 lost,
             )),

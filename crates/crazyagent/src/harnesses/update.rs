@@ -7,6 +7,7 @@ pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
     UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
 };
+pub(crate) use state::needs;
 pub use state::{
     BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_LIST_INVALID,
     INSTALL_NOT_FOUND, INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS,
@@ -96,7 +97,8 @@ pub struct LastUpdate {
 
 /// Everything a client shows on one harness row about versions. `command` is the exact update
 /// line of an installed harness, `install` the exact install line of a missing one, `refusal`
-/// the code for why a button is not offered and `guide` the vendor's page for that case.
+/// the code for why a button is not offered, `guide` the vendor's page for that case and
+/// `needs` what an installed harness lacks before it can run, as the tool resolver reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessVersions {
@@ -110,6 +112,18 @@ pub struct HarnessVersions {
     pub guide: Option<String>,
     pub running: bool,
     pub last: Option<LastUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs: Option<HarnessNeeds>,
+}
+
+/// What an installed harness lacks before it can run, from the tool resolver
+/// (`crate::tools::resolve_entry`): the program its first line asks for, such as `node`
+/// for an npm-built Codex, and the resolver's one owner line for it. No path is sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessNeeds {
+    pub program: Option<String>,
+    pub line: String,
 }
 
 /// The owner's choice for harness updates: check and update, check only, or neither.
@@ -165,15 +179,17 @@ pub struct UpdateSettings {
 }
 
 /// The folders an install is recognized by: the owner's home, the Homebrew prefixes in the
-/// order they are tried, whether Homebrew casks can be installed on this platform, and the
-/// npm that installs npm harnesses into the engine's own prefix, when a usable Node is found.
-/// Tests pass temp folders; the engine passes the real ones.
+/// order they are tried, whether Homebrew casks can be installed on this platform, the npm
+/// that installs npm harnesses into the engine's own prefix, when a usable Node is found, and
+/// the tool resolver's places a harness runs from. Tests pass temp folders; the engine
+/// passes the real ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roots {
     pub home: PathBuf,
     pub brew_prefixes: Vec<PathBuf>,
     pub casks: bool,
     pub npm: Option<NpmInstall>,
+    pub places: crate::tools::Places,
 }
 
 /// The npm an npm harness installs with and the node entry it runs, found by the one
