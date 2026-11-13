@@ -1054,11 +1054,33 @@ fn trusted_group(group: u32) -> bool {
 }
 
 /// Whether a group that can write a folder holds only root or this user: root's group, or
-/// this user's own group, as user private groups give it. Input: the group id. Output:
-/// the answer.
+/// this process's own group when it is this user's private group ([`own_group_private`]);
+/// a shared primary group, whose other users can write the folder, is not trusted.
+/// Input: the group id. Output: the answer.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn trusted_group(group: u32) -> bool {
-    group == 0 || group == rustix::process::getegid().as_raw()
+    group == 0 || (group == rustix::process::getegid().as_raw() && own_group_private())
+}
+
+/// Whether this process's own group is this user's private group ([`private_group`]), read
+/// once through the system's user and group lookup, which may ask a directory server; a
+/// failed lookup counts as not private, so its folders fall to the stricter rule.
+/// Output: the answer.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn own_group_private() -> bool {
+    static PRIVATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PRIVATE.get_or_init(|| {
+        let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .ok()
+            .flatten();
+        let group = nix::unistd::Group::from_gid(nix::unistd::getegid())
+            .ok()
+            .flatten();
+        match (user, group) {
+            (Some(user), Some(group)) => private_group(&group.name, &group.mem, &user.name),
+            _ => false,
+        }
+    })
 }
 
 /// Whether a group named `name`, listing `members`, is the user private group of the user
@@ -1066,8 +1088,8 @@ fn trusted_group(group: u32) -> bool {
 /// Fedora make one per user; a shared primary group such as openSUSE's `users` is not.
 /// Inputs: the group's name, its listed members and the user's name. Output: the answer.
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
-fn private_group(_name: &str, _members: &[String], _user: &str) -> bool {
-    true
+fn private_group(name: &str, members: &[String], user: &str) -> bool {
+    !user.is_empty() && name == user && members.iter().all(|member| member == user)
 }
 
 /// Names no user id where launchd domains do not exist. Output: zero, unused off macOS.
