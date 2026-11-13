@@ -141,9 +141,9 @@ impl Places {
         places
     }
 
-    /// Whether a folder lies in an engine data folder's `setup` folder, which only a data
-    /// folder inside a project makes one agents can write. Input: the folder. Output: the
-    /// answer.
+    /// Whether a folder lies in an engine data folder's `setup` folder, which agents can
+    /// write only when that data folder sits inside a project or a `.crazyagent` folder.
+    /// Input: the folder. Output: the answer.
     fn in_engine_setup(&self, folder: &Path) -> bool {
         self.engine_roots
             .iter()

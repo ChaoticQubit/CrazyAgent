@@ -527,6 +527,28 @@ fn a_tool_in_the_setup_folder_of_an_engine_folder_inside_a_project_is_refused_by
     );
 }
 
+/// 2.4.1 R3: a script found in a trusted folder whose `env` interpreter sits only in the
+/// set-aside setup folder of an engine data folder inside a project is refused by the
+/// interpreter's file, never reported as needing an interpreter with an install hint.
+#[test]
+fn a_script_whose_interpreter_is_only_in_a_refused_setup_folder_names_that_file() {
+    let (_folder, home) = scratch();
+    let root = project(&home.join("work/repo")).join(".local-state/engine");
+    let interpreter = program(&root.join("setup/bin/crazyagent-dev-node"), NODE);
+    program(
+        &home.join(".local/bin/crazyagent-dev-script"),
+        "#!/usr/bin/env crazyagent-dev-node\n",
+    );
+    let engine = Places::engine(Some(&root), None, Some(home), Some(OsStr::new("")));
+    let missing = resolve("crazyagent-dev-script", &engine).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+    assert_eq!(missing.tool, "crazyagent-dev-script");
+    assert_eq!(
+        missing.refused.map(|refused| refused.file),
+        Some(interpreter)
+    );
+}
+
 /// R-M1: the engine's data folder holds the agents' HOMEs, worktrees and team state, which
 /// agents write. A PATH folder there is refused while the engine's own `setup/bin` is kept,
 /// and a file found in `setup/bin` whose real file sits in an agent's HOME is passed over.
@@ -556,7 +578,7 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
 
 /// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
 /// that sits in a temp folder, which agents with the temp folder grant and other users
-/// write, is refused. Probed folders pass the probes' own rule instead (`probe::kept`).
+/// write, is refused. Probed folders meet the same rule on the engine's places (2.4.1 R1).
 #[test]
 fn a_path_folder_in_a_temp_folder_is_refused() {
     let (_folder, home) = scratch();
