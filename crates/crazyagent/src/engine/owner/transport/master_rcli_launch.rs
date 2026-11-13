@@ -813,7 +813,7 @@ fallback_allowed = false
         use crate::model_choice::test_launch::{NotStarted, Slot, Tested, rcli_not_started};
         let case = Fixture::keyed().await;
         let generated = generated_home(&case, &keyed_connection());
-        let root = case.host.authority.root.path.clone();
+        let root = super::super::changes::engine_root(&case.host.authority).unwrap();
         let global = case.root.path().join("global.toml");
         let project = case.root.path().join("project.toml");
         let pool = reference("local-pool");
@@ -849,6 +849,53 @@ fallback_allowed = false
         assert_eq!(case.names(), before);
         let canonical = std::fs::canonicalize(&root).unwrap();
         assert!(Slot::take(&canonical, "rcli").is_some());
+        case.close().await;
+    }
+
+    /// M-5 with the engine root's generated SDK homes (2.4.0 KY-M1 layout): a pooled keyed
+    /// account whose generated home holds its config but no key file is not set up, so the
+    /// RCLI test launch for its provider waits for a set-up account; once the key file is
+    /// there, the same account is picked and the launch no longer waits for one.
+    #[tokio::test]
+    async fn an_rcli_test_launch_waits_while_the_keyed_account_home_lacks_its_key() {
+        use crate::model_choice::test_launch::{NotStarted, Tested, rcli_not_started};
+        let case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        let root = super::super::changes::engine_root(&case.host.authority).unwrap();
+        assert!(
+            std::fs::canonicalize(&generated)
+                .unwrap()
+                .starts_with(std::fs::canonicalize(&root).unwrap())
+        );
+        let global = case.root.path().join("global.toml");
+        let project = case.root.path().join("project.toml");
+        let pool = reference("local-pool");
+        let test = || {
+            super::super::master_rcli::model_test::run(
+                &case.host,
+                &root,
+                (&global, &project),
+                "owner-model",
+                "openai",
+                &pool,
+            )
+        };
+        let standin = case.root.path().join("synthetic-rcli");
+        std::fs::write(&standin, b"#!/bin/sh\nexit 3\n").unwrap();
+        std::fs::set_permissions(&standin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        case.host
+            .register_rcli_master_executable(
+                crate::engine::RegisteredNativeAuthHost::capture(&standin).unwrap(),
+            )
+            .unwrap();
+        let no_account = Ok((
+            Tested::Pending,
+            Some(rcli_not_started("openai", NotStarted::NoAccount)),
+        ));
+        assert!(!generated.join(".backboard/keys.json").exists());
+        assert_eq!(test(), no_account);
+        private_file(&generated.join(".backboard/keys.json"), b"{}");
+        assert_ne!(test(), no_account);
         case.close().await;
     }
 
