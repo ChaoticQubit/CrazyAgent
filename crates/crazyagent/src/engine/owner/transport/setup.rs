@@ -65,7 +65,7 @@ fn platform_installer(root: &Path) -> Arc<dyn Installer> {
 
 /// Finishes one owner request that touches setup, after the engine answered it: a setup
 /// status read gets each dependency's state from the last background version check, an
-/// applied setup run or one-dependency install starts in the background, and every removal, applied or
+/// applied setup run, one-dependency install or permission fix starts in the background, and every removal, applied or
 /// not, sweeps the folders and secrets it moved aside or left, an applied agent policy
 /// reaches the project's open IDE, and a Reconcile answered Committed with an applied result
 /// reaches every open IDE, since a Save's lost reply leaves that the only call after its
@@ -117,6 +117,14 @@ pub(super) async fn after_owner(
             OwnerResponse::Applied { operation },
         ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
             start_install(engine_root(authority)?, *name)?;
+        }
+        (
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::FixToolPermissions { name, tree },
+            },
+            OwnerResponse::Applied { operation },
+        ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
+            start_fix(engine_root(authority)?, *name, tree.clone())?;
         }
         (
             OwnerOperation::Apply {
@@ -179,21 +187,43 @@ fn start_check(root: &Path) {
     let guard = CheckGuard(root.to_path_buf());
     let installer = platform_installer(root);
     tokio::spawn(async move {
-        let found = tokio::task::spawn_blocking(move || {
-            Dependency::ALL.map(|dep| (dep, installer.lookup(dep)))
-        })
-        .await;
-        if let Ok(found) = found {
+        let looked = tokio::task::spawn_blocking(move || look(installer.as_ref())).await;
+        if let Ok((found, fixes)) = looked {
             progress::with(&guard.0, |state| {
                 state.checked = Some(progress::Checked {
                     at: std::time::Instant::now(),
-                    found: found.to_vec(),
+                    found,
                     probe: mark,
                 });
+                state.fixes = fixes;
             });
         }
         drop(guard);
     });
+}
+
+/// Looks for every dependency once, keeping the permission fix target of each one found and
+/// passed over (DEC-162). Input: the installer. Output: what each lookup found and the fix
+/// targets by dependency.
+fn look(
+    installer: &dyn Installer,
+) -> (
+    Vec<(Dependency, crate::setup::Lookup)>,
+    std::collections::BTreeMap<Dependency, crate::tools::permission_fix::Target>,
+) {
+    let found: Vec<_> = Dependency::ALL
+        .iter()
+        .map(|dep| (*dep, installer.lookup(*dep)))
+        .collect();
+    let fixes = found
+        .iter()
+        .filter_map(|(dep, lookup)| match lookup {
+            Ok(Err(missing)) => installer.fix_target(missing).map(|target| (*dep, target)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(found.len(), Dependency::ALL.len());
+    (found, fixes)
 }
 
 async fn dependency_rows(root: &Path, deadline: Instant) -> Vec<crate::setup::DependencyStatus> {
@@ -260,7 +290,7 @@ pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
 /// its pin. Only that row changes, and the next status read checks every tool again.
 /// Inputs: the engine root and the dependency. Output: Ok once it runs, or `setup_busy`.
 pub(super) fn start_install(root: PathBuf, dep: Dependency) -> Result<(), EngineError> {
-    let guard = begin_install(root, dep)?;
+    let guard = begin_one(root, dep)?;
     tokio::spawn(async move {
         let root = guard.0.clone();
         install_dependency(platform_installer(&root), &root, dep).await;
@@ -270,16 +300,18 @@ pub(super) fn start_install(root: PathBuf, dep: Dependency) -> Result<(), Engine
     Ok(())
 }
 
-/// Marks a one-dependency install as the running setup: refused while any run goes on,
-/// else running with only that dependency's earlier row cleared. Inputs: the engine root
-/// and the dependency. Output: the guard that ends the run, or `setup_busy`.
-fn begin_install(root: PathBuf, dep: Dependency) -> Result<RunGuard, EngineError> {
+/// Marks a one-dependency install or permission fix as the running setup: refused while
+/// any run goes on, else running with only that dependency's earlier row and fix failure
+/// cleared. Inputs: the engine root and the dependency. Output: the guard that ends the
+/// run, or `setup_busy`.
+fn begin_one(root: PathBuf, dep: Dependency) -> Result<RunGuard, EngineError> {
     let begun = progress::with(&root, |state| {
         if state.running {
             return false;
         }
         state.running = true;
         state.dependencies.remove(&dep);
+        state.fix_failed.remove(&dep);
         true
     });
     if !begun {
@@ -287,6 +319,52 @@ fn begin_install(root: PathBuf, dep: Dependency) -> Result<RunGuard, EngineError
     }
     assert!(progress::snapshot(&root).running);
     Ok(RunGuard(root))
+}
+
+/// Runs the owner's confirmed permission fix for one refused dependency alone in the
+/// background, as the setup row's Fix asks (DEC-162), one at a time with any other setup
+/// run. Inputs: the engine root, the dependency and the tree the owner confirmed. Output:
+/// Ok once it runs, or `setup_busy`.
+fn start_fix(root: PathBuf, dep: Dependency, tree: String) -> Result<(), EngineError> {
+    let guard = begin_one(root, dep)?;
+    tokio::spawn(async move {
+        let root = guard.0.clone();
+        fix_dependency(platform_installer(&root), &root, dep, tree).await;
+        drop(guard);
+    });
+    Ok(())
+}
+
+/// Removes group and other write from the confirmed tree through the installer, logs one
+/// line naming the tree and the counts or the code, keeps the failure's sentence on the
+/// dependency's row, and has the next status read check every tool again. Inputs: the
+/// installer, the engine root, the dependency and the confirmed tree.
+async fn fix_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency, tree: String) {
+    let shown = tree.clone();
+    let outcome = tokio::task::spawn_blocking(move || installer.fix_permissions(dep, &tree))
+        .await
+        .unwrap_or(Err(crate::tools::permission_fix::TOOL_FIX_FAILED));
+    match outcome {
+        Ok(report) => eprintln!(
+            "tool_fix_done tool={} tree={shown:?} changed={} shared={} skipped_foreign={} skipped_links={} skipped_other={}",
+            dep.program(),
+            report.changed,
+            report.shared,
+            report.skipped_foreign,
+            report.skipped_links,
+            report.skipped_other
+        ),
+        Err(code) => eprintln!(
+            "tool_fix_stopped tool={} tree={shown:?} code={code}",
+            dep.program()
+        ),
+    }
+    progress::with(root, |state| {
+        if let Err(code) = outcome {
+            state.fix_failed.insert(dep, plain_reason(code).to_owned());
+        }
+        state.checked = None;
+    });
 }
 
 async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency) {
