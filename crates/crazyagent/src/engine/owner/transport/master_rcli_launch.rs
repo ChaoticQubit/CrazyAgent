@@ -671,6 +671,70 @@ fallback_allowed = false
         case.close().await;
     }
 
+    /// The synthetic API key Fixture::keyed's account has saved, as save_key stores it.
+    const SAVED_KEY: &[u8] = b"sk-synthetic-ky-m1-saved-key";
+
+    /// A stand-in for the RCLI host's private key writer: it saves the key it reads after
+    /// the length prefix as the home's keys.json and answers with the configured_only ack
+    /// the engine's writer protocol expects, echoing the request's id, generation and
+    /// provider.
+    const KEY_WRITER: &str = r#"#!/bin/sh
+[ "$1" = --private-key-write ] || exit 2
+umask 077
+dd bs=1 skip=4 2>/dev/null >"$HOME/.backboard/keys.json" || exit 3
+id=$(printf '%s' "$2" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+generation=$(printf '%s' "$2" | sed 's/.*"generation":\([0-9][0-9]*\).*/\1/')
+provider=$(printf '%s' "$2" | sed 's/.*"provider":"\([^"]*\)".*/\1/')
+ack="{\"protocol_version\":1,\"request_id\":\"$id\",\"generation\":$generation,\"provider\":\"$provider\",\"status\":\"configured_only\"}"
+size=${#ack}
+printf "\\000\\000\\$(printf %03o $((size / 256)))\\$(printf %03o $((size % 256)))"
+printf '%s' "$ack"
+"#;
+
+    /// Saves the keyed account's synthetic key the way the add-account screen does: an
+    /// owner-only `account-keys` folder in the engine root holding an owner-only file named
+    /// by the key reference. Input: the fixture. Output: none.
+    fn save_key(case: &Fixture) {
+        let folder = case
+            .root
+            .path()
+            .join("state")
+            .join(crate::storage::accounts::ACCOUNT_KEYS);
+        if !folder.exists() {
+            private_directory(&folder);
+        }
+        private_file(&folder.join("synthetic-key-ref-legacy"), SAVED_KEY);
+    }
+
+    /// Writes KEY_WRITER as an owner-only executable in the fixture's private folder.
+    /// Input: the fixture. Output: its path, for EngineService::register_rcli_executable.
+    fn key_writer(case: &Fixture) -> PathBuf {
+        let path = case.root.path().join("rcli-key-writer");
+        private_file(&path, KEY_WRITER.as_bytes());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    /// KY-M1: a pooled pre-fix keyed account whose key is saved in the engine's key store
+    /// gets that key written into its generated home in the engine root before the master
+    /// launch, through the Configure flow and the registered key writer (a stand-in here),
+    /// and leaves no setup unsettled.
+    #[tokio::test]
+    async fn a_keyed_master_whose_generated_home_lacks_its_key_gets_its_saved_key_written() {
+        let mut case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        save_key(&case);
+        let writer = key_writer(&case);
+        case.service.register_rcli_executable(&writer).unwrap();
+        case.host.set_up_master_key(&case.prepared).await.unwrap();
+        assert_eq!(
+            std::fs::read(generated.join(".backboard/keys.json")).unwrap(),
+            SAVED_KEY
+        );
+        assert_eq!(unsettled_setups(&case), 0);
+        case.close().await;
+    }
+
     fn copy_prepared(prepared: &PreparedMasterTurn) -> PreparedMasterTurn {
         PreparedMasterTurn {
             text: prepared.text.clone(),
