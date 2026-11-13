@@ -156,6 +156,87 @@ pub fn source_label(source: &super::pack::PackSource) -> String {
 mod tests {
     use super::*;
     use crate::setup::{InstallError, Located, Version};
+    use crate::tools::probe::Mark;
+    use std::time::Duration;
+
+    /// The mark of a probe whose first run ended, so a tool not found reads Missing.
+    /// Output: the mark.
+    fn settled() -> Mark {
+        Mark {
+            generation: 1,
+            first_run_pending: false,
+        }
+    }
+
+    /// SETUP-PROBE-GAP: until the login-shell probe's first run ends, a tool not found may
+    /// still be on the login PATH, so its row reads Checking, which both clients read again;
+    /// once that run ended it reads Missing with the resolver's line. A found tool and a
+    /// refused check show as they are either way.
+    #[test]
+    fn a_tool_not_found_reads_checking_until_the_first_probe_run_ends() {
+        let progress = |first_run_pending| Progress {
+            checked: Some(Checked {
+                at: Instant::now(),
+                found: vec![
+                    (Dependency::Tmux, Ok(Err(Dependency::Tmux.not_found()))),
+                    (
+                        Dependency::Uv,
+                        Ok(Ok(Located {
+                            version: Version::parse("0.13.5").unwrap(),
+                            bundled: false,
+                            note: None,
+                        })),
+                    ),
+                    (Dependency::Graphify, Err(InstallError("setup_install_failed"))),
+                ],
+                probe: Mark {
+                    generation: 0,
+                    first_run_pending,
+                },
+            }),
+            ..Progress::default()
+        };
+        let pending = dependency_rows(&progress(true));
+        assert_eq!(pending[0].state, DependencyState::Checking);
+        assert!(matches!(pending[1].state, DependencyState::Found { .. }));
+        assert!(matches!(pending[2].state, DependencyState::Failed { .. }));
+        let ended = dependency_rows(&progress(false));
+        assert_eq!(
+            ended[0].state,
+            DependencyState::Missing {
+                line: crate::tools::TMUX_MISSING.to_owned()
+            }
+        );
+        assert_eq!(ended[1].state, pending[1].state);
+        assert_eq!(ended[2].state, pending[2].state);
+    }
+
+    /// SETUP-PROBE-GAP: a check is due when none ended, when it is [`RECHECK_AFTER`] old, and
+    /// at once when the probe's mark moved since the check read it, so a tool the login-shell
+    /// probe just found shows on the next status read instead of up to 30 s later.
+    #[test]
+    fn a_check_is_due_again_at_once_when_the_probe_mark_moved() {
+        let mark = Mark {
+            generation: 3,
+            first_run_pending: false,
+        };
+        let at = Instant::now();
+        let checked = Checked {
+            at,
+            found: Vec::new(),
+            probe: mark,
+        };
+        assert!(check_due(None, mark, at));
+        assert!(!check_due(Some(&checked), mark, at));
+        let almost = at + RECHECK_AFTER - Duration::from_millis(1);
+        assert!(!check_due(Some(&checked), mark, almost));
+        assert!(check_due(Some(&checked), mark, at + RECHECK_AFTER));
+        let moved = Mark {
+            generation: 4,
+            ..mark
+        };
+        assert!(check_due(Some(&checked), moved, at));
+    }
 
     /// DEC-157: a tmux found as the copy the app ships shows Bundled with its version, which
     /// clients read as `{"state":"bundled","version":...}`; any other copy stays Found.
@@ -175,6 +256,7 @@ mod tests {
                     (Dependency::Tmux, located(true)),
                     (Dependency::Uv, located(false)),
                 ],
+                probe: settled(),
             }),
             ..Progress::default()
         };
@@ -210,6 +292,7 @@ mod tests {
                             note: Some(note),
                         })),
                     )],
+                    probe: settled(),
                 }),
                 ..Progress::default()
             };
@@ -235,6 +318,7 @@ mod tests {
             checked: Some(Checked {
                 at: Instant::now(),
                 found: Dependency::ALL.map(|dep| (dep, Err(unsupported))).to_vec(),
+                probe: settled(),
             }),
             ..Progress::default()
         };
@@ -252,6 +336,7 @@ mod tests {
             checked: Some(Checked {
                 at: Instant::now(),
                 found: Dependency::ALL.map(|dep| (dep, Err(broken))).to_vec(),
+                probe: settled(),
             }),
             ..Progress::default()
         };
@@ -288,6 +373,7 @@ mod tests {
                     ),
                     (Dependency::Graphify, Ok(Err(needs.clone()))),
                 ],
+                probe: settled(),
             }),
             ..Progress::default()
         };
