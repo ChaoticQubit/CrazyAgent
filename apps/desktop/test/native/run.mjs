@@ -204,15 +204,17 @@ function captured(entry) {
 }
 
 /** The engine's environment for one suite: the run's own, or for the Node suite a clean Mac's:
- * a Codex built by npm in a folder of this run on PATH, no Node on PATH and an empty clean-Mac
- * gate root so the gate build sees no Homebrew; a shared prepared home is never written.
+ * a Codex the app's npm put in the engine prefix `<engine root>/setup/harnesses`, the one folder
+ * the resolver accepts here (it refuses PATH folders in a project or a temp folder), no Node on
+ * PATH and an empty clean-Mac gate root; the suite's home is never written.
  * Input: the run environment. Output: the engine environment. */
 function engineEnvironment(env) {
   if (suite !== "first-run-harnesses-node") return env;
-  const bin = mkdtempSync(join(evidence, "codex-"));
+  const bin = join(engineRoot, "setup", "harnesses", "bin");
+  mkdirSync(bin, { recursive: true, mode: 0o700 });
   writeFileSync(join(bin, "codex"), "#!/usr/bin/env node\n", { mode: 0o755 });
   const gate = mkdtempSync(join(evidence, "gate-"));
-  return { ...env, PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`, CRAZYAGENT_GATE_SYSTEM_ROOT: gate };
+  return { ...env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CRAZYAGENT_GATE_SYSTEM_ROOT: gate };
 }
 
 async function execute() {
