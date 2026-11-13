@@ -186,6 +186,14 @@ pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
     private(path, &metadata, 0o700, "700")
 }
 
+/// Whether a folder already is one [`private_folder`] leaves: a real folder, not a link,
+/// owned by this user with mode 700 where Unix modes exist. Nothing is created. Input: the
+/// folder. Output: the answer, false for a missing folder.
+pub(crate) fn is_private_folder(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && private(path, &metadata, 0o700, "700").is_ok())
+}
+
 fn private_settings(path: &Path, defaults: &str) -> Result<(), PathsError> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);

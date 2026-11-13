@@ -948,12 +948,16 @@ pub fn retire_old_copies(layout: &Layout, installed: &Path) {
 /// the command line link in `cli` that names the old engine is pointed at the new one first,
 /// then every release file there is removed and the folder goes once empty. A link that
 /// cannot be moved keeps the old copy, so it never dangles; anything CrazyAgent did not put
-/// there stays. Inputs: the layout, the engine kept and the link folder.
+/// there stays. Only a real, private folder of this user's (700, as 2.4.0 made it) is
+/// touched, so a linked or shared `bin` never leads a removal outside the data root (rv-code
+/// F1). Inputs: the layout, the engine kept and the link folder.
 fn retire_old_copies_with(layout: &Layout, installed: &Path, cli: Option<&Path>) {
-    if !installed.starts_with(layout.root().join("setup").join("bin")) {
+    let old = &layout.root().join("bin");
+    if !installed.starts_with(layout.root().join("setup").join("bin"))
+        || !crate::paths::is_private_folder(old)
+    {
         return;
     }
-    let old = &layout.root().join("bin");
     assert!(installed.is_absolute() && !installed.starts_with(old));
     let main = format!("crazyagent{}", std::env::consts::EXE_SUFFIX);
     if let Some(cli) = cli
