@@ -178,7 +178,7 @@ end(state, "sdk-two");
 assert.deepEqual(state.complete("two", "completed"), [{ kind: "completed", turn_id: "two", status: "succeeded" }]);
 }
 });
-test("a failed turn names the provider limit or rejected key the SDK reported, and nothing else names one", () => {
+test("a failed turn names the provider limit, rejected key or not-found model the SDK reported, and nothing else names one", () => {
 for (const [message, failure] of [
 ["OpenAI request failed (HTTP 429): Rate limit reached for requests", "rate_limited"],
 ["OpenAI request failed (HTTP 429): You exceeded your current quota, please check your plan and billing details.", "quota_exhausted"],
@@ -187,6 +187,10 @@ for (const [message, failure] of [
 ["OpenRouter request failed: HTTP 401", "invalid_authentication"],
 ["Google request failed (HTTP 403): API key not valid", "invalid_authentication"],
 ["openai-compatible request failed: HTTP 429", "rate_limited"],
+["OpenAI request failed (HTTP 404): The model `gpt-synthetic` does not exist or you do not have access to it.", "not_found"],
+["fd1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6a1b request failed (HTTP 404): model: claude-synthetic", "not_found"],
+["fd1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6a1b request failed: HTTP 404", "not_found"],
+["OpenRouter request failed (HTTP 400): synthetic/model is not a valid model ID", undefined],
 ["OpenAI request failed (HTTP 400): Invalid request", undefined],
 ["OpenAI request failed (HTTP 500): server error", undefined],
 ["The model said: OpenAI request failed (HTTP 429)", undefined],

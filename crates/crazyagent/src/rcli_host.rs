@@ -1196,6 +1196,10 @@ mod tests {
             );
             assert_eq!(serde_json::to_value(&value.0.event).unwrap(), body);
         }
+        let found =
+            json!({"kind":"completed","turn_id":"turn-a","status":"failed","failure":"not_found"});
+        let value = event(found.clone()).expect("a failed turn may name the host's not_found");
+        assert_eq!(serde_json::to_value(&value.0.event).unwrap(), found);
         let plain = json!({"kind":"completed","turn_id":"turn-a","status":"failed"});
         let value = event(plain.clone()).unwrap();
         assert!(matches!(

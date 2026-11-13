@@ -539,6 +539,13 @@ fn an_rcli_provider_failure_stops_the_turn_like_a_native_one() {
         assert_eq!(native(code), expected);
     }
     assert_eq!(failed_turn_code(None), "rcli_master_execution_failed");
+    let not_found = serde_json::from_value::<RcliProviderFailure>(serde_json::json!("not_found"))
+        .expect("the host's not_found is a known provider failure");
+    assert_eq!(
+        failed_turn_code(Some(not_found)),
+        "rcli_master_execution_failed",
+        "a 404 on a master turn stays a plain failed turn (DEC-150 addendum 9e)"
+    );
     assert_eq!(
         reason(failed_turn_code(None)),
         MasterReason::RuntimeUnavailable
