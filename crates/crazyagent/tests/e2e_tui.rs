@@ -2235,6 +2235,7 @@ mod models {
     use super::*;
     use crazyagent::client_controller::OwnerController;
     use crazyagent::harness_settings::{Access, Source};
+    use crazyagent::harnesses::finding::Found;
     use crazyagent::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
     use crazyagent::model_choice::{Models, NOT_SUPPORTED, Origin, Row, Slot, Written};
     use serde_json::{Value, json};
@@ -2320,31 +2321,48 @@ mod models {
             .collect()
     }
 
+    /// Makes the Models rows' scratch folder in this user's own temp folder and reads it
+    /// through its links, then checks no part of it is changeable by another user, the rule
+    /// the harness pin applies, so stand-ins inside it can be pinned. A world-writable /tmp,
+    /// as on most Linux machines, fails here: set TMPDIR to a private folder. Input: a name
+    /// prefix. Output: the folder, removed when dropped, and its real path.
+    fn private_scratch(prefix: &str) -> (tempfile::TempDir, PathBuf) {
+        let disk = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        let root = std::fs::canonicalize(disk.path()).unwrap();
+        assert_eq!(
+            crazyagent::service::changeable_by_others(&root),
+            None,
+            "the Models rows need a private temp folder (set TMPDIR to one), not {root:?}"
+        );
+        (disk, root)
+    }
+
     impl Tui {
-        /// Starts the engine with the stand-ins first on its PATH, saves a profile, a
-        /// projects home and one project, and opens the TUI on a settled Home. Input: a
-        /// scratch prefix. Output: the TUI.
+        /// Starts the engine with the stand-ins in the test HOME's `~/.local/bin` inside a
+        /// private scratch folder the harness pin accepts, on a PATH of that folder and the
+        /// system folders alone, so the pick takes the stand-ins and never an install of this
+        /// machine; saves a profile, a projects home and one project, and opens the TUI on a
+        /// settled Home. Input: a scratch prefix. Output: the TUI.
         fn start(prefix: &str) -> Self {
-            let disk = scratch("ca-e2e-models-");
-            let bin = disk.path().join("bin");
-            let home = disk.path().join("home");
-            let projects = disk.path().join("Projects");
-            for folder in [&bin, &home, &projects] {
-                std::fs::create_dir(folder).unwrap();
+            let (disk, root) = private_scratch("e2e-models-");
+            let home = root.join("home");
+            let bin = home.join(".local/bin");
+            let projects = root.join("Projects");
+            for folder in [&bin, &projects] {
+                std::fs::create_dir_all(folder).unwrap();
             }
             stand_in(
                 &bin.join("claude"),
                 &format!("{} (Claude Code)", qualified_versions()[0]),
             );
             stand_in(&bin.join("opencode"), "1.0.0");
-            let lists = disk.path().join("codex-lists");
+            let lists = root.join("codex-lists");
             codex_stand_in(&bin.join("codex"), &lists);
             stand_in(&bin.join("crazyagent-rcli"), "3.0.4");
-            let inherited = std::env::var_os("PATH").unwrap_or_default();
             let mut engine = Engine::new(prefix);
             engine.home = Some(home);
             engine.env_path = Some(
-                std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+                std::env::join_paths([bin, PathBuf::from("/usr/bin"), PathBuf::from("/bin")])
                     .unwrap(),
             );
             engine.launch();
@@ -2545,6 +2563,34 @@ mod models {
             drop(pty);
             engine.stop();
         }
+    }
+
+    /// The engine pins the Codex and Claude Code stand-ins of the test HOME at start, never
+    /// an install found on this machine, so no Models row runs a real harness with the test
+    /// HOME (V3SI-S1, STD-M1).
+    #[test]
+    fn the_models_rows_pin_their_stand_ins_and_never_a_real_install() {
+        let tui = Tui::start("ca-e2e-m00-");
+        let bin = tui
+            .engine
+            .home
+            .clone()
+            .expect("the Models rows set HOME")
+            .join(".local/bin");
+        for (id, file) in [("codex", "codex"), (HARNESS, "claude")] {
+            let found = tui.owner(move |controller| {
+                Box::pin(async move { controller.harness_find(id).await.unwrap() })
+            });
+            let stand_in = bin.join(file);
+            assert!(
+                matches!(
+                    &found,
+                    Found::Registered { path } | Found::Ready { path } if *path == stand_in
+                ),
+                "{id} must pin {stand_in:?}, found {found:?}"
+            );
+        }
+        tui.finish();
     }
 
     #[test]
