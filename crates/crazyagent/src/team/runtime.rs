@@ -10067,10 +10067,12 @@ impl TeamRuntime {
                 if end == TurnEnd::RateLimited {
                     self.pause(&project, &connection)?;
                 }
-                if end == TurnEnd::ModelRefusalSaid
-                    && let Some(check) = self.said_check(id)?
-                {
-                    spawn_check(check);
+                if end == TurnEnd::ModelRefusalSaid {
+                    match self.said_check(id) {
+                        Ok(Some(check)) => spawn_check(check),
+                        Ok(None) => {}
+                        Err(problem) => eprintln!("model_check_not_claimed cause={}", problem.0),
+                    }
                 }
                 self.count_turn(id, &project, master)?;
                 if team_tool {
@@ -10704,13 +10706,16 @@ impl TeamRuntime {
         match super::model_pick::claim_check(&self.connection, connection, model, now_ms())? {
             Claim::Held => Ok(None),
             Claim::Refused { checked_ms } => {
-                super::model_pick::refuse(
-                    &self.connection,
-                    project,
-                    connection,
-                    model,
-                    checked_ms,
-                )?;
+                let now = now_ms();
+                if !super::model_pick::refused(&self.connection, project, connection, model, now)? {
+                    super::model_pick::refuse(
+                        &self.connection,
+                        project,
+                        connection,
+                        model,
+                        checked_ms,
+                    )?;
+                }
                 Ok(None)
             }
             Claim::Run => Ok(Some(Check {
@@ -12485,7 +12490,13 @@ fn spawn_check(check: Check) {
         .name("model-check".into())
         .spawn(move || {
             let result = match run_check(&check) {
-                Ok(tested) => format!("{tested:?}").to_lowercase(),
+                Ok((tested, reason)) => {
+                    let tested = format!("{tested:?}").to_lowercase();
+                    reason.map_or_else(
+                        || tested.clone(),
+                        |reason| format!("{tested} reason={reason}"),
+                    )
+                }
                 Err(code) => code,
             };
             eprintln!("model_check harness={} result={result}", check.harness);
@@ -12497,9 +12508,9 @@ fn spawn_check(check: Check) {
 
 /// Runs the engine's check of a said refusal: one test launch of the model on the said
 /// turn's account only, waiting at most `CHECK_WAIT` for the harness's test slot, and
-/// records a refusal the engine read itself. Takes the check. Returns the decision, or the
-/// test launch's or the database's code.
-fn run_check(check: &Check) -> Result<Tested, String> {
+/// records a refusal the engine read itself. Takes the check. Returns the decision and its
+/// fixed-word pending reason, or the test launch's or the database's code.
+fn run_check(check: &Check) -> Result<(Tested, Option<String>), String> {
     let executable = |id: &str| (check.harness == id).then_some(check.executable.as_path());
     let request = test_launch::Request {
         root: &check.root,
@@ -12511,9 +12522,9 @@ fn run_check(check: &Check) -> Result<Tested, String> {
         target: test_launch::Target::Connection(&check.connection),
     };
     let asked = Instant::now();
-    let tested = loop {
+    let (tested, reason) = loop {
         match test_launch::run(&request) {
-            Ok((tested, _)) => break tested,
+            Ok(decided) => break decided,
             Err(test_launch::BUSY) if asked.elapsed() < CHECK_WAIT => {
                 std::thread::sleep(CHECK_POLL)
             }
@@ -12522,7 +12533,7 @@ fn run_check(check: &Check) -> Result<Tested, String> {
     };
     let db = crate::storage::versioned::open(&check.root).map_err(|problem| problem.0)?;
     check_ended(&db, check, tested, now_ms()).map_err(|problem| problem.0)?;
-    Ok(tested)
+    Ok((tested, reason))
 }
 
 /// The problem a sub-agent's turn leaves on its agent: the closed process with the turn's
