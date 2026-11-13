@@ -1,4 +1,4 @@
-import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, plainError, type Result } from "./api";
+import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, oneSelection, plainError, type Result } from "./api";
 import {
   allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterMessages, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
@@ -148,6 +148,8 @@ export interface ProjectContext {
   project_id: string;
   folder: string;
   items: ContextItem[];
+  unlisted_docs?: number;
+  docs_folder_cut?: boolean;
 }
 
 export interface ContextChunk {
@@ -185,10 +187,46 @@ export type Toolchain = "rust" | "node" | "python";
  * one per access level and kind of folder, per_agent one per agent. */
 export type ToolCacheScope = "shared" | "per_agent";
 
+/** When a wider saved access reaches agents already running (F08): when_idle stops each at its
+ * next idle point so its next start has it, the live master resuming its own conversation;
+ * next_start leaves it until it next starts. Lowering or removing an extra always stops at once. */
+export type AccessApply = "when_idle" | "next_start";
+
+/** One narrow extra the owner allows a project's agents beyond their level (F08): connecting to
+ * one unix socket, connecting to one port on this computer, or the owner's own temp folder. */
+export type AccessGrant = { kind: "socket"; path: string } | { kind: "port"; port: number } | { kind: "temp_folder" };
+
+/** One row of a project's extras log, newest first: granted and revoked by an owner save,
+ * allowed and denied by an access request question (by is `owner` or `question <id>`). */
+export interface GrantLogRow {
+  at_ms: number;
+  action: "granted" | "revoked" | "allowed" | "denied";
+  grant: string;
+  by: string;
+}
+
+/** Which of the project folder's local folders agents see (DEC-147.9): all of them, gitignored
+ * ones included, only the top-level folders the owner picked, or none. */
+export type SharedScope = "all" | "chosen" | "none";
+
+/** Whether agents may change the shared top-level folders git does not track. */
+export type SharedAccess = "read_only" | "read_write";
+
+/** A project's shared local folders choice: which folders, how, the top-level folders picked
+ * for Chosen folders and the secret paths the owner shared back for reading. */
+export interface SharedFolders {
+  scope: SharedScope;
+  access: SharedAccess;
+  chosen: string[];
+  secrets: string[];
+}
+
 /** A project's saved agent policy: the level, the network choice, the toolchain switches
  * that differ from the project's own use, whether git in the IDE runs the project's own
- * hooks, what the IDE may change in agent folders, and who shares the agents' tool cache,
- * shared when it is left out. */
+ * hooks, what the IDE may change in agent folders, who shares the agents' tool cache,
+ * shared when it is left out, when wider access reaches running agents and the allowed
+ * extras, the saved ones kept when left out, and the shared local folders, All and
+ * Read-only when left out. */
 export interface AgentPolicy {
   access: AgentAccess;
   network: AgentNetwork;
@@ -196,11 +234,15 @@ export interface AgentPolicy {
   ide_git_hooks: boolean;
   tool_cache?: ToolCacheScope;
   ide_agent_files: IdeAgentFiles;
+  apply_changes?: AccessApply;
+  grants?: AccessGrant[];
+  shared_folders?: SharedFolders;
 }
 
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
  * with the reason one can't run, the network choices, every detected toolchain, the IDE
- * hooks switch, the IDE agent folders choice and the tool cache choice with every choice. */
+ * hooks switch, the IDE agent folders choice, the tool cache choice with every choice, the
+ * shared local folders choice and the project folder's top-level folders to pick from. */
 export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
@@ -211,6 +253,13 @@ export interface PolicyView {
   tool_cache: ToolCacheScope;
   tool_caches: { scope: ToolCacheScope; label: string }[];
   ide_agent_files: IdeAgentFiles;
+  apply_changes?: AccessApply;
+  apply_choices?: { apply: AccessApply; label: string }[];
+  grants?: { grant: AccessGrant; label: string }[];
+  temp_folder?: { path: string | null; unavailable: string | null };
+  grant_log?: GrantLogRow[];
+  shared_folders: SharedFolders;
+  local_folders: string[];
   version: number;
 }
 
@@ -748,15 +797,17 @@ export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddO
 
 export const PAGES_MAX = 50;
 
-async function allRecords(collection: "pools" | "connections"): Promise<ModelAccessRecord[]> {
-  const records: ModelAccessRecord[] = [];
-  let page = await modelAccessPage(collection, false);
-  records.push(...page.items);
-  for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
-    page = await modelAccessPage(collection, true);
+function allRecords(collection: "pools" | "connections"): Promise<ModelAccessRecord[]> {
+  return oneSelection(async () => {
+    const records: ModelAccessRecord[] = [];
+    let page = await modelAccessPage(collection, false);
     records.push(...page.items);
-  }
-  return records;
+    for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
+      page = await modelAccessPage(collection, true);
+      records.push(...page.items);
+    }
+    return records;
+  });
 }
 
 /** Reads every pool with its member connections.
@@ -794,9 +845,11 @@ export async function setProjectPool(projectId: string, poolId: string | null, g
   return wrap(async () => {
     const opened = await openProject(projectId);
     if (!opened.fresh || opened.project_id !== projectId) throw { code: "invalid_project" };
-    const page = await modelAccessPage("pools", false);
-    if (!page.writable) throw { code: "settings_read_only" };
-    const state = receiptState(await editModelAccess(page.ticket, { kind: "assign_project_pool", project: projectId, pool: poolId }, generation));
+    const state = await oneSelection(async (): Promise<ReceiptState> => {
+      const page = await modelAccessPage("pools", false);
+      if (!page.writable) throw { code: "settings_read_only" };
+      return receiptState(await editModelAccess(page.ticket, { kind: "assign_project_pool", project: projectId, pool: poolId }, generation));
+    });
     if (state.kind !== "applied") return state;
     const saved = (await allRecords("pools")).flatMap((record) => record.kind === "pool" ? [record.pool] : []);
     return projectPoolIs(saved, projectId, poolId) ? state : { kind: "unconfirmed" } as ReceiptState;

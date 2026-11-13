@@ -8,7 +8,7 @@ const run = tabRunner(fixture);
 const onAccounts = (scene, check, ...rest) => run({ tab: "accounts", ...scene }, check, ...rest);
 const onGitHub = (scene, check, ...rest) => run({ tab: "github", ...scene }, check, ...rest);
 const onProfile = (scene, check, ...rest) => run({ tab: "profile", ...scene }, check, ...rest);
-const DIALOG = "dialog[open]";
+const DIALOG = "dialog[open]:not(:has(> .dialog-body > .user-dialog))";
 const top = (page) => page.evaluate("Fixture.top()");
 const read = (page) => page.evaluate("Fixture.sections()");
 const say = (page) => page.evaluate("Fixture.text()");
@@ -324,11 +324,12 @@ test("Profile's top shows its title and purpose with no action", async () => {
   assert.deepEqual(seen.actions, []);
 });
 
-test("Profile then Appearance, each field on its own line", async () => {
+test("Profile then Appearance then Learn CrazyAgent, each field on its own line", async () => {
   const sections = await onProfile({}, read);
-  assert.deepEqual(sections.map((section) => section.heading), ["Profile", "Appearance"]);
+  assert.deepEqual(sections.map((section) => section.heading), ["Profile", "Appearance", "Learn CrazyAgent"]);
   assert.deepEqual(sections[0].rows.map((row) => row.label), ["Name", "Role", "Short bio", "Preferred stack", "Replies", "Before acting"]);
   assert.deepEqual(sections[1].rows.map((row) => row.label), ["Theme", "Terminal input", "Questions show"]);
+  assert.deepEqual(sections[2].rows, [], "the replay entries are buttons in the section's body, not field rows");
   const by = Object.fromEntries(sections.flatMap((section) => section.rows).map((row) => [row.label, row]));
   for (const label of ["Name", "Role", "Replies", "Before acting", "Theme", "Terminal input", "Questions show"]) assert.ok(by[label].controlLeft > by[label].labelRight, `${label} ${JSON.stringify(by[label])}`);
   for (const label of ["Short bio", "Preferred stack"]) assert.ok(by[label].controlLeft < by[label].labelRight, `${label} stacks ${JSON.stringify(by[label])}`);
@@ -355,11 +356,12 @@ test("the chosen stack lines up with its field, and Save sits on the section's p
     const chip = document.querySelector(".set-row .chips .chip").getBoundingClientRect();
     const field = document.getElementById("profile-stack").getBoundingClientRect();
     const save = document.querySelector("form[aria-label=Profile] button[type=submit]").getBoundingClientRect();
-    const group = document.querySelector(".set-group").getBoundingClientRect();
-    return { chipLeft: chip.left, fieldLeft: field.left, below: group.bottom - save.bottom };
+    const group = document.querySelector(".set-group");
+    const padding = parseFloat(getComputedStyle(document.querySelector("form[aria-label=Profile] .set-body")).paddingBottom) + parseFloat(getComputedStyle(group).borderBottomWidth);
+    return { chipLeft: chip.left, fieldLeft: field.left, below: group.getBoundingClientRect().bottom - save.bottom, padding };
   })()`));
   assert.ok(Math.abs(seen.chipLeft - seen.fieldLeft) <= 1, JSON.stringify(seen));
-  assert.equal(seen.below, 13, JSON.stringify(seen));
+  assert.ok(seen.padding > 0 && Math.abs(seen.below - seen.padding) < 0.5, JSON.stringify(seen));
 });
 
 test("Save changes waits for a change and then sends the profile", async () => {
@@ -414,19 +416,19 @@ test("Theme changes the app's look from its line", async () => {
 });
 
 for (const [state, words] of [["error", /Couldn't load your profile\./], ["not_ready", /Your profile isn't ready yet/]]) {
-  test(`Profile's ${state} read keeps the title and Appearance and says why`, async () => {
+  test(`Profile's ${state} read keeps the title, Appearance and Learn CrazyAgent and says why`, async () => {
     const seen = await onProfile({ profile: state }, async (page) => ({ top: await top(page), words: await say(page), sections: await read(page) }));
     assert.equal(seen.top?.heading, "Profile");
     assert.match(seen.words, words);
-    assert.deepEqual(seen.sections.map((section) => section.heading), ["Appearance"]);
+    assert.deepEqual(seen.sections.map((section) => section.heading), ["Appearance", "Learn CrazyAgent"]);
   });
 }
 
-test("Profile still loading keeps the title and Appearance, with no form", async () => {
+test("Profile still loading keeps the title, Appearance and Learn CrazyAgent, with no form", async () => {
   const seen = await onProfile({ profile: "loading" }, async (page) => ({ top: await top(page), form: await count(page, "form[aria-label=Profile]"), sections: await read(page) }));
   assert.equal(seen.top?.heading, "Profile");
   assert.equal(seen.form, 0);
-  assert.deepEqual(seen.sections.map((section) => section.heading), ["Appearance"]);
+  assert.deepEqual(seen.sections.map((section) => section.heading), ["Appearance", "Learn CrazyAgent"]);
 });
 
 test("real Tab keys walk the profile's fields in order", async () => {

@@ -8,7 +8,9 @@ use crazyagent::engine::owner::{
     OwnerResponse, OwnerResult,
 };
 use crazyagent::protocol::*;
+use crazyagent::usage::service::{UsageService, start_for_engine};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -58,6 +60,27 @@ async fn await_stop() -> FixtureResult<()> {
     }
 }
 
+/// Starts the engine's usage upkeep beside the fixture engine when the native run sets
+/// `CRAZYAGENT_DESKTOP_TEST_USAGE_UPKEEP=1`, as the engine binary does for a team. It gets no
+/// harness executable and no lookup, so it never spawns a tool or calls a provider, and an
+/// account that is not signed in reads nothing. Input: the fixture root. Output: the upkeep,
+/// none when not asked for, or why it could not start.
+fn usage_upkeep(root: &Path) -> FixtureResult<Option<UsageService>> {
+    match std::env::var_os("CRAZYAGENT_DESKTOP_TEST_USAGE_UPKEEP") {
+        None => Ok(None),
+        Some(value) if value == "1" => start_for_engine(
+            root,
+            &root.join("g"),
+            &root.join("p"),
+            BTreeMap::new(),
+            None,
+        )
+        .map(Some)
+        .map_err(|problem| format!("usage upkeep did not start: {problem}").into()),
+        Some(_) => Err("the usage upkeep switch takes only 1".into()),
+    }
+}
+
 async fn serve(root: &Path, projects: &Path, metadata: bool) -> FixtureResult<()> {
     if !root.is_absolute() || std::fs::read_dir(root)?.next().is_some() {
         return Err("fixture requires a new empty absolute directory".into());
@@ -76,10 +99,20 @@ async fn serve(root: &Path, projects: &Path, metadata: bool) -> FixtureResult<()
         let config = resolve_config(&root.join("g"), &root.join("p"))?;
         EngineService::start(root, "e.sock", &config, &stopped).await?
     };
+    let upkeep = match usage_upkeep(root) {
+        Ok(upkeep) => upkeep,
+        Err(error) => {
+            service.shutdown().await?;
+            return Err(error);
+        }
+    };
     let result = match attach(root, projects).await {
         Ok(()) => await_stop().await,
         Err(error) => Err(error),
     };
+    if let Some(upkeep) = upkeep {
+        let _ = tokio::task::spawn_blocking(move || upkeep.stop()).await;
+    }
     let cleanup = service.shutdown().await;
     cleanup?;
     result
@@ -248,6 +281,18 @@ async fn observe_native_auth(id: &str, operation: Option<&str>) -> FixtureResult
     }))
 }
 
+/// Reads whether the owner skipped the Learn CrazyAgent guide through the engine's own
+/// learning read, independently of the window. Input: the engine socket from the
+/// environment. Output: one JSON line with the skipped flag only; no counts or step words.
+async fn observe_learning() -> FixtureResult<()> {
+    let socket =
+        std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET").ok_or("native fixture socket is required")?;
+    let client = Client::new(socket.into(), Duration::from_secs(3))?;
+    let (_, mut owner) = OwnerController::attach_configured(client, OwnerClientKind::Tui).await?;
+    let progress = owner.learning_progress().await?;
+    emit(json!({ "skipped": progress.skipped }))
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).take(4).collect();
@@ -259,6 +304,7 @@ async fn main() -> std::process::ExitCode {
             serve(Path::new(root), Path::new(projects), true).await
         }
         [mode] if mode == "observe-model-access" => observe_model_access().await,
+        [mode] if mode == "observe-learning" => observe_learning().await,
         [mode, id] if mode == "observe-native-auth" => match id.to_str() {
             Some(id) => observe_native_auth(id, None).await,
             None => Err("invalid connection id".into()),

@@ -67,14 +67,15 @@ test("an unqualified platform shows Unavailable with the platform name and offer
   for (const code of ["ide_project_folder_invalid", "git_exclude_invalid"]) assert.ok(engine.includes(`"${code}",`), code);
 });
 
-test("the IDE tab takes the place of Changes and Context once the engine's IDE can open", () => {
+test("the IDE tab takes the place of Changes once the engine's IDE can open, and Context stays after Questions (DEC-152)", () => {
   const ids = (tabs) => tabs.map((tab) => tab.id);
   const base = ids(page.TABS);
   assert.ok(!base.includes("ide"));
   assert.deepEqual(ids(page.projectTabs(undefined)), base, "until the engine answers, no IDE tab");
   const ready = page.projectTabs({ state: state({ state: "ready", version: "1.143.17183", root: "/x" }), platform: "macos" });
   assert.equal(ids(ready).indexOf("ide"), base.indexOf("changes"));
-  assert.ok(!ids(ready).includes("changes") && !ids(ready).includes("context"));
+  assert.ok(!ids(ready).includes("changes"));
+  assert.equal(ids(ready).indexOf("context"), ids(ready).indexOf("questions") + 1);
   assert.equal(ready.find((tab) => tab.id === "ide").label, "IDE");
   const lib = read("src-tauri/src/bridge/ide.rs");
   assert.doesNotMatch(lib, /IDE_TAB_FLAG|CRAZYAGENT_IDE_TAB/, "IDE-15 removed the desktop's own switch");

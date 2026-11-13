@@ -585,6 +585,19 @@ async fn a_chosen_codex_file_is_pinned_and_never_replaces_a_pinned_one() {
     .await;
 }
 
+/// Gives a file this user's own group, which the macOS changeable rule does not trust (only
+/// wheel and admin are), so a group-writable file is refused as changeable by others whatever
+/// group the temp folder hands down (R-L2, rv-secreview R2-L1). Input: the file.
+#[cfg(target_os = "macos")]
+fn in_own_group(file: &Path) {
+    let group = rustix::process::getegid().as_raw();
+    assert!(
+        group != 0 && group != 80,
+        "the row needs an untrusted group"
+    );
+    std::os::unix::fs::chown(file, None, Some(group)).unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_found_codex_that_fails_the_pin_checks_is_refused_with_its_code_not_missing() {
@@ -593,13 +606,14 @@ async fn a_found_codex_that_fails_the_pin_checks_is_refused_with_its_code_not_mi
         std::fs::create_dir(&bin).unwrap();
         let codex = physical_file(&bin, "codex", b"group-writable-codex");
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o775)).unwrap();
+        in_own_group(&codex);
         let path = std::env::join_paths([bin.clone()]).unwrap();
         assert_eq!(
             host.find_harness("codex", None, &on(&path), Some(&path))
                 .unwrap(),
             Found::Refused {
                 path: codex.clone(),
-                code: "native_auth_host_executable_unsafe".into()
+                code: crate::harnesses::finding::PATH_CHANGEABLE.into()
             }
         );
         assert!(host.registered_codex_executable().is_err());
@@ -607,7 +621,7 @@ async fn a_found_codex_that_fails_the_pin_checks_is_refused_with_its_code_not_mi
             host.register_installed_harness("codex", &on(&path), Some(&path))
                 .unwrap_err()
                 .0,
-            "native_auth_host_executable_unsafe"
+            crate::harnesses::finding::PATH_CHANGEABLE
         );
         let unknown = host
             .find_harness("aider", None, &on(&path), Some(&path))
@@ -629,6 +643,7 @@ async fn check_again_passes_over_a_group_writable_or_empty_codex_and_pins_a_good
         }
         let writable = physical_file(&group, "codex", b"group-writable-codex");
         std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+        in_own_group(&writable);
         let nothing = physical_file(&empty, "codex", b"");
         let safe = physical_file(&good, "codex", b"good-codex");
         let path = std::env::join_paths([group, empty, good]).unwrap();
@@ -645,11 +660,9 @@ async fn check_again_passes_over_a_group_writable_or_empty_codex_and_pins_a_good
             },
         );
         assert_eq!(picked.and_then(Result::ok), Some(safe.clone()));
+        let changeable = crate::harnesses::finding::PATH_CHANGEABLE.to_owned();
         let unsafe_code = "native_auth_host_executable_unsafe".to_owned();
-        assert_eq!(
-            passed,
-            vec![(writable, unsafe_code.clone()), (nothing, unsafe_code)]
-        );
+        assert_eq!(passed, vec![(writable, changeable), (nothing, unsafe_code)]);
         assert_eq!(
             host.find_harness("codex", None, &on(&path), Some(&path))
                 .unwrap(),

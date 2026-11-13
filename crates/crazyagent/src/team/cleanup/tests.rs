@@ -583,6 +583,36 @@ fn a_removed_agent_keeps_its_history_and_is_never_offered_to_wake() {
     assert!(case.kept(2));
 }
 
+/// F10: once cleanup removed an agent, the master's status lists it among the retired
+/// sub-agents by its label, so it hands their work to a new agent instead of waking them,
+/// and the status text says so; an agent cleanup kept is not listed.
+#[test]
+fn a_removed_agent_is_listed_to_the_master_as_retired() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    assert!(
+        crate::team::events::retired_agents(&case.db, &case.project)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    let label = crate::team::events::label(&case.db, 1).unwrap();
+    assert_eq!(
+        crate::team::events::retired_agents(&case.db, &case.project).unwrap(),
+        std::slice::from_ref(&label)
+    );
+    let text = crate::team::events::status(&case.db, &case.project)
+        .unwrap()
+        .text();
+    assert!(
+        text.contains(&format!(
+            "Retired sub-agents, whose worktrees are gone, so they cannot be woken; hand their work out with spawn() instead: {label}."
+        )),
+        "{text}"
+    );
+}
+
 /// DEC-123, After N days: the sweep removes the worktree of each finished agent past its wait,
 /// an agent with no finish time counting as past it, and keeps the rest, a check keeping one
 /// never stopping the others; once the wait is over the next pass takes the one that waited.
@@ -1650,6 +1680,67 @@ fn a_leftover_the_engine_cannot_delete_keeps_the_agent_offered_and_a_later_remov
     assert_eq!(case.remove(&[1]), removed(&[1]));
     assert!(!case.worktree(1).exists() && case.history_kept(1) && !case.known(1));
     assert!(case.retiring().is_empty() && case.listed().is_empty());
+    drop(unlocked);
+}
+
+/// F10 (L3 r1 F2): when git drops an agent's worktree record but leaves a file behind,
+/// the removal still forgets the worktree's agent branch record and drops the branch, as a
+/// full removal does, so a fresh start of the same agent at the same `agent-<id>` path in
+/// Named mode never inherits the old branch and fails with `changes_agent_branch_exists`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_leftover_removal_forgets_the_agent_branch_record_and_drops_the_branch() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    crate::landing::claim_task_branch(&case.db, &case.repo, &case.worktree(1), "fix-footer")
+        .unwrap();
+    let branch = crate::landing::name_agent_branch(
+        &case.db,
+        &case.repo,
+        &case.worktree(1),
+        &case.git_dir(1),
+    )
+    .unwrap();
+    let path = case.worktree(1).to_str().unwrap().to_owned();
+    let recorded = |case: &Case| -> i64 {
+        case.db
+            .query_row(
+                "SELECT COUNT(*) FROM landing_agent_branches WHERE worktree=?1",
+                [&path],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(recorded(&case), 1);
+    let stuck = case.worktree(1).join("target/stuck.bin");
+    write(&stuck, b"locked\n");
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlocked = Unlocked(stuck.clone());
+    assert!(chflags("uchg", &stuck));
+    assert_eq!(case.remove(&[1]), refused("cleanup_worktree_leftover"));
+    assert!(!case.git_dir(1).exists() && stuck.exists());
+    assert_eq!(recorded(&case), 0, "the branch record is forgotten");
+    let gone = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .args([
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{branch}"),
+            ])
+            .current_dir(&case.repo)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &case.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(!gone.status.success(), "the branch {branch} is dropped");
+    assert!(chflags("nouchg", &stuck));
     drop(unlocked);
 }
 

@@ -84,6 +84,28 @@ async function seedUsage(rows) {
   }
 }
 
+/** Writes one account's free resets into the fixture engine's own store, as a read that found
+ * a new one would, with weekly kind, an expiry three days out and a gain stamped now. Inputs:
+ * the account name and its count. Output: none. */
+function seedResets(name, count) {
+  assert.ok(ids[name], `${name} was added first`);
+  const now = Date.now();
+  const store = new DatabaseSync(join(dirname(process.env.CRAZYAGENT_DESKTOP_SOCKET), "engine.db"));
+  try {
+    store.exec("PRAGMA busy_timeout = 5000");
+    store.prepare("INSERT OR REPLACE INTO account_limit_extras (account,resets_count,reset_kinds,resets_expire_ms,resets_checked_ms,resets_gained_ms) VALUES (?,?,'weekly',?,?,?)")
+      .run(ids[name], count, now + 3 * 86_400_000, now, now);
+  } finally {
+    store.close();
+  }
+}
+
+/** Reads the free resets and credits line of each shown row. Output: the line by account name. */
+function rowExtras() {
+  return browser.execute(() => Object.fromEntries([...document.querySelectorAll("main .pool-row")].filter((row) => row.getClientRects().length)
+    .map((row) => [row.querySelector(".pool-name").textContent, row.querySelector(".pool-extras")?.textContent ?? null])));
+}
+
 /** Adds an OpenAI-compatible URL account through the app's own command. A URL account is never
  * held for sign-in, so it stands in for a key account here with no secret stored. Inputs: the
  * name and the URL. Output: its id. */
@@ -282,12 +304,32 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     assert.deepEqual(found.accounts.at(-1), { connection: ids[SIERRA], standing: { kind: "not_signed_in" } });
   });
 
+  it("each row ends with its free resets and credits line in the engine's words, and a new free reset is told once (DEC-154)", async () => {
+    const read = new Map((await command("desktop_usage_extras", { detail: false })).map((row) => [row.account, row.extras]));
+    for (const name of [ALPHA, BRAVO, CHARLIE, SIERRA]) assert.ok(read.has(ids[name]), `the engine answers ${name}`);
+    const url = read.get(ids[ALPHA]);
+    assert.equal(url.adapter, "not_reported", "a URL account on a host with no balance call is not read");
+    assert.equal(url.resets, null);
+    assert.equal(url.credits, null);
+    assert.equal(read.get(ids[SIERRA]).not_reported, "not reported by Claude Code");
+    seedResets(SIERRA, 2);
+    const claude = /^2 free resets \(weekly\), next expires .+ \(may break\) \u00b7 Credits: not reported by Claude Code$/;
+    let told = false;
+    await until(async () => {
+      told ||= (await toasts()).includes(`${SIERRA} has a new free reset. 2 free resets now.`);
+      const lines = await rowExtras();
+      return told && lines[ALPHA] === `Free resets and credits: ${url.not_reported}` && claude.test(lines[SIERRA] ?? "");
+    }, 75_000, "the rows did not show the engine's lines, or the new free reset was not told");
+    assert.ok(Object.values(await rowExtras()).every((line) => line !== null && !/\b0\b/.test(line)), "no row reads a bare 0");
+    await shot("pools-extras");
+  });
+
   for (const key of ["balanced", "manual", "use"]) {
     const order = ORDERS[key];
     it(`the default for every pool, ${order.label}, orders a pool on Default`, async () => {
       await click(option(APP, order.label));
       await rowsAre(lineup(order.rows), order.value);
-      await until(() => says("main .pool-app-hint", order.hint), UI_MS, `the hint did not follow ${order.label}`);
+      await until(() => says(`main section[aria-label=${JSON.stringify(APP)}] .pool-app-hint`, order.hint), UI_MS, `the hint did not follow ${order.label}`);
       await until(async () => await picked(POOL_ORDER) === `Default (${order.label})`, UI_MS, `Default did not name ${order.label}`);
       await orderSaid(`Order comes from ${order.label}, the default for every pool`);
       const saved = await command("desktop_account_schedule", {});

@@ -36,9 +36,10 @@ pub enum RecordSource {
 /// resumed conversation its record and the offset where this pane's turns begin, the
 /// project access level the agent started at, where its launch wrote the project context
 /// files that hold MCP secrets, the toolchains its sandbox granted, the loopback port of the
-/// model proxy its profile and variables name (S4b), and the project network it started
-/// under (CS-2). A record from an engine that did not keep the level, the files, the
-/// toolchains, the port or the network has none.
+/// model proxy its profile and variables name (S4b), the project network it started
+/// under (CS-2) and the owner's narrow grants its profile holds (F08). A record from an
+/// engine that did not keep the level, the files, the toolchains, the port, the network or
+/// the grants has none; no grants means none were held.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -62,6 +63,8 @@ pub struct PaneRecord {
     pub network: Option<AgentNetwork>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<LineageToken>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants: Option<Vec<crate::sandbox::policy::AccessGrant>>,
 }
 
 impl PaneRecord {
@@ -98,6 +101,7 @@ impl PaneRecord {
             proxy: None,
             network: None,
             lineage: None,
+            grants: None,
         })
     }
 
@@ -130,6 +134,14 @@ impl PaneRecord {
             .context
             .as_ref()
             .is_none_or(|files| files.home.is_absolute());
+        let grants = record.grants.as_ref().is_none_or(|grants| {
+            crate::sandbox::policy::AgentPolicy {
+                grants: grants.clone(),
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        });
         let toolchains = record.toolchains.as_ref().is_none_or(|toolchains| {
             toolchains.len() <= Toolchain::ALL.len()
                 && toolchains
@@ -144,6 +156,7 @@ impl PaneRecord {
             && resumed
             && context
             && toolchains
+            && grants
             && record.proxy != Some(0))
         .then_some(record)
     }
@@ -368,8 +381,7 @@ impl TerminalSession {
             unconfined,
             #[cfg(target_os = "macos")]
             unkept,
-            lineage: super::lineage_of(record.pid, unkept, unconfined, record.lineage.clone()),
-            followed: Instant::now(),
+            lineage: super::follower_of(record.pid, unkept, unconfined, record.lineage.clone()),
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: context,

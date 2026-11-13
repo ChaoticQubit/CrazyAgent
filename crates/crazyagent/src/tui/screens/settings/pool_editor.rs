@@ -468,6 +468,10 @@ fn saved(ctx: &mut Ctx) -> Flow {
 }
 
 impl Screen for PoolEditor {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Pools".into(), self.title().into()]
     }

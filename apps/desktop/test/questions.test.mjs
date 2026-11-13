@@ -350,3 +350,21 @@ test("a row read later takes the keyboard only while the owner has not put it an
   assert.equal(panel.keyboardFree({ ...inDrawer(true), inside: false }, drawer), false, "another dialog's head");
   assert.equal(panel.keyboardFree(inDrawer(false), null), false, "no drawer, a control keeps its focus");
 });
+
+test("the drawer with no open question says where agents' questions wait in the TUI's words, above any agent waiting in its terminal (DEC-141, F12)", async () => {
+  const { QuestionsPanel } = await import("../src/screens/team/questions.tsx");
+  const EMPTY = "No questions here. Agents' questions wait on the Questions page.";
+  const waiting = (count) => Array.from({ length: count }, (_, index) => ({ agent: index + 1, label: `A${index}`, waiting: "question", since_ms: 0, terminal: null }));
+  const drawer = (questions, more, agents) => renderToStaticMarkup(createElement(QuestionsPanel, {
+    projectId: "p", reload: forbidden, onOpen: forbidden,
+    read: { shown: { kind: "ok", value: { project_id: "p", questions, more, waiting: waiting(agents) } }, stale: null },
+  })).replace(/<[^>]+>/g, " ").replaceAll("&#x27;", "'").replace(/\s+/g, " ");
+  const empty = drawer([], 0, 0);
+  assert.ok(empty.includes(EMPTY), `an empty drawer points to the Questions page: ${empty}`);
+  assert.ok(!empty.includes("No agent is waiting on you."), "the old line is gone: an agent's question may still wait on the Questions page");
+  const terminal = drawer([], 0, 1);
+  assert.ok(terminal.includes(EMPTY), `with only an agent waiting in its terminal the line still shows: ${terminal}`);
+  assert.ok(terminal.indexOf(EMPTY) < terminal.indexOf("Waiting on you in their terminal"), "the line comes before the agents waiting in their terminal, as in the TUI");
+  assert.ok(!drawer([agentQuestion(1, "me", "Me")], 0, 0).includes(EMPTY), "an open question replaces the line");
+  assert.ok(!drawer([], 2, 0).includes(EMPTY), "questions past the page replace the line too");
+});

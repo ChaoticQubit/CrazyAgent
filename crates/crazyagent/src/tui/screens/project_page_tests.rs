@@ -47,6 +47,7 @@ fn ctx(width: u16, height: u16) -> Ctx {
     );
     ctx.width = width;
     ctx.height = height;
+    ctx.store.learning = Load::NotReady;
     ctx
 }
 
@@ -5338,6 +5339,27 @@ mod overview_tabs {
         let shown = frame(&mut page_with_overview(overview));
         assert!(shown.contains("Couldn't refresh the tabs. The account is out of usage"));
         assert!(shown.contains("Alpha reads papers."));
+    }
+
+    #[test]
+    fn a_run_waiting_for_an_account_says_why_and_never_that_the_refresh_failed() {
+        let reason = crate::project_overview::NO_ACCOUNT;
+        for (stale, running) in [(true, false), (false, true)] {
+            let mut overview = empty();
+            overview.failure = Some(reason.into());
+            overview.stale = stale;
+            overview.running = running;
+            let shown = flat(&mut page_with_overview(overview));
+            assert!(shown.contains(reason), "{shown}");
+            assert!(!shown.contains("Couldn't refresh the tabs"), "{shown}");
+        }
+        let mut ended = empty();
+        ended.failure = Some(reason.into());
+        let shown = flat(&mut page_with_overview(ended));
+        assert!(
+            shown.contains(&format!("Couldn't refresh the tabs. {reason}")),
+            "{shown}"
+        );
     }
 
     #[test]

@@ -178,9 +178,11 @@ pub enum Request {
     Process(Box<super::client::process::ProcessQuery>),
     Recovery(Box<super::client::recovery::RecoveryQuery>),
     Roadmap(Box<super::client::roadmap::RoadmapQuery>),
+    Demo(Box<super::client::demo::DemoQuery>),
     Questions(Box<super::client::questions::QuestionsQuery>),
     Cleanup(Box<super::client::cleanup::CleanupQuery>),
     Reveal(Box<super::client::ide::RevealQuery>),
+    Learning(Box<super::client::learning::LearningQuery>),
     Reconnect,
 }
 
@@ -227,9 +229,11 @@ impl std::fmt::Debug for Request {
             Self::Process(_) => "Process",
             Self::Recovery(_) => "Recovery",
             Self::Roadmap(_) => "Roadmap",
+            Self::Demo(_) => "Demo",
             Self::Questions(_) => "Questions",
             Self::Cleanup(_) => "Cleanup",
             Self::Reveal(_) => "Reveal",
+            Self::Learning(_) => "Learning",
             Self::Reconnect => "Reconnect",
         })
     }

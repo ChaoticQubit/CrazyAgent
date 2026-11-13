@@ -7,12 +7,13 @@ use super::new_project_view::{
 use super::planning_line::{planning, planning_value};
 use super::project::{
     Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, OVERVIEW_TAB_LABELS, Picks, ProjectScreen,
-    REVIEW_ROWS, RemoveChoice, Speaker, Tab, Transcript, memory_source, plain_problem,
-    research_kind,
+    REVIEW_ROWS, RemoveChoice, Speaker, Tab, Transcript, memory_source, overview_pending,
+    plain_problem, research_kind,
 };
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render, sanitize};
 use super::project_master::{activity_rows, last_activity};
+use super::project_team::window;
 use super::project_time::{clock, duration};
 use super::sessions::Sessions;
 use crate::project_overview::{
@@ -927,11 +928,18 @@ fn overview_tab_rows(
     }
     let mut rows = vec![Row::default(), strip];
     if let Some(failure) = &overview.failure {
-        let line = format!("Couldn't refresh the tabs. {}", sanitize(failure));
+        let (line, style) = if overview_pending(overview) {
+            (sanitize(failure), look.muted)
+        } else {
+            (
+                format!("Couldn't refresh the tabs. {}", sanitize(failure)),
+                look.warning,
+            )
+        };
         rows.extend(
             wrap_words(&line, width)
                 .into_iter()
-                .map(|line| Row::of(line, look.warning)),
+                .map(|line| Row::of(line, style)),
         );
     }
     let (notes, text) = overview_picked(overview, screen.overview_tab);
@@ -2062,9 +2070,13 @@ fn source(screen: &ProjectScreen, item: &ContextItem, look: &Look) -> (Row, Row)
     }
 }
 
-fn tree_rows(screen: &ProjectScreen, look: &Look, wide: bool, width: usize) -> Vec<Row> {
+/// Draws the Context tree: a row per folder and per file, the selected file marked.
+/// Inputs: the screen, the look, whether the tree sits beside the reader and its width.
+/// Output: the rows and the index of the selected file's row.
+fn tree_rows(screen: &ProjectScreen, look: &Look, wide: bool, width: usize) -> (Vec<Row>, usize) {
     let items = screen.tree();
     let mut rows = Vec::new();
+    let mut selected = 0;
     let mut folder = None;
     let focus = !screen.reading || wide;
     for (index, item) in items.iter().enumerate() {
@@ -2093,6 +2105,9 @@ fn tree_rows(screen: &ProjectScreen, look: &Look, wide: bool, width: usize) -> V
                 vec![Row::of(format!("{indent}{name}"), look.fg), badge, origin],
             )
         };
+        if index == screen.tree_cursor {
+            selected = rows.len();
+        }
         rows.push(list_row(
             row,
             width,
@@ -2101,7 +2116,58 @@ fn tree_rows(screen: &ProjectScreen, look: &Look, wide: bool, width: usize) -> V
             look,
         ));
     }
-    rows
+    assert!(rows.is_empty() || selected < rows.len());
+    (rows, selected)
+}
+
+/// Keeps the Context tree rows that fit, scrolled so the selected file stays in view.
+/// Inputs: the tree rows, the selected file's row and the rows there is room for.
+/// Output: at most `size` rows, and at least one when the tree has any.
+fn tree_window(rows: Vec<Row>, selected: usize, size: usize) -> Vec<Row> {
+    let size = size.max(1);
+    if rows.len() <= size {
+        return rows;
+    }
+    let first = window(selected, rows.len(), size);
+    let kept: Vec<Row> = rows.into_iter().skip(first).take(size).collect();
+    assert_eq!(kept.len(), size);
+    kept
+}
+
+/// The line the Context tree shows under its files when the engine left docs out of its
+/// listing, in the desktop's words (DEC-152), so a cut list never reads as whole.
+/// Inputs: how many docs were left out and whether the walk stopped before the whole docs
+/// folder. Output: the line, or none when nothing was left out.
+fn unlisted_line(unlisted: usize, cut: bool) -> Option<String> {
+    let folder = "the docs folder has more files than CrazyAgent reads";
+    let counted = (unlisted > 0).then(|| {
+        format!(
+            "{unlisted} more {} not listed",
+            if unlisted == 1 { "doc" } else { "docs" }
+        )
+    });
+    match (counted, cut) {
+        (None, false) => None,
+        (None, true) => Some(format!("More docs not listed: {folder}")),
+        (Some(counted), false) => Some(counted),
+        (Some(counted), true) => Some(format!("{counted}, and {folder}")),
+    }
+}
+
+/// Wraps the left-out docs line to the tree's width. Inputs: the screen, the width and the
+/// look. Output: the muted rows, or none when the listing left nothing out.
+fn unlisted_rows(screen: &ProjectScreen, width: usize, look: &Look) -> Vec<Row> {
+    screen
+        .context
+        .as_ref()
+        .and_then(|context| unlisted_line(context.unlisted_docs, context.docs_folder_cut))
+        .map(|line| {
+            wrap_words(&line, width.max(1))
+                .into_iter()
+                .map(|part| Row::of(part, look.muted))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn preview_rows(screen: &mut ProjectScreen, width: usize, room: usize, look: &Look) -> Vec<Row> {
@@ -2228,8 +2294,12 @@ fn context(
     if wide {
         let tree_width = 36;
         let preview_width = content.saturating_sub(39);
+        let unlisted = unlisted_rows(screen, tree_width, look);
+        let size = room.saturating_sub(lines.len() + 2 + unlisted.len() + 5);
+        let (rows, selected) = tree_rows(screen, look, true, tree_width);
         let mut tree = vec![Row::of("Files", look.accent), Row::default()];
-        tree.extend(tree_rows(screen, look, true, tree_width));
+        tree.extend(tree_window(rows, selected, size));
+        tree.extend(unlisted);
         tree.push(Row::default());
         tree.push(Row::of("Agents write results here", look.muted));
         tree.push(Row::of("as Markdown files.", look.muted));
@@ -2256,7 +2326,11 @@ fn context(
         }
         return (lines, None, help);
     }
-    lines.extend(tree_rows(screen, look, false, content));
+    let unlisted = unlisted_rows(screen, content, look);
+    let size = room.saturating_sub(lines.len() + unlisted.len() + 3);
+    let (rows, selected) = tree_rows(screen, look, false, content);
+    lines.extend(tree_window(rows, selected, size));
+    lines.extend(unlisted);
     lines.push(Row::default());
     lines.push(Row::of(
         "Agents write results here as Markdown. o opens a file in your editor.",

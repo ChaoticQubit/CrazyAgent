@@ -121,6 +121,10 @@ fn an_idle_pane_is_adopted_as_it_is() {
     assert_eq!(session.record(), Some(&record));
     assert_eq!(session.process_group(), record.pid);
     assert!(
+        session.lineage.is_some(),
+        "an adopted Full access pane follows its lineage on a thread of its own"
+    );
+    assert!(
         session.ready && !session.turn && !session.took_none(),
         "the adopted agent waits for its next prompt"
     );
@@ -415,6 +419,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         proxy: Some(49_152),
         network: None,
         lineage: None,
+        grants: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
@@ -668,6 +673,7 @@ fn keyed(key: &std::path::Path) -> PaneRecord {
         proxy: None,
         network: None,
         lineage: None,
+        grants: None,
     }
 }
 

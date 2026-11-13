@@ -156,6 +156,8 @@ fn planning_asks_before_it_can_replace_the_roadmap() {
         project_id: project.clone(),
         folder: "/Users/mira/Projects/notes-cli".into(),
         items,
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     };
     let brief = ContextItem {
         path: "context/brief.md".into(),
@@ -349,6 +351,28 @@ fn the_status_line_is_read_again_slowly_when_idle_and_quickly_while_a_check_runs
     assert_eq!(line.refresh(), Err(STATUS_CHECKING));
     assert_eq!(line.next_query(NOW + 64_999), None);
     assert!(line.next_query(NOW + 65_000).is_some());
+}
+
+#[test]
+fn a_check_waiting_for_an_account_says_why_without_the_failure_mark_until_the_check_ends() {
+    let reason = crate::roadmap_status::NO_ACCOUNT;
+    for (stale, running) in [(true, false), (true, true)] {
+        let mut line = StatusLine::new(alpha());
+        let mut waiting = checked(&[ItemStatus::Pending]);
+        waiting.problem = Some(reason.into());
+        waiting.stale = stale;
+        waiting.running = running;
+        exchange(&mut line, NOW, Ok(RoadmapReply::Status(Box::new(waiting))));
+        let text = shown(&line);
+        assert!(text.contains(reason), "{text}");
+        assert!(!text.contains('!'), "{text}");
+    }
+    let mut line = StatusLine::new(alpha());
+    let mut ended = checked(&[ItemStatus::Pending]);
+    ended.problem = Some(reason.into());
+    exchange(&mut line, NOW, Ok(RoadmapReply::Status(Box::new(ended))));
+    let text = shown(&line);
+    assert!(text.contains(&format!("! {reason}")), "{text}");
 }
 
 #[test]

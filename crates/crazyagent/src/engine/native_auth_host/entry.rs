@@ -1,5 +1,5 @@
-use super::RegisteredNativeAuthHost;
 use super::custody::CustodySession;
+use super::{HandedWord, RegisteredNativeAuthHost};
 use crate::engine::bootstrap::runner_binding;
 use crate::engine::owner::transport::native_auth_channel::NativeAuthCustodyChannel;
 use crate::engine::owner::{HostStamp, NativeAuthFact};
@@ -72,7 +72,7 @@ pub(in crate::engine) async fn run(
     runtime_dir: &Path,
     input: OwnedFd,
 ) -> Result<NativeAuthFact, EngineError> {
-    run_inner(runtime_dir, input, None, None).await
+    run_inner(runtime_dir, input, None, None, &[]).await
 }
 
 pub(in crate::engine) async fn run_with_codex(
@@ -80,12 +80,14 @@ pub(in crate::engine) async fn run_with_codex(
     input: OwnedFd,
     executable: &Path,
     expected_sha256: &str,
+    launch: &[HandedWord<'_>],
 ) -> Result<NativeAuthFact, EngineError> {
     run_inner(
         runtime_dir,
         input,
         Some((executable, expected_sha256)),
         None,
+        launch,
     )
     .await
 }
@@ -95,14 +97,32 @@ pub(in crate::engine) async fn run_with_claude(
     input: OwnedFd,
     executable: &Path,
     expected_sha256: &str,
+    launch: &[HandedWord<'_>],
 ) -> Result<NativeAuthFact, EngineError> {
     run_inner(
         runtime_dir,
         input,
         None,
         Some((executable, expected_sha256)),
+        launch,
     )
     .await
+}
+
+/// The harness the engine handed a custodian, pinned with the launch the engine resolved
+/// for it: the harness and each launch file must hash to what the engine sent. Inputs: the
+/// harness file, its SHA-256 and the handed words. Output: the harness, or
+/// `native_auth_host_executable_changed`.
+fn pinned_harness(
+    executable: &Path,
+    expected_sha256: &str,
+    launch: &[HandedWord<'_>],
+) -> Result<RegisteredNativeAuthHost, EngineError> {
+    let harness = RegisteredNativeAuthHost::capture(executable)?;
+    if harness.verified_sha256()? != expected_sha256 {
+        return Err(EngineError("native_auth_host_executable_changed".into()));
+    }
+    Ok(harness.with_launch(super::launch::pinned(launch)?))
 }
 
 async fn run_inner(
@@ -110,7 +130,9 @@ async fn run_inner(
     input: OwnedFd,
     codex: Option<(&Path, &str)>,
     claude: Option<(&Path, &str)>,
+    launch: &[HandedWord<'_>],
 ) -> Result<NativeAuthFact, EngineError> {
+    assert!(launch.is_empty() || codex.is_some() || claude.is_some());
     let token = read_bootstrap(&input, Instant::now() + BOOTSTRAP_TIME_MAX).await?;
     drop(input);
     let mut channel = NativeAuthCustodyChannel::connect(runtime_dir, token).await?;
@@ -141,20 +163,14 @@ async fn run_inner(
         if codex.is_some() || fact.binding.connection.harness.as_str() != "claude" {
             return Err(EngineError("native_auth_method_mismatch".into()));
         }
-        let executable = RegisteredNativeAuthHost::capture(executable)?;
-        if executable.verified_sha256()? != expected_sha256 {
-            return Err(EngineError("native_auth_host_executable_changed".into()));
-        }
+        let executable = pinned_harness(executable, expected_sha256, launch)?;
         super::claude_auth::run(session, &mut channel, &executable).await?
     } else if let Some((executable, expected_sha256)) = codex {
         if fact.binding.connection.harness.as_str() != "codex" {
             return Err(EngineError("native_auth_method_mismatch".into()));
         }
-        let executable = RegisteredNativeAuthHost::capture(executable)?;
-        if executable.verified_sha256()? != expected_sha256 {
-            return Err(EngineError("native_auth_host_executable_changed".into()));
-        }
-        super::codex_auth::run(session, &mut channel, executable.verified_path()?).await?
+        let executable = pinned_harness(executable, expected_sha256, launch)?;
+        super::codex_auth::run(session, &mut channel, &executable).await?
     } else {
         session.seal_without_effect()?
     };

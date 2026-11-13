@@ -33,21 +33,42 @@ allowed_destinations = []
 [model_access]
 accounts = ["local-1"]
 connections = [
-  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://LOCAL_ADDRESS/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
 ]
 pools = [
   { id = "pool-a", name = "Main", members = ["local-a"], projects = [], roles = [], fallback_allowed = false },
 ]
 "#;
 
+/// Stands for the seeded local account's address in test settings. `Engine::with` swaps it
+/// for a loopback port that refuses every connection, so no row reaches a model server the
+/// host runs (a host Ollama on 127.0.0.1:11434 made the account read ready).
+const LOCAL_ADDRESS: &str = "LOCAL_ADDRESS";
+
 struct Engine {
     root: tempfile::TempDir,
     user: tempfile::TempDir,
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
+    _refusing: tokio::net::TcpSocket,
     controller: OwnerController,
     #[cfg(target_os = "macos")]
     _keychain: crate::credentials::test_keychain::TestKeychain,
+}
+
+/// Binds a loopback port without listening on it, so every connection to it is refused
+/// while the socket lives and no other process can take the port. Output: the socket, which
+/// the test engine holds, and its address.
+fn refusing_port() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
+    let socket =
+        crate::spawn_gate::bind_tcp_unlistened(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap();
+    let address = socket.local_addr().unwrap();
+    assert!(
+        address.ip().is_loopback() && address.port() != 0,
+        "{address}"
+    );
+    (socket, address)
 }
 
 impl Engine {
@@ -56,6 +77,9 @@ impl Engine {
     }
 
     async fn with(settings: &str) -> Self {
+        let (refusing, address) = refusing_port();
+        let settings = settings.replace(LOCAL_ADDRESS, &address.to_string());
+        assert!(!settings.contains(LOCAL_ADDRESS), "{settings}");
         let root = tempfile::Builder::new()
             .prefix("ca-tui-intake-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -68,7 +92,7 @@ impl Engine {
             keychain
         };
         let global = root.path().join("global.toml");
-        std::fs::write(&global, settings).unwrap();
+        std::fs::write(&global, &settings).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -98,6 +122,7 @@ impl Engine {
             user,
             _service: service,
             _stop: stop,
+            _refusing: refusing,
             controller,
             #[cfg(target_os = "macos")]
             _keychain: keychain,
@@ -198,6 +223,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
                 {
                     connection.questions(*query).unwrap();
+                }
+                Request::Learning(query) => {
+                    sent.push("learning");
+                    connection.learning(*query).unwrap();
                 }
                 other => panic!("intake pages never send {other:?}"),
             }
@@ -1167,11 +1196,14 @@ async fn first_run_setup_continues_without_installing_and_home_lists_what_is_mis
     let mut connection = engine.connect();
     assert_eq!(pump(&mut shell, &mut connection).await, ["settings"]);
     let rows = render(&mut shell, 80, 24);
-    let help = rows.last().unwrap();
+    let help = crate::tui::screens::settings_accounts::tests::bar_rows(&rows).join("\n");
     assert!(help.contains("Enter Install and continue"), "{rows:#?}");
     assert!(help.contains("c Continue without installing"), "{rows:#?}");
 
     shell.key(Key::Char('c'));
+    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::Home));
     settle_setup(&mut shell, &mut connection).await;
     let rows = render(&mut shell, 80, 24);
@@ -1267,6 +1299,81 @@ async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready()
         status.dependencies
     );
     assert_eq!(shows(&rows, "[ ] Install tools"), !found, "{rows:#?}");
+}
+
+/// DEC-153: a fresh engine has every learning step open, so Home shows Learn CrazyAgent with
+/// setup under Basics; h hides the guide through the engine's skipped mark and Home falls
+/// back to Get set up while setup is not done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn home_reads_learn_crazyagent_from_the_engine_and_hide_guide_keeps_get_set_up() {
+    let mut engine = Engine::start().await;
+    let mut ctx = screen_ctx(&engine.user());
+    ctx.store.learning = Load::Idle;
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    settle_setup(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "Learn CrazyAgent"), "{rows:#?}");
+    assert!(shows(&rows, " of 13 done"), "{rows:#?}");
+    assert!(shows(&rows, "Basics"), "{rows:#?}");
+    assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
+    assert!(shows(&rows, "[ ] Create a project"), "{rows:#?}");
+    assert!(!shows(&rows, "Get set up"), "{rows:#?}");
+    let footer = rows.last().unwrap();
+    assert!(footer.contains("h Hide guide"), "{rows:#?}");
+    let done = |rows: &[String]| -> usize {
+        let row = rows
+            .iter()
+            .find(|row| row.contains(" of 13 done"))
+            .expect("the progress line");
+        let text = row.rsplit('│').next().unwrap().trim();
+        text.split(' ').next().unwrap().parse().unwrap()
+    };
+    let before = done(&rows);
+
+    shell.key(Key::Char('u'));
+    assert_eq!(shell.place(), Some(Place::Usage));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        sent.contains(&"learning"),
+        "the visit sends the metrics and usage marks: {sent:?}"
+    );
+    let engine_read = engine.controller.learning_progress().await.unwrap();
+    for id in [
+        crate::learning::StepId::Metrics,
+        crate::learning::StepId::Usage,
+    ] {
+        assert!(
+            engine_read
+                .steps
+                .iter()
+                .any(|step| step.id == id && step.done()),
+            "{id:?} ticks from the visit: {engine_read:?}"
+        );
+    }
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home));
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(done(&render(&mut shell, 80, 24)), before + 2);
+
+    shell.key(Key::Char('h'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"learning"), "{sent:?}");
+    pump(&mut shell, &mut connection).await;
+    assert!(
+        matches!(&shell.ctx.store.learning, Load::Ready(progress) if progress.skipped),
+        "{:?}",
+        shell.ctx.store.learning
+    );
+    assert!(
+        engine.controller.learning_progress().await.unwrap().skipped,
+        "the engine keeps the skip"
+    );
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "Get set up"), "{rows:#?}");
+    assert!(!shows(&rows, "Learn CrazyAgent"), "{rows:#?}");
+    assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

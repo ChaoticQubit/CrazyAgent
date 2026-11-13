@@ -136,6 +136,7 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         TURN_DEADLINE => MasterReason::TimeLimit,
         code if minutes_of_cause(code).is_some() => MasterReason::TimeLimit,
         "rcli_master_profile_changed"
+        | crate::master_session::RCLI_KEY_SETUP_CAUSE
         | "rcli_master_profile_mismatch"
         | "native_profile_binding_conflict"
         | "native_profile_identity_changed"
@@ -215,6 +216,7 @@ impl OwnerRuntimeHandle {
         let run_time = prepared.time.run_time();
         let deadline = run_time.map(|time| Instant::now() + time);
         assert_eq!(deadline.is_none(), prepared.time.minutes().is_none());
+        self.set_up_master_key(prepared).await?;
         let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let current = self
             .inspect_master_turn(

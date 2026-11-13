@@ -15,12 +15,14 @@ use std::process::Command;
 
 pub mod elf;
 pub mod extra_paths;
+pub mod grants;
 pub mod hidden_paths;
 pub mod ide_shell;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod model_proxy;
 pub mod policy;
+pub mod shared_folders;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
 #[cfg(target_os = "macos")]
@@ -106,6 +108,10 @@ pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sa
 /// Seatbelt holds the per-path rule, and no IDE sandbox runs there in V1 (DEC-124).
 pub const AGENT_FILES_NEED_SEATBELT: &str = "agent folder protection needs the macOS sandbox";
 
+/// Why a sandbox that opens shared project folders for writing does not start on Linux or
+/// Windows: only Seatbelt keeps secret files closed inside those folders (DEC-147.9).
+pub const SHARED_WRITES_NEED_SEATBELT: &str = "writable shared folders need the macOS sandbox";
+
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
@@ -123,11 +129,18 @@ pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
 /// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
 /// git-ignored project paths (MAP-2). A project with more builds no graph.
 pub const KEPT_OUT_MAX: usize = 1024;
+/// The most top-level names a Chosen folders or None launch keeps open in the project
+/// folder: every present entry, the engine's names and the picked ones.
+pub const OPEN_TOPS_MAX: usize = 512;
 /// The opening of the Seatbelt rule for paths kept out: contents, folder listings and
 /// attribute values are denied with every write, run, link and clone, while names, sizes
 /// and dates stay readable, so a tool that only stats such a path does not fail.
 const KEPT_OUT_DENY: &str =
     "(deny file-read-data file-read-xattr file-write* process-exec file-link file-clone";
+/// The longest quoted string or regex, in raw bytes, Seatbelt's profile reader takes: one
+/// byte more fails the whole profile with `Error reading string`, whatever the bytes are
+/// (probe 2026-11-12: 1023 read, 1024 refused, backslashes and multibyte letters alike).
+pub(crate) const SBPL_STRING_MAX: usize = 1023;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
@@ -162,6 +175,7 @@ const TOOL_FILES_MAX: usize = 4;
 const EXECS_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
+#[cfg(unix)]
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
 const AGENT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
 
@@ -831,6 +845,12 @@ pub struct ProjectSandbox {
     lead_branch: Option<String>,
     adds_worktrees: bool,
     agent_files: Option<policy::AgentFilesRule>,
+    granted: Vec<PathBuf>,
+    owner_tmp: Option<PathBuf>,
+    project_secrets: Option<PathBuf>,
+    secrets_revealed: Vec<PathBuf>,
+    shared_writes: Vec<PathBuf>,
+    open_tops: Option<Vec<String>>,
     node_bin: Option<PathBuf>,
 }
 
@@ -911,8 +931,97 @@ impl ProjectSandbox {
             lead_branch: None,
             adds_worktrees: false,
             agent_files: None,
+            granted: Vec::new(),
+            owner_tmp: None,
+            project_secrets: None,
+            secrets_revealed: Vec::new(),
+            shared_writes: Vec::new(),
+            open_tops: None,
             node_bin: None,
         })
+    }
+
+    /// Adds the narrow extras the owner allowed the project's agents (F08): each socket
+    /// grant as a connect-and-read grant of its exact path in a list of its own, never bind,
+    /// write or unlink; each port grant as an outbound loopback port when the network is
+    /// limited (an open network reaches it already); and the temp folder grant as the
+    /// owner's private temp folder, written as a root and handed over as `TMPDIR`, with every
+    /// socket node in it kept unwritable. Inputs: the saved grants and the owner's temp
+    /// folder as [`grants::owner_temp_folder`] gives it, none when it cannot be given.
+    /// Output: the widened sandbox, or `Invalid`; sockets and the temp folder need Seatbelt.
+    pub fn grant_access(
+        mut self,
+        grants: &[policy::AccessGrant],
+        owner_tmp: Option<&Path>,
+    ) -> Result<Self, SandboxError> {
+        if grants.len() > policy::GRANTS_MAX {
+            return Err(invalid("too many access grants"));
+        }
+        for grant in grants {
+            if !grant.plain() {
+                return Err(invalid("an access grant is not plain"));
+            }
+            match grant {
+                policy::AccessGrant::Socket { path } => {
+                    if !cfg!(target_os = "macos") {
+                        return Err(invalid("unix socket grants need Seatbelt"));
+                    }
+                    let folder = path.parent().filter(|folder| {
+                        fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir())
+                    });
+                    let known = self
+                        .sockets
+                        .iter()
+                        .chain(&self.served)
+                        .chain(&self.reached)
+                        .chain(&self.shut)
+                        .chain(&self.granted)
+                        .any(|socket| socket == path);
+                    if folder.is_none() || known || self.granted.len() >= policy::GRANT_SOCKETS_MAX
+                    {
+                        return Err(invalid("a socket grant cannot be held"));
+                    }
+                    self.granted.push(path.clone());
+                }
+                policy::AccessGrant::Port { port } => {
+                    if let SandboxNetwork::Only(remotes) = &mut self.network {
+                        let remote = SandboxRemote::Loopback(*port);
+                        if !remotes.contains(&remote) {
+                            remotes.push(remote);
+                        }
+                        if remotes.len() > REMOTES_MAX {
+                            return Err(invalid("network remotes must be 1..8 nonzero ports"));
+                        }
+                    }
+                }
+                policy::AccessGrant::TempFolder => {
+                    if !cfg!(target_os = "macos") {
+                        return Err(invalid("the temp folder grant needs Seatbelt"));
+                    }
+                    let tmp = owner_tmp
+                        .ok_or_else(|| invalid("the owner's temp folder cannot be given"))?;
+                    let owner = owner_home()?;
+                    let secrets: Vec<PathBuf> = owner_secrets(&owner).collect();
+                    granted_root(tmp, &owner, &secrets)?;
+                    clear_of_secrets(tmp, &self.engine_secrets)?;
+                    self.owner_tmp = Some(tmp.to_path_buf());
+                }
+            }
+        }
+        assert!(self.granted.len() <= policy::GRANT_SOCKETS_MAX);
+        Ok(self)
+    }
+
+    /// The owner's temp folder this sandbox hands over as `TMPDIR` under a temp folder
+    /// grant, or none. Takes the sandbox. Returns the folder.
+    pub fn owner_tmp(&self) -> Option<&Path> {
+        self.owner_tmp.as_deref()
+    }
+
+    /// The exact sockets the owner's grants let this agent connect to. Takes the sandbox.
+    /// Returns the paths.
+    pub fn granted_sockets(&self) -> &[PathBuf] {
+        &self.granted
     }
 
     /// Lets the agent bind and connect one Unix socket at an exact path, read and write that
@@ -1055,6 +1164,47 @@ impl ProjectSandbox {
             clear_of_secrets(root, &secrets)?;
         }
         self.engine_secrets = secrets;
+        Ok(self)
+    }
+
+    /// Adds the engine root's secrets for an agent whose runtime folder is one folder in it,
+    /// as an owner generation is for a master: every entry guard_engine would name for the
+    /// engine root except that folder itself, where the agent's home lives. Call it after
+    /// guard_engine on the runtime folder, whose secrets stay. Inputs: the engine root and
+    /// the runtime folder. Output: the guarded sandbox, or a refusal.
+    pub fn guard_engine_around(
+        mut self,
+        engine: &Path,
+        runtime: &Path,
+    ) -> Result<Self, SandboxError> {
+        let engine = canonical(engine)?;
+        let runtime = canonical(runtime)?;
+        if !clean_absolute(&engine)
+            || !engine.is_dir()
+            || runtime.parent() != Some(engine.as_path())
+        {
+            return Err(invalid(
+                "engine root must be the existing folder around the runtime",
+            ));
+        }
+        let secrets: Vec<PathBuf> = engine_secrets_in(&engine)?
+            .into_iter()
+            .filter(|secret| *secret != runtime)
+            .collect();
+        for root in self
+            .writable_roots()
+            .chain(self.read_roots.iter())
+            .chain(self.tool_roots.iter())
+            .chain(self.tool_files.iter())
+        {
+            clear_of_secrets(root, &secrets)?;
+        }
+        for secret in secrets {
+            if !self.engine_secrets.contains(&secret) {
+                self.engine_secrets.push(secret);
+            }
+        }
+        assert!(!self.engine_secrets.contains(&runtime));
         Ok(self)
     }
 
@@ -1318,6 +1468,42 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets a script harness's interpreters run as the tool resolver found them
+    /// ([`crate::tools::Resolved::grants`]), such as the `node` an npm-built Codex asks `env`
+    /// for from nvm, volta or Homebrew: each interpreter's folder becomes readable as a
+    /// toolchain folder unless a system or granted folder covers it. Input: the resolved
+    /// harness. Output: the sandbox, or a refusal for an interpreter in the project or in a
+    /// folder the agent can write.
+    pub fn allow_interpreters(
+        mut self,
+        resolved: &crate::tools::Resolved,
+    ) -> Result<Self, SandboxError> {
+        for file in resolved.grants().into_iter().skip(1) {
+            let folder = file
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| invalid("an interpreter must sit in a folder"))?;
+            let agents = crate::harnesses::in_crazyagent_folder(&folder)
+                || folder.starts_with(&self.project_root)
+                || self
+                    .writable_roots()
+                    .any(|root| folder.starts_with(root) || root.starts_with(&folder));
+            if agents {
+                return Err(invalid("an interpreter sits where the agent can write"));
+            }
+            let covered = SYSTEM_READ_ROOTS
+                .iter()
+                .map(Path::new)
+                .chain(self.read_roots.iter().map(PathBuf::as_path))
+                .chain(self.tool_roots.iter().map(PathBuf::as_path))
+                .any(|root| folder.starts_with(root));
+            if !covered {
+                self = self.allow_node_folder(&folder)?;
+            }
+        }
+        Ok(self)
+    }
+
     /// Grants one folder of a Node script harness read-only: under Seatbelt as a toolchain
     /// folder, so every credential name below it stays denied, elsewhere as a read root.
     /// Input: a canonical existing folder. Output: the widened sandbox, or a refusal when the
@@ -1568,6 +1754,214 @@ impl ProjectSandbox {
         }
         self.hidden.push(folder.to_path_buf());
         Ok(self)
+    }
+
+    /// Keeps the secret files and folders of the project folder `root` closed to the agent
+    /// (DEC-147.9): contents, attribute values, writes, runs, links and clones of every path
+    /// there with a name in [`shared_folders::SECRET_NAMES`], in any letter case, are denied,
+    /// names and sizes stay visible, except under `root/.git` and inside the agent's own
+    /// writable roots below it, its worktree or clone, never `root` itself. Each of `revealed`, the secrets the owner
+    /// shared back, is readable again, never writable. The deny comes before every older
+    /// deny in the profile, so none of those gives way. Inputs: a clean canonical folder the
+    /// sandbox already reads and at most [`shared_folders::SECRETS_MAX`] clean paths strictly
+    /// inside it. Output: the sandbox, or `Invalid` for a second call or a path out of shape.
+    pub fn keep_project_secrets(
+        mut self,
+        root: &Path,
+        revealed: &[PathBuf],
+    ) -> Result<Self, SandboxError> {
+        if self.project_secrets.is_some() {
+            return Err(invalid("the project's secrets are already kept closed"));
+        }
+        let readable = self
+            .read_roots
+            .iter()
+            .chain([&self.project_root])
+            .any(|read| read == root);
+        if !clean_absolute(root) || !readable || canonical(root)? != root {
+            return Err(invalid(
+                "the folder whose secrets stay closed must be a canonical folder the sandbox reads",
+            ));
+        }
+        if revealed.len() > shared_folders::SECRETS_MAX
+            || !revealed.iter().all(|path| {
+                clean_absolute(path)
+                    && path.starts_with(root)
+                    && path != root
+                    && !path.starts_with(root.join(".git"))
+            })
+        {
+            return Err(invalid(
+                "a shared-back secret must be a clean path inside the project folder",
+            ));
+        }
+        self.project_secrets = Some(root.to_path_buf());
+        self.secrets_revealed = revealed.to_vec();
+        Ok(self)
+    }
+
+    /// Keeps every top-level entry of the [`Self::keep_project_secrets`] folder closed as
+    /// [`Self::keep_out`] does but `open`, so one made after launch stays closed (L4 r1 L1);
+    /// own writable roots below it stay open, never the folder itself. Input: at most
+    /// [`OPEN_TOPS_MAX`] names, each [`plain_top`]. Output: the narrowed sandbox, or `Invalid`
+    /// without that folder, for a second call or for a name out of shape.
+    pub fn open_only_tops(mut self, open: &[String]) -> Result<Self, SandboxError> {
+        if self.project_secrets.is_none() || self.open_tops.is_some() {
+            return Err(invalid(
+                "the open top-level names need the project folder, once",
+            ));
+        }
+        if open.len() > OPEN_TOPS_MAX || !open.iter().all(|name| plain_top(name)) {
+            return Err(invalid("an open top-level name must be one plain name"));
+        }
+        self.open_tops = Some(open.to_vec());
+        Ok(self)
+    }
+
+    /// Lets the agent write one shared top-level folder of the project folder that git does
+    /// not track (DEC-147.9 Read-write) as one more writable root, pinned in place; the secret
+    /// names inside it stay closed, and every older deny still wins. Never a hidden folder, an
+    /// engine folder or one named `context` ([`shared_folders::never_written`]). Input: a canonical existing folder
+    /// directly inside the folder [`Self::keep_project_secrets`] named, clear of
+    /// [`Self::secret_paths`] and of every other writable root. Output: the widened sandbox, or
+    /// `Invalid`; only Seatbelt holds it.
+    pub fn allow_shared_write(mut self, folder: &Path) -> Result<Self, SandboxError> {
+        if self.shared_writes.len() >= shared_folders::SHARED_WRITES_MAX {
+            return Err(invalid("too many shared writable folders"));
+        }
+        let in_project = self
+            .project_secrets
+            .as_ref()
+            .is_some_and(|root| folder.parent() == Some(root.as_path()));
+        let kept_read_only = match (self.project_secrets.as_ref(), folder.file_name()) {
+            (Some(root), Some(name)) => name
+                .to_str()
+                .is_none_or(|name| shared_folders::never_written(root, name)),
+            _ => true,
+        };
+        if !in_project || kept_read_only {
+            return Err(invalid(
+                "a shared writable folder must be a top-level project folder kept under its secret rule",
+            ));
+        }
+        granted_root(folder, &owner_home()?, &self.secret_paths())?;
+        if self
+            .writable_roots()
+            .any(|root| root.starts_with(folder) || folder.starts_with(root))
+        {
+            return Err(invalid(
+                "a shared writable folder must lie outside every other writable root",
+            ));
+        }
+        self.shared_writes.push(folder.to_path_buf());
+        assert!(self.writes(folder));
+        assert!(self.shared_writes.len() <= shared_folders::SHARED_WRITES_MAX);
+        Ok(self)
+    }
+
+    /// The Seatbelt rule of [`Self::open_only_tops`]: every path below the project folder is
+    /// kept out but the open top-level names and the agent's own writable roots there.
+    /// Output: the rule, empty when no names were set.
+    fn closed_tops_rule(&self) -> String {
+        let (Some(root), Some(open)) = (self.project_secrets.as_ref(), self.open_tops.as_ref())
+        else {
+            return String::new();
+        };
+        assert!(clean_absolute(root));
+        let pattern = seatbelt_pattern(root);
+        let mut text = format!("{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{pattern}/\")");
+        let names: Vec<String> = open.iter().map(|name| regex_escape(name)).collect();
+        for body in regex_bodies(&format!("^{pattern}/"), &names, "(/.*)?$") {
+            text.push_str(&format!("\n    (require-not (regex #\"{body}\"))"));
+        }
+        for own in self.writable_roots().filter(|own| {
+            own.starts_with(root) && own.as_path() != root.as_path() && clean_absolute(own)
+        }) {
+            text.push_str(&format!(
+                "\n    (require-not (subpath \"{}\"))",
+                own.display()
+            ));
+        }
+        text.push_str("))\n");
+        text
+    }
+
+    /// The Seatbelt rules of [`Self::keep_project_secrets`]: the deny of secret names in the
+    /// project folder outside `.git` and the agent's own writable roots there (never the
+    /// shared writable folders); no clone of any folder, and no move or removal of a folder
+    /// inside a shared writable folder, so no folder that holds a secret leaves the name rule
+    /// by a plain-named parent (L4 r1 H2); then the read allow of env templates
+    /// ([`shared_folders::SECRET_TEMPLATES`]) and of each shared-back secret. Output: the
+    /// rules, empty when no folder was named.
+    fn project_secret_rules(&self) -> String {
+        let Some(root) = self
+            .project_secrets
+            .as_ref()
+            .filter(|root| clean_absolute(root))
+        else {
+            return String::new();
+        };
+        let names: Vec<String> = shared_folders::SECRET_NAMES
+            .iter()
+            .map(|name| fold_case(name))
+            .collect();
+        let own: String = self
+            .writable_roots()
+            .filter(|own| {
+                own.starts_with(root)
+                    && own.as_path() != root.as_path()
+                    && !self.shared_writes.contains(own)
+                    && clean_absolute(own)
+            })
+            .map(|own| format!("\n    (require-not (subpath \"{}\"))", own.display()))
+            .collect();
+        let prefix = format!("^{}/(.*/)?", seatbelt_pattern(root));
+        let mut text = String::new();
+        for body in regex_bodies(&prefix, &names, "(/.*)?$") {
+            text.push_str(&format!(
+                "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"{body}\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
+                root.display()
+            ));
+        }
+        text.push_str("(deny file-clone (vnode-type DIRECTORY))\n");
+        for folder in self
+            .shared_writes
+            .iter()
+            .filter(|folder| clean_absolute(folder))
+        {
+            text.push_str(&format!(
+                "(deny file-write-unlink\n  (require-all\n    (subpath \"{}\")\n    (vnode-type DIRECTORY)))\n",
+                folder.display()
+            ));
+        }
+        text.push_str(&format!(
+            "(allow file-read-data file-read-xattr\n  (regex #\"^{}/(.*/)?{}$\"))\n",
+            seatbelt_pattern(root),
+            fold_case(shared_folders::SECRET_TEMPLATES)
+        ));
+        let revealed: Vec<&PathBuf> = self
+            .secrets_revealed
+            .iter()
+            .filter(|path| clean_absolute(path))
+            .collect();
+        if !revealed.is_empty() {
+            text.push_str("(allow file-read-data file-read-xattr");
+            for path in revealed {
+                text.push_str(&format!("\n  (subpath \"{}\")", path.display()));
+            }
+            text.push_str(")\n");
+        }
+        text
+    }
+
+    /// The project folder whose secret names this sandbox keeps closed, if any.
+    pub fn project_secrets(&self) -> Option<&Path> {
+        self.project_secrets.as_deref()
+    }
+
+    /// The shared top-level project folders this sandbox lets the agent write.
+    pub fn shared_writes(&self) -> &[PathBuf] {
+        &self.shared_writes
     }
 
     /// Holds the project's agent folders choice in this sandbox (DEC-124): a Sandboxed IDE
@@ -1944,6 +2338,8 @@ impl ProjectSandbox {
             .chain(self.worktrees.iter())
             .chain(self.shared.iter())
             .chain(self.tool_cache.iter().map(|(root, _)| root))
+            .chain(self.owner_tmp.iter())
+            .chain(self.shared_writes.iter())
     }
 
     /// The read-only toolchain folders, Seatbelt only, with credential names carved out.
@@ -2038,6 +2434,7 @@ impl ProjectSandbox {
                 link.display()
             ));
         }
+        text.push_str(&self.project_secret_rules());
         text.push_str("(deny file-read* file-write*");
         for secret in self.secret_paths() {
             if clean_absolute(&secret) {
@@ -2074,6 +2471,7 @@ impl ProjectSandbox {
             }
             text.push_str(")\n");
         }
+        text.push_str(&self.closed_tops_rule());
         for file in self.revealed.iter().filter(|file| clean_absolute(file)) {
             text.push_str(&format!(
                 "(allow file-read* (literal \"{}\"))\n",
@@ -2088,6 +2486,12 @@ impl ProjectSandbox {
             text.push_str(&format!(
                 "(deny {FIXED_WRITES}\n  (literal \"{}\"))\n",
                 scratch.display()
+            ));
+        }
+        if let Some(tmp) = &self.owner_tmp {
+            let tmp = tmp.display();
+            text.push_str(&format!(
+                "(deny {FIXED_WRITES}\n  (literal \"{tmp}\"))\n(deny file-write*\n  (require-all\n    (subpath \"{tmp}\")\n    (vnode-type SOCKET)))\n"
             ));
         }
         text.push_str(&self.git_link_denies());
@@ -2121,7 +2525,7 @@ impl ProjectSandbox {
                 "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(deny file-write-unlink (literal \"{path}\"))\n"
             ));
         }
-        for socket in &self.reached {
+        for socket in self.reached.iter().chain(&self.granted) {
             let path = socket.display();
             let folder = socket.parent().unwrap_or(socket).display();
             text.push_str(&format!(
@@ -2165,7 +2569,7 @@ impl ProjectSandbox {
         text.push_str(&agent_files);
         assert_eq!(
             text.matches("unix-socket").count(),
-            2 * self.sockets.len() + self.served.len() + self.reached.len()
+            2 * self.sockets.len() + self.served.len() + self.reached.len() + self.granted.len()
         );
         let mut last: Vec<String> = self
             .read_only
@@ -2206,6 +2610,7 @@ impl ProjectSandbox {
                 && self
                     .reached
                     .iter()
+                    .chain(&self.granted)
                     .all(|socket| denied_last("file-write*", socket)),
             "a served socket's unlink deny and a reached socket's write deny must follow every write allow, since the last match wins"
         );
@@ -2261,7 +2666,6 @@ impl ProjectSandbox {
                 .iter()
                 .all(|service| !KEYCHAIN_SERVICES.contains(service))
         );
-        assert!(text.len() <= PROFILE_BYTES_MAX);
         text
     }
 
@@ -2496,7 +2900,8 @@ impl ProjectSandbox {
 
     /// Writes the profile with mode 0600 at `path`, replacing any earlier one
     /// atomically. The path must lie outside every writable root, so no agent
-    /// can rewrite the profile its next launch uses.
+    /// can rewrite the profile its next launch uses. A profile holding a string Seatbelt
+    /// cannot read, or longer than [`PROFILE_BYTES_MAX`], is refused as `Invalid`, never written.
     #[cfg(unix)]
     pub fn install(&self, path: &Path) -> Result<(), SandboxError> {
         let parent = path
@@ -2515,6 +2920,15 @@ impl ProjectSandbox {
                 "profile must live outside the sandbox's writable roots",
             ));
         }
+        let profile = self.profile();
+        if !sbpl_overlong(&profile).is_empty() {
+            return Err(invalid(
+                "a path or name in the sandbox profile is longer than Seatbelt reads",
+            ));
+        }
+        if profile.len() > PROFILE_BYTES_MAX {
+            return Err(invalid("the sandbox profile is larger than its 64 KiB cap"));
+        }
         let staging = parent.join(format!(".{name}.{}.tmp", std::process::id()));
         let mut file = OpenOptions::new()
             .write(true)
@@ -2523,7 +2937,7 @@ impl ProjectSandbox {
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
             .open(&staging)?;
         let written = file
-            .write_all(self.profile().as_bytes())
+            .write_all(profile.as_bytes())
             .and_then(|()| file.sync_all())
             .and_then(|()| fs::rename(&staging, &target));
         if let Err(error) = written {
@@ -2565,7 +2979,11 @@ impl ProjectSandbox {
     /// ([`toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = toolchains::ToolHomes::at(&self.owner_home);
-        let tmp = self.scratch.as_ref().unwrap_or(&self.agent_tmp);
+        let tmp = self
+            .owner_tmp
+            .as_ref()
+            .or(self.scratch.as_ref())
+            .unwrap_or(&self.agent_tmp);
         let path = toolchains::agent_path(&homes, AGENT_PATH);
         let path = match self.node_bin.as_deref().and_then(Path::to_str) {
             Some(bin) => format!("{bin}:{path}"),
@@ -2686,8 +3104,15 @@ impl InstalledSandbox {
     /// install refusal, or `Unavailable` where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() {
+        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
+        {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
+        }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if !sandbox.shared_writes.is_empty() {
+            return Err(SandboxError::Unavailable(
+                SHARED_WRITES_NEED_SEATBELT.into(),
+            ));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if sandbox
@@ -3014,6 +3439,89 @@ pub(crate) fn any_case(text: &str) -> String {
 
 /// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
 /// without a quote or backslash. Output: the pattern text, without anchors.
+/// A Seatbelt regex fragment matched in any letter case, as [`any_case`] does for plain
+/// text: each ASCII letter becomes both cases, `k` also the Kelvin sign and `s` the long s,
+/// which a case-insensitive volume folds the same; every other character, regex syntax
+/// included, stays as written. Input: a fragment with no bracket class. Output: the pattern.
+pub(crate) fn fold_case(pattern: &str) -> String {
+    assert!(!pattern.contains('[') && !pattern.contains('"'));
+    pattern
+        .chars()
+        .map(|character| {
+            if character.eq_ignore_ascii_case(&'k') {
+                "(k|K|\u{212a})".to_owned()
+            } else if character.eq_ignore_ascii_case(&'s') {
+                "(s|S|\u{17f})".to_owned()
+            } else if character.is_ascii_alphabetic() {
+                format!(
+                    "[{}{}]",
+                    character.to_ascii_lowercase(),
+                    character.to_ascii_uppercase()
+                )
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Whether `name` can be one top-level name [`ProjectSandbox::open_only_tops`] keeps open:
+/// one path part, never `.` or `..`, at most 255 bytes, with no control character, quote or
+/// backslash, so it sits in a Seatbelt pattern as written. Takes the name. Returns the answer.
+pub(crate) fn plain_top(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '"' | '\\' | '\''))
+}
+
+/// Seatbelt regex bodies `{prefix}(a|b|...){suffix}` that together match each of
+/// `alternatives`, packed whole, in order, so each body fits [`SBPL_STRING_MAX`] bytes; one
+/// alternative too long beside the prefix keeps a body of its own, which [`sbpl_overlong`]
+/// then names. Inputs: the prefix, the regex fragments and the suffix. Output: the bodies.
+fn regex_bodies(prefix: &str, alternatives: &[String], suffix: &str) -> Vec<String> {
+    let body = |group: &[&str]| format!("{prefix}({}){suffix}", group.join("|"));
+    let mut bodies = Vec::new();
+    let mut group: Vec<&str> = Vec::new();
+    for alternative in alternatives {
+        let mut wider = group.clone();
+        wider.push(alternative);
+        if !group.is_empty() && body(&wider).len() > SBPL_STRING_MAX {
+            bodies.push(body(&group));
+            group.clear();
+        }
+        group.push(alternative);
+    }
+    if !group.is_empty() {
+        bodies.push(body(&group));
+    }
+    assert!(bodies.len() <= alternatives.len());
+    bodies
+}
+
+/// The quoted strings and regexes of a Seatbelt profile longer than its reader takes
+/// ([`SBPL_STRING_MAX`] bytes), every one, so a profile that would not parse is refused
+/// before it is written. Input: the profile text, whose strings hold no quote. Output: the
+/// strings too long, none for a profile that parses; an odd quote count names the rest.
+#[cfg(unix)]
+pub(crate) fn sbpl_overlong(profile: &str) -> Vec<&str> {
+    let parts: Vec<&str> = profile.split('"').collect();
+    let mut overlong: Vec<&str> = parts
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .copied()
+        .filter(|part| part.len() > SBPL_STRING_MAX)
+        .collect();
+    if parts.len().is_multiple_of(2) {
+        overlong.push(parts[parts.len() - 1]);
+    }
+    overlong
+}
+
 fn regex_escape(text: &str) -> String {
     assert!(!text.contains('"') && !text.contains('\\'));
     let mut pattern = String::with_capacity(text.len() * 2);
@@ -3765,5 +4273,248 @@ mod order_tests {
             &text.replace(&pins[1], ""),
             &pins
         ));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod access_grant_tests {
+    use super::*;
+    use policy::AccessGrant;
+
+    fn case() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for folder in ["project", "home", "tmp", "owner-tmp"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        (temp, root)
+    }
+
+    /// F08: a socket grant is a connect-only rule ahead of the network section with its
+    /// write deny after every write allow, a port grant joins a limited network on
+    /// loopback, and the temp folder grant becomes a writable root handed over as TMPDIR
+    /// with every socket node in it kept unwritable.
+    #[test]
+    fn grants_add_a_connect_only_socket_a_loopback_port_and_the_owner_s_temp_folder() {
+        let (_temp, root) = case();
+        let socket = root.join("owner-tmp").join("discord-ipc-0");
+        let owner_tmp = root.join("owner-tmp");
+        let sandbox = ProjectSandbox::new(
+            &root.join("project"),
+            &root.join("home"),
+            &root.join("tmp"),
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+        )
+        .unwrap()
+        .grant_access(
+            &[
+                AccessGrant::Socket {
+                    path: socket.clone(),
+                },
+                AccessGrant::Port { port: 47_821 },
+                AccessGrant::TempFolder,
+            ],
+            Some(&owner_tmp),
+        )
+        .unwrap();
+        assert_eq!(
+            sandbox.network(),
+            &SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::Loopback(47_821)
+            ])
+        );
+        assert_eq!(sandbox.granted_sockets(), std::slice::from_ref(&socket));
+        assert_eq!(sandbox.owner_tmp(), Some(owner_tmp.as_path()));
+        assert!(sandbox.writes(&owner_tmp.join("note.txt")));
+        let text = sandbox.profile();
+        let path = socket.display();
+        assert!(text.contains(&format!(
+            "(allow network-outbound (remote unix-socket (path-literal \"{path}\")))"
+        )));
+        assert!(!text.contains(&format!(
+            "(allow network-bind (local unix-socket (path-literal \"{path}\")))"
+        )));
+        assert!(text.contains(&format!("(deny file-write* (literal \"{path}\"))")));
+        assert!(text.contains("(allow network-outbound (remote ip \"localhost:47821\"))"));
+        assert!(text.contains(&format!(
+            "(deny file-write*\n  (require-all\n    (subpath \"{}\")\n    (vnode-type SOCKET)))",
+            owner_tmp.display()
+        )));
+        let env = sandbox.base_env(true);
+        let tmpdir = env
+            .iter()
+            .find(|(name, _)| *name == "TMPDIR")
+            .map(|(_, value)| value.clone());
+        assert_eq!(tmpdir, Some(owner_tmp.clone().into_os_string()));
+    }
+
+    /// F08: a grant beyond its kind's bound, a socket in a missing folder, a temp folder
+    /// grant without the owner's folder and a port that overfills a limited network are
+    /// refused; an open network takes a port grant as it is.
+    #[test]
+    fn grants_that_cannot_be_held_are_refused() {
+        let (_temp, root) = case();
+        let fresh = |network| {
+            ProjectSandbox::new(
+                &root.join("project"),
+                &root.join("home"),
+                &root.join("tmp"),
+                network,
+            )
+            .unwrap()
+        };
+        let socket = |name: &str| AccessGrant::Socket {
+            path: root.join("owner-tmp").join(name),
+        };
+        let only = || SandboxNetwork::Only(Vec::new());
+        assert!(
+            fresh(only())
+                .grant_access(&[socket("a"), socket("b"), socket("c")], None)
+                .is_err()
+        );
+        let missing = AccessGrant::Socket {
+            path: root.join("gone").join("x"),
+        };
+        assert!(fresh(only()).grant_access(&[missing], None).is_err());
+        assert!(
+            fresh(only())
+                .grant_access(&[AccessGrant::TempFolder], None)
+                .is_err()
+        );
+        let full: Vec<SandboxRemote> = (1..=REMOTES_MAX as u16)
+            .map(SandboxRemote::AnyHost)
+            .collect();
+        assert!(
+            fresh(SandboxNetwork::Only(full))
+                .grant_access(&[AccessGrant::Port { port: 47_821 }], None)
+                .is_err()
+        );
+        let open = fresh(SandboxNetwork::Open)
+            .grant_access(&[AccessGrant::Port { port: 47_821 }], None)
+            .unwrap();
+        assert_eq!(open.network(), &SandboxNetwork::Open);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod profile_string_tests {
+    use super::*;
+
+    /// v2.4.0 gate: the folded secret names, 1300 bytes as one regex, split into bodies each
+    /// Seatbelt reads, every name kept whole and in order; a list that fits stays one body
+    /// in the shape it had, and no names give no body.
+    #[test]
+    fn regex_bodies_pack_whole_names_under_the_reader_limit() {
+        let names: Vec<String> = shared_folders::SECRET_NAMES
+            .iter()
+            .map(|name| fold_case(name))
+            .collect();
+        let prefix = format!("^/private/tmp/{}/(.*/)?", "p".repeat(200));
+        let bodies = regex_bodies(&prefix, &names, "(/.*)?$");
+        assert!(bodies.len() >= 2, "{bodies:#?}");
+        assert!(bodies.iter().all(|body| body.len() <= SBPL_STRING_MAX));
+        let mut at = 0;
+        for body in &bodies {
+            let group = &body[prefix.len() + 1..body.len() - "(/.*)?$".len() - 1];
+            let start = at;
+            while at < names.len() && names[start..=at].join("|").len() <= group.len() {
+                at += 1;
+            }
+            assert_eq!(names[start..at].join("|"), group);
+        }
+        assert_eq!(at, names.len());
+        assert_eq!(
+            regex_bodies("^/r/", &["a".into(), "b".into()], "(/.*)?$"),
+            vec!["^/r/(a|b)(/.*)?$".to_owned()]
+        );
+        assert!(regex_bodies("^/r/", &[], "(/.*)?$").is_empty());
+    }
+
+    /// The guard names every string past the limit, none in a profile that parses, and an
+    /// unclosed quote too.
+    #[test]
+    fn sbpl_overlong_names_every_string_past_the_reader_limit() {
+        let fits = "a".repeat(SBPL_STRING_MAX);
+        let long = "b".repeat(SBPL_STRING_MAX + 1);
+        let longer = "c".repeat(2 * SBPL_STRING_MAX);
+        let text = format!(
+            "(deny file-read* (subpath \"{fits}\") (literal \"{long}\") (regex #\"{longer}\"))"
+        );
+        assert_eq!(sbpl_overlong(&text), vec![long.as_str(), longer.as_str()]);
+        assert!(sbpl_overlong(&format!("(literal \"{fits}\")")).is_empty());
+        assert_eq!(sbpl_overlong("(literal \"/open"), vec!["/open"]);
+    }
+
+    /// The default secret rule and 64 long open top-level names give a profile with no string
+    /// past the limit; a project folder so deep that one secret name no longer fits, and the
+    /// most open names at the longest length, which pass the 64 KiB cap, are each refused at
+    /// install with `Invalid`, never a panic, before a profile sandbox-exec cannot load is
+    /// written.
+    #[test]
+    fn a_profile_keeps_every_string_seatbelt_reads_or_is_refused_at_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (home, tmp, profiles) = (base.join("home"), base.join("tmp"), base.join("sb"));
+        let project = base.join("project");
+        for folder in [&home, &tmp, &profiles, &project] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let open: Vec<String> = (0..64)
+            .map(|at| format!("{at:02}{}", "n".repeat(40)))
+            .collect();
+        let wide = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+            .unwrap()
+            .keep_project_secrets(&project, &[])
+            .unwrap()
+            .open_only_tops(&open)
+            .unwrap();
+        let text = wide.profile();
+        assert!(sbpl_overlong(&text).is_empty());
+        assert!(text.matches("(require-not (regex #\"").count() >= 2);
+        assert!(text.matches(KEPT_OUT_DENY).count() >= 3);
+        wide.install(&profiles.join("wide.sb")).unwrap();
+
+        let most: Vec<String> = (0..OPEN_TOPS_MAX)
+            .map(|at| format!("{at:03}{}", "n".repeat(252)))
+            .collect();
+        let crowded = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+            .unwrap()
+            .keep_project_secrets(&project, &[])
+            .unwrap()
+            .open_only_tops(&most)
+            .unwrap();
+        let text = crowded.profile();
+        assert!(sbpl_overlong(&text).is_empty());
+        assert!(text.len() > PROFILE_BYTES_MAX);
+        let target = profiles.join("crowded.sb");
+        match crowded.install(&target) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert_eq!(reason, "the sandbox profile is larger than its 64 KiB cap")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!target.exists());
+
+        let mut deep = base.join("deep");
+        while deep.as_os_str().len() < 1000 {
+            let room = 1000 - deep.as_os_str().len();
+            deep = deep.join("d".repeat(room.clamp(1, 200)));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        let narrow = ProjectSandbox::new(&deep, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+            .unwrap()
+            .keep_project_secrets(&deep, &[])
+            .unwrap();
+        assert!(!sbpl_overlong(&narrow.profile()).is_empty());
+        let target = profiles.join("deep.sb");
+        match narrow.install(&target) {
+            Err(SandboxError::Invalid(reason)) => assert_eq!(
+                reason,
+                "a path or name in the sandbox profile is longer than Seatbelt reads"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(!target.exists());
     }
 }

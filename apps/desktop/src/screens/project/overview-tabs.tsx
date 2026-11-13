@@ -106,6 +106,7 @@ const READ_ONLY = "This is the project's own file. Edit it in the project.";
 const CUT = "Showing the first part of a long file.";
 const NO_README = "This project has no README file.";
 const WRITING = "Writing now";
+const QUEUED = "Refresh waiting to run";
 const NOT_READY = "CrazyAgent's engine isn't ready yet. Try again in a moment.";
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -251,19 +252,38 @@ export async function runResearch(data: Pick<ProjectData, "id" | "setup" | "noti
   return "";
 }
 
+/** Whether the engine holds a writing run that has not started yet, after a Refresh, a
+ * landed change set or a wait for an account: engine state, so it survives leaving the
+ * view. Input: the overview. Output: the answer. */
+function queued(overview: ProjectOverview): boolean {
+  return overview.stale && !overview.running && overview.refresh !== "off" && !overview.needs_home;
+}
+
+/** The stored failure line: an alert only for a run that ended. While a run is queued or
+ * writing, as one waiting for an account is, the same reason shows under a status, since
+ * that refresh has not failed. Input: the overview. Output: the line, or null with none. */
+function failureLine(overview: ProjectOverview): ReactNode {
+  if (!overview.failure) return null;
+  if (overview.running || queued(overview)) return <p className="pj-muted" role="status">{displayText(overview.failure)}</p>;
+  return <p className="pj-error" role="alert">Couldn't refresh the tabs. {displayText(overview.failure)}</p>;
+}
+
 /** What a generated tab with no text says, by what will write it. Input: the overview.
  * Output: the line. */
 function unwritten(overview: ProjectOverview): string {
   if (overview.running) return `${WRITING}. This tab fills in when the run ends.`;
   if (overview.refresh === "off") return "Overview tabs are off in Project settings.";
+  if (queued(overview)) return "A refresh is waiting to run. This tab fills in when it ends.";
   if (overview.refresh === "refresh_only") return "Not written yet. Choose Refresh to write it.";
   return "Not written yet. It is written after the next landed change set, or when you choose Refresh.";
 }
 
-/** The strip's status words: that a run is writing, else when the tabs were last checked.
- * Inputs: the overview and now in milliseconds. Output: the words, or null with nothing to say. */
+/** The strip's status words: that a run is writing or waiting to run, else when the tabs
+ * were last checked. Inputs: the overview and now in milliseconds. Output: the words, or null
+ * with nothing to say. */
 function checked(overview: ProjectOverview, now: number): string | null {
   if (overview.running) return WRITING;
+  if (queued(overview)) return QUEUED;
   if (overview.checked_ms === null || overview.needs_home) return null;
   const said = ago(overview.checked_ms, now);
   return `Checked ${said === "Just now" ? "just now" : said}`;
@@ -555,7 +575,8 @@ function CompetitorsPanel({ data, overview, state, onSelect }: { data: ProjectDa
   const text = state.text === null ? null : <MarkdownView source={state.text} onOpenLink={(href) => void openLink(href)} />;
   if (source.kind === "missing") return <><NoCompetitorResearch data={data} onSelect={onSelect} />{text}</>;
   const follow = overview.running ? `${WRITING}. This tab fills in when the run ends.`
-    : overview.refresh === "off" ? "Overview tabs are off in Project settings." : "Choose Refresh to write this tab from it.";
+    : overview.refresh === "off" ? "Overview tabs are off in Project settings."
+    : queued(overview) ? "A refresh is waiting to run. This tab fills in when it ends." : "Choose Refresh to write this tab from it.";
   return <>
     {source.kind === "report" && <div className="pj-row"><span className="pj-small pj-muted">Written from the competitor research report.</span>
       <button type="button" className="btn" onClick={() => data.navigate(`/projects/${encodeURIComponent(data.id)}/context?file=${encodeURIComponent(source.path)}`)}>Open report</button></div>}
@@ -625,10 +646,11 @@ function Proposal({ data, label, state, review, onReview, actions }: {
 }
 
 /** One generated tab: the move line for a project outside the CrazyAgent folder, why its file
- * can't be shown, or its body with Edit and, when a refresh proposal waits, its banner or
- * review. An open editor takes the body's place; once the tab changed under it, the changed
- * tab shows above the editor so the owner can compare, and a Save is made only against the
- * version the owner was told about: each later change holds the Save and says so again.
+ * can't be shown, or its body and, when a refresh proposal waits, its banner or review; its
+ * Edit sits in the Overview's row. An open editor takes the body's place; once the tab changed
+ * under it, the changed tab shows above the editor so the owner can compare, and a Save is
+ * made only against the version the owner was told about: each later change holds the Save
+ * and says so again.
  * Inputs: the project data, the overview, the tab, its open editor and review or null with
  * their handlers, the actions, the Run mode, the tab pick handler and how Quick info renders
  * a text. Output: the panel body. */
@@ -661,7 +683,6 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview,
   const label = STRIP.find((item) => item.id === tab)?.label ?? "";
   if (draft === null) return <>
     {state.proposal !== null && <Proposal data={data} label={label} state={state} review={review} onReview={onReview} actions={actions} />}
-    <div className="ov-edit-row"><button type="button" className="btn" id={EDIT_OPEN} onClick={() => onDraft({ version: state.version, text: state.text ?? "", busy: false, note: "", changed: false, told: false })}>Edit</button></div>
     {body}
   </>;
   const save = async () => {
@@ -679,7 +700,8 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview,
 }
 
 /** The Overview's tab strip and the picked tab: Quick info, Features, Competitors, Install &
- * use, README and Activity, with when the tabs were checked and the Refresh button. README and
+ * use, README and Activity. The strip sits alone; one row under it holds when the tabs were
+ * checked, Edit for a shown generated tab with no open editor, and Refresh. README and
  * Activity show even when the tabs could not be read. Open editors are kept for the session,
  * so typed text survives leaving the Overview until it is saved or cancelled.
  * Inputs: the project data, the overview or null, why it is null, now, the picked tab, the
@@ -712,6 +734,9 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
     storeDrafts(data.id, next, store);
   };
   const status = overview === null ? null : checked(overview, now);
+  const editable = selected === "readme" || selected === "activity" || overview === null || overview.needs_home || (drafts[selected] ?? null) !== null
+    ? undefined
+    : overview.tabs.find((item) => item.tab === selected && !item.blocked);
   const off = overview === null || overview.running || overview.refresh === "off" || overview.needs_home;
   const refresh = async () => {
     assert(!off, "Refresh was chosen while it is disabled");
@@ -724,23 +749,24 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
   };
   const missing = overview === null && selected !== "activity" ? <p className={problem ? "pj-error" : "pj-muted"} role={problem ? "alert" : "status"}>{problem ?? LOADING}</p> : null;
   return <section className="pj-stack-s ov-tabs" aria-label="Overview tabs">
-    <div className="ov-strip">
-      <div className="tabs ov-tablist" role="tablist" aria-label="Overview" onKeyDown={(event) => {
-        const next = stripMove(selected, event.key);
-        if (next === null) return;
-        event.preventDefault();
-        onSelect(next);
-        requestAnimationFrame(() => document.getElementById(`ov-tab-${next}`)?.focus());
-      }}>
-        {STRIP.map((item) => <button key={item.id} type="button" id={`ov-tab-${item.id}`} role="tab" className="tab" aria-controls="ov-panel"
-          aria-selected={item.id === selected} tabIndex={item.id === selected ? 0 : -1} onClick={() => onSelect(item.id)}>{item.label}</button>)}
-      </div>
-      <div className="pj-row ov-meta">
-        {status && <span className="pj-small pj-muted" role="status">{status}</span>}
+    <div className="tabs ov-tablist" role="tablist" aria-label="Overview" onKeyDown={(event) => {
+      const next = stripMove(selected, event.key);
+      if (next === null) return;
+      event.preventDefault();
+      onSelect(next);
+      requestAnimationFrame(() => document.getElementById(`ov-tab-${next}`)?.focus());
+    }}>
+      {STRIP.map((item) => <button key={item.id} type="button" id={`ov-tab-${item.id}`} role="tab" className="tab" aria-controls="ov-panel"
+        aria-selected={item.id === selected} tabIndex={item.id === selected ? 0 : -1} onClick={() => onSelect(item.id)}>{item.label}</button>)}
+    </div>
+    <div className="ov-bar">
+      {status && <span className="pj-small pj-muted" role="status">{status}</span>}
+      <div className="pj-row ov-actions">
+        {editable && <button type="button" className="btn" id={EDIT_OPEN} onClick={() => keepDraft(editable.tab, { version: editable.version, text: editable.text ?? "", busy: false, note: "", changed: false, told: false })}>Edit</button>}
         <button type="button" className="btn" disabled={off || asking} onClick={() => void refresh()}>Refresh</button>
       </div>
     </div>
-    {overview?.failure && <p className="pj-error" role="alert">Couldn't refresh the tabs. {displayText(overview.failure)}</p>}
+    {overview !== null && failureLine(overview)}
     <div className="pj-stack-s" id="ov-panel" role="tabpanel" aria-labelledby={`ov-tab-${selected}`}>
       {missing}
       {selected === "activity" && activity}

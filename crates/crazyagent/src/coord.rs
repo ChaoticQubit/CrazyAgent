@@ -30,6 +30,7 @@ pub mod adoption;
 mod claims;
 pub mod delivery;
 pub mod hook;
+pub mod lane;
 mod messages;
 mod presence;
 pub mod relay;

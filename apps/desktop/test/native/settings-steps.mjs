@@ -96,14 +96,51 @@ export async function until(condition, timeout, label) {
   }
 }
 
-/** Clicks a control with a WebDriver element click once the owner could reach it.
- * Inputs: the step selector and the time limit in ms. */
+/** What kept the owner from a control a click waited for: how many elements the selector
+ * matches, whether WebDriver calls the first displayed and clickable, its disabled and
+ * aria-disabled, its rect against the viewport, and the element on top at its middle and that
+ * element's parent (tag, class, data-*). Input: the step selector. Output: one line. */
+async function blocker(selector) {
+  const path = locator(selector);
+  const matches = await $$(path);
+  if (matches.length === 0) return "no element matches";
+  const first = matches[0];
+  const page = await browser.execute((path) => {
+    const node = /^[(/]/.test(path)
+      ? document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
+      : document.querySelector(path);
+    if (!node) return "the page finds no element";
+    const name = (element) => element
+      ? `${element.tagName.toLowerCase()} class="${element.getAttribute("class") ?? ""}"${[...element.attributes].filter((item) => item.name.startsWith("data-")).map((item) => ` ${item.name}="${item.value}"`).join("")}`
+      : "nothing";
+    const box = node.getBoundingClientRect();
+    const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return {
+      disabled: node.disabled === true,
+      ariaDisabled: node.getAttribute("aria-disabled"),
+      rect: [box.left, box.top, box.width, box.height].map(Math.round),
+      viewport: [window.innerWidth, window.innerHeight],
+      top: name(top),
+      topParent: name(top?.parentElement ?? null),
+      topIsIt: Boolean(top && (top === node || node.contains(top))),
+    };
+  }, path);
+  return `${matches.length} match; first displayed=${await first.isDisplayed()} clickable=${await first.isClickable()} ${JSON.stringify(page)}`;
+}
+
+/** Clicks a control with a WebDriver element click once the owner could reach it, and names
+ * what stood in the way ([`blocker`]) when it never could. Inputs: the step selector and the
+ * time limit in ms. */
 export async function click(selector, timeout = 15000) {
   let target = null;
-  await until(async () => {
-    target = await find(selector);
-    return Boolean(target) && await reachable(target);
-  }, timeout, `${selector} was never shown, enabled and on top`);
+  try {
+    await until(async () => {
+      target = await find(selector);
+      return Boolean(target) && await reachable(target);
+    }, timeout, `${selector} was never shown, enabled and on top`);
+  } catch (failure) {
+    throw new Error(`${failure.message}; in the way: ${await blocker(selector)}`);
+  }
   await target.click();
 }
 
@@ -172,10 +209,10 @@ export async function menu(label, item) {
   await click(`//*[@role="menuitem"][normalize-space(.)=${literal(item)}]`);
 }
 
-/** Goes through first run the way an owner does: saves the profile, continues past the
- * projects folder, skips tool setup (nothing is installed) and picks Add account, which
- * opens Settings, Accounts with the Add account dialog. Input: the owner's name. */
-export async function finishWelcome(name) {
+/** Goes through first run the way an owner does up to its last page: saves the profile,
+ * continues past the projects folder and skips tool setup (nothing is installed), then waits
+ * for the Accounts step. Input: the owner's name. */
+export async function reachAccountsStep(name) {
   await until(() => shown("#profile-name"), 60000, "first-run Welcome page did not appear");
   assert.deepEqual(await texts("h1"), ["Tell CrazyAgent about you"]);
   await type("#profile-name", name);
@@ -188,9 +225,33 @@ export async function finishWelcome(name) {
   await until(async () => await shown("button=Skip for now") || await shown("button=Continue"), 30000, "the tools step offered no way on");
   await click(await shown("button=Skip for now") ? "button=Skip for now" : "button=Continue");
   await until(() => says("h1", "Add an account"), 15000, "the accounts step did not open");
+}
+
+/** Goes through first run the way an owner does and picks Add account on its last page, which
+ * opens Settings, Accounts with the Add account dialog. Input: the owner's name. */
+export async function finishWelcome(name) {
+  await reachAccountsStep(name);
+  await addAccountFromFirstRun();
+}
+
+/** Picks Add account on the first-run Accounts step and waits for Settings, Accounts with the
+ * Add account dialog. Input: none. Output: none; fails when the dialog does not open. */
+export async function addAccountFromFirstRun() {
   await click("button=Add account");
   await until(async () => /^#\/settings\/accounts/.test(await browser.execute(() => location.hash)) &&
     await says("dialog[open] h2", "Add an account"), 15000, "Add account did not open in Settings, Accounts");
+}
+
+/** Reads whether the engine holds the Learn CrazyAgent guide as skipped, through the desktop
+ * owner fixture, independently of the window. Output: true when the owner skipped the guide. */
+export async function observeLearningSkipped() {
+  const result = await execute(process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE, ["observe-learning"],
+    { timeout: 10000, killSignal: "SIGKILL", maxBuffer: OBSERVATION_BYTES_MAX * 2 });
+  assert.equal(result.stderr, "", "the learning observation ran without diagnostics");
+  assert(Buffer.byteLength(result.stdout) <= OBSERVATION_BYTES_MAX, "the learning observation stays bounded");
+  const { skipped } = JSON.parse(result.stdout);
+  assert.equal(typeof skipped, "boolean", "the engine said whether the guide is skipped");
+  return skipped;
 }
 
 /** Reads what the engine itself holds for model access through the desktop owner fixture,

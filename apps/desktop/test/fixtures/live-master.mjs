@@ -118,13 +118,16 @@ export function readSwitch(master, on, patch = {}) {
 }
 
 /** Mounts the live master view in one of its states: running with the master's terminal,
- * running before the terminal opens, starting, refused with an engine code, or stopped with
- * the engine's reason when the code is given, idle-stopped when the state says so, with the
- * team status read so far, if any. */
+ * running before the terminal opens, still not open a minute later (overdue) whether or
+ * not the team lists it, starting,
+ * refused with an engine code, or stopped with the engine's reason when the code is given,
+ * idle-stopped when the state says so, with the team status read so far, if any. */
 export function mountView(state, code = "", team = undefined) {
   const panel = page();
-  const live = state === "running" ? { kind: "running", node }
-    : state === "waiting" ? { kind: "running", node: null }
+  const live = state === "running" ? { kind: "running", node, since: null }
+    : state === "waiting" ? { kind: "running", node: null, since: Date.now() }
+    : state === "overdue" ? { kind: "running", node: null, since: Date.now() - 61_000 }
+    : state === "overdue-listed" ? { kind: "running", node, since: Date.now() - 61_000 }
     : state === "refused" ? { kind: "refused", code, copy: "The engine refused." }
     : state === "stopped" ? { kind: "stopped", problem: code || null, idle: false }
     : state === "idle-stopped" ? { kind: "stopped", problem: code, idle: true }

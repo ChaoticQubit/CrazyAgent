@@ -27,6 +27,7 @@ crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]\n\
 crazyagent team-mcp-agent MAILBOX_DIR [OFF_TOOL ...]\n\
 crazyagent coord-hook post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR\n\
 crazyagent coord-watch MAILBOX_DIR\n\
+crazyagent lane --folder LANE_DIR [--uses NAME]... [--label TEXT] -- PROGRAM [ARGUMENT ...]\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -222,6 +223,17 @@ fn main() -> ExitCode {
     }
     if args
         .first()
+        .is_some_and(|arg| arg == crazyagent::coord::lane::COMMAND)
+    {
+        let lane: Vec<OsString> = std::env::args_os()
+            .skip(2)
+            .take(crazyagent::coord::lane::ARGUMENTS_MAX + 1)
+            .collect();
+        let code = crazyagent::coord::lane::run(&lane, &mut io::stderr().lock());
+        return ExitCode::from(u8::try_from(code.clamp(0, 255)).unwrap_or(1));
+    }
+    if args
+        .first()
         .is_some_and(|arg| arg == crazyagent::coord::relay::WATCH_COMMAND)
     {
         let result = if args.len() != 2 {
@@ -301,8 +313,10 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
     let usage = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
     let codex = match args.len() {
         2 => None,
-        6 if (args[2] == "--codex-executable" && args[4] == "--codex-sha256")
-            || (args[2] == "--claude-executable" && args[4] == "--claude-sha256") =>
+        count
+            if count >= 6
+                && ((args[2] == "--codex-executable" && args[4] == "--codex-sha256")
+                    || (args[2] == "--claude-executable" && args[4] == "--claude-sha256")) =>
         {
             let executable = Path::new(&args[3]);
             if !executable.is_absolute() {
@@ -321,6 +335,8 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
         }
         _ => return Err(usage.into()),
     };
+    let launch = crazyagent::engine::handed_words(args.get(6..).unwrap_or_default())
+        .map_err(|error| error.to_string())?;
     let input = rustix::io::fcntl_dupfd_cloexec(io::stdin(), 3)
         .map(std::fs::File::from)
         .map_err(|_| "native_auth_bootstrap_stdin_unavailable".to_owned())?;
@@ -345,6 +361,7 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
                         input.into(),
                         executable,
                         digest,
+                        &launch,
                     )
                     .await;
                 }
@@ -353,6 +370,7 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
                     input.into(),
                     executable,
                     digest,
+                    &launch,
                 )
                 .await
             } else {
@@ -533,6 +551,7 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     }
     .map_err(|e| e.to_string())?;
     layout.prepare().map_err(|e| e.to_string())?;
+    crazyagent::tools::record_engine_root(layout.root());
     let executable = current_executable()?;
     let found_on_path = [
         explicit.codex.is_none(),
@@ -572,7 +591,11 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
             .claude
             .or(chosen.claude)
             .or_else(|| found("claude-code")),
-        rcli: crazyagent::paths::rcli_entry(explicit.rcli, path.as_deref(), executable.parent()),
+        rcli: crazyagent::paths::rcli_entry(
+            explicit.rcli,
+            &crazyagent::tools::Places::from_environment(Some(layout.root())),
+            executable.parent(),
+        ),
     };
     Ok(EngineStart {
         root: layout.root().to_path_buf(),
@@ -763,10 +786,12 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         harnesses.codex.as_deref(),
                         harnesses.claude.as_deref(),
                         agent_terminal(&service),
+                        terminal_probe(&service),
                         agents,
                         service
                             .owner_runtime()
                             .map(|handle| handle.harness_lookup()),
+                        service.owner_runtime().map(|handle| handle.reproving()),
                     )
                     .map(Some)
                 })
@@ -821,6 +846,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         std::env::current_exe().ok().as_deref(),
                         agents,
                         agent_terminal(&service),
+                        terminal_probe(&service),
                         service.owner_runtime().map(|handle| handle.reproving()),
                         service
                             .owner_runtime()
@@ -1025,7 +1051,7 @@ async fn offer_restart(
     service.stop().map_err(|e| e.to_string())?;
     let since = crazyagent::service::log_length(layout);
     service.start().map_err(|e| e.to_string())?;
-    crazyagent::service::wait_ready(layout, crazyagent::service::READY_TIMEOUT, None, since)
+    crazyagent::service::wait_started(layout, service, crazyagent::service::READY_TIMEOUT, since)
         .await
         .map_err(|e| e.to_string())?;
     match crazyagent::service::check_engine(
@@ -1108,7 +1134,30 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
         "start" if answering => println!("The engine is already running"),
         "start" => {
             let since = crazyagent::service::log_length(&layout);
-            service.start().map_err(|e| e.to_string())?;
+            let another = service.runs_another_program();
+            if another && service.may_replace() {
+                let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+                crazyagent::service::Service {
+                    executable: crazyagent::service::persistable(
+                        &service.executable,
+                        &layout,
+                        appdir.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?,
+                    ..service.clone()
+                }
+                .install()
+            } else {
+                if another {
+                    eprintln!(
+                        "{} runs another engine; it starts as it is. To run this one at login: {} service install",
+                        service.definition.display(),
+                        service.executable.display()
+                    );
+                }
+                service.start()
+            }
+            .map_err(|e| e.to_string())?;
             wait(&layout, since)?;
             println!("Started {}", service.name);
         }
@@ -1156,9 +1205,24 @@ fn stop_background(
     }
 }
 
+/// Looks for the engine's terminal host again, as tmux is found now, for a team runtime
+/// that started without one, so tmux installed after the engine started runs the live
+/// master with no engine restart. Takes the engine service. Returns the probe, or none
+/// without an owner runtime.
+fn terminal_probe(
+    service: &crazyagent::engine::bootstrap::EngineService,
+) -> Option<crazyagent::team::runtime::TerminalProbe> {
+    let handle = service.owner_runtime()?.clone();
+    Some(Box::new(move || {
+        let host = handle.terminal().ok()?;
+        host.alive().ok()?;
+        Some(host)
+    }))
+}
+
 /// Opens the engine's terminal host for team and research agents when it can run now.
-/// Takes the engine service. Returns the host, or none after saying why on stderr; agents
-/// then run headless until the engine restarts with tmux available.
+/// Takes the engine service. Returns the host, or none after saying why on stderr; team
+/// agents then run headless until a live master start finds tmux ([`terminal_probe`]).
 fn agent_terminal(
     service: &crazyagent::engine::bootstrap::EngineService,
 ) -> Option<std::sync::Arc<dyn crazyagent::terminal::Host>> {

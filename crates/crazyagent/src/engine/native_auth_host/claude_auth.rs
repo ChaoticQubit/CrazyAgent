@@ -31,15 +31,18 @@ enum ClaudeAuthCommand {
     Renew,
 }
 
+/// Builds one Claude Code auth child from the launch words the engine handed, in the
+/// profile home with only its own environment. Inputs: the words, the profile home and the
+/// action. Output: the command, or `native_auth_claude_launch_invalid` for a relative word
+/// or home.
 fn auth_command(
-    executable: &Path,
+    words: &[std::ffi::OsString],
     home: &Path,
     action: ClaudeAuthCommand,
 ) -> Result<Command, EngineError> {
-    if !executable.is_absolute() || !home.is_absolute() {
+    let Some(mut command) = super::handed_command(words).filter(|_| home.is_absolute()) else {
         return Err(EngineError("native_auth_claude_launch_invalid".into()));
-    }
-    let mut command = Command::new(executable);
+    };
     match action {
         ClaudeAuthCommand::Login => command.args(["auth", "login"]),
         ClaudeAuthCommand::Status => command.args(["auth", "status"]),
@@ -51,7 +54,7 @@ fn auth_command(
         .env("HOME", home)
         .env("CLAUDE_CONFIG_DIR", home)
         .env("TMPDIR", home)
-        .env("PATH", super::sign_in_path(executable))
+        .env("PATH", super::SIGN_IN_PATH)
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .current_dir(home)
@@ -64,7 +67,7 @@ fn auth_command(
         .stderr(Stdio::piped())
         .process_group(0);
     assert_eq!(command.get_current_dir(), Some(home));
-    assert_eq!(command.get_program(), executable.as_os_str());
+    assert!(Path::new(command.get_program()).is_absolute());
     Ok(command)
 }
 

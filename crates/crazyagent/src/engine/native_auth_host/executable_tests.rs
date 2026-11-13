@@ -170,7 +170,8 @@ fn native_auth_custodian_command_keeps_self_and_codex_pins_distinct() {
     let path = executable(root.path(), "crazyagent");
     let codex_path = executable(root.path(), "codex");
     let codex = RegisteredNativeAuthHost::capture(&codex_path).unwrap();
-    let command = super::custodian_command(&path, root.path(), Some(&codex)).unwrap();
+    let command =
+        super::custodian_command(&path, root.path(), Some(("codex", &codex, &[]))).unwrap();
     assert_eq!(command.get_program(), path.as_os_str());
     let arguments: Vec<_> = command.get_args().map(|value| value.to_owned()).collect();
     assert_eq!(
@@ -210,7 +211,129 @@ fn native_auth_custodian_command_rejects_changed_codex_pin() {
     let codex_path = executable(root.path(), "codex");
     let codex = RegisteredNativeAuthHost::capture(&codex_path).unwrap();
     std::fs::write(codex_path, b"changed").unwrap();
-    assert!(super::custodian_command(&path, root.path(), Some(&codex)).is_err());
+    assert!(super::custodian_command(&path, root.path(), Some(("codex", &codex, &[]))).is_err());
+}
+
+/// A Codex sign-in custodian is handed the launch the engine resolved, each file by its real
+/// path and hash and each first-line word as it is, and still gets no environment at all; the
+/// custodian reads and pins those words back into the same launch.
+#[test]
+fn native_auth_custodian_command_hands_the_pinned_launch_with_no_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "crazyagent");
+    let codex_path = executable(root.path(), "codex");
+    let node_path = executable(root.path(), "node");
+    std::fs::write(&node_path, b"interpreter-bytes").unwrap();
+    let codex = RegisteredNativeAuthHost::capture(&codex_path).unwrap();
+    let launch = vec![
+        super::LaunchWord::File(RegisteredNativeAuthHost::capture(&node_path).unwrap()),
+        super::LaunchWord::Argument("--no-warnings".into()),
+        super::LaunchWord::File(RegisteredNativeAuthHost::capture(&codex_path).unwrap()),
+    ];
+    let command =
+        super::custodian_command(&path, root.path(), Some(("codex", &codex, &launch))).unwrap();
+    let digest = |file: &Path| format!("{:x}", Sha256::digest(std::fs::read(file).unwrap()));
+    let arguments: Vec<std::ffi::OsString> =
+        command.get_args().map(|value| value.to_owned()).collect();
+    let expected: Vec<std::ffi::OsString> = vec![
+        "native-auth-custodian".into(),
+        root.path().as_os_str().to_owned(),
+        "--codex-executable".into(),
+        codex_path.clone().into_os_string(),
+        "--codex-sha256".into(),
+        digest(&codex_path).into(),
+        "--launch-file".into(),
+        node_path.clone().into_os_string(),
+        "--launch-sha256".into(),
+        digest(&node_path).into(),
+        "--launch-argument".into(),
+        "--no-warnings".into(),
+        "--launch-file".into(),
+        codex_path.clone().into_os_string(),
+        "--launch-sha256".into(),
+        digest(&codex_path).into(),
+    ];
+    assert_eq!(arguments, expected);
+    assert_eq!(command.get_envs().count(), 0);
+    let handed = super::handed_words(&arguments[6..]).unwrap();
+    let pinned = super::launch::pinned(&handed).unwrap();
+    let harness = RegisteredNativeAuthHost::capture(&codex_path)
+        .unwrap()
+        .with_launch(pinned);
+    assert_eq!(
+        harness.launch_words().unwrap(),
+        vec![
+            node_path.into_os_string(),
+            "--no-warnings".into(),
+            codex_path.into_os_string()
+        ]
+    );
+}
+
+/// A launch file that changed after the engine hashed it is refused when the custodian pins
+/// it, and every other shape of launch arguments is refused before anything is pinned.
+#[test]
+fn a_handed_launch_refuses_a_changed_file_and_every_other_shape() {
+    let root = tempfile::tempdir().unwrap();
+    let node = executable(root.path(), "node").into_os_string();
+    let zeros: std::ffi::OsString = "0".repeat(64).into();
+    let words = |items: &[&std::ffi::OsStr]| -> Vec<std::ffi::OsString> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    };
+    let file = [
+        "--launch-file".as_ref(),
+        node.as_os_str(),
+        "--launch-sha256".as_ref(),
+        zeros.as_os_str(),
+    ];
+    let handed = words(&file);
+    let parsed = super::handed_words(&handed).unwrap();
+    assert_eq!(
+        super::launch::pinned(&parsed).err().unwrap().0,
+        "native_auth_host_executable_changed"
+    );
+    assert!(super::handed_words(&[]).unwrap().is_empty());
+    let upper: std::ffi::OsString = "A".repeat(64).into();
+    let too_many: Vec<std::ffi::OsString> =
+        std::iter::repeat_n(handed.clone(), 13).flatten().collect();
+    for shape in [
+        words(&["--launch-argument".as_ref(), "x".as_ref()]),
+        words(&[
+            "--launch-file".as_ref(),
+            "relative".as_ref(),
+            "--launch-sha256".as_ref(),
+            zeros.as_os_str(),
+        ]),
+        words(&[
+            "--launch-file".as_ref(),
+            node.as_os_str(),
+            "--launch-sha256".as_ref(),
+            upper.as_os_str(),
+        ]),
+        words(&["--launch-file".as_ref(), node.as_os_str()]),
+        words(&[&file[..], &["--launch-argument".as_ref(), "x".as_ref()]].concat()),
+        words(&["--launch-other".as_ref(), node.as_os_str()]),
+        too_many,
+    ] {
+        assert_eq!(
+            super::handed_words(&shape).err().unwrap().0,
+            "native_auth_host_launch_invalid",
+            "{shape:?}"
+        );
+    }
+}
+
+/// A harness whose interpreter the engine's resolver cannot find gets no launch, so its
+/// custodian is handed no harness and the sign-in settles unavailable, never the resolver's
+/// sentence as a code.
+#[test]
+fn a_harness_whose_interpreter_is_missing_gets_no_launch() {
+    let root = tempfile::tempdir().unwrap();
+    let codex = std::fs::canonicalize(root.path()).unwrap().join("codex");
+    std::fs::write(&codex, "#!/nonexistent/crazyagent-test-interpreter\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let harness = RegisteredNativeAuthHost::capture(&codex).unwrap();
+    assert!(super::launch::resolved(&harness).is_none());
 }
 
 #[test]

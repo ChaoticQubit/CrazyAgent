@@ -76,6 +76,8 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
+/// How long [`unreached_provider`] waits for a loopback model provider to take a connection.
+const PROVIDER_REACH_TIME: Duration = Duration::from_secs(2);
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 /// The `RunError::Invalid` text of a run whose agent state folder already exists,
@@ -303,9 +305,60 @@ pub struct ResearchRunner {
     stopping: AtomicBool,
     setup: Mutex<()>,
     custody: Mutex<Result<NativeProfileCustody, EngineError>>,
-    terminal: Option<Arc<dyn Host>>,
+    terminal: Mutex<Option<Arc<dyn Host>>>,
+    terminal_probe: Option<Mutex<crate::team::runtime::TerminalProbe>>,
     agents: Option<Arc<Agents>>,
     settings: Option<(PathBuf, PathBuf)>,
+    reproving: Option<Arc<AtomicBool>>,
+}
+
+/// The words that start a research harness with no search path
+/// ([`crate::harnesses::interactive::launch_words`]): its file, or for a script that asks
+/// `env` for its interpreter, such as an npm-built Codex asking for `node`, that
+/// interpreter's absolute file and then the script. Input: the harness's real file. Output:
+/// the words, or the tool resolver's owner line when the interpreter is missing.
+fn harness_words(program: &Path) -> Result<Vec<String>, RunError> {
+    let words = crate::harnesses::interactive::launch_words(program)
+        .map_err(|problem| RunError::Invalid(problem.0))?;
+    assert!(
+        words
+            .first()
+            .is_some_and(|word| Path::new(word).is_absolute())
+    );
+    Ok(words)
+}
+
+/// Lets a research harness run in `sandbox`, only once the tool resolver lets it launch
+/// ([`crate::harnesses::interactive::launch_tool`]): the real file that starts, the Node
+/// folders of an npm install ([`ProjectSandbox::allow_node_for`]) and its interpreters
+/// ([`ProjectSandbox::allow_interpreters`]), the same grants a team agent gets. Inputs: the
+/// sandbox and the harness's real file. Output: the sandbox, or the resolver's owner line.
+fn allow_harness(sandbox: ProjectSandbox, program: &Path) -> Result<ProjectSandbox, RunError> {
+    let places = crate::tools::Places::from_environment(None);
+    let launched = crate::harnesses::interactive::launch_tool(program, &places)
+        .map_err(|problem| RunError::Invalid(problem.0))?;
+    let sandbox = sandbox
+        .allow_exec(&launched.program)?
+        .allow_node_for(&launched.program)?;
+    Ok(sandbox.allow_interpreters(&launched)?)
+}
+
+/// Ends every research pane an earlier engine left in `host`, with every process its harness
+/// started, since that engine's jobs went back to the queue. Takes the host. Returns the
+/// host's plain code when it cannot list or end them.
+fn end_left_panes(host: &dyn Host) -> Result<(), RunError> {
+    let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
+    for agent in host.alive().map_err(host_error)? {
+        if !agent.as_str().starts_with(PANE_PREFIX) {
+            continue;
+        }
+        match end_left_pane(host, &agent, "research") {
+            Ok(_) => {}
+            Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+            Err(problem) => return Err(host_error(problem)),
+        }
+    }
+    Ok(())
 }
 
 /// Where one launch of a claimed research job runs: the canonical project folder, its
@@ -453,9 +506,11 @@ impl ResearchRunner {
             stopping: AtomicBool::new(false),
             setup: Mutex::new(()),
             custody: Mutex::new(custody),
-            terminal: None,
+            terminal: Mutex::new(None),
+            terminal_probe: None,
             agents: None,
             settings: None,
+            reproving: None,
         })
     }
 
@@ -473,19 +528,40 @@ impl ResearchRunner {
     /// the queue; a cleanup not confirmed is reported on stderr. Takes the host.
     /// Returns the runner, or the host's plain code.
     pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, RunError> {
-        let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
-        for agent in host.alive().map_err(host_error)? {
-            if !agent.as_str().starts_with(PANE_PREFIX) {
-                continue;
-            }
-            match end_left_pane(host.as_ref(), &agent, "research") {
-                Ok(_) => {}
-                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
-                Err(problem) => return Err(host_error(problem)),
+        end_left_panes(host.as_ref())?;
+        *self
+            .terminal
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner) = Some(host);
+        Ok(self)
+    }
+
+    /// Lets a runner that started with no terminal host look for one again at each research
+    /// agent's start, so tmux installed after the engine started runs the next agent in a
+    /// pane with no engine restart. Takes the probe. Returns the runner.
+    pub fn with_terminal_probe(mut self, probe: crate::team::runtime::TerminalProbe) -> Self {
+        self.terminal_probe = Some(Mutex::new(probe));
+        self
+    }
+
+    /// The terminal host a research agent starts in now: the one the runner holds, else the
+    /// one its probe finds, kept once its earlier panes end ([`end_left_panes`]). Output:
+    /// the host, or none while no terminal program is found, so the agent runs headless.
+    fn terminal(&self) -> Option<Arc<dyn Host>> {
+        let mut held = self.terminal.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.is_none() {
+            let probe = self.terminal_probe.as_ref()?;
+            let host = (probe.lock().unwrap_or_else(PoisonError::into_inner))()?;
+            match end_left_panes(host.as_ref()) {
+                Ok(()) => *held = Some(host),
+                Err(problem) => {
+                    eprintln!(
+                        "research terminal found but not used ({problem}); agents run headless"
+                    );
+                }
             }
         }
-        self.terminal = Some(host);
-        Ok(self)
+        held.clone()
     }
 
     /// Names each running research job in the engine's agent register as a holder of the
@@ -494,6 +570,22 @@ impl ResearchRunner {
     pub fn with_agents(mut self, agents: Arc<Agents>) -> Self {
         self.agents = Some(agents);
         self
+    }
+
+    /// Shares the engine's flag that is set while its engine-start re-proof of earlier
+    /// sign-ins still runs (DEC-108), so work that finds no signed-in account then waits
+    /// for the re-proof instead of reporting none. Takes the flag. Returns the runner.
+    pub fn with_reproof(mut self, reproving: Arc<AtomicBool>) -> Self {
+        self.reproving = Some(reproving);
+        self
+    }
+
+    /// Whether the engine-start re-proof of earlier sign-ins still runs; false without the
+    /// engine's flag. Output: the flag's value.
+    pub fn reproving(&self) -> bool {
+        self.reproving
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 
     /// Lets the runner run Claude Code jobs with the absolute `claude`
@@ -967,7 +1059,7 @@ impl ResearchRunner {
         for folder in read_folders(&program, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
-        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
+        sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
         let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
@@ -984,6 +1076,11 @@ impl ResearchRunner {
             for folder in &hidden {
                 sandbox = sandbox.hide(folder)?;
             }
+            if !unconfined {
+                sandbox =
+                    crate::sandbox::shared_folders::apply(sandbox, &root, &policy.shared_folders)
+                        .map_err(|code| RunError::Invalid(code.into()))?;
+            }
             sandbox.install(&profile)?;
             Ok(sandbox)
         })??;
@@ -991,7 +1088,7 @@ impl ResearchRunner {
         let linked = self.linked_research(job, &root)?;
         let prompt = research_prompt(&root, &job.kind, &linked)?;
         write_private(&agent, &agent.join("prompt.md"), prompt.as_bytes())?;
-        if let Some(host) = &self.terminal {
+        if let Some(host) = self.terminal() {
             let output = match harness {
                 ResearchHarness::Codex => tmp.join("report.md"),
                 ResearchHarness::ClaudeCode => agent.join("output.md"),
@@ -1059,7 +1156,9 @@ impl ResearchRunner {
         if let Some(relay) = relay {
             write_relay_token(&home, relay)?;
         }
-        let mut launch = Command::new(&program);
+        let words = harness_words(&program)?;
+        let mut launch = Command::new(&words[0]);
+        launch.args(&words[1..]);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
@@ -1499,7 +1598,8 @@ pub(crate) enum ReadOnlyEnding {
 }
 
 impl ResearchRunner {
-    /// Runs one agent with tools off that can read `run.folder` but write only
+    /// Runs one agent with tools off that can read `run.folder`, its secret files
+    /// closed but the ones the owner shared back (DEC-147.9), but write only
     /// its own engine-owned work, home and temp folders, reaching nothing but
     /// its model endpoint. A managed account is held under the engine custody
     /// lease for the whole run. Takes the run and `stop`, polled while the
@@ -1613,7 +1713,7 @@ impl ResearchRunner {
         if let Some(parent) = program.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
-        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
+        sandbox = allow_harness(sandbox, &program)?;
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)
@@ -1626,10 +1726,27 @@ impl ResearchRunner {
         for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {
             sandbox = sandbox.hide(sub)?;
         }
+        let shared = match run.project {
+            Some(project) => {
+                ResearchJobs::open(&self.database)?
+                    .agent_policy(project)
+                    .map_err(|_| RunError::Invalid("project agent policy unreadable".into()))?
+                    .shared_folders
+            }
+            None => crate::sandbox::shared_folders::SharedFolders::default(),
+        };
+        let read_only = crate::sandbox::shared_folders::SharedFolders {
+            access: crate::sandbox::shared_folders::SharedAccess::ReadOnly,
+            ..shared
+        };
+        sandbox = crate::sandbox::shared_folders::apply(sandbox, &folder, &read_only)
+            .map_err(|code| RunError::Invalid(code.into()))?;
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
-        let mut command = sandbox.command(&profile, &program);
+        let words = harness_words(&program)?;
+        let mut command = sandbox.command(&profile, Path::new(&words[0]));
+        command.args(&words[1..]);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
@@ -1963,6 +2080,50 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
             })
         }
     }
+}
+
+/// Tells whether a loopback endpoint account's model provider refuses every connect, so a
+/// caller can fail at once with a plain line in place of a harness retrying it for minutes.
+/// Managed accounts, remote endpoints and any other connect error are not named. Input: the
+/// account. Output: the owner's line naming the provider's host and port, else none.
+pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
+    let (ResearchAccount::Endpoint { base_url, .. }
+    | ResearchAccount::AnthropicEndpoint { base_url, .. }) = account
+    else {
+        return None;
+    };
+    let Ok(SandboxRemote::Loopback(port)) = model_remote(account) else {
+        return None;
+    };
+    let url = endpoint_url(base_url).ok()?;
+    let addresses: Vec<std::net::SocketAddr> = match url.host()? {
+        url::Host::Ipv4(address) => vec![(address, port).into()],
+        url::Host::Ipv6(address) => vec![(address, port).into()],
+        url::Host::Domain(_) => vec![
+            (std::net::Ipv4Addr::LOCALHOST, port).into(),
+            (std::net::Ipv6Addr::LOCALHOST, port).into(),
+        ],
+    };
+    assert!(
+        !addresses.is_empty() && addresses.iter().all(|address| address.ip().is_loopback()),
+        "a loopback endpoint is checked on loopback addresses only"
+    );
+    let unreached = addresses.iter().all(|address| {
+        refused(crate::spawn_gate::connect_tcp_std_timeout(address, PROVIDER_REACH_TIME).map(drop))
+    });
+    let host = url.host_str()?;
+    unreached.then(|| {
+        format!(
+            "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then retry setup."
+        )
+    })
+}
+
+/// Tells whether one connect to a loopback model provider proves nothing listens there:
+/// only a refused connect does, never a success, a timeout or another error such as too
+/// many open files. Input: the connect's outcome. Output: true only for a refusal.
+fn refused(outcome: std::io::Result<()>) -> bool {
+    matches!(outcome, Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused)
 }
 
 /// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
@@ -2346,6 +2507,27 @@ fn repository_setup(root: &Path) -> RepositorySetup {
     RepositorySetup(key)
 }
 
+/// Runs one git command the engine makes in a project folder it created: the safe git
+/// options, a cleared environment with a private HOME and TMPDIR, no system config, no input
+/// or output, bounded by SETUP_TIMEOUT. Inputs: the folder, the private home and the
+/// arguments. Output: whether git succeeded, or the spawn or wait failure.
+pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<bool, RunError> {
+    let mut command = Command::new(GIT);
+    command
+        .args(GIT_SAFE)
+        .args(arguments)
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", tmp)
+        .env("TMPDIR", tmp)
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)? == Ended::Succeeded)
+}
+
 /// Makes a project folder the engine created a git repository with one empty start commit,
 /// one setup per repository at a time. A folder with any `.git` entry is the owner's repository and
 /// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
@@ -2363,25 +2545,7 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
             "the project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit".into(),
         ));
     }
-    let git = |arguments: &[&str]| -> Result<bool, RunError> {
-        let mut command = Command::new(GIT);
-        command
-            .args(GIT_SAFE)
-            .args(arguments)
-            .current_dir(root)
-            .env_clear()
-            .env("HOME", tmp)
-            .env("TMPDIR", tmp)
-            .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        Ok(
-            wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)?
-                == Ended::Succeeded,
-        )
-    };
+    let git = |arguments: &[&str]| engine_git(root, tmp, arguments);
     let created = git(&["init", "-q", "--template="])?
         && git(&[
             "-c",
@@ -3951,6 +4115,165 @@ mod tests {
         CredentialRef::new(value).unwrap()
     }
 
+    /// A terminal host that lists the panes it was given and fails every other call, or
+    /// fails its listing too, as a tmux server that cannot answer.
+    struct Listed(Result<Vec<AgentId>, crate::terminal::HostError>);
+
+    impl Host for Listed {
+        fn spawn(
+            &self,
+            _agent: &AgentId,
+            _command: &crate::harnesses::interactive::InteractiveCommand,
+        ) -> Result<crate::terminal::PaneRef, crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        }
+
+        fn attach(
+            &self,
+            _agent: &AgentId,
+        ) -> Result<crate::terminal::TerminalStream, crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        }
+
+        fn input(&self, _agent: &AgentId, _bytes: &[u8]) -> Result<(), crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        }
+
+        fn resize(
+            &self,
+            _agent: &AgentId,
+            _cols: u16,
+            _rows: u16,
+        ) -> Result<(), crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        }
+
+        fn kill(&self, _agent: &AgentId) -> Result<(), crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_agent_unknown".into()))
+        }
+
+        fn alive(&self) -> Result<Vec<AgentId>, crate::terminal::HostError> {
+            self.0.clone()
+        }
+    }
+
+    /// On a fresh Mac the engine starts before setup installs tmux. Research agents then run
+    /// headless only until tmux is found: the runner looks for the terminal again at each
+    /// agent's start, keeps the first host that answers and asks no more, and a host that
+    /// cannot list its panes is not kept, so the next agent looks again.
+    #[test]
+    fn a_terminal_found_after_engine_start_runs_the_next_research_agent_in_a_pane() {
+        use std::sync::atomic::AtomicUsize;
+        let root = engine_root();
+        let found: Arc<Mutex<Option<Arc<dyn Host>>>> = Arc::new(Mutex::new(None));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let probe = {
+            let found = found.clone();
+            let asked = asked.clone();
+            Box::new(move || {
+                asked.fetch_add(1, Ordering::SeqCst);
+                found.lock().unwrap().clone()
+            })
+        };
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_terminal_probe(probe);
+        assert!(runner.terminal().is_none());
+        assert!(runner.terminal().is_none());
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "each agent's start looks again"
+        );
+        let broken: Arc<dyn Host> = Arc::new(Listed(Err(crate::terminal::HostError(
+            "terminal_unavailable".into(),
+        ))));
+        *found.lock().unwrap() = Some(broken);
+        assert!(
+            runner.terminal().is_none(),
+            "a host that cannot answer is not kept"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+        let host: Arc<dyn Host> = Arc::new(Listed(Ok(vec![AgentId::new("team-7").unwrap()])));
+        *found.lock().unwrap() = Some(host.clone());
+        let first = runner
+            .terminal()
+            .expect("tmux installed after start is found");
+        assert!(Arc::ptr_eq(&first, &host));
+        *found.lock().unwrap() = None;
+        let kept = runner.terminal().expect("the found host is kept");
+        assert!(Arc::ptr_eq(&kept, &host));
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            4,
+            "a kept host is not looked for again"
+        );
+    }
+
+    /// An npm-built harness asks `env` for its interpreter, and a research agent runs with
+    /// no search path that finds Node from nvm, volta or Homebrew. Its launch words start
+    /// the interpreter the tool resolver finds, by its absolute file, then the script; a
+    /// native harness is one word. The stand-in asks for `sh`, found on every Mac.
+    #[test]
+    fn a_research_harness_script_starts_through_its_resolved_interpreter() {
+        let install = tempfile::tempdir().unwrap();
+        let base = install.path().canonicalize().unwrap();
+        let script = base.join("lib/node_modules/@openai/codex/bin/codex.js");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "#!/usr/bin/env sh\nexit 0\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let interpreter =
+            crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+        assert_eq!(
+            harness_words(&script).unwrap(),
+            vec![
+                interpreter.program.to_str().unwrap().to_owned(),
+                script.to_str().unwrap().to_owned()
+            ]
+        );
+        let native = base.join("codex");
+        fs::write(&native, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            harness_words(&native).unwrap(),
+            vec![native.to_str().unwrap().to_owned()]
+        );
+    }
+
+    /// A research harness whose file sits inside a project, where agents can write, gets
+    /// no launch words and no sandbox grant: both answer with the tool resolver's owner line
+    /// before anything runs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_research_harness_inside_a_project_is_refused_before_any_grant() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("agent").join("home");
+        let tmp = base.join("agent").join("tmp");
+        for folder in [&project, &home, &tmp] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let harness = base.join("installed").join("project");
+        fs::create_dir_all(harness.join(".crazyagent")).unwrap();
+        let program = harness.join("bin").join("codex");
+        fs::create_dir_all(program.parent().unwrap()).unwrap();
+        fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let line =
+            crate::tools::resolve_entry(&program, &crate::tools::Places::from_environment(None))
+                .unwrap_err()
+                .line();
+        assert!(matches!(harness_words(&program), Err(RunError::Invalid(code)) if code == line));
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        assert!(matches!(
+            allow_harness(sandbox, &program),
+            Err(RunError::Invalid(code)) if code == line
+        ));
+    }
+
     #[test]
     fn a_harness_installed_after_engine_start_can_run_only_through_the_engines_lookup() {
         let root = engine_root();
@@ -3966,6 +4289,74 @@ mod tests {
         assert!(runner.can_run(ResearchHarness::Codex));
         assert_eq!(runner.harness(ResearchHarness::Codex), Some(codex));
         assert!(!runner.can_run(ResearchHarness::ClaudeCode));
+    }
+
+    /// A loopback provider that refuses connections is named at once with its host and port
+    /// and the way out, for either endpoint kind; one that listens and a remote endpoint are
+    /// never named, and no check waits on a remote host.
+    #[test]
+    fn a_loopback_provider_that_refuses_connections_is_named_at_once_and_a_listening_one_is_not() {
+        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let open = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let listening = open.local_addr().unwrap().port();
+        let codex = |base_url: String| ResearchAccount::Endpoint {
+            base_url,
+            model: "local-model".into(),
+            key: None,
+        };
+        let claude = |base_url: String| ResearchAccount::AnthropicEndpoint {
+            base_url,
+            model: "local-model".into(),
+            key: None,
+        };
+        let line = format!(
+            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then retry setup."
+        );
+        let started = Instant::now();
+        assert_eq!(
+            unreached_provider(&codex(format!("http://127.0.0.1:{port}/v1"))),
+            Some(line.clone())
+        );
+        assert_eq!(
+            unreached_provider(&claude(format!("http://127.0.0.1:{port}"))),
+            Some(line)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            unreached_provider(&codex(format!("http://127.0.0.1:{listening}/v1"))),
+            None
+        );
+        assert_eq!(
+            unreached_provider(&claude(format!("http://localhost:{listening}"))),
+            None
+        );
+        let started = Instant::now();
+        assert_eq!(
+            unreached_provider(&codex("https://models.example.test/v1".into())),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drop(open);
+    }
+
+    /// MR-L1: only a refused connect proves nothing listens on a loopback provider. A
+    /// success, a connect that ran out of time, too many open files or any other error never
+    /// does, so such a mapping step still runs its try as before.
+    #[test]
+    fn only_a_refused_connect_counts_as_an_unreached_provider() {
+        use std::io::{Error, ErrorKind};
+        assert!(refused(Err(Error::from(ErrorKind::ConnectionRefused))));
+        assert!(!refused(Ok(())));
+        assert!(!refused(Err(Error::from(ErrorKind::TimedOut))));
+        assert!(!refused(Err(Error::from_raw_os_error(libc::EMFILE))));
+        assert!(!refused(Err(Error::from(ErrorKind::AddrNotAvailable))));
+        assert!(!refused(Err(Error::from(ErrorKind::PermissionDenied))));
     }
 
     #[test]
@@ -4023,6 +4414,152 @@ mod tests {
                 row.4.as_str()
             ),
             ("alpha", "", "onboarding", "codex")
+        );
+    }
+
+    /// DEC-147.9: a read-only run on a project folder runs under the secret deny of that
+    /// folder, with the secret the owner shared back readable again and nothing else.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_keeps_the_project_secrets_closed_but_the_shared_back_ones() {
+        let root = engine_root();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join(".env"), "TOKEN=1\n").unwrap();
+        let project = ProjectId::new("alpha").unwrap();
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        let policy = crate::sandbox::policy::AgentPolicy {
+            shared_folders: crate::sandbox::shared_folders::SharedFolders {
+                secrets: vec![".env".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        drop(connection);
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-1",
+            agent: "overview",
+            project: Some(&project),
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-1.sb"))
+            .expect("the run installed its profile");
+        assert!(
+            profile.contains(&format!(
+                "(require-not (subpath \"{}/.git\"))",
+                folder.display()
+            )),
+            "{profile}"
+        );
+        assert!(
+            profile.contains(&format!(
+                "(allow file-read-data file-read-xattr\n  (subpath \"{}\")",
+                folder.join(".env").display()
+            )),
+            "{profile}"
+        );
+    }
+
+    /// L4 r1 H1: a read-only run follows the project's shared folders choice too. Under
+    /// Chosen an untracked local folder not picked stays closed, and a saved Read-write never
+    /// opens the picked one for writes, since a read-only run only reads.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_keeps_the_folders_the_project_does_not_share_closed() {
+        let root = engine_root();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("README.md"), "readme\n").unwrap();
+        repository_git(&folder, &["init", "-q"]);
+        repository_git(&folder, &["add", "README.md"]);
+        repository_git(&folder, &["commit", "-q", "-m", "Start"]);
+        for name in ["notes", "drafts"] {
+            fs::create_dir(folder.join(name)).unwrap();
+            fs::write(folder.join(name).join("plan.txt"), "plan\n").unwrap();
+        }
+        let project = ProjectId::new("alpha").unwrap();
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        let policy = crate::sandbox::policy::AgentPolicy {
+            shared_folders: crate::sandbox::shared_folders::SharedFolders {
+                scope: crate::sandbox::shared_folders::SharedScope::Chosen,
+                access: crate::sandbox::shared_folders::SharedAccess::ReadWrite,
+                chosen: vec!["notes".into()],
+                secrets: Vec::new(),
+            },
+            ..Default::default()
+        };
+        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        drop(connection);
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-2",
+            agent: "overview",
+            project: Some(&project),
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-2.sb"))
+            .expect("the run installed its profile");
+        assert!(
+            profile.contains(&format!(
+                "(subpath \"{}\")",
+                folder.join("drafts").display()
+            )),
+            "{profile}"
+        );
+        let writes = profile
+            .split("(allow file-write*")
+            .nth(1)
+            .and_then(|rest| rest.split("))\n").next())
+            .expect("the profile allows its own writes");
+        assert!(!writes.contains(&folder.display().to_string()), "{writes}");
+        assert!(
+            !profile.contains(&format!(
+                "(deny file-write-unlink\n  (require-all\n    (subpath \"{}\")",
+                folder.join("notes").display()
+            )),
+            "{profile}"
         );
     }
 

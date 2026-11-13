@@ -1022,7 +1022,8 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
                 drop.to_str().unwrap(),
                 drop.with_file_name(crate::team::tool::MAILBOX_FOLDER)
                     .to_str()
-                    .unwrap()
+                    .unwrap(),
+                "wake"
             ],
         }}})
     );
@@ -1162,7 +1163,7 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
         changed
     };
     let widened = serde_json::json!({"mcpServers": {
-        "crazyagent-team": {"type": "stdio", "command": engine, "args": ["team-mcp", drop, drop.with_file_name(crate::team::tool::MAILBOX_FOLDER)]},
+        "crazyagent-team": {"type": "stdio", "command": engine, "args": ["team-mcp", drop, drop.with_file_name(crate::team::tool::MAILBOX_FOLDER), "wake"]},
         "extra": {"type": "stdio", "command": "/bin/sh", "args": []},
     }})
     .to_string();

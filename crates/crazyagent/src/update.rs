@@ -29,10 +29,11 @@ const POLL: Duration = Duration::from_millis(20);
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 const KEY_PLACEHOLDER: &str = "REPLACE_WITH_LEADER_PUBKEY";
 const DESKTOP_CONFIG: &str = include_str!("../../../apps/desktop/src-tauri/tauri.conf.json");
-pub(crate) const BINARIES: [&str; 5] = [
+pub(crate) const BINARIES: [&str; 6] = [
     "crazyagent",
     "crazyagent-rcli",
     "crazyagent-runner",
+    "crazyagent-tmux",
     "crazyagent-landlock",
     "crazyagent-win-boundary",
 ];
@@ -1112,7 +1113,7 @@ pub fn run(args: &[OsString]) -> Result<String, UpdateError> {
     if inside_app_bundle(&executable) {
         return Err(fail(
             "update_inside_app",
-            "This crazyagent belongs to the CrazyAgent app. Update the app instead: open CrazyAgent, then Settings > Updates.",
+            "This crazyagent belongs to the CrazyAgent app. Update the app instead: open CrazyAgent, then Updates in the menu under your name.",
         ));
     }
     let install = executable

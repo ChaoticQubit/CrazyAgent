@@ -42,6 +42,8 @@ pub(crate) use native_auth::CUSTODIAN_CODES;
 pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
+#[cfg(unix)]
+pub(crate) use native_auth::account_check_running;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::sign_in_rechecking;
@@ -1092,6 +1094,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::coordination::initialize(connection)?;
     crate::memory::initialize(connection)?;
     crate::project_setup::initialize(connection)?;
+    crate::demo::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
     crate::sandbox_settings::initialize(connection)?;
@@ -1100,6 +1103,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::master_step_limit::initialize(connection)?;
     crate::master_time_limit::initialize(connection)?;
     crate::master_frame_limit::initialize(connection)?;
+    crate::learning::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1368,10 +1372,24 @@ fn unlock_database(file: &std::fs::File) -> Result<(), EngineError> {
         .map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
+/// Asks SQLite for write-ahead logging and reads the mode back, since a store that cannot take
+/// WAL answers with the journal it kept, not an error. An anonymous in-memory store, which no
+/// other connection can open, may keep `memory` (DEC-147 addendum). Takes the connection.
+/// Returns the kept mode when the store is not in WAL, none when it is, or the SQLite failure.
+pub fn wal_refused(connection: &Connection) -> rusqlite::Result<Option<String>> {
+    let mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    let anonymous = connection.path().is_none_or(str::is_empty);
+    let kept = mode != "wal" && !(anonymous && mode == "memory");
+    Ok(kept.then_some(mode))
+}
+
 #[cfg(unix)]
 fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
-    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+    if let Some(mode) = wal_refused(connection).map_err(error)? {
+        return Err(error(format!("database_wal_refused: {mode}")));
+    }
+    connection.execute_batch("PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
             INSERT OR IGNORE INTO state VALUES (1,0);
             CREATE TABLE IF NOT EXISTS operations (client TEXT NOT NULL, id TEXT NOT NULL,
@@ -1450,6 +1468,7 @@ fn apply(
             | Command::OwnerMasterSteps { .. }
             | Command::OwnerMasterTime { .. }
             | Command::OwnerMasterFrames { .. }
+            | Command::OwnerLearningMark { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1640,6 +1659,7 @@ fn execute(
         Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
         Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
         Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
+        Command::OwnerLearningMark { step, on } => crate::learning::mark(tx, *step, *on),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -1653,6 +1673,7 @@ fn execute(
         Command::ProjectSetup { action } => {
             let caches = match action {
                 crate::project_setup::SetupAction::Remove { project_id } => {
+                    crate::learning::latch(tx);
                     projects_home::forgotten_caches(tx, path, project_id)?
                 }
                 _ => Vec::new(),
@@ -2368,7 +2389,16 @@ fn setup_plan(
     if owner_revision(&tx)? != request.expected_revision.value() {
         return Ok(Err("stale_revision".into()));
     }
-    crate::project_setup::plan_new(&tx, config, path, &action)
+    let OwnerMutation::CreateDemo { pool, .. } = mutation else {
+        return crate::project_setup::plan_new(&tx, config, path, &action);
+    };
+    if crate::demo::exists(&tx)? {
+        return Ok(Err("demo_exists".into()));
+    }
+    if let Some(code) = crate::demo::pool_unavailable(&tx, config, pool)? {
+        return Ok(Err(code.into()));
+    }
+    Ok(crate::project_setup::plan_new(&tx, config, path, &action)?.map_err(crate::demo::refusal))
 }
 
 /// Applies one owner mutation, optionally with a disk effect already done.
@@ -2417,10 +2447,22 @@ fn owner_apply_with(
             projects_home::record(&tx, path, &request.request_id, &command, effect)?
         }
         (Some(Effect::NewProject(staged)), Command::ProjectSetup { action }) => {
-            crate::project_setup::record_new(&tx, config, action, staged)?
+            let outcome = crate::project_setup::record_new(&tx, config, action, staged)?;
+            if let (
+                Outcome::Applied,
+                OwnerOperation::Apply {
+                    mutation: OwnerMutation::CreateDemo { project_id, .. },
+                },
+            ) = (&outcome, &request.operation)
+            {
+                crate::demo::assert_confined(&tx, project_id)?;
+                crate::demo::record(&tx, project_id, crate::team::now_ms())?;
+            }
+            outcome
         }
         (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
         (Some(Effect::Delete(outcome)), Command::ProjectSetup { action }) => {
+            crate::learning::latch(&tx);
             crate::project_setup::record_delete(&tx, action, outcome, revision)?
         }
         (Some(Effect::Delete(_)), _) => return Err(error("delete_record_invalid")),
@@ -2484,6 +2526,14 @@ fn owner_apply_with(
     )?;
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
+    if changed
+        && let OwnerOperation::Apply {
+            mutation: OwnerMutation::CreateDemo { .. },
+        } = &request.operation
+        && let Err(e) = crate::demo::plant_question(db)
+    {
+        eprintln!("demo_question_not_planted cause={}", e.0);
+    }
     Ok(OwnerApplied {
         result,
         provenance,
@@ -2688,15 +2738,18 @@ fn owner_read(
             };
             let homes = crate::sandbox::toolchains::ToolHomes::owner()
                 .map_err(|_| error("agent_policy_unreadable"))?;
+            let mut policy = crate::sandbox::policy::load(&tx, project_id.as_str())
+                .map_err(error)?
+                .view(
+                    &setup.project_folder(),
+                    &homes,
+                    versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
+                );
+            policy.grant_log =
+                crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;
             OwnerData::ProjectAgentPolicy {
                 project_id: project_id.clone(),
-                policy: crate::sandbox::policy::load(&tx, project_id.as_str())
-                    .map_err(error)?
-                    .view(
-                        &setup.project_folder(),
-                        &homes,
-                        versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
-                    ),
+                policy,
             }
         }
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
@@ -2801,8 +2854,14 @@ fn owner_read(
         OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
         OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,
         OwnerRead::MasterFrameSettings => crate::master_frame_limit::read(&tx)?,
+        OwnerRead::ProjectDemo => OwnerData::ProjectDemo {
+            demo: crate::demo::view(&tx, config)?,
+        },
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
+        },
+        OwnerRead::LearningProgress => OwnerData::LearningProgress {
+            progress: crate::learning::progress(&tx)?,
         },
         OwnerRead::Memories {
             scope,
@@ -4177,6 +4236,44 @@ mod database_lock_tests {
 
         drop(next_owner);
         release_database_lock(lock_database(&path).unwrap()).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod journal_mode_tests {
+    use super::*;
+
+    fn journal_mode(connection: &Connection) -> String {
+        connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// SQLITE-WAL-UNCHECKED: a store that answers the WAL request by keeping a rollback journal,
+    /// here an anonymous temporary database, fails the engine schema with one plain code instead
+    /// of opening in rollback mode, where a read-only reader beside the writer gets IOERR_LOCK.
+    #[test]
+    fn the_engine_schema_refuses_a_store_that_keeps_a_rollback_journal() {
+        let temporary = Connection::open("").unwrap();
+        let refused = initialize_schema(&temporary);
+        assert_eq!(
+            refused.map_err(|error| error.0),
+            Err("database_wal_refused: delete".to_owned())
+        );
+        assert_eq!(journal_mode(&temporary), "delete");
+    }
+
+    /// A store with a file name runs in write-ahead logging, and an anonymous in-memory store,
+    /// which no other connection can open, keeps its memory journal (DEC-147 addendum).
+    #[test]
+    fn a_file_store_runs_in_wal_and_an_anonymous_memory_store_keeps_its_memory_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let file = Connection::open(root.path().join("engine.db")).unwrap();
+        initialize_schema(&file).unwrap();
+        assert_eq!(journal_mode(&file), "wal");
+        let memory = Connection::open_in_memory().unwrap();
+        initialize_schema(&memory).unwrap();
+        assert_eq!(journal_mode(&memory), "memory");
     }
 }
 

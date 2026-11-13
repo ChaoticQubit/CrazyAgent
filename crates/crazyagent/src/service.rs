@@ -13,6 +13,9 @@ pub const SYSTEMD_UNIT: &str = "crazyagent-engine.service";
 pub const WINDOWS_TASK: &str = "CrazyAgent Engine";
 /// How long a client waits for a starting engine to answer.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a client waits for an engine while its service manager still runs the process
+/// it started: a busy machine took close to a minute to bring the owner's engine up.
+pub const START_TIMEOUT: Duration = Duration::from_secs(180);
 
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SYSTEMCTL: &str = "systemctl";
@@ -29,6 +32,7 @@ const SERVICE_PATH_EXTRAS: [&str; 6] = [
 const POLL: Duration = Duration::from_millis(100);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(35);
+const LIVENESS_EVERY: Duration = Duration::from_secs(1);
 const LOG_SCAN_BYTES: u64 = 4 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,7 +310,7 @@ impl Service {
 </dict>\n\
 </plist>\n",
                 label = xml(&self.name),
-                executable = xml(&executable),
+                executable = self.written_executable(),
                 root = xml(&root),
                 path = xml(&self.path.to_string_lossy()),
                 log = xml(&log),
@@ -326,7 +330,7 @@ StandardError=append:{log}\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n",
-                executable = systemd_quoted(&executable),
+                executable = self.written_executable(),
                 root = systemd_quoted(&root),
                 path = systemd_quoted(&format!("PATH={}", self.path.to_string_lossy())),
                 log = systemd_specifiers(&log),
@@ -557,6 +561,79 @@ WantedBy=default.target\n",
         self.executable != bundled && !self.current()
     }
 
+    /// The executable as [`Self::definition_text`] writes it on this platform: XML-escaped in
+    /// a plist, quoted for systemd, quoted for cmd and then XML-escaped in a Windows task.
+    /// Output: the text that names the executable in the definition.
+    fn written_executable(&self) -> String {
+        let executable = self.executable.to_string_lossy();
+        match self.platform {
+            Platform::MacOs => xml(&executable),
+            Platform::Linux => systemd_quoted(&executable),
+            Platform::Windows => xml(&windows_quoted(&executable)),
+        }
+    }
+
+    /// Whether the installed definition runs another program than this service's engine, as
+    /// an install script's layout or an older app location does: the line of
+    /// [`Self::definition_text`] naming the executable, as written there, is not in the file.
+    /// A different PATH or setting does not count. Output: false when nothing readable is
+    /// installed.
+    pub fn runs_another_program(&self) -> bool {
+        let Ok(text) = self.definition_text() else {
+            return false;
+        };
+        let written = self.written_executable();
+        let own = text.lines().find(|line| line.contains(written.as_str()));
+        assert!(own.is_some(), "a definition names its executable");
+        std::fs::read_to_string(&self.definition)
+            .is_ok_and(|installed| !installed.lines().any(|line| Some(line) == own))
+    }
+
+    /// Whether `service start` may replace an installed definition that runs another program
+    /// with this service's engine: the engine is an installed desktop app's (an app bundle, a
+    /// mounted AppImage or a Windows install folder) outside any cargo target folder, and no
+    /// engine known at this data root is newer, neither the last one that ran here nor the app
+    /// bundle the installed plist runs. Output: the answer; false for a dev or worktree build.
+    pub fn may_replace(&self) -> bool {
+        let own = canonical(&self.executable);
+        let built = own
+            .ancestors()
+            .any(|folder| folder.join("CACHEDIR.TAG").is_file());
+        if built || !crate::update::inside_app_bundle(&own) {
+            return false;
+        }
+        [
+            crate::engine::bootstrap::reported_engine_version(&self.root),
+            self.installed_bundle_version(),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|known| {
+            crate::update::is_newer(&known, crate::version::VERSION).is_ok_and(|newer| !newer)
+        })
+    }
+
+    /// The version of the app bundle the installed plist runs, from that bundle's Info.plist
+    /// read as text. Output: none when either file is not plain text, is larger than its cap,
+    /// or the plist names no app bundle.
+    fn installed_bundle_version(&self) -> Option<String> {
+        let installed = bounded_text(&self.definition)?;
+        let program = installed
+            .lines()
+            .skip_while(|line| !line.contains("<key>ProgramArguments</key>"))
+            .find_map(plist_string)?;
+        let bundle = Path::new(&program).ancestors().find(|folder| {
+            folder
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        })?;
+        let info = bounded_text(&bundle.join("Contents").join("Info.plist"))?;
+        info.lines()
+            .skip_while(|line| !line.contains("<key>CFBundleShortVersionString</key>"))
+            .nth(1)
+            .and_then(plist_string)
+    }
+
     fn loaded(&self) -> Result<bool, ServiceError> {
         Ok(run_quiet(&self.status_command(current_uid()))?.0)
     }
@@ -668,34 +745,117 @@ WantedBy=default.target\n",
 }
 
 /// The first entry on a path that someone other than this user or root can change: an
-/// entry another user owns, or a world-writable folder such as `/tmp`, where a name that
-/// goes away can be taken by anyone. It reads the path as written and with the links of its
-/// existing part resolved. A link's own mode bits, group-writable folders and missing
-/// entries are not counted (only who can change a folder can create an entry in it), and an
-/// entry that cannot be read counts as changeable. Input: the absolute path.
-/// Output: the entry, or none when only this user and the system can change it.
+/// entry another user owns, a world-writable entry such as `/tmp`, or a file or folder an
+/// untrusted group can write ([`trusted_group`]), except a sticky store such as /nix/store
+/// above an entry's own folder ([`first_changeable_part`]). It reads the path as written and
+/// with its links resolved; an unreadable entry counts. Input: the absolute path. Output:
+/// the entry.
 #[cfg(unix)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
+    changeable(path, false)
+}
+
+/// Like [`changeable_by_others`] for the tools the resolver runs, where a sticky folder
+/// others can write, such as `/tmp`, also passes as a store above an entry's own folder,
+/// since no one can replace a part this user or root owns there. Input: the absolute path.
+/// Output: the entry, or none.
+#[cfg(unix)]
+pub(crate) fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
+    changeable(path, true)
+}
+
+/// Reads a path as written and with its links resolved and names its first changeable part
+/// ([`first_changeable_part`]). Inputs: the path and whether world-writable stores pass.
+/// Output: the entry, or none.
+#[cfg(unix)]
+fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
     let resolved = canonical(path);
-    [path, resolved.as_path()]
-        .into_iter()
-        .flat_map(Path::ancestors)
-        .find(|entry| match std::fs::symlink_metadata(entry) {
-            Ok(metadata) => {
-                (metadata.uid() != me && metadata.uid() != 0)
-                    || (!metadata.file_type().is_symlink() && metadata.mode() & 0o002 != 0)
+    [path, resolved.as_path()].into_iter().find_map(|path| {
+        let parts: Vec<Part> = path.ancestors().map(read_part).collect();
+        first_changeable_part(&parts, me, open_stores)
+            .and_then(|depth| path.ancestors().nth(depth))
+            .map(Path::to_path_buf)
+    })
+}
+
+/// One part of a path as the ownership rule reads it: missing, unreadable, or its owner,
+/// group, mode and whether it is a folder or a link.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Part {
+    Missing,
+    Unreadable,
+    Found {
+        owner: u32,
+        group: u32,
+        mode: u32,
+        folder: bool,
+        link: bool,
+    },
+}
+
+/// Reads one part of a path without following a link. Input: the part. Output: the read.
+#[cfg(unix)]
+fn read_part(entry: &Path) -> Part {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(entry) {
+        Ok(metadata) => Part::Found {
+            owner: metadata.uid(),
+            group: metadata.gid(),
+            mode: metadata.mode(),
+            folder: metadata.is_dir(),
+            link: metadata.file_type().is_symlink(),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Part::Missing,
+        Err(_) => Part::Unreadable,
+    }
+}
+
+/// The first part, the entry first, that someone other than `me` or root can change. A
+/// sticky folder `me` or root owns, two or more parts above the entry with the part below
+/// it present, is a store: its group's write passes, and with `open_stores` everyone's
+/// does too. Inputs: the parts, `me` and `open_stores`. Output: the part's index, or none.
+#[cfg(unix)]
+pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) -> Option<usize> {
+    let mut below_exists = false;
+    for (depth, part) in parts.iter().enumerate() {
+        let changeable = match *part {
+            Part::Missing => false,
+            Part::Unreadable => true,
+            Part::Found {
+                owner,
+                group,
+                mode,
+                folder,
+                link,
+            } => {
+                let owned = owner == me || owner == 0;
+                let store = depth >= 2 && below_exists && owned && folder && mode & 0o1000 != 0;
+                let world = !link && mode & 0o002 != 0;
+                let grouped = !link && mode & 0o020 != 0 && !trusted_group(group);
+                !owned || (world && !(store && open_stores)) || (grouped && !store)
             }
-            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-        })
-        .map(Path::to_path_buf)
+        };
+        if changeable {
+            return Some(depth);
+        }
+        below_exists = *part != Part::Missing;
+    }
+    None
 }
 
 /// Reports no changeable entry where Unix owners and modes do not exist; the Windows task
 /// runs from the folder the installer chose. Input unused. Output: none.
 #[cfg(not(unix))]
 pub fn changeable_by_others(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// Reports no changeable entry where Unix owners and modes do not exist. Input unused.
+/// Output: none.
+#[cfg(not(unix))]
+pub(crate) fn changeable_past_sticky(_path: &Path) -> Option<PathBuf> {
     None
 }
 
@@ -824,6 +984,39 @@ fn systemd_specifiers(text: &str) -> String {
     text.replace('%', "%%")
 }
 
+/// The largest definition or Info.plist read when telling installed versions apart.
+const PLIST_BYTES_MAX: u64 = 64 << 10;
+
+/// Reads a small file as UTF-8 text. Input: the path. Output: the text, or none when it is
+/// missing, not UTF-8 or larger than [`PLIST_BYTES_MAX`].
+fn bounded_text(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(PLIST_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= PLIST_BYTES_MAX).then_some(text)
+}
+
+/// The text of a one-line plist `<string>` element, with XML's five escapes undone. Input:
+/// the line. Output: the text, or none for a line that holds no such element.
+fn plist_string(line: &str) -> Option<String> {
+    let inner = line
+        .trim()
+        .strip_prefix("<string>")?
+        .strip_suffix("</string>")?;
+    Some(
+        inner
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
+}
+
 fn systemd_quoted(text: &str) -> String {
     let mut quoted = String::from("\"");
     for character in text.chars() {
@@ -846,6 +1039,26 @@ fn windows_quoted(text: &str) -> String {
 #[cfg(unix)]
 fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
+}
+
+/// The macOS admin group, whose members can already act as root.
+#[cfg(target_os = "macos")]
+const ADMIN_GROUP: u32 = 80;
+
+/// Whether a group that can write a folder holds only users who may already act as root:
+/// wheel and admin. Every macOS user is in staff, so a staff folder is not trusted.
+/// Input: the group id. Output: the answer.
+#[cfg(target_os = "macos")]
+fn trusted_group(group: u32) -> bool {
+    group == 0 || group == ADMIN_GROUP
+}
+
+/// Whether a group that can write a folder holds only root or this user: root's group, or
+/// this user's own group, as user private groups give it. Input: the group id. Output:
+/// the answer.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn trusted_group(group: u32) -> bool {
+    group == 0 || group == rustix::process::getegid().as_raw()
 }
 
 /// Names no user id where launchd domains do not exist. Output: zero, unused off macOS.
@@ -1006,8 +1219,8 @@ pub enum Started {
 /// Starts the engine for a client when none answers: through the installed service, or
 /// else as a detached `<executable> engine --home <root>` with output in the engine log.
 /// Inputs: the layout, the service, the executable, the PATH a detached engine gets and
-/// the wait bound. Output: how the engine runs once it answers, or a clear error naming
-/// the log after the bound or when the started engine stops.
+/// the wait bound, which a service start outlasts while it runs ([`wait_started`]).
+/// Output: how the engine runs once it answers, or an error naming the log.
 pub async fn ensure_running(
     layout: &Layout,
     service: &Service,
@@ -1020,18 +1233,15 @@ pub async fn ensure_running(
     }
     layout.prepare()?;
     let since = log_length(layout);
-    let mut child = None;
-    let started = if service.status()?.installed {
+    if service.status()?.installed {
         service.start()?;
-        Started::Service
-    } else {
-        let spawned = spawn_detached(layout, executable, path)?;
-        let pid = spawned.id();
-        child = Some(spawned);
-        Started::Detached { pid }
-    };
-    wait_ready(layout, bound, child.as_mut(), since).await?;
-    Ok(started)
+        wait_started(layout, service, bound, since).await?;
+        return Ok(Started::Service);
+    }
+    let mut child = spawn_detached(layout, executable, path)?;
+    let pid = child.id();
+    wait_ready(layout, bound, Some(&mut child), since).await?;
+    Ok(Started::Detached { pid })
 }
 
 fn spawn_detached(
@@ -1185,14 +1395,7 @@ pub async fn wait_ready(
 ) -> Result<(), ServiceError> {
     let deadline = Instant::now() + bound;
     loop {
-        let probe = PROBE_TIMEOUT.min(bound.max(POLL));
-        if logged_ready(layout, since)
-            && answering(&layout.socket())
-            && !matches!(
-                check_engine(layout.root(), OwnerClientKind::Tui, probe).await,
-                EngineCheck::Unavailable { .. }
-            )
-        {
+        if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
             return Ok(());
         }
         if let Some(child) = child.as_deref_mut()
@@ -1205,15 +1408,76 @@ pub async fn wait_ready(
             )));
         }
         if Instant::now() >= deadline {
-            return Err(failure(format!(
-                "the engine did not answer within {} s{}; see {}",
-                bound.as_secs(),
-                backup_reason(layout),
-                layout.engine_log().display()
-            )));
+            return Err(unanswered(layout, bound));
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// Waits like [`wait_ready`] for an engine a service manager starts. Past `bound` it keeps
+/// waiting, up to [`START_TIMEOUT`], while the manager still runs the process it was first
+/// seen running, and it fails at once when that process stops or another one takes its
+/// place. Inputs: the layout, the service, the bound and the log length before the start.
+/// Output: Ok once the engine answers, or an error naming the engine log.
+pub async fn wait_started(
+    layout: &Layout,
+    service: &Service,
+    bound: Duration,
+    since: u64,
+) -> Result<(), ServiceError> {
+    assert!(bound <= START_TIMEOUT);
+    let started = Instant::now();
+    let mut seen: Option<u32> = None;
+    let mut looked: Option<Instant> = None;
+    loop {
+        if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
+            return Ok(());
+        }
+        if looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
+            looked = Some(Instant::now());
+            let status = service.status()?;
+            let running = status.pid.filter(|_| status.running);
+            match (seen, running) {
+                (None, pid) => seen = pid,
+                (Some(first), Some(pid)) if pid == first => {}
+                (Some(_), _) => {
+                    return Err(failure(format!(
+                        "the engine stopped while starting{}; see {}",
+                        backup_reason(layout),
+                        layout.engine_log().display()
+                    )));
+                }
+            }
+        }
+        let limit = if seen.is_some() { START_TIMEOUT } else { bound };
+        if started.elapsed() >= limit {
+            return Err(unanswered(layout, limit));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Whether the engine at a layout has written `ready` to its log after a start and answers
+/// an authenticated read. Inputs: the layout, the log length before the start and the read's
+/// bound. Output: the answer.
+async fn answered(layout: &Layout, since: u64, probe: Duration) -> bool {
+    logged_ready(layout, since)
+        && answering(&layout.socket())
+        && !matches!(
+            check_engine(layout.root(), OwnerClientKind::Tui, probe).await,
+            EngineCheck::Unavailable { .. }
+        )
+}
+
+/// The error of an engine that did not answer within a bound. Inputs: the layout and the
+/// bound. Output: the error naming the bound, a failed upgrade backup and the engine log.
+fn unanswered(layout: &Layout, bound: Duration) -> ServiceError {
+    failure(format!(
+        "the engine did not answer within {} s{}; see {}",
+        bound.as_secs(),
+        backup_reason(layout),
+        layout.engine_log().display()
+    ))
 }
 
 /// Links the running `crazyagent` into a folder on the user's PATH so a shell finds it:

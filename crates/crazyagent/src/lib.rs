@@ -16,6 +16,7 @@ pub mod conversation;
 pub mod coord;
 pub mod coordination;
 pub mod credentials;
+pub mod demo;
 pub mod engine;
 pub mod file_identity;
 #[cfg(unix)]
@@ -34,6 +35,7 @@ pub mod isolation;
 pub mod landing;
 pub mod landing_turns;
 pub mod launch_context;
+pub mod learning;
 pub mod ledger;
 pub mod master_frame_limit;
 pub mod master_session;
@@ -78,6 +80,7 @@ pub mod spawn_gate;
 pub mod storage;
 pub mod team;
 pub mod terminal;
+pub mod tools;
 pub mod tui;
 /// `crazyagent update`: release channel, signed download, verification and executable swap.
 pub mod update;

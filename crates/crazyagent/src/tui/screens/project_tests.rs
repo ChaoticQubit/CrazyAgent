@@ -2621,7 +2621,14 @@ fn access_view(access: AgentAccess, version: u64) -> PolicyView {
         tool_cache: Default::default(),
         tool_caches: Vec::new(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
+        local_folders: Vec::new(),
         version,
+        apply_changes: Default::default(),
+        apply_choices: Vec::new(),
+        grants: Vec::new(),
+        temp_folder: Default::default(),
+        grant_log: Vec::new(),
     }
 }
 
@@ -2663,7 +2670,9 @@ fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
+            ..Default::default()
         },
     };
     assert_eq!(
@@ -2867,6 +2876,8 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
         project_id: project.clone(),
         folder: "/Users/owner/hidden".into(),
         items: vec![],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
@@ -3102,6 +3113,8 @@ fn console_screen() -> ProjectScreen {
             bytes: 10,
             linked: false,
         }],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     screen.open(Tab::Conversation);
     assert!(screen.typing);
@@ -3620,6 +3633,8 @@ fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder
                 linked: false,
             },
         ],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     let spec = OpenRequest::Context {
         folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
@@ -3678,6 +3693,8 @@ fn shift_o_on_the_context_tab_is_in_the_key_help_and_says_why_when_the_ide_canno
             bytes: 20,
             linked: false,
         }],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     };
     screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
     let look = Look::plain();
@@ -4323,6 +4340,118 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
 }
 
 #[test]
+fn the_context_tab_names_the_docs_the_engine_left_out_as_the_desktop_does_never_a_silent_drop() {
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    let doc = |path: &str| ContextItem {
+        path: format!("repo/{path}"),
+        kind: ContextKind::Document,
+        bytes: 8,
+        linked: true,
+    };
+    let listed = |unlisted_docs: usize, docs_folder_cut: bool| ProjectContext {
+        project_id: project.clone(),
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        items: vec![doc("docs/adr/0001-store.md"), doc("docs/roadmap/README.md")],
+        unlisted_docs,
+        docs_folder_cut,
+    };
+    let look = Look::plain();
+    let mut words = |context: ProjectContext, width: u16| {
+        screen.context = Some(context);
+        let drawn = project_screen(&mut screen, width, 40, &look);
+        text(&drawn.rows)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for width in [80, 120] {
+        let whole = words(listed(0, false), width);
+        assert!(whole.contains("README.md"), "{whole}");
+        assert!(
+            !whole.contains("not listed"),
+            "a whole list says nothing: {whole}"
+        );
+        let cut = words(listed(6, false), width);
+        assert!(cut.contains("6 more docs not listed"), "{width}: {cut}");
+        assert!(
+            cut.find("README.md") < cut.find("6 more docs not listed"),
+            "the line follows the docs: {cut}"
+        );
+    }
+    let one = words(listed(1, false), 80);
+    assert!(one.contains("1 more doc not listed"), "{one}");
+    assert!(!one.contains("1 more docs"), "{one}");
+    let folder = words(listed(0, true), 80);
+    assert!(
+        folder
+            .contains("More docs not listed: the docs folder has more files than CrazyAgent reads"),
+        "{folder}"
+    );
+    let both = words(listed(6, true), 80);
+    assert!(
+        both.contains(
+            "6 more docs not listed, and the docs folder has more files than CrazyAgent reads"
+        ),
+        "{both}"
+    );
+}
+
+#[test]
+fn the_context_tree_scrolls_to_keep_the_cursor_in_view_and_the_left_out_count_stays_shown() {
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let look = Look::plain();
+    for width in [80, 120] {
+        let mut screen = loaded(&project);
+        screen.open(Tab::Context);
+        screen.context = Some(ProjectContext {
+            project_id: project.clone(),
+            folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+            items: (0..60)
+                .map(|index| ContextItem {
+                    path: format!("repo/docs/doc-{index:03}.md"),
+                    kind: ContextKind::Document,
+                    bytes: 8,
+                    linked: true,
+                })
+                .collect(),
+            unlisted_docs: 6,
+            docs_folder_cut: false,
+        });
+        let words = |screen: &mut ProjectScreen| {
+            text(&project_screen(screen, width, 24, &look).rows)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let first = words(&mut screen);
+        assert!(first.contains("> doc-000.md"), "{width}: {first}");
+        for _ in 0..59 {
+            assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+        }
+        let last = words(&mut screen);
+        assert!(
+            last.contains("> doc-059.md"),
+            "the cursor stays in view at {width}: {last}"
+        );
+        assert!(
+            !last.contains("doc-000.md"),
+            "the tree scrolled at {width}: {last}"
+        );
+        assert!(last.contains(PROJECT_MEMORY_HINT), "{width}: {last}");
+        assert!(
+            first.contains("6 more docs not listed") && last.contains("6 more docs not listed"),
+            "the count stays shown at {width}: {last}"
+        );
+    }
+}
+
+const PROJECT_MEMORY_HINT: &str = "p opens Project memory.";
+
+#[test]
 fn a_file_linked_from_the_repo_says_so_opens_from_the_project_folder_and_is_not_deleted() {
     use super::project::OpenRequest;
     use crate::project_setup::{ContextItem, ProjectContext};
@@ -4338,6 +4467,8 @@ fn a_file_linked_from_the_repo_says_so_opens_from_the_project_folder_and_is_not_
             bytes: 15,
             linked: true,
         }],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     let look = Look::plain();
     let drawn = project_screen(&mut screen, 80, 24, &look);
@@ -4603,6 +4734,8 @@ fn p_on_the_context_tab_opens_project_memory_and_both_layouts_say_so() {
             bytes: 20,
             linked: false,
         }],
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     });
     let look = Look::plain();
     for (width, height) in [(80, 24), (120, 36)] {

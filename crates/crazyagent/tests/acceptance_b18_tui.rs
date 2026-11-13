@@ -32,6 +32,8 @@ const PROJECT: &str = "Tidepool b18";
 const TASKS: usize = 40;
 const TASK_BYTES: usize = 6000;
 const OWNER_GIT: &str = "[user]\n\tname = Owner Example\n\temail = owner@example.invalid\n";
+#[cfg(target_os = "macos")]
+const WAKE_NEEDS_A_POOL: &str = "The agent could not restart: Needs a pool.";
 
 struct Pty {
     tmux: PathBuf,
@@ -591,15 +593,40 @@ fn b18_the_owner_sees_switches_and_wakes_a_finished_agent() {
         screen.contains("It comes back in the team tree."),
         "{screen}"
     );
-    let stored = count(
+    let asked = Instant::now();
+    let notes = loop {
+        let notes: Vec<String> = db
+            .prepare(
+                "SELECT text FROM team_messages WHERE project=?1 AND author='engine' AND state='note' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([id], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        if notes.iter().any(|text| text == WAKE_NEEDS_A_POOL) {
+            break notes;
+        }
+        assert!(
+            asked.elapsed() < SCREEN_TIME,
+            "the team runtime takes the stored wake and notes why it could not restart: {notes:?}"
+        );
+        std::thread::sleep(POLL_TIME);
+    };
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|text| *text == WAKE_NEEDS_A_POOL)
+            .count(),
+        1,
+        "the one stored wake is taken once: {notes:?}"
+    );
+    let pending = count(
         &db,
         "SELECT count(*) FROM team_wake_requests WHERE agent=?1",
         agent,
     );
-    assert_eq!(
-        stored, 1,
-        "w stores one wake request for the team runtime's next tick"
-    );
+    assert_eq!(pending, 0, "the team runtime took the wake request");
     let stopped = count(
         &db,
         "SELECT count(*) FROM team_agents WHERE id=?1 AND status='stopped'",
@@ -607,7 +634,7 @@ fn b18_the_owner_sees_switches_and_wakes_a_finished_agent() {
     );
     assert_eq!(
         stopped, 1,
-        "this engine runs no team runtime, so the agent stays stopped until one takes the wake"
+        "the project has no pool, so the woken agent stays stopped"
     );
     drop(pty);
     drop(db);

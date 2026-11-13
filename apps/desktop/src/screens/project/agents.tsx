@@ -17,6 +17,7 @@ import { teamLine } from "../team/graph";
 import type { PerWindow } from "../terminals/pages";
 import { SETTING_GROUPS, StopAll, TeamActions, TeamControls, type SettingGroupId } from "../team/controls";
 import { TeamEventsPanel, WakeRulesPanel } from "../team/wake-rules";
+import { HeavyLaneQueue } from "../team/coordination";
 import { LeftoversPanel } from "../team/leftovers";
 import { QuestionsPanel, askCount, asksWords, questionsTitle, useQuestions } from "../team/questions";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
@@ -228,6 +229,7 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     {team.result?.kind === "ok" && team.result.value.paused && <StopAll projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
+    {team.result?.kind === "ok" && <HeavyLaneQueue status={team.result.value} now={data.now} />}
     {team.result?.kind === "ok" && <LeftoversPanel projectId={data.id} status={team.result.value} nowMs={data.now} reload={data.reloadTeam} />}
     <TeamGraphView projectId={data.id} perWindow={perWindow} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)}
       {...bar} />

@@ -3987,3 +3987,290 @@ fn a_confined_shell_lists_its_own_running_child() {
     let listed = text.lines().last().unwrap();
     assert!(listed.split(' ').any(|pid| pid == child), "{text}");
 }
+
+/// F08: under a real Seatbelt profile a socket grant connects to that one socket and to no
+/// other, neither socket can be removed, the temp folder grant hands the folder over as
+/// TMPDIR and takes a new file there, and a port grant joins the limited network.
+#[test]
+fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets() {
+    use crazyagent::sandbox::policy::AccessGrant;
+    let case = case();
+    let owner_tmp = case.root.join("otmp");
+    fs::create_dir_all(&owner_tmp).unwrap();
+    let granted = owner_tmp.join("g.sock");
+    let other = owner_tmp.join("o.sock");
+    let listener = crazyagent::spawn_gate::bind_unix_std(&granted).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let _served = std::thread::spawn(move || {
+        for _ in 0..600 {
+            if crazyagent::spawn_gate::accept_unix_std(&listener).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+    let _other = crazyagent::spawn_gate::bind_unix_std(&other).unwrap();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .grant_access(
+            &[
+                AccessGrant::Socket {
+                    path: granted.clone(),
+                },
+                AccessGrant::TempFolder,
+                AccessGrant::Port { port: 47_821 },
+            ],
+            Some(&owner_tmp),
+        )
+        .unwrap();
+    assert_eq!(
+        sandbox.network(),
+        &SandboxNetwork::Only(vec![SandboxRemote::Loopback(47_821)])
+    );
+    let profile = case.profiles.join("grants.sb");
+    let env = command_env(&sandbox, &profile);
+    assert_eq!(env["TMPDIR"], owner_tmp.display().to_string());
+    let script = format!(
+        "/usr/bin/nc -U {g} </dev/null && echo reached-granted; /usr/bin/nc -U {o} </dev/null || echo refused-other; rm -f {g} {o}; test -S {g} && echo kept-granted; test -S {o} && echo kept-other; echo hi > \"$TMPDIR/note.txt\" && echo wrote-tmp",
+        g = quoted(&granted),
+        o = quoted(&other)
+    );
+    let out = run(&sandbox, &profile, &script);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in [
+        "reached-granted",
+        "refused-other",
+        "kept-granted",
+        "kept-other",
+        "wrote-tmp",
+    ] {
+        assert!(
+            stdout.lines().any(|l| l == line),
+            "{line} missing: {stdout} / {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(owner_tmp.join("note.txt")).unwrap(),
+        "hi\n"
+    );
+}
+
+/// v2.4.0 gate: a profile with every grant kind (a socket, a port, the owner's temp folder,
+/// a toolchain, a tool cache), the default secret rule through `shared_folders::apply`, a
+/// shared writable folder and open top-level names long enough to split their rule parses
+/// under sandbox-exec and holds: secrets from the first and last secret name stay closed,
+/// the first and last open name and a plain file read, an unlisted name stays closed.
+#[test]
+fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
+    use crazyagent::sandbox::policy::AccessGrant;
+    use crazyagent::sandbox::shared_folders::{SharedFolders, apply};
+    use crazyagent::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    let case = case();
+    let own = case.project.join(".crazyagent/worktrees/agent-1");
+    let owner_tmp = case.root.join("otmp");
+    let open: Vec<String> = (0..30)
+        .map(|at| format!("open-{at:02}-{}", "x".repeat(40)))
+        .collect();
+    let (first, last) = (case.project.join(&open[0]), case.project.join(&open[29]));
+    let (shared, closed) = (case.project.join("shared"), case.project.join("closed"));
+    for folder in [&own, &owner_tmp, &first, &last, &shared, &closed] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    for (path, text) in [
+        (first.join("plain.txt"), "plain"),
+        (first.join(".env"), "SECRET=1"),
+        (last.join("plain.txt"), "plain"),
+        (last.join("app.tfvars"), "secret = 1"),
+        (closed.join("plain.txt"), "plain"),
+    ] {
+        fs::write(path, text).unwrap();
+    }
+    let granted = owner_tmp.join("g.sock");
+    let listener = crazyagent::spawn_gate::bind_unix_std(&granted).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let _served = std::thread::spawn(move || {
+        for _ in 0..600 {
+            if crazyagent::spawn_gate::accept_unix_std(&listener).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+    let cache = tool_cache(&case, false);
+    let homes = ToolHomes::owner().unwrap();
+    let names: Vec<String> = [".crazyagent".to_owned(), "shared".to_owned()]
+        .into_iter()
+        .chain(open.iter().cloned())
+        .collect();
+    let base = ProjectSandbox::new(
+        &own,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(&case.project)
+    .unwrap()
+    .allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node]))
+    .unwrap()
+    .allow_tool_cache(&cache.root, cache.uv)
+    .unwrap()
+    .grant_access(
+        &[
+            AccessGrant::Socket {
+                path: granted.clone(),
+            },
+            AccessGrant::TempFolder,
+            AccessGrant::Port { port: 47_821 },
+        ],
+        Some(&owner_tmp),
+    )
+    .unwrap();
+    let sandbox = apply(base, &case.project, &SharedFolders::default())
+        .unwrap()
+        .open_only_tops(&names)
+        .unwrap()
+        .allow_shared_write(&shared)
+        .unwrap();
+    let text = sandbox.profile();
+    assert!(
+        text.matches("(require-not (regex #\"").count() >= 2,
+        "{text}"
+    );
+    let profile = case.profiles.join("every-grant.sb");
+    let script = format!(
+        "echo started; cat {fp} && echo; cat {lp} && echo; cat {fe} || echo env-closed; cat {lt} || echo tfvars-closed; cat {cp} || echo unlisted-closed; echo hi > {sn} && echo wrote-shared; echo hi > \"$TMPDIR/note.txt\" && echo wrote-tmp; /usr/bin/nc -U {g} </dev/null && echo reached-granted",
+        fp = quoted(&first.join("plain.txt")),
+        lp = quoted(&last.join("plain.txt")),
+        fe = quoted(&first.join(".env")),
+        lt = quoted(&last.join("app.tfvars")),
+        cp = quoted(&closed.join("plain.txt")),
+        sn = quoted(&shared.join("new.txt")),
+        g = quoted(&granted)
+    );
+    let out = run(&sandbox, &profile, &script);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("Error reading string"), "{stderr}\n{text}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "started",
+            "plain",
+            "plain",
+            "env-closed",
+            "tfvars-closed",
+            "unlisted-closed",
+            "wrote-shared",
+            "wrote-tmp",
+            "reached-granted"
+        ],
+        "{stderr}"
+    );
+    assert_eq!(fs::read_to_string(shared.join("new.txt")).unwrap(), "hi\n");
+}
+
+/// v2.4.0 gate, security: every `SECRET_NAMES` entry stays denied once the secret rule is
+/// split into strings Seatbelt reads. Each entry has one sample path only it matches (grep
+/// -E outside the sandbox proves the pairing), and under the real profile no sample, at the
+/// top of the project or deeper, can be read, while a plain file next to them can.
+#[test]
+fn every_secret_name_stays_denied_once_the_secret_rule_is_split() {
+    use crazyagent::sandbox::shared_folders::{SECRET_NAMES, SharedFolders, apply};
+    const SAMPLES: [&str; 25] = [
+        ".env",
+        ".git-credentials",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".pgpass",
+        ".htpasswd",
+        ".dockercfg",
+        ".s3cfg",
+        ".yarnrc.yml",
+        "pip.conf",
+        "kubeconfig",
+        ".ssh/id",
+        ".aws/config",
+        ".gnupg/pubring.kbx",
+        ".kube/config",
+        ".docker/config.json",
+        ".config/gcloud/adc",
+        "id_ed25519",
+        "credentials.json",
+        "secrets.yaml",
+        "my-service-account.json",
+        "server.pem",
+        "main.tfstate.backup",
+        "prod.tfvars",
+    ];
+    assert_eq!(SAMPLES.len(), SECRET_NAMES.len());
+    let case = case();
+    let list = case.outside.join("samples.txt");
+    fs::write(&list, format!("{}\n", SAMPLES.join("\n"))).unwrap();
+    for (at, name) in SECRET_NAMES.iter().enumerate() {
+        let found = crazyagent::spawn_gate::output(
+            std::process::Command::new("/usr/bin/grep")
+                .arg("-Eix")
+                .arg(format!("(.*/)?({name})(/.*)?"))
+                .arg(&list)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        let matched: Vec<String> = String::from_utf8_lossy(&found.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(matched, [SAMPLES[at]], "{name}");
+    }
+    let deep = case.project.join("deep").join("er");
+    let mut paths = Vec::new();
+    for sample in SAMPLES {
+        for base in [&case.project, &deep] {
+            let path = base.join(sample);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "secret").unwrap();
+            paths.push(path);
+        }
+    }
+    let plain = deep.join("plain.txt");
+    fs::write(&plain, "plain").unwrap();
+    let sandbox = apply(
+        sandbox(&case, SandboxNetwork::Only(Vec::new())),
+        &case.project,
+        &SharedFolders::default(),
+    )
+    .unwrap();
+    let text = sandbox.profile();
+    let denies = text
+        .matches(&format!(
+            "(require-not (subpath \"{}/.git\"))",
+            case.project.display()
+        ))
+        .count();
+    assert!(denies >= 2, "{text}");
+    let script = paths
+        .iter()
+        .map(|path| {
+            format!(
+                "cat {p} >/dev/null 2>&1 && echo open {p};",
+                p = quoted(path)
+            )
+        })
+        .chain([format!(
+            "cat {} >/dev/null && echo plain-read",
+            quoted(&plain)
+        )])
+        .collect::<Vec<_>>()
+        .join(" ");
+    let out = run(&sandbox, &case.profiles.join("secret-names.sb"), &script);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "plain-read\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -7,7 +7,7 @@ export { isMac, shortcutKey, keyLabel, sendsMessage, type ComposerKeyEvent, type
 export { PageHeader, Tabs, Panel, type TabLink } from "./layout";
 export { SettingLine, SettingSection } from "./setting";
 export { WindowedList, windowRange } from "./windowed-list";
-export { AppShell, Sidebar, agentsWorking, type EngineRestartControl, type EngineState, type SidebarProject } from "./shell";
+export { AppShell, Sidebar, agentsWorking, type EngineRestartControl, type EngineState, type SidebarProject, type UserMenuControl } from "./shell";
 export { BrandMark } from "./brand";
 export { Icon, ProviderMark, ICON_NAMES, type IconName } from "./icon";
-export { parseRoute, formatRoute, navigate, useRoute, type Route, type SettingsTab, type ProjectTab, type NewProjectStep } from "./router";
+export { parseRoute, formatRoute, navigate, useRoute, isUserMenuTab, type Route, type SettingsTab, type ProjectTab, type NewProjectStep } from "./router";

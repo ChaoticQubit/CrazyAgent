@@ -4,15 +4,14 @@
 ─────────────────────━━━━━━━━━──────────────────────────────────────────────────
   Harnesses                                                   2 of 9 installed  
     Harness       Status           Control            Works with                
-  > Codex         ✓ Ready          Full control       ChatGPT, OpenAI API       
-    Claude Code   ✓ Ready          Full control       Claude, Anthropic API     
-    OpenCode      ⊘ Not installed  ? Unknown          Any API key or URL        
-    Gemini CLI    ⊘ Not installed  ? Unknown          Google, Gemini API key    
-    Cursor CLI    ⊘ Not installed  ◧ Limited control  Cursor account            
-    fx by Vercel  ⊘ Not installed  ? Unknown          Not known yet             
-    Antigravity   ⊘ Not installed  ◧ Limited control  Google account            
-    OpenClaw      ⊘ Not installed  ? Unknown          Any API key or URL        
-    Pi            ⊘ Not installed  ? Unknown          Any API key or URL        
+  > Codex         ✓ Ready          Full control       ChatGPT, OpenAI API    █  
+    Claude Code   ✓ Ready          Full control       Claude, Anthropic API  █  
+    OpenCode      ⊘ Not installed  ? Unknown          Any API key or URL     █  
+    Gemini CLI    ⊘ Not installed  ? Unknown          Google, Gemini API key █  
+    Cursor CLI    ⊘ Not installed  ◧ Limited control  Cursor account         █  
+    fx by Vercel  ⊘ Not installed  ? Unknown          Not known yet          █  
+    Antigravity   ⊘ Not installed  ◧ Limited control  Google account         █  
+    OpenClaw      ⊘ Not installed  ? Unknown          Any API key or URL     │  
                                                                                 
   Codex                                                                         
   Found at     /opt/homebrew/bin/codex                                          
@@ -21,4 +20,5 @@
   Can be       Master, sub-agent, research agent                                
   Accounts     7 ChatGPT accounts signed in                                     
                                                                                 
- ↑↓ Move  r Check again  c Check for updates  u Update                   ? Help 
+ ↑↓ Move  r Check again  c Check for updates  u Update  Shift-←→ Sections       
+ Esc Home                                                                ? Help 

@@ -1023,10 +1023,16 @@ fn a_live_master_s_team_calls_take_effect_while_its_turn_still_runs() {
             true
         )
     );
-    assert!(
-        text(&answers[2])
-            .0
-            .starts_with("Not sent: no agent of this project is called @page-writer"),
+    assert_eq!(
+        text(&answers[2]),
+        (
+            format!(
+                "Not sent: @page-writer is the handle of task {task}, which has not started yet. Send it again once {}() shows it running.",
+                tool::INSPECT_WORK_TOOL
+            )
+            .as_str(),
+            true
+        ),
         "{answers:#?}"
     );
     assert!(!text(&answers[3]).1, "{answers:#?}");
@@ -3081,6 +3087,144 @@ fn a_message_to_a_finished_agent_that_cannot_wake_is_refused_and_not_stored() {
     };
     assert_eq!(count("SELECT COUNT(*) FROM coord_messages"), 0);
     assert_eq!(count("SELECT COUNT(*) FROM team_tasks"), 0);
+}
+
+/// A master's reply to a message from a worker that has since finished wakes that worker,
+/// as a message does (F16, HB "my reply didn't wake him"). A refused wake, here a worker
+/// whose worktree is gone, pins nothing, but the reply stays and waits until the worker is
+/// woken, as it did before L6 (HB-S5-E).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_reply_to_a_finished_worker_wakes_it_and_a_refused_wake_keeps_the_reply_waiting() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let asked = |fixture: &Fixture, role: &str| -> (i64, i64) {
+        let agent = named_sub(fixture, role, "idle");
+        let message = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Agent(agent),
+                to: crate::coord::Party::Agent(MASTER),
+                kind: crate::coord::MessageKind::Prompt,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: "Which footer should I add?".to_owned(),
+                idempotency_key: None,
+            },
+            NOW,
+        )
+        .unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET status='stopped', stopped_ms=?2 WHERE id=?1",
+                params![agent, NOW + 1],
+            )
+            .unwrap();
+        (agent, message)
+    };
+    let (agent, message) = asked(&fixture, "page-writer");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "reply", "reply_to": message, "text": "The plain one."}),
+    );
+    assert!(
+        !refused
+            && said.starts_with("Sent reply #")
+            && said.contains(&format!("to message #{message}. Waking {label}:")),
+        "{said}"
+    );
+    let woken = pinned(&fixture, agent);
+    assert_eq!(woken.len(), 1, "the reply pins one wake task");
+    let (waiting, _) = crate::coord::delivery::next_turn(&fixture.connection, agent).unwrap();
+    assert_eq!(waiting.matches("The plain one.").count(), 1, "{waiting}");
+    let (gone, earlier) = asked(&fixture, "old-job");
+    no_worktree(&fixture, gone);
+    let replies = |fixture: &Fixture| -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM coord_messages WHERE reply_to=?1",
+                [earlier],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "reply", "reply_to": earlier, "text": "Pick it up again."}),
+    );
+    let gone_label = super::super::events::label(&fixture.connection, gone).unwrap();
+    assert!(!refused, "{said}");
+    assert!(
+        said.starts_with("Sent reply #")
+            && said.contains(&format!(
+                "to message #{earlier}. {gone_label} has stopped, so it waits until {gone_label} is woken. Not woken: the worktree of {gone_label} was cleaned up."
+            )),
+        "{said}"
+    );
+    assert_eq!(replies(&fixture), 1, "a refused wake keeps the reply");
+    assert!(
+        pinned(&fixture, gone).is_empty(),
+        "the refused wake pins nothing"
+    );
+}
+
+/// A message to the handle the master gave a task that has not started names that task
+/// instead of "no agent is called" (F16, DM "@classifier-storage not recognized"), even
+/// when an earlier agent held that handle and moved on to another job: the master gave the
+/// name to the task, so the registry does not redirect it to the earlier holder.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_waiting_task_s_handle_is_named_as_waiting_even_after_an_earlier_holder_moved_on() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let earlier = named_sub(&fixture, "classifier-storage", "working");
+    let project = ProjectId::new(PROJECT).unwrap();
+    assert!(
+        super::super::names::assign_role(&fixture.connection, &project, earlier, "storage-api")
+            .unwrap()
+            .is_ok()
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','claude-code',1,'Own the store','queued',?2)",
+            params![PROJECT, NOW],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_roles(task,project,role) VALUES (?1,?2,'classifier-storage')",
+            params![task, PROJECT],
+        )
+        .unwrap();
+    assert_eq!(
+        as_master(
+            &mut fixture,
+            tool::UPDATE_WORK_TOOL,
+            json!({"to": "@classifier-storage", "text": "Use the Store API."})
+        ),
+        (
+            format!(
+                "Not sent: @classifier-storage is the handle of task {task}, which has not started yet. Send it again once inspect_work() shows it running."
+            ),
+            true
+        )
+    );
+    let count: i64 = fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM coord_messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "nothing reaches the earlier holder");
 }
 
 /// Runs git in `dir` with an isolated home and no system config, as the owner or an agent
@@ -6074,6 +6218,8 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
             tool::WITHDRAW_TOOL,
+            tool::REQUEST_ACCESS_TOOL,
+            tool::WAKE_TOOL,
             tool::REMEMBER_TOOL,
             tool::RECALL_TOOL
         ]
@@ -6166,6 +6312,8 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
             tool::WITHDRAW_TOOL,
+            tool::REQUEST_ACCESS_TOOL,
+            tool::WAKE_TOOL,
             tool::REMEMBER_TOOL
         ]
     );

@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
-import { saveProfile, type OwnerProfile } from "../../api";
-import { BrandMark, Button, ChipInput, Notice, Segmented, SettingLine, TextArea, TextField, navigate, type Route } from "../../ui";
+import { saveProfile, type OwnerProfile, type Result } from "../../api";
+import { setLearningMark } from "../../api-learning";
+import { BrandMark, Button, Checkbox, ChipInput, Notice, Segmented, SettingLine, TextArea, TextField, navigate, type Route } from "../../ui";
 import { HomeFolderPicker } from "../intake/home-folder";
 import { ToolsSetup } from "../intake/setup-step";
 import "../intake/intake.css";
@@ -121,7 +122,7 @@ export type FirstRunStep = "profile" | "home" | "tools" | "accounts";
 
 export const FIRST_RUN_STEPS: { id: FirstRunStep; label: string; title: string; intro: string }[] = [
   { id: "profile", label: "Profile", title: "Tell CrazyAgent about you",
-    intro: "Agents read this before they work for you. You can change it later in Settings, Profile." },
+    intro: "Agents read this before they work for you. You can change it later from Profile in the menu under your name." },
   { id: "home", label: "Projects folder", title: "Choose your projects folder",
     intro: "Every project lives in its own folder here. CrazyAgent keeps its own data in a private folder, not in this one." },
   { id: "tools", label: "Tools", title: "Set up tools",
@@ -130,21 +131,41 @@ export const FIRST_RUN_STEPS: { id: FirstRunStep; label: string; title: string; 
     intro: "Agents need a model account to work. Sign in with ChatGPT or Claude, or add an API key or a local model." },
 ];
 
+/** The Learn CrazyAgent offer on the last first-run page, in the same words as the TUI
+ * Accounts step: heading, two sentences and the label of its ticked box. */
+export const LEARN_OFFER = {
+  title: "Learn CrazyAgent",
+  text: "A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets. Its first step is an optional demo project.",
+  tick: "Show the guide on Home",
+};
+
+/** What the first run says after it tried to skip the guide. Input: the engine's answer to the
+ * skip. Output: nothing when it saved, else one plain sentence saying the guide stays on Home. */
+export function skipGuideNote(result: Result<void>): string | undefined {
+  if (result.kind === "ok") return undefined;
+  if (result.kind === "not_ready") return "Skipping the guide isn't ready in this build, so it stays on Home.";
+  return `Couldn't skip the guide, so it stays on Home. ${result.message}`;
+}
+
 /** The first-run flow with no sidebar, in the order profile, projects folder, tools, accounts:
  * the brand, the step list and a short intro on the left, the step on the right. Finishing goes
- * to Home or to Add account. Inputs: the saved handler, an optional skip handler used when the
- * engine has no profile support yet, and the step to start on. */
-export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
-  onSaved: (profile: OwnerProfile, next?: Route) => void;
-  onSkip?: (next?: Route) => void;
+ * to Home or to Add account, first skipping the guide when its box is unticked; the handlers get
+ * the skip note when that did not save. Inputs: the saved handler, an optional skip handler, the
+ * step to start on, and the saved profile a replay from Profile starts the form with. */
+export function Welcome({ onSaved, onSkip, initialStep = "profile", profile = null }: {
+  onSaved: (profile: OwnerProfile, next?: Route, note?: string) => void;
+  onSkip?: (next?: Route, note?: string) => void;
   initialStep?: FirstRunStep;
+  profile?: OwnerProfile | null;
 }) {
   const [step, setStep] = useState<FirstRunStep>(initialStep);
   const [saved, setSaved] = useState<OwnerProfile | null>(null);
-  const [draft, setDraft] = useState(emptyProfileDraft);
+  const [draft, setDraft] = useState(() => profile ? draftFromProfile(profile) : emptyProfileDraft());
   const [errors, setErrors] = useState<ProfileErrors>({});
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<{ message: string; notReady: boolean }>();
+  const [guide, setGuide] = useState(true);
+  const [leaving, setLeaving] = useState(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (saving) return;
@@ -161,9 +182,12 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
     if ("failure" in result) setFailure({ message: result.failure, notReady: result.notReady });
     else { setSaved(result.saved); setStep("home"); }
   }
-  const finish = (next: Route) => {
-    if (saved) onSaved(saved, next);
-    else onSkip?.(next);
+  const finish = async (next: Route) => {
+    if (leaving) return;
+    setLeaving(true);
+    const note = guide ? undefined : skipGuideNote(await setLearningMark("skipped", true));
+    if (saved) onSaved(saved, next, note);
+    else onSkip?.(next, note);
   };
   const current = FIRST_RUN_STEPS.find((item) => item.id === step) ?? FIRST_RUN_STEPS[0];
   return <main id="main" className="welcome">
@@ -191,9 +215,14 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
     </section>}
     {step === "accounts" && <section className="form" aria-label="Accounts">
       <div className="row">
-        <Button variant="primary" size="large" icon="key-round" onClick={() => finish({ name: "settings", tab: "accounts", action: "add" })}>Add account</Button>
-        <Button variant="quiet" onClick={() => finish({ name: "home" })}>Skip for now</Button>
+        <Button variant="primary" size="large" icon="key-round" disabled={leaving} onClick={() => void finish({ name: "settings", tab: "accounts", action: "add" })}>Add account</Button>
+        <Button variant="quiet" disabled={leaving} onClick={() => void finish({ name: "home" })}>Skip for now</Button>
       </div>
+      <section className="stack-small" aria-labelledby="learn-offer-title">
+        <h2 id="learn-offer-title">{LEARN_OFFER.title}</h2>
+        <p>{LEARN_OFFER.text}</p>
+        <Checkbox label={LEARN_OFFER.tick} checked={guide} onChecked={setGuide} disabled={leaving} />
+      </section>
     </section>}
   </main>;
 }

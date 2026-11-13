@@ -39,11 +39,13 @@ fn protocol_error(_: crate::adapters::codex::ProtocolError) -> EngineError {
     failure("native_auth_codex_protocol_invalid")
 }
 
-fn command(executable: &Path, home: &Path) -> Result<Command, EngineError> {
-    if !executable.is_absolute() || !home.is_absolute() {
+/// Builds the Codex app-server child from the launch words the engine handed, in the
+/// profile home with only its own environment. Inputs: the words and the profile home.
+/// Output: the command, or `native_auth_codex_launch_invalid` for a relative word or home.
+fn command(words: &[std::ffi::OsString], home: &Path) -> Result<Command, EngineError> {
+    let Some(mut command) = super::handed_command(words).filter(|_| home.is_absolute()) else {
         return Err(failure("native_auth_codex_launch_invalid"));
-    }
-    let mut command = Command::new(executable);
+    };
     command
         .args([
             "-c",
@@ -56,7 +58,7 @@ fn command(executable: &Path, home: &Path) -> Result<Command, EngineError> {
         .env("HOME", home)
         .env("CODEX_HOME", home)
         .env("TMPDIR", home)
-        .env("PATH", super::sign_in_path(executable))
+        .env("PATH", super::SIGN_IN_PATH)
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .current_dir(home)
@@ -65,7 +67,7 @@ fn command(executable: &Path, home: &Path) -> Result<Command, EngineError> {
         .stderr(Stdio::piped())
         .process_group(0);
     assert_eq!(command.get_current_dir(), Some(home));
-    assert_eq!(command.get_program(), executable.as_os_str());
+    assert!(Path::new(command.get_program()).is_absolute());
     Ok(command)
 }
 
@@ -636,10 +638,15 @@ fn dropped_name(method: &str, code: Option<&str>) -> String {
     }
 }
 
+/// Runs one Codex sign-in action in the profile the session holds, starting the launch words
+/// the engine handed. A harness that cannot start, whether a pinned file changed or the
+/// start itself fails, ends the session without effect, so the sign-in settles unavailable
+/// and frees the account. Inputs: the session, its channel and the pinned harness. Output:
+/// the retirement.
 pub(in crate::engine) async fn run(
     mut session: CustodySession,
     channel: &mut NativeAuthCustodyChannel,
-    executable: &Path,
+    executable: &super::RegisteredNativeAuthHost,
 ) -> Result<Retirement, EngineError> {
     let action = channel.fact().action.clone();
     let run_time = run_time(&action)?;
@@ -650,7 +657,13 @@ pub(in crate::engine) async fn run(
         return session.seal_without_effect();
     }
     let home = session.profile_path()?;
-    let Ok(child) = crate::spawn_gate::spawn(&mut command(executable, &home)?) else {
+    let Ok(mut launch) = executable
+        .launch_words()
+        .and_then(|words| command(&words, &home))
+    else {
+        return session.seal_without_effect();
+    };
+    let Ok(child) = crate::spawn_gate::spawn(&mut launch) else {
         return session.seal_without_effect();
     };
     let group = Pid::from_raw(i32::try_from(child.id()).map_err(io_error)?)

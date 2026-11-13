@@ -630,6 +630,7 @@ fn bundle(folder: &Path) -> PathBuf {
         "crazyagent",
         "crazyagent-rcli",
         "crazyagent-runner",
+        "crazyagent-tmux",
         "crazyagent-landlock",
     ] {
         write_mode(&folder.join(name), &format!("{name} bytes"), 0o755);
@@ -737,8 +738,10 @@ fn persistable_runs_an_engine_outside_the_mount_in_place_and_copies_one_from_the
             "crazyagent",
             "crazyagent-landlock",
             "crazyagent-rcli",
-            "crazyagent-runner"
-        ]
+            "crazyagent-runner",
+            "crazyagent-tmux"
+        ],
+        "the bundled tmux is copied beside the engine, which finds it there (DEC-157)"
     );
     for name in &names {
         assert_eq!(
@@ -900,6 +903,150 @@ fn current_holds_only_for_the_definition_install_would_write_now() {
     }
 }
 
+/// v2.4.0 owner update bug: the update's `service start` started the definition an install
+/// script wrote for an older engine. A definition running another program is told apart from
+/// one that only has another PATH, which still starts as it is.
+#[test]
+fn a_definition_that_runs_another_program_is_told_apart_from_one_with_another_path() {
+    let temp = tempfile::tempdir().unwrap();
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = temp.path().join("CrazyAgent.app").join("crazyagent");
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        assert!(!own.runs_another_program());
+        let mut script = own.clone();
+        script.executable = temp.path().join("bin").join("engine-start");
+        write_definition(
+            &own.definition,
+            &script.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(own.runs_another_program());
+        let mut elsewhere = own.clone();
+        elsewhere.path = OsString::from("/usr/bin:/bin");
+        write_definition(
+            &own.definition,
+            &elsewhere.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(!own.current());
+        assert!(!own.runs_another_program());
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert!(!own.runs_another_program());
+    }
+}
+
+/// rv-code F1: the definition writes the executable escaped (XML in a plist, quoted for
+/// systemd), so an app kept in a folder named with `&` or `$` is still found in its own
+/// definition and still told apart from an install script's.
+#[test]
+fn an_executable_path_with_escaped_characters_is_still_found_in_its_definition() {
+    let temp = tempfile::tempdir().unwrap();
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = temp
+            .path()
+            .join("Tools & $Apps")
+            .join("CrazyAgent.app")
+            .join("crazyagent");
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert!(!own.runs_another_program());
+        let mut script = own.clone();
+        script.executable = temp.path().join("bin").join("engine-start");
+        write_definition(
+            &own.definition,
+            &script.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(own.runs_another_program());
+    }
+}
+
+/// rv-secreview UE-L1: `service start` replaces a definition that runs another program only
+/// with an installed app's engine outside any cargo target folder, and never under a newer
+/// engine: the last one that ran at the data root or the app bundle the installed plist runs.
+#[cfg(unix)]
+#[test]
+fn only_an_installed_app_engine_that_is_not_older_may_replace_another_program() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = temp
+        .path()
+        .join("Applications")
+        .join("CrazyAgent.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("crazyagent");
+    std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    std::fs::write(&bundled, b"engine").unwrap();
+    let mut own = service(Platform::MacOs);
+    own.root = temp.path().join("engine");
+    std::fs::create_dir_all(&own.root).unwrap();
+    own.executable = bundled.clone();
+    own.definition = temp.path().join("dev.crazyagent.engine.plist");
+    assert!(own.may_replace());
+    let mut plain = own.clone();
+    plain.executable = temp.path().join("bin").join("crazyagent");
+    assert!(!plain.may_replace());
+    let target = temp.path().join("worktree").join("target");
+    let built = target
+        .join("release")
+        .join("bundle")
+        .join("macos")
+        .join("CrazyAgent.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("crazyagent");
+    std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+    std::fs::write(&built, b"engine").unwrap();
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    let mut dev = own.clone();
+    dev.executable = built;
+    assert!(!dev.may_replace());
+    let old = temp.path().join("Old.app");
+    std::fs::create_dir_all(old.join("Contents").join("MacOS")).unwrap();
+    let mut installed = own.clone();
+    installed.executable = old.join("Contents").join("MacOS").join("crazyagent");
+    write_definition(
+        &own.definition,
+        &installed.definition_text().unwrap(),
+        Platform::MacOs,
+    )
+    .unwrap();
+    let info = |version: &str| {
+        std::fs::write(
+            old.join("Contents").join("Info.plist"),
+            format!("<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleShortVersionString</key>\n\t<string>{version}</string>\n</dict>\n</plist>\n"),
+        )
+        .unwrap();
+    };
+    info("99.0.0");
+    assert!(!own.may_replace());
+    info("0.0.1");
+    assert!(own.may_replace());
+    std::fs::write(
+        own.root.join("owner-current"),
+        br#"{"engine_version":"99.0.0"}"#,
+    )
+    .unwrap();
+    assert!(!own.may_replace());
+    std::fs::write(
+        own.root.join("owner-current"),
+        br#"{"engine_version":"0.0.1"}"#,
+    )
+    .unwrap();
+    assert!(own.may_replace());
+}
+
 #[test]
 fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
     let temp = tempfile::tempdir().unwrap();
@@ -932,5 +1079,154 @@ fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
         )
         .unwrap();
         assert!(!copied.stale(&bundled));
+    }
+}
+
+/// A Nix-style store, a sticky folder its group can write such as /nix/store
+/// (root:nixbld 1775), is fine two or more levels above an entry whose folder below it
+/// exists, since its group cannot replace an entry another user owns; the entry's own
+/// folder, and a missing folder below the store, keep the full checks (L8c, 11-12).
+#[cfg(unix)]
+#[test]
+fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a_missing_one() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let temp = durable_folder();
+    let store = temp.path().join("store");
+    let package = store.join("hash-tool-1.0");
+    let bin = package.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("tool");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let loose = store.join("loose");
+    std::fs::write(&loose, "").unwrap();
+    let mode = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    mode(&tool, 0o555);
+    mode(&bin, 0o555);
+    mode(&package, 0o555);
+    mode(&store, 0o1775);
+    if trusted_group(std::fs::metadata(&store).unwrap().gid()) {
+        mode(&package, 0o755);
+        mode(&bin, 0o755);
+        return;
+    }
+    assert_eq!(changeable_by_others(&tool), None);
+    assert_eq!(changeable_by_others(&bin), None);
+    assert_eq!(
+        changeable_by_others(&loose),
+        Some(store.clone()),
+        "the entry's own folder keeps the full checks"
+    );
+    assert_eq!(
+        changeable_by_others(&store.join("gone/bin/tool")),
+        Some(store.clone()),
+        "the group could make a missing folder below the store"
+    );
+    mode(&store, 0o775);
+    assert_eq!(
+        changeable_by_others(&tool),
+        Some(store.clone()),
+        "without the sticky bit the group can replace the package"
+    );
+    mode(&package, 0o755);
+    mode(&bin, 0o755);
+}
+
+/// The ownership rule on synthetic parts, the entry first (leader 17:12, L8c): a /tmp-like
+/// folder (root 1777) above this user's 0700 folder passes for the tools the resolver runs
+/// and stays changeable for the engine service; a part another user owns below it is
+/// refused; a /nix/store-like folder (root:nixbld 1775) above 0555 packages passes for
+/// both; a missing part below a store, or a store as the entry's own folder, is refused.
+#[cfg(unix)]
+#[test]
+fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
+    const ME: u32 = 501;
+    const OTHER: u32 = 502;
+    const NIXBLD: u32 = 30_000;
+    let found = |owner, group, mode, folder| Part::Found {
+        owner,
+        group,
+        mode,
+        folder,
+        link: false,
+    };
+    let system = found(0, 0, 0o755, true);
+    let tmp = found(0, 0, 0o1777, true);
+    let tool = found(ME, 20, 0o755, false);
+    let own = found(ME, 20, 0o700, true);
+    let under_tmp = [tool, own, tmp, system, system];
+    assert_eq!(first_changeable_part(&under_tmp, ME, true), None);
+    assert_eq!(
+        first_changeable_part(&under_tmp, ME, false),
+        Some(2),
+        "the service check is unchanged"
+    );
+    let theirs = [tool, found(OTHER, 20, 0o700, true), tmp, system];
+    assert_eq!(first_changeable_part(&theirs, ME, true), Some(1));
+    let deeper = [tool, own, found(OTHER, 20, 0o755, true), tmp, system];
+    assert_eq!(first_changeable_part(&deeper, ME, true), Some(2));
+    assert_eq!(
+        first_changeable_part(&[tool, tmp, system], ME, true),
+        Some(1)
+    );
+    let missing = [Part::Missing, Part::Missing, tmp, system];
+    assert_eq!(first_changeable_part(&missing, ME, true), Some(2));
+    let package = found(0, 0, 0o555, true);
+    let nix = [
+        found(0, 0, 0o555, false),
+        package,
+        package,
+        found(0, NIXBLD, 0o1775, true),
+        system,
+        system,
+    ];
+    assert_eq!(first_changeable_part(&nix, ME, true), None);
+    assert_eq!(first_changeable_part(&nix, ME, false), None);
+    let plain = [tool, own, found(ME, 20, 0o775, true), system];
+    assert_eq!(
+        first_changeable_part(&plain, ME, true),
+        Some(2),
+        "a group-writable folder with no sticky bit"
+    );
+}
+
+/// R2-L1: a file a group other than root's can write counts as changeable, like a folder,
+/// for the engine service and for the tools the resolver runs: a 0775 staff file in this
+/// user's 0755 folder is refused, 0755 or a root-group 0775 passes, and a link's own mode is
+/// never read.
+#[cfg(unix)]
+#[test]
+fn a_file_an_untrusted_group_can_write_is_changeable_like_a_folder() {
+    const ME: u32 = 501;
+    const STAFF: u32 = 20;
+    let found = |group, mode, folder, link| Part::Found {
+        owner: ME,
+        group,
+        mode,
+        folder,
+        link,
+    };
+    let own = found(STAFF, 0o755, true, false);
+    let system = Part::Found {
+        owner: 0,
+        group: 0,
+        mode: 0o755,
+        folder: true,
+        link: false,
+    };
+    for open_stores in [false, true] {
+        let grouped = [found(STAFF, 0o775, false, false), own, system];
+        assert_eq!(first_changeable_part(&grouped, ME, open_stores), Some(0));
+        let plain = [found(STAFF, 0o755, false, false), own, system];
+        assert_eq!(first_changeable_part(&plain, ME, open_stores), None);
+        let root_group = [found(0, 0o775, false, false), own, system];
+        assert_eq!(first_changeable_part(&root_group, ME, open_stores), None);
+        let link = [found(STAFF, 0o777, false, true), own, system];
+        assert_eq!(
+            first_changeable_part(&link, ME, open_stores),
+            None,
+            "a link's own mode is not read"
+        );
     }
 }

@@ -1,27 +1,31 @@
 use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
 use super::client::changes::{ChangesQuery, ChangesView};
+use super::client::learning::{LearningEvent, LearningQuery, LearningReply};
 use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
-use super::client::settings::SettingsEvent;
+use super::client::settings::{SettingsEvent, SettingsJob};
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
-    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, footer, header, hint,
-    strip_bidi, too_small,
+    HINT_ROWS_MAX, Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, hint,
+    strip_bidi, too_small, wrapped_footer,
 };
 use super::keys::{Global, Key, global};
 use super::screens::intake::not_ready;
 use super::screens::new_project_page::kept_draft;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
+use super::screens::usage::extras::{ResetWatch, reset_notice};
 use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
-use super::seam::{Arrival, ProjectCard, Request};
+use super::seam::{Arrival, ProjectCard, Request, account_labels};
 use super::text::{cells, join, list_row, pad, styled};
 use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
+use crate::learning::MarkStep;
+use crate::terminal::TerminalFrame;
 use ratatui::Frame;
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 use std::time::{Duration, Instant};
@@ -170,6 +174,7 @@ pub struct Shell {
     overlay: Option<Overlay>,
     quit: bool,
     busy_since: Option<Instant>,
+    resets: ResetWatch,
 }
 
 impl Shell {
@@ -188,6 +193,7 @@ impl Shell {
             overlay: None,
             quit: false,
             busy_since: None,
+            resets: ResetWatch::default(),
         };
         shell.refresh();
         shell
@@ -287,11 +293,15 @@ impl Shell {
             .last_mut()
             .expect("the stack is never empty")
             .shown(ctx);
+        for step in visit_marks(self.top().place()) {
+            self.ctx.learn(*step);
+        }
     }
 
     /// Runs the periodic refresh the run loop makes every few seconds: asks the engine how
-    /// many change sets wait for the owner, in all and in the top screen's project, then
-    /// refreshes the top screen.
+    /// many change sets wait for the owner, in all and in the top screen's project, reads the
+    /// stored extras for the new free reset notice once a minute, then refreshes the top
+    /// screen.
     /// Input: none. Output: none; requests are queued on the context.
     pub fn tick(&mut self) {
         let project = self.top().project();
@@ -299,7 +309,42 @@ impl Shell {
             .request(Request::Changes(Box::new(ChangesQuery::Waiting {
                 project,
             })));
+        self.watch_resets();
         self.refresh();
+    }
+
+    /// Asks for the stored extras, never the detail rows, once the watch is due, with the
+    /// account names when none are loaded yet. Input: none. Output: none.
+    fn watch_resets(&mut self) {
+        if self.ctx.link != Link::Ready || !self.resets.due(clock::now_ms()) {
+            return;
+        }
+        self.ctx
+            .request(Request::Settings(Box::new(SettingsJob::Extras {
+                detail: false,
+            })));
+        if self.ctx.store.accounts.ready().is_none() {
+            self.ctx
+                .request(Request::Settings(Box::new(SettingsJob::AllAccounts)));
+        }
+    }
+
+    /// Says once when an account gains a free reset, from any extras read. Input: the read.
+    /// Output: none.
+    fn new_resets(&mut self, rows: &[crate::engine::owner::AccountExtras]) {
+        let send = self.resets.look(rows, clock::now_ms());
+        let labels = account_labels(
+            self.ctx
+                .store
+                .accounts
+                .ready()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        );
+        if let Some(notice) = reset_notice(&send, &labels) {
+            self.ctx
+                .say(Message::success(&notice, "See it in Settings, Pools."));
+        }
     }
 
     fn running(&self) -> usize {
@@ -359,6 +404,7 @@ impl Shell {
                     self.show();
                 }
             }
+            Flow::Go(place) => self.go(place),
         }
     }
 
@@ -612,12 +658,24 @@ impl Shell {
                     };
                 }
                 super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
+                if let Some(SettingsEvent::Extras(Ok(rows))) = settings_event(&arrival) {
+                    self.new_resets(rows);
+                }
                 if let Arrival::Owner(event) = &arrival
                     && let OwnerEvent::Questions(event) = event.as_ref()
                 {
                     self.questions(event);
                 }
+                if let Arrival::Owner(event) = &arrival
+                    && let OwnerEvent::Learning(event) = event.as_ref()
+                {
+                    self.learning(event);
+                }
             }
+            Arrival::Terminal {
+                frame: TerminalFrame::Attached { .. },
+                ..
+            } => self.ctx.learn(MarkStep::Terminal),
             _ => {}
         }
         super::screens::new_project_page::carry_background(&arrival, &mut self.ctx);
@@ -633,6 +691,29 @@ impl Shell {
         self.apply(top_flow);
         if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected(_)) {
             self.show();
+        }
+    }
+
+    /// Keeps the learning read for Home, keeping the last good read over a failed one, and
+    /// answers a mark: a set mark reads the steps again, a refused one is sent again on the
+    /// next visit. Input: the learning reply. Output: none.
+    fn learning(&mut self, event: &LearningEvent) {
+        if let LearningQuery::Mark { step, .. } = &event.query {
+            match &event.result {
+                Ok(_) => self
+                    .ctx
+                    .request(Request::Learning(Box::new(LearningQuery::Progress))),
+                Err(_) => self.ctx.unlearn(*step),
+            }
+            return;
+        }
+        let learning = &mut self.ctx.store.learning;
+        match &event.result {
+            Ok(LearningReply::Progress(progress)) => *learning = Load::Ready(progress.clone()),
+            Ok(LearningReply::Marked) => unreachable!("a learning read answers with the steps"),
+            Err(_) if learning.ready().is_some() => {}
+            Err(code) if not_ready(code) => *learning = Load::NotReady,
+            Err(code) => *learning = Load::Failed(code.clone()),
         }
     }
 
@@ -674,6 +755,14 @@ impl Shell {
             }
             _ => {}
         }
+    }
+
+    /// The hints the help bar shows now: an overlay's, else the top screen's modal's, else
+    /// the top screen's own. Input: none. Output: the hints in order.
+    fn bar_hints(&self) -> Vec<Hint> {
+        self.overlay_hints()
+            .or_else(|| self.top().modal(&self.ctx).map(|(_, hints)| hints))
+            .unwrap_or_else(|| self.top().hints(&self.ctx))
     }
 
     fn overlay_hints(&self) -> Option<Vec<Hint>> {
@@ -858,10 +947,19 @@ impl Shell {
             too_small(frame.buffer_mut(), area, &self.ctx.theme);
             return;
         }
-        let [head, rule, body, message, help] = bands(area);
         let width = area.width as usize;
         let theme = self.ctx.theme.clone();
         let glyphs = self.ctx.glyphs;
+        let pending = self.ctx.store.pending();
+        let rows_max = if self.top().wraps_hints() {
+            HINT_ROWS_MAX
+        } else {
+            1
+        };
+        let bar_rows =
+            wrapped_footer(width, &self.bar_hints(), pending, &theme, glyphs, rows_max).len();
+        self.ctx.hint_rows = u16::try_from(bar_rows).expect("the bar has at most three rows");
+        let [head, rule, body, message, help] = bands(area, self.ctx.hint_rows);
         let top = self.stack.last().expect("the stack is never empty");
         let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
         let status = with_waiting(waiting, top.status(&self.ctx), &theme);
@@ -885,21 +983,10 @@ impl Shell {
             draw_lines(frame.buffer_mut(), message, &[note.line(&theme, glyphs)]);
         }
         let screen_modal = self.top().modal(&self.ctx);
-        let hints = self
-            .overlay_hints()
-            .or_else(|| screen_modal.as_ref().map(|(_, hints)| hints.clone()))
-            .unwrap_or_else(|| self.top().hints(&self.ctx));
-        draw_lines(
-            frame.buffer_mut(),
-            help,
-            &[footer(
-                width,
-                &hints,
-                self.ctx.store.pending(),
-                &theme,
-                glyphs,
-            )],
-        );
+        let bar = wrapped_footer(width, &self.bar_hints(), pending, &theme, glyphs, bar_rows);
+        let shown = u16::try_from(bar.len()).expect("the bar has at most three rows");
+        let help = Rect::new(help.x, help.y + help.height - shown, help.width, shown);
+        draw_lines(frame.buffer_mut(), help, &bar);
         let mut cursor = if screen_modal.is_some() || self.overlay.is_some() {
             None
         } else {
@@ -930,6 +1017,19 @@ impl Shell {
         {
             frame.set_cursor_position(cursor);
         }
+    }
+}
+
+/// The learning marks opening a place sets: Usage shows the owner's usage and metrics, the
+/// app's or a project's Process page the process. Input: the top screen's place. Output:
+/// the marks, none for other places.
+fn visit_marks(place: Option<Place>) -> &'static [MarkStep] {
+    match place {
+        Some(Place::Usage) => &[MarkStep::Metrics, MarkStep::Usage],
+        Some(Place::Settings(SettingsSection::Process) | Place::ProjectProcess { .. }) => {
+            &[MarkStep::Process]
+        }
+        _ => &[],
     }
 }
 
@@ -1340,6 +1440,17 @@ mod tests {
     }
 
     #[test]
+    fn skip_for_now_in_a_first_run_started_again_from_profile_leaves_one_home() {
+        let mut shell = at(Place::Home, ctx());
+        shell.apply(Flow::Open(Place::FirstRunAccounts));
+        assert_eq!(shell.depth(), 2);
+        shell.key(Key::Right);
+        shell.key(Key::Enter);
+        assert_eq!(shell.place(), Some(Place::Home));
+        assert_eq!(shell.depth(), 1, "Skip for now goes back to the root Home");
+    }
+
+    #[test]
     fn quit_asks_before_unsaved_profile_changes_are_lost() {
         let loaded = || {
             let mut ctx = ctx();
@@ -1524,5 +1635,125 @@ mod tests {
         assert_eq!(shell.place(), Some(Place::Home));
         assert!(matches!(shell.ctx.store.profile, Load::Ready(Some(_))));
         assert!(drain(&mut shell).contains(&"Projects".to_owned()));
+    }
+
+    fn extras_arrival(account: &str, count: u32, gained_ms: i64) -> Arrival {
+        use crate::usage::extras::{Adapter, LimitExtras, Resets, Spend};
+        let extras = LimitExtras {
+            harness: "Codex".into(),
+            adapter: Adapter::Codex,
+            may_break: true,
+            resets: Some(Resets {
+                count,
+                kinds: vec![],
+                next_expiry_ms: None,
+            }),
+            credits: None,
+            spend: Spend::InApp,
+            not_reported: "not reported by Codex".into(),
+            resets_checked_ms: Some(gained_ms),
+            credits_checked_ms: None,
+            resets_gained_ms: Some(gained_ms),
+        };
+        Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+            SettingsEvent::Extras(Ok(vec![crate::engine::owner::AccountExtras {
+                account: crate::protocol::CredentialRef::new(account).unwrap(),
+                extras,
+            }])),
+        ))))
+    }
+
+    fn watch_asks(shell: &mut Shell) -> (usize, usize) {
+        let mut asks = (0, 0);
+        while let Some(request) = shell.ctx.next_request() {
+            if let Request::Settings(job) = request {
+                match *job {
+                    SettingsJob::Extras { detail: false } => asks.0 += 1,
+                    SettingsJob::AllAccounts => asks.1 += 1,
+                    _ => {}
+                }
+            }
+        }
+        asks
+    }
+
+    /// DEC-154: the shell reads the stored extras at most once a minute from its 5 s tick,
+    /// never the detail rows, and says a new free reset once, naming the account. Profile
+    /// reads no accounts of its own, so every account read counted here is the watch's.
+    #[test]
+    fn the_shell_reads_the_stored_extras_once_a_minute_and_says_a_new_free_reset_once() {
+        let mut ctx = ctx();
+        ctx.store.accounts = Load::Ready(vec![crate::tui::seam::AccountRow {
+            id: crate::protocol::CredentialRef::new("acct-a").unwrap(),
+            name: "Work".into(),
+            provider: "OpenAI".into(),
+            status: "Ready".into(),
+            no_window: None,
+        }]);
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
+        drain(&mut shell);
+        shell.tick();
+        assert_eq!(
+            watch_asks(&mut shell),
+            (1, 0),
+            "names already loaded are not read again"
+        );
+        shell.tick();
+        assert_eq!(
+            watch_asks(&mut shell),
+            (0, 0),
+            "the 5 s tick never asks again so soon"
+        );
+
+        let gained = clock::now_ms() - 60_000;
+        shell.arrive(extras_arrival("acct-a", 2, gained));
+        let said = shell.ctx.message().expect("a new free reset is said");
+        assert_eq!(
+            (said.tone, said.lead.as_str()),
+            (
+                super::super::frame::Tone::Success,
+                "Work has a new free reset. 2 free resets now."
+            )
+        );
+        assert_eq!(said.rest, "See it in Settings, Pools.");
+
+        shell.ctx.say(Message::success("Saved.", ""));
+        shell.arrive(extras_arrival("acct-a", 2, gained));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("Saved."),
+            "the same arrival is never said twice"
+        );
+        shell.arrive(extras_arrival("acct-a", 3, clock::now_ms()));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("Work has a new free reset. 3 free resets now.")
+        );
+    }
+
+    /// The first watch read also asks for the account names when none are loaded, and an
+    /// account with no name yet is said as "An account", never by its id.
+    #[test]
+    fn the_reset_watch_asks_for_the_account_names_once_and_never_shows_an_id() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        drain(&mut shell);
+        shell.tick();
+        assert_eq!(watch_asks(&mut shell), (1, 1));
+        shell.arrive(extras_arrival("acct-a", 1, clock::now_ms()));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("An account has a new free reset. 1 free reset now.")
+        );
+    }
+
+    /// A shell not yet connected asks for nothing.
+    #[test]
+    fn the_reset_watch_waits_for_the_engine() {
+        let mut ctx = ctx();
+        ctx.link = Link::Connecting;
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
+        drain(&mut shell);
+        shell.tick();
+        assert_eq!(watch_asks(&mut shell), (0, 0));
     }
 }

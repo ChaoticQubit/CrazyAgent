@@ -25,6 +25,17 @@ const ENGINE_TICK: Duration = Duration::from_secs(1);
 const STATUS_EVERY_TICKS: u32 = 5;
 #[cfg(unix)]
 const CHECKS_MAX: usize = 8;
+/// How soon a status run that found no account tries again while the engine still
+/// re-proves earlier sign-ins (DEC-108) or an account check of this engine run holds its
+/// profile: each settles within its own bound.
+#[cfg(unix)]
+const SETTLING_RETRY_MS: i64 = 10 * 1000;
+#[cfg(unix)]
+const _: () = assert!(
+    SETTLING_RETRY_MS > 0
+        && SETTLING_RETRY_MS < crate::roadmap_status::RETRY_MS
+        && SETTLING_RETRY_MS < crate::project_overview::agent::RETRY_MS
+);
 /// The most finished status runs whose folders wait for the usage upkeep at once; past it
 /// the oldest is removed at once.
 #[cfg(unix)]
@@ -338,6 +349,7 @@ impl StatusUpkeep {
             db,
             checks: &mut self.checks,
             upkeep: Upkeep::Roadmap,
+            settling: runner.reproving() || crate::storage::account_check_running(db),
         };
         let now = crate::team::now_ms();
         if let Err(error) = crate::roadmap_status::tick(db, &mut starts, now)
@@ -379,8 +391,10 @@ impl StatusUpkeep {
 }
 
 /// Starts the runs a store hands out, for the store `upkeep` names: on the first account a
-/// harness resolves for the project, later when every fitting account is paused, and with
-/// a plain failure when the pool has none.
+/// harness resolves for the project, later when every fitting account is paused, and when
+/// the pool has none, soon again with no line while the engine still re-proves earlier
+/// sign-ins or an account check of this engine run holds its profile (`settling`), else
+/// later again under one plain line that stays until a run gets an account.
 #[cfg(unix)]
 struct StatusStarts<'a, F> {
     runner: &'a Arc<ResearchRunner>,
@@ -388,6 +402,7 @@ struct StatusStarts<'a, F> {
     db: &'a rusqlite::Connection,
     checks: &'a mut Vec<JoinHandle<Option<crate::roadmap_status::run::RunLeft>>>,
     upkeep: Upkeep,
+    settling: bool,
 }
 
 #[cfg(unix)]
@@ -403,6 +418,21 @@ where
         let now = crate::team::now_ms();
         let stored = match picked(resolved) {
             Picked::Account(root, account) => {
+                let found = match self.upkeep {
+                    Upkeep::Roadmap => {
+                        crate::roadmap_status::account_found(self.db, project, claim)
+                    }
+                    Upkeep::Overview => {
+                        crate::project_overview::account_found(self.db, project, claim)
+                    }
+                };
+                if let Err(error) = found {
+                    eprintln!(
+                        "upkeep_line_kept store={:?} cause={}",
+                        self.upkeep,
+                        crate::protocol::plain_code(&error.0)
+                    );
+                }
                 let (runner, project, upkeep) = (self.runner.clone(), project.clone(), self.upkeep);
                 self.checks.push(std::thread::spawn(move || match upkeep {
                     Upkeep::Roadmap => {
@@ -425,14 +455,29 @@ where
                     crate::project_overview::requeue(self.db, project, claim, until_ms.max(now))
                 }
             },
+            Picked::Nothing if self.settling => {
+                let due_ms = now.saturating_add(SETTLING_RETRY_MS);
+                match self.upkeep {
+                    Upkeep::Roadmap => {
+                        crate::roadmap_status::requeue(self.db, project, claim, due_ms)
+                    }
+                    Upkeep::Overview => {
+                        crate::project_overview::requeue(self.db, project, claim, due_ms)
+                    }
+                }
+            }
             Picked::Nothing => match self.upkeep {
                 Upkeep::Roadmap => {
-                    let failed = Err(crate::roadmap_status::NO_ACCOUNT);
-                    crate::roadmap_status::finish(self.db, project, claim, failed, now)
+                    let due_ms = now.saturating_add(crate::roadmap_status::RETRY_MS);
+                    let words = crate::roadmap_status::NO_ACCOUNT;
+                    crate::roadmap_status::wait_for_account(self.db, project, claim, words, due_ms)
                 }
                 Upkeep::Overview => {
+                    let due_ms = now.saturating_add(crate::project_overview::agent::RETRY_MS);
                     let words = crate::project_overview::NO_ACCOUNT;
-                    crate::project_overview::fail(self.db, project, claim, words, now)
+                    crate::project_overview::wait_for_account(
+                        self.db, project, claim, words, due_ms,
+                    )
                 }
             },
         };
@@ -450,8 +495,9 @@ where
 /// database's `research_jobs` table that project creation fills, agent state
 /// in `<runtime>/research`, one folder per project in `<runtime>/projects`,
 /// pool assignment read live from the engine's settings files, with a
-/// terminal host every agent in its own pane, and with the engine's agent
-/// register each running job named as a holder of the account it signs in with.
+/// terminal host every agent in its own pane, a look for that host again at each
+/// agent's start while it has none, and with the engine's agent register each
+/// running job named as a holder of the account it signs in with.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
@@ -461,8 +507,10 @@ pub fn start_for_engine(
     codex: Option<&Path>,
     claude: Option<&Path>,
     terminal: Option<Arc<dyn crate::terminal::Host>>,
+    probe: Option<crate::team::runtime::TerminalProbe>,
     agents: Option<Arc<crate::agents::Agents>>,
     lookup: Option<crate::paths::HarnessLookup>,
+    reproving: Option<Arc<AtomicBool>>,
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
@@ -508,8 +556,14 @@ pub fn start_for_engine(
             .with_terminal(host)
             .map_err(|error| error.to_string())?;
     }
+    if let Some(probe) = probe {
+        runner = runner.with_terminal_probe(probe);
+    }
     if let Some(agents) = agents {
         runner = runner.with_agents(agents);
+    }
+    if let Some(reproving) = reproving {
+        runner = runner.with_reproof(reproving);
     }
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
     Ok(ResearchService::start(
@@ -520,8 +574,8 @@ pub fn start_for_engine(
 }
 
 /// Refuses engine research where its 0700 state folders and private database cannot be
-/// made or checked. Takes the runtime, settings files, harness paths, terminal host and
-/// agent register, all unused. Returns `research_runtime_unavailable`.
+/// made or checked. Takes the runtime, settings files, harness paths, terminal host, its
+/// probe and agent register, all unused. Returns `research_runtime_unavailable`.
 #[cfg(not(unix))]
 #[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
@@ -531,8 +585,10 @@ pub fn start_for_engine(
     _codex: Option<&Path>,
     _claude: Option<&Path>,
     _terminal: Option<Arc<dyn crate::terminal::Host>>,
+    _probe: Option<crate::team::runtime::TerminalProbe>,
     _agents: Option<Arc<crate::agents::Agents>>,
     _lookup: Option<crate::paths::HarnessLookup>,
+    _reproving: Option<Arc<AtomicBool>>,
 ) -> Result<ResearchService, String> {
     Err("research_runtime_unavailable".into())
 }
@@ -653,5 +709,259 @@ mod tests {
             Some((root, AccountPick::NoUsableAccount)),
         ];
         assert!(matches!(picked(none.into_iter()), Picked::Nothing));
+    }
+
+    /// An engine folder with a private engine database, a runner with no harness, so every
+    /// run a status store hands out finds no account, and a connection with the roadmap
+    /// status and Overview tables made. Input: the engine's re-proof flag, if any. Output:
+    /// the folder guard, the runner and the connection.
+    fn engine_without_accounts(
+        reproving: Option<Arc<AtomicBool>>,
+    ) -> (tempfile::TempDir, Arc<ResearchRunner>, rusqlite::Connection) {
+        let private = || std::fs::Permissions::from_mode(0o700);
+        let temp = tempfile::Builder::new()
+            .prefix("ca-upkeep-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(temp.path(), private()).unwrap();
+        let engine = temp.path().canonicalize().unwrap().join("engine");
+        let state = engine.join("research");
+        for folder in [&engine, &state] {
+            std::fs::create_dir(folder).unwrap();
+            std::fs::set_permissions(folder, private()).unwrap();
+        }
+        let db = crate::questions::open(&engine).unwrap();
+        db.execute_batch("PRAGMA user_version=1").unwrap();
+        let database = engine.join("engine.db");
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+        crate::roadmap_status::initialize(&db).unwrap();
+        crate::project_overview::initialize(&db).unwrap();
+        let mut runner =
+            ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
+        if let Some(reproving) = reproving {
+            runner = runner.with_reproof(reproving);
+        }
+        assert!(
+            STATUS_HARNESSES
+                .into_iter()
+                .all(|harness| !runner.can_run(harness))
+        );
+        (temp, Arc::new(runner), db)
+    }
+
+    /// The stored state of one project's status run: whether it waits to run, when it is
+    /// due, whether it runs and the line it shows. Inputs: the connection, the table and the
+    /// column holding the line. Output: the four values.
+    fn waiting_row(
+        db: &rusqlite::Connection,
+        table: &str,
+        line: &str,
+    ) -> (bool, i64, Option<i64>, Option<String>) {
+        db.query_row(
+            &format!("SELECT stale,due_ms,running_ms,{line} FROM {table} WHERE project='alpha'"),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_overview_run_with_no_account_keeps_waiting_for_one_under_one_plain_line() {
+        let (_temp, runner, db) = engine_without_accounts(None);
+        let project = ProjectId::new("alpha").unwrap();
+        crate::project_overview::refresh(&db, &project).unwrap();
+        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let mut checks = Vec::new();
+        let mut starts = StatusStarts {
+            runner: &runner,
+            resolve: &resolve,
+            db: &db,
+            checks: &mut checks,
+            upkeep: Upkeep::Overview,
+            settling: false,
+        };
+        let now = crate::team::now_ms();
+        let mut noted = crate::project_overview::Started::default();
+        let steady = std::time::Instant::now();
+        let started =
+            crate::project_overview::tick(&db, &mut starts, &mut noted, steady, now).unwrap();
+        assert_eq!(started, 1);
+        assert!(checks.is_empty(), "no agent starts without an account");
+        let (stale, due_ms, running, line) = waiting_row(&db, "project_overview", "failure");
+        assert_eq!(line.as_deref(), Some(crate::project_overview::NO_ACCOUNT));
+        assert_eq!(running, None);
+        assert!(
+            stale,
+            "the run waits for an account instead of ending for good"
+        );
+        assert!(due_ms > now, "the next try is a while away");
+    }
+
+    #[test]
+    fn a_roadmap_check_with_no_account_keeps_waiting_for_one_under_one_plain_line() {
+        let (_temp, runner, db) = engine_without_accounts(None);
+        let project = ProjectId::new("alpha").unwrap();
+        crate::roadmap_status::refresh(&db, &project).unwrap();
+        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let mut checks = Vec::new();
+        let mut starts = StatusStarts {
+            runner: &runner,
+            resolve: &resolve,
+            db: &db,
+            checks: &mut checks,
+            upkeep: Upkeep::Roadmap,
+            settling: false,
+        };
+        let now = crate::team::now_ms();
+        let started = crate::roadmap_status::tick(&db, &mut starts, now).unwrap();
+        assert_eq!(started, 1);
+        assert!(checks.is_empty(), "no agent starts without an account");
+        let (stale, due_ms, running, line) = waiting_row(&db, "roadmap_status", "problem");
+        assert_eq!(line.as_deref(), Some(crate::roadmap_status::NO_ACCOUNT));
+        assert_eq!(running, None);
+        assert!(
+            stale,
+            "the check waits for an account instead of ending for good"
+        );
+        assert!(due_ms > now, "the next try is a while away");
+    }
+
+    #[test]
+    fn a_status_run_with_no_account_waits_without_a_line_while_the_engine_re_proves_sign_ins() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let (_temp, runner, db) = engine_without_accounts(Some(flag.clone()));
+        assert!(runner.reproving());
+        let project = ProjectId::new("alpha").unwrap();
+        crate::project_overview::refresh(&db, &project).unwrap();
+        crate::roadmap_status::refresh(&db, &project).unwrap();
+        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let mut checks = Vec::new();
+        let mut starts = StatusStarts {
+            runner: &runner,
+            resolve: &resolve,
+            db: &db,
+            checks: &mut checks,
+            upkeep: Upkeep::Roadmap,
+            settling: runner.reproving(),
+        };
+        let now = crate::team::now_ms();
+        assert_eq!(
+            crate::roadmap_status::tick(&db, &mut starts, now).unwrap(),
+            1
+        );
+        starts.upkeep = Upkeep::Overview;
+        let mut noted = crate::project_overview::Started::default();
+        let steady = std::time::Instant::now();
+        let started =
+            crate::project_overview::tick(&db, &mut starts, &mut noted, steady, now).unwrap();
+        assert_eq!(started, 1);
+        assert!(checks.is_empty(), "no agent starts without an account");
+        for (table, line) in [
+            ("roadmap_status", "problem"),
+            ("project_overview", "failure"),
+        ] {
+            let (stale, due_ms, running, shown) = waiting_row(&db, table, line);
+            assert_eq!(
+                shown, None,
+                "{table} shows no line while sign-ins are re-proved"
+            );
+            assert_eq!(running, None);
+            assert!(stale && due_ms > now, "{table} tries again soon");
+            assert!(due_ms <= now.saturating_add(SETTLING_RETRY_MS) + 1000);
+        }
+        flag.store(false, Ordering::SeqCst);
+        assert!(!runner.reproving(), "the wait ends with the re-proof");
+    }
+
+    fn fence_of_an_account_check(db: &rusqlite::Connection, phase: &str) {
+        db.execute_batch(
+            "CREATE TABLE owner_meta(singleton INTEGER PRIMARY KEY, schema_version INTEGER,
+               runtime_state TEXT, db_instance TEXT, engine_epoch TEXT);
+             INSERT INTO owner_meta VALUES(1,1,'active','instance','epoch-now');
+             CREATE TABLE native_auth_operations(id TEXT PRIMARY KEY, phase TEXT);
+             CREATE TABLE native_auth_fences(profile_key TEXT PRIMARY KEY, operation_id TEXT,
+               db_instance TEXT, engine_epoch TEXT);
+             INSERT INTO native_auth_fences VALUES('profile','check','instance','epoch-now');",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO native_auth_operations VALUES('check',?1)",
+            [phase],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_status_run_with_no_account_waits_without_a_line_while_an_account_check_of_this_engine_runs()
+     {
+        let (temp, runner, db) = engine_without_accounts(None);
+        fence_of_an_account_check(&db, "checking_account");
+        let project = ProjectId::new("alpha").unwrap();
+        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let engine = temp.path().canonicalize().unwrap().join("engine");
+        let mut upkeep = StatusUpkeep::open(&engine.join("engine.db"));
+        let pass = |upkeep: &mut StatusUpkeep| {
+            for _ in 0..STATUS_EVERY_TICKS {
+                upkeep.tick(&runner, &resolve);
+            }
+        };
+        let now = crate::team::now_ms();
+        crate::project_overview::refresh(&db, &project).unwrap();
+        crate::roadmap_status::refresh(&db, &project).unwrap();
+        pass(&mut upkeep);
+        for (table, line) in [
+            ("roadmap_status", "problem"),
+            ("project_overview", "failure"),
+        ] {
+            let (stale, due_ms, running, shown) = waiting_row(&db, table, line);
+            assert_eq!(
+                shown, None,
+                "{table} shows no line while an account is checked"
+            );
+            assert!(
+                stale && running.is_none() && due_ms > now,
+                "{table} tries again"
+            );
+        }
+
+        db.execute(
+            "UPDATE native_auth_fences SET engine_epoch='epoch-before'",
+            [],
+        )
+        .unwrap();
+        crate::project_overview::refresh(&db, &project).unwrap();
+        crate::roadmap_status::refresh(&db, &project).unwrap();
+        pass(&mut upkeep);
+        let (_, _, _, overview) = waiting_row(&db, "project_overview", "failure");
+        let (_, _, _, roadmap) = waiting_row(&db, "roadmap_status", "problem");
+        assert_eq!(
+            overview.as_deref(),
+            Some(crate::project_overview::NO_ACCOUNT)
+        );
+        assert_eq!(roadmap.as_deref(), Some(crate::roadmap_status::NO_ACCOUNT));
+    }
+
+    #[test]
+    fn a_status_run_with_no_account_shows_its_line_when_the_account_check_of_this_engine_was_left_uncertain()
+     {
+        let (temp, runner, db) = engine_without_accounts(None);
+        fence_of_an_account_check(&db, "uncertain");
+        let project = ProjectId::new("alpha").unwrap();
+        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let engine = temp.path().canonicalize().unwrap().join("engine");
+        let mut upkeep = StatusUpkeep::open(&engine.join("engine.db"));
+        crate::project_overview::refresh(&db, &project).unwrap();
+        crate::roadmap_status::refresh(&db, &project).unwrap();
+        for _ in 0..STATUS_EVERY_TICKS {
+            upkeep.tick(&runner, &resolve);
+        }
+        let (_, _, _, overview) = waiting_row(&db, "project_overview", "failure");
+        let (_, _, _, roadmap) = waiting_row(&db, "roadmap_status", "problem");
+        assert_eq!(
+            overview.as_deref(),
+            Some(crate::project_overview::NO_ACCOUNT),
+            "a fence kept only for the next engine start is no running check"
+        );
+        assert_eq!(roadmap.as_deref(), Some(crate::roadmap_status::NO_ACCOUNT));
     }
 }

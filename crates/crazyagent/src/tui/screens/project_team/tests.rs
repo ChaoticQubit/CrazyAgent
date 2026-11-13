@@ -1,6 +1,8 @@
 use super::*;
 use crate::client_controller::OwnerController;
-use crate::coord::settings::{CoordSettings, RoleSkills, TaskStart, TerminalDisplay};
+use crate::coord::settings::{
+    CoordSettings, HeavyLane, RoleSkills, SharedResource, TaskStart, TerminalDisplay,
+};
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
@@ -176,6 +178,7 @@ fn team() -> TeamStatus {
         master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
+        landing_mode: crate::team::LandingMode::Squash,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -1955,16 +1958,17 @@ fn stored() -> crate::project_setup::StoredSetup {
 /// Team settings name the saved master harness on the plan line and, after the On harness
 /// switch choice, when a saved change reaches the running master; at 80 columns too, where a
 /// setting of its own would fold the first settings row away. In a short window the focused
-/// agent's Tools and Working copy rows give way first, then the plan line, as `draw` orders
-/// them: at 80 by 25 the plan line shows, at 80 by 24 it gives way, and every setting, Left
-/// running included, shows at both (v2.3.2 gate rows 26 and 27).
+/// agent's Tools and Working copy rows give way first, then the settings rows after the first
+/// scroll, as `draw` orders them, so the plan line shows at 80 by 25 and 80 by 24
+/// (BL-TUI-8024-PLANLINE, gate row 26). The settings pack in order (backlog 42): at 80 by 25
+/// every setting shows, and at 80 by 24 Left running is one PgDn away.
 #[test]
 fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_master() {
-    let view = loaded();
+    let mut view = loaded();
     let tall = frame(&view, 160, 36);
     assert!(find(&tall, "Working copy").contains("agent-1"));
     assert!(find(&tall, "Tools").contains("On, inside the project folder"));
-    for (width, height) in [(160, 36), (80, 25)] {
+    for (width, height) in [(160, 36), (80, 25), (80, 24)] {
         let rows = frame(&view, width, height);
         assert!(find(&rows, "leads.").contains("Codex leads."));
         assert!(
@@ -1990,7 +1994,22 @@ fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_m
             .contains("On harness switch  Carry over, when the master is idle")
     );
     assert!(find(&short, "Max teammates").contains("Max teammates  No limit"));
-    assert!(find(&short, "Left running").contains("Left running  End them"));
+    assert!(
+        find(&frame(&view, 80, 25), "Left running").contains("Left running  End them"),
+        "every setting fits at 80 by 25"
+    );
+    let short = frame(&view, 80, 24);
+    assert!(find(&short, "more settings").contains("PgDn  more settings below"));
+    assert!(
+        !short
+            .iter()
+            .any(|row| row.contains("Left running  End them"))
+    );
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let scrolled = frame(&view, 80, 24);
+    assert!(find(&scrolled, "leads.").contains("Codex leads."));
+    assert!(find(&scrolled, "Left running").contains("Left running  End them"));
+    assert_eq!(view.key(press(KeyCode::PageUp)), TeamReply::Handled);
     let mut later = team();
     later.apply_harness_switch = crate::team::SwitchApply::NextStart;
     let mut view = TeamView::new(project());
@@ -3135,6 +3154,58 @@ fn reuse_idle_agents_shows_off_by_default_and_space_flips_it() {
             })
         );
         stored.reuse_idle = mode;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(row(&view).contains(words), "{}", row(&view));
+    }
+}
+
+/// The Coordination screen's last row shows the stored Landing choice, Squash by default,
+/// and Space flips it to Merge commit and back: each press sends the setting's own change
+/// and the row shows the choice (DEC-147.6).
+#[test]
+fn landing_shows_squash_by_default_and_space_flips_it_to_merge_commit() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut stored = team();
+    stored.coordination = Some(crate::team::coordination(&connection, &project()).unwrap());
+    stored.landing_mode = crate::team::landing_mode(&connection, &project()).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    for _ in 0..17 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 17);
+    let row = |view: &TeamView| find(&frame(view, 120, 40), "Landing").to_owned();
+    assert!(row(&view).contains("Squash"), "{}", row(&view));
+    let mut at = NOW;
+    for (mode, words, done) in [
+        (
+            crate::team::LandingMode::Merge,
+            "Merge commit",
+            "Landing is Merge commit: accepted changes land as a merge commit that keeps every agent commit in your history.",
+        ),
+        (
+            crate::team::LandingMode::Squash,
+            "Squash",
+            "Landing is Squash: each accepted change set lands as one commit.",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::LandingMode {
+                project_id: project(),
+                mode,
+            })
+        );
+        stored.landing_mode = mode;
         at += 60_000;
         assert_eq!(
             settled(&mut view, reply, &stored, at),
@@ -4707,6 +4778,147 @@ fn every_harness_kind_says_what_its_delivery_choices_do() {
     }
 }
 
+/// Opens the coordination editor of a project with no saved settings, read from a real
+/// engine database, with the given heavy lane, and moves to one row. Takes the row and the
+/// lane. Returns the view, its stored team read and the coordination view it was built from.
+fn coordination_row(
+    at: usize,
+    lane: crate::coord::lane::LaneView,
+) -> (TeamView, TeamStatus, crate::team::CoordinationView) {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let mut coordination = crate::team::coordination(&connection, &project()).unwrap();
+    coordination.lane = lane;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut stored = team();
+    stored.coordination = Some(coordination.clone());
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    for _ in 0..at {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, at);
+    (view, stored, coordination)
+}
+
+/// F28: the Heavy lane row shows 1 at a time by default with the lane's running and waiting
+/// counts, and Space walks every option, 2, 3 and 4 at a time, No limit and back to 1: each
+/// press sends the whole settings with the next option, the engine's answer names it and the
+/// row shows the stored one.
+#[test]
+fn the_heavy_lane_row_shows_one_at_a_time_and_space_walks_every_option() {
+    let at = COORD_ROWS
+        .iter()
+        .position(|row| *row == CoordRow::HeavyLane)
+        .unwrap();
+    let (mut view, mut stored, coordination) = coordination_row(at, Default::default());
+    let lane = |view: &TeamView| find(&frame(view, 120, 60), "Heavy lane").to_owned();
+    assert!(lane(&view).contains("1 at a time"), "{}", lane(&view));
+    assert!(
+        lane(&view).contains("0 running, 0 waiting"),
+        "{}",
+        lane(&view)
+    );
+    let mut now = NOW;
+    let mut expected = coordination.settings.clone();
+    for next in [
+        HeavyLane::Two,
+        HeavyLane::Three,
+        HeavyLane::Four,
+        HeavyLane::NoLimit,
+        HeavyLane::One,
+    ] {
+        expected.heavy_lane = next;
+        let reply = view.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::CoordSettings {
+                project_id: project(),
+                settings: expected.clone(),
+            })
+        );
+        stored.coordination.as_mut().unwrap().settings = expected.clone();
+        now += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, now),
+            Some(Notice::plain(format!(
+                "Heavy lane: {}.",
+                next.words().to_lowercase()
+            )))
+        );
+        assert!(lane(&view).contains(next.words()), "{}", lane(&view));
+    }
+}
+
+/// F28: the Heavy lane row counts the commands the engine's lane view holds.
+#[test]
+fn the_heavy_lane_row_counts_running_and_waiting_commands() {
+    use crate::coord::lane::LaneEntry;
+    let at = COORD_ROWS
+        .iter()
+        .position(|row| *row == CoordRow::HeavyLane)
+        .unwrap();
+    let entry = |agent: i64| LaneEntry {
+        agent,
+        label: "make".into(),
+        uses: vec![],
+        since_ms: NOW,
+    };
+    let lane = crate::coord::lane::LaneView {
+        running: vec![entry(1)],
+        waiting: vec![entry(2), entry(3)],
+    };
+    let (view, _, _) = coordination_row(at, lane);
+    let row = find(&frame(&view, 120, 60), "Heavy lane").to_owned();
+    assert!(row.contains("1 running, 2 waiting"), "{row}");
+}
+
+/// F28: the Shared resources row shows None by default; Enter opens its input, a typed
+/// list of name and name:slots entries is sent as the whole settings with those resources,
+/// one slot where none is typed, and slots that are not a number or a name the engine
+/// refuses send nothing.
+#[test]
+fn the_shared_resources_row_takes_names_and_slots() {
+    let at = COORD_ROWS
+        .iter()
+        .position(|row| *row == CoordRow::Resources)
+        .unwrap();
+    let (mut view, _, coordination) = coordination_row(at, Default::default());
+    assert!(find(&frame(&view, 120, 60), "Shared resources").contains("None"));
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    typed(&mut view, "ollama:1, postgres:2 redis");
+    let mut expected = coordination.settings.clone();
+    expected.shared_resources = vec![
+        SharedResource {
+            name: "ollama".into(),
+            slots: 1,
+        },
+        SharedResource {
+            name: "postgres".into(),
+            slots: 2,
+        },
+        SharedResource {
+            name: "redis".into(),
+            slots: 1,
+        },
+    ];
+    assert_eq!(
+        view.key(press(KeyCode::Enter)),
+        TeamReply::Change(TeamAction::CoordSettings {
+            project_id: project(),
+            settings: expected,
+        })
+    );
+    for bad in ["ollama:two", "Ollama", "ollama:0", "ollama:9"] {
+        let (mut view, _, _) = coordination_row(at, Default::default());
+        assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+        typed(&mut view, bad);
+        assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled, "{bad}");
+    }
+}
+
 /// Sub-agent rounds per message (U) and Master run time (N) each step through every choice
 /// and back (F09, F01): each key sends its change, the engine's answer says the new choice
 /// and the team rows show what the engine stored.
@@ -4858,4 +5070,251 @@ fn x_ends_and_k_keeps_the_oldest_hold_and_each_hold_has_a_row() {
             key: 3,
         })
     );
+}
+
+/// The 25 settings of the `team()` fixture, label and value, in the order they pack.
+const FIXTURE_SETTINGS: [&str; 25] = [
+    "Keep warm  Off",
+    "Task  Off",
+    "Session  Off",
+    "Idle stop  Off",
+    "On harness switch  Carry over, when the master is idle",
+    "Sub-agent depth  2",
+    "Worker lands  When the lead accepts",
+    "Agent branches  Named branch",
+    "Max harnesses  No limit",
+    "Live terminal  On",
+    "Max teammates  No limit",
+    "Sub-agent rounds  Until the goal is done",
+    "Master run time  7 days",
+    "Spread accounts  Off",
+    "Token budget  Off",
+    "Master's branch  Repository default",
+    "Land on  Master's branch",
+    "Master accepts change sets  Itself",
+    "Re-ask empty reply  On",
+    "End a turn after done  10 min",
+    "New folder limit  1000 files",
+    "Master idle stop  15 min",
+    "Terminals per window  6",
+    "Background commands  Wait",
+    "Left running  End them",
+];
+
+/// Where each setting shows in a frame, as a row and a byte column, or none when it is
+/// scrolled out of view; a setting shown twice fails. Takes the rendered rows and the settings
+/// as label and value. Returns one place per setting, in the settings' order.
+fn setting_places(rows: &[String], settings: &[&str]) -> Vec<Option<(usize, usize)>> {
+    settings
+        .iter()
+        .map(|setting| {
+            let found: Vec<(usize, usize)> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(at, row)| row.find(setting).map(|column| (at, column)))
+                .collect();
+            assert!(
+                found.len() <= 1,
+                "{setting:?} shows twice:\n{}",
+                rows.join("\n")
+            );
+            found.first().copied()
+        })
+        .collect()
+}
+
+/// Checks that the settings in view read in their one fixed order, by row and then column.
+/// Takes the rendered rows and the settings. Returns which settings show.
+fn settings_in_order(rows: &[String], settings: &[&str]) -> Vec<bool> {
+    let places = setting_places(rows, settings);
+    let seen: Vec<(usize, usize)> = places.iter().flatten().copied().collect();
+    assert!(
+        seen.windows(2).all(|pair| pair[0] < pair[1]),
+        "the settings read out of order:\n{}",
+        rows.join("\n")
+    );
+    places.iter().map(Option::is_some).collect()
+}
+
+/// Checks one 80 column frame of the `team()` fixture: the plan line once, the settings in
+/// view in their fixed order and none twice, every row within 80 columns. Takes the rendered
+/// rows. Returns which settings show.
+fn plan_line_and_settings_in_order(rows: &[String]) -> Vec<bool> {
+    let shown = rows.join("\n");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("Codex leads."))
+            .count(),
+        1,
+        "{shown}"
+    );
+    assert!(rows.iter().all(|row| row.chars().count() <= 80), "{shown}");
+    settings_in_order(rows, &FIXTURE_SETTINGS)
+}
+
+/// Checks that a frame before PgDn and one after it show every setting between them. Takes
+/// which settings each frame shows.
+fn every_setting_across(top: &[bool], bottom: &[bool]) {
+    for (at, setting) in FIXTURE_SETTINGS.iter().enumerate() {
+        assert!(top[at] || bottom[at], "{setting:?} is reached with PgDn");
+    }
+}
+
+/// At 80 by 24 the team view keeps its plan line in view (backlog BL-TUI-8024-PLANLINE) and
+/// the settings keep their one order (backlog 42 TUI-SETTINGS-SCROLL): the settings rows after
+/// the first scroll, a muted marker names PgDn, and PgDn brings the rest, Left running
+/// included, while the counts row and the plan line stay.
+#[test]
+fn the_team_view_at_80_by_24_keeps_the_plan_line_and_scrolls_to_every_setting() {
+    let mut view = loaded();
+    let top = frame(&view, 80, 24);
+    let above = plan_line_and_settings_in_order(&top);
+    assert!(find(&top, "more settings").contains("PgDn  more settings below"));
+    assert!(above[0], "the counts row stays");
+    assert!(
+        !above[24],
+        "Left running sits behind PgDn:\n{}",
+        top.join("\n")
+    );
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let bottom = frame(&view, 80, 24);
+    let below = plan_line_and_settings_in_order(&bottom);
+    assert!(find(&bottom, "more settings").contains("PgUp  more settings above"));
+    assert!(below[0], "the counts row stays");
+    every_setting_across(&above, &below);
+    assert_eq!(view.key(press(KeyCode::PageUp)), TeamReply::Handled);
+    assert_eq!(frame(&view, 80, 24), top, "PgUp goes back to the top");
+}
+
+/// Team settings drawn by the shell at 80 by 24 keep the plan line in view and reach every
+/// setting with PgDn (backlog BL-TUI-8024-PLANLINE, backlog 42): the screen wraps its hint bar
+/// to three rows there, so its body has the same 18 rows as the Agents tab.
+#[test]
+fn team_settings_at_80_by_24_keep_the_plan_line_and_scroll_to_every_setting() {
+    use crate::tui::client::{OwnerEvent, SetupEvent};
+    use crate::tui::keys::Key;
+    use crate::tui::screens::settings_accounts::tests::{ctx, render};
+    use crate::tui::screens::team_settings::TeamSettings;
+    use crate::tui::seam::{Arrival, Request};
+    use crate::tui::shell::Shell;
+    let mut shell = Shell::with(
+        ctx(80, 24),
+        Box::new(TeamSettings::new(project(), "Tidepool".into())),
+    );
+    let mut queries = Vec::new();
+    while let Some(request) = shell.ctx.next_request() {
+        if let Request::Setup(query) = request {
+            queries.push(query);
+        }
+    }
+    assert_eq!(queries.len(), 1, "{queries:?}");
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: queries.remove(0),
+            result: Ok(SetupView::Team(Box::new(team()))),
+        },
+    )))));
+    let top = render(&mut shell, 80, 24);
+    let above = plan_line_and_settings_in_order(&top);
+    assert!(find(&top, "more settings").contains("PgDn  more settings below"));
+    shell.key(Key::PageDown);
+    let bottom = render(&mut shell, 80, 24);
+    let below = plan_line_and_settings_in_order(&bottom);
+    assert!(find(&bottom, "more settings").contains("PgUp  more settings above"));
+    every_setting_across(&above, &below);
+}
+
+/// The settings keep one order at every width and when a value widens a row (backlog 42):
+/// they pack in order only, so a resize or a key never moves a setting ahead of an earlier
+/// one, and a window tall enough for every row shows no marker.
+#[test]
+fn the_settings_keep_one_order_at_every_width_and_when_a_value_widens() {
+    let view = loaded();
+    for width in [80, 100, 120, 160] {
+        let rows = frame(&view, width, 60);
+        let shown = settings_in_order(&rows, &FIXTURE_SETTINGS);
+        assert!(shown.iter().all(|seen| *seen), "{}", rows.join("\n"));
+        assert!(
+            !rows.iter().any(|row| row.contains("more settings")),
+            "nothing scrolls at {width} columns when every row fits"
+        );
+    }
+    let mut wide = team();
+    wide.ask_before_merge = true;
+    wide.leftovers = LeftoverMode::Keep;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(wide))));
+    let mut settings = FIXTURE_SETTINGS;
+    settings[17] = "Master accepts change sets  Only when I click or say accept all";
+    settings[24] = "Left running  Keep running";
+    for width in [80, 100] {
+        let rows = frame(&view, width, 60);
+        let shown = settings_in_order(&rows, &settings);
+        assert!(shown.iter().all(|seen| *seen), "{}", rows.join("\n"));
+    }
+}
+
+/// PgDn and PgUp clamp to the frame they were pressed under: after a resize a stale position
+/// never eats a key press, the marker says which way more settings are, and with nothing to
+/// scroll the keys are left to the screen.
+#[test]
+fn a_resize_never_leaves_a_scroll_position_that_eats_a_key() {
+    let mut view = loaded();
+    frame(&view, 80, 24);
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let bottom = frame(&view, 80, 24);
+    assert!(find(&bottom, "more settings").contains("PgUp  more settings above"));
+    let shorter = frame(&view, 80, 23);
+    assert!(
+        find(&shorter, "more settings").contains("PgUp PgDn  more settings above and below"),
+        "{}",
+        shorter.join("\n")
+    );
+    assert_eq!(view.key(press(KeyCode::PageUp)), TeamReply::Handled);
+    let back = frame(&view, 80, 23);
+    assert!(find(&back, "more settings").contains("PgDn  more settings below"));
+    plan_line_and_settings_in_order(&back);
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let tall = frame(&view, 80, 60);
+    assert!(!tall.iter().any(|row| row.contains("more settings")));
+    assert_eq!(
+        view.key(press(KeyCode::PageDown)),
+        TeamReply::Ignored,
+        "with nothing to scroll PgDn is left to the screen"
+    );
+    let again = frame(&view, 80, 24);
+    assert!(
+        find(&again, "more settings").contains("PgDn  more settings below"),
+        "a key pressed with nothing to scroll leaves the settings at the top"
+    );
+}
+
+/// The counts row and the Left running hold rows never scroll: a hold whose keys act stays in
+/// view at both ends of the scrolled settings.
+#[test]
+fn hold_rows_stay_in_view_while_the_settings_scroll() {
+    use crate::harnesses::leftovers::{HeldView, HoldState};
+    let mut view = loaded();
+    let mut stored = team();
+    stored.leftover_holds = vec![HeldView {
+        key: 4,
+        who: "the master".to_owned(),
+        names: "4 node".to_owned(),
+        state: HoldState::Held,
+        since_ms: NOW,
+        holds_account: true,
+    }];
+    reread(&mut view, stored, NOW + 60_000);
+    let top = frame(&view, 80, 24);
+    assert!(find(&top, "the master: 4 node").contains("Left running  the master: 4 node"));
+    assert!(find(&top, "more settings").contains("PgDn  more settings below"));
+    assert!(find(&top, "Keep warm").contains("Keep warm  Off"));
+    assert_eq!(view.key(press(KeyCode::PageDown)), TeamReply::Handled);
+    let bottom = frame(&view, 80, 24);
+    assert!(find(&bottom, "the master: 4 node").contains("Left running  the master: 4 node"));
+    assert!(find(&bottom, "Keep warm").contains("Keep warm  Off"));
+    assert!(find(&bottom, "Left running  End them").contains("Left running  End them"));
+    assert!(find(&bottom, "leads.").contains("Codex leads."));
 }

@@ -417,7 +417,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -860,6 +860,8 @@ export type MasterLands = "merges" | "waits";
 export type CatchUpMain = "on" | "off";
 /** Whether an idle agent of the same lead may take a project's next task, or each new task starts a new agent. */
 export type ReuseIdle = "on" | "off";
+/** How an accepted change set lands on the owner's branch: one squash commit, or a merge commit keeping every agent commit. */
+export type LandingMode = "squash" | "merge";
 
 /** A harness kind the coordination settings are kept for, by its catalog id. */
 export type CoordHarness = "claude-code" | "codex" | "rcli";
@@ -906,9 +908,21 @@ export type TerminalDisplay = "classic" | "fullscreen";
  * context-mode tools to load and the approved skills to check for the task. */
 export type TaskStart = "on" | "off";
 
+/** How many heavy commands of a project run at once through its heavy lane (F28): 1, 2, 3 or
+ * 4 at a time, or No limit. */
+export type HeavyLane = "one" | "two" | "three" | "four" | "no_limit";
+
+/** A named thing a project's heavy commands share, such as a local model or a database, and
+ * how many commands may use it at once, 1 to 8. */
+export interface SharedResource {
+  name: string;
+  slots: number;
+}
+
 /** A project's coordination settings: question routing, claim overlaps, workflow nudges, the
  * tool names the adoption counts include, the skills each team role gets, the terminal
- * display of every harness and the Task-start reminder. */
+ * display of every harness, the Task-start reminder, the heavy lane size and the shared
+ * resources. */
 export interface CoordSettings {
   questions_to: QuestionsTo;
   overlaps: Overlaps;
@@ -917,6 +931,24 @@ export interface CoordSettings {
   role_skills: RoleSkills;
   terminal_display: TerminalDisplay;
   task_start: TaskStart;
+  heavy_lane: HeavyLane;
+  shared_resources: SharedResource[];
+}
+
+/** One heavy command in a project's lane: the agent that runs it, its label (never its
+ * arguments), the shared resources it uses and when it started or began to wait. */
+export interface LaneEntry {
+  agent: number;
+  label: string;
+  uses: string[];
+  since_ms: number;
+}
+
+/** A project's heavy lane at one moment: the commands that run and those that wait, each in
+ * turn order. */
+export interface LaneView {
+  running: LaneEntry[];
+  waiting: LaneEntry[];
 }
 
 /** One harness kind's sub-agent mode and delivery, whether it has native teammates at all, and
@@ -929,10 +961,12 @@ export interface HarnessCoordination {
   displays?: TerminalDisplay[];
 }
 
-/** A project's coordination settings with each harness kind's mode and delivery. */
+/** A project's coordination settings with each harness kind's mode and delivery and its
+ * heavy lane; an engine from before F28 sends no lane. */
 export interface CoordinationView {
   settings: CoordSettings;
   harnesses: HarnessCoordination[];
+  lane?: LaneView;
 }
 
 export interface SessionSwitch {
@@ -967,6 +1001,7 @@ export interface TeamStatus {
   master_live_terminal?: boolean;
   catch_up_main?: CatchUpMain;
   reuse_idle?: ReuseIdle;
+  landing_mode?: LandingMode;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
   message_settings?: MessageSettings;
@@ -1501,7 +1536,7 @@ export type DependencyName = "tmux" | "uv" | "graphify";
 
 export type DependencyState =
   | { state: "checking" }
-  | { state: "missing" }
+  | { state: "missing"; line?: string }
   | { state: "found"; version: string }
   | { state: "installing" }
   | { state: "installed"; version: string }

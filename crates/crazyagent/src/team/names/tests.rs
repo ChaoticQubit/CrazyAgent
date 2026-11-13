@@ -773,3 +773,180 @@ fn a_woken_agent_reclaims_its_names_and_never_shares_a_live_handle() {
         "a free handle is kept as it was"
     );
 }
+
+/// The handle registry keeps a handle pointing at the agent that last held it (F16): a
+/// sub-agent reused for a later job, or renamed by the owner, is still reached by its
+/// earlier handle, live or finished, and a new holder of a handle takes it over.
+#[test]
+fn an_earlier_handle_reaches_its_agent_after_a_new_job_or_a_rename_until_another_takes_it() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let started = |task: i64| {
+        connection
+            .execute("UPDATE team_tasks SET status='running' WHERE id=?1", [task])
+            .unwrap();
+    };
+    let sub = agent(&connection, "alpha", "sub", "working");
+    let first = task(&connection, "alpha");
+    give_role(&connection, &alpha, first, "classifier-storage", 0).unwrap();
+    assign_task_role(&connection, &alpha, sub, first).unwrap();
+    started(first);
+    let second = task(&connection, "alpha");
+    give_role(&connection, &alpha, second, "storage-api", 0).unwrap();
+    assert_eq!(
+        assign_task_role(&connection, &alpha, sub, second).unwrap(),
+        Some("storage-api".into())
+    );
+    started(second);
+    assert_eq!(
+        resolve(&connection, &alpha, "@classifier-storage").unwrap(),
+        Some(sub),
+        "the earlier job's handle still reaches the reused agent"
+    );
+    assert_eq!(
+        rename(&connection, &alpha, sub, "store").unwrap(),
+        Ok("store".into())
+    );
+    for earlier in ["@storage-api", "@classifier-storage", "storage-api"] {
+        assert_eq!(
+            resolve(&connection, &alpha, earlier).unwrap(),
+            Some(sub),
+            "{earlier}"
+        );
+    }
+    assert_eq!(
+        resolve(&connection, &project("beta"), "@storage-api").unwrap(),
+        None,
+        "the registry never reaches into another project"
+    );
+    stop(&connection, sub);
+    assert_eq!(resolve(&connection, &alpha, "@storage-api").unwrap(), None);
+    assert_eq!(
+        resolve_finished(&connection, &alpha, "@storage-api").unwrap(),
+        Some(sub),
+        "a finished agent is found by an earlier handle for a wake"
+    );
+    let newer = agent(&connection, "alpha", "sub", "working");
+    assign_role(&connection, &alpha, newer, "storage-api")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolve(&connection, &alpha, "@storage-api").unwrap(),
+        Some(newer)
+    );
+    stop(&connection, newer);
+    assert_eq!(
+        resolve_finished(&connection, &alpha, "@storage-api").unwrap(),
+        Some(newer),
+        "the newest holder of a handle takes it over"
+    );
+    let holder: i64 = connection
+        .query_row(
+            "SELECT agent FROM team_handles WHERE project='alpha' AND handle='storage-api'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(holder, newer);
+}
+
+/// A handle the master gave a task that has not started yet names that task, and stops
+/// doing so once the task starts (F16, DM "@classifier-storage not recognized").
+#[test]
+fn a_waiting_task_s_role_names_that_task_until_it_starts() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let queued = task(&connection, "alpha");
+    give_role(&connection, &alpha, queued, "Classifier storage", 0).unwrap();
+    for name in [
+        "@classifier-storage",
+        "classifier-storage",
+        " @Classifier-Storage ",
+    ] {
+        assert_eq!(
+            waiting_task(&connection, &alpha, name).unwrap(),
+            Some(queued),
+            "{name}"
+        );
+    }
+    for name in ["@other", "", "@", &"x".repeat(200)] {
+        assert_eq!(
+            waiting_task(&connection, &alpha, name).unwrap(),
+            None,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        waiting_task(&connection, &project("beta"), "@classifier-storage").unwrap(),
+        None
+    );
+    let earlier = agent(&connection, "alpha", "sub", "working");
+    assign_role(&connection, &alpha, earlier, "classifier-storage")
+        .unwrap()
+        .unwrap();
+    assign_role(&connection, &alpha, earlier, "storage-api")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolve(&connection, &alpha, "@classifier-storage").unwrap(),
+        None,
+        "the waiting task the master gave the handle outranks its earlier holder"
+    );
+    stop(&connection, earlier);
+    assert_eq!(
+        resolve_finished(&connection, &alpha, "@classifier-storage").unwrap(),
+        None
+    );
+    connection
+        .execute(
+            "UPDATE team_tasks SET status='running' WHERE id=?1",
+            [queued],
+        )
+        .unwrap();
+    assert_eq!(
+        waiting_task(&connection, &alpha, "@classifier-storage").unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_finished(&connection, &alpha, "@classifier-storage").unwrap(),
+        Some(earlier),
+        "once the task started, the registry reaches the earlier holder again"
+    );
+}
+
+/// The registry keeps at most `HANDLES_KEPT_MAX` handles per project, the newest, and none
+/// of an agent that no longer exists.
+#[test]
+fn the_handle_registry_keeps_its_newest_handles_within_the_bound() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let sub = agent(&connection, "alpha", "sub", "working");
+    for at in 0..=HANDLES_KEPT_MAX {
+        assign_role(&connection, &alpha, sub, &format!("job-{at}a"))
+            .unwrap()
+            .unwrap();
+    }
+    let count = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_handles WHERE project='alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(count(&connection), HANDLES_KEPT_MAX as i64);
+    assert_eq!(
+        resolve(&connection, &alpha, &format!("@job-{HANDLES_KEPT_MAX}a")).unwrap(),
+        Some(sub)
+    );
+    assert_eq!(resolve(&connection, &alpha, "@job-0a").unwrap(), None);
+    let other = agent(&connection, "alpha", "sub", "working");
+    connection
+        .execute("DELETE FROM team_agents WHERE id=?1", [sub])
+        .unwrap();
+    assign_role(&connection, &alpha, other, "fresh")
+        .unwrap()
+        .unwrap();
+    assert_eq!(count(&connection), 1, "rows of a deleted agent are dropped");
+}

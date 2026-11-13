@@ -428,3 +428,64 @@ async fn a_recount_choice_with_nothing_to_decide_is_refused_by_its_own_code() {
     assert_eq!(refused.0, "usage_recount_not_ready");
     usage.stop().await;
 }
+
+/// The extras read answers one entry per saved account, named by its harness, with nothing
+/// read yet as not reported and never as 0, and it shows what the usage store holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_extras_read_answers_each_saved_account_with_its_stored_resets_and_credits() {
+    let usage = Usage::start().await;
+    let added = saved_claude(&usage).await;
+
+    let unread = usage.client.usage_extras(false).await.unwrap();
+
+    assert_eq!(unread.len(), 1, "{unread:?}");
+    assert_eq!(unread[0].account, added.id);
+    assert_eq!(unread[0].extras.not_reported, "not reported by Claude Code");
+    assert_eq!(unread[0].extras.resets, None);
+    assert_eq!(unread[0].extras.credits, None);
+
+    let db = crate::usage::open(&usage.engine_root).unwrap();
+    let now = crate::team::now_ms();
+    let read = crate::usage::extras::Extras {
+        resets: crate::usage::extras::Field::Known(crate::usage::extras::Resets {
+            count: 2,
+            kinds: vec![crate::usage::extras::ResetKind::Weekly],
+            next_expiry_ms: Some(now + 86_400_000),
+        }),
+        credits: crate::usage::extras::Field::Known("4.20 USD left".into()),
+    };
+    crate::usage::extras::record_extras(&db, &added.id, &read, now).unwrap();
+    drop(db);
+
+    let stored = usage.client.usage_extras(false).await.unwrap();
+
+    assert_eq!(stored.len(), 1);
+    let resets = stored[0].extras.resets.clone().unwrap();
+    assert_eq!(
+        (resets.count, resets.kinds),
+        (2, vec![crate::usage::extras::ResetKind::Weekly])
+    );
+    assert_eq!(stored[0].extras.credits.as_deref(), Some("4.20 USD left"));
+    usage.stop().await;
+}
+
+/// Only a read that says Pools is open asks the usage service for the detail rows; Metrics,
+/// the TUI usage screen and the new-reset watch read what is stored and never ask.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_pools_extras_read_asks_for_the_detail_rows() {
+    let usage = Usage::start().await;
+    saved_claude(&usage).await;
+    let db = crate::usage::open(&usage.engine_root).unwrap();
+
+    let due = |db: &rusqlite::Connection| {
+        crate::usage::extras::detail_due(db, None, crate::team::now_ms()).unwrap()
+    };
+
+    usage.client.usage_extras(false).await.unwrap();
+    assert!(!due(&db), "a stored-only read takes no Pools lease");
+
+    usage.client.usage_extras(true).await.unwrap();
+    assert!(due(&db), "a Pools read takes the lease the next poll reads");
+    drop(db);
+    usage.stop().await;
+}

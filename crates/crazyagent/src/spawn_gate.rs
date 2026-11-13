@@ -204,6 +204,23 @@ pub async fn bind_tcp(
     Err(last)
 }
 
+/// Binds a Tokio TCP socket to `address` without listening on it, so the port stays held
+/// and every connection to it is refused while the socket lives; the socket is created
+/// inside the gate. Input: the address. Output: the bound socket or the bind error.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn bind_tcp_unlistened(
+    address: std::net::SocketAddr,
+) -> io::Result<tokio::net::TcpSocket> {
+    let socket = guarded(|| match address {
+        std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+        std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+    })?;
+    socket.bind(address)?;
+    assert_eq!(socket.local_addr()?.ip(), address.ip());
+    Ok(socket)
+}
+
 /// Binds a Tokio Unix listener at `path` inside the gate, through its short address when
 /// the path is too long for a socket address. Must run inside a Tokio runtime.
 /// Input: the socket path. Output: the listener.

@@ -587,6 +587,14 @@ pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
     Some(kept.into_iter().collect())
 }
 
+/// Every path below `repo` git does not track, ignored or not, a wholly untracked folder
+/// once with a closing `/`, for the shared folders choice (DEC-147.9). Asks git once,
+/// bounded as [`answer`]. Takes the folder. Returns the paths, or `None` when git fails, runs
+/// over or names a path that is not UTF-8.
+pub(crate) fn untracked(repo: &Path) -> Option<Vec<String>> {
+    listed(repo, &["-o", "--directory"])
+}
+
 /// The paths below `repo`, a folder outside git, the code graph must never read (MAP-2): the
 /// outermost file or folder of each path whose name is secret-like, but for a programming
 /// source file, and each folder holding a `.git` entry, whole, each folder with a closing

@@ -144,75 +144,6 @@ fn database() -> (tempfile::TempDir, Connection) {
     (directory, connection)
 }
 
-#[test]
-fn delegation_lines_are_read_from_a_master_reply() {
-    let reply = "I will split this.\nDELEGATE: Write apple.txt\n- delegate codex: List the files\n`DELEGATE claude-code: Review the notes`\nDELEGATE Bad Name: nope\nDELEGATE:   \nNot a DELEGATE: line";
-    assert_eq!(
-        parse_delegations(reply),
-        [
-            Delegation {
-                harness: None,
-                prompt: "Write apple.txt".into(),
-                role: None,
-            },
-            Delegation {
-                harness: Some("codex".into()),
-                prompt: "List the files".into(),
-                role: None,
-            },
-            Delegation {
-                harness: Some("claude-code".into()),
-                prompt: "Review the notes".into(),
-                role: None,
-            },
-        ]
-    );
-    let many = (0..20)
-        .map(|i| format!("DELEGATE: task {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(parse_delegations(&many).len(), DELEGATIONS_PER_REPLY_MAX);
-    let long = format!("DELEGATE: {}", "x".repeat(TASK_PROMPT_BYTES_MAX + 1));
-    assert!(parse_delegations(&long).is_empty());
-}
-
-/// A master that is not live wakes a finished sub-agent with a reply line (WK-R5): `WAKE`,
-/// the agent's name or number, a colon and the text, in any case and list form.
-#[test]
-fn wake_lines_are_read_from_a_master_reply() {
-    let reply = "Two of them know this.
-WAKE @onboarding-fix: Fix the copy again
-- wake Sub-agent 4: Add the footer
-`WAKE Ada: Check the title`
-WAKEUP Ada: nope
-WAKE : no name
-WAKE Ada:   
-WAKE Ada no colon
-Not a WAKE Ada: line";
-    let line = |agent: &str, text: &str| WakeLine {
-        agent: agent.into(),
-        text: text.into(),
-    };
-    assert_eq!(
-        parse_wakes(reply),
-        [
-            line("@onboarding-fix", "Fix the copy again"),
-            line("Sub-agent 4", "Add the footer"),
-            line("Ada", "Check the title"),
-        ]
-    );
-    let many = (0..20)
-        .map(|i| format!("WAKE Sub-agent {i}: task {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(parse_wakes(&many).len(), DELEGATIONS_PER_REPLY_MAX);
-    let long = format!("WAKE Ada: {}", "x".repeat(TASK_PROMPT_BYTES_MAX + 1));
-    assert!(parse_wakes(&long).is_empty());
-    let named = format!("WAKE {}: text", "a".repeat(WAKE_NAME_BYTES_MAX + 1));
-    assert!(parse_wakes(&named).is_empty());
-    assert!(parse_delegations(reply).is_empty());
-}
-
 /// Finished agents (DEC-102, narrowed after the DEC-104 trial) are the stopped and failed
 /// sub-agents; an idle one stays in view, one that ran a turn too. Each finished agent says
 /// whether the owner's Wake can wake it and, when not, why. A Wake of a finished agent with a kept worktree is recorded once for the team
@@ -1772,7 +1703,11 @@ fn the_owner_hands_off_plan_steps_the_master_proposed() {
         &tx,
         &project,
         MessageAuthor::Master,
-        "Two steps:\nDELEGATE: Write apple.txt\nDELEGATE gemini: Write pear.txt",
+        &format!(
+            "Two steps:\n{}\nDELEGATE: Not a block\n{}",
+            task_block(r#"{"task": "Write apple.txt"}"#),
+            task_block(r#"{"task": "Write pear.txt", "harness": "gemini"}"#)
+        ),
         MessageState::Reply,
         10,
     )
@@ -1834,7 +1769,7 @@ fn the_owner_hands_off_plan_steps_the_master_proposed() {
         &tx,
         &project,
         MessageAuthor::Owner,
-        "DELEGATE: Not a master step",
+        &task_block(r#"{"task": "Not a master step"}"#),
         MessageState::Pending,
         12,
     )
@@ -1860,7 +1795,7 @@ fn the_owner_hands_off_plan_steps_the_master_proposed() {
         &tx,
         &project,
         MessageAuthor::Master,
-        "DELEGATE: Write plum.txt",
+        &task_block(r#"{"task": "Write plum.txt"}"#),
         MessageState::Reply,
         13,
     )
@@ -1889,6 +1824,12 @@ fn the_owner_hands_off_plan_steps_the_master_proposed() {
     );
     assert_eq!(team.plan.len(), 1, "the plan is the latest master reply");
     assert_eq!(team.plan[0].task, Some(plum.id));
+}
+
+/// Writes one `crazyagent-task` block around a JSON object, as a master without team
+/// tools hands out work (L6). Takes the object. Returns the block.
+fn task_block(object: &str) -> String {
+    format!("{}\n{object}\n```", tool::BLOCK_FENCE)
 }
 
 #[test]
@@ -5385,6 +5326,11 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
         },
         terminal_display: crate::coord::settings::TerminalDisplay::Fullscreen,
         task_start: crate::coord::settings::TaskStart::Off,
+        heavy_lane: crate::coord::settings::HeavyLane::Two,
+        shared_resources: vec![crate::coord::settings::SharedResource {
+            name: "ollama".into(),
+            slots: 1,
+        }],
     };
     for action in [
         TeamAction::CoordSettings {
@@ -6597,6 +6543,92 @@ fn the_catch_up_with_main_action_is_saved_and_shown_in_the_team_status() {
         );
         tx.commit().unwrap();
         assert_eq!(status(&connection, &setup).unwrap().catch_up_main, mode);
+    }
+}
+
+/// "Landing" is Squash for a project with no choice saved and for a store with no team
+/// tables, reads the owner's Merge commit and Squash again, the choice is per project, and
+/// a stored name it does not know is refused (DEC-147.6).
+#[test]
+fn landing_mode_defaults_to_squash_and_reads_the_saved_choice() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-landing-mode").unwrap();
+    assert_eq!(
+        landing_mode(&connection, &project).unwrap(),
+        LandingMode::Squash,
+        "Squash is the default"
+    );
+    for value in [LandingMode::Merge, LandingMode::Squash, LandingMode::Merge] {
+        set_landing_mode(&connection, &project, value).unwrap();
+        assert_eq!(landing_mode(&connection, &project).unwrap(), value);
+    }
+    assert_eq!(
+        landing_mode(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        LandingMode::Squash,
+        "the choice is per project"
+    );
+    let bare = Connection::open_in_memory().unwrap();
+    assert_eq!(
+        landing_mode(&bare, &project).unwrap(),
+        LandingMode::Squash,
+        "a store with no team tables reads Squash"
+    );
+    assert_eq!(LandingMode::named("rebase"), None);
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO team_landing_mode(project,mode) VALUES ('team-odd','rebase')",
+                [],
+            )
+            .is_err(),
+        "the table refuses a mode it does not know"
+    );
+}
+
+/// The owner's Landing action saves Merge commit and Squash again for the project and the
+/// team status shows each choice (DEC-147.6).
+#[test]
+fn the_landing_mode_action_is_saved_and_shown_in_the_team_status() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-landing-action",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-landing-action", &["local-a"]);
+    assert_eq!(
+        status(&connection, &setup).unwrap().landing_mode,
+        LandingMode::Squash,
+        "Squash is the default"
+    );
+    for mode in [LandingMode::Merge, LandingMode::Squash] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::LandingMode {
+                    project_id: setup.project_id.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().landing_mode, mode);
     }
 }
 

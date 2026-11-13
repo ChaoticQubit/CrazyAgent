@@ -14,6 +14,15 @@ pub const LINKS_MAX: usize = 32;
 pub const LINK_PATH_BYTES_MAX: usize = 512;
 /// The most bytes read from one linked file; a longer file is not read at all.
 pub const LINK_BYTES_MAX: u64 = 256 * 1024;
+/// The folder below the project folder whose Markdown files the owner's Context tree lists
+/// without a link (DEC-152).
+pub const DOCS_FOLDER: &str = "docs";
+/// The most docs one owner listing carries; the agents' context index never lists docs.
+pub const DOCS_ITEMS_MAX: usize = 256;
+/// The most names of one doc path, the docs folder and the file name included.
+pub const DOCS_DEPTH_MAX: usize = 8;
+/// The most folder entries one docs listing looks at, so a large docs folder bounds the walk.
+pub const DOCS_ENTRIES_SCANNED: usize = 4096;
 /// The most stored rows one listing looks at, so rows of kinds a newer engine wrote
 /// cannot hide the links this engine reads.
 const LINK_ROWS_SCANNED: usize = 8 * LINKS_MAX;
@@ -237,6 +246,106 @@ pub(crate) fn below_folder(path: &str) -> bool {
             .iter()
             .all(|name| !name.is_empty() && *name != "." && *name != "..")
         && !names[0].eq_ignore_ascii_case(crate::projects_home::CRAZYAGENT_DIRECTORY)
+}
+
+/// The docs one listing found: the first by path with their sizes in bytes, how many more
+/// it found and left out, and whether it stopped at [`DOCS_ENTRIES_SCANNED`] with entries
+/// still unread, so the docs folder may hold docs it never saw.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Docs {
+    pub listed: Vec<(String, u64)>,
+    pub unlisted: usize,
+    pub cut: bool,
+}
+
+/// Whether `path` names a Markdown doc of the project's docs folder: a path [`below_folder`]
+/// allows, starting with [`DOCS_FOLDER`], of at most [`DOCS_DEPTH_MAX`] names, none of them
+/// hidden, ending in `.md` in any letter case. Input: the path below the project folder.
+/// Output: the answer, checked again on every read so a listing never admits a path.
+pub fn is_doc(path: &str) -> bool {
+    let names: Vec<&str> = path.split('/').collect();
+    below_folder(path)
+        && (2..=DOCS_DEPTH_MAX).contains(&names.len())
+        && names[0] == DOCS_FOLDER
+        && names.iter().all(|name| !name.starts_with('.'))
+        && path.as_bytes()[path.len() - 3..].eq_ignore_ascii_case(b".md")
+}
+
+/// Lists the docs below `folder`'s docs folder, opening every folder beneath `folder` with no
+/// link followed and reading only metadata: a regular file [`is_doc`] allows, with one hard
+/// link and at most [`LINK_BYTES_MAX`] bytes. Inputs: the project folder and the most docs
+/// to keep. Output: the docs, sorted by path, cut to `most`.
+#[cfg(unix)]
+pub fn docs(folder: &Path, most: usize) -> Docs {
+    use rustix::fs::{AtFlags, FileType};
+    assert!(most > 0);
+    let mut found: Vec<(String, u64)> = Vec::new();
+    let mut folders = vec![DOCS_FOLDER.to_owned()];
+    let mut scanned = 0;
+    let mut cut = false;
+    while let Some(relative) = folders.pop() {
+        let names: Vec<&str> = relative.split('/').collect();
+        assert!(names.len() < DOCS_DEPTH_MAX);
+        let Ok(directory) = super::open_beneath(folder, &names) else {
+            continue;
+        };
+        let Ok(entries) = rustix::fs::Dir::read_from(&directory) else {
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                break;
+            };
+            let raw = entry.file_name().to_bytes();
+            if raw == b"." || raw == b".." {
+                continue;
+            }
+            if scanned == DOCS_ENTRIES_SCANNED {
+                cut = true;
+                break;
+            }
+            scanned += 1;
+            let Ok(name) = entry.file_name().to_str() else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(stat) = rustix::fs::statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) else {
+                continue;
+            };
+            let path = format!("{relative}/{name}");
+            let size = u64::try_from(stat.st_size).unwrap_or(u64::MAX);
+            match FileType::from_raw_mode(stat.st_mode) {
+                FileType::Directory if names.len() + 2 <= DOCS_DEPTH_MAX => folders.push(path),
+                FileType::RegularFile
+                    if stat.st_nlink == 1 && size <= LINK_BYTES_MAX && is_doc(&path) =>
+                {
+                    found.push((path, size));
+                }
+                _ => {}
+            }
+        }
+        if cut {
+            break;
+        }
+    }
+    assert!(scanned <= DOCS_ENTRIES_SCANNED && found.len() <= scanned);
+    found.sort();
+    let unlisted = found.len().saturating_sub(most);
+    found.truncate(most);
+    Docs {
+        listed: found,
+        unlisted,
+        cut,
+    }
+}
+
+/// Lists no docs where no directory-relative no-follow open exists. Inputs: the folder and
+/// the bound, both unused. Output: an empty listing.
+#[cfg(not(unix))]
+pub fn docs(_folder: &Path, _most: usize) -> Docs {
+    Docs::default()
 }
 
 /// The stored name of a link kind: `roadmap`, or `research:` and the research kind's name.

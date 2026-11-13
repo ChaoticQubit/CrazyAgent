@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use crazyagent::accounts::{AccountDraft, Provider, SignInMethod};
 use crazyagent::config::{
     AccountPool, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
@@ -524,6 +525,182 @@ async fn desktop_reports_actual_source_conflict_without_losing_the_engine_reason
             )
             .await?,
         )?;
+        Ok(())
+    }
+    .await;
+    h.close().await;
+    result.unwrap();
+}
+
+/// Saves one account, its connection and a pool holding it, as the Pools screen's first Add
+/// leaves them. Input: the harness. Output: the pool as saved.
+async fn saved_pool(h: &mut Harness) -> TestResult<AccountPool> {
+    applied(
+        &h.submit(
+            ModelAccessEdit::AddAccount {
+                account_ref: reference("account"),
+            },
+            1,
+        )
+        .await?,
+    )?;
+    applied(
+        &h.submit(
+            ModelAccessEdit::CreateConnection {
+                connection: connection(),
+            },
+            2,
+        )
+        .await?,
+    )?;
+    let pool = AccountPool {
+        id: reference("pool"),
+        name: Some("Main pool".into()),
+        members: vec![reference("connection")],
+        projects: Vec::new(),
+        roles: Vec::new(),
+        fallback_allowed: false,
+        provider_quota_policy: crazyagent::config::ProviderQuotaPolicy::BoundedAttempt,
+    };
+    applied(
+        &h.submit(ModelAccessEdit::CreatePool { pool: pool.clone() }, 3)
+            .await?,
+    )?;
+    Ok(pool)
+}
+
+/// Reads the name of the one pool in the harness's settings files. Input: the harness. Output:
+/// the name as saved.
+fn saved_pool_name(h: &Harness) -> TestResult<Option<String>> {
+    let pools = resolve_config(
+        &h.root.path().join("global.toml"),
+        &h.root.path().join("project.toml"),
+    )?
+    .settings
+    .model_access
+    .ok_or("real catalog missing")?
+    .pools;
+    assert_eq!(pools.len(), 1, "the harness holds one pool");
+    Ok(pools[0].name.clone())
+}
+
+/// Builds a Claude subscription account the Accounts page adds, a write that does not pass
+/// through the bridge's model-access selection. Input: its name. Output: the draft.
+fn claude(name: &str) -> AccountDraft {
+    AccountDraft {
+        provider: Provider::Claude,
+        method: SignInMethod::Subscription,
+        name: name.into(),
+        url: None,
+        model: None,
+    }
+}
+
+#[tokio::test]
+async fn desktop_reads_between_inspect_and_edit_keep_the_ticket() {
+    let mut h = Harness::start(true).await.unwrap();
+    let result: TestResult<_> = async {
+        let pool = saved_pool(&mut h).await?;
+        let detail = h
+            .bridge
+            .inspect_model_access(ModelAccessCollection::Pools, "pool")
+            .await?;
+        h.bridge.pool_summaries().await?;
+        h.bridge.account_schedule().await?;
+        h.bridge.account_ranking().await?;
+        let receipt = h
+            .bridge
+            .edit_model_access(
+                &detail.ticket,
+                ModelAccessEdit::ReplacePool {
+                    pool: AccountPool {
+                        name: Some("Renamed".into()),
+                        ..pool
+                    },
+                },
+                4,
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "a read between inspect and edit expired the ticket: {}",
+                    error.code
+                )
+            })?;
+        applied(&receipt)?;
+        if saved_pool_name(&h)?.as_deref() != Some("Renamed") {
+            return Err("the edit after the reads was not saved".into());
+        }
+        Ok(())
+    }
+    .await;
+    h.close().await;
+    result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_a_write_between_inspect_and_edit_still_refuses_the_edit() {
+    let mut h = Harness::start(true).await.unwrap();
+    let result: TestResult<_> = async {
+        let pool = saved_pool(&mut h).await?;
+        let rename = |name: &str| ModelAccessEdit::ReplacePool {
+            pool: AccountPool {
+                name: Some(name.into()),
+                ..pool.clone()
+            },
+        };
+        let detail = h
+            .bridge
+            .inspect_model_access(ModelAccessCollection::Pools, "pool")
+            .await?;
+        applied(
+            &h.submit(
+                ModelAccessEdit::AddAccount {
+                    account_ref: reference("second"),
+                },
+                4,
+            )
+            .await?,
+        )?;
+        let error = h
+            .bridge
+            .edit_model_access(&detail.ticket, rename("After a bridge write"), 5)
+            .await
+            .unwrap_err();
+        if error.code != "stale_model_access" {
+            return Err(format!("a bridge write kept the ticket: {}", error.code).into());
+        }
+        let detail = h
+            .bridge
+            .inspect_model_access(ModelAccessCollection::Pools, "pool")
+            .await?;
+        h.bridge.add_account(claude("Second Claude"), None).await?;
+        h.bridge.pool_summaries().await?;
+        let error = h
+            .bridge
+            .edit_model_access(&detail.ticket, rename("After an account write"), 6)
+            .await
+            .unwrap_err();
+        if error.code != "stale_model_access" {
+            return Err(
+                format!("a write a read then showed kept the ticket: {}", error.code).into(),
+            );
+        }
+        let detail = h
+            .bridge
+            .inspect_model_access(ModelAccessCollection::Pools, "pool")
+            .await?;
+        h.bridge.add_account(claude("Third Claude"), None).await?;
+        let unread = h
+            .bridge
+            .edit_model_access(&detail.ticket, rename("After an unread write"), 7)
+            .await;
+        if matches!(&unread, Ok(receipt) if receipt.outcome == ActionOutcome::Applied) {
+            return Err("an edit after a write no read showed was applied".into());
+        }
+        if saved_pool_name(&h)?.as_deref() != Some("Main pool") {
+            return Err("an edit after a write changed the pool".into());
+        }
         Ok(())
     }
     .await;

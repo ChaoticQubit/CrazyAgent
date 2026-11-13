@@ -474,6 +474,57 @@ fn quoted(text: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
+/// Fits the rows above the editor into `room` on a short body, such as 80x24 under a
+/// wrapped hint bar, so the editor and the line under it stay in view. Only when they do
+/// not fit: blank separator rows give way first, bottom up, then the intro drops to its
+/// short rows, without the Ctrl-G and Ctrl-D sentence the hint bar names too. Inputs: the
+/// rows, the room, the intro's row count after the title and its short rows. Output: unit.
+fn give_way(lines: &mut Vec<Line<'static>>, room: usize, intro: usize, short: Vec<Line<'static>>) {
+    while lines.len() > room
+        && let Some(at) = lines.iter().rposition(|line| line.width() == 0)
+    {
+        lines.remove(at);
+    }
+    if lines.len() > room && short.len() < intro {
+        lines.splice(1..=intro, short);
+    }
+}
+
+/// The conflict's rows above the editor: its heading, the first `shown` rows of the text
+/// that landed, a line counting the rows left out, the choices and a blank separator.
+/// Inputs: the conflict, its quoted rows, how many to show, the width and the context.
+/// Output: the rows.
+fn conflict_rows(
+    conflict: &Conflict,
+    body: &[String],
+    shown: usize,
+    width: usize,
+    ctx: &Ctx,
+) -> Vec<Line<'static>> {
+    let theme = &ctx.theme;
+    let mut lines: Vec<Line<'static>> = wrap(&conflict.heading(), width)
+        .into_iter()
+        .map(|text| styled(text, Role::Warning, theme))
+        .collect();
+    lines.extend(body.iter().take(shown).map(|text| {
+        Line::from(vec![
+            Span::styled(format!("{} ", ctx.glyphs.vline), theme.muted),
+            Span::raw(text.clone()),
+        ])
+    }));
+    let more = body.len().saturating_sub(shown);
+    if more > 0 {
+        lines.push(styled(format!("{more} more lines"), Role::Muted, theme));
+    }
+    lines.extend(
+        wrap(CHOICES, width)
+            .into_iter()
+            .map(|text| styled(text, Role::Muted, theme)),
+    );
+    lines.push(Line::default());
+    lines
+}
+
 /// One agent's grounding and skill counts as one line of words: graphify, `ctx_*`, then
 /// every skill its project enabled by name with zero included, then the other skills it
 /// called. Inputs: the view's skill names and the agent's row. Output: the words.
@@ -1441,12 +1492,17 @@ impl ProcessPage {
             Scope::Project { name, .. } => format!("Instructions every agent in {name} gets, after the app-wide ones. Kept in the project's .crazyagent/instructions.md, which git ignores."),
         };
         let seeds = "Ctrl-G imports an instructions file you name, such as a CLAUDE.md, and Ctrl-D the CrazyAgent default process, each as a preview first.";
-        let intro = match self.scope {
+        let full = match self.scope {
             Scope::App => format!("{intro} {seeds}"),
-            Scope::Project { .. } => intro,
+            Scope::Project { .. } => intro.clone(),
         };
+        let intro_rows = wrap(&full, width).len();
+        let short: Vec<Line<'static>> = wrap(&intro, width)
+            .into_iter()
+            .map(|text| styled(text, Role::Muted, theme))
+            .collect();
         lines.extend(
-            wrap(&intro, width)
+            wrap(&full, width)
                 .into_iter()
                 .map(|text| styled(text, Role::Muted, theme)),
         );
@@ -1477,35 +1533,30 @@ impl ProcessPage {
             }
             Scope::App => self.app_ai_lines(width, &mut lines, ctx),
         }
-        if let Some(conflict) = &self.conflict {
-            lines.extend(
-                wrap(&conflict.heading(), width)
-                    .into_iter()
-                    .map(|text| styled(text, Role::Warning, theme)),
-            );
-            let body = quoted(&conflict.current, width);
-            let more = body.len().saturating_sub(LINES_SHOWN_MAX);
-            lines.extend(body.into_iter().take(LINES_SHOWN_MAX).map(|text| {
-                Line::from(vec![
-                    Span::styled(format!("{} ", ctx.glyphs.vline), theme.muted),
-                    Span::raw(text),
-                ])
-            }));
-            if more > 0 {
-                lines.push(styled(format!("{more} more lines"), Role::Muted, theme));
-            }
-            lines.extend(
-                wrap(CHOICES, width)
-                    .into_iter()
-                    .map(|text| styled(text, Role::Muted, theme)),
-            );
-            lines.push(Line::default());
-        }
         let floor = if self.problem.is_some() || self.pending.is_some() {
             EDITOR_ROWS_MIN - 1
         } else {
             EDITOR_ROWS_MIN
         };
+        let room = height.saturating_sub(EDITOR_CHROME_ROWS + floor);
+        if let Some(conflict) = &self.conflict {
+            let body = quoted(&conflict.current, width);
+            let most = body.len().min(LINES_SHOWN_MAX);
+            let fits = |shown: usize| {
+                let mut trial = lines.clone();
+                trial.extend(conflict_rows(conflict, &body, shown, width, ctx));
+                give_way(&mut trial, room, intro_rows, short.clone());
+                trial.len() <= room
+            };
+            let shown = match self.scope {
+                Scope::App => (1..=most).rev().find(|&shown| fits(shown)).unwrap_or(1),
+                Scope::Project { .. } => most,
+            };
+            lines.extend(conflict_rows(conflict, &body, shown, width, ctx));
+        }
+        if self.scope == Scope::App {
+            give_way(&mut lines, room, intro_rows, short);
+        }
         let rows = height
             .saturating_sub(lines.len() + EDITOR_CHROME_ROWS)
             .max(floor);
@@ -1780,6 +1831,10 @@ impl ProcessPage {
 }
 
 impl Screen for ProcessPage {
+    fn wraps_hints(&self) -> bool {
+        self.scope == Scope::App
+    }
+
     fn crumbs(&self) -> Vec<String> {
         match &self.scope {
             Scope::App => vec!["Settings".into(), "Process".into()],

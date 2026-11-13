@@ -35,6 +35,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_master_closed",
     "changes_master_not_started",
     "changes_master_tools_off",
+    "changes_merge_unsafe",
     "changes_message_invalid",
     "changes_not_found",
     "changes_outcome_unknown",
@@ -460,15 +461,10 @@ impl OwnerClient {
 }
 
 /// The engine root that holds `engine.db`: the parent of the owner runtime's per-start
-/// folder. Input: the authority. Output: the root, or `changes_unavailable`.
+/// folder, as Root::engine_root finds it. Input: the authority. Output: the root, or that
+/// refusal.
 pub(super) fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
-    authority.root.verify()?;
-    authority
-        .root
-        .path
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| failure("changes_unavailable"))
+    authority.root.engine_root().map(Path::to_path_buf)
 }
 
 /// Encodes this protocol's refusal of a request the engine did not run.

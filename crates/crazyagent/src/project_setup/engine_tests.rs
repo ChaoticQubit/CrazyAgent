@@ -1594,6 +1594,8 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
             VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');
             INSERT INTO team_owner_turns(message,project) VALUES (1,'setup-pooled');
+            INSERT INTO team_task_roles(task,project,role) VALUES (1,'setup-pooled','docs');
+            INSERT INTO team_handles(project,handle,agent,held_ms) VALUES ('setup-pooled','docs',1,0);
             INSERT INTO team_master_idle_stop(project,choice) VALUES ('setup-pooled','off');
             INSERT INTO team_master_live_terminal(project,terminal) VALUES ('setup-pooled',0);
             INSERT INTO team_events(project,agent,task,kind,text,state,created_ms)
@@ -1657,6 +1659,16 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM team_owner_turns WHERE project='setup-pooled'"),
         0,
         "the owner's chat turns go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_task_roles WHERE project='setup-pooled'"),
+        0,
+        "the roles of its tasks go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_handles WHERE project='setup-pooled'"),
+        0,
+        "its handle registry goes with it, so a reused project id reaches no old agent"
     );
     assert!(
         crate::questions::count_pending(&questions)
@@ -2599,6 +2611,8 @@ async fn on_linux_the_owner_sees_why_wider_levels_cannot_run_and_saving_one_is_r
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
                     ide_agent_files: Default::default(),
+                    shared_folders: Default::default(),
+                    ..Default::default()
                 },
                 request,
             )
@@ -2646,6 +2660,8 @@ async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refu
         ide_git_hooks,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
+        ..Default::default()
     };
     let choice = |toolchain: Toolchain, allowed: bool| ToolchainChoice { toolchain, allowed };
     let chosen = |view: &crate::sandbox::policy::PolicyView, toolchain: Toolchain| {
@@ -2765,6 +2781,8 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         ide_git_hooks: true,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
+        ..Default::default()
     };
     let saved = owner
         .set_project_agent_policy(project.clone(), fresh.version, policy.clone(), 2)
@@ -2785,7 +2803,9 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
+                shared_folders: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
+                ..Default::default()
             },
             7,
         )
@@ -2829,6 +2849,8 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         ide_git_hooks: false,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
+        ..Default::default()
     };
     assert_eq!(twice.validate(), Err("agent_policy_invalid"));
     let action = SetupAction::SetAgentPolicy {
@@ -2853,6 +2875,8 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         ide_git_hooks: false,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
+        ..Default::default()
     };
     let saved = owner
         .set_project_agent_policy(project.clone(), view.version, full, 3)
@@ -2931,7 +2955,9 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
+                shared_folders: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
+                ..Default::default()
             },
             6,
         )
@@ -2957,7 +2983,9 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
+                shared_folders: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
+                ..Default::default()
             },
             7,
         )
@@ -3398,5 +3426,139 @@ async fn an_applied_access_save_stops_the_projects_running_ide() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    engine.stop().await;
+}
+
+/// F08 (L2): an owner save checks each allowed extra it adds as a request does, refuses a
+/// port the system lends out, logs each extra added and removed as the owner's, and the
+/// Agent access view lists that log newest first with the Apply access changes choice.
+#[tokio::test]
+async fn owner_saves_allowed_extras_checked_and_logged_and_reads_them_back() {
+    use crate::sandbox::policy::{AccessApply, AccessGrant, AgentPolicy};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let fresh = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(fresh.apply_changes, AccessApply::WhenIdle);
+    assert!(fresh.grants.is_empty() && fresh.grant_log.is_empty());
+
+    let with = |grants: Vec<AccessGrant>| AgentPolicy {
+        grants,
+        apply_changes: AccessApply::NextStart,
+        ..Default::default()
+    };
+    let lent = owner
+        .set_project_agent_policy(
+            project.clone(),
+            fresh.version,
+            with(vec![AccessGrant::Port { port: 55_000 }]),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(lent), rejected("grant_port_dynamic"));
+
+    let saved = owner
+        .set_project_agent_policy(
+            project.clone(),
+            fresh.version,
+            with(vec![AccessGrant::Port { port: 5432 }]),
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    let view = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(view.apply_changes, AccessApply::NextStart);
+    assert_eq!(view.grants.len(), 1);
+    assert_eq!(view.grants[0].grant, AccessGrant::Port { port: 5432 });
+    assert_eq!(view.grant_log.len(), 1);
+    assert_eq!(
+        (
+            view.grant_log[0].action.as_str(),
+            view.grant_log[0].by.as_str()
+        ),
+        ("granted", "owner")
+    );
+
+    let removed = owner
+        .set_project_agent_policy(project.clone(), view.version, with(Vec::new()), 4)
+        .await
+        .unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    let after = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert!(after.grants.is_empty());
+    assert_eq!(after.grant_log[0].action, "revoked", "newest first");
+    assert_eq!(after.grant_log.len(), 2);
+    engine.stop().await;
+}
+
+/// F26: a new project gets a first policy at Sandboxed that allows every toolchain the
+/// owner has installed, at version 0, and a later save keeps exactly the choices sent.
+#[tokio::test]
+async fn a_new_project_records_the_toolchains_the_owner_has_installed_in_its_first_policy() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("f26-tools").unwrap();
+    let response = owner
+        .setup_project(project.clone(), spec("Tool shop"), pooled_setup(vec![]), 1)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM project_agent_policy WHERE project='f26-tools'"),
+        1,
+        "a new project gets its first policy"
+    );
+    let fresh = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!((fresh.access, fresh.version), (AgentAccess::Sandboxed, 0));
+    assert!(
+        fresh
+            .toolchains
+            .iter()
+            .filter(|row| row.installed)
+            .all(|row| row.allowed),
+        "{:?}",
+        fresh.toolchains
+    );
+    let database = engine.root.path().join("engine.db");
+    let body = || -> String {
+        rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT body FROM project_agent_policy WHERE project='f26-tools'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let installed = fresh.toolchains.iter().filter(|row| row.installed).count();
+    assert_eq!(
+        body().matches("\"allowed\":true").count(),
+        installed,
+        "one recorded choice per installed toolchain: {}",
+        body()
+    );
+    let saved = owner
+        .set_project_agent_policy(project.clone(), fresh.version, AgentPolicy::default(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    assert!(
+        !body().contains("\"toolchain\""),
+        "a later save keeps exactly the choices sent: {}",
+        body()
+    );
     engine.stop().await;
 }

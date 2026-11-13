@@ -7,18 +7,22 @@ import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPending
 import { questionWatch } from "./notify";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
+import { DemoPage } from "./screens/demo/offer";
+import { useLearningVisits } from "./screens/dashboard/learn";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
 import { CloneFromGitHub } from "./screens/intake/clone";
 import { OnboardingReview } from "./screens/intake/onboarding";
 import { AppMetrics } from "./screens/metrics";
+import { useResetNotice } from "./screens/metrics/extras";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
+import { UserDialogLayer, closeUserDialog, openUserDialog, useUserDialog } from "./screens/user-menu";
 import { alertRoute, freshAlerts, unseenByProject, workingByProject } from "./screens/team/wake";
 import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
 import { blocking, updateStore } from "./screens/settings/updates-state";
-import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route, type SidebarProject } from "./ui";
+import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, formatRoute, isUserMenuTab, navigate, parseRoute, shortcutKey, useRoute, type Route, type SidebarProject } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 
 /** Support details the engine-down screen copies, like the TUI's: what is wrong, the window
@@ -30,8 +34,8 @@ export function supportDetails(width: number, height: number, now: Date): string
 
 const UPDATES_ROUTE: Route = { name: "settings", tab: "updates" };
 
-/** The way to Settings, Updates from a full-window state that needs no engine, naming a
- * release a check already found. Output: the line and the Check for updates button. */
+/** The way to Updates from a full-window state that needs no engine, naming a release a
+ * check already found. Output: the line and the Check for updates button. */
 function UpdateLink() {
   const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
   return <>
@@ -67,9 +71,9 @@ function EngineDown({ onRetry }: { onRetry: () => void }) {
   </main>;
 }
 
-/** Settings, Updates on its own, for when the engine is down, still starting, or first-run
- * setup is unfinished, so the owner can always check for and install an update. Input: the
- * session. Output: the full-window page with Back. */
+/** Updates on its own, for when the engine is down, still starting, or first-run
+ * setup is unfinished, so the owner can always check for and install an update. Back closes
+ * the Updates dialog it stands in for. Input: the session. Output: the full-window page. */
 function UpdatesAlone({ session }: { session: Session }) {
   return <SessionContext.Provider value={session}>
     <main id="main" className="full-state">
@@ -77,7 +81,7 @@ function UpdatesAlone({ session }: { session: Session }) {
         <BrandMark />
         <h1>Updates</h1>
         <UpdatesSettings />
-        <span><Button icon="arrow-left" onClick={() => navigate({ name: "home" })}>Back</Button></span>
+        <span><Button icon="arrow-left" onClick={() => { closeUserDialog(); navigate({ name: "home" }); }}>Back</Button></span>
       </div>
     </main>
     <Toast message={session.toast} />
@@ -130,9 +134,11 @@ function Launching() {
 export function Screen({ route, session, alerts }: { route: Route; session: Session; alerts?: Map<string, number> }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
-    case "settings": return <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} />;
+    case "settings": return isUserMenuTab(route.tab) ? <Home alerts={alerts} />
+      : <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
+    case "demo": return <DemoPage />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
     case "metrics": return <AppMetrics projects={projects ?? []} />;
     case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
@@ -140,22 +146,28 @@ export function Screen({ route, session, alerts }: { route: Route; session: Sess
   }
 }
 
-/** The shell's sidebar with the engine restart its footer menu runs: the same restart
- * Settings, Updates uses, held off while an update install runs, and the session reconnects
- * once the engine is back. Inputs: the route, the projects, the profile name and the session. */
+/** The shell's sidebar with its footer's user menu: the four dialogs it opens and the engine
+ * restart, the same restart Updates uses, held off while an update install runs, and the
+ * session reconnects once the engine is back. Inputs: the route, the projects, the profile
+ * name and the session. */
 function ShellSidebar({ route, projects, profileName, session }: { route: Route; projects: SidebarProject[] | undefined; profileName: string | undefined; session: Session }) {
   const [restart, restartNow] = useEngineRestart(session.retry);
   const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
   const control = { held: blocking(update), busy: restart.kind === "busy", failure: restart.kind === "failed" ? restart.message : "", onRestart: restartNow };
-  return <Sidebar route={route} projects={projects} profileName={profileName} engine={session.engine} onRetry={session.retry} restart={control} />;
+  const menu = { open: useUserDialog(), onOpen: openUserDialog };
+  return <Sidebar route={route} projects={projects} profileName={profileName} engine={session.engine} onRetry={session.retry} restart={control} menu={menu} />;
 }
 
 /** The whole app for one session and route: the engine-down or engine-outdated state, the
  * launch skeleton, the first-run Welcome page while the profile is empty, or the shell with the
- * routed screen. Settings, Updates opens on its own in place of all but the shell. Inputs: the
- * session and the current route. */
-export function AppView({ session, route, alerts, working }: { session: Session; route: Route; alerts?: Map<string, number>; working?: ReadonlyMap<string, number> }) {
-  const updates = route.name === "settings" && route.tab === "updates";
+ * routed screen. Updates, by route or as the open dialog, opens on its own in place of all but
+ * the shell, so an install that restarts the engine keeps it in view. In the shell a route to
+ * Profile, Updates, GitHub or Projects folder opens that dialog over the page under it.
+ * Inputs: the session, the current route, and the last shell page that was none of those four
+ * with its address. */
+export function AppView({ session, route, alerts, working, under, back }: { session: Session; route: Route; alerts?: Map<string, number>; working?: ReadonlyMap<string, number>; under?: Route; back?: string }) {
+  const open = useUserDialog();
+  const updates = route.name === "settings" && route.tab === "updates" || open === "updates";
   if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
   if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
   if (session.engine === "connecting" || session.profile.kind === "loading") return updates ? <UpdatesAlone session={session} /> : <Launching />;
@@ -163,10 +175,12 @@ export function AppView({ session, route, alerts, working }: { session: Session;
   if (session.profile.kind === "ok" && profile === null && updates) return <UpdatesAlone session={session} />;
   if (session.profile.kind === "ok" && profile === null || route.name === "welcome") {
     return <SessionContext.Provider value={session}>
-      <Welcome onSaved={(_, next) => { void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
-        onSkip={(next) => navigate(next ?? { name: "home" }, true)} />
+      <Welcome profile={profile} onSaved={(_, next, note) => { if (note) session.showToast(note); void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
+        onSkip={(next, note) => { if (note) session.showToast(note); navigate(next ?? { name: "home" }, true); }} />
     </SessionContext.Provider>;
   }
+  const asked = route.name === "settings" && isUserMenuTab(route.tab) ? route.tab : null;
+  const page = asked === null ? route : under ?? { name: "home" };
   const toastOpen = session.toastOpen;
   const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => {
     const unseen = alerts?.get(project.id) ?? 0;
@@ -174,7 +188,7 @@ export function AppView({ session, route, alerts, working }: { session: Session;
   }) : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} onOpen={toastOpen ? () => navigate(toastOpen) : undefined} />}
-      sidebar={<ShellSidebar route={route} projects={projects} profileName={profile?.name} session={session} />}>
+      sidebar={<ShellSidebar route={page} projects={projects} profileName={profile?.name} session={session} />}>
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
         <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>
@@ -191,7 +205,8 @@ export function AppView({ session, route, alerts, working }: { session: Session;
         onClick={() => void session.clearStuckSignIn()}>Clear stuck sign-in</Button>}>
         {STUCK_SIGN_IN_LINE}
       </Banner>}
-      <Screen route={route} session={session} alerts={alerts} />
+      <Screen route={page} session={session} alerts={alerts} />
+      <UserDialogLayer asked={asked} under={page} back={back} />
       <GoToLayer projects={projects ?? []} />
     </AppShell>
   </SessionContext.Provider>;
@@ -307,14 +322,32 @@ function useIdeFocus(running: boolean) {
   }, [running]);
 }
 
+/** The page a user-menu dialog opens over and the address it came from. */
+export interface PageUnder { route: Route; hash?: string }
+
+/** The page a user-menu dialog opens over: the shown route with its live address, or the
+ * page kept before for Welcome, a user-menu route, or a live address that names another page
+ * because a navigation's hashchange has not landed yet. Inputs: the shown route, the live
+ * hash and the page kept. Output: the page to keep. */
+export function pageUnder(route: Route, hash: string, kept: PageUnder): PageUnder {
+  if (route.name === "welcome" || (route.name === "settings" && isUserMenuTab(route.tab))) return kept;
+  if (formatRoute(parseRoute(hash)) !== formatRoute(route)) return kept;
+  return { route, hash: hash || undefined };
+}
+
 /** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
- * notification and question watch and the TUI's "open in IDE" focus. */
+ * notification and question watch, the new free reset notice and the TUI's "open in IDE"
+ * focus. */
 export function App() {
   const session = useSession();
   const route = useRoute();
+  const under = useRef<PageUnder>({ route: { name: "home" } });
+  under.current = pageUnder(route, typeof window === "undefined" ? "" : window.location.hash, under.current);
   useShortcuts();
   useUpdateWatch(session.showToast);
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
+  useResetNotice(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
-  return <AppView session={session} route={route} alerts={alerts} working={working} />;
+  useLearningVisits(route, session.engine === "running");
+  return <AppView session={session} route={route} alerts={alerts} working={working} under={under.current.route} back={under.current.hash} />;
 }

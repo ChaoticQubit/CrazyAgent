@@ -89,6 +89,35 @@ test("a tab not written yet says what will write it, by the refresh setting", ()
   assert.match(page({ selected: "features", overview: base() }), /Not written yet\. It is written after the next landed change set, or when you choose Refresh\./);
 });
 
+test("a refresh the engine queued says it is waiting to run, read from the engine, so it shows again when the view opens again", () => {
+  const queued = { ...base(), stale: true, checked_ms: NOW - 60 * 60_000 };
+  const html = page({ selected: "features", overview: queued });
+  assert.match(html, />Refresh waiting to run</);
+  assert.match(html, /A refresh is waiting to run\. This tab fills in when it ends\./);
+  assert.doesNotMatch(html, /after the next landed change set/);
+  assert.doesNotMatch(html, /Checked/);
+  for (const quiet of [{ ...queued, refresh: "off" }, { ...queued, running: true }, { ...queued, stale: false }]) {
+    assert.doesNotMatch(page({ selected: "features", overview: quiet }), /waiting to run/);
+  }
+});
+
+test("the tab strip sits on its own row and the tab's status, Edit and Refresh share the one row under it", () => {
+  const html = page({ selected: "features", overview: { ...withTab(base(), "features", "- Search\n"), checked_ms: NOW - 3 * 60_000 } });
+  const start = html.indexOf('class="ov-bar"');
+  assert.ok(start > html.indexOf('role="tablist"'), "the row comes after the strip");
+  const bar = html.slice(start, html.indexOf('id="ov-panel"'));
+  assert.match(bar, /Checked 3 min ago/);
+  assert.match(bar, /<button[^>]*id="ov-edit-open"[^>]*>Edit<\/button>/);
+  assert.match(bar, />Refresh<\/button>/);
+  assert.doesNotMatch(bar, /role="tab"/);
+  assert.doesNotMatch(html, /ov-edit-row|ov-meta/);
+  assert.equal((html.match(/>Edit<\/button>/g) ?? []).length, 1, "Edit is shown once, in the row");
+  const readme = page({ selected: "readme", overview: { ...base(), checked_ms: NOW - 3 * 60_000 } });
+  const readmeBar = readme.slice(readme.indexOf('class="ov-bar"'), readme.indexOf('id="ov-panel"'));
+  assert.match(readmeBar, />Refresh<\/button>/);
+  assert.doesNotMatch(readmeBar, />Edit</);
+});
+
 test("Refresh is disabled while a run is going and when the tabs are off", () => {
   assert.match(page({ selected: "features", overview: { ...base(), running: true } }), /<button[^>]*disabled=""[^>]*>Refresh<\/button>/);
   assert.match(page({ selected: "features", overview: { ...base(), refresh: "off" } }), /<button[^>]*disabled=""[^>]*>Refresh<\/button>/);
@@ -99,7 +128,23 @@ test("Refresh is disabled while a run is going and when the tabs are off", () =>
 test("a failed run shows its plain reason and keeps the tab text", () => {
   const html = page({ selected: "features", overview: { ...withTab(base(), "features", "- Search\n"), failure: "The account is out of usage" } });
   assert.match(html, /Couldn&#x27;t refresh the tabs\. The account is out of usage/);
+  assert.match(html, /role="alert"[^>]*>Couldn&#x27;t refresh the tabs\. The account is out of usage/);
   assert.match(html, /Search/);
+});
+
+test("a run that waits for an account says why under a status, never as a failed refresh alert, while it is queued or running", () => {
+  const reason = "No account in this project's pool can run the refresh";
+  const waiting = { ...base(), stale: true, failure: reason };
+  for (const overview of [waiting, { ...waiting, stale: false, running: true }]) {
+    const html = page({ selected: "features", overview });
+    assert.doesNotMatch(html, /role="alert"/);
+    assert.doesNotMatch(html, /Couldn&#x27;t refresh the tabs/);
+    assert.match(html, /<p class="pj-muted" role="status">No account in this project&#x27;s pool can run the refresh<\/p>/);
+  }
+  const ended = page({ selected: "features", overview: { ...base(), failure: reason } });
+  assert.match(ended, /<p class="pj-error" role="alert">Couldn&#x27;t refresh the tabs\. No account in this project&#x27;s pool can run the refresh<\/p>/);
+  const off = page({ selected: "features", overview: { ...waiting, refresh: "off" } });
+  assert.match(off, /role="alert"[^>]*>Couldn&#x27;t refresh the tabs\./);
 });
 
 test("the strip says when the tabs were last checked and that a run is writing", () => {

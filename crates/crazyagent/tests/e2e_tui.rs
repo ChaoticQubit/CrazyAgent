@@ -282,15 +282,16 @@ fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
     }
 }
 
-/// Waits for Home's setup panel to show its tools check. The panel shows once the pools and
-/// the accounts are in, and the check is the last answer Home waits for before it decides
-/// where the focus goes, so from that frame on only keys move the focus.
-/// Input: the TUI on its first Home, on an engine with no account. Output: none; panics
-/// when the panel never shows the check.
+/// Waits for Home's side panel to settle on its tools check, the last answer Home waits for
+/// before it moves the focus to the panel, so from that frame on only keys move the focus.
+/// "Get set up" shows the check's words; "Learn CrazyAgent" (DEC-153) shows them only on the
+/// picked row, so there the focus reaching Add an account is the sign.
+/// Input: the TUI on its first Home, on an engine with no account. Output: none; panics.
 fn setup_checked(pty: &Pty) {
-    let screen = pty.until("Home's setup panel shows its tools check", |now| {
-        now.contains("Get set up")
-            && (now.contains("[x] Install tools") || now.contains("Missing: "))
+    let screen = pty.until("Home's side panel settles on its tools check", |now| {
+        (now.contains("Get set up")
+            && (now.contains("[x] Install tools") || now.contains("Missing: ")))
+            || (now.contains("Learn CrazyAgent") && enter_hint(now) == Some("Add an account"))
     });
     assert!(
         enter_hint(&screen).is_some(),
@@ -1563,6 +1564,253 @@ fn the_tui_saves_a_master_harness_that_waits_for_the_masters_next_start() {
     });
     let (mode, _) = runtime.block_on(switch_state(&engine, &project));
     assert_eq!(mode, crazyagent::team::SwitchApply::WhenIdle);
+    drop(pty);
+    engine.stop();
+}
+
+const RIGHT_KEY: &[u8] = b"\x1b[C";
+const ESC_KEY: &[u8] = b"\x1b";
+const GUIDE_QUIET: Duration = Duration::from_secs(3);
+
+/// Whether the engine holds the Learn CrazyAgent guide as skipped, read through the real
+/// owner socket. Inputs: the runtime and the engine. Output: the skipped flag.
+fn guide_skipped(runtime: &tokio::runtime::Runtime, engine: &Engine) -> bool {
+    runtime.block_on(async {
+        let mut owner = Owner::attach(engine).await;
+        let progress = owner.controller.learning_progress().await.unwrap();
+        owner.controller.detach();
+        progress.skipped
+    })
+}
+
+/// Takes a fresh engine through the TUI first run to its last page: saves a profile, keeps
+/// the suggested projects folder, continues past Setup without installing, then waits for
+/// the Accounts step with its ticked Learn CrazyAgent offer. Inputs: the engine and the home
+/// folder the TUI runs with. Output: the TUI on the Accounts step.
+fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
+    std::fs::create_dir(home.join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/CrazyAgent")
+    } else {
+        home.join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    let mut pty = ScriptPty::launch(&engine.socket(), home);
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty.type_bytes(b"c");
+    pty.until("the Accounts step opens with the ticked guide", |screen| {
+        screen.contains("Add an account")
+            && screen.contains("[> Add account ]   [ Skip for now ]")
+            && screen.contains("Learn CrazyAgent")
+            && screen.contains("[x] Show the guide on Home")
+    });
+    pty
+}
+
+/// DEC-153: keeping the Learn CrazyAgent guide ticked and picking Skip for now ends first run
+/// on Home with the guide, and the engine holds nothing as skipped.
+#[test]
+fn first_run_with_the_guide_ticked_skips_accounts_and_keeps_the_guide_on_home() {
+    let mut engine = Engine::start("ca-e2e-learn-");
+    let home = scratch("ca-e2e-learn-home-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut pty = reach_accounts_step(&engine, home.path());
+    pty.type_bytes(RIGHT_KEY);
+    pty.until("Right focuses Skip for now", |screen| {
+        screen.contains("[ Add account ]   [> Skip for now ]")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Home shows the Learn CrazyAgent guide", |screen| {
+        screen.contains("New project")
+            && screen.contains("Learn CrazyAgent")
+            && !screen.contains("Show the guide on Home")
+    });
+    assert!(
+        !guide_skipped(&runtime, &engine),
+        "a ticked guide writes no skip"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// Ends a fresh engine's TUI first run with the guide unticked and Skip for now, then waits
+/// for Home without the guide and for the engine to hold the guide as skipped. Inputs: the
+/// runtime, the engine and the home folder the TUI runs with. Output: the TUI on Home.
+fn first_run_skipping_the_guide(
+    runtime: &tokio::runtime::Runtime,
+    engine: &Engine,
+    home: &Path,
+) -> ScriptPty {
+    let mut pty = reach_accounts_step(engine, home);
+    pty.type_bytes(b" ");
+    pty.until("Space unticks the guide", |screen| {
+        screen.contains("[ ] Show the guide on Home")
+    });
+    pty.type_bytes(RIGHT_KEY);
+    pty.until("Right focuses Skip for now", |screen| {
+        screen.contains("[ Add account ]   [> Skip for now ]")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Home opens with Get set up and no guide", |screen| {
+        screen.contains("New project")
+            && screen.contains("Get set up")
+            && !screen.contains("Learn CrazyAgent")
+    });
+    let start = Instant::now();
+    while !guide_skipped(runtime, engine) {
+        assert!(
+            start.elapsed() < SCREEN_TIME,
+            "the engine never held the guide as skipped"
+        );
+        std::thread::sleep(POLL_TIME);
+    }
+    pty
+}
+
+/// Opens Settings, Profile from Home and waits for its Learn CrazyAgent entries.
+/// Input: the TUI on Home. Output: none; the TUI is on Settings, Profile.
+fn open_profile_replay(pty: &mut ScriptPty) {
+    pty.type_bytes(b"s");
+    pty.until("Settings opens on Accounts", |screen| {
+        screen.contains("Settings  /  Accounts")
+    });
+    pty.type_bytes(b"[");
+    pty.until("Profile shows the Learn CrazyAgent entries", |screen| {
+        screen.contains("Settings  /  Profile")
+            && screen.contains("g  Show the learning guide again")
+            && screen.contains("f  Run first-run setup again")
+    });
+}
+
+/// DEC-153 slice 4: after first run skipped the guide, Settings, Profile's Show the learning
+/// guide again clears the skip in the engine and Home shows the guide again.
+#[test]
+fn show_the_learning_guide_again_on_profile_clears_the_skip_and_home_shows_the_guide() {
+    let mut engine = Engine::start("ca-e2e-learn-");
+    let home = scratch("ca-e2e-learn-home-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut pty = first_run_skipping_the_guide(&runtime, &engine, home.path());
+    open_profile_replay(&mut pty);
+    pty.type_bytes(b"g");
+    pty.until("Home shows the Learn CrazyAgent guide again", |screen| {
+        screen.contains("New project")
+            && screen.contains("Learn CrazyAgent")
+            && !screen.contains("Settings  /  Profile")
+    });
+    assert!(
+        !guide_skipped(&runtime, &engine),
+        "the replay clears the skip in the engine"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-153 slice 4: after first run skipped the guide, Settings, Profile's Run first-run
+/// setup again clears the skip in the engine, starts first run with the saved profile, and
+/// Skip for now with the guide ticked ends on Home with the guide.
+#[test]
+fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_the_guide() {
+    let mut engine = Engine::start("ca-e2e-learn-");
+    let home = scratch("ca-e2e-learn-home-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut pty = first_run_skipping_the_guide(&runtime, &engine, home.path());
+    open_profile_replay(&mut pty);
+    pty.type_bytes(b"f");
+    pty.until("first run opens with the saved profile", |screen| {
+        screen.contains("Welcome to CrazyAgent") && screen.contains("Mira Okafor")
+    });
+    assert!(
+        !guide_skipped(&runtime, &engine),
+        "the replay clears the skip before first run"
+    );
+    pty.type_bytes(b"\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty.type_bytes(b"c");
+    pty.until("the Accounts step opens with the ticked guide", |screen| {
+        screen.contains("[x] Show the guide on Home")
+    });
+    pty.type_bytes(RIGHT_KEY);
+    pty.until("Right focuses Skip for now", |screen| {
+        screen.contains("[ Add account ]   [> Skip for now ]")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Home shows the Learn CrazyAgent guide", |screen| {
+        screen.contains("New project")
+            && screen.contains("Learn CrazyAgent")
+            && !screen.contains("Show the guide on Home")
+    });
+    assert!(
+        !guide_skipped(&runtime, &engine),
+        "a ticked guide writes no skip"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-153: unticking the guide and picking Add account ends first run on Add account over
+/// Home, the engine holds the guide as skipped, and Home shows no guide.
+#[test]
+fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
+    let mut engine = Engine::start("ca-e2e-learn-");
+    let home = scratch("ca-e2e-learn-home-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut pty = reach_accounts_step(&engine, home.path());
+    pty.type_bytes(b" ");
+    pty.until("Space unticks the guide", |screen| {
+        screen.contains("[ ] Show the guide on Home")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Add account opens", |screen| {
+        screen.contains("Accounts  /  Add account") && !screen.contains("Show the guide on Home")
+    });
+    let start = Instant::now();
+    while !guide_skipped(&runtime, &engine) {
+        assert!(
+            start.elapsed() < SCREEN_TIME,
+            "the engine never held the guide as skipped"
+        );
+        std::thread::sleep(POLL_TIME);
+    }
+    pty.type_bytes(ESC_KEY);
+    pty.until("Esc leaves Add account for Home", |screen| {
+        screen.contains("New project") && !screen.contains("Accounts  /  Add account")
+    });
+    let quiet = Instant::now();
+    while quiet.elapsed() < GUIDE_QUIET {
+        let screen = pty.screen();
+        assert!(
+            !screen.contains("Learn CrazyAgent"),
+            "a skipped guide stays off Home:\n{screen}"
+        );
+        std::thread::sleep(POLL_TIME);
+    }
     drop(pty);
     engine.stop();
 }

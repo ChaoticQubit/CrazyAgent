@@ -2,7 +2,7 @@ use super::super::RegisteredNativeAuthHost;
 use super::super::custody::{CustodySession, cleanup_direct_child, cleanup_owned_group};
 use super::transcript::Transcript;
 use super::types::{ClaudeAuthObservation, completion_bytes};
-use super::{ClaudeAuthCommand, RENEWAL_TIME, auth_command};
+use super::{CHECK_TIME, ClaudeAuthCommand, RENEWAL_TIME, auth_command};
 use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyChannel, NativeAuthCustodyControl,
 };
@@ -18,6 +18,19 @@ const OUTPUT_MAX: usize = 65536;
 const CLEANUP: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(20);
 const CHECK: Duration = Duration::from_millis(100);
+
+/// The longest one official `claude` command may run, inside its operation's own deadline. A
+/// status may use the whole account check bound: under build load a cold start passed 2 s and
+/// cut checks of signed-in accounts (v2.4.0 owner update). Input: the command. Output: its
+/// bound.
+pub(super) fn command_bound(action: ClaudeAuthCommand) -> Duration {
+    match action {
+        ClaudeAuthCommand::Login => Duration::from_secs(575),
+        ClaudeAuthCommand::Renew => RENEWAL_TIME,
+        ClaudeAuthCommand::Status => CHECK_TIME,
+        ClaudeAuthCommand::Logout => Duration::from_secs(2),
+    }
+}
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.into())
@@ -239,7 +252,7 @@ pub(super) async fn run_child(
     if session.profile_path()? != home {
         return Err(failure("native_auth_claude_profile_mismatch"));
     }
-    let command = auth_command(executable.verified_path()?, home, action)?;
+    let command = auth_command(&executable.launch_words()?, home, action)?;
     let mut command = command;
     let child = crate::spawn_gate::spawn(&mut command)
         .map_err(|_| failure("native_auth_claude_launch_failed"))?;
@@ -260,12 +273,7 @@ pub(super) async fn run_child(
         .ok()
         .and_then(Pid::from_raw)
         .ok_or_else(|| failure("native_auth_child_cleanup_uncertain"))?;
-    let bound = match action {
-        ClaudeAuthCommand::Login => Duration::from_secs(575),
-        ClaudeAuthCommand::Renew => RENEWAL_TIME,
-        ClaudeAuthCommand::Status | ClaudeAuthCommand::Logout => Duration::from_secs(2),
-    };
-    let deadline = operation_deadline.min(Instant::now() + bound);
+    let deadline = operation_deadline.min(Instant::now() + command_bound(action));
     let result = match Pipes::take(session.child_mut()?, action) {
         Ok(mut pipes) => tokio::time::timeout(
             deadline.saturating_duration_since(Instant::now()),

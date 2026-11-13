@@ -143,7 +143,9 @@ impl Hooked {
                     ide_git_hooks: on,
                     tool_cache: Default::default(),
                     ide_agent_files: Default::default(),
+                    shared_folders: Default::default(),
                     network: crazyagent::sandbox::policy::AgentNetwork::default(),
+                    ..Default::default()
                 },
                 generation,
             )

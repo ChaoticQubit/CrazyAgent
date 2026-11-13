@@ -11,6 +11,9 @@
 .settings-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .settings-top h2 { margin: 0; font-size: 18px; line-height: 24px; font-weight: 600; }
 .settings-top p { margin: 2px 0 0; color: var(--text-2); font-size: 13px; max-width: 560px; }
+.user-dialog { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.user-dialog .settings-top h2 { display: none; }
+.user-dialog .settings-top p { margin: 0; }
 .settings-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
 @media (max-width: 980px) { .settings-two { grid-template-columns: minmax(0, 1fr); } }
 .set-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--border); }
@@ -68,7 +71,8 @@
 .pool-limit.full { color: var(--danger); font-weight: 600; }
 .pool-limit.full .pool-bar i { background: var(--danger); }
 .pool-limit-none { font: 11px/16px var(--mono); color: var(--text-3); text-align: right; }
-@container (max-width: 560px) { .pool-row { grid-template-columns: 24px minmax(0, 1fr); } .pool-right { grid-column: 2; margin-top: 6px; } .pool-limit-none { text-align: left; } }
+.pool-extras { margin-top: 2px; font: 11px/16px var(--mono); color: var(--text-2); text-align: right; overflow-wrap: anywhere; }
+@container (max-width: 560px) { .pool-row { grid-template-columns: 24px minmax(0, 1fr); } .pool-right { grid-column: 2; margin-top: 6px; } .pool-limit-none, .pool-extras { text-align: left; } }
 .pool-left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .pool-app-order { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
 .pool-app-order h3 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 600; }
@@ -85,6 +89,11 @@
 .pool-sched .input { height: 28px; }
 .pool-sched-text { flex: 1 1 220px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--text-2); }
 .pool-sched-text b { display: block; font-weight: 600; color: var(--text); }
+.spend-reset { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.spend-reset-line { font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+.pool-right .spend-reset { justify-content: flex-end; text-align: right; }
+@container (max-width: 560px) { .pool-right .spend-reset { justify-content: flex-start; text-align: left; } }
+.pool-spend { margin-top: var(--space-4); }
 .pool-refusal { position: sticky; top: 8px; z-index: 3; margin-bottom: var(--space-4); border-radius: var(--radius-panel); background: var(--bg); }
 @container (max-width: 560px) { .pool-ctl { justify-content: flex-start; } }
 

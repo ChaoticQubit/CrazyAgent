@@ -7,8 +7,9 @@ use super::project_time::{clock, duration};
 use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
-    NativeSubAgents, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
-    TaskStart, TerminalDisplay, native_scope, native_sub_agents,
+    HeavyLane, NativeSubAgents, Nudges, Overlaps, QuestionsTo, RESOURCE_NAME_BYTES_MAX,
+    ROLE_SKILLS_MAX, SHARED_RESOURCES_MAX, SharedResource, SkillRole, SubagentMode, TaskStart,
+    TerminalDisplay, native_scope, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
@@ -21,9 +22,9 @@ use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, R
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
-    CoordinationView, DelegationPath, LeftoverMode, MASTER_BRANCH_BYTES_MAX, MasterLands,
-    ReuseIdle, SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction,
-    TeamAgent, TeamHarness, TeamStatus, TeamTask,
+    CoordinationView, DelegationPath, LandingMode, LeftoverMode, MASTER_BRANCH_BYTES_MAX,
+    MasterLands, ReuseIdle, SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus,
+    TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::{AccountRow, account_label};
@@ -168,8 +169,8 @@ pub(in crate::tui) struct CoordEdit {
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
 /// the one terminal display of every harness (N-D9, DEC-141), where sub-agent questions go,
 /// overlapping edits, whether agents may catch up with main (OS-8), workflow nudges, the
-/// Task-start reminder (T3-15), the counted tools or the skills one team role gets (DEC-111
-/// R3).
+/// Task-start reminder (T3-15), the counted tools, the skills one team role gets (DEC-111
+/// R3), the heavy lane size or the shared resources (F28).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
@@ -183,9 +184,12 @@ pub(in crate::tui) enum CoordRow {
     Counted,
     Skills(SkillRole),
     ReuseIdle,
+    LandingMode,
+    HeavyLane,
+    Resources,
 }
 
-const COORD_ROWS: [CoordRow; 17] = [
+const COORD_ROWS: [CoordRow; 20] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::Mode(HarnessKind::Codex),
@@ -203,7 +207,11 @@ const COORD_ROWS: [CoordRow; 17] = [
     CoordRow::Skills(SkillRole::Lead),
     CoordRow::Skills(SkillRole::Worker),
     CoordRow::ReuseIdle,
+    CoordRow::LandingMode,
+    CoordRow::HeavyLane,
+    CoordRow::Resources,
 ];
+const RESOURCES_TEXT_BYTES_MAX: usize = SHARED_RESOURCES_MAX * (RESOURCE_NAME_BYTES_MAX + 6);
 const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
 const OVERLAPS: [Overlaps; 4] = [
     Overlaps::Warn,
@@ -275,6 +283,9 @@ pub(in crate::tui) struct TeamView {
     saving: Option<SetupAction>,
     catalog: Option<Vec<HarnessChoice>>,
     catalog_due: bool,
+    settings_scroll: usize,
+    settings_scroll_max: std::cell::Cell<usize>,
+    settings_window: std::cell::Cell<usize>,
 }
 
 impl TeamView {
@@ -311,6 +322,9 @@ impl TeamView {
             saving: None,
             catalog: None,
             catalog_due: false,
+            settings_scroll: 0,
+            settings_scroll_max: std::cell::Cell::new(0),
+            settings_window: std::cell::Cell::new(0),
         }
     }
 
@@ -786,10 +800,32 @@ impl TeamView {
                 self.alerts = true;
                 TeamReply::Handled
             }
+            KeyCode::PageDown => self.scroll_settings(true),
+            KeyCode::PageUp => self.scroll_settings(false),
             _ => TeamReply::Ignored,
         };
         self.clamp();
         reply
+    }
+
+    /// Moves the settings rows after the first by the rows in view, down or up, after
+    /// clamping the position to the range of the last frame drawn, so a position a resize
+    /// left behind never eats a key press. Takes the direction. Returns Handled, or Ignored
+    /// when nothing scrolls, so the screen can use the key.
+    fn scroll_settings(&mut self, down: bool) -> TeamReply {
+        let max = self.settings_scroll_max.get();
+        self.settings_scroll = self.settings_scroll.min(max);
+        if max == 0 {
+            return TeamReply::Ignored;
+        }
+        let page = self.settings_window.get().max(1);
+        self.settings_scroll = if down {
+            (self.settings_scroll + page).min(max)
+        } else {
+            self.settings_scroll.saturating_sub(page)
+        };
+        assert!(self.settings_scroll <= max);
+        TeamReply::Handled
     }
 
     /// Answers the stop that waits on a key: y sends Stop all or Stop harness, a number
@@ -2464,6 +2500,7 @@ impl TeamView {
                 }
                 KeyCode::Enter => match COORD_ROWS[edit.row] {
                     CoordRow::Skills(role) => self.save_skills(role),
+                    CoordRow::Resources => self.save_resources(),
                     _ => self.save_counted(),
                 },
                 _ => {
@@ -2503,6 +2540,15 @@ impl TeamView {
             KeyCode::Enter | KeyCode::Char(' ') if row == CoordRow::Counted => {
                 let mut input = TextInput::single(COUNTED_TEXT_BYTES_MAX);
                 input.set(&view.settings.counted_tools.join(", "));
+                self.coord = Some(CoordEdit {
+                    row: edit.row,
+                    input: Some(input),
+                });
+                TeamReply::Handled
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if row == CoordRow::Resources => {
+                let mut input = TextInput::single(RESOURCES_TEXT_BYTES_MAX);
+                input.set(&resources_text(&view.settings.shared_resources));
                 self.coord = Some(CoordEdit {
                     row: edit.row,
                     input: Some(input),
@@ -2681,6 +2727,24 @@ impl TeamView {
                 };
                 (TeamAction::ReuseIdle { project_id, mode }, done.to_owned())
             }
+            CoordRow::LandingMode => {
+                let mode = match self.status.as_ref().map(|status| status.landing_mode) {
+                    Some(LandingMode::Merge) => LandingMode::Squash,
+                    Some(LandingMode::Squash) | None => LandingMode::Merge,
+                };
+                let done = match mode {
+                    LandingMode::Merge => {
+                        "Landing is Merge commit: accepted changes land as a merge commit that keeps every agent commit in your history."
+                    }
+                    LandingMode::Squash => {
+                        "Landing is Squash: each accepted change set lands as one commit."
+                    }
+                };
+                (
+                    TeamAction::LandingMode { project_id, mode },
+                    done.to_owned(),
+                )
+            }
             CoordRow::Nudges => {
                 settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
                 let done = format!(
@@ -2709,7 +2773,21 @@ impl TeamView {
                     done,
                 )
             }
-            CoordRow::Counted => return TeamReply::Handled,
+            CoordRow::HeavyLane => {
+                settings.heavy_lane = cycle(&HeavyLane::ALL, settings.heavy_lane, forward);
+                let done = format!(
+                    "Heavy lane: {}.",
+                    settings.heavy_lane.words().to_lowercase()
+                );
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    done,
+                )
+            }
+            CoordRow::Counted | CoordRow::Resources => return TeamReply::Handled,
             CoordRow::Skills(role) => {
                 if settings.role_skills.of(role).is_none() {
                     if let Some(at) = self.coord.as_ref().map(|edit| edit.row) {
@@ -2833,6 +2911,45 @@ impl TeamView {
         )
     }
 
+    /// Sends the shared resources typed on their row (F28): `name` or `name:slots` entries
+    /// split on commas or spaces, one slot when none is given, checked with the engine's
+    /// rule first; an empty line removes them all. Output: the change, or Handled with the
+    /// reason they can't be saved.
+    fn save_resources(&mut self) -> TeamReply {
+        let Some(typed) = self
+            .coord
+            .as_ref()
+            .and_then(|edit| edit.input.as_ref())
+            .map(|input| input.value().to_owned())
+        else {
+            return TeamReply::Handled;
+        };
+        let Some(mut settings) = self
+            .status
+            .as_ref()
+            .and_then(|status| status.coordination.as_ref())
+            .map(|view| view.settings.clone())
+        else {
+            return TeamReply::Handled;
+        };
+        let Some(resources) = resources_typed(&typed) else {
+            self.notice = Some(Notice::problem(team_plain("coord_settings_invalid")));
+            return TeamReply::Handled;
+        };
+        settings.shared_resources = resources;
+        if settings.validate().is_err() {
+            self.notice = Some(Notice::problem(team_plain("coord_settings_invalid")));
+            return TeamReply::Handled;
+        }
+        self.coord_change(
+            TeamAction::CoordSettings {
+                project_id: self.project.clone(),
+                settings,
+            },
+            "Shared resources saved.".to_owned(),
+        )
+    }
+
     fn coord_change(&mut self, action: TeamAction, done: String) -> TeamReply {
         if self.still_saving() {
             return TeamReply::Handled;
@@ -2944,6 +3061,15 @@ impl TeamView {
                     .to_owned(),
                     "",
                 ),
+                CoordRow::LandingMode => (
+                    "Landing".to_owned(),
+                    match self.status.as_ref().map(|status| status.landing_mode) {
+                        Some(LandingMode::Merge) => "Merge commit",
+                        Some(LandingMode::Squash) | None => "Squash",
+                    }
+                    .to_owned(),
+                    "",
+                ),
                 CoordRow::Nudges => (
                     "Workflow nudges".to_owned(),
                     view.settings.nudges.words().to_owned(),
@@ -2957,6 +3083,25 @@ impl TeamView {
                 CoordRow::Counted => (
                     "Counted tools".to_owned(),
                     view.settings.counted_tools.join(", "),
+                    "",
+                ),
+                CoordRow::HeavyLane => (
+                    "Heavy lane".to_owned(),
+                    format!(
+                        "{}  {} running, {} waiting",
+                        view.settings.heavy_lane.words(),
+                        view.lane.running.len(),
+                        view.lane.waiting.len()
+                    ),
+                    "",
+                ),
+                CoordRow::Resources => (
+                    "Shared resources".to_owned(),
+                    if view.settings.shared_resources.is_empty() {
+                        "None".to_owned()
+                    } else {
+                        resources_text(&view.settings.shared_resources)
+                    },
                     "",
                 ),
                 CoordRow::Skills(role) => (
@@ -2989,6 +3134,9 @@ impl TeamView {
             Row::of(
                 match COORD_ROWS[edit.row] {
                     CoordRow::Skills(_) => "No skills: type names separated by commas",
+                    CoordRow::Resources => {
+                        "No shared resources: type name or name:slots, such as ollama:1"
+                    }
                     _ => "No tools counted",
                 },
                 look.muted,
@@ -3027,9 +3175,9 @@ impl TeamView {
     /// and places the typing cursor.
     /// When the window is too short for the lists, the panel and any footer question, the
     /// blank rows before the panel and before the tasks go first, then the focused agent's
-    /// Tools and Working copy rows, then the plan line while every harness can run, then the
-    /// settings summary folds toward its first row, so every setting shows while blank rows,
-    /// those panel rows or the plan line can make room.
+    /// Tools and Working copy rows, then the settings rows after the first scroll behind a
+    /// marker row (PgUp and PgDn), then the plan line while every harness can run, once the
+    /// settings can scroll no further. The counts row and the hold rows never scroll.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -3041,8 +3189,9 @@ impl TeamView {
         look: &Look,
     ) -> (Vec<Row>, Help, Option<(usize, usize)>) {
         let wide = content >= WIDE;
-        let mut lines = self.summary(content, look);
+        let (mut lines, packed) = self.summary(content, look);
         let summary_rows = lines.len();
+        assert!(packed >= 1 && packed <= summary_rows);
         let Some(status) = &self.status else {
             lines.push(Row::of("Loading...", look.muted));
             lines.extend(
@@ -3133,24 +3282,37 @@ impl TeamView {
                 .harnesses
                 .iter()
                 .any(|harness| harness.role == AgentRole::Master);
-        let plan_gives_way = usize::from(plan_can_go && left > 0);
-        let folded = (left - plan_gives_way).min(summary_rows.saturating_sub(1));
+        let scrolled = scrolled_rows(packed, left);
+        let won = scrolled.saturating_sub(1);
+        let plan_gives_way = usize::from(plan_can_go && left > won);
+        let in_view = packed - 1 - scrolled;
         assert!(
-            folded < summary_rows.max(1),
-            "the summary's first row stays"
+            scrolled == 0 || in_view >= 1,
+            "one scrolled row stays in view"
         );
-        assert!(folded == 0 || spacers == 2, "blank rows go before settings");
         assert!(
-            folded == 0 || plan_gives_way == 1 || !plan_can_go,
-            "the plan line goes before settings"
+            scrolled == 0 || spacers == 2,
+            "blank rows go before settings"
         );
+        assert!(
+            plan_gives_way == 0 || scrolled == 0 || in_view == 1,
+            "the settings scroll before the plan line goes"
+        );
+        self.settings_scroll_max.set(scrolled);
+        self.settings_window.set(in_view);
         if plan_gives_way == 1 {
             lines.remove(summary_rows);
         }
-        if folded > 0 {
-            lines.drain(1..=folded);
+        if scrolled > 0 {
+            let offset = self.settings_scroll.min(scrolled);
+            lines.drain(1 + offset + in_view..packed);
+            lines.drain(1..1 + offset);
+            lines.insert(
+                1 + in_view,
+                scroll_marker(offset > 0, offset < scrolled, content, look),
+            );
         }
-        let fixed = fixed - spacers - briefed - plan_gives_way - folded;
+        let fixed = fixed - spacers - briefed - plan_gives_way - won;
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -3267,19 +3429,15 @@ impl TeamView {
         (lines, self.help(), cursor)
     }
 
-    /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
-    /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
-    /// harness change applies, Sub-agent depth,
-    /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
-    /// Token budget, Master's branch, Land on, Master accepts change sets, New folder limit, Background
-    /// commands), each whole. A
-    /// setting that does not fit on the row starts the next one, right-aligned under the
-    /// first. Counts wider
-    /// than the content are cut with an ellipsis like any row. Inputs: the content width and
-    /// the look. Output: one row, or more when the settings wrap.
-    fn summary(&self, content: usize, look: &Look) -> Vec<Row> {
+    /// The Team rows: the agent counts, a stopped team and alerts, then every team setting whole,
+    /// right-aligned, then one row per Left running hold. Settings wrap in order only, so a
+    /// resize or a wider value never moves a setting ahead of an earlier one; a short window
+    /// scrolls them instead. Counts wider than the content are cut like any row. Inputs: the
+    /// content width and the look. Output: the rows and how many of them hold the counts and
+    /// settings, the hold rows after them.
+    fn summary(&self, content: usize, look: &Look) -> (Vec<Row>, usize) {
         let Some(status) = &self.status else {
-            return vec![Row::of("Team", look.accent).pad(content)];
+            return (vec![Row::of("Team", look.accent).pad(content)], 1);
         };
         let count = |wanted: &[AgentStatus]| {
             status
@@ -3456,32 +3614,18 @@ impl TeamView {
             ),
             setting("Left running", leftover_words(status.leftovers).to_owned()),
         ];
-        let mut rows = Vec::new();
-        let mut right = Row::default();
-        for item in settings
+        let items: Vec<Row> = settings
             .into_iter()
             .chain(live_terminal)
             .chain(middle)
             .chain(master_lands)
             .chain(later)
-        {
-            let used = match (left.width(), right.width()) {
-                (0, 0) => 0,
-                (0, taken) | (taken, 0) => taken + 2,
-                (lead, taken) => lead + 2 + taken + 2,
-            };
-            if used > 0 && used + item.width() > content {
-                rows.push(spread(content, left, right));
-                left = Row::default();
-                right = Row::default();
-            }
-            right = if right.width() == 0 {
-                item
-            } else {
-                right.push("  ", look.muted).cat(item)
-            };
-        }
-        rows.push(spread(content, left, right));
+            .collect();
+        let mut rows: Vec<Row> = pack(&items, left, content, look.muted)
+            .into_iter()
+            .map(|(lead, right)| spread(content, lead, right))
+            .collect();
+        let packed = rows.len();
         for hold in status.leftover_holds.iter().take(LEFTOVER_ROWS_MAX) {
             rows.push(
                 Row::of("Left running  ", look.warning)
@@ -3490,7 +3634,8 @@ impl TeamView {
                     .pad(content),
             );
         }
-        rows
+        assert!(packed >= 1 && rows.len() - packed <= LEFTOVER_ROWS_MAX);
+        (rows, packed)
     }
 
     /// The panel under the lists for the focused agent or task. When `brief`, for a short
@@ -3769,6 +3914,7 @@ impl TeamView {
                 CoordRow::Skills(_) => {
                     help.extend([("Space", "All or chosen"), ("Enter", "Edit skills")]);
                 }
+                CoordRow::Resources => help.push(("Enter", "Edit resources")),
                 _ => help.extend([("Space", "Change"), ("\u{2190}\u{2192}", "Change")]),
             }
             help.push(("Esc", "Close"));
@@ -3954,6 +4100,40 @@ fn budget_words(budget: Option<u64>, used: Option<u64>) -> String {
             crate::team::token_words(budget)
         ),
     }
+}
+
+/// Writes shared resources as their row shows and edits them: `name:slots` entries joined
+/// by ", ". Takes the resources. Returns the text.
+fn resources_text(resources: &[SharedResource]) -> String {
+    resources
+        .iter()
+        .map(|resource| format!("{}:{}", resource.name, resource.slots))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Reads typed shared resources: `name` or `name:slots` entries split on commas or spaces,
+/// one slot when none is given, at most `SHARED_RESOURCES_MAX + 1` entries read so a long
+/// line is refused by the engine's rule. Takes the text. Returns the resources, or None for
+/// slots that are not a number.
+fn resources_typed(typed: &str) -> Option<Vec<SharedResource>> {
+    let mut found = Vec::new();
+    for entry in typed
+        .split([',', ' ', '\t'])
+        .filter(|entry| !entry.is_empty())
+        .take(SHARED_RESOURCES_MAX + 1)
+    {
+        let (name, slots) = match entry.split_once(':') {
+            Some((name, slots)) => (name, slots.parse::<u8>().ok()?),
+            None => (entry, 1),
+        };
+        found.push(SharedResource {
+            name: name.to_owned(),
+            slots,
+        });
+    }
+    assert!(found.len() <= SHARED_RESOURCES_MAX + 1);
+    Some(found)
 }
 
 /// The choice after or before `current` in `all`, wrapping at both ends.
@@ -4405,6 +4585,63 @@ fn heads(widths: &[usize], names: &[&str], look: &Look) -> Row {
                 .collect(),
         )
         .restyle(look.muted),
+    )
+}
+
+/// Packs the team settings onto summary rows after the counts, each setting whole and in
+/// order: a setting that does not fit starts the next row. Inputs: the settings, the counts,
+/// the content width and the style of the gap between settings. Output: each row's counts
+/// part and settings part, the counts on the first row only.
+fn pack(items: &[Row], counts: Row, content: usize, gap: Style) -> Vec<(Row, Row)> {
+    let used = |(lead, right): &(Row, Row)| match (lead.width(), right.width()) {
+        (0, 0) => 0,
+        (0, taken) | (taken, 0) => taken + 2,
+        (lead, taken) => lead + 2 + taken + 2,
+    };
+    let mut rows = vec![(counts, Row::default())];
+    for item in items {
+        let fits = |row: &(Row, Row)| used(row) == 0 || used(row) + item.width() <= content;
+        let at = rows.last().is_some_and(fits).then(|| rows.len() - 1);
+        let at = at.unwrap_or_else(|| {
+            rows.push((Row::default(), Row::default()));
+            rows.len() - 1
+        });
+        let right = std::mem::take(&mut rows[at].1);
+        rows[at].1 = if right.width() == 0 {
+            item.clone()
+        } else {
+            right.push("  ", gap).cat(item.clone())
+        };
+    }
+    rows
+}
+
+/// How many settings rows after the first scroll out of view to win back `over` rows: one
+/// more than `over`, for the marker row, keeping at least one scrolled row in view; none when
+/// that wins no row back. Inputs: the packed rows, the counts row included, and the rows the
+/// window is short by. Output: the rows scrolled out of view.
+fn scrolled_rows(packed: usize, over: usize) -> usize {
+    let hidden = (over + 1).min(packed.saturating_sub(2));
+    if over == 0 || hidden < 2 { 0 } else { hidden }
+}
+
+/// The marker row under scrolled settings, right-aligned like them: the keys that bring more
+/// settings and which way they are. Inputs: whether settings are above and below the view,
+/// the content width and the look. Output: the row.
+fn scroll_marker(above: bool, below: bool, content: usize, look: &Look) -> Row {
+    assert!(
+        above || below,
+        "the marker shows only while settings are out of view"
+    );
+    let (keys, words) = match (above, below) {
+        (true, true) => ("PgUp PgDn", "more settings above and below"),
+        (true, false) => ("PgUp", "more settings above"),
+        (false, _) => ("PgDn", "more settings below"),
+    };
+    spread(
+        content,
+        Row::default(),
+        Row::of(keys, look.accent).push(format!("  {words}"), look.muted),
     )
 }
 

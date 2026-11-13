@@ -984,6 +984,61 @@ pub fn requeue(
     Ok(changed == 1)
 }
 
+/// Puts the check holding `claim` back to wait for an account, with `words` as its problem:
+/// no longer running, stale again and due at `due_ms`, so the line stays while no account
+/// of the project's pool can run it and the first check that gets one replaces it. A run
+/// that was closed or replaced changes nothing. Inputs: the connection, the project, the
+/// claim, the words and when to try again. Output: whether this run was the one in
+/// flight, or `roadmap_status_unavailable`.
+pub fn wait_for_account(
+    db: &Connection,
+    project: &ProjectId,
+    claim: Claim,
+    words: &str,
+    due_ms: i64,
+) -> Result<bool, EngineError> {
+    assert!(due_ms >= 0 && claim.ms() >= 0);
+    let changed = db
+        .execute(
+            "UPDATE roadmap_status SET running_ms=NULL, stale=1, due_ms=?3, problem=?4
+             WHERE project=?1 AND running_ms=?2",
+            params![
+                project.as_str(),
+                claim.ms(),
+                due_ms,
+                line(words, NOTE_BYTES_MAX)
+            ],
+        )
+        .map_err(unavailable)?;
+    assert!(changed <= 1);
+    Ok(changed == 1)
+}
+
+/// Drops the no-account problem of the check holding `claim` once that check got an
+/// account, so the line never stands beside the check that answers it; any other problem
+/// stays until the check ends. Inputs: the connection, the project and the claim. Output:
+/// whether a line went, or `roadmap_status_unavailable`.
+pub fn account_found(
+    db: &Connection,
+    project: &ProjectId,
+    claim: Claim,
+) -> Result<bool, EngineError> {
+    assert!(claim.ms() >= 0);
+    let cleared = db
+        .execute(
+            "UPDATE roadmap_status SET problem=NULL
+             WHERE project=?1 AND running_ms=?2 AND problem=?3",
+            params![
+                project.as_str(),
+                claim.ms(),
+                line(NO_ACCOUNT, NOTE_BYTES_MAX)
+            ],
+        )
+        .map_err(unavailable)?;
+    assert!(cleared <= 1);
+    Ok(cleared == 1)
+}
+
 /// Whether a run still holds its claim: no longer once `tick` closed it, the owner switched
 /// the status off or the project was removed, and then the run stops and stores nothing. A
 /// store that cannot be read counts as held, so a busy database stops no run. Inputs: the

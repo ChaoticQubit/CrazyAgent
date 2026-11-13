@@ -33,6 +33,16 @@ export async function closedPort() {
   return port;
 }
 
+/** Opens a local port that takes connections but answers no request, for the provider of an
+ * engine whose runs a stand-in harness serves: the engine's reach check finds it listening,
+ * and a request that does reach it has its connection closed unanswered. Input: none.
+ * Output: the server, to close, and its port. */
+export async function silentProvider() {
+  const server = createServer((request) => request.socket.destroy());
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  return { server, port: server.address().port };
+}
+
 /** Starts a child with its output kept as evidence and waits for its ready line.
  * Input: the binary, its arguments, environment, evidence folder, name and ready pattern.
  * Output: the child and the ready line's match. */
@@ -232,7 +242,7 @@ export const INTERNALS = `(() => {
  * opening a fold by its label, and opening the Agents toolbar's questions drawer. Input: the
  * page's evaluate and send. Output: the helpers. */
 export function owner({ evaluate, send }, evidence) {
-  const seen = () => evaluate("document.body.innerText");
+  const seen = () => evaluate("document.body?.innerText ?? \"\"");
   let shots = 0;
   const capture = async (label) => {
     shots += 1;
@@ -277,7 +287,12 @@ export function owner({ evaluate, send }, evidence) {
       const element = wanted === null ? all[0] : all.find((item) => (item.innerText ?? item.textContent ?? "").replace(/\\s+/g, " ").trim() === wanted
         || item.getAttribute("aria-label") === wanted);
       if (!element) return { missing: all.map((item) => (item.innerText ?? "").trim()).filter(Boolean).slice(0, 40) };
-      element.scrollIntoView({ block: "center" });
+      const reached = (rect) => {
+        if (rect.top < 0 || rect.left < 0 || rect.bottom > innerHeight || rect.right > innerWidth) return false;
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return hit !== null && (hit === element || element.contains(hit));
+      };
+      if (!reached(element.getBoundingClientRect())) element.scrollIntoView({ block: "center" });
       const rect = element.getBoundingClientRect();
       const x = rect.left + rect.width / 2;
       const y = rect.top + rect.height / 2;

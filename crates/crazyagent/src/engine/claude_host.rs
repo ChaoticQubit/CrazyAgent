@@ -85,22 +85,24 @@ pub(in crate::engine) struct MasterTools<'a> {
 
 impl MasterTools<'_> {
     /// The arguments of the engine's team server, the same for Claude Code and Codex and in
-    /// the team runtime's order: `team-mcp`, the drop file, the mailbox and the tools left out.
-    /// Input: the tools. Output: the arguments, or `claude_host_invalid_launch` for a relative
-    /// path, one with a control character or an unknown tool name.
+    /// the team runtime's order: `team-mcp`, the drop file, the mailbox, the tools left out and
+    /// `wake`, which a conversation master leaves out because it wakes no sub-agent. Input: the
+    /// tools. Output: the arguments, or `claude_host_invalid_launch` for a relative path, one
+    /// with a control character or an unknown tool name.
     pub(in crate::engine) fn server_args(&self) -> Result<Vec<String>, EngineError> {
         let (Some(drop), Some(mailbox)) = (plain_path(self.drop), plain_path(self.mailbox)) else {
             return Err(failure("claude_host_invalid_launch"));
         };
-        if !crate::team::tool::known_tools(self.off) {
+        let wake = crate::team::tool::WAKE_TOOL;
+        let args: Vec<String> = [crate::team::tool::SERVER_COMMAND.to_owned(), drop, mailbox]
+            .into_iter()
+            .chain(self.off.iter().cloned())
+            .chain(std::iter::once(wake.to_owned()))
+            .collect();
+        if !crate::team::tool::known_tools(&args[3..]) || self.off.iter().any(|tool| tool == wake) {
             return Err(failure("claude_host_invalid_launch"));
         }
-        Ok(
-            [crate::team::tool::SERVER_COMMAND.to_owned(), drop, mailbox]
-                .into_iter()
-                .chain(self.off.iter().cloned())
-                .collect(),
-        )
+        Ok(args)
     }
 }
 
@@ -759,7 +761,8 @@ fn failure(code: &'static str) -> EngineError {
 
 /// Reads the team server a tools-on master command names, so the command can be built
 /// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable,
-/// drop file, mailbox and tools switched off, or none when the text is not one engine server.
+/// drop file, mailbox and tools switched off before the trailing `wake` that `server_args`
+/// adds, or none when the text is not one engine server ending in it.
 #[cfg(unix)]
 fn named_tools(config: &str) -> Option<(PathBuf, PathBuf, PathBuf, Vec<String>)> {
     let config: serde_json::Value = serde_json::from_str(config).ok()?;
@@ -773,9 +776,12 @@ fn named_tools(config: &str) -> Option<(PathBuf, PathBuf, PathBuf, Vec<String>)>
         .iter()
         .map(serde_json::Value::as_str)
         .collect::<Option<Vec<&str>>>()?;
-    let [_, drop, mailbox, off @ ..] = args.as_slice() else {
+    let [_, drop, mailbox, off @ .., last] = args.as_slice() else {
         return None;
     };
+    if *last != crate::team::tool::WAKE_TOOL {
+        return None;
+    }
     Some((
         PathBuf::from(engine),
         PathBuf::from(drop),

@@ -600,6 +600,112 @@ fn a_stale_save_keeps_the_draft_and_never_adopts_the_newer_version() {
     );
 }
 
+/// A refused save over a four-line newer text keeps the editor and the "not saved" line in
+/// view at 80x24 under the wrapped hint bar (backlog 27, review F1): the blank separators
+/// give way, then the intro's Ctrl-G and Ctrl-D sentence, which the bar still names. At
+/// 120x40 nothing gives way.
+#[test]
+fn a_refused_save_over_a_four_line_text_keeps_the_problem_in_view_at_80_by_24() {
+    use crate::tui::screens::settings_accounts::tests::bar_rows;
+    let mut shell = opened(Scope::App, "Old rule.");
+    typed(&mut shell, "Mine. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Mine. Old rule.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    let stale = SavedText::Stale {
+        version: READ_VERSION,
+        current: ProcessText {
+            text: "One.\nTwo.\nThree.\nFour.".into(),
+            version: READ_VERSION + 1,
+        },
+        writer: crate::storage::versioned::LastWriter::Owner,
+    };
+    shell.arrive(answered(save, Ok(ProcessReply::Saved(stale))));
+    let rows = render(&mut shell, 80, 24);
+    let shown = rows.join("\n");
+    for text in [
+        "Four.",
+        "Keep mine",
+        "Instructions for agents",
+        "Mine. ",
+        "so yours were not saved.",
+    ] {
+        assert!(shown.contains(text), "{text}:\n{shown}");
+    }
+    assert!(!shown.contains("Ctrl-G imports"), "{shown}");
+    let bar = bar_rows(&rows).join("\n");
+    assert!(bar.contains("Ctrl-G Import from file"), "{shown}");
+    assert!(bar.contains("Ctrl-D Default process"), "{shown}");
+    let tall = render(&mut shell, 120, 40).join("\n");
+    assert!(tall.contains("Ctrl-G imports"), "{tall}");
+    assert!(tall.contains("so yours were not saved."), "{tall}");
+}
+
+/// A refused save over a newer text of six or more rows keeps the problem line and both
+/// editor rows in view at 80x24 (backlog 39): after the blank rows and the long intro, the
+/// quote of the text that landed gives way from the bottom, down to one row, and its more
+/// line counts what it hid. At 120x40 the quote shows its six rows.
+#[test]
+fn a_refused_save_over_a_long_newer_text_keeps_the_problem_and_both_editor_rows_in_view_at_80_by_24()
+ {
+    let names = [
+        "One.", "Two.", "Three.", "Four.", "Five.", "Six.", "Seven.", "Eight.", "Nine.", "Ten.",
+        "Eleven.", "Twelve.",
+    ];
+    for count in [6, 7, 12] {
+        let mut shell = opened(Scope::App, "Old rule.\nSecond rule.");
+        typed(&mut shell, "Mine. ");
+        shell.key(Key::Ctrl('s'));
+        let save = ProcessQuery::Save {
+            project: None,
+            text: "Mine. Old rule.\nSecond rule.".into(),
+            version: READ_VERSION,
+            opened: None,
+        };
+        assert_eq!(requests(&mut shell), vec![save.clone()]);
+        let stale = SavedText::Stale {
+            version: READ_VERSION,
+            current: ProcessText {
+                text: names[..count].join("\n"),
+                version: READ_VERSION + 1,
+            },
+            writer: crate::storage::versioned::LastWriter::Owner,
+        };
+        shell.arrive(answered(save, Ok(ProcessReply::Saved(stale))));
+        let shown = render(&mut shell, 80, 24).join("\n");
+        for text in [
+            "since you opened it.",
+            "One.",
+            "more lines",
+            "Keep mine",
+            "Instructions for agents",
+            "Mine. ",
+            "Second rule.",
+            "so yours were not saved.",
+        ] {
+            assert!(shown.contains(text), "{count} rows, {text}:\n{shown}");
+        }
+        let last = names[count.min(LINES_SHOWN_MAX) - 1];
+        assert!(
+            !shown.contains(last),
+            "{count} rows: the quote gave way:\n{shown}"
+        );
+        let tall = render(&mut shell, 120, 40).join("\n");
+        assert!(tall.contains(last), "{count} rows:\n{tall}");
+        let more = match count.saturating_sub(LINES_SHOWN_MAX) {
+            0 => !tall.contains("more lines"),
+            hidden => tall.contains(&format!("{hidden} more lines")),
+        };
+        assert!(more, "{count} rows:\n{tall}");
+        assert!(tall.contains("so yours were not saved."), "{tall}");
+    }
+}
+
 #[test]
 fn stale_save_shows_the_conflict_choices() {
     let stale = |named: u64, text: &str| {
@@ -1108,6 +1214,28 @@ fn the_app_page_has_no_agent_settings() {
     assert_eq!(requests(&mut shell), vec![]);
 }
 
+/// Settings > Process keeps every hint on the bar at 80x24 (backlog 27, review F1): its
+/// keys wrap to more bar rows instead of dropping `Esc Home`, the same as every other
+/// settings screen. Reads the hints from the one-row bar at 240 columns first.
+#[test]
+fn every_app_process_hint_stays_on_the_bar_at_80_by_24() {
+    use crate::tui::screens::settings_accounts::tests::{bar_rows, every_hint_once, wide_hints};
+    let mut shell = opened(Scope::App, "Use tdd.\n");
+    let rows = render(&mut shell, 240, 24);
+    let wide = bar_rows(&rows);
+    assert_eq!(wide.len(), 1, "{wide:?}");
+    let hints = wide_hints(&wide[0]);
+    assert!(hints.iter().any(|hint| hint == "Esc Home"), "{hints:?}");
+    assert!(hints.iter().any(|hint| hint == "Ctrl-S Save"), "{hints:?}");
+    let rows = render(&mut shell, 80, 24);
+    every_hint_once(&rows, &hints, "80x24");
+    assert!(
+        rows.iter().any(|row| row.contains("se tdd.")),
+        "the saved text stays in view, the cursor on its first cell:\n{}",
+        rows.join("\n")
+    );
+}
+
 #[test]
 fn a_text_over_64_kb_says_why_and_is_never_sent() {
     let mut shell = opened(Scope::App, "");
@@ -1293,7 +1421,9 @@ fn import_from_file_reads_a_named_file_as_a_preview() {
     std::fs::write(&file, "Plan first.\n").unwrap();
     let mut shell = opened(Scope::App, "Saved rule.");
     assert!(
-        render(&mut shell, 80, 24)[23].contains("Ctrl-G Import from file"),
+        crate::tui::screens::settings_accounts::tests::bar_rows(&render(&mut shell, 80, 24))
+            .join("\n")
+            .contains("Ctrl-G Import from file"),
         "{}",
         screen(&mut shell)
     );
@@ -1304,7 +1434,9 @@ fn import_from_file_reads_a_named_file_as_a_preview() {
     assert!(field.contains("Import from file"), "{field}");
     assert!(field.contains("~/never"), "{field}");
     assert!(
-        render(&mut shell, 80, 24)[23].contains("Enter Read file"),
+        crate::tui::screens::settings_accounts::tests::bar_rows(&render(&mut shell, 80, 24))
+            .join("\n")
+            .contains("Enter Read file"),
         "{field}"
     );
     shell.key(Key::Esc);

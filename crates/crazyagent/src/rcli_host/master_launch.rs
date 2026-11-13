@@ -200,24 +200,47 @@ impl RcliMasterLaunch {
     }
 }
 
-/// Projects a logical connection into the supported isolated SDK selection.
-/// Takes the complete connection without configuration or project revisions.
-/// Returns a physical selection while retaining the original connection.
+/// The provider ids rcli keeps for its own builtin providers and refuses for a configured
+/// one (`RESERVED_CUSTOM_PROVIDER_IDS` in rcli's src/config/providers.ts, 3.0.4). A profile
+/// naming one is never a valid master selection.
+pub(crate) const RESERVED_PROVIDER_IDS: &[&str] = &[
+    "openai",
+    "anthropic",
+    "google",
+    "openrouter",
+    "gemini",
+    "google-gemini",
+];
+
+/// Projects a logical connection into the supported isolated SDK selection. An
+/// OpenAI-compatible connection, and a keyed one saved under a provider id rcli keeps for a
+/// builtin, get a provider id hashed from the whole connection, so none shadows a builtin.
+/// Takes the complete connection without configuration or project revisions. Returns a
+/// physical selection while retaining the original connection.
 pub(crate) fn configured_sdk_connection(
     connection: &ModelConnection,
 ) -> Result<ModelConnection, ProtocolError> {
     let mut selection = connection.clone();
+    let hashed = || -> Result<CredentialRef, ProtocolError> {
+        let bytes =
+            serde_json::to_vec(connection).map_err(|_| error("rcli_master_profile_mismatch"))?;
+        CredentialRef::new(hash_bytes(&bytes))
+    };
     match connection.protocol.as_str() {
         "openai-compatible" => {
-            let bytes = serde_json::to_vec(connection)
-                .map_err(|_| error("rcli_master_profile_mismatch"))?;
-            selection.provider = CredentialRef::new(hash_bytes(&bytes))?;
+            selection.provider = hashed()?;
             selection.protocol = CredentialRef::new("openai-chat")?;
             assert_eq!(selection.provider.as_str().len(), 64);
         }
-        "openai-chat" | "openai-responses" | "anthropic-messages" => {}
+        "openai-chat" | "openai-responses" | "anthropic-messages" => {
+            if RESERVED_PROVIDER_IDS.contains(&connection.provider.as_str()) {
+                selection.provider = hashed()?;
+                assert_eq!(selection.provider.as_str().len(), 64);
+            }
+        }
         _ => return Err(error("rcli_master_profile_mismatch")),
     }
+    assert!(!RESERVED_PROVIDER_IDS.contains(&selection.provider.as_str()));
     assert_eq!(selection.id, connection.id);
     assert_eq!(selection.account_ref, connection.account_ref);
     Ok(selection)
@@ -488,15 +511,7 @@ fn validate_selection(
         || !provider.id.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
         })
-        || [
-            "openai",
-            "anthropic",
-            "google",
-            "openrouter",
-            "gemini",
-            "google-gemini",
-        ]
-        .contains(&provider.id.as_str())
+        || RESERVED_PROVIDER_IDS.contains(&provider.id.as_str())
         || provider.name.trim().is_empty()
         || provider.enabled == Some(false)
         || provider.protocol != connection.protocol.as_str()

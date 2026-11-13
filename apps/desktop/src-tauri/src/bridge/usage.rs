@@ -1,11 +1,12 @@
 use super::*;
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::{OwnerClient, USAGE_CODES};
+use crazyagent::engine::owner::{AccountExtras, OwnerClient, USAGE_CODES};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::usage::WindowKind;
 use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneySettings;
 use crazyagent::usage::report::UsageReport;
+use crazyagent::usage::spend::SpendSettings;
 use std::sync::Arc;
 
 pub(super) fn usage_error(error: EngineError) -> BridgeError {
@@ -79,6 +80,16 @@ impl NativeBridge {
         }))
     }
 
+    /// Reads every saved account's free resets, credits and spend as stored, run without the
+    /// bridge lock; `detail` only while Pools is open. Input: whether Pools is open. Output:
+    /// one entry per account.
+    pub fn usage_extras(&self, detail: bool) -> Result<Unlocked<Vec<AccountExtras>>, BridgeError> {
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client.usage_extras(detail).await.map_err(usage_error)
+        }))
+    }
+
     /// Asks the engine to poll every signed-in account's limits now, run without the
     /// bridge lock. Output: done once the request is stored.
     pub fn usage_refresh(&self) -> Result<Unlocked<()>, BridgeError> {
@@ -106,6 +117,33 @@ impl NativeBridge {
                 .usage_decide_recount(use_new)
                 .await
                 .map_err(usage_error)
+        }))
+    }
+
+    /// Asks the engine to spend one free reset on an account, run without the bridge lock.
+    /// Inputs: the account id and whether the owner confirmed this spend. Output: done once
+    /// queued.
+    pub fn usage_spend(
+        &self,
+        account: String,
+        confirmed: bool,
+    ) -> Result<Unlocked<()>, BridgeError> {
+        let account = CredentialRef::new(account).map_err(|_| failure("usage_request_invalid"))?;
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client
+                .usage_spend(account, confirmed)
+                .await
+                .map_err(usage_error)
+        }))
+    }
+
+    /// Stores the owner's spend settings, run without the bridge lock. Input: the settings.
+    /// Output: done once they are stored.
+    pub fn usage_set_spend(&self, settings: SpendSettings) -> Result<Unlocked<()>, BridgeError> {
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client.usage_set_spend(settings).await.map_err(usage_error)
         }))
     }
 

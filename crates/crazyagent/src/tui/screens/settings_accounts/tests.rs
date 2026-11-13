@@ -27,6 +27,7 @@ pub(crate) fn ctx(width: u16, height: u16) -> Ctx {
     ctx.height = height;
     ctx.tick = 4;
     ctx.link = Link::Ready;
+    ctx.store.learning = Load::NotReady;
     ctx
 }
 
@@ -58,6 +59,48 @@ pub(crate) fn render(shell: &mut Shell, width: u16, height: u16) -> Vec<String> 
         rows.push(line);
     }
     rows
+}
+
+/// The help bar of a rendered frame: the rows under the blank message line, one row or
+/// more when a settings screen's hints wrap. Takes the rendered rows. Returns the bar rows,
+/// top first, so `? Help` ends the last one.
+pub(crate) fn bar_rows(rows: &[String]) -> &[String] {
+    let blank = rows
+        .iter()
+        .rposition(|row| row.trim().is_empty())
+        .unwrap_or_else(|| panic!("no blank message line:\n{}", rows.join("\n")));
+    &rows[blank + 1..]
+}
+
+/// The hints of a one-row bar as it reads: each `key label`, then `? Help`, split at the
+/// three-space gap a bar of 100 columns or more puts between them. Takes the bar row.
+/// Returns the hints in order.
+pub(crate) fn wide_hints(bar: &str) -> Vec<String> {
+    bar.split("   ")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Checks that each hint shows exactly once across the bar rows and that `? Help` ends the
+/// last row, at most three rows. Takes the rendered rows, the hints and a size label.
+/// Returns nothing; panics with the bar on a miss.
+pub(crate) fn every_hint_once(rows: &[String], hints: &[String], size: &str) {
+    let bar = bar_rows(rows);
+    let shown = bar.join("\n");
+    assert!(!bar.is_empty() && bar.len() <= 3, "{size}:\n{shown}");
+    assert!(
+        bar.last().unwrap().trim_end().ends_with("? Help"),
+        "{size}:\n{shown}"
+    );
+    for hint in hints {
+        assert_eq!(
+            shown.matches(hint.as_str()).count(),
+            1,
+            "{size} {hint}:\n{shown}"
+        );
+    }
 }
 
 pub(crate) fn fixture(name: &str, swaps: &[(&str, &str)]) -> Vec<String> {
@@ -419,9 +462,9 @@ fn filtering_keeps_matching_rows_and_counts_them() {
     shell.key(Key::Esc);
     let rows = render(&mut shell, 80, 24);
     assert!(
-        rows[21].starts_with("  Showing 1-12 of 240."),
+        rows[20].starts_with("  Showing 1-11 of 240."),
         "{}",
-        rows[21]
+        rows[20]
     );
 }
 

@@ -1,5 +1,7 @@
 import { createElement } from "react";
 import { Settings } from "../../src/screens/settings/index.tsx";
+import { UserMenuDialog } from "../../src/screens/user-menu.tsx";
+import { isUserMenuTab } from "../../src/ui/router.ts";
 import { mountTab, sceneRead } from "./settings-tab.mjs";
 
 export * from "./settings-tab.mjs";
@@ -34,9 +36,11 @@ function answer(scene, command) {
   throw `Command ${command} not found`;
 }
 
-/** Mounts Accounts, GitHub or Profile on the Settings page against a fake engine. Inputs: the
- * scene, naming the tab, the route action and each read, and the theme. Output: nothing. */
+/** Mounts Accounts on the Settings page, or GitHub or Profile in its user menu dialog
+ * (DEC-151), against a fake engine. Inputs: the scene, naming the tab, the route action and
+ * each read, and the theme. Output: nothing. */
 export async function mount(scene, theme = "light") {
   const session = { profile: PROFILES[scene.profile ?? "ok"], refreshProfile: async () => {} };
-  await mountTab(createElement(Settings, { tab: scene.tab, action: scene.action }), (command) => answer(scene, command), theme, session);
+  const panel = isUserMenuTab(scene.tab) ? createElement(UserMenuDialog, { tab: scene.tab, onClose: () => {} }) : createElement(Settings, { tab: scene.tab, action: scene.action });
+  await mountTab(panel, (command) => answer(scene, command), theme, session);
 }

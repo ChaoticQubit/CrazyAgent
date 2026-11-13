@@ -344,6 +344,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
             crate::team::tool::ASK_TOOL,
             crate::team::tool::RECORD_TOOL,
             crate::team::tool::WITHDRAW_TOOL,
+            crate::team::tool::REQUEST_ACCESS_TOOL,
             crate::team::tool::REMEMBER_TOOL
         ],
         "a console master with tools asks the owner and remembers through the engine, less the tools switched off"
@@ -358,7 +359,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                 "team-mcp",
                 record.to_str().unwrap(),
                 mailbox.to_str().unwrap(),
-                "recall"
+                "recall",
+                "wake"
             ],
         }}})
     );
@@ -442,7 +444,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
             "team-mcp",
             record.to_str().unwrap(),
             mailbox.to_str().unwrap(),
-            "recall"
+            "recall",
+            "wake"
         ]),
     );
     assert_eq!(
@@ -460,7 +463,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     "team-mcp",
                     record.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],
@@ -473,7 +477,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     "team-mcp",
                     record.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],
@@ -486,7 +491,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     "team-mcp",
                     record.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],
@@ -499,7 +505,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     "team-mcp",
                     other_drop.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],
@@ -513,6 +520,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     record.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
                     "recall",
+                    "wake",
                     "--verbose"
                 ]),
             ),
@@ -529,7 +537,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                         .with_file_name(crate::team::tool::MAILBOX_FOLDER)
                         .to_str()
                         .unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],
@@ -541,7 +550,21 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                 json!([
                     "team-mcp",
                     record.to_str().unwrap(),
-                    mailbox.to_str().unwrap()
+                    mailbox.to_str().unwrap(),
+                    "wake"
+                ]),
+            ),
+            vec![],
+        ),
+        (
+            "wake listed for a conversation master",
+            served(
+                &engine,
+                json!([
+                    "team-mcp",
+                    record.to_str().unwrap(),
+                    mailbox.to_str().unwrap(),
+                    "recall"
                 ]),
             ),
             vec![],
@@ -565,7 +588,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
             "{name}"
         );
     }
-    let caches = default_master_tool_caches(&root.path, &repository);
+    let caches = default_master_tool_caches(root.engine_root().unwrap(), &repository);
     let turn_tmp = turn.join("tmp");
     assert_eq!(
         sandbox.sandbox().writable_roots().collect::<Vec<_>>(),

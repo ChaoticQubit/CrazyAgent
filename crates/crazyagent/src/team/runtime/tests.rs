@@ -24,6 +24,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[path = "keyed_relay_tests.rs"]
 mod keyed_relay_tests;
 
+#[cfg(target_os = "macos")]
+#[path = "live_terminal_probe_tests.rs"]
+mod live_terminal_probe_tests;
+
 const PROJECT: &str = "team-panes";
 
 const ENDPOINT: &str = "local-a";
@@ -395,6 +399,8 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
+                shared_folders: Default::default(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -499,7 +505,9 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -626,7 +634,9 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
         ide_git_hooks: false,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
+        ..Default::default()
     };
     crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
     fixture
@@ -783,21 +793,24 @@ fn count(connection: &Connection, sql: &str) -> i64 {
         .unwrap()
 }
 
-/// A master that is not live wakes a finished sub-agent with a `WAKE` line in its reply
-/// (WK-R5): its framing lists the finished sub-agents and says how once there is one, the
-/// line pins the text to that agent, and the master hears, under the name the engine
+/// A master that is not live wakes a finished sub-agent with its `wake` tool, or without
+/// team tools with a `crazyagent-task` block (WK-R5, L6): its framing lists the finished
+/// sub-agents and says how once there is one, a `WAKE` line in its reply wakes nothing, a
+/// proposal pins the text to that agent, and the master hears, under the name the engine
 /// settled, what was woken and what was not.
 /// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
 /// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
 #[cfg(target_os = "macos")]
 #[test]
-fn a_master_that_is_not_live_wakes_a_finished_sub_agent_with_a_reply_line() {
+fn a_master_that_is_not_live_wakes_a_finished_sub_agent_with_its_tool_or_a_task_block() {
     let mut fixture = Fixture::new(1);
     let project = fixture.setup.project_id.clone();
-    assert!(
-        !framing(&fixture.setup, false, &[], &[]).contains("WAKE"),
-        "no wake words while no sub-agent finished"
-    );
+    for team_tool in [false, true] {
+        assert!(
+            !framing(&fixture.setup, team_tool, &[], &[]).contains("To wake a finished sub-agent"),
+            "no wake words while no sub-agent finished"
+        );
+    }
     let finished = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
     assert!(
         names::assign_role(&fixture.connection, &project, finished, "page-writer")
@@ -820,35 +833,74 @@ fn a_master_that_is_not_live_wakes_a_finished_sub_agent_with_a_reply_line() {
     assert_eq!(listed.len(), 1, "{listed:?}");
     for team_tool in [false, true] {
         let framed = framing(&fixture.setup, team_tool, &[], &listed);
-        assert!(
-            framed.contains("WAKE <its name or Sub-agent number>: <the text>"),
-            "{framed}"
-        );
+        let how = if team_tool {
+            "call the wake tool with its name or Sub-agent number and the text".to_owned()
+        } else {
+            format!(
+                "{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```",
+                tool::BLOCK_FENCE
+            )
+        };
+        assert!(framed.contains(&how), "{framed}");
+        assert!(!framed.contains("WAKE"), "{framed}");
         assert!(framed.contains(&listed[0]), "{framed}");
     }
     let label = super::super::events::label(&fixture.connection, finished).unwrap();
     assert!(label.ends_with("(@page-writer)"), "{label}");
 
-    let tx = fixture.connection.transaction().unwrap();
-    let message = append_message(
-        &tx,
-        &project,
-        MessageAuthor::Owner,
-        "Finish the page",
-        MessageState::Pending,
-        1,
-    )
-    .unwrap()
-    .unwrap();
-    tx.commit().unwrap();
+    let owner_says = |fixture: &mut Fixture, text: &str| -> i64 {
+        let tx = fixture.connection.transaction().unwrap();
+        let message = append_message(
+            &tx,
+            &project,
+            MessageAuthor::Owner,
+            text,
+            MessageState::Pending,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        tx.commit().unwrap();
+        message
+    };
+    let prose = owner_says(&mut fixture, "Finish the page");
     let mut team = fixture.runtime();
     team.finish_message(
         &project,
-        message,
-        "The page writer knows this.\nWAKE @page-writer: Add the footer\nWAKE Nobody: Check the title",
+        prose,
+        "The page writer knows this.\nWAKE @page-writer: Add the footer",
         TurnEnd::Success,
         None,
         vec![],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1"
+        ),
+        0,
+        "a WAKE line in the reply text wakes nothing"
+    );
+    let message = owner_says(&mut fixture, "Finish the page now");
+    let wake = |agent: &str, text: &str| {
+        tool::Proposal::Wake(crate::team::WakeLine {
+            agent: agent.into(),
+            text: text.into(),
+        })
+    };
+    team.finish_message(
+        &project,
+        message,
+        "The page writer knows this.",
+        TurnEnd::Success,
+        None,
+        vec![
+            wake("@page-writer", "Add the footer"),
+            wake("Nobody", "Check the title"),
+        ],
+        &[],
     )
     .unwrap();
     let pinned: Vec<String> = fixture
@@ -904,7 +956,7 @@ fn a_kept_master_hears_of_a_sub_agent_that_finished_after_its_briefing() {
             .filter(|message| message.author == MessageAuthor::Master)
             .count()
     };
-    let syntax = "WAKE <its name or Sub-agent number>: <the text>";
+    let syntax = "{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}";
 
     say(&mut fixture, "Plan the page");
     fixture.until(&mut team, "the master answers the first message", |f| {
@@ -1050,15 +1102,30 @@ fn a_full_project_still_stores_the_master_reply_and_delivers_sub_agent_results()
         "the unanswered owner message outlived the append that pruned history"
     );
     let mut team = fixture.runtime();
-    team.finish_message(&project, waiting, "Noted.", TurnEnd::Success, None, vec![])
-        .unwrap();
     team.finish_message(
         &project,
-        latest,
-        "Here is the plan.\nDELEGATE: Write the landing page",
+        waiting,
+        "Noted.",
         TurnEnd::Success,
         None,
         vec![],
+        &[],
+    )
+    .unwrap();
+    let plan = format!(
+        "Here is the plan.\n{}\n{{\"task\": \"Write the landing page\"}}\n```",
+        tool::BLOCK_FENCE
+    );
+    let (proposed, unread) = tool::reply_blocks(&plan);
+    assert!(unread.is_empty(), "{unread:?}");
+    team.finish_message(
+        &project,
+        latest,
+        &plan,
+        TurnEnd::Success,
+        None,
+        proposed,
+        &unread,
     )
     .unwrap();
     let team_status = status(&fixture.connection, &fixture.setup).unwrap();
@@ -1068,13 +1135,7 @@ fn a_full_project_still_stores_the_master_reply_and_delivers_sub_agent_results()
         .filter(|message| message.author == MessageAuthor::Master && message.id > latest)
         .map(|message| message.text.as_str())
         .collect();
-    assert_eq!(
-        replies,
-        [
-            "Noted.",
-            "Here is the plan.\nDELEGATE: Write the landing page"
-        ]
-    );
+    assert_eq!(replies, ["Noted.", plan.as_str()]);
     assert_eq!(state(latest).as_deref(), Some("answered"));
     assert_eq!(
         state(waiting),
@@ -1659,10 +1720,26 @@ fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
         .unwrap();
     team.finish_task(task, "", TurnEnd::Closed, Some("launch_closed"))
         .unwrap();
-    team.finish_message(&project, message, "", TurnEnd::Interrupted, None, vec![])
-        .unwrap();
-    team.finish_message(&project, message, "Done", TurnEnd::Success, None, vec![])
-        .unwrap();
+    team.finish_message(
+        &project,
+        message,
+        "",
+        TurnEnd::Interrupted,
+        None,
+        vec![],
+        &[],
+    )
+    .unwrap();
+    team.finish_message(
+        &project,
+        message,
+        "Done",
+        TurnEnd::Success,
+        None,
+        vec![],
+        &[],
+    )
+    .unwrap();
     for table in ["team_tasks", "team_messages"] {
         assert_eq!(
             count(
@@ -9458,6 +9535,274 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
     host.close(&[]).unwrap();
 }
 
+/// Runs git in a folder for a test and returns its trimmed stdout, empty when git fails.
+/// Takes the folder and git's arguments.
+#[cfg(target_os = "macos")]
+fn git_text(folder: &Path, args: &[&str]) -> String {
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .args(args)
+            .current_dir(folder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    if !output.status.success() {
+        return String::new();
+    }
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Retires a stopped sub-agent the way cleanup leaves it while its record still waits:
+/// its worktree, git folder, own branch, landing base and agent branch record are gone,
+/// and its `team_worktrees` row has moved to `team_retiring`. Takes the fixture and the
+/// agent. Returns the worktree path it had.
+#[cfg(target_os = "macos")]
+fn retire_like_cleanup(fixture: &Fixture, agent: i64) -> PathBuf {
+    let (repository, worktree, git_dir): (String, String, String) = fixture
+        .connection
+        .query_row(
+            "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1",
+            [agent],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let place = PathBuf::from(&worktree);
+    let branch = git_text(&place, &["symbolic-ref", "-q", "--short", "HEAD"]);
+    std::fs::remove_dir_all(&place).unwrap();
+    if !Path::new(&git_dir).starts_with(&place) {
+        std::fs::remove_dir_all(&git_dir).unwrap();
+        if !branch.is_empty() {
+            git_text(Path::new(&repository), &["branch", "-D", &branch]);
+            assert_eq!(
+                git_text(
+                    Path::new(&repository),
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "-q",
+                        &format!("refs/heads/{branch}")
+                    ]
+                ),
+                "",
+                "the retired agent's own branch is gone"
+            );
+        }
+    }
+    let landing = crate::landing::open(&fixture.base).unwrap();
+    landing
+        .execute("DELETE FROM landing_bases WHERE worktree=?1", [&worktree])
+        .unwrap();
+    landing
+        .execute(
+            "DELETE FROM landing_agent_branches WHERE worktree=?1",
+            [&worktree],
+        )
+        .unwrap();
+    crate::team::cleanup::initialize(&fixture.connection).unwrap();
+    assert_eq!(
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_retiring(agent,project,repository,worktree,git_dir,since_ms)
+                 SELECT agent,project,repository,worktree,git_dir,?2 FROM team_worktrees WHERE agent=?1",
+                params![agent, now_ms()],
+            )
+            .unwrap(),
+        1
+    );
+    fixture
+        .connection
+        .execute("DELETE FROM team_worktrees WHERE agent=?1", [agent])
+        .unwrap();
+    place
+}
+
+/// F10: a task pinned to a sub-agent that cleanup then retired is never failed. While its
+/// old record still waits in `team_retiring`, left behind or not, the task stays queued and
+/// nothing starts; once
+/// the record is gone the agent starts again under the same id and name in a new worktree
+/// on the current tip, with a fresh conversation, and gets the task.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_for_a_retired_sub_agent_waits_while_it_retires_then_starts_it_fresh_under_its_name() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    idle_stop(&fixture, WAKE_IDLE);
+    delegate_page(&fixture);
+    fixture.until(
+        &mut team,
+        "the sub-agent finishes, keeps its conversation and stops",
+        |f| {
+            subs(f).first().is_some_and(|id| {
+                f.agent_status(*id).0 == AgentStatus::Stopped
+                    && agent_conversation(f, *id).is_some()
+            })
+        },
+    );
+    let member = subs(&fixture)[0];
+    let (conversation, _) = agent_conversation(&fixture, member).unwrap();
+    let persona = names::name(&fixture.connection, member)
+        .unwrap()
+        .unwrap()
+        .persona;
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    assert_eq!(masters(&fixture.connection), [master]);
+    let mailbox = fixture.base.join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    assert!(!wake_call(&fixture, &mailbox, 1, &persona, "Add a footer to page.md.").1);
+    let task: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT task FROM team_task_pins WHERE agent=?1",
+            [member],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let place = retire_like_cleanup(&fixture, member);
+    let status = |f: &Fixture| -> String {
+        f.connection
+            .query_row("SELECT status FROM team_tasks WHERE id=?1", [task], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        status(&fixture),
+        "queued",
+        "the task waits while the agent retires"
+    );
+    assert_eq!(fixture.agent_status(member).0, AgentStatus::Stopped);
+    assert_eq!(launches(&fixture, member).len(), 1, "nothing started yet");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_retiring SET leftover=1 WHERE agent=?1",
+            [member],
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        status(&fixture),
+        "queued",
+        "a record left behind holds the task too, since its removal deletes what is at the path"
+    );
+    assert_eq!(launches(&fixture, member).len(), 1, "nothing started yet");
+
+    fixture
+        .connection
+        .execute("DELETE FROM team_retiring WHERE agent=?1", [member])
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the retired sub-agent starts again with the task",
+        |f| {
+            launches(f, member).len() == 2 && pasted(f, member).contains("Add a footer to page.md.")
+        },
+    );
+    assert_ne!(status(&fixture), "failed");
+    assert!(
+        !launches(&fixture, member)[1].contains("resume"),
+        "a fresh conversation: {:?}",
+        launches(&fixture, member)
+    );
+    assert!(
+        !launches(&fixture, member)[1].contains(&conversation),
+        "{:?}",
+        launches(&fixture, member)
+    );
+    assert_eq!(
+        subs(&fixture),
+        vec![member],
+        "no other sub-agent was started"
+    );
+    assert_eq!(
+        names::name(&fixture.connection, member)
+            .unwrap()
+            .unwrap()
+            .persona,
+        persona,
+        "the same name"
+    );
+    let (worktree, repository): (String, String) = fixture
+        .connection
+        .query_row(
+            "SELECT worktree,repository FROM team_worktrees WHERE agent=?1",
+            [member],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        PathBuf::from(&worktree),
+        place,
+        "a new worktree at the agent's own path"
+    );
+    assert!(place.is_dir());
+    let tip = git_text(Path::new(&repository), &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git_text(&place, &["rev-parse", "HEAD"]),
+        tip,
+        "the new worktree starts on the current tip"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// F10: whoever sent a task that started a retired sub-agent fresh is told once, its lead
+/// when it has one, so it briefs the agent again; with no lead and no live master no one is
+/// told, and an agent is never told about itself.
+#[test]
+fn a_fresh_start_of_a_retired_agent_is_told_to_the_task_s_lead() {
+    let fixture = Fixture::new(2);
+    let team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let member = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let notes = |to: i64| -> Vec<String> {
+        let mut statement = fixture
+            .connection
+            .prepare(
+                "SELECT body FROM coord_messages WHERE project=?1 AND to_agent=?2 AND kind='note' ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map(params![PROJECT, to], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    team.tell_restarted(&project, None, member).unwrap();
+    team.tell_restarted(&project, Some(member), member).unwrap();
+    assert!(
+        notes(member).is_empty(),
+        "no lead, no live master, never itself"
+    );
+    team.tell_restarted(&project, Some(lead), member).unwrap();
+    let name = names::name(&fixture.connection, member).unwrap();
+    assert_eq!(
+        notes(lead),
+        vec![super::restarted_note(&names::label(
+            AgentRole::Sub,
+            member,
+            name.as_ref()
+        ))]
+    );
+    assert!(notes(lead)[0].contains("brief it again in full"));
+}
+
 /// Starts the runtime on a one-agent keyless endpoint team with Codex messages set to
 /// Native only, hands it a task and waits until its tools-off sub-agent finished and
 /// stopped. Takes the fixture and the host. Returns the runtime and the sub-agent.
@@ -10165,10 +10510,17 @@ done
 /// `claude_access`. Takes the fixture. Returns the runtime.
 #[cfg(target_os = "macos")]
 fn piped_runtime(fixture: &Fixture) -> TeamRuntime {
+    piped_runtime_with(fixture, PIPED_CLAUDE)
+}
+
+/// A runtime with no terminal host, so Claude Code agents run piped, with the given Claude
+/// Code stand-in and `claude_access`. Takes the fixture and the script. Returns the runtime.
+#[cfg(target_os = "macos")]
+fn piped_runtime_with(fixture: &Fixture, script: &str) -> TeamRuntime {
     let bin = fixture.base.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let claude = bin.join("claude");
-    std::fs::write(&claude, PIPED_CLAUDE).unwrap();
+    std::fs::write(&claude, script).unwrap();
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
     let access = claude_access(fixture);
     TeamRuntime::open(
@@ -10179,6 +10531,155 @@ fn piped_runtime(fixture: &Fixture) -> TeamRuntime {
         TeamLimits::default(),
     )
     .unwrap()
+}
+
+/// What the block stand-ins reply (L6, F16): a free `DELEGATE` line and a quoted block the
+/// engine must not read, and one `crazyagent-task` block it reads.
+#[cfg(target_os = "macos")]
+const BLOCK_REPLY: &str = "Handing it out.\nDELEGATE: Write pear.txt\n> ```crazyagent-task\n> {\"task\": \"Write plum.txt\"}\n> ```\n```crazyagent-task\n{\"task\": \"Write apple.txt\", \"role\": \"apple-writer\"}\n```";
+
+/// A stand-in script whose every "Done." reply is `BLOCK_REPLY`, escaped for a JSON string
+/// inside its printf format. Takes the script. Returns it.
+#[cfg(target_os = "macos")]
+fn block_replying(script: &str) -> String {
+    let json = serde_json::to_string(BLOCK_REPLY).unwrap();
+    let inner = &json[1..json.len() - 1];
+    assert!(!inner.contains('\'') && !inner.contains('%'));
+    let changed = script.replace("Done.", &inner.replace('\\', "\\\\"));
+    assert_ne!(changed, script);
+    changed
+}
+
+/// Checks that a tools-off master's `BLOCK_REPLY` handed out exactly the block's task, as
+/// the master's own, with the role it gave, and nothing for the free line or the quote.
+/// Takes the fixture.
+#[cfg(target_os = "macos")]
+fn assert_block_delegated(fixture: &Fixture) {
+    let tasks: Vec<(String, String)> = fixture
+        .connection
+        .prepare("SELECT prompt,source FROM team_tasks WHERE project=?1 ORDER BY id")
+        .unwrap()
+        .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        tasks,
+        [("Write apple.txt".to_owned(), "master".to_owned())],
+        "only the block hands out work"
+    );
+    let role: String = fixture
+        .connection
+        .query_row(
+            "SELECT r.role FROM team_task_roles r JOIN team_tasks t ON t.id=r.task WHERE t.prompt='Write apple.txt'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(role, "apple-writer");
+}
+
+/// A tools-off master on Codex hands out work only through a `crazyagent-task` block (L6,
+/// F16, DEC-141): the block's task becomes a master task with its role, and a free
+/// `DELEGATE` line or a quoted block in the same reply hands out nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_off_codex_master_delegates_through_the_task_block_only() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(
+        &fixture,
+        &host,
+        &block_replying(RESUMING_CODEX),
+        TeamLimits::default(),
+    );
+    tell_master(&fixture, "Plan the fruit stand");
+    fixture.until(&mut team, "the Codex master answers", |f| {
+        master_replies(f) == 1
+    });
+    assert_block_delegated(&fixture);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// A tools-off live master's turn hands out work through the same block reader (L6, F16):
+/// only the block's task, with its role, and a note for a block it could not read.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_off_live_master_turn_hands_out_only_its_task_blocks() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    team.admit_reply_blocks(&project, BLOCK_REPLY, 1).unwrap();
+    assert_block_delegated(&fixture);
+    team.admit_reply_blocks(
+        &project,
+        &format!(
+            "{}\n{{\"task\": \"a\", \"extra\": 1}}\n```",
+            tool::BLOCK_FENCE
+        ),
+        2,
+    )
+    .unwrap();
+    assert_block_delegated(&fixture);
+    assert!(
+        fixture.note(&format!("{UNREAD_BLOCKS_NOTE}\n- {}", tool::BLOCK_INVALID)),
+        "{:#?}",
+        fixture.status().messages
+    );
+}
+
+/// A master with team tools on hands out work only with its tools: a `crazyagent-task`
+/// block in its reply is not read, and it and the owner get one team note saying so, on
+/// the configured and the live path alike; a reply with no block gets none (L6 review).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_master_s_task_block_is_not_read_and_gets_one_note() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let drop = fixture.base.join("no-drop").join(tool::DROP_FILE);
+    assert_eq!(
+        turn_proposals(true, &drop, BLOCK_REPLY),
+        (Vec::new(), vec![tool::BLOCK_TOOLS_ON])
+    );
+    assert_eq!(
+        turn_proposals(true, &drop, "Handing it out."),
+        (Vec::new(), Vec::new())
+    );
+    let mut team = fixture.runtime();
+    team.note_ignored_blocks(&project, "Handing it out.")
+        .unwrap();
+    assert!(!fixture.note(&format!("{UNREAD_BLOCKS_NOTE}\n- {}", tool::BLOCK_TOOLS_ON)));
+    team.note_ignored_blocks(&project, BLOCK_REPLY).unwrap();
+    assert!(
+        fixture.note(&format!("{UNREAD_BLOCKS_NOTE}\n- {}", tool::BLOCK_TOOLS_ON)),
+        "{:#?}",
+        fixture.status().messages
+    );
+    let tasks: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tasks, 0, "a tools-on master's block hands out nothing");
+}
+
+/// A tools-off master on Claude Code hands out work the same way (L6, F16, DEC-141).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_off_claude_code_master_delegates_through_the_task_block_only() {
+    let fixture = Fixture::new(1);
+    set_master(&fixture, "claude-code");
+    let mut team = piped_runtime_with(&fixture, &block_replying(PIPED_CLAUDE));
+    tell_master(&fixture, "Plan the fruit stand");
+    fixture.until(&mut team, "the Claude Code master answers", |f| {
+        master_replies(f) == 1
+    });
+    assert_block_delegated(&fixture);
+    team.shutdown().unwrap();
 }
 
 /// The fixture's edited instructions with enough further sections to pass the 32 KiB a piped
@@ -11466,6 +11967,8 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -13699,7 +14202,14 @@ fn assert_live_master_instructions(text: &str) {
         text.contains("Wait for the owner's first line before you start any work."),
         "{text}"
     );
-    assert!(text.contains("DELEGATE: <the task>"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "{}\n{{\"task\": \"<the task>\", \"harness\": \"<harness>\", \"role\": \"<short-role>\"}}\n```",
+            tool::BLOCK_FENCE
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("DELEGATE"), "{text}");
     assert!(
         text.contains(crate::launch_context::MASTER_LANDING_RULES),
         "{text}"
@@ -14177,6 +14687,8 @@ fn agent_at_level_running(
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -14401,6 +14913,8 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -14459,7 +14973,9 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -14511,6 +15027,8 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -14660,6 +15178,8 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -14721,6 +15241,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         access: AgentAccess::Full,
         toolchains: Vec::new(),
         network: crate::sandbox::policy::AgentNetwork::Open,
+        grants: Vec::new(),
         layout,
         git_identity: None,
         limits: LaunchLimits::default(),
@@ -16729,6 +17250,7 @@ fn between_turns(
         access: AgentAccess::Sandboxed,
         network: crate::sandbox::policy::AgentNetwork::Open,
         toolchains: None,
+        access_grants: Vec::new(),
         checked: None,
         narrowed: None,
         ran_before: Duration::ZERO,
@@ -18578,6 +19100,7 @@ fn only_a_launch_with_no_conversation_to_continue_starts_its_worker_fresh() {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -22344,6 +22867,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         access: AgentAccess::OwnBranch,
         network: crate::sandbox::policy::AgentNetwork::Open,
+        grants: Vec::new(),
         layout: Layout::Linked,
         git_identity: None,
         limits: LaunchLimits::default(),
@@ -23205,6 +23729,7 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -23286,6 +23811,7 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -23542,6 +24068,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         };
         let (orders, ordered) = channel();
         let (reports, _reported) = channel();
@@ -23607,6 +24134,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
+            grants: Vec::new(),
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
@@ -24066,6 +24594,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         sandbox_profile: PathBuf::from("/private/tmp/agent-1.sb"),
         access: AgentAccess::Sandboxed,
         network: crate::sandbox::policy::AgentNetwork::Open,
+        grants: Vec::new(),
         layout: Layout::Linked,
         git_identity: None,
         limits: LaunchLimits::default(),
@@ -25550,6 +26079,8 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
                     ide_agent_files: Default::default(),
+                    shared_folders: Default::default(),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -31257,6 +31788,167 @@ fn a_project_hold_is_in_the_holding_projects_paused_set_only() {
     );
 }
 
+/// The policy F08 rows save: Sandboxed with the given allowed extras and Apply access
+/// changes choice. Input: the grants and the choice. Output: the policy.
+fn granted_policy(
+    grants: Vec<AccessGrant>,
+    apply_changes: AccessApply,
+) -> crate::sandbox::policy::AgentPolicy {
+    crate::sandbox::policy::AgentPolicy {
+        grants,
+        apply_changes,
+        ..Default::default()
+    }
+}
+
+/// A worker between turns that holds no toolchain and the saved network, so only what an
+/// F08 row changes widens or narrows it, with the receiver of its orders. Input: the
+/// project and the role. Output: the worker and its orders.
+fn held_worker(project: &ProjectId, role: AgentRole) -> (Worker, Receiver<Order>) {
+    let mut worker = between_turns(project, role, true, false);
+    let (order, orders) = channel();
+    worker.orders = order;
+    worker.toolchains = Some(Vec::new());
+    (worker, orders)
+}
+
+/// F08 (L2): a grant the owner adds while the live master runs is a widening; under When
+/// idle the master keeps working through an open turn and stops at its next idle point as
+/// a planned restart that resumes its own conversation, with one note before and one after.
+#[test]
+fn a_grant_added_under_when_idle_restarts_the_live_master_at_its_next_idle_point() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let (mut master, orders) = held_worker(&project, AgentRole::Master);
+    master.live = true;
+    master.turn_started = Some(now_ms());
+    team.workers.insert(7, master);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_live_masters SET agent=7 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &granted_policy(
+            vec![AccessGrant::Port { port: 8080 }],
+            AccessApply::WhenIdle,
+        ),
+    )
+    .unwrap();
+    let notes = |text: &str| {
+        fixture
+            .status()
+            .messages
+            .iter()
+            .filter(|message| message.text == text)
+            .count()
+    };
+
+    team.retire_narrowed(&fixture.setup);
+    team.restart_widened(&fixture.setup).unwrap();
+    assert!(!team.workers[&7].stopping, "an open turn is not cut");
+    assert!(team.access_restarts.contains_key(&7));
+    assert!(orders.try_recv().is_err());
+    assert_eq!(notes(ACCESS_WIDER_WHEN_IDLE), 1);
+
+    team.workers.get_mut(&7).unwrap().turn_started = None;
+    team.retire_narrowed(&fixture.setup);
+    team.restart_widened(&fixture.setup).unwrap();
+    assert!(team.workers[&7].stopping, "the idle master stops");
+    assert!(matches!(orders.try_recv(), Ok(Order::Stop)));
+    assert!(team.master_restarts.contains(&project), "a planned restart");
+    assert!(!team.access_restarts.contains_key(&7));
+    assert_eq!(team.workers[&7].narrowed, None, "a widening is no refusal");
+    assert_eq!(
+        notes(ACCESS_WIDER_WHEN_IDLE),
+        1,
+        "the saved widening is noted once"
+    );
+    assert_eq!(notes(ACCESS_MASTER_RESTARTED), 1);
+}
+
+/// F08 (L2): under At its next start a widening stops no running agent; the team gets one
+/// note and the agent keeps the profile it started with.
+#[test]
+fn a_grant_added_under_at_next_start_leaves_running_agents_with_one_note() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let (sub, orders) = held_worker(&project, AgentRole::Sub);
+    team.workers.insert(8, sub);
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &granted_policy(vec![AccessGrant::TempFolder], AccessApply::NextStart),
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        team.retire_narrowed(&fixture.setup);
+        team.restart_widened(&fixture.setup).unwrap();
+    }
+    assert!(!team.workers[&8].stopping);
+    assert!(orders.try_recv().is_err());
+    assert!(team.access_restarts.is_empty());
+    assert!(team.master_restarts.is_empty());
+    let noted = fixture
+        .status()
+        .messages
+        .iter()
+        .filter(|message| message.text == ACCESS_WIDER_NEXT_START)
+        .count();
+    assert_eq!(noted, 1);
+}
+
+/// F08 (L2): removing a grant is a narrowing whatever Apply access changes says: every
+/// agent whose profile holds it stops at once, mid turn too, held with its own reason, and
+/// an agent that never held it keeps running.
+#[test]
+fn a_removed_grant_stops_each_agent_holding_it_at_once() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let port = AccessGrant::Port { port: 8080 };
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &granted_policy(vec![port.clone()], AccessApply::NextStart),
+    )
+    .unwrap();
+    let (mut holder, orders) = held_worker(&project, AgentRole::Sub);
+    holder.access_grants = vec![port];
+    holder.own_turn = Some(now_ms());
+    team.workers.insert(9, holder);
+    let (other, other_orders) = held_worker(&project, AgentRole::Sub);
+    team.workers.insert(10, other);
+    team.retire_narrowed(&fixture.setup);
+    assert!(
+        !team.workers[&9].stopping,
+        "a held grant still saved keeps it running"
+    );
+
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &granted_policy(Vec::new(), AccessApply::NextStart),
+    )
+    .unwrap();
+    team.retire_narrowed(&fixture.setup);
+    let holder = &team.workers[&9];
+    assert!(holder.stopping && holder.held);
+    assert_eq!(holder.narrowed, Some(Narrowed::Revoked));
+    assert!(Narrowed::Revoked.problem().contains("agent_grant_revoked"));
+    assert!(matches!(orders.try_recv(), Ok(Order::Stop)));
+    assert!(!team.workers[&10].stopping);
+    assert!(other_orders.try_recv().is_err());
+}
+
 #[cfg(target_os = "macos")]
 const RUN_DAY_MS: i64 = 86_400_000;
 
@@ -31326,6 +32018,30 @@ fn team_message(fixture: &Fixture, author: MessageAuthor, text: &str, state: Mes
     id
 }
 
+/// A master's proposal of one Codex task, as its delegate tool or a task block records it.
+/// Input: the task. Output: the proposal.
+#[cfg(target_os = "macos")]
+fn codex_task(task: &str) -> tool::Proposal {
+    tool::Proposal::Delegate(crate::team::Delegation {
+        harness: Some("codex".into()),
+        prompt: task.into(),
+        role: None,
+    })
+}
+
+/// A tools-off master's reply that hands each task to Codex in its own `crazyagent-task`
+/// block (L6). Input: the tasks. Output: the reply text.
+#[cfg(target_os = "macos")]
+fn codex_blocks(tasks: &[&str]) -> String {
+    assert!(!tasks.is_empty());
+    let mut reply = String::from("On it.");
+    for task in tasks {
+        let block = serde_json::json!({"task": task, "harness": "codex"});
+        reply.push_str(&format!("\n{}\n{block}\n```", tool::BLOCK_FENCE));
+    }
+    reply
+}
+
 /// Counts the tasks the master handed over. Input: the fixture. Output: the count.
 #[cfg(target_os = "macos")]
 fn handed_over(fixture: &Fixture) -> i64 {
@@ -31351,10 +32067,11 @@ fn rounds_row(max: Option<u8>) {
         team.finish_message(
             &project,
             answering,
-            &format!("On it.\nDELEGATE codex: Step {round}"),
+            "On it.",
             TurnEnd::Success,
             None,
-            vec![],
+            vec![codex_task(&format!("Step {round}"))],
+            &[],
         )
         .unwrap();
         let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
@@ -31444,10 +32161,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         first,
-        "DELEGATE codex: Step 0",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Step 0")],
+        &[],
     )
     .unwrap();
     let results = team_message(
@@ -31459,10 +32177,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         results,
-        "DELEGATE codex: Step 1",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Step 1")],
+        &[],
     )
     .unwrap();
     assert_eq!(handed_over(&fixture), 1, "the limit held the second round");
@@ -31477,10 +32196,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         kept,
-        "DELEGATE codex: Step 1",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Step 1")],
+        &[],
     )
     .unwrap();
     for round in 2..6 {
@@ -31493,10 +32213,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
         team.finish_message(
             &project,
             results,
-            &format!("DELEGATE codex: Step {round}"),
+            "On it.",
             TurnEnd::Success,
             None,
-            vec![],
+            vec![codex_task(&format!("Step {round}"))],
+            &[],
         )
         .unwrap();
     }
@@ -31510,10 +32231,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         next,
-        "DELEGATE codex: Footer",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Footer")],
+        &[],
     )
     .unwrap();
     let results = team_message(
@@ -31525,10 +32247,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         results,
-        "DELEGATE codex: Footer again",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Footer again")],
+        &[],
     )
     .unwrap();
     assert_eq!(handed_over(&fixture), 7, "the new goal has the limit back");
@@ -31638,10 +32361,10 @@ fn fan_out_row(max: u8) {
     );
 }
 
-/// A tools-off live master's reply lines are one round of the owner's goal per turn (S1 r2
-/// L1): under 1 round its first turn's two lines are handed over under that turn's key, its
-/// next turn's line is refused with one note that names keep going, and after the owner's
-/// keep going a later turn's line is handed over under its own key.
+/// A tools-off live master's task blocks are one round of the owner's goal per turn (S1 r2
+/// L1, L6): under 1 round its first turn's two blocks are handed over under that turn's key,
+/// its next turn's block is refused with one note that names keep going, and after the
+/// owner's keep going a later turn's block is handed over under its own key.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_tools_off_live_masters_reply_lines_past_the_round_limit_wait_for_keep_going() {
@@ -31650,12 +32373,8 @@ fn a_tools_off_live_masters_reply_lines_past_the_round_limit_wait_for_keep_going
     let project = fixture.setup.project_id.clone();
     let mut team = fixture.runtime();
     owner_says(&fixture, "Build the page");
-    team.admit_reply_lines(
-        &project,
-        "On it.\nDELEGATE codex: Frontend\nDELEGATE codex: Backend",
-        1,
-    )
-    .unwrap();
+    team.admit_reply_blocks(&project, &codex_blocks(&["Frontend", "Backend"]), 1)
+        .unwrap();
     assert_eq!(handed_over(&fixture), 2);
     assert_eq!(
         count(
@@ -31663,17 +32382,17 @@ fn a_tools_off_live_masters_reply_lines_past_the_round_limit_wait_for_keep_going
             "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND source='master' AND turn=-1"
         ),
         2,
-        "both lines of turn 1 carry its key"
+        "both blocks of turn 1 carry its key"
     );
     let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
     assert_eq!(rounds.used, 1);
     assert!(!rounds.open());
-    team.admit_reply_lines(&project, "DELEGATE codex: Tests", 2)
+    team.admit_reply_blocks(&project, &codex_blocks(&["Tests"]), 2)
         .unwrap();
     assert_eq!(handed_over(&fixture), 2, "the limit held turn 2");
     assert_eq!(noted(&fixture, &rounds.limit_note()), 1);
     owner_says(&fixture, "keep going");
-    team.admit_reply_lines(&project, "DELEGATE codex: Tests", 3)
+    team.admit_reply_blocks(&project, &codex_blocks(&["Tests"]), 3)
         .unwrap();
     assert_eq!(handed_over(&fixture), 3, "keep going lets turn 3 hand over");
     assert_eq!(
@@ -32033,4 +32752,25 @@ fn a_restarted_engine_gives_the_adopted_live_master_a_fresh_run_time() {
         0
     );
     again.shutdown().unwrap();
+}
+
+/// SQLITE-WAL-UNCHECKED: the team runtime refuses a store that answers its WAL request by keeping
+/// a rollback journal, here an anonymous temporary database, with one plain code instead of
+/// running the team on it.
+#[test]
+fn the_team_runtime_refuses_a_store_that_keeps_a_rollback_journal() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let state = root.path().canonicalize().unwrap().join("team");
+    let opened = TeamRuntime::open(
+        Path::new(""),
+        &state,
+        BTreeMap::new(),
+        Box::new(|| None::<ModelAccess>),
+        TeamLimits::default(),
+    );
+    match opened {
+        Err(EngineError(code)) => assert_eq!(code, "database_wal_refused: delete"),
+        Ok(_) => panic!("the team runtime opened a store that keeps a rollback journal"),
+    }
 }

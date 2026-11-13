@@ -59,7 +59,7 @@ async fn first_run_saves_the_profile_picks_the_home_reads_setup_and_reaches_home
     for dependency in &status.dependencies {
         assert!(!dependency.label.is_empty());
         match &dependency.state {
-            DependencyState::Missing => {}
+            DependencyState::Missing { .. } => {}
             DependencyState::Found { version } => {
                 assert!(!version.as_str().is_empty(), "{dependency:?}")
             }

@@ -291,7 +291,7 @@ fn pack_word(state: &PackState) -> &'static str {
 fn tool_word(state: &DependencyState) -> String {
     match state {
         DependencyState::Checking => "Checking".into(),
-        DependencyState::Missing => "Not installed".into(),
+        DependencyState::Missing { .. } => "Not installed".into(),
         DependencyState::Found { version } => format!("Found {}", version.as_str()),
         DependencyState::Installing => "Installing".into(),
         DependencyState::Installed { version } => format!("Installed {}", version.as_str()),
@@ -372,7 +372,7 @@ enum Sent {
 
 /// The setup page: the tools CrazyAgent needs on this machine and the default
 /// skills and plugins pack, with ticks. First run shows it after the projects
-/// home folder: Enter installs and continues to Home, and continuing past the
+/// home folder: Enter installs and continues to the Accounts step, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
 /// remove, the projects home folder, the GitHub account, the Linux sockets
 /// setting, when finished agents' worktrees go, what quitting does to team agents and
@@ -562,7 +562,7 @@ impl AppSetup {
 
     fn run(&mut self, ctx: &mut Ctx) -> Flow {
         let running = match &self.setup {
-            Load::NotReady if self.first_run => return Flow::Replace(open(&Place::Home, ctx)),
+            Load::NotReady if self.first_run => return Self::next_step(ctx),
             Load::Failed(_) => {
                 self.reload(ctx);
                 return Flow::Handled;
@@ -599,7 +599,7 @@ impl AppSetup {
             .filter(|tool| {
                 matches!(
                     tool.state,
-                    DependencyState::Missing | DependencyState::Failed { .. }
+                    DependencyState::Missing { .. } | DependencyState::Failed { .. }
                 )
             })
             .count();
@@ -643,7 +643,7 @@ impl AppSetup {
         let problems = self.problems();
         if problems == 0 {
             if self.first_run {
-                return Flow::Replace(open(&Place::Home, ctx));
+                return Self::next_step(ctx);
             }
             ctx.say(Message::success(
                 "Setup finished.",
@@ -1452,8 +1452,14 @@ impl AppSetup {
         }
     }
 
+    /// Leaves first run's Setup for the Accounts step, the only way first run
+    /// leaves this page. Input: the context. Output: the flow that replaces Setup.
+    fn next_step(ctx: &mut Ctx) -> Flow {
+        Flow::Replace(open(&Place::FirstRunAccounts, ctx))
+    }
+
     /// True when no setup run is going and no change waits for the engine.
-    /// Input: none. Output: whether first run may leave for Home.
+    /// Input: none. Output: whether first run may leave for its Accounts step.
     fn quiet(&self) -> bool {
         !self.started && self.sent.is_none()
     }
@@ -1490,10 +1496,17 @@ impl AppSetup {
                     glyphs,
                 ),
             ]));
-            if let DependencyState::Failed { reason } = &tool.state {
+            let detail = match &tool.state {
+                DependencyState::Failed { reason } => Some(setup_reason(reason)),
+                DependencyState::Missing { line } if !line.is_empty() => {
+                    Some(super::new_project_view::printable(line.clone()))
+                }
+                _ => None,
+            };
+            if let Some(detail) = detail {
                 let gap = " ".repeat(2 + TOOL_WIDTH + 2);
                 lines.extend(
-                    wrap(&setup_reason(reason), rest).into_iter().map(|part| {
+                    wrap(&detail, rest).into_iter().map(|part| {
                         join([Line::raw(gap.clone()), styled(part, Role::Muted, theme)])
                     }),
                 );
@@ -1964,6 +1977,10 @@ fn ask_skip(lines: usize, ask_top: usize, height: usize) -> usize {
 }
 
 impl Screen for AppSetup {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         if self.first_run {
             vec!["Setup".into()]
@@ -2089,9 +2106,7 @@ impl Screen for AppSetup {
                 self.reload(ctx);
                 Flow::Handled
             }
-            Key::Char('c') if self.first_run && self.quiet() && checked => {
-                Flow::Replace(open(&Place::Home, ctx))
-            }
+            Key::Char('c') if self.first_run && self.quiet() && checked => Self::next_step(ctx),
             Key::Char('d') if !self.first_run => {
                 self.ask_remove(ctx);
                 Flow::Handled

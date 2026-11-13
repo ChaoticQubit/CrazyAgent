@@ -229,23 +229,58 @@ pub fn brief(
     Ok((text, with_competitors))
 }
 
-/// What a run says when its reply named tabs it could not use: too long, blank, cut off
-/// or refused by the tab's file. Input: how many. Output: the line, none for zero.
-fn left_note(left: usize) -> Option<String> {
-    let note = match left {
-        0 => return None,
-        1 => "1 tab in the reply could not be used and stayed as it was".to_owned(),
-        more => format!("{more} tabs in the reply could not be used and stayed as they were"),
-    };
-    assert!(note.len() <= FAILURE_BYTES_MAX);
+/// Why an asked tab a reply left out was not written.
+const LEFT_OUT: &str = "left out of the reply";
+
+/// Why the tab file refused a tab's text, by the refusal code. Input: the code. Output: the
+/// words, to follow "was" or "were".
+fn refused_why(code: &str) -> &'static str {
+    match code {
+        super::TAB_TOO_LARGE => "too long for a tab",
+        super::TAB_EMPTY => "blank in the reply",
+        super::TAB_CHANGED => "changed in the project during the run",
+        _ => "not writable in the project folder",
+    }
+}
+
+/// One line naming each asked tab a run did not write and why, the tabs of one reason
+/// together, in tab order. Input: each such tab with its reason. Output: the line within
+/// [`FAILURE_BYTES_MAX`], none when every asked tab was taken.
+fn missed_note(missed: &[(Tab, &'static str)]) -> Option<String> {
+    let mut reasons: Vec<&'static str> = Vec::new();
+    for &(_, why) in missed {
+        if !reasons.contains(&why) {
+            reasons.push(why);
+        }
+    }
+    let mut sentences: Vec<String> = Vec::with_capacity(reasons.len());
+    for why in reasons {
+        let names: Vec<&str> = missed
+            .iter()
+            .filter(|&&(_, reason)| reason == why)
+            .map(|&(tab, _)| tab.label())
+            .collect();
+        let sentence = match names.split_last() {
+            Some((last, [])) => format!("{last} was {why}."),
+            Some((last, rest)) => format!("{} and {last} were {why}.", rest.join(", ")),
+            None => unreachable!("every reason comes from a missed tab"),
+        };
+        sentences.push(sentence);
+    }
+    if sentences.is_empty() {
+        return None;
+    }
+    let note = clipped(sentences.join(" "), FAILURE_BYTES_MAX);
+    assert!(!note.is_empty() && note.len() <= FAILURE_BYTES_MAX);
     Some(note)
 }
 
-/// Offers the tabs of a reply. Inputs: the connection, the project, its folder, the reply
-/// and whether competitor research was in the evidence (without it a Competitors tab in
-/// the reply is dropped). Output: Ok when a tab was written, proposed or already the same,
-/// with a line when the reply named more tabs than could be used, else the words saying
-/// why the run failed.
+/// Offers the tabs of a reply, in tab order. Inputs: the connection, the project, its
+/// folder, the reply and whether competitor research was in the evidence (without it the
+/// Competitors tab is not asked for and a Competitors tab in the reply is dropped). Output:
+/// Ok when a tab was written, proposed or already the same, with a line naming each asked
+/// tab that was not and why (left out of the reply, blank, cut off, too long, or refused
+/// by its file), else the words saying why the run failed.
 fn offered(
     db: &Connection,
     project: &ProjectId,
@@ -264,33 +299,46 @@ fn offered(
     if tabs.is_empty() {
         return Err(NO_TABS);
     }
+    let named = named_tabs(reply);
     let mut taken = 0usize;
-    for (tab, text) in &tabs {
-        let outcome: Result<Offered, EngineError> = offer(db, project, folder, *tab, text);
+    let mut missed: Vec<(Tab, &'static str)> = Vec::new();
+    for tab in Tab::ALL.into_iter().filter(asked) {
+        let Some((_, text)) = tabs.iter().find(|(held, _)| *held == tab) else {
+            let why = if named.contains(&tab) {
+                super::pack::dropped_why(reply, tab)
+            } else {
+                LEFT_OUT
+            };
+            missed.push((tab, why));
+            continue;
+        };
+        let outcome: Result<Offered, EngineError> = offer(db, project, folder, tab, text);
         match outcome {
             Ok(_) => taken += 1,
-            Err(error) => eprintln!(
-                "project_overview_tab_not_offered cause={}",
-                crate::protocol::plain_code(&error.0)
-            ),
+            Err(error) => {
+                eprintln!(
+                    "project_overview_tab_not_offered cause={}",
+                    crate::protocol::plain_code(&error.0)
+                );
+                missed.push((tab, refused_why(&error.0)));
+            }
         }
     }
-    assert!(taken <= tabs.len());
+    assert_eq!(
+        taken + missed.len(),
+        Tab::ALL.into_iter().filter(asked).count(),
+        "every asked tab is taken or named"
+    );
     if taken == 0 {
         return Err(NOT_WRITTEN);
     }
-    let named = named_tabs(reply)
-        .into_iter()
-        .filter(|tab| asked(tab))
-        .count();
-    assert!(taken <= named, "every tab taken was named in the reply");
-    Ok(left_note(named - taken))
+    Ok(missed_note(&missed))
 }
 
 /// Ends the run a claim names, and only that run. The run is closed first, by its claim:
 /// a run that was closed for its time on the steady clock, or whose project is gone, ends
 /// nothing and writes no tab. A reply's tabs are offered only after that, then the time
-/// is stored, with a line when some named tab could not be used; a failure stores one
+/// is stored, with a line naming each asked tab that was not written; a failure stores one
 /// plain line and is not retried until the next landing or Refresh; a skip only closes
 /// the run. A reply whose offers do not finish leaves the run closed as unfinished.
 /// Inputs: the connection, the project, its folder, the claim, how the run ended and now.
@@ -384,6 +432,52 @@ pub fn requeue(
         .map_err(unavailable)?;
     assert!(changed <= 1);
     Ok(changed == 1)
+}
+
+/// Puts the run holding `claim` back to wait for an account, with `words` as its line: no
+/// longer running, stale again and due at `due_ms`, so the line stays while no account of
+/// the project's pool can run it and the first run that gets one replaces it. A run that
+/// was closed or replaced changes nothing. Inputs: the connection, the project, the claim,
+/// the words and when to try again. Output: whether this run was the one in flight, or
+/// `overview_unavailable`.
+pub fn wait_for_account(
+    db: &Connection,
+    project: &ProjectId,
+    claim: Claim,
+    words: &str,
+    due_ms: i64,
+) -> Result<bool, EngineError> {
+    assert!(due_ms >= 0 && claim.ms() >= 0);
+    let changed = db
+        .execute(
+            "UPDATE project_overview SET running_ms=NULL, stale=1, due_ms=?3, failure=?4
+             WHERE project=?1 AND running_ms=?2",
+            params![project.as_str(), claim.ms(), due_ms, line(words)],
+        )
+        .map_err(unavailable)?;
+    assert!(changed <= 1);
+    Ok(changed == 1)
+}
+
+/// Drops the no-account line of the run holding `claim` once that run got an account, so
+/// the line never stands beside the run that answers it; any other line stays until the
+/// run ends. Inputs: the connection, the project and the claim. Output: whether a line
+/// went, or `overview_unavailable`.
+pub fn account_found(
+    db: &Connection,
+    project: &ProjectId,
+    claim: Claim,
+) -> Result<bool, EngineError> {
+    assert!(claim.ms() >= 0);
+    let cleared = db
+        .execute(
+            "UPDATE project_overview SET failure=NULL
+             WHERE project=?1 AND running_ms=?2 AND failure=?3",
+            params![project.as_str(), claim.ms(), line(NO_ACCOUNT)],
+        )
+        .map_err(unavailable)?;
+    assert!(cleared <= 1);
+    Ok(cleared == 1)
 }
 
 /// Makes the Overview tables and closes every run an engine that stopped left open: a run

@@ -48,8 +48,6 @@ pub const STATUS_MESSAGES_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = 80;
 pub const STATUS_REPLY_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 4096;
 const STATUS_TEXT_CAPS: [usize; 8] = [8192, 4096, 2048, 1024, 512, 256, 128, 64];
-pub const DELEGATE_MARKER: &str = "DELEGATE";
-pub const WAKE_MARKER: &str = "WAKE";
 pub const WAKE_NAME_BYTES_MAX: usize = 64;
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
@@ -348,10 +346,10 @@ impl DelegationPath {
     pub fn label(self) -> &'static str {
         match self {
             Self::Reply => {
-                "Asks for sub-agents in its reply; the engine checks the team plan and creates the tasks"
+                "Writes a crazyagent-task block in its reply; the engine checks the team plan and creates the tasks"
             }
             Self::Tool => {
-                "Calls the engine's delegate tool or asks in its reply; the engine checks the team plan and creates the tasks"
+                "Calls the engine's team tools; the engine checks the team plan and creates the tasks"
             }
             Self::Unavailable => {
                 "Cannot lead sub-agents yet; you can still hand tasks to sub-agents yourself"
@@ -792,6 +790,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         mode: ReuseIdle,
     },
+    LandingMode {
+        project_id: ProjectId,
+        mode: LandingMode,
+    },
     NewFolderLimit {
         project_id: ProjectId,
         files: u32,
@@ -883,16 +885,20 @@ pub struct HarnessCoordination {
     pub displays: Vec<crate::coord::settings::TerminalDisplay>,
 }
 
-/// A project's coordination settings (DEC-104) with every harness kind's mode and delivery.
+/// A project's coordination settings (DEC-104) with every harness kind's mode and delivery,
+/// and its heavy lane: the heavy commands that run and wait (F28). An engine from before F28
+/// sends no lane, which reads as empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinationView {
     pub settings: crate::coord::settings::CoordSettings,
     pub harnesses: Vec<HarnessCoordination>,
+    #[serde(default)]
+    pub lane: crate::coord::lane::LaneView,
 }
 
-/// Reads a project's coordination settings and each harness kind's sub-agent mode and delivery,
-/// with the plan defaults for anything the owner never set.
+/// Reads a project's coordination settings, each harness kind's sub-agent mode and delivery,
+/// with the plan defaults for anything the owner never set, and its heavy lane (F28).
 /// Takes a connection and the project. Returns the view, one row per harness kind.
 pub fn coordination(
     connection: &Connection,
@@ -912,6 +918,7 @@ pub fn coordination(
     let view = CoordinationView {
         settings: settings::read(connection, project)?,
         harnesses,
+        lane: crate::coord::lane::view(connection, project)?,
     };
     assert!(
         view.harnesses
@@ -1084,6 +1091,7 @@ impl TeamAction {
             | Self::TerminalsPerWindow { .. }
             | Self::CatchUpMain { .. }
             | Self::ReuseIdle { .. }
+            | Self::LandingMode { .. }
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
@@ -1121,6 +1129,7 @@ impl TeamAction {
             | Self::MasterLiveTerminal { project_id, .. }
             | Self::CatchUpMain { project_id, .. }
             | Self::ReuseIdle { project_id, .. }
+            | Self::LandingMode { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
             | Self::TerminalsPerWindow { project_id, .. }
             | Self::MessageSettings { project_id, .. }
@@ -1397,7 +1406,8 @@ pub fn resumes_on(pool: &[TeamAccount], picked: &TeamAccount, kept: &str) -> boo
                 .any(|account| account.connection.as_str() == kept && subscription(account)))
 }
 
-/// One task the master asked for in its reply, with the role handle it gave the job, if any.
+/// One task the master asked for with its `delegate` tool or a `crazyagent-task` block (L6),
+/// with the role handle it gave the job, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delegation {
     pub harness: Option<String>,
@@ -1406,88 +1416,13 @@ pub struct Delegation {
     pub role: Option<String>,
 }
 
-/// Reads delegation lines from a master reply: `DELEGATE: task` or `DELEGATE harness: task`.
-/// Takes the reply text; list bullets, quotes and backticks around a line are ignored.
-/// Returns at most eight delegations whose task text is within bounds.
-pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
-    let mut found = Vec::new();
-    for line in reply.lines() {
-        if found.len() == DELEGATIONS_PER_REPLY_MAX {
-            break;
-        }
-        let line = reply_line(line);
-        let Some(head) = line.get(..DELEGATE_MARKER.len()) else {
-            continue;
-        };
-        if !head.eq_ignore_ascii_case(DELEGATE_MARKER) {
-            continue;
-        }
-        let Some((target, task)) = line[DELEGATE_MARKER.len()..].split_once(':') else {
-            continue;
-        };
-        if let Some(delegation) = delegation(target, task.trim().trim_matches('`')) {
-            found.push(delegation);
-        }
-    }
-    assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
-    found
-}
-
-/// Strips the list bullets, quotes and backticks a model puts around a reply line.
-/// Takes the line. Returns its text.
-fn reply_line(line: &str) -> &str {
-    line.trim()
-        .trim_start_matches(|c: char| {
-            c == '-' || c == '*' || c == '>' || c == '`' || c.is_ascii_digit() || c == '.'
-        })
-        .trim()
-        .trim_end_matches('`')
-        .trim()
-}
-
-/// One finished sub-agent a master that is not live asked in its reply to wake (WK-R5): the
-/// name or number it gave and the text for the agent's next task.
+/// One finished sub-agent a master that is not live asked to wake (WK-R5), with its `wake`
+/// tool or a `crazyagent-task` block (L6): the name or number it gave and the text for the
+/// agent's next task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WakeLine {
     pub agent: String,
     pub text: String,
-}
-
-/// Reads wake lines from a master reply: `WAKE <name or Sub-agent number>: <text>`.
-/// Takes the reply text; list bullets, quotes and backticks around a line are ignored.
-/// Returns at most eight wakes, each with a name of up to `WAKE_NAME_BYTES_MAX` bytes and a
-/// task text within bounds.
-pub fn parse_wakes(reply: &str) -> Vec<WakeLine> {
-    let mut found = Vec::new();
-    for line in reply.lines() {
-        if found.len() == DELEGATIONS_PER_REPLY_MAX {
-            break;
-        }
-        let line = reply_line(line);
-        let Some(head) = line.get(..WAKE_MARKER.len()) else {
-            continue;
-        };
-        let rest = &line[WAKE_MARKER.len()..];
-        if !head.eq_ignore_ascii_case(WAKE_MARKER) || !rest.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let Some((agent, text)) = rest.split_once(':') else {
-            continue;
-        };
-        let (agent, text) = (agent.trim(), text.trim().trim_matches('`').trim());
-        if agent.is_empty()
-            || agent.len() > WAKE_NAME_BYTES_MAX
-            || !text_valid(text, TASK_PROMPT_BYTES_MAX)
-        {
-            continue;
-        }
-        found.push(WakeLine {
-            agent: agent.to_owned(),
-            text: text.to_owned(),
-        });
-    }
-    assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
-    found
 }
 
 fn delegation(target: &str, task: &str) -> Option<Delegation> {
@@ -1674,6 +1609,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_reuse_idle (
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('on','off'))
+            );
+            CREATE TABLE IF NOT EXISTS team_landing_mode (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('squash','merge'))
             );
             CREATE TABLE IF NOT EXISTS team_session_switches (
                 session TEXT PRIMARY KEY,
@@ -2785,6 +2724,10 @@ fn perform(
             set_reuse_idle(tx, project, *mode)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::LandingMode { mode, .. } => {
+            set_landing_mode(tx, project, *mode)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::NewFolderLimit { files, .. } => {
             tx.execute(
                 "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,?2)
@@ -2827,7 +2770,11 @@ fn perform(
             if !settings_write(tx, project, *version)? {
                 return Ok(rejected(STALE_CODE));
             }
+            let retry = *on && master::switch(tx, project)?.0 == Some(true);
             master::set_live(tx, project, *on)?;
+            if retry {
+                master::ask_retry(tx, project)?;
+            }
             Ok(Outcome::Applied)
         }
         TeamAction::Pause { .. } => {
@@ -3321,7 +3268,8 @@ fn master_reply(
         .map_err(error)
 }
 
-/// Lists the sub-agent tasks a master reply proposed, each with the task handed off for it.
+/// Lists the sub-agent tasks a master reply proposed in its `crazyagent-task` blocks, read
+/// by `tool::reply_blocks`, each with the task handed off for it.
 /// Takes a connection, the project, the master reply id and its text.
 /// Returns at most eight steps in reply order; equal prompts match tasks in creation order.
 pub fn plan_steps(
@@ -3344,8 +3292,15 @@ pub fn plan_steps(
         .map(|task| task.map(Some))
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let steps: Vec<PlanStep> = parse_delegations(text)
-        .into_iter()
+    let delegations =
+        tool::reply_blocks(text)
+            .0
+            .into_iter()
+            .filter_map(|proposed| match proposed {
+                tool::Proposal::Delegate(found) => Some(found),
+                tool::Proposal::Wake(_) => None,
+            });
+    let steps: Vec<PlanStep> = delegations
         .enumerate()
         .map(|(step, delegation)| PlanStep {
             reply,
@@ -3616,6 +3571,8 @@ pub struct TeamStatus {
     pub catch_up_main: CatchUpMain,
     #[serde(default)]
     pub reuse_idle: ReuseIdle,
+    #[serde(default)]
+    pub landing_mode: LandingMode,
     #[serde(default = "new_folder_default")]
     pub new_folder_files_max: u32,
     #[serde(default)]
@@ -4689,6 +4646,83 @@ pub fn set_reuse_idle(
     Ok(())
 }
 
+/// The owner's "Landing" setting (DEC-147.6): `Squash`, the default, lands each accepted
+/// change set as one commit whose only parent is the branch tip; `Merge` lands the same
+/// files as a merge commit whose second parent is the set's head, so every agent commit
+/// stays in the branch's history and agents keep their ancestry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandingMode {
+    #[default]
+    Squash,
+    Merge,
+}
+
+impl LandingMode {
+    /// The stored name of the setting. Output: `squash` or `merge`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Squash => "squash",
+            Self::Merge => "merge",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Squash, Self::Merge]
+            .into_iter()
+            .find(|value| value.name() == name)
+    }
+}
+
+/// Reads a project's "Landing" setting: `Squash` when no choice is saved and for a store
+/// that keeps no team tables. Takes a connection and the project. Returns the setting, or
+/// `team_landing_mode_invalid` for a stored name it does not know.
+pub fn landing_mode(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<LandingMode, EngineError> {
+    let kept: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_landing_mode')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !kept {
+        return Ok(LandingMode::default());
+    }
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_landing_mode WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode {
+        None => Ok(LandingMode::default()),
+        Some(mode) => LandingMode::named(&mode).ok_or_else(|| failure("team_landing_mode_invalid")),
+    }
+}
+
+/// Saves a project's "Landing" setting, replacing an earlier choice. Takes a connection,
+/// the project and the setting. Returns done.
+pub fn set_landing_mode(
+    connection: &Connection,
+    project: &ProjectId,
+    value: LandingMode,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_landing_mode(project,mode) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+            params![project.as_str(), value.name()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
 /// The most files one new top-level folder, a folder the owner's branch does not have,
 /// may gain in one of the project's change sets before the engine refuses the set
 /// (DEC-107); `NEW_FOLDER_FILES_DEFAULT` until the owner picks another. Takes a connection
@@ -5573,6 +5607,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         master_live_terminal: master::live_terminal(connection, project)?,
         catch_up_main: catch_up_main(connection, project)?,
         reuse_idle: reuse_idle(connection, project)?,
+        landing_mode: landing_mode(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
         message_settings: agent_messages::settings(connection, project)?,

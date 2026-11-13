@@ -98,8 +98,9 @@ fn state(problem: impl std::fmt::Display) -> EngineError {
 }
 
 /// Creates the live master tables: the per-project live switch with its turn and owner
-/// typing state, the turns a live master ended and the harness conversation each master
-/// session continues. `names` keeps the role a delegation asked for.
+/// typing state, the owner's pending Try again, the turns a live master ended and the
+/// harness conversation each master session continues. `names` keeps the role a delegation
+/// asked for.
 /// Takes the engine database. Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
@@ -121,6 +122,9 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             );
             CREATE TABLE IF NOT EXISTS team_master_input_holds (
                 agent INTEGER PRIMARY KEY
+            );
+            CREATE TABLE IF NOT EXISTS team_master_retries (
+                project TEXT PRIMARY KEY
             );
             CREATE TABLE IF NOT EXISTS team_master_turns (
                 agent INTEGER NOT NULL,
@@ -248,6 +252,11 @@ pub(crate) const SIGN_INS_CHECKING: &str = "Checking account sign-ins after the 
 /// yet (LMS-1); the views show it as is.
 pub(crate) const PROFILE_IN_USE: &str = "Waiting for the account: another process is using its profile, such as a sign-in or a sign-out. The live master starts once the profile is free.";
 
+/// The live master's problem line and one team note when it cannot start because no terminal
+/// program is found, which on macOS and Linux is tmux: the resolver's owner line, naming what
+/// is missing and how to install it, and the views offer Try again. The views show it as is.
+pub(crate) const TERMINAL_MISSING: &str = crate::tools::TMUX_MISSING;
+
 /// The live master's problem line and one team note while an owner line has waited longer
 /// than a first screen may take for the master's app to read keys (F2); the line is typed
 /// once the app turns bracketed paste on.
@@ -256,25 +265,57 @@ pub(crate) const MASTER_NOT_READING: &str =
 
 /// Turns a project's live master on or off: on, the runtime keeps the master's own app
 /// running in a terminal; off, the master ends with its next stop. Turning it on clears why
-/// it last could not start, and either way a sign-in, profile or key-reading wait line no
-/// longer applies.
+/// it last could not start, except a missing tmux, which stays until a start finds it so a
+/// Try again that finds it still missing writes no second note; either way a sign-in,
+/// profile or key-reading wait line no longer applies.
 /// Takes the owner transaction, the project and the switch. Returns any SQLite failure.
 pub fn set_live(connection: &Connection, project: &ProjectId, on: bool) -> Result<(), EngineError> {
     connection
         .execute(
             "INSERT INTO team_live_masters(project,live) VALUES (?1,?2)
              ON CONFLICT(project) DO UPDATE SET live=excluded.live,
-               problem=CASE WHEN excluded.live OR problem IN (?3,?4,?5) THEN NULL ELSE problem END",
+               problem=CASE WHEN (excluded.live AND problem IS NOT ?6) OR problem IN (?3,?4,?5)
+                 THEN NULL ELSE problem END",
             params![
                 project.as_str(),
                 on,
                 SIGN_INS_CHECKING,
                 PROFILE_IN_USE,
-                MASTER_NOT_READING
+                MASTER_NOT_READING,
+                TERMINAL_MISSING
             ],
         )
         .map_err(state)?;
     Ok(())
+}
+
+/// Keeps the owner's Try again while a project's live master switch is already on, as on an
+/// overdue terminal, for the runtime to take ([`take_retry`]). Takes the owner transaction
+/// and the project. Returns any SQLite failure.
+pub(crate) fn ask_retry(connection: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO team_master_retries(project) VALUES (?1)",
+            [project.as_str()],
+        )
+        .map_err(state)?;
+    Ok(())
+}
+
+/// Takes and forgets the owner's pending Try again for a project, so each one is acted on
+/// once. Takes the engine database and the project. Returns whether one was pending.
+pub(crate) fn take_retry(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<bool, EngineError> {
+    let taken = connection
+        .execute(
+            "DELETE FROM team_master_retries WHERE project=?1",
+            [project.as_str()],
+        )
+        .map_err(state)?;
+    assert!(taken <= 1);
+    Ok(taken == 1)
 }
 
 /// Reads whether a project's master runs live: its run flag is on and the owner's "Live
@@ -1346,6 +1387,13 @@ fn answer(
             version,
             owner_turn,
         } => record_answer(connection, project, question, version, owner_turn)?,
+        Call::RequestAccess { grant, reason } => tool::questions::request_reply(
+            connection,
+            project,
+            &crate::questions::Asker::Master(master),
+            &grant,
+            &reason,
+        ),
         Call::RelayAnswer {
             question,
             version,
@@ -1391,7 +1439,8 @@ pub(super) fn answer_sub(
         call @ (Call::Ask { .. }
         | Call::RecordAnswer { .. }
         | Call::RelayAnswer { .. }
-        | Call::Withdraw { .. }) => {
+        | Call::Withdraw { .. }
+        | Call::RequestAccess { .. }) => {
             tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }
         Call::Sessions { .. }
@@ -2216,7 +2265,10 @@ fn withdraw_question(
 
 /// Reads the team agent id of a project's live master. Takes the database and project.
 /// Returns the id, none when no live master is on record, or a SQLite failure.
-fn live_master(connection: &Connection, project: &ProjectId) -> Result<Option<i64>, EngineError> {
+pub(super) fn live_master(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<i64>, EngineError> {
     connection
         .query_row(
             "SELECT agent FROM team_live_masters WHERE project=?1",
@@ -2352,6 +2404,14 @@ pub(super) fn wake_in(
         None => super::events::resolve(tx, project, agent)?,
     };
     let Some(id) = found else {
+        if let Some(task) = super::names::waiting_task(tx, project, agent)? {
+            return Ok((
+                format!(
+                    "Not woken: {shown} is the handle of task {task}, which has not started yet, so it needs no wake."
+                ),
+                true,
+            ));
+        }
         return Ok((unknown, true));
     };
     let label = super::events::label(tx, id)?;
@@ -2390,8 +2450,7 @@ pub(super) fn wake_in(
             tool::SPAWN_TOOL
         ),
         Err("team_agent_no_worktree") => format!(
-            "the worktree of {label} was cleaned up. Hand the work out with a {} line instead.",
-            super::DELEGATE_MARKER
+            "the worktree of {label} was cleaned up. Hand the work out as a new task instead."
         ),
         Err(code) => format!("{}.", super::runtime::refusal(code)),
     };

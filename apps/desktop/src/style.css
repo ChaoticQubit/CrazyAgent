@@ -140,6 +140,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .sidebar-foot .foot-retry { flex: none; height: 24px; margin: -3px 0; padding: 0 var(--space-1); }
 .sidebar-foot .engine-state { white-space: nowrap; }
 .sidebar-foot .me { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 18px; font-weight: 600; color: var(--text); text-decoration: none; }
+.sidebar-foot button.me { padding: 0; border: 0; border-radius: var(--radius-control); background: none; text-align: left; cursor: pointer; }
 .engine-state { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; }
 .engine-state.running { color: var(--ok); }
 .engine-state.down { color: var(--danger); }
@@ -251,6 +252,9 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .setup-panel li { display: grid; gap: var(--space-2); padding: 14px var(--space-4); border-top: 1px solid var(--border); }
 .setup-panel li:first-child { border-top: 0; }
 .setup-panel .done { display: inline-flex; align-items: center; gap: 6px; color: var(--ok); font-weight: 600; }
+.setup-panel h3 { margin: 0; padding: var(--space-3) var(--space-4) var(--space-1); border-top: 1px solid var(--border); color: var(--text-2); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.setup-panel section:first-of-type h3 { border-top: 0; }
+.setup-panel .learn-progress { margin: 0; padding: var(--space-2) var(--space-4) 0; }
 .needs { display: grid; gap: var(--space-2); margin-bottom: var(--space-4); }
 .need { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); }
 

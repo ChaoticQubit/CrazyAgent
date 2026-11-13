@@ -1,8 +1,9 @@
+import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { constants } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { constants, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 
@@ -21,8 +22,8 @@ const TREE_FILES = 16;
 const LARGE_BYTES = 50 * 1024 * 1024;
 const LFS_POINTER = "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
 const REPO = "owner-shaped";
-const ROOT_PREFIX = "ca-of-";
-const ROOT_NAME = /^ca-of-[A-Za-z0-9]{6}$/;
+const ROOT_PREFIX = "owner-flow-";
+const ROOT_NAME = /^owner-flow-[A-Za-z0-9]{6}$/;
 const ROOT_MARK = "owner-flow-root";
 const ROOT_QUIET_MS = 15 * 60 * 1000;
 const ROOT_ACTIVITY = [".", "h/engine.db", "h/engine.db-wal", `repos/${REPO}/.git`, `repos/${REPO}/.git/index`];
@@ -92,6 +93,30 @@ function realProfile() {
   if (!root || !project) return { problem: "real_profile_incomplete: set CRAZYAGENT_MANAGED_RUNTIME and CRAZYAGENT_MANAGED_CLAUDE_PROJECT" };
   if (!isAbsolute(root) || !existsSync(join(root, "engine.db"))) return { problem: "real_profile_runtime_without_engine_db" };
   return { socket: join(root, "engine.sock"), database: join(root, "engine.db"), project, bridge: null, turnMs: REAL_TURN_MS };
+}
+
+/** Checks the folder the engine made for a team agent as its project's access level wants
+ * (DEC-102): Sandboxed, a linked worktree the project's git lists; Own branch and Full, an own
+ * clone with its own .git folder, on the branch the engine stored for it, reading the project's
+ * objects through its one alternates line and holding a commit of the project.
+ * Input: the repository, the folder, the access level and the engine database. Output: null, or what differs. */
+function agentFolderProblem(repo, folder, access, database) {
+  const link = join(folder, ".git");
+  const want = access === "sandboxed" ? "linked worktree" : "own clone";
+  const found = !existsSync(link) ? "nothing" : lstatSync(link).isDirectory() ? "own clone" : lstatSync(link).isFile() ? "linked worktree" : "a link";
+  if (found !== want) return `${access} access wants a ${want}, found ${found}`;
+  const real = realpathSync(folder);
+  if (want === "linked worktree") return git(repo, "worktree", "list", "--porcelain").split("\n").includes(`worktree ${real}`) ? null : "the linked worktree is not in git worktree list";
+  if (git(folder, "rev-parse", "--show-toplevel").trim() !== real) return "the clone is not a repository of its own";
+  const stored = engineRows(database, "SELECT branch FROM landing_agent_branches WHERE worktree=?1", real).map((row) => row.branch)[0];
+  const branch = stored ?? `agent/${basename(real)}`;
+  const head = git(folder, "symbolic-ref", "HEAD").trim();
+  if (head !== `refs/heads/${branch}`) return `the clone is on ${head}, not its branch ${branch}`;
+  const objects = join(realpathSync(repo), ".git", "objects");
+  const alternates = readFileSync(join(link, "objects", "info", "alternates"), "utf8").split("\n").filter(Boolean);
+  if (alternates.length !== 1 || alternates[0] !== objects) return `the clone reads objects from ${alternates.join(", ") || "nothing"}, not the project's ${objects}`;
+  const commit = git(folder, "rev-parse", "HEAD").trim();
+  return git(repo, "cat-file", "-t", commit).trim() === "commit" ? null : `the clone's commit ${commit} is not a commit of the project`;
 }
 
 /** Runs git in a folder and stops the run when it fails.
@@ -340,7 +365,7 @@ function rootText(path) {
   return lstatSync(path, { throwIfNoEntry: false })?.isFile() ? readFileSync(path, "utf8") : "";
 }
 
-/** Says why --clean keeps a ca-of-* folder: gone, not this user's folder, held open by a live
+/** Says why --clean keeps an owner-flow-* folder: gone, not this user's folder, held open by a live
  * process, without this smoke's stand-in claude, kept for SMOKE_EVIDENCE, or changed within 15
  * minutes. Input: the folder, the pid holding a file in it (if any) and the time now.
  * Output: the reason, or null when the folder may be removed. */
@@ -349,19 +374,19 @@ function keepReason(root, holder, now) {
   if (!folder) return "already gone";
   if (!folder.isDirectory() || folder.uid !== process.getuid()) return "not this smoke's";
   if (holder) return `in use by pid ${holder}`;
-  if (!rootText(join(root, "bin", "claude")).includes(STAND_IN_SIGN)) return "not this smoke's";
+  if (!rootText(join(root, "u", ".local", "bin", "claude")).includes(STAND_IN_SIGN)) return "not this smoke's";
   if (rootText(join(root, ROOT_MARK)) === "kept\n") return "kept for SMOKE_EVIDENCE";
   const changed = Math.max(...ROOT_ACTIVITY.map((path) => lstatSync(join(root, path), { throwIfNoEntry: false })?.mtimeMs ?? 0));
   if (now - changed < ROOT_QUIET_MS) return `changed ${Math.round((now - changed) / 60000)} min ago`;
   return null;
 }
 
-/** Removes the temp roots that earlier smoke runs left in /tmp, keeping every folder keepReason
+/** Removes the temp roots that earlier smoke runs left in the temp folder, keeping every folder keepReason
  * names. lsof lists the open files of this user's processes once, so a running smoke's root is
- * never touched. Input: whether to list only. Output: one line per ca-of-* folder and the counts;
+ * never touched. Input: whether to list only. Output: one line per owner-flow-* folder and the counts;
  * exit 2 when lsof cannot list, 1 when a root could not be removed. */
 function clean(dryRun) {
-  const base = realpathSync("/tmp");
+  const base = realpathSync(tmpdir());
   const listed = spawnSync("lsof", ["-n", "-P", "-w", "-u", String(process.getuid()), "-F", "pn"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
   if (listed.status !== 0 || !listed.stdout) {
     console.error(`BLOCKED: lsof could not list open files (${listed.error?.code ?? listed.status}), so no root is known to be unused`);
@@ -410,14 +435,17 @@ async function main() {
   const bridgeBinary = required("SMOKE_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   const real = realProfile();
   process.umask(0o077);
-  const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), ROOT_PREFIX)));
+  const root = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), ROOT_PREFIX)));
   const evidence = process.env.SMOKE_EVIDENCE && isAbsolute(process.env.SMOKE_EVIDENCE) ? process.env.SMOKE_EVIDENCE : join(root, "evidence");
   const keep = Boolean(process.env.SMOKE_EVIDENCE) && evidence === join(root, "evidence");
   claimRoot(root, keep);
+  for (let at = root; at !== dirname(at); at = dirname(at)) {
+    assert((statSync(at).mode & 0o002) === 0, `${at} is writable by every user, so the engine refuses a harness under it: set TMPDIR to a private folder`);
+  }
   console.log(`temp root ${root} (${keep ? "kept for SMOKE_EVIDENCE" : "removed on exit; SMOKE_EVIDENCE=1 keeps it"})`);
   const crazyHome = join(root, "h");
   const userHome = join(root, "u");
-  const bin = join(root, "bin");
+  const bin = join(userHome, ".local", "bin");
   const repo = join(root, "repos", REPO);
   const linked = join(root, "repos", `${REPO}-worktrees`);
   const projects = join(root, "projects");
@@ -797,9 +825,10 @@ async function main() {
       team.agents.push(agent.id);
       if (!agent.worktree) throw new Refused("team_agent_without_worktree", launched(agent, task));
       const folder = join(repo, agent.worktree);
-      const listed = existsSync(folder) && git(repo, "worktree", "list", "--porcelain").split("\n").some((line) => line === `worktree ${realpathSync(folder)}`);
-      if (!listed) throw new Refused("team_worktree_not_added", agent.worktree);
-      return `worktree ${agent.worktree}; launch ${launched(agent, task)}`;
+      const access = engineRows(database, "SELECT body FROM project_agent_policy WHERE project=?1", needs(state.project, "1")).map((row) => JSON.parse(row.body).access)[0] ?? "sandboxed";
+      const problem = agentFolderProblem(repo, folder, access, database);
+      if (problem) throw new Refused("team_worktree_not_added", `${agent.worktree}: ${problem}`);
+      return `${access === "sandboxed" ? "linked worktree" : "own clone"} ${agent.worktree}; launch ${launched(agent, task)}`;
     });
     await step("6c", "the agent shows in the team status and in the agents view", async () => {
       const id = needs(team.agents[0], "6b");

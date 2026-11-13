@@ -26,9 +26,10 @@ use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::coord::tool_switches::Switch;
+use crazyagent::demo::DemoView;
 use crazyagent::engine::owner::{
-    AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
-    NativeAuthMethod,
+    AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
+    ModelAccessCollection, NativeAuthMethod,
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
@@ -36,6 +37,7 @@ use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
 use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, OwnerDirty, TargetBranches};
+use crazyagent::learning::{LearningProgress, MarkStep};
 use crazyagent::master_frame_limit::MasterFrameSettings;
 use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
@@ -64,6 +66,7 @@ use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneySettings;
 use crazyagent::usage::report::UsageReport;
+use crazyagent::usage::spend::SpendSettings;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -162,10 +165,11 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
 
 /// Installs the service when it is missing, when `reinstall` asks or when it is
 /// [`crazyagent::service::Service::stale`], else starts it as it is, then waits for the
-/// engine with the shared bound. The service runs the sidecar, or its private copy when
-/// the sidecar sits in the AppImage mount folder; a sidecar other users can change is
-/// refused. Inputs: the layout, the service and whether to replace the definition with
-/// this app's sidecar. Output: Ok once it answers.
+/// engine while the service still runs it ([`crazyagent::service::wait_started`]). The
+/// service runs the sidecar, or its private copy when the sidecar sits in the AppImage
+/// mount folder; a sidecar other users can change is refused. Inputs: the layout, the
+/// service and whether to replace the definition with this app's sidecar. Output: Ok once
+/// it answers.
 async fn start_engine(
     layout: &crazyagent::paths::Layout,
     service: &crazyagent::service::Service,
@@ -200,7 +204,7 @@ async fn start_engine(
             .start()
             .map_err(|_| engine_failure("engine_service_failed"))?;
     }
-    crazyagent::service::wait_ready(layout, crazyagent::service::READY_TIMEOUT, None, since)
+    crazyagent::service::wait_started(layout, &service, crazyagent::service::READY_TIMEOUT, since)
         .await
         .map_err(|_| engine_failure(start_failure(layout)))
 }
@@ -1385,6 +1389,21 @@ async fn desktop_team_reuse_idle(
 }
 
 #[tauri::command]
+async fn desktop_team_landing_mode(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_landing_mode(&id, &mode, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_new_folder_limit(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2184,6 +2203,26 @@ async fn desktop_remove_project(
 }
 
 #[tauri::command]
+async fn desktop_project_demo(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<DemoView, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.project_demo().await
+}
+
+#[tauri::command]
+async fn desktop_create_demo(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    pool: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.create_demo(pool, generation).await
+}
+
+#[tauri::command]
 async fn desktop_project_removal(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2979,6 +3018,30 @@ async fn desktop_set_quit_settings(
 }
 
 #[tauri::command]
+async fn desktop_learning_progress(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<LearningProgress, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.learning_progress().await
+}
+
+#[tauri::command]
+async fn desktop_set_learning_mark(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    step: MarkStep,
+    on: bool,
+    generation: u64,
+) -> Result<Option<IntentReceipt>, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_learning_mark(step, on, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_master_step_settings(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3553,6 +3616,17 @@ async fn desktop_usage_metrics(
 }
 
 #[tauri::command]
+async fn desktop_usage_extras(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    detail: bool,
+) -> Result<Vec<AccountExtras>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_extras(detail)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_refresh(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3576,6 +3650,29 @@ async fn desktop_usage_set_money(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.usage_set_money(settings)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_spend(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    account: String,
+    confirmed: bool,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_spend(account, confirmed)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_set_spend(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: SpendSettings,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_set_spend(settings)?;
     call.await
 }
 
@@ -4775,6 +4872,7 @@ native_commands! {
     desktop_team_master_idle_stop,
     desktop_team_master_live_terminal,
     desktop_team_reuse_idle,
+    desktop_team_landing_mode,
     desktop_team_new_folder_limit,
     desktop_team_coordination,
     desktop_team_harness_mode,
@@ -4813,6 +4911,8 @@ native_commands! {
     desktop_close_project_walls,
     desktop_update_project_setup,
     desktop_remove_project,
+    desktop_project_demo,
+    desktop_create_demo,
     desktop_move_project_home,
     desktop_cancel_research,
     desktop_retry_research,
@@ -4903,6 +5003,8 @@ native_commands! {
     desktop_set_cleanup_settings,
     desktop_quit_settings,
     desktop_set_quit_settings,
+    desktop_learning_progress,
+    desktop_set_learning_mark,
     desktop_master_step_settings,
     desktop_set_master_step_settings,
     desktop_master_time_settings,
@@ -4999,10 +5101,13 @@ native_commands! {
     desktop_usage_report,
     desktop_usage_metrics,
     desktop_usage_refresh,
+    desktop_usage_extras,
     desktop_usage_notices,
     desktop_usage_set_money,
     desktop_usage_decide_recount,
     desktop_usage_set_reset,
+    desktop_usage_spend,
+    desktop_usage_set_spend,
     desktop_ide_extension_asks,
     desktop_ide_extension_approve,
     desktop_ide_extension_decline,

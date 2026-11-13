@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { shownView } from "./agents-cards.mjs";
-import { TURN_S } from "./master-switch.wdio.conf.mjs";
+import { TURN_S, home } from "./master-switch.wdio.conf.mjs";
 import { click, shown, toasts, unfold } from "./settings-steps.mjs";
 import { go, paste, pick, reopen, run, segment, tab, terminalTyping, until, waitFor } from "./trial-kit.mjs";
 import { KEYS, TERMINAL, masterRows, sendToMaster, startIfPaused, teamNodes, terminalLive } from "./trial4/n-d8-master-reply.mjs";
@@ -25,7 +25,7 @@ const WAITS = "[data-testid=master-switch-waits]";
 const DIVIDER = "[data-testid=harness-switch]";
 const STOP = "//dialog[@open]//button[normalize-space(.)=\"Stop all\"]";
 const INPUT_KEY = "crazyagent.terminal-input";
-const STORE = join(root, "home", "Library", "WebKit", basename(process.env.WD_APP));
+const STORE = join(home, "Library", "WebKit", basename(process.env.WD_APP));
 const kit = { go, tab, pick, paste, reopen, until, waitFor, project: () => run.project };
 let generation = 0;
 
@@ -146,29 +146,31 @@ async function masterFollowsSavedInput() {
   return seen;
 }
 
-/** Saves a Terminal input option on Settings, Profile, as the owner does, and reads it back after
- * leaving the page and opening it again. Input: the option's label. */
+/** Saves a Terminal input option in the Profile dialog, as the owner does, and reads it back
+ * after leaving it and opening it again. Input: the option's label. */
 async function saveInput(option) {
   const choice = segment("Terminal input", option);
   await go("#/settings/profile");
-  await until(() => shown(choice), UI_MS, "Settings, Profile never showed Terminal input");
+  await until(() => shown(choice), UI_MS, "the Profile dialog never showed Terminal input");
   await click(choice);
   await go("#/settings/process");
   await go("#/settings/profile");
-  await until(async () => (await shown(choice)) && (await $(choice).getAttribute("aria-checked")) === "true", UI_MS, `Terminal input did not read ${option} after opening Settings again`);
+  await until(async () => (await shown(choice)) && (await $(choice).getAttribute("aria-checked")) === "true", UI_MS, `Terminal input did not read ${option} after opening Profile again`);
 }
 
 /** Starts one sub-agent through the app's own command, opens its terminal from its card and
- * reads what the owner is offered there. Input: the project id. Output: { label, boxes }. */
+ * reads what the owner is offered there. The engine names a sub-agent "Ada" until it holds
+ * its job and "Ada (@task-1)" after, so its card is looked up by the name it keeps once its
+ * job is on it. Input: the project id. Output: { label, boxes }. */
 async function subAgentOffers(id) {
   const receipt = await invoke("desktop_team_delegate", { id, harness: "claude-code", prompt: "Stand by.", generation: ++generation });
   assert.equal(receipt.outcome, "applied", `the sub-agent is asked for: ${JSON.stringify(receipt)}`);
   let agent;
   await waitFor(async () => {
     const nodes = await teamNodes(id);
-    agent = nodes.find((node) => node.kind !== "master" && node.terminal);
+    agent = nodes.find((node) => node.kind !== "master" && node.terminal && node.label.includes("(@"));
     return { done: agent !== undefined, seen: JSON.stringify(nodes).slice(0, 400) };
-  }, SWITCH_MS, "no sub-agent terminal ever started");
+  }, SWITCH_MS, "no sub-agent terminal ever started under its job's name");
   await tab("agents");
   await shownView(kit, agent.label);
   const boxes = await browser.execute((label) => {
@@ -209,12 +211,33 @@ async function ownerTurn(line, name) {
   return way;
 }
 
+/** Presses the mouse on the middle of the master terminal's screen as the owner's click does,
+ * which is how xterm takes the keyboard; the native driver's element click sends no mouse
+ * press. The press goes to what the page shows at that point, so a covered screen is never
+ * pressed. Output: "pressed", or what is drawn there instead. */
+function pressTerminal() {
+  return browser.execute((selector) => {
+    const screen = document.querySelector(`${selector} .xterm-screen`);
+    if (!screen) return "no master terminal screen";
+    screen.scrollIntoView({ block: "center", inline: "center" });
+    const box = screen.getBoundingClientRect();
+    const at = { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2, bubbles: true, cancelable: true, view: window };
+    const hit = document.elementFromPoint(at.clientX, at.clientY);
+    if (!hit || !screen.contains(hit)) return `covered by ${hit ? `${hit.tagName.toLowerCase()} class="${hit.getAttribute("class") ?? ""}"` : "nothing"}`;
+    hit.dispatchEvent(new MouseEvent("mousedown", { ...at, button: 0, buttons: 1 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { ...at, button: 0, buttons: 0 }));
+    hit.dispatchEvent(new MouseEvent("click", { ...at, button: 0, buttons: 0 }));
+    return "pressed";
+  }, TERMINAL);
+}
+
 /** Types one line at the keyboard into the master terminal and checks what the saved Terminal
  * input says must happen: with keys let through it starts a turn, with them held back none
  * starts. Inputs: the line, the harness name the stand-in prints and whether keys reach it. */
 async function typeIntoTerminal(line, name, reaches) {
   const turns = await shownTurns(name);
-  await $(TERMINAL).click();
+  const pressed = await pressTerminal();
+  assert.equal(pressed, "pressed", `the owner's press lands on the master terminal's screen: ${pressed}`);
   assert.equal(await browser.execute(() => document.activeElement?.classList.contains("xterm-helper-textarea") === true), true, "the keys are typed with the focus on the terminal");
   await browser.keys(line);
   await browser.keys(KEYS.enter);
@@ -229,12 +252,15 @@ async function typeIntoTerminal(line, name, reaches) {
   assert.equal(await shownTurns(name), turns, "keys typed at the terminal reached the harness under Message box only");
 }
 
-/** Reads the owner turns the engine counted from the live terminal in the project's newest
- * master session. Input: the project id. Output: { turns, last } or null before any. */
-function ownerTurns(id) {
+/** Reads the live terminal turns the engine stored for a project's master on one harness:
+ * the owner messages of its live conversation (session_messages, where every master turn is
+ * kept since the engine moved them there from session_owner_turns). Inputs: the project id
+ * and the harness id. Output: { turns, last }, the count and the newest one's words. */
+function ownerTurns(id, harness) {
   const store = new DatabaseSync(join(root, "engine", "engine.db"), { readOnly: true });
+  const owner = "project=:project AND speaker='owner' AND mode='live' AND harness=:harness";
   try {
-    return store.prepare("SELECT turns, last_line AS last FROM session_owner_turns WHERE project=? ORDER BY rowid DESC LIMIT 1").get(id) ?? null;
+    return store.prepare(`SELECT COUNT(*) AS turns, (SELECT text FROM session_messages WHERE ${owner} ORDER BY at_ms DESC, seq DESC LIMIT 1) AS last FROM session_messages WHERE ${owner}`).get({ project: id, harness });
   } finally {
     store.close();
   }
@@ -299,11 +325,11 @@ describe("A saved master harness change reaches the live master as the owner's A
     assert.deepEqual(switches(id), []);
     const after = await switchedTo("Codex");
     assert.deepEqual(switches(id), ["codex"], "the engine wrote one switch row, to Codex");
-    const counted = ownerTurns(id)?.turns ?? 0;
+    const counted = ownerTurns(id, "codex").turns;
     await ownerTurn("Now on Codex.", "Codex");
     await waitFor(async () => {
-      const now = ownerTurns(id);
-      return { done: (now?.turns ?? 0) > counted, seen: `${JSON.stringify(now)}, ${counted} turns before the Codex turn` };
+      const now = ownerTurns(id, "codex");
+      return { done: now.turns > counted, seen: `${JSON.stringify(now)}, ${counted} turns before the Codex turn` };
     }, SWITCH_MS, "the engine never counted the Codex turn in the live session");
     assert.ok(after.divider.includes("Codex"));
   });

@@ -318,6 +318,10 @@ impl ToolsPage {
 }
 
 impl Screen for ToolsPage {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         crumbs_of(self.project.as_ref(), "Tools")
     }

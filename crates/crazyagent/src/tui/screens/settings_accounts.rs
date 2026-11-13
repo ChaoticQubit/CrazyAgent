@@ -335,7 +335,7 @@ impl Accounts {
 
     fn rows_visible(ctx: &Ctx) -> usize {
         (ctx.height as usize)
-            .saturating_sub(4 + 2 + CHROME_ROWS)
+            .saturating_sub(4 + 2 + CHROME_ROWS + ctx.extra_hint_rows())
             .max(1)
     }
 
@@ -713,6 +713,10 @@ pub fn plain(code: &str) -> &'static str {
 }
 
 impl Screen for Accounts {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Accounts".into()]
     }
@@ -1290,6 +1294,10 @@ impl AccountDetails {
 }
 
 impl Screen for AccountDetails {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec![
             "Settings".into(),

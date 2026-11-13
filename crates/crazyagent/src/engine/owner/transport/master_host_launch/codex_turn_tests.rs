@@ -203,7 +203,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         off: &[],
     };
     assert!(require_master_tool_policy(&command, Some(unused)).is_err());
-    let caches = default_master_tool_caches(&root.path, &repository);
+    let caches = default_master_tool_caches(root.engine_root().unwrap(), &repository);
     let off_tmp = off_turn.join("tmp");
     assert_eq!(
         sandbox.sandbox().writable_roots().collect::<Vec<_>>(),
@@ -315,13 +315,14 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             crate::team::tool::ASK_TOOL,
             crate::team::tool::RECORD_TOOL,
             crate::team::tool::WITHDRAW_TOOL,
+            crate::team::tool::REQUEST_ACCESS_TOOL,
             crate::team::tool::REMEMBER_TOOL
         ],
         "a console master with tools asks the owner and remembers through the engine, less the tools switched off"
     );
     assert_eq!(std::fs::metadata(&mailbox).unwrap().mode() & 0o7777, 0o700);
     let expected: toml::Table = toml::from_str(&format!(
-        "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}, {:?}, \"recall\"]\n",
+        "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}, {:?}, \"recall\", \"wake\"]\n",
         engine.to_str().unwrap(),
         record.to_str().unwrap(),
         mailbox.to_str().unwrap()
@@ -354,7 +355,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             .position(|arg| arg.starts_with("mcp_servers="))
             .unwrap();
         args[server] = format!(
-            "mcp_servers={{crazyagent-team={{command={:?},args=[\"team-mcp\",{:?},{:?},\"recall\"]}},owner={{command=\"/usr/bin/true\"}}}}",
+            "mcp_servers={{crazyagent-team={{command={:?},args=[\"team-mcp\",{:?},{:?},\"recall\",\"wake\"]}},owner={{command=\"/usr/bin/true\"}}}}",
             engine.to_str().unwrap(),
             record.to_str().unwrap(),
             mailbox.to_str().unwrap()
@@ -439,7 +440,10 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     };
     assert_eq!(
         require_master_tool_policy(
-            &served(&engine, &[&record, &mailbox, Path::new("recall")]),
+            &served(
+                &engine,
+                &[&record, &mailbox, Path::new("recall"), Path::new("wake")]
+            ),
             Some(tools)
         ),
         Ok(())
@@ -449,24 +453,42 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             "another executable",
             served(
                 Path::new("/usr/bin/true"),
-                &[&record, &mailbox, Path::new("recall")],
+                &[&record, &mailbox, Path::new("recall"), Path::new("wake")],
             ),
         ),
         (
             "a link to the engine",
-            served(&link, &[&record, &mailbox, Path::new("recall")]),
+            served(
+                &link,
+                &[&record, &mailbox, Path::new("recall"), Path::new("wake")],
+            ),
         ),
         (
             "a hard link to the engine",
-            served(&hard, &[&record, &mailbox, Path::new("recall")]),
+            served(
+                &hard,
+                &[&record, &mailbox, Path::new("recall"), Path::new("wake")],
+            ),
         ),
         (
             "another turn's drop file",
-            served(&engine, &[&other_drop, &mailbox, Path::new("recall")]),
+            served(
+                &engine,
+                &[
+                    &other_drop,
+                    &mailbox,
+                    Path::new("recall"),
+                    Path::new("wake"),
+                ],
+            ),
         ),
         (
             "a switched-off tool listed again",
-            served(&engine, &[&record, &mailbox]),
+            served(&engine, &[&record, &mailbox, Path::new("wake")]),
+        ),
+        (
+            "wake listed for a conversation master",
+            served(&engine, &[&record, &mailbox, Path::new("recall")]),
         ),
         (
             "an extra argument",
@@ -476,6 +498,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
                     &record,
                     &mailbox,
                     Path::new("recall"),
+                    Path::new("wake"),
                     Path::new("--verbose"),
                 ],
             ),

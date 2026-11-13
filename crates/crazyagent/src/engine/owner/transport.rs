@@ -188,6 +188,16 @@ impl Root {
         Ok(())
     }
 
+    /// The engine root around this per-start owner folder, which holds `engine.db` and the
+    /// engine's stores, once the folder is checked to still be the one opened. Input: the
+    /// root. Output: the engine root, the verify refusal, or `owner_root_unavailable`.
+    fn engine_root(&self) -> Result<&Path, EngineError> {
+        self.verify()?;
+        self.path
+            .parent()
+            .ok_or_else(|| failure("owner_root_unavailable"))
+    }
+
     /// Refuses to open a capability file without directory-relative Unix opens.
     /// Takes the file name and create flag, both unused.
     /// Returns `owner_root_unavailable`.

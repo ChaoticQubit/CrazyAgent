@@ -124,6 +124,8 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
     "The master stopped: its account is busy signing in or out. (native_profile_in_use)");
   assert.equal(research.turnLine(turn("failed", "connection_changed", "native_profile_connection_missing")),
     "The master stopped: its settings changed while it was open. (native_profile_connection_missing)");
+  const keySetup = "The master could not set this account's API key up for agents. Set it up again: in the app, Settings, Pools, Get ready for agents; in the terminal app, Model access, k Private profile setup.";
+  assert.equal(research.turnLine(turn("failed", "connection_changed", "rcli_master_key_setup_required", keySetup)), `${keySetup} (rcli_master_key_setup_required)`);
   assert.equal(research.turnLine(turn("failed", "transient_failure", "native_profile_renewal_failed")),
     "The master stopped: the account's sign-in could not be renewed just now, so it is unavailable for a moment. Your next message uses the next account in the pool, or this one after a minute. (native_profile_renewal_failed)");
   assert.equal(research.turnLine(turn("failed", "instructions_too_large", "master_instructions_too_large")),
@@ -558,7 +560,7 @@ test("a file linked from the repo has its own group, says where it is from and c
   assert.match(markup, /Linked from your repo/);
   assert.match(markup, />Open in default app</);
   assert.doesNotMatch(markup, /class="btn danger-text">Delete<|>Edit</);
-  assert.equal(markup.split("notes/market.md").length - 1, 1, "a linked research file is listed once, in the repo group");
+  assert.equal(markup.split(">market.md<").length - 1, 1, "a linked research file is listed once, in the repo group");
   const mixed = { kind: "ok", value: { ...only.value, items: [{ path: "context/brief.md", kind: "brief", bytes: 120 }, linked] } };
   const brief = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: mixed } }));
   assert.match(brief, /<h2 class="pj-mono">context\/brief\.md<\/h2>/, "the brief still opens first");
@@ -566,6 +568,34 @@ test("a file linked from the repo has its own group, says where it is from and c
   assert.match(brief, /From your repo/);
   const none = { kind: "ok", value: { ...only.value, items: [{ path: "context/brief.md", kind: "brief", bytes: 120 }] } };
   assert.doesNotMatch(renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: none } })), /From your repo/);
+});
+
+test("a docs-only project's tree lists its nested docs folder by folder, with Project memory one click away (DEC-152)", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  const doc = (path) => ({ path: `repo/${path}`, kind: "document", bytes: 10, linked: true });
+  const items = ["docs/architecture/adr/0001-store.md", "docs/architecture/overview.md", "docs/roadmap/README.md", "ROADMAP.md"].map(doc);
+  const docsOnly = { kind: "ok", value: { project_id: "p-1", folder: "/tmp/p-1/.crazyagent", items } };
+  const markup = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: docsOnly } }));
+  assert.match(markup, /<button[^>]*class="pj-titem pin"[^>]*>.*?Project memory<\/button>/);
+  for (const folder of ["docs/architecture/", "docs/architecture/adr/", "docs/roadmap/"]) {
+    assert.match(markup, new RegExp(`${folder.replaceAll("/", "\\/")}<\\/span>`), folder);
+  }
+  for (const name of ["0001-store.md", "overview.md", "README.md", "ROADMAP.md"]) assert.match(markup, new RegExp(`${name.replace(".", "\\.")}<\\/button>`), name);
+  assert.ok(markup.indexOf("docs/architecture/</span>") < markup.indexOf("docs/architecture/adr/</span>"));
+  assert.doesNotMatch(markup, /more docs? not listed/i, "a whole list says nothing about a cut");
+  const cut = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: { kind: "ok", value: { ...docsOnly.value, unlisted_docs: 6 } } } }));
+  assert.match(cut, /<li><span class="pj-folder pj-muted">6 more docs not listed<\/span><\/li>/, "a cut list names how many docs it left out, never a silent drop");
+  assert.equal(context.unlistedLine(0, false), null);
+  assert.equal(context.unlistedLine(1, false), "1 more doc not listed");
+  assert.equal(context.unlistedLine(6, false), "6 more docs not listed");
+  assert.equal(context.unlistedLine(0, true), "More docs not listed: the docs folder has more files than CrazyAgent reads");
+  assert.equal(context.unlistedLine(6, true), "6 more docs not listed, and the docs folder has more files than CrazyAgent reads");
+  assert.deepEqual(context.repoFolders(items).map(([folder, entries]) => [folder, entries.map((entry) => entry.path)]), [
+    ["", ["repo/ROADMAP.md"]],
+    ["docs/architecture", ["repo/docs/architecture/overview.md"]],
+    ["docs/architecture/adr", ["repo/docs/architecture/adr/0001-store.md"]],
+    ["docs/roadmap", ["repo/docs/roadmap/README.md"]],
+  ], "a folder comes before the folders inside it, and files at the repo root come first");
 });
 
 test("a project change shows a toast only when the engine applied it", () => {
@@ -1065,12 +1095,12 @@ test("a master turn whose edits wait in Changes shows the engine's note, and a t
 
 const ideView = (build, platform = "macos", unqualified = null) => ({ state: { build, unqualified }, platform });
 
-test("the IDE tab replaces Context and Changes only on a qualified platform with a Ready build", async () => {
+test("the IDE tab replaces Changes only on a qualified platform with a Ready build, and Context stays listed beside it (DEC-152)", async () => {
   const page = await import("../src/screens/project/index.tsx");
   const client = await import("../src/api-ide.ts");
   const ids = (view) => page.projectTabs(view).map((tab) => tab.id);
   const fixed = ["overview", "conversation", "agents", "changes", "questions", "context", "process", "metrics", "settings"];
-  const swapped = ["overview", "conversation", "agents", "ide", "questions", "process", "metrics", "settings"];
+  const swapped = ["overview", "conversation", "agents", "ide", "questions", "context", "process", "metrics", "settings"];
   assert.deepEqual(ids(undefined), fixed, "until the engine answers, the page keeps Context and Changes and names no IDE");
   assert.equal(client.ideUnavailable(undefined), null);
   const ready = ideView({ state: "ready", version: "1.143.17183", root: "/data/ide/build" });
@@ -1128,9 +1158,9 @@ test("routes to a replaced tab keep their target, listed beside the IDE while op
   const failed = ideView({ state: "failed", code: "ide_build_download_failed" });
   const ids = (view, route) => page.projectTabs(view, route).map((tab) => tab.id);
   const routed = (route, view) => page.routedTab(route, page.projectTabs(view, route));
-  assert.deepEqual(ids(ready, "overview"), ["overview", "conversation", "agents", "ide", "questions", "process", "metrics", "settings"]);
-  assert.deepEqual(ids(ready, "changes"), ["overview", "conversation", "agents", "ide", "changes", "questions", "process", "metrics", "settings"], "an open Changes is listed after the IDE");
-  assert.deepEqual(ids(ready, "context"), ["overview", "conversation", "agents", "ide", "questions", "context", "process", "metrics", "settings"]);
+  assert.deepEqual(ids(ready, "overview"), ["overview", "conversation", "agents", "ide", "questions", "context", "process", "metrics", "settings"]);
+  assert.deepEqual(ids(ready, "changes"), ["overview", "conversation", "agents", "ide", "changes", "questions", "context", "process", "metrics", "settings"], "an open Changes is listed after the IDE");
+  assert.deepEqual(ids(ready, "context"), ids(ready, "overview"), "Context is listed once, in its own place");
   assert.equal(routed("changes", ready), "changes");
   assert.equal(routed("context", ready), "context", "Overview's Review and Open report links open their file in Context");
   assert.equal(routed("ide", ready), "ide");
@@ -1144,16 +1174,16 @@ test("routes to a replaced tab keep their target, listed beside the IDE while op
   assert.match(index, /tabs\.map\(\(item\) => item\.id\)\.join\(" "\)\]\);/, "the number shortcuts follow the listed tabs, not only their count");
 });
 
-test("every Changes and Context action stays one menu choice away while the IDE replaces them", async () => {
+test("Changes stays one menu choice away while the IDE replaces it, and the menu no longer offers Context, a tab again (DEC-152)", async () => {
   const page = await import("../src/screens/project/index.tsx");
   const ids = (view) => page.replacedTabs(view).map((tab) => tab.id);
-  assert.deepEqual(ids(ideView({ state: "ready", version: "1.143.17183", root: "/x" })), ["changes", "context"]);
+  assert.deepEqual(ids(ideView({ state: "ready", version: "1.143.17183", root: "/x" })), ["changes"]);
   assert.deepEqual(ids(ideView({ state: "downloading", bytes: 1, total: 2 })), []);
   assert.deepEqual(ids(ideView({ state: "failed", code: "ide_build_storage" })), []);
   assert.deepEqual(ids(undefined), []);
   const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
   const menu = index.slice(index.indexOf("function ProjectMenu"), index.indexOf("function hashSection"));
-  assert.match(menu, /replaced\.map\(\(item\) => \(\{ label: `Open \$\{item\.label\}`/, "the project menu offers Open Changes and Open Context");
+  assert.match(menu, /replaced\.map\(\(item\) => \(\{ label: `Open \$\{item\.label\}`/, "the project menu offers Open Changes");
   assert.match(menu, /data\.navigate\(`\/projects\/\$\{encodeURIComponent\(data\.id\)\}\/\$\{item\.id\}`\)/);
   assert.match(index, /<ProjectMenu data=\{data\} replaced=\{replacedTabs\(view\)\} \/>/);
 });

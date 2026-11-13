@@ -1,6 +1,8 @@
+import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
@@ -10,7 +12,7 @@ import { INTERNALS, bridgeCall, owner, serveApp, start, stop } from "./e2e-harne
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const LIVE_MASTER = fileURLToPath(new URL("./questions-live-master.mjs", import.meta.url));
-const ROOT_PREFIX = "ca-qf-";
+const ROOT_PREFIX = "cad-qf-";
 const REPO = "qf-shop";
 const IMPORTED = "qf-imported";
 const ABOUT = "A small shop that sells house plants online.";
@@ -72,7 +74,7 @@ const PERMISSION = " Bash command\n   cargo test\n Do you want to proceed?\n ❯
 const BOX = " ☐ Sign-in\n\n Which sign-in should the app use?\n\n ❯ 1. OAuth\n      The provider's own sign-in page\n   2. API key\n      A key kept in project settings\n   3. Type something.\n\n Enter to select · ↑/↓ to navigate · Esc to cancel\n";
 const BOX_QUESTION = "Which sign-in should the app use?";
 
-/** The stand-in `claude` the engine finds on PATH: it signs in and out through a private
+/** The stand-in `claude` the engine finds in ~/.local/bin: it signs in and out through a private
  * keychain like Claude Code, runs the live master stand-in for an interactive launch and
  * refuses headless turns, or holds them while the silent mark exists so a job stays running.
  * Inputs: node's path and the bin folder. Output: the script text. */
@@ -337,12 +339,16 @@ async function main() {
   const bridgeBinary = required("SMOKE_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   const real = realProfile();
   process.umask(0o077);
-  const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), ROOT_PREFIX)));
+  const base = realpathSync(tmpdir());
+  for (let at = base; at !== dirname(at); at = dirname(at)) {
+    assert((statSync(at).mode & 0o002) === 0, `${at} is writable by every user, so the engine refuses a harness under it: set TMPDIR to a private folder`);
+  }
+  const root = realpathSync(mkdtempSync(join(base, ROOT_PREFIX)));
   const keep = process.env.QUESTIONS_FLOW_EVIDENCE === "1";
   const evidence = join(root, "evidence");
   const crazyHome = join(root, "h");
   const userHome = join(root, "u");
-  const bin = join(root, "bin");
+  const bin = join(userHome, ".local", "bin");
   const projects = join(root, "projects");
   const repo = join(root, "repos", REPO);
   const imported = join(root, "repos", IMPORTED);
@@ -704,6 +710,8 @@ async function main() {
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/settings/profile` });
         await view.click(label, `[role=radiogroup][aria-label="Questions show"] button`);
         await until("questions_show_saved", VIEW_MS, async () => (await page.evaluate(`document.querySelector('[role=radiogroup][aria-label="Questions show"] button[aria-checked="true"]')?.textContent?.trim() ?? ""`)) === label);
+        for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+        await until("profile_dialog_closed", VIEW_MS, async () => page.evaluate("document.querySelector('dialog[open]') === null"));
       };
       const noneWaiting = () => {
         const waiting = rows(database, "SELECT id, question FROM questions_log WHERE project = ? AND status = 'pending'", state.project);

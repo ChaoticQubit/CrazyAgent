@@ -210,12 +210,14 @@ fn an_archive_without_crazyagent_is_refused_before_anything_changes() {
 }
 
 #[test]
-fn every_helper_the_release_ships_is_replaced_including_the_windows_boundary() {
+fn every_helper_the_release_ships_is_replaced_including_the_windows_boundary_and_the_bundled_tmux()
+{
     let install = tempfile::tempdir().unwrap();
     script(&install.path().join("crazyagent"), "echo crazyagent 0.0.1");
     let helpers = [
         "crazyagent-rcli",
         "crazyagent-runner",
+        "crazyagent-tmux",
         "crazyagent-landlock",
         "crazyagent-win-boundary",
     ];
@@ -236,5 +238,29 @@ fn every_helper_the_release_ships_is_replaced_including_the_windows_boundary() {
             "{helper}"
         );
     }
+    assert!(leftovers(install.path()).is_empty());
+}
+
+/// 2.4.0 ships no `crazyagent-tmux` (DEC-157 bundles it from 2.4.1, Windows never). An
+/// update from such a release still succeeds, replaces what it ships and makes no
+/// `crazyagent-tmux` file, so naming the bundled tmux in the swap list never needs the asset.
+#[test]
+fn an_update_from_a_release_without_the_bundled_tmux_succeeds_and_makes_no_tmux_file() {
+    let install = tempfile::tempdir().unwrap();
+    script(&install.path().join("crazyagent"), "echo crazyagent 0.0.1");
+    script(&install.path().join("crazyagent-rcli"), "echo old rcli");
+    let staged = install.path().join(".crazyagent-update-no-tmux");
+    std::fs::create_dir(&staged).unwrap();
+    executable(&staged.join("crazyagent"), &real_crazyagent());
+    script(&staged.join("crazyagent-rcli"), "echo new rcli");
+    update::swap(install.path(), &staged, VERSION).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(install.path().join("crazyagent-rcli")).unwrap(),
+        "#!/bin/sh\necho new rcli\n"
+    );
+    assert!(
+        std::fs::symlink_metadata(install.path().join("crazyagent-tmux")).is_err(),
+        "no bundled tmux file appears when the release has none"
+    );
     assert!(leftovers(install.path()).is_empty());
 }

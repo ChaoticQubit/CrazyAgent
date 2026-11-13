@@ -347,13 +347,59 @@ fn the_first_read_asks_for_the_first_writing_run_and_lists_the_four_tabs_in_orde
             .iter()
             .all(|tab| tab.text.is_none() && tab.version.is_empty() && !tab.edited)
     );
-    db.execute("UPDATE project_overview SET stale=0", [])
+    db.execute("UPDATE project_overview SET stale=0, checked_ms=2", [])
         .unwrap();
     assert!(!read(&db, &project, folder.path(), 2).unwrap().stale);
     refresh(&db, &project).unwrap();
     assert!(state(&db, &project).unwrap().stale);
     set_refresh(&db, &project, Refresh::Off).unwrap();
     assert_eq!(refresh(&db, &project).unwrap_err().0, OFF);
+}
+
+/// The due time of a project's next writing run. Inputs: the connection and the project.
+/// Output: the time in ms, 0 for at once.
+fn due_ms(db: &Connection, project: &ProjectId) -> i64 {
+    db.query_row(
+        "SELECT due_ms FROM project_overview WHERE project=?1",
+        [project.as_str()],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// V240-BRIDGE-REDS (overview-tabs:209): what happens to refreshed tabs, or After each
+/// landed change set, saved before the Overview was ever read still lets the first read ask
+/// for the first writing run at once; Refresh only and Off still wait for Refresh, and a
+/// project whose run already wrote its tabs is never asked again by a read.
+#[test]
+fn a_setting_saved_before_the_first_read_still_lets_that_read_ask_for_the_first_run() {
+    for apply in [Apply::WhenUnedited, Apply::AlwaysAsk] {
+        let (db, project, folder) = case();
+        set_apply(&db, &project, apply).unwrap();
+        assert!(!state(&db, &project).unwrap().stale);
+        let overview = read(&db, &project, folder.path(), 1).unwrap();
+        assert!(overview.stale, "{apply:?}");
+        assert_eq!(overview.apply, apply);
+        assert_eq!(due_ms(&db, &project), 0, "{apply:?}");
+    }
+    let (db, project, folder) = case();
+    set_refresh(&db, &project, Refresh::AfterLanding).unwrap();
+    assert!(read(&db, &project, folder.path(), 1).unwrap().stale);
+    assert_eq!(due_ms(&db, &project), 0);
+    for refresh in [Refresh::RefreshOnly, Refresh::Off] {
+        let (db, project, folder) = case();
+        set_refresh(&db, &project, refresh).unwrap();
+        set_apply(&db, &project, Apply::WhenUnedited).unwrap();
+        assert!(
+            !read(&db, &project, folder.path(), 1).unwrap().stale,
+            "{refresh:?}"
+        );
+    }
+    let (db, project, folder) = case();
+    set_apply(&db, &project, Apply::WhenUnedited).unwrap();
+    db.execute("UPDATE project_overview SET checked_ms=5", [])
+        .unwrap();
+    assert!(!read(&db, &project, folder.path(), 6).unwrap().stale);
 }
 
 #[test]
@@ -1561,7 +1607,7 @@ fn a_tab_the_run_could_not_use_is_said_while_the_others_are_written() {
     assert!(tab_of(&overview, Tab::Features).text.is_none());
     assert_eq!(
         overview.failure.as_deref(),
-        Some("1 tab in the reply could not be used and stayed as it was")
+        Some("Features was too long for a tab. Install & use was left out of the reply.")
     );
     assert_eq!(overview.checked_ms, Some(7));
     assert!(!overview.running);
@@ -1572,6 +1618,89 @@ fn a_tab_the_run_could_not_use_is_said_while_the_others_are_written() {
     let overview = read(&db, &project, folder.path(), 11).unwrap();
     assert!(overview.failure.is_none(), "a whole reply clears the line");
     assert_eq!(overview.checked_ms, Some(10));
+}
+
+#[test]
+fn a_reply_that_leaves_asked_tabs_out_writes_the_others_and_names_the_ones_left_out() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let ended = Ended::Reply {
+        reply: "~~~quick-info\nBeehive keeps bees.\n~~~\n\n~~~competitors\nHive is older.\n~~~\n",
+        with_competitors: true,
+    };
+    assert_eq!(runs.end(&db, folder.path(), ended, 7), 1);
+    let overview = read(&db, &project, folder.path(), 8).unwrap();
+    assert_eq!(
+        tab_of(&overview, Tab::QuickInfo).text.as_deref(),
+        Some("Beehive keeps bees.\n")
+    );
+    assert_eq!(
+        tab_of(&overview, Tab::Competitors).text.as_deref(),
+        Some("Hive is older.\n")
+    );
+    assert!(tab_of(&overview, Tab::Features).text.is_none());
+    assert_eq!(
+        overview.failure.as_deref(),
+        Some("Features and Install & use were left out of the reply.")
+    );
+    assert_eq!(overview.checked_ms, Some(7));
+
+    refresh(&db, &project).unwrap();
+    assert_eq!(tick(&db, &mut runs, 9).unwrap(), 1);
+    let unasked = Ended::Reply {
+        reply: REPLY,
+        with_competitors: false,
+    };
+    assert_eq!(runs.end(&db, folder.path(), unasked, 10), 1);
+    let overview = read(&db, &project, folder.path(), 11).unwrap();
+    assert!(
+        overview.failure.is_none(),
+        "a tab that was not asked for is never named"
+    );
+}
+
+#[test]
+fn a_run_that_got_an_account_drops_the_no_account_line_and_keeps_any_other() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let (_, waiting) = runs.claims.pop().unwrap();
+    assert!(wait_for_account(&db, &project, waiting, NO_ACCOUNT, 5).unwrap());
+    let overview = read(&db, &project, folder.path(), 6).unwrap();
+    assert_eq!(overview.failure.as_deref(), Some(NO_ACCOUNT));
+    assert!(overview.stale && !overview.running);
+
+    assert_eq!(tick(&db, &mut runs, 6).unwrap(), 1);
+    let found = runs.claims.last().unwrap().1;
+    assert!(account_found(&db, &project, found).unwrap());
+    let overview = read(&db, &project, folder.path(), 7).unwrap();
+    assert!(overview.running && overview.failure.is_none());
+    assert_eq!(
+        runs.end(&db, folder.path(), Ended::Failed(UNFINISHED), 8),
+        1
+    );
+
+    refresh(&db, &project).unwrap();
+    assert_eq!(tick(&db, &mut runs, 9).unwrap(), 1);
+    let next = runs.claims.last().unwrap().1;
+    assert!(
+        !account_found(&db, &project, next).unwrap(),
+        "another line stays until the run ends"
+    );
+    let overview = read(&db, &project, folder.path(), 10).unwrap();
+    assert_eq!(overview.failure.as_deref(), Some(UNFINISHED));
+}
+
+#[test]
+fn the_prompt_asks_for_every_tab_and_never_lets_the_agent_leave_one_out() {
+    for with_competitors in [false, true] {
+        let text = prompt("EVIDENCE", &[], with_competitors);
+        assert!(!text.contains("Leave out a tab"), "{text}");
+        assert!(text.contains("Write every tab asked for."), "{text}");
+    }
 }
 
 #[test]

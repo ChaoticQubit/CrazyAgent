@@ -228,6 +228,11 @@ pub enum Command {
         settings: crate::master_frame_limit::MasterFrameSettings,
     },
     #[serde(skip_deserializing)]
+    OwnerLearningMark {
+        step: crate::learning::MarkStep,
+        on: bool,
+    },
+    #[serde(skip_deserializing)]
     OwnerMemory {
         action: crate::memory::library::LibraryAction,
     },

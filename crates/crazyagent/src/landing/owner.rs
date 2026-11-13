@@ -1235,10 +1235,11 @@ fn finish(
     }
 }
 
-/// Drops a landed change set's pending ref, forgets the owner edits settled on it and
-/// points its agent's worktree at the landed commit when the worktree holds nothing newer
-/// than the set. Inputs: the store, the landed set and its landed commit. Output: Ok once
-/// done.
+/// Drops a landed change set's pending ref, forgets the owner edits settled on it, points
+/// its agent's worktree at the landed commit when the worktree holds nothing newer than the
+/// set, and moves the project's other resting agents onto the Land on tip (DEC-147.6). The
+/// caller holds the repository's hold. Inputs: the store, the landed set and its landed
+/// commit. Output: Ok once done.
 fn tidy(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
     flow::set_engine_ref(
         &shared(&record.repository)?,
@@ -1257,6 +1258,7 @@ fn tidy(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engine
             crate::protocol::plain_code(&error.0)
         ),
     }
+    super::ancestry::move_resting(db, &record.project, &record.repository, &record.worktree);
     Ok(())
 }
 
@@ -1643,7 +1645,19 @@ fn accept_held(
     let identity = owner_identity(&repository, home)?;
     let message = edited.unwrap_or_else(|| record.message());
     let identity = (identity.0.as_str(), identity.1.as_str());
-    let commit = owner.commit_tree(&tree, &[&tip], &format!("{message}\n"), identity)?;
+    let second = super::ancestry::merge_parent(
+        db,
+        &owner,
+        &repository,
+        &record.project,
+        &tip,
+        &record.head,
+        identity,
+    )?;
+    let parents: Vec<&str> = std::iter::once(tip.as_str())
+        .chain(second.as_deref())
+        .collect();
+    let commit = owner.commit_tree(&tree, &parents, &format!("{message}\n"), identity)?;
     verify_objects(&repository, &[&commit], &[&tip, &record.head, &record.base])?;
     record.intent = Some(Intent::Land {
         reference: reference.clone(),

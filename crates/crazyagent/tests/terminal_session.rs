@@ -787,3 +787,57 @@ fn a_sandboxed_pane_runs_its_harness_under_the_keeper_inside_the_profile() {
     assert_eq!(pane.session.stop().unwrap(), None);
     assert!(!pane.host.alive().unwrap().contains(&pane.agent));
 }
+
+/// A stand-in that takes six seconds before it draws its ready line and reads keys, longer
+/// than the 4 s the engine allows between two process tables a Full access pane follows,
+/// as a harness loading its tools may.
+const SLOW_START_STAND_IN: &str = "#!/bin/sh\nprintf 'stand-in starting\\n'\n/bin/sleep 6\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+
+/// How long an owner leaves a pane's events unread in the follow-gap row: past the 4 s
+/// the engine allows between two process tables a Full access pane follows.
+const UNREAD: Duration = Duration::from_secs(7);
+
+/// Reads a pane's events for `wait`, as the engine's loops do between their other work.
+/// Inputs: the session and how long. Output: none.
+fn read_for(session: &mut TerminalSession, wait: Duration) {
+    let until = Instant::now() + wait;
+    while Instant::now() < until {
+        let _ = session.next_event(Duration::from_millis(250)).unwrap();
+    }
+}
+
+/// BL-PANE-FOLLOW-GAP: a Full access sub-agent whose harness takes longer than the follow
+/// gap to take its first prompt is followed while that prompt waits, so its stop, after a
+/// turn read as usual, finds nothing unchecked instead of holding the agent's account.
+#[test]
+fn a_full_access_pane_slow_to_take_its_first_prompt_stops_with_nothing_unchecked() {
+    let mut pane = stand_in_on(SLOW_START_STAND_IN, "stand-in-14", None, false);
+    pane.session.send("first prompt").unwrap();
+    let typed = typed_until(&pane.home.join("typed"), b"first prompt");
+    assert!(
+        contains(&typed, b"first prompt"),
+        "the prompt never arrived"
+    );
+    read_for(&mut pane.session, Duration::from_secs(3));
+    let stopped = pane.session.stop();
+    assert!(
+        matches!(stopped, Ok(None)),
+        "the stop of a Full access pane slow to take its first prompt was {stopped:?}"
+    );
+}
+
+/// BL-PANE-FOLLOW-GAP: a Full access pane whose owner reads none of its events for longer
+/// than the follow gap, as while it works on something else, and then reads them again
+/// still stops with nothing unchecked: following does not wait on the owner reading.
+#[test]
+fn a_full_access_pane_left_unread_past_the_follow_gap_stops_with_nothing_unchecked() {
+    let mut pane = stand_in_on(STAND_IN, "stand-in-15", None, false);
+    read_for(&mut pane.session, Duration::from_secs(2));
+    std::thread::sleep(UNREAD);
+    read_for(&mut pane.session, Duration::from_secs(3));
+    let stopped = pane.session.stop();
+    assert!(
+        matches!(stopped, Ok(None)),
+        "the stop of a Full access pane left unread past the follow gap was {stopped:?}"
+    );
+}

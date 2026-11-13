@@ -413,6 +413,135 @@ pub(super) async fn serve(
     write_wire(stream, &reply).await
 }
 
+impl OwnerRuntimeHandle {
+    /// Writes a pooled keyed RCLI account's saved API key into its generated SDK home before
+    /// the master launch, through the Configure flow and the same writer, when the home
+    /// holds the config but no key file, as a keyed account saved before DEC-150 addendum 9a
+    /// left it (KY-M1). Input: the prepared turn. Output: Ok when nothing was missing or the
+    /// key was written; otherwise the RCLI_KEY_SETUP_CAUSE refusal.
+    pub(super) async fn set_up_master_key(
+        &self,
+        prepared: &crate::storage::PreparedMasterTurn,
+    ) -> Result<(), EngineError> {
+        let ModelAuthentication::ApiKey { credential_ref } = &prepared.attempt.connection.auth
+        else {
+            return Ok(());
+        };
+        let refused = || failure(crate::master_session::RCLI_KEY_SETUP_CAUSE);
+        let root = super::changes::engine_root(&self.authority).map_err(|_| refused())?;
+        if !crate::engine::bootstrap::generated_home_needs_key(&root, credential_ref)
+            .map_err(|_| refused())?
+        {
+            return Ok(());
+        }
+        let written = self.configure_saved_key(prepared).await;
+        match (
+            written,
+            crate::engine::bootstrap::generated_home_needs_key(&root, credential_ref),
+        ) {
+            (Ok(()), Ok(false)) => Ok(()),
+            _ => Err(refused()),
+        }
+    }
+
+    /// Runs the Configure flow for the prepared turn's account with the key saved with it,
+    /// as the session's owner, still admitted before Finish, and waits for the writer, which
+    /// runs on even if the turn is dropped. Input: the prepared turn. Output: Ok once the
+    /// key is written and the operation settled; any refusal otherwise.
+    async fn configure_saved_key(
+        &self,
+        prepared: &crate::storage::PreparedMasterTurn,
+    ) -> Result<(), EngineError> {
+        let identity = self.identity();
+        let owner = &prepared.session.owner;
+        let admission = {
+            let slots = self
+                .authority
+                .slots
+                .lock()
+                .map_err(|_| failure("owner_runtime_stale"))?;
+            slots
+                .iter()
+                .find(|slot| {
+                    let admission = &slot.registration.admission;
+                    slot.registration.active
+                        && admission.db_instance == identity.db_instance
+                        && admission.engine_epoch == identity.engine_epoch
+                        && admission.owner_id == owner.owner_id
+                        && admission.owner_epoch == owner.resulting_epoch
+                })
+                .map(|slot| slot.registration.admission.clone())
+        }
+        .ok_or_else(|| failure("master_runtime_scope_revoked"))?;
+        let binding = prepared.profile.binding();
+        let request = AccountProfileRequest {
+            request_id: RequestId::new(format!(
+                "master-key-{}",
+                crate::engine::owner::random_id()?
+            ))
+            .map_err(|_| failure("owner_identity_encoding"))?,
+            scope: crate::engine::owner::NativeAuthScope {
+                expected_database_instance: admission.db_instance.clone(),
+                connection: prepared.attempt.connection.id.clone(),
+                expected_config_id: binding.config_id.clone(),
+                expected_source_hash: binding.source_hash.clone(),
+            },
+        };
+        let secret = saved_key(&self.engine, &self.authority, &admission, &request)
+            .await?
+            .ok_or_else(|| failure("account_profile_secret_required_or_unexpected"))?;
+        self.registered_rcli_private_key_executable()?;
+        let reserved = actor(
+            &self.engine,
+            &admission,
+            Command::Reserve(request.clone(), true),
+        )
+        .await?;
+        if !matches!(reserved, ResultValue::Accepted) {
+            return Err(unknown());
+        }
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let begun = actor(
+                &runtime.engine,
+                &admission,
+                Command::Apply(request.clone(), Some(secret)),
+            )
+            .await;
+            let work = match begun {
+                Ok(ResultValue::Work(work)) => work,
+                Ok(_) => return Err(unknown()),
+                Err(error) => {
+                    let _ = actor(&runtime.engine, &admission, Command::Abandon(request)).await;
+                    return Err(error);
+                }
+            };
+            let (work, succeeded) = writer::run(&runtime, work).await?;
+            let admitted = runtime.authority.slots.lock().is_ok_and(|slots| {
+                slots.iter().any(|slot| {
+                    slot.registration.active && slot.registration.admission == admission
+                })
+            });
+            if !admitted {
+                return Err(failure("master_runtime_scope_revoked"));
+            }
+            actor(
+                &runtime.engine,
+                &admission,
+                Command::Finish(work, succeeded),
+            )
+            .await?;
+            if succeeded {
+                Ok(())
+            } else {
+                Err(failure("rcli_private_key_write_failed"))
+            }
+        })
+        .await
+        .map_err(|_| unknown())?
+    }
+}
+
 /// Finds the key saved with a registry account when a client configures its harness profile
 /// without sending one, so the key is read only from the engine's account key store.
 /// Inputs: engine, authority, admission and request. Output: the saved key, if any.

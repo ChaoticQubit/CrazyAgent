@@ -5,8 +5,8 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
-    BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, MasterIdleStop, MasterLands, ReuseIdle,
-    SwitchApply, SwitchMode, TeamAction, TeamStatus, TerminalsPerWindow,
+    BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, LandingMode, MasterIdleStop,
+    MasterLands, ReuseIdle, SwitchApply, SwitchMode, TeamAction, TeamStatus, TerminalsPerWindow,
 };
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
@@ -571,6 +571,22 @@ impl NativeBridge {
         let project_id = project(id)?;
         let mode = ReuseIdle::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
         self.team_action(TeamAction::ReuseIdle { project_id, mode }, generation)
+            .await
+    }
+
+    /// Sets a project's "Landing" setting: `squash` lands each accepted change set as one
+    /// commit, `merge` lands it as a merge commit that keeps every agent commit (DEC-147.6).
+    /// Takes the project id, the mode and the client generation. Returns the actual commit
+    /// receipt, or `team_action_invalid` for any other mode.
+    pub async fn team_landing_mode(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = LandingMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::LandingMode { project_id, mode }, generation)
             .await
     }
 

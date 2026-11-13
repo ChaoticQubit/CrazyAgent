@@ -456,7 +456,7 @@ impl Plugins {
     }
 
     fn windows(&self, ctx: &Ctx, subtitle_rows: usize) -> (usize, usize, usize) {
-        let content = (ctx.height as usize).saturating_sub(4 + 1);
+        let content = (ctx.height as usize).saturating_sub(4 + 1 + ctx.extra_hint_rows());
         let avail = content.saturating_sub(1 + subtitle_rows + 1 + 3 + 2).max(3);
         let hooks = self.hooks.len().max(1).min((avail / 3).max(1));
         let avail = avail.saturating_sub(hooks).max(2);
@@ -906,6 +906,10 @@ impl Plugins {
 }
 
 impl Screen for Plugins {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Plugins and skills".into()]
     }
@@ -1533,6 +1537,10 @@ impl AddPlugin {
 }
 
 impl Screen for AddPlugin {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         let page = match self.kind {
             Kind::Skill => "Add skill",
@@ -1898,6 +1906,10 @@ impl EditServer {
 }
 
 impl Screen for EditServer {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         crumbs_of(self.project.as_ref(), &self.server.name)
     }

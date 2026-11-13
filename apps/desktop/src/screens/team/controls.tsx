@@ -1,15 +1,15 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setLeftovers, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMasterRounds, setMasterRunTime, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setDoneQuiet, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setLeftovers, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandingMode, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMasterRounds, setMasterRunTime, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setDoneQuiet, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { BackgroundAtEnd, LeftoverMode, BranchMode, ChildLanding, IntentReceipt, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
+import type { BackgroundAtEnd, LeftoverMode, BranchMode, ChildLanding, IntentReceipt, LandingMode, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { IconName, SelectOption } from "../../ui";
 import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
 import { afterSave, shownChoice, useHeld } from "../../state";
 import { displayText } from "../conversation";
 import { savedStale } from "../project/settings";
-import { CoordinationControls, PerHarnessControls, TerminalDisplaySetting, ToolsControls } from "./coordination";
+import { CoordinationControls, HeavyLaneControls, PerHarnessControls, TerminalDisplaySetting, ToolsControls } from "./coordination";
 import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, useTeam, type TeamProject } from "./setup-rows";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
@@ -310,7 +310,7 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
     rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply", "End a turn after done"] },
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
-    rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", ...PER_HARNESS_ROWS] },
+    rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Landing", "Finished agents", "Terminal display", "Heavy lane", "Shared resources", ...PER_HARNESS_ROWS] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
     rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Left running after a stop", "Token budget", "Master run time", "Sub-agent rounds per message"] },
 ];
@@ -578,6 +578,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits", Object.is, status);
   const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on", Object.is, status);
   const [reuseIdle, holdReuseIdle] = useHeld<"off" | "on">(status.reuse_idle === "on" ? "on" : "off", Object.is, status);
+  const [landing, holdLanding] = useHeld<LandingMode>(status.landing_mode === "merge" ? "merge" : "squash", Object.is, status);
   const [newFolder, holdNewFolder] = useHeld(status.new_folder_files_max ?? NEW_FOLDER_DEFAULT, Object.is, status);
   const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses), Object.is, status);
   const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates), Object.is, status);
@@ -657,6 +658,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const chooseAskMerge = (choice: "off" | "on") => change(() => setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting", () => holdAskMerge(choice));
   const chooseCatchUp = (choice: "off" | "on") => change(() => setCatchUpMain(projectId, choice), "the catch up with main setting", () => holdCatchUp(choice));
   const chooseReuseIdle = (choice: "off" | "on") => change(() => setReuseIdle(projectId, choice), "the reuse idle agents setting", () => holdReuseIdle(choice));
+  const chooseLandingMode = (choice: LandingMode) => change(() => setLandingMode(projectId, choice), "the landing setting", () => holdLanding(choice));
   const chooseNewFolder = (files: number) => change(() => setNewFolderLimit(projectId, files), "the new folder limit", () => holdNewFolder(files));
 
   async function saveBackground(choice: BackgroundAtEnd) {
@@ -795,6 +797,12 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
             <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off makes the git the app writes for an agent refuse that command, except a master at Full access, whose git runs everything. Off is a guide, not a lock: nothing checks it later, so landed work can still come in another way.</span>
           </SettingRow>
+          <SettingRow label="Landing">
+            <span className="set-label" aria-hidden="true">Landing</span>
+            <Segmented label="Landing" value={landing} onValue={(choice) => { if (!busy) void chooseLandingMode(choice); }}
+              options={[{ value: "squash", label: "Squash" }, { value: "merge", label: "Merge commit" }]} />
+            <span className="tg-terminal-note">Squash lands each accepted change set as one commit. Merge commit keeps every agent commit in your history, so an agent's own git merge crazyagent/main stops conflicting. After each accept, an agent with no unlanded work moves onto the landed main, or is told to when it works in its own copy.</span>
+          </SettingRow>
           <SettingRow label="Finished agents">
             <span className="set-label" aria-hidden="true">Finished agents</span>
             <Segmented label="Finished agents" value={listed} onValue={(choice) => { if (!busy) void view(choice); }}
@@ -802,6 +810,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
           </SettingRow>
           <TerminalDisplaySetting projectId={projectId} status={status} reload={reload} />
+          <HeavyLaneControls projectId={projectId} status={status} reload={reload} />
           <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => settingMatches(row, words))}>Per harness</h3>
           <PerHarnessControls projectId={projectId} status={status} reload={reload} />
         </SettingGroup>

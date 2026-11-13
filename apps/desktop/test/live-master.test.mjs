@@ -137,14 +137,20 @@ test("a started live master that waits for its account's profile shows the engin
   assert.ok(!seen.briefed.text.includes(wait), seen.briefed.text);
 });
 
-test("a stopped live master says why it stopped, or that opening the tab or a new session starts it, with no Start button unless an idle stop ended it", async () => {
+test("a stopped live master says why it stopped and offers Try again, or says that opening the tab or a new session starts it, with no Start button unless an idle stop ended it (owner 11-12)", async () => {
   const why = "The live master could not start: no signed-in account.";
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate(`Fixture.mountView("stopped", ${JSON.stringify(why)})`);
     const guarded = await evaluate("Fixture.shown()");
+    const retried = await evaluate('Fixture.click("Try again")');
+    const asked = await evaluate("Fixture.startsAsked()");
     await evaluate('Fixture.mountView("stopped")');
-    return { guarded, owner: await evaluate("Fixture.shown()") };
+    return { guarded, retried, asked, owner: await evaluate("Fixture.shown()") };
   });
+  assert.ok(seen.guarded.buttons.includes("Try again"), seen.guarded.buttons.join(", "));
+  assert.equal(seen.retried, true);
+  assert.equal(seen.asked, 1, "Try again starts the live master once");
+  assert.ok(!seen.owner.buttons.includes("Try again"), `the owner's own stop has nothing to try again: ${seen.owner.buttons.join(", ")}`);
   for (const view of [seen.guarded, seen.owner]) {
     assert.equal(view.terminal, false);
     assert.equal(view.state, "Stopped");
@@ -153,6 +159,96 @@ test("a stopped live master says why it stopped, or that opening the tab or a ne
   }
   assert.ok(seen.guarded.text.includes(why), seen.guarded.text);
   assert.match(seen.owner.text, /The live master is stopped\. It starts again when you open this tab or start a new session\./);
+});
+
+const TMUX_MISSING = "tmux is missing, so the live master's terminal can't open. Install tmux: run setup again from Settings (it needs Homebrew, from brew.sh), or run brew install tmux in Terminal. Then try again.";
+const OVERDUE = "The master's terminal hasn't opened after a minute.";
+const WAITING_LINE = "Waiting for the master's terminal.";
+
+test("a live master the engine stopped because tmux is missing says so, how to install it, and offers Try again, never the endless wait (owner 11-12)", async () => {
+  const status = { kind: "ok", value: teamStatus({ live_master: false, live_problem: TMUX_MISSING }) };
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate(`Fixture.mountView("stopped", ${JSON.stringify(TMUX_MISSING)}, ${JSON.stringify(status)})`);
+    const view = await evaluate("Fixture.shown()");
+    const retried = await evaluate('Fixture.click("Try again")');
+    return { view, retried, asked: await evaluate("Fixture.startsAsked()") };
+  });
+  assert.ok(seen.view.text.includes(TMUX_MISSING), seen.view.text);
+  assert.ok(!seen.view.text.includes(WAITING_LINE), seen.view.text);
+  assert.equal(seen.view.terminal, false);
+  assert.ok(seen.view.buttons.includes("Try again"), seen.view.buttons.join(", "));
+  assert.equal(seen.retried, true);
+  assert.equal(seen.asked, 1);
+});
+
+test("a master terminal not open a minute after the start says so with the engine's line and Try again instead of the spinner, and a fresh wait still spins (owner 11-12)", async () => {
+  const quiet = { kind: "ok", value: teamStatus({ live_master: true, live_problem: null }) };
+  const told = { kind: "ok", value: teamStatus({ live_master: true, live_problem: TMUX_MISSING }) };
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate(`Fixture.mountView("overdue", "", ${JSON.stringify(quiet)})`);
+    const overdue = await evaluate("Fixture.shown()");
+    const spinning = await evaluate('Boolean(document.querySelector(".tg-terminal-state .spin, .tg-terminal-state svg"))');
+    const retried = await evaluate('Fixture.click("Try again")');
+    const asked = await evaluate("Fixture.startsAsked()");
+    await evaluate(`Fixture.mountView("overdue", "", ${JSON.stringify(told)})`);
+    const reasoned = await evaluate("Fixture.shown()");
+    await evaluate(`Fixture.mountView("waiting", "", ${JSON.stringify(quiet)})`);
+    const fresh = await evaluate("Fixture.shown()");
+    return { overdue, spinning, retried, asked, reasoned, fresh };
+  });
+  assert.ok(seen.overdue.text.includes(OVERDUE), seen.overdue.text);
+  assert.ok(!seen.overdue.text.includes(WAITING_LINE), seen.overdue.text);
+  assert.equal(seen.spinning, false, "no spinner once the wait is overdue");
+  assert.ok(seen.overdue.buttons.includes("Try again"), seen.overdue.buttons.join(", "));
+  assert.equal(seen.retried, true);
+  assert.equal(seen.asked, 1, "Try again starts the live master once");
+  assert.ok(seen.reasoned.text.includes(OVERDUE), seen.reasoned.text);
+  assert.ok(seen.reasoned.text.includes(TMUX_MISSING), seen.reasoned.text);
+  assert.ok(seen.fresh.text.includes(WAITING_LINE), seen.fresh.text);
+  assert.ok(!seen.fresh.text.includes(OVERDUE), seen.fresh.text);
+  assert.ok(!seen.fresh.buttons.includes("Try again"), seen.fresh.buttons.join(", "));
+});
+
+test("the wait for the master's terminal is bounded: overdue a minute after the area first saw the master on with no terminal, and a terminal or a new start restarts the clock (owner 11-12)", () => {
+  assert.equal(live.OPEN_LIMIT_MS, 60_000);
+  assert.equal(live.openOverdue(null, 1_000_000), false);
+  assert.equal(live.openOverdue(1_000, 60_999), false);
+  assert.equal(live.openOverdue(1_000, 61_000), true);
+  const node = { id: "m", kind: "master", parent: null, label: "m", harness: "codex", status: null, status_label: null, account: null, terminal: "team-1" };
+  const bare = { ...node, terminal: null };
+  assert.deepEqual(live.runningState({ kind: "starting" }, null, 5, false), { kind: "running", node: null, since: 5 });
+  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, bare, 9, false), { kind: "running", node: null, since: 5 }, "a master with no terminal yet keeps the clock");
+  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, node, 9, true), { kind: "running", node, since: null });
+  assert.deepEqual(live.runningState({ kind: "running", node, since: null }, null, 12, false), { kind: "running", node: null, since: 12 });
+  const refused = { kind: "refused", code: "x", copy: "y" };
+  assert.equal(live.runningState(refused, node, 9, true), refused, "a refused start stays refused");
+  const missing = { kind: "not_ready" };
+  assert.equal(live.runningState(missing, node, 9, true), missing);
+});
+
+test("the wait for the master's terminal ends only when it opens: a listed terminal keeps the clock until its first frame and one that closes with the switch on starts it again, as the TUI (rv-code V240-MASTER-UI N1, DEC-141)", () => {
+  const node = { id: "m", kind: "master", parent: null, label: "m", harness: "codex", status: null, status_label: null, account: null, terminal: "team-1" };
+  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, node, 9, false), { kind: "running", node, since: 5 }, "listed with no first frame: the clock runs on");
+  assert.deepEqual(live.runningState({ kind: "running", node, since: 5 }, node, 9, true), { kind: "running", node, since: null }, "the first frame ends the wait");
+  assert.deepEqual(live.runningState({ kind: "running", node, since: null }, node, 12, false), { kind: "running", node, since: 12 }, "a terminal that closed with the switch on starts a new wait");
+  assert.deepEqual(live.runningState({ kind: "running", node, since: 12 }, node, 20, false), { kind: "running", node, since: 12 }, "a later read keeps that wait's start");
+});
+
+test("a listed master terminal with no first frame a minute on says so with Try again and keeps the terminal mounted for a late frame (rv-code V240-MASTER-UI N1, owner 11-12)", async () => {
+  const quiet = { kind: "ok", value: teamStatus({ live_master: true, live_problem: null }) };
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate(`Fixture.mountView("overdue-listed", "", ${JSON.stringify(quiet)})`);
+    const overdue = await evaluate("Fixture.shown()");
+    const mounted = await evaluate('Boolean(document.querySelector(".tg-terminal"))');
+    const retried = await evaluate('Fixture.click("Try again")');
+    const asked = await evaluate("Fixture.startsAsked()");
+    return { overdue, mounted, retried, asked };
+  });
+  assert.ok(seen.overdue.text.includes(OVERDUE), seen.overdue.text);
+  assert.ok(seen.overdue.buttons.includes("Try again"), seen.overdue.buttons.join(", "));
+  assert.equal(seen.mounted, true, "the terminal stays mounted so a late first frame ends the note");
+  assert.equal(seen.retried, true);
+  assert.equal(seen.asked, 1, "Try again starts the live master once");
 });
 
 test("opening the master area starts a stopped or never-set live master once and leaves a running one alone", async () => {

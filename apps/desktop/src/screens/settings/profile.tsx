@@ -5,6 +5,7 @@ import { QuestionsShownSetting } from "../project/question-popup";
 import { INPUT_CHOICES, type InputChoice } from "../team/terminal-io";
 import { Button, LoadError, NotReady, Notice, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { ProfileFields, draftFromProfile, emptyProfileDraft, submitProfile, type ProfileDraft, type ProfileErrors } from "../first-run";
+import { LearningReplay } from "../dashboard/learn";
 
 function Appearance() {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
@@ -24,8 +25,9 @@ function Appearance() {
 }
 
 /** Settings, Profile: the Welcome fields saved with Save changes (only after a change), plus
- * Appearance. Reads the profile from the session. */
-export function ProfileSettings() {
+ * Appearance and the Learn CrazyAgent replay entries. Reads the profile from the session.
+ * Input: what closes the Profile dialog, for a replay entry that moves on. */
+export function ProfileSettings({ onClose }: { onClose?: () => void } = {}) {
   const session = useAppSession();
   const saved = session.profile.kind === "ok" ? session.profile.value : null;
   const [draft, setDraft] = useState<ProfileDraft>(() => saved ? draftFromProfile(saved) : emptyProfileDraft());
@@ -62,5 +64,6 @@ export function ProfileSettings() {
         </form>
       </SettingSection>}
     <Appearance />
+    <LearningReplay onClose={onClose} />
   </div>;
 }

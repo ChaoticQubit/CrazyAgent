@@ -51,12 +51,12 @@ const IDE_TAB = { id: "ide", label: "IDE", icon: "file-code" } as const satisfie
 
 export type TabId = typeof TABS[number]["id"] | typeof IDE_TAB.id;
 
-const REPLACED: readonly TabId[] = ["changes", "context"];
+const REPLACED: readonly TabId[] = ["changes"];
 
-/** The project page's tabs: the fixed ones, with the IDE in place of Changes and Context
- * once the engine's IDE can open. A replaced tab the route opens stays listed after the IDE.
- * Inputs: the IDE view, undefined until it is read, and the route's tab. Output: the tabs
- * in order. */
+/** The project page's tabs: the fixed ones, with the IDE in place of Changes once the
+ * engine's IDE can open, Context staying a tab beside it (DEC-152). A replaced tab the route
+ * opens stays listed after the IDE. Inputs: the IDE view, undefined until it is read, and
+ * the route's tab. Output: the tabs in order. */
 export function projectTabs(view: IdeView | undefined, route = ""): readonly { id: TabId; label: string; icon: IconName }[] {
   if (!ideReplacesTabs(view)) return TABS;
   return TABS.flatMap<{ id: TabId; label: string; icon: IconName }>((item) => {

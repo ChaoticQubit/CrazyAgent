@@ -36,6 +36,10 @@ pub const CONTEXT_DIRECTORY: &str = "context";
 pub const LINKED_PREFIX: &str = "repo/";
 /// The most bytes of a context item path an owner read carries.
 pub const CONTEXT_PATH_BYTES_MAX: usize = 512;
+/// The most bytes of the context an owner read lists, docs included, so its reply fits one
+/// frame with room for the reply around it.
+pub const CONTEXT_LISTED_BYTES_MAX: usize = 48 * 1024;
+const _: () = assert!(CONTEXT_LISTED_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MAX);
 pub const PROJECTS_DIRECTORY: &str = "projects";
 #[cfg(unix)]
 const BRIEF_PARTIAL: &str = ".brief.partial";
@@ -661,12 +665,26 @@ pub struct ContextItem {
     pub linked: bool,
 }
 
+/// A project's context as the owner reads it: the project, its state folder and its items.
+/// `unlisted_docs` counts the docs of the project's docs folder a listing found and left
+/// out, and `docs_folder_cut` says the listing stopped before reading the whole folder; both
+/// are left off the wire when nothing was left out, so such a list reads as it did before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectContext {
     pub project_id: ProjectId,
     pub folder: String,
     pub items: Vec<ContextItem>,
+    #[serde(default, skip_serializing_if = "none_unlisted")]
+    pub unlisted_docs: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub docs_folder_cut: bool,
+}
+
+/// Whether a context listing left no doc out, so its count stays off the wire.
+/// Input: the count. Output: the answer.
+fn none_unlisted(count: &usize) -> bool {
+    *count == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2465,7 +2483,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 51] = [
+const REMOVED_WITH_PROJECT: [&str; 54] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2497,9 +2515,12 @@ const REMOVED_WITH_PROJECT: [&str; 51] = [
     "team_wall",
     "team_catch_up_main",
     "team_reuse_idle",
+    "team_landing_mode",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",
+    "team_task_roles",
+    "team_handles",
     "team_wake_requests",
     "team_owner_stops",
     "team_status_log",
@@ -2579,11 +2600,12 @@ fn set_hidden_paths(
     Ok(Outcome::Applied)
 }
 
-/// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
-/// choices, when the owner's screen showed the current version. Takes the transaction,
-/// project, the version the screen read and the policy. Returns Applied, or a plain
-/// rejection for an unknown project, an invalid policy, a level this computer cannot run or
-/// a policy that changed since it was read (`stale_revision`).
+/// Saves a project's agent policy (DEC-101, DEC-102): its access level, toolchain choices
+/// and allowed extras (F08), when the owner's screen showed the current version. Each extra
+/// the save adds is checked and kept in canonical form, and each one added or removed is
+/// logged as the owner's. Takes the transaction, project, the version the screen read and
+/// the policy. Returns Applied, or a plain rejection for an unknown project, an invalid
+/// policy or extra, a level this computer cannot run or a stale screen (`stale_revision`).
 fn set_agent_policy(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2606,11 +2628,42 @@ fn set_agent_policy(
     if policy.access.unavailable().is_some() {
         return Ok(rejected("agent_access_unavailable"));
     }
+    let before = crate::sandbox::policy::load(tx, project_id.as_str())
+        .map(|saved| saved.grants)
+        .unwrap_or_default();
+    let data = crate::sandbox::grants::data_root(tx).unwrap_or_default();
+    let mut kept = Vec::with_capacity(policy.grants.len());
+    for grant in &policy.grants {
+        if before.contains(grant) {
+            kept.push(grant.clone());
+            continue;
+        }
+        match crate::sandbox::grants::checked(grant, &data) {
+            Ok(grant) => kept.push(grant),
+            Err(code) => return Ok(rejected(code)),
+        }
+    }
+    let policy = crate::sandbox::policy::AgentPolicy {
+        grants: kept,
+        ..policy.clone()
+    };
+    if let Err(code) = policy.validate() {
+        return Ok(rejected(code));
+    }
     let item = crate::storage::versioned::agent_policy_item(project_id);
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
-    crate::sandbox::policy::save(tx, project_id.as_str(), policy).map_err(error)?;
+    crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+    crate::sandbox::grants::log_changes(
+        tx,
+        project_id.as_str(),
+        &before,
+        &policy.grants,
+        "owner",
+        crate::team::now_ms(),
+    )
+    .map_err(error)?;
     Ok(Outcome::Applied)
 }
 
@@ -2656,6 +2709,7 @@ fn remove(
     crate::questions::forget_project(tx, project_id)?;
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
+    crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::agent_policy_item(project_id),
@@ -2865,7 +2919,8 @@ impl NewProjectPlan {
     }
 }
 
-/// Records a New Project whose folder the owner transport built.
+/// Records a New Project whose folder the owner transport built, with a first agent
+/// policy that records the toolchains the owner has installed (F26).
 /// Takes the transaction, configuration, the Create action and the staged
 /// result. Returns Applied once the rows are written, the brief is in place
 /// and the folder is moved into the home, else the refusal; the checks run
@@ -2907,6 +2962,17 @@ pub(crate) fn record_new(
     )?;
     if outcome == Outcome::Applied {
         let stored = load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
+        if !crate::sandbox::policy::saved(tx, project_id.as_str()).map_err(error)? {
+            let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
+            let policy = crate::sandbox::policy::AgentPolicy {
+                toolchains: crate::sandbox::policy::recorded_toolchains(
+                    &staged.staging,
+                    homes.as_ref(),
+                ),
+                ..Default::default()
+            };
+            crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+        }
         let state = crate::projects_home::state_folder(&staged.staging);
         assert_ne!(state, staged.staging);
         let context = open_beneath(&state, &[CONTEXT_DIRECTORY]).map_err(error)?;
@@ -3211,14 +3277,17 @@ pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError>
         project_id: stored.project_id.clone(),
         folder: folder.to_string_lossy().into_owned(),
         items,
+        unlisted_docs: 0,
+        docs_folder_cut: false,
     })
 }
 
 /// Lists a project's context as [`list_context`] does, then the repository files linked into
 /// it: each link that [`links::read_linked`] reads becomes a `repo/<path>` item with `linked`
-/// set, a roadmap as a plan and a research file as research. A link that does not read, or
-/// whose context path is over [`CONTEXT_PATH_BYTES_MAX`], is left out. Inputs: the stored
-/// setup and its links. Output: at most [`CONTEXT_ITEMS_MAX`] items.
+/// set, a roadmap as a plan and a research file as research, then the docs [`add_docs`]
+/// finds. A link that does not read, or whose context path is over
+/// [`CONTEXT_PATH_BYTES_MAX`], is left out. Inputs: the stored setup and its links. Output:
+/// at most [`CONTEXT_ITEMS_MAX`] items and [`links::DOCS_ITEMS_MAX`] docs.
 pub fn list_context_with_links(
     stored: &StoredSetup,
     links: &[links::DocLink],
@@ -3251,15 +3320,64 @@ pub fn list_context_with_links(
         });
     }
     assert!(context.items.len() <= CONTEXT_ITEMS_MAX);
+    add_docs(&mut context, &folder);
+    assert!(context.items.len() <= CONTEXT_ITEMS_MAX + links::DOCS_ITEMS_MAX);
     Ok(context)
 }
 
+/// Adds the project's own docs to an owner listing as `repo/<path>` documents with `linked`
+/// set (DEC-152), skipping a doc already listed through a link. A doc past
+/// [`CONTEXT_PATH_BYTES_MAX`] or [`CONTEXT_LISTED_BYTES_MAX`], or past the docs bound, is
+/// counted in `unlisted_docs`, never dropped silently. Inputs: the listing and the project
+/// folder. Output: none; the listing gains the docs, the count and whether the walk was cut.
+fn add_docs(context: &mut ProjectContext, folder: &Path) {
+    let docs = links::docs(folder, links::DOCS_ITEMS_MAX);
+    let before = context.items.len();
+    let mut listed_bytes = wire_bytes(&*context);
+    let mut unlisted = docs.unlisted;
+    let mut full = false;
+    for (doc, bytes) in docs.listed {
+        let path = format!("{LINKED_PREFIX}{doc}");
+        if context.items.iter().any(|item| item.path == path) {
+            continue;
+        }
+        let item = ContextItem {
+            path,
+            kind: ContextKind::Document,
+            bytes,
+            linked: true,
+        };
+        let size = wire_bytes(&item).saturating_add(1);
+        full = full
+            || item.path.len() > CONTEXT_PATH_BYTES_MAX
+            || listed_bytes.saturating_add(size) > CONTEXT_LISTED_BYTES_MAX;
+        if full {
+            unlisted += 1;
+            continue;
+        }
+        listed_bytes += size;
+        context.items.push(item);
+    }
+    let added = context.items.len() - before;
+    assert!(added == 0 || listed_bytes <= CONTEXT_LISTED_BYTES_MAX);
+    assert!(added <= links::DOCS_ITEMS_MAX && unlisted >= docs.unlisted);
+    context.unlisted_docs = unlisted;
+    context.docs_folder_cut = docs.cut;
+}
+
+/// The bytes a value takes on the wire as JSON. Input: the value. Output: the size, or
+/// `usize::MAX` for a value that does not serialize, so it never fits a bound.
+fn wire_bytes<T: Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+}
+
 /// Reads one bounded chunk of a context item as [`read_context`] does, or of a linked
-/// repository file asked for as `repo/<path>`: only a path that is a stored link is read,
-/// below the project folder through [`links::read_linked`], so no link is followed and no
-/// other file of the repository can be asked for. Inputs: the stored setup, its links, the
-/// item path and a byte offset. Output: the chunk, `context_path_invalid` for a `repo/` path
-/// that is no stored link, or `context_item_missing` when the linked file does not read.
+/// repository file asked for as `repo/<path>`: only a path that is a stored link or a doc
+/// [`links::is_doc`] allows is read, below the project folder through
+/// [`links::read_linked`], so no link is followed and no other file of the repository can be
+/// asked for. Inputs: the stored setup, its links, the item path and a byte offset. Output:
+/// the chunk, `context_path_invalid` for any other `repo/` path, or `context_item_missing`
+/// when the file does not read.
 pub fn read_context_with_links(
     stored: &StoredSetup,
     links: &[links::DocLink],
@@ -3270,7 +3388,7 @@ pub fn read_context_with_links(
         return read_context(stored, path, offset);
     };
     assert!(links.len() <= links::LINKS_MAX);
-    if !links.iter().any(|link| link.path == linked) {
+    if !links.iter().any(|link| link.path == linked) && !links::is_doc(linked) {
         return Err(failure("context_path_invalid"));
     }
     let text = links::read_linked(&stored.project_folder(), linked)

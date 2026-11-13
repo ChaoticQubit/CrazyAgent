@@ -1,3 +1,4 @@
+use super::replay::Replay;
 use super::{draw_page, step};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, hint, sections_hint};
@@ -14,11 +15,12 @@ use ratatui::text::Line;
 
 const FORM_WIDTH: usize = 72;
 
-/// Settings, Profile: the welcome form prefilled, plus the Colors choice.
-/// Input: keys and the profile arrivals. Output: the form; Save changes saves
-/// the profile in the engine and the Colors choice on this Mac.
+/// Settings, Profile: the welcome form prefilled, plus the Colors choice and the
+/// Learn CrazyAgent replay entries. Input: keys and the profile arrivals. Output: the
+/// form; Save changes saves the profile in the engine and the Colors choice on this Mac.
 pub struct ProfilePage {
     form: Option<ProfileForm>,
+    replay: Replay,
 }
 
 impl ProfilePage {
@@ -29,7 +31,10 @@ impl ProfilePage {
             Load::Ready(profile) => Some(Self::form(profile.as_ref(), ctx)),
             _ => None,
         };
-        Self { form }
+        Self {
+            form,
+            replay: Replay::default(),
+        }
     }
 
     fn form(profile: Option<&crate::owner_profile::OwnerProfile>, ctx: &Ctx) -> ProfileForm {
@@ -42,6 +47,10 @@ impl ProfilePage {
 }
 
 impl Screen for ProfilePage {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Profile".into()]
     }
@@ -63,11 +72,22 @@ impl Screen for ProfilePage {
         ]
     }
 
+    fn keys(&self, ctx: &Ctx) -> Vec<Hint> {
+        let mut keys = self.hints(ctx);
+        keys.extend(Replay::keys());
+        keys
+    }
+
     fn typing(&self) -> bool {
         self.form.as_ref().is_some_and(ProfileForm::typing)
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if !self.typing()
+            && let Some(flow) = self.replay.key(key, ctx)
+        {
+            return flow;
+        }
         let Some(form) = &mut self.form else {
             return Flow::Ignored;
         };
@@ -92,6 +112,9 @@ impl Screen for ProfilePage {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        if let Some(flow) = self.replay.arrive(arrival, ctx) {
+            return flow;
+        }
         match arrival {
             Arrival::Profile(Ok(profile)) if self.form.is_none() => {
                 self.form = Some(Self::form(profile.as_ref(), ctx));
@@ -173,6 +196,7 @@ impl Screen for ProfilePage {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
+        Replay::shown(ctx);
         if self.form.is_none() {
             ctx.request(Request::Profile);
         }
@@ -180,7 +204,7 @@ impl Screen for ProfilePage {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let wide = ctx.wide();
-        let (content, cursor) = match &self.form {
+        let (mut content, cursor) = match &self.form {
             Some(form) => {
                 let limit = if wide {
                     FORM_WIDTH
@@ -213,6 +237,7 @@ impl Screen for ProfilePage {
                 None,
             ),
         };
+        content.extend(self.replay.lines(area.width as usize - 4, ctx));
         draw_page(frame, area, SettingsSection::Profile, content, cursor, ctx)
     }
 

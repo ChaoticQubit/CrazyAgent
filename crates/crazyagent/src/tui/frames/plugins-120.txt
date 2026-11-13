@@ -32,5 +32,5 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
-                                                                                                                        
- a Add skill   m Add MCP server   h Add hooks   Space On or off   Enter Details   i Import   l Tools   d Remove  ? Help 
+ a Add skill   m Add MCP server   h Add hooks   Space On or off   Enter Details   i Import   l Tools   d Remove         
+ Shift-←→ Sections   Esc Home                                                                                    ? Help 

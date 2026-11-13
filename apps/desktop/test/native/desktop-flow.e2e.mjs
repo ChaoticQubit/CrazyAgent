@@ -166,9 +166,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       assert.doesNotMatch(setUp, /\.crazyagent/, "the project page does not show CrazyAgent's own folder as the project");
       assert.doesNotMatch(setUp, /Couldn't give/, "the chosen pool went to the project's master");
       await me.click("Home", "nav a, aside a, a");
-      const ready = await me.waitFor("the project card on Home", (text) => /Projects/.test(text) && !/No projects yet/.test(text) && text.split("Get set up")[0].includes(REPO));
+      const ready = await me.waitFor("the project card on Home", (text) => /Projects/.test(text) && !/No projects yet/.test(text) && text.split(/Learn CrazyAgent|Get set up/)[0].includes(REPO));
       await me.capture("home-ready");
-      assert.doesNotMatch(ready, /Continue setup|being set up|Setting up/i, "nothing is left being set up (LB-10)");
+      const aboveGuide = ready.split(/Learn CrazyAgent|Get set up/)[0];
+      assert.doesNotMatch(aboveGuide, /Continue setup|being set up|Setting up/i, "nothing on Home above the setup guide is left being set up (LB-10)");
       const cards = await page.evaluate(`[...document.querySelectorAll(".cards a[href*='/projects/']")].map((card) => card.innerText.replace(/\\s+/g, " ").trim())`);
       assert.equal(cards.length, 1, `Home shows one project card: ${JSON.stringify(cards)}`);
       assert.match(cards[0], new RegExp(REPO), "the card is the project"); 

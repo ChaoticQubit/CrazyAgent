@@ -269,3 +269,265 @@ fn poll_failures_map_to_plain_codes_and_odd_replies_are_refused() {
         })
     );
 }
+
+fn claude_windows() -> serde_json::Value {
+    serde_json::json!({
+        "five_hour": {"utilization": 37.0, "resets_at": "2026-10-27T08:00:00+00:00"},
+        "seven_day": {"utilization": 81.5, "resets_at": "2026-10-30T00:00:00+00:00"},
+        "extra_usage": {"is_enabled": false}
+    })
+}
+
+#[test]
+fn a_background_claude_poll_makes_one_request_without_the_private_query() {
+    let secret = token();
+    let server = Server::start(|_, _| Answer::json(200, claude_windows()));
+    let (observed, extras) = poll_with_extras(
+        Provider::Claude,
+        local(&server, "/api/oauth/usage"),
+        &credential(&secret, None, None),
+        true,
+        NOW,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        observed.five_hour.map(|window| window.used_percent),
+        Some(37.0)
+    );
+    assert_eq!(
+        extras,
+        Extras {
+            resets: Field::NotAsked,
+            credits: Field::Known("Extra usage off".into()),
+        }
+    );
+    let seen = server.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].query, "");
+}
+
+#[test]
+fn a_refused_claude_detail_keeps_the_windows_and_reads_resets_absent() {
+    let secret = token();
+    for status in [401, 403, 429, 500] {
+        let server = Server::start(move |seen, _| {
+            if seen.query.is_empty() {
+                Answer::json(200, claude_windows())
+            } else {
+                Answer::json(status, serde_json::json!({"error": "scope"}))
+            }
+        });
+        let (observed, extras) = poll_with_extras(
+            Provider::Claude,
+            local(&server, "/api/oauth/usage"),
+            &credential(&secret, None, None),
+            true,
+            NOW,
+            true,
+        )
+        .unwrap();
+        assert!(
+            observed.five_hour.is_some() && observed.weekly.is_some(),
+            "{status}"
+        );
+        assert_eq!(extras.resets, Field::Absent, "{status}");
+        assert_eq!(extras.credits, Field::Known("Extra usage off".into()));
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2, "{status}");
+        assert_eq!(seen[1].path, "/api/oauth/usage");
+        assert_eq!(seen[1].query, super::super::extras::CLAUDE_DETAIL_QUERY);
+        assert_eq!(
+            seen[1].header("authorization"),
+            Some(format!("Bearer {secret}").as_str())
+        );
+        assert_eq!(seen[1].header("anthropic-beta"), Some("oauth-2025-04-20"));
+    }
+}
+
+#[test]
+fn a_good_claude_detail_reads_the_free_resets() {
+    let secret = token();
+    let server = Server::start(|seen, _| {
+        if seen.query.is_empty() {
+            Answer::json(200, claude_windows())
+        } else {
+            Answer::json(
+                200,
+                serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
+                    {"resets_left": 2, "paused": false, "ends_at": "2026-10-27T08:00:00+00:00"}
+                ]}}),
+            )
+        }
+    });
+    let (_, extras) = poll_with_extras(
+        Provider::Claude,
+        local(&server, "/api/oauth/usage"),
+        &credential(&secret, None, None),
+        true,
+        NOW,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        extras.resets,
+        Field::Known(super::super::extras::Resets {
+            count: 2,
+            kinds: vec![],
+            next_expiry_ms: Some(1_793_088_000_000),
+        })
+    );
+}
+
+#[test]
+fn a_failed_main_poll_makes_no_detail_request() {
+    let server = Server::start(|_, _| Answer::json(401, serde_json::json!({})));
+    let failed = poll_with_extras(
+        Provider::Claude,
+        local(&server, "/api/oauth/usage"),
+        &credential(&token(), None, None),
+        true,
+        NOW,
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(failed.0, "usage_sign_in_lapsed");
+    assert_eq!(server.seen().len(), 1);
+}
+
+#[test]
+fn a_malformed_codex_reset_field_keeps_the_windows_from_the_one_request() {
+    let server = Server::start(|_, _| {
+        Answer::json(
+            200,
+            serde_json::json!({
+                "plan_type": "plus",
+                "rate_limit": {"primary_window": {"used_percent": 12, "limit_window_seconds": 18000, "reset_at": 1_793_010_000}},
+                "rate_limit_reset_credits": {"available_count": "two"},
+                "credits": {"has_credits": true, "unlimited": true}
+            }),
+        )
+    });
+    let (observed, extras) = poll_with_extras(
+        Provider::Codex,
+        local(&server, "/backend-api/wham/usage"),
+        &credential(&token(), Some("acct-1"), None),
+        true,
+        NOW,
+        true,
+    )
+    .unwrap();
+    assert!(observed.five_hour.is_some());
+    assert_eq!(
+        extras,
+        Extras {
+            resets: Field::Absent,
+            credits: Field::Known("Unlimited credits".into()),
+        }
+    );
+    assert_eq!(server.seen().len(), 1, "Codex has no detail request");
+}
+
+#[test]
+fn a_key_balance_read_sends_only_that_key_and_reads_failures_absent() {
+    let key = token();
+    let secret = SecretString::new(key.as_bytes().to_vec()).unwrap();
+    let server = Server::start(|_, _| {
+        Answer::json(
+            200,
+            serde_json::json!({"data": {"total_credits": 20, "total_usage": 7.5}}),
+        )
+    });
+    assert_eq!(
+        poll_balance(
+            Adapter::OpenRouter,
+            local(&server, "/api/v1/credits"),
+            &secret,
+            true
+        ),
+        Field::Known("12.50 USD left".into())
+    );
+    let seen = server.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].method, "GET");
+    assert_eq!(seen[0].path, "/api/v1/credits");
+    assert_eq!(
+        seen[0].header("authorization"),
+        Some(format!("Bearer {key}").as_str())
+    );
+    assert_eq!(seen[0].header("anthropic-beta"), None);
+    assert_eq!(seen[0].header("chatgpt-account-id"), None);
+    for answer in [
+        Answer::json(401, serde_json::json!({})),
+        Answer::json(302, serde_json::json!({})),
+        Answer::json(200, serde_json::json!({"data": "lots"})),
+        Answer::bytes(200, b"not json".to_vec()),
+    ] {
+        let status = answer.status;
+        let server = Server::start(move |_, _| Answer {
+            status: answer.status,
+            headers: answer.headers.clone(),
+            body: answer.body.clone(),
+        });
+        assert_eq!(
+            poll_balance(
+                Adapter::OpenRouter,
+                local(&server, "/api/v1/credits"),
+                &secret,
+                true
+            ),
+            Field::Absent,
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn a_key_balance_read_over_plain_http_is_refused_outside_the_loopback_test() {
+    let key = SecretString::new(token().into_bytes()).unwrap();
+    let server = Server::start(|_, _| Answer::json(200, serde_json::json!({})));
+    assert_eq!(
+        poll_balance(
+            Adapter::OpenRouter,
+            local(&server, "/api/v1/credits"),
+            &key,
+            false
+        ),
+        Field::Absent
+    );
+    assert!(server.seen().is_empty(), "nothing left the engine");
+}
+
+#[test]
+fn a_detail_only_read_makes_one_request_with_the_private_query() {
+    let secret = token();
+    let server = Server::start(|_, _| {
+        Answer::json(
+            200,
+            serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
+                {"resets_left": 1, "paused": false}
+            ]}}),
+        )
+    });
+    let read = claude_detail(
+        local(&server, "/api/oauth/usage"),
+        &credential(&secret, None, None),
+        true,
+        NOW,
+    );
+    assert_eq!(
+        read,
+        Field::Known(super::super::extras::Resets {
+            count: 1,
+            kinds: vec![],
+            next_expiry_ms: None,
+        })
+    );
+    let seen = server.seen();
+    assert_eq!(seen.len(), 1, "no window poll rides along");
+    assert_eq!(seen[0].query, super::super::extras::CLAUDE_DETAIL_QUERY);
+    assert_eq!(
+        seen[0].header("authorization"),
+        Some(format!("Bearer {secret}").as_str())
+    );
+}

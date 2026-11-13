@@ -9,7 +9,7 @@ import { createConnection, createServer } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
-import { createRunDirectories } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, lockHome, runProjects } from "./run-layout.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workRoot = resolve(appRoot, "../../.local-state/desktop-execution");
@@ -23,9 +23,10 @@ const began = performance.now();
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
 const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
-assert(["model-access", "model-access-read-only", "native-auth", "pools-screen"].includes(suite),
+assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "pools-spend", "first-run-guide", "first-run-skip-guide",
+  "learning-replay-guide", "learning-replay-first-run"].includes(suite),
   "closed native suite required");
-const WEBDRIVER_SECONDS = suite === "pools-screen" ? 900 : 300;
+const WEBDRIVER_SECONDS = suite === "pools-screen" || suite === "pools-spend" ? 900 : 300;
 let interrupted = false;
 
 function interrupt() {
@@ -50,11 +51,15 @@ function binary(path) {
     sha256: createHash("sha256").update(readFileSync(path)).digest("hex") };
 }
 
-function environment() {
+async function environment() {
   createRunDirectories(evidence);
-  return {
+  const { home, prepared } = chooseHome(join(evidence, "home"));
+  await lockHome(home, { label: `run.mjs ${suite} ${evidence}` });
+  clearWebStore(home);
+  return { projects: runProjects(home), env: {
     PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
-    HOME: join(evidence, "home"),
+    HOME: home,
+    ...(prepared ? { CFFIXED_USER_HOME: home } : {}),
     TMPDIR: join(evidence, "tmp"),
     LANG: "en_US.UTF-8",
     NO_COLOR: "1",
@@ -63,7 +68,8 @@ function environment() {
     CRAZYAGENT_DESKTOP_TEST_FIXTURE: fixture,
     CRAZYAGENT_DESKTOP_TEST_EVIDENCE: evidence,
     CRAZYAGENT_DESKTOP_TEST_SUITE: suite,
-  };
+    ...(suite === "pools-spend" ? { CRAZYAGENT_DESKTOP_TEST_USAGE_UPKEEP: "1" } : {}),
+  } };
 }
 
 function signalGroup(entry, signal) {
@@ -201,10 +207,8 @@ function captured(entry) {
 
 async function execute() {
   const binaries = [binary(app), binary(fixture)];
-  const env = environment();
+  const { env, projects } = await environment();
   const port = await unusedPort();
-  const projects = join(env.HOME, "Projects");
-  mkdirSync(projects, { mode: 0o700 });
   const engine = launch("engine", fixture,
     [suite === "model-access-read-only" ? "serve" : "serve-model-access",
       engineRoot, projects], env, WEBDRIVER_SECONDS + 30);
@@ -252,6 +256,7 @@ catch (error) {
   writeFileSync(join(evidence, "setup-failure.json"), JSON.stringify({
     started, ended: new Date().toISOString(), failure: String(error.message),
   }), { flag: "wx", mode: 0o600 });
+  console.error(String(error.message));
   console.error(join(evidence, "setup-failure.json"));
   process.exitCode = 1;
 }

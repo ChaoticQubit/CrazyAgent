@@ -12,6 +12,18 @@ use crate::engine::owner::transport::native_auth_channel::{
 /// the sign-in an earlier run proved.
 const UNRUN_CHECKS_MAX: i64 = 16;
 
+/// The codes an existing-account check settles with when it ended before the provider
+/// answered: an engine stop or a custodian that ended unnamed, a custody session the engine
+/// lost, a status command or bootstrap past its bound. None of them says the account is
+/// signed out, so a restart re-proof looks past them ([`never_ran`]).
+const UNANSWERED_CHECK_CODES: [&str; 5] = [
+    "native_auth_interrupted",
+    "native_auth_recovery_required",
+    "native_auth_claude_deadline",
+    "native_auth_codex_deadline",
+    "native_auth_bootstrap_timeout",
+];
+
 /// The failure codes a sign-in custodian may name that its settled attempt records (OP-7):
 /// each tells the owner something a plain retry does not, and the app has a sentence for
 /// each. Any other cause a custodian names settles the attempt as `native_auth_interrupted`.
@@ -1283,6 +1295,25 @@ pub(crate) fn sign_in_rechecking(
     Ok(running || reproof_due(tx, connection, host)?)
 }
 
+/// Tells whether an account check or sign-in of this engine run holds its profile now: a
+/// fence stamped with the active engine's database and run whose flow is not uncertain. Its
+/// fence goes when the flow ends. An uncertain flow keeps its fence until recovery and an
+/// earlier run's fence has no flow left, so both count as none. Input: the engine
+/// connection. Output: the answer, false when the tables cannot be read.
+#[cfg(unix)]
+pub(crate) fn account_check_running(db: &Connection) -> bool {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_fences AS fence JOIN owner_meta AS meta
+           ON meta.singleton=1 AND meta.schema_version=1 AND meta.runtime_state='active'
+           AND fence.db_instance=meta.db_instance AND fence.engine_epoch=meta.engine_epoch
+           JOIN native_auth_operations AS operation ON operation.id=fence.operation_id
+           AND operation.phase<>'uncertain')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
 /// The earlier engine run a connection's newest sign-in was proved under, when it finished
 /// authenticated in this database under another run, looking past newer account checks
 /// the host never ran (LB-26). Inputs: the transaction, the connection and the running
@@ -1307,7 +1338,7 @@ fn earlier_run(
         .map_err(error)?;
     for bytes in rows {
         let fact = decode_fact(&bytes)?;
-        if never_ran(&fact) {
+        if never_ran(&fact, host) {
             continue;
         }
         if fact.phase != NativeAuthPhase::AuthenticatedObserved
@@ -1327,12 +1358,26 @@ fn earlier_run(
     Ok(None)
 }
 
-/// Tells whether an operation was an account check the host never ran, which says nothing
-/// about the sign-in it would have checked. Input: the operation's fact. Output: true for
-/// an existing-account check that ended unavailable because the host could not run it.
-fn never_ran(fact: &NativeAuthFact) -> bool {
-    fact.phase == NativeAuthPhase::Unavailable
-        && fact.code.as_deref() == Some("native_auth_host_unavailable")
+/// Tells whether an operation was an account check that got no answer from the provider,
+/// which says nothing about the sign-in it would have checked: the host could not run it,
+/// or an earlier run's check ended unanswered, cut by an engine stop, a lost custody session
+/// or its time bound. A check cut in the running host stays, so it is not retried each turn.
+/// Inputs: the operation's fact and the running host. Output: true for such a check.
+fn never_ran(fact: &NativeAuthFact, host: &HostStamp) -> bool {
+    let unanswered = match fact.phase {
+        NativeAuthPhase::Unavailable => {
+            fact.code.as_deref() == Some("native_auth_host_unavailable")
+        }
+        NativeAuthPhase::Failed | NativeAuthPhase::Uncertain => {
+            fact.binding.engine_epoch != host.engine_epoch
+                && fact
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| UNANSWERED_CHECK_CODES.contains(&code))
+        }
+        _ => false,
+    };
+    unanswered
         && matches!(
             fact.action,
             NativeAuthAction::SignIn {

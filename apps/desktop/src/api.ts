@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -155,12 +155,34 @@ const COPY: Record<string, string> = {
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
+  shared_folders_unlisted: "CrazyAgent couldn't list the project folder's files with git, so the agent didn't start. Choose All local folders with Read-only in Agent access, or check the project's git.",
+  shared_folders_too_many: "The project folder has more than 256 untracked files and folders to keep out, or more than 32 folders to open for writing, so the agent didn't start. Choose All local folders in Agent access, or gather those files into fewer folders.",
+  shared_folders_refused: "The sandbox couldn't keep the project's secret files closed or open a shared folder, so the agent didn't start. Check Shared project folders in Agent access.",
+  shared_folders_need_macos: "On Linux and Windows only All local folders with Read-only can start agents. Change Shared project folders in Agent access.",
   agent_access_lowered: "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
   agent_network_narrowed: "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
   agent_toolchain_lowered: "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
   agent_project_unreadable: "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
   agent_git_needs_tools: "Agent git needs the Command Line Tools: run xcode-select --install.",
   project_network_unreadable: "CrazyAgent couldn't read this project's network choice, so the check was refused. Try again.",
+  temp_folder_shared: "Your temp folder is shared with other users on this computer, so it is never given to agents.",
+  temp_folder_needs_macos: "Your temp folder can be given to agents only on macOS in this version.",
+  grant_socket_needs_macos: "A socket can be allowed only on macOS in this version.",
+  grant_socket_not_plain: "The socket path must be a full path of letters, digits, slashes, dots, dashes and underscores, at most 103 bytes, in a folder that exists.",
+  grant_socket_secret: "That socket sits with your keys or credentials, so it is never allowed.",
+  grant_socket_engine: "That socket belongs to CrazyAgent itself, so it is never allowed.",
+  grant_socket_agent: "That socket controls a terminal, an editor or an SSH connection (tmux, screen, dtach, Zellij, kitty, WezTerm, Alacritty, iTerm2, Emacs, Neovim, Kakoune, VS Code, Cursor and the like) or hands out your SSH keys, which can run anything as you, so it is never allowed.",
+  grant_socket_host: "That socket controls containers or virtual machines (Docker, containerd, Podman, Colima, Lima, OrbStack and the like), which can reach your whole computer, so it is never allowed.",
+  grant_socket_keys: "That socket belongs to a key or password agent (gpg-agent, 1Password, SSH or another agent), so it is never allowed.",
+  grant_socket_owner: "That socket belongs to the system or another user, has a second name, or sits in a folder other users can change, so it is never allowed.",
+  grant_socket_missing: "There is no socket at that path now. Start the program that makes it, then allow it again.",
+  grant_port_reserved: "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), or controls Docker, a browser or a debugger (Node, Java, Python or Go), so it is never allowed.",
+  grant_port_dynamic: "Ports from 49152 up are lent by the system to CrazyAgent's IDE and other apps for a while, so they are never allowed. Pick a fixed port below 49152.",
+  agent_grants_invalid: "A project allows at most 2 sockets, 4 ports and your temp folder, each once.",
+  grant_full: "This project already allows as many extras of that kind as it can.",
+  grant_requests_full: "Four access requests of this project are still waiting for the owner.",
+  grant_reason_invalid: "Give a reason in plain words.",
+  agent_grant_revoked: "An allowed extra this agent held (a socket, a port or your temp folder) was removed, so the agent was stopped. Its next start goes without it.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -202,6 +224,18 @@ export function classifyFailure(error: unknown): Failure {
   const cause = typeof error === "object" && error !== null && "cause" in error && typeof error.cause === "string" ? error.cause : undefined;
   if (code === UNREACHABLE && cause !== undefined && STALE_ENGINE_CAUSES.includes(cause)) return { kind: "error", code: STALE_ENGINE, cause, message: plainError(STALE_ENGINE) };
   return cause === undefined ? { kind: "error", code, message: plainError(code) } : { kind: "error", code, cause, message: plainError(code, cause) };
+}
+
+let selection: Promise<unknown> = Promise.resolve();
+
+/** Runs one read-then-use of the bridge's model-access selection after every earlier one has
+ * ended: the bridge keeps one selected record, ticket and paging cursor from an inspect or a
+ * page read to the edit, set-up or next page that uses it, so two such pairs at once would move
+ * it under each other. A pair must not start another. Input: the pair. Output: its result. */
+export function oneSelection<T>(pair: () => Promise<T>): Promise<T> {
+  const run = selection.then(() => pair());
+  selection = run.catch(() => undefined);
+  return run;
 }
 
 /** Calls one Tauri command, retrying only the bridge's pre-action "busy" refusal.
@@ -357,6 +391,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   master_step_settings: "changing the master step limit",
   master_time_settings: "changing the master time limit",
   master_frame_settings: "changing the master frame size limit",
+  learning_mark: "saving your learning progress",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
@@ -369,6 +404,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_setup_update: "updating the project setup",
   project_remove: "removing the project",
   project_delete: "deleting the project",
+  create_demo: "creating the demo project",
   research_cancel: "cancelling the research",
   research_retry: "retrying the research",
   plan_roadmap: "planning the roadmap",
@@ -664,9 +700,11 @@ export function profileNotNeeded(code: string): boolean {
  * sent: the engine uses the key it already holds. Input: account id. Output: ok when the
  * engine configured it or it needs no profile, otherwise a plain error. */
 export async function readyForAgents(id: string): Promise<Result<void>> {
-  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
-  if (detail.kind !== "ok") return detail;
-  const configured = await call<AccountProfileView>("desktop_configure_account_profile", { ticket: detail.value.ticket, secret: null, generation: nextGeneration() });
+  const configured = await oneSelection(async (): Promise<Result<AccountProfileView>> => {
+    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "connections", id });
+    if (detail.kind !== "ok") return detail;
+    return call<AccountProfileView>("desktop_configure_account_profile", { ticket: detail.value.ticket, secret: null, generation: nextGeneration() });
+  });
   if (configured.kind === "error" && profileNotNeeded(configured.code)) return { kind: "ok", value: undefined };
   if (configured.kind !== "ok") return configured;
   if (configured.value.pending || configured.value.reply.outcome === "not_recorded") {
@@ -868,10 +906,12 @@ export function mergePool(now: PoolBase, opened: PoolBase, saved: PoolBase): Res
 export async function createPool(id: string, name: string, members: string[]): Promise<Result<void>> {
   const input = poolInput(name, members);
   if (input.kind !== "ok") return input;
-  const page = await call<ModelAccessPage>("desktop_model_access_page", { collection: "pools", next: false });
-  if (page.kind !== "ok") return page;
   const edit: ModelAccessEdit = { kind: "create_pool", pool: { id, name: input.value.name, members: input.value.members, projects: [], roles: [], fallback_allowed: false } as AccountPool };
-  return change("desktop_edit_model_access", { ticket: page.value.ticket, edit, generation: nextGeneration() });
+  return oneSelection(async (): Promise<Result<void>> => {
+    const page = await call<ModelAccessPage>("desktop_model_access_page", { collection: "pools", next: false });
+    if (page.kind !== "ok") return page;
+    return change("desktop_edit_model_access", { ticket: page.value.ticket, edit, generation: nextGeneration() });
+  });
 }
 
 /** Saves the owner's changes to a pool while keeping its project assignments and any change made
@@ -880,22 +920,26 @@ export async function createPool(id: string, name: string, members: string[]): P
 export async function savePool(id: string, name: string, members: string[], opened: PoolBase): Promise<Result<void>> {
   const input = poolInput(name, members);
   if (input.kind !== "ok") return input;
-  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
-  if (detail.kind !== "ok") return detail;
-  if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
-  const now = detail.value.record.pool;
-  const merged = mergePool({ name: now.name ?? "", members: now.members }, opened, input.value);
-  if (merged.kind !== "ok") return merged;
-  const edit: ModelAccessEdit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
-  return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit, generation: nextGeneration() });
+  return oneSelection(async (): Promise<Result<void>> => {
+    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
+    if (detail.kind !== "ok") return detail;
+    if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
+    const now = detail.value.record.pool;
+    const merged = mergePool({ name: now.name ?? "", members: now.members }, opened, input.value);
+    if (merged.kind !== "ok") return merged;
+    const edit: ModelAccessEdit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
+    return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit, generation: nextGeneration() });
+  });
 }
 
 /** Deletes a pool and takes it off every project that uses it, in one engine change.
  * Input: pool id. Output: ok once deleted; those projects then have no pool. */
 export async function deletePool(id: string): Promise<Result<void>> {
-  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
-  if (detail.kind !== "ok") return detail;
-  return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit: { kind: "remove_pool", id }, generation: nextGeneration() });
+  return oneSelection(async (): Promise<Result<void>> => {
+    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
+    if (detail.kind !== "ok") return detail;
+    return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit: { kind: "remove_pool", id }, generation: nextGeneration() });
+  });
 }
 
 export type HarnessAccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
@@ -1562,6 +1606,13 @@ export function setMasterLiveTerminal(id: string, on: boolean): Promise<Result<I
  * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
 export function setReuseIdle(id: string, mode: ReuseIdle): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_reuse_idle", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets the project's "Landing" setting: squash lands each accepted change set as one commit;
+ * merge lands it as a merge commit that keeps every agent commit in the owner's history.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setLandingMode(id: string, mode: LandingMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_landing_mode", { id, mode, generation: nextGeneration() });
 }
 
 /** Sets the most files one new top-level folder, a folder the owner's branch does not have,

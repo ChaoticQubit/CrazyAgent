@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, endTerminals, owner, required, serveApp, silentProvider, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -110,6 +110,16 @@ fi
   return [first, answer + rest.join("\n")].join("\n");
 }
 
+/** The Codex stand-in that first runs a shell block in every run it serves, then answers as
+ * the counting stand-in does. Input: the block, which must end with a newline. Output: the
+ * script. */
+export function startingWith(block) {
+  assert.ok(typeof block === "string" && block.endsWith("\n") && !block.includes("\0"), "a stand-in start is some shell ending with a newline");
+  const [first, ...rest] = COUNTING_CODEX.split("\n");
+  assert.equal(first, "#!/bin/sh", "the stand-in starts with its interpreter line");
+  return [first, block + rest.join("\n")].join("\n");
+}
+
 /** Writes the stand-in Codex the engine is started with. Inputs: the test root and the
  * script. Output: its absolute path. */
 function standInHarness(root, script) {
@@ -164,9 +174,11 @@ async function addProject(bridge, repo, generation) {
  * Agents tab, runs the steps and stops everything. Inputs: the test context, the temporary
  * folder prefix, the steps (given the first project, every project, the engine root, the
  * owner on the page, the page, the served app and the bridge), how many projects, one to
- * four, and the stand-in Codex script. Output: none. */
-export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_CODEX) {
+ * four, the stand-in Codex script and whether the engine gets its own private temp folder
+ * beside its root, as the owner's engine does, instead of the one holding it. Output: none. */
+export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_CODEX, { ownTemp = false } = {}) {
   assert.ok(Number.isInteger(count) && count >= 1 && count <= 4, `one to four projects, not ${count}`);
+  assert.equal(typeof ownTemp, "boolean", "ownTemp is true or false");
   assert.ok(typeof codex === "string" && codex.startsWith("#!/bin/sh\n"), "the stand-in Codex is a shell script");
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -178,9 +190,10 @@ export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_COD
   const home = join(root, "home");
   const projects = join(root, "projects");
   const repos = Array.from({ length: count }, (_, index) => join(root, "repos", index === 0 ? "fruit-stand" : `fruit-stand-${index + 1}`));
-  for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, ...repos]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const temp = ownTemp ? join(root, "tmp") : tmpdir();
+  for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, ...repos, ...(ownTemp ? [temp] : [])]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   repos.forEach(ownerRepo);
-  const provider = await closedPort();
+  const provider = await silentProvider();
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
 allowed_destinations = []
@@ -188,11 +201,11 @@ allowed_destinations = []
 [model_access]
 accounts = ["local-account"]
 connections = [
-  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/v1" }, model = { id = "e2e-model", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider.port}/v1" }, model = { id = "e2e-model", author = "openai-compatible" }, auth = { method = "none" } },
 ]
 pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
-  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
+  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: temp, LANG: "en_US.UTF-8" };
   const log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
   let engine;
   let bridgeProcess;
@@ -239,6 +252,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     log.closing = true;
     writeFileSync(join(evidence, "calls.json"), JSON.stringify(log.calls, null, 1));
     site?.server.close();
+    provider.server.close();
     await stop(bridgeProcess);
     await stop(engine);
     await endTerminals(runtime);
