@@ -21,6 +21,7 @@ pub(in crate::tui) enum ModelChoiceQuery {
         harness: String,
         project: Option<ProjectId>,
         fresh: bool,
+        retry: bool,
     },
     Set {
         harness: String,
@@ -118,9 +119,10 @@ async fn run(
             harness,
             project,
             fresh,
+            retry,
         } => {
             let models = controller
-                .model_choice_values(harness, project.clone(), *fresh)
+                .model_choice_values(harness, project.clone(), *fresh, *retry)
                 .await?;
             let rules = match project {
                 None => Some(controller.model_choice_rules().await?),

@@ -1092,6 +1092,53 @@ fn an_executable_file_is_asked_for_its_version_once() {
 
 #[cfg(unix)]
 #[test]
+fn a_failed_version_ask_for_models_is_kept_for_the_backoff_and_a_launch_asks_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("tool");
+    let count = tmp.path().join("tool.count");
+    let write = |body: &str| {
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho asked >> \"$0.count\"\n{body}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let asked = || std::fs::read_to_string(&count).unwrap().lines().count();
+    let limit = Duration::from_secs(20);
+    let backoff = Duration::from_secs(600);
+    let start = std::time::Instant::now();
+    let models = |at: Duration| installed::version_for_models(&path, limit, backoff, start + at);
+    write("exit 3");
+    assert_eq!(models(Duration::ZERO), None);
+    assert_eq!(asked(), 1);
+    assert_eq!(models(Duration::from_secs(1)), None);
+    assert_eq!(models(backoff - Duration::from_millis(1)), None);
+    assert_eq!(asked(), 1, "a Models read inside the backoff asks nothing");
+    assert_eq!(installed::version_cached(&path, limit), None);
+    assert_eq!(asked(), 2, "a launch asks again");
+    assert_eq!(models(backoff), None);
+    assert_eq!(asked(), 3, "the backoff ends");
+    write("echo \"tool 3.4.5\"");
+    assert_eq!(
+        models(backoff + Duration::from_secs(1)).as_deref(),
+        Some("3.4.5")
+    );
+    assert_eq!(asked(), 4, "a changed file is a new identity");
+    assert_eq!(
+        models(backoff + Duration::from_secs(2)).as_deref(),
+        Some("3.4.5")
+    );
+    assert_eq!(asked(), 4);
+    assert_eq!(
+        installed::version_for_models(&tmp.path().join("missing"), limit, backoff, start),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_probe_past_its_limit_leaves_no_process_behind() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();

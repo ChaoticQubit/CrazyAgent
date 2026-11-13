@@ -60,14 +60,19 @@ function catalogVersion() {
   return version;
 }
 
-/** Puts a stand-in Claude Code on PATH for the project Models suite, whose project page lists
- * installed harnesses only: it answers the catalog's first version and does nothing else.
+/** Puts stand-in harnesses on PATH for the Models suites: for the project suite, whose page
+ * lists installed harnesses only, a Claude Code answering the catalog's first version; for the
+ * app suite, a Codex whose model list command fails, adding a line to bin/codex.lists each run.
  * Output: the folder to put first on PATH, or none for every other suite. */
 function standIns() {
-  if (suite !== "models-project") return null;
+  const scripts = {
+    "models-project": () => ({ claude: `#!/bin/sh\nprintf '${catalogVersion()} (Claude Code)\\n'\n` }),
+    "models-app": () => ({ codex: "#!/bin/sh\nif [ \"$1 $2 $3\" = 'debug models --bundled' ]; then\n  echo run >> \"$0.lists\"\n  exit 1\nfi\nprintf 'codex-cli 0.167.1\\n'\n" }),
+  }[suite];
+  if (scripts === undefined) return null;
   const folder = join(evidence, "bin");
   mkdirSync(folder, { mode: 0o700 });
-  writeFileSync(join(folder, "claude"), `#!/bin/sh\nprintf '${catalogVersion()} (Claude Code)\\n'\n`, { mode: 0o700 });
+  for (const [name, script] of Object.entries(scripts())) writeFileSync(join(folder, name), script, { mode: 0o700 });
   return folder;
 }
 

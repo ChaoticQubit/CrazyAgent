@@ -428,6 +428,7 @@ impl TeamView {
             harness,
             project: Some(self.project.clone()),
             fresh: false,
+            retry: false,
         })
     }
 

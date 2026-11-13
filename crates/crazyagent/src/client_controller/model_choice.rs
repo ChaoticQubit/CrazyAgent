@@ -14,17 +14,19 @@ impl OwnerController {
     }
 
     /// Reads a harness's Models section app-wide or for one project (DEC-150); `fresh`
-    /// marks a Models view opening, which reads the harness's own list once first. Inputs:
-    /// the harness, the project, none for the app, and `fresh`. Output: the section, or a
+    /// marks a Models view opening, which reads the harness's own list first, and `retry`
+    /// the owner asking again past the list's backoff. Inputs: the harness, the project,
+    /// none for the app, `fresh` and `retry`. Output: the section, or a
     /// `MODEL_CHOICE_PROTOCOL_CODES` refusal.
     pub async fn model_choice_values(
         &self,
         harness: &str,
         project: Option<ProjectId>,
         fresh: bool,
+        retry: bool,
     ) -> Result<Models, EngineError> {
         self.model_choice_client()?
-            .model_choice_values(harness, project, fresh)
+            .model_choice_values(harness, project, fresh, retry)
             .await
     }
 

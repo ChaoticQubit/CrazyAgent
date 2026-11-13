@@ -61,6 +61,7 @@ fn models(rows: [Row; 3], owned: &[(&str, Origin)]) -> Models {
         reason: None,
         testable: true,
         live_note: None,
+        live_retry: false,
     }
 }
 
@@ -111,6 +112,7 @@ fn read_query(project: Option<ProjectId>) -> ModelChoiceQuery {
         harness: HARNESS.into(),
         project,
         fresh: true,
+        retry: false,
     }
 }
 
@@ -585,6 +587,7 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
         reason: None,
         testable: false,
         live_note: None,
+        live_retry: false,
     };
     let page = ModelsPage::new("opencode".into(), "OpenCode".into(), Scope::App);
     let mut shell = Shell::with(ctx(80, 24), Box::new(page));
@@ -592,6 +595,7 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
         harness: "opencode".into(),
         project: None,
         fresh: true,
+        retry: false,
     };
     assert_eq!(requests(&mut shell), vec![first.clone()]);
     shell.arrive(arrival(
@@ -707,6 +711,26 @@ fn the_engines_live_list_note_shows_word_for_word_under_the_catalog_line() {
     let mut shell = app_page(plain_models());
     let text = screen(&mut shell);
     assert!(!text.contains("live list not reported"), "{text}");
+}
+
+#[test]
+fn r_reads_the_harness_list_again_even_inside_the_backoff() {
+    let mut shell = app_page(Models {
+        live_note: Some("live list not reported by Claude Code".into()),
+        live_retry: true,
+        ..plain_models()
+    });
+    press(&mut shell, &[Key::Char('r')]);
+    assert_eq!(
+        requests(&mut shell),
+        vec![ModelChoiceQuery::Read {
+            harness: HARNESS.into(),
+            project: None,
+            fresh: true,
+            retry: true,
+        }],
+        "the page opening asked with retry off, r asks again"
+    );
 }
 
 fn pool(name: &str) -> crate::pools::PoolSummary {

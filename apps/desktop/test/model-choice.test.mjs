@@ -21,6 +21,7 @@ const page = (rows = {}, extra = {}) => ({
     qualified: extra.qualified ?? true,
     reason: extra.reason ?? null,
     live_note: extra.live_note ?? null,
+    live_retry: extra.live_retry ?? false,
   },
   project_id: extra.project_id ?? null, qualified_versions: ["2.1.309"], sources: ["https://docs.anthropic.com/en/docs/claude-code/model-config"],
 });
@@ -214,7 +215,7 @@ test("the model rules show both rules with every option and the one in force", (
 
 test("every call names its command once with exactly the window's arguments", () => {
   const source = readFileSync(new URL("../src/api-model-choice.ts", import.meta.url), "utf8");
-  assert.match(source, /call<ModelsPage>\("desktop_model_choice", \{ harness, projectId, fresh \}\)/);
+  assert.match(source, /call<ModelsPage>\("desktop_model_choice", \{ harness, projectId, fresh, retry \}\)/);
   assert.match(source, /call<void>\("desktop_set_model_choice", \{ harness, projectId, slot, value, version \}\)/);
   assert.match(source, /call<void>\("desktop_reset_model_choice", \{ harness, projectId, slot, version \}\)/);
   assert.match(source, /call<ModelAdded>\("desktop_add_model", \{ harness, model \}\)/);
@@ -241,11 +242,20 @@ test("the engine's live list note shows word for word under the catalog line, an
   assert.doesNotMatch(section(ok(page())), /live list not reported/);
 });
 
+test("Check again shows beside the live list note only when the engine can read the list again", () => {
+  const note = "live list not reported by Claude Code";
+  const markup = section(ok(page({}, { live_note: note, live_retry: true })));
+  assert.match(markup, /live list not reported by Claude Code\.\s*<button[^>]*>Check again<\/button>/);
+  assert.doesNotMatch(section(ok(page({}, { live_note: note }))), /Check again/, "no list command or no executable");
+  assert.doesNotMatch(section(ok(page({}, { live_retry: true }))), /Check again/, "the list was reported");
+});
+
 test("the Models section reads the live list only when it opens and on Retry, never after a change", () => {
   const source = readFileSync(new URL("../src/screens/settings/models-section.tsx", import.meta.url), "utf8");
-  assert.match(source, /loadModels\(harness, projectId, live\)/, "the read names whether it is fresh");
+  assert.match(source, /loadModels\(harness, projectId, live, forced\)/, "the read names whether it is fresh and asked again");
   assert.match(source, /const live = fresh\.current;\s*fresh\.current = false;/, "only the first read after an open is fresh");
-  assert.match(source, /function retry\(\) \{\s*fresh\.current = true;\s*reload\(\);\s*\}/, "Retry reads it again");
+  assert.match(source, /const forced = again\.current;\s*again\.current = false;/, "only Retry and Check again skip the backoff");
+  assert.match(source, /function retry\(\) \{\s*fresh\.current = true;\s*again\.current = true;\s*reload\(\);\s*\}/, "Retry reads it again past the backoff");
   assert.match(source, /onRetry=\{retry\}/);
   assert.doesNotMatch(source, /onRetry=\{reload\}/, "Retry never re-reads stale");
 });

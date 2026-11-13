@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { click, finishWelcome, observeModelChoice, shot, shown, text, type, until } from "./settings-steps.mjs";
 
 const UI_MS = 15000;
@@ -52,6 +54,7 @@ describe("Settings, Harnesses, Claude Code: the Models section on the real deskt
   it("says the live list was not reported by Claude Code, which has no list command, and keeps the shipped ids", async () => {
     await until(async () => (await text("main")).includes("live list not reported by Claude Code."), UI_MS, "the engine's live list note did not show");
     assert(await (await $('#models-master option[value="opus"]')).isExisting(), "the shipped ids stay");
+    assert(!(await (await $("button=Check again")).isExisting()), "no list command, nothing to ask again");
   });
 
   it("choosing a master model and Save stores it app-wide", async () => {
@@ -169,5 +172,23 @@ describe("Settings, Harnesses, Claude Code: the Models section on the real deskt
     assert(words.includes("An id you add needs a test launch, and this harness has none."), "Add says why");
     assert.equal(await $('button[aria-label="Save Allowed models"]').isExisting(), false, "no Save");
     await shot("models-app-not-supported");
+  });
+
+  it("a Codex list read that came back unreported waits its backoff, and Check again reads it at once", async () => {
+    const lists = join(process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE, "bin", "codex.lists");
+    const runs = () => existsSync(lists) ? readFileSync(lists, "utf8").split("\n").filter(Boolean).length : 0;
+    const codex = async (label) => {
+      await browser.execute((hash) => { location.hash = hash; }, "#/settings/harnesses?harness=codex");
+      await until(async () => (await text("main")).includes("live list not reported by Codex."), 30000, label);
+    };
+    await codex("the Codex Models section did not say its list was not reported");
+    assert.equal(runs(), 1, "the open read the list once");
+    assert(await (await $("button=Check again")).isExisting(), "Codex has a list command and an executable");
+    await openPage();
+    await codex("the note did not show at once on the next open");
+    assert.equal(runs(), 1, "a plain open inside the backoff starts no harness");
+    await click("button=Check again");
+    await until(async () => runs() === 2, UI_MS, "Check again did not read the list");
+    await shot("models-app-check-again");
   });
 });

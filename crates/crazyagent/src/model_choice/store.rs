@@ -98,6 +98,7 @@ pub fn values(
         reason,
         testable: super::test_launch::supported(harness),
         live_note: (!reported).then(|| super::live::not_reported(harness)),
+        live_retry: false,
     })
 }
 

@@ -17,6 +17,10 @@ pub const NOT_REPORTED: &str = "live list not reported by";
 /// The longest line a Models section may show for an unreported list; a client refuses a
 /// section with a longer one.
 pub const NOTE_BYTES_MAX: usize = 128;
+/// How long a plain Models open does not read a harness's list again after its last read
+/// came back unreported, so a hanging list command stalls one open, not each; the owner's
+/// Check again in the desktop and r in the TUI read it at once (DEC-150 addendum 11).
+pub const BACKOFF: Duration = Duration::from_secs(10 * 60);
 
 /// The folder under the engine root that holds each read's private home.
 #[cfg(unix)]
@@ -276,6 +280,26 @@ pub fn merged(harness: &str, shipped: &[String], live: &[String]) -> Vec<String>
         .collect();
     super::assert_catalog(harness, &joined);
     joined
+}
+
+/// Reads one harness's list for a Models open and keeps what it found. Inputs: the engine
+/// database, the harness id, its registered executable, whether the owner asked again, the
+/// time now in ms and the read. Output: whether the read ran, or the store's refusal.
+pub(crate) fn refresh(
+    db: &rusqlite::Connection,
+    harness: &str,
+    executable: Option<&Path>,
+    retry: bool,
+    now_ms: i64,
+    read: impl FnOnce(&Path) -> Option<Vec<String>>,
+) -> Result<bool, crate::engine::EngineError> {
+    let _ = (retry, now_ms);
+    if reader(harness).is_none() {
+        return Ok(false);
+    }
+    let found = executable.and_then(read);
+    super::store::live_record(db, harness, found.as_deref())?;
+    Ok(true)
 }
 
 /// Reads one harness's model list once, through the tool resolver (Q1 a): the registered

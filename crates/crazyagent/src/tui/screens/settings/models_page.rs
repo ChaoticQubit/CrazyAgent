@@ -488,6 +488,7 @@ impl ModelsPage {
             harness: self.harness.clone(),
             project: self.project(),
             fresh: true,
+            retry: false,
         };
         self.ask(query, ctx);
     }

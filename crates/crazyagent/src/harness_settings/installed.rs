@@ -50,6 +50,18 @@ pub fn version_cached(executable: &Path, limit: Duration) -> Option<String> {
     Some(version)
 }
 
+/// Asks an executable for its version for a Models read. Inputs: the executable, the
+/// limit, the backoff and the time now. Output: the version, or none.
+pub fn version_for_models(
+    executable: &Path,
+    limit: Duration,
+    backoff: Duration,
+    now: Instant,
+) -> Option<String> {
+    let _ = (backoff, now);
+    version_cached(executable, limit)
+}
+
 fn known() -> MutexGuard<'static, BTreeMap<Identity, String>> {
     KNOWN.lock().unwrap_or_else(PoisonError::into_inner)
 }

@@ -203,7 +203,7 @@ impl NativeBridge {
         let client = self.model_choice_client()?;
         Ok(Box::pin(async move {
             let models = client
-                .model_choice_values(&harness, project, fresh)
+                .model_choice_values(&harness, project, fresh, false)
                 .await
                 .map_err(model_choice_error)?;
             page_of(models, &harness, project_id)
@@ -539,6 +539,7 @@ mod tests {
             reason: None,
             testable: true,
             live_note: None,
+            live_retry: false,
         };
         let all = || Slot::ALL.into_iter().map(row).collect::<Vec<_>>();
         let page = page_of(models(all(), "claude-code", 2), "claude-code", None).unwrap();

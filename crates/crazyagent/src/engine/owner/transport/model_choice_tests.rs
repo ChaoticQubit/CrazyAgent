@@ -321,6 +321,7 @@ fn the_largest_models_section_fits_one_owner_frame() {
         reason: Some("r".repeat(crate::model_choice::UNQUALIFIED_REASON_BYTES_MAX)),
         testable: true,
         live_note: Some(crate::model_choice::live::not_reported("claude-code")),
+        live_retry: true,
     };
     for reply in [
         Reply::Values {
@@ -361,6 +362,61 @@ fn only_a_models_view_open_reads_the_live_list() {
         live_due(&action(json!({"model_choice": {"kind": "rules"}}))),
         None
     );
+}
+
+#[test]
+fn only_an_ask_again_reads_the_live_list_inside_its_backoff() {
+    let action = |body: Value| parse(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let again = action(json!({"model_choice": {
+        "kind": "values", "harness": "codex", "project": null, "fresh": true, "retry": true
+    }}));
+    assert_eq!(live_due(&again), Some("codex"));
+    assert!(retried(&again));
+    let open = action(
+        json!({"model_choice": {"kind": "values", "harness": "codex", "project": null, "fresh": true}}),
+    );
+    assert!(!retried(&open), "a plain open keeps the backoff");
+    assert!(!retried(&action(
+        json!({"model_choice": {"kind": "rules"}})
+    )));
+}
+
+#[test]
+fn a_models_reply_says_whether_the_harness_list_can_be_read_again() {
+    let (_tmp, root) = engine();
+    let db = versioned::open(&root).unwrap();
+    store::live_record(&db, "codex", Some(&["gpt-live".to_owned()])).unwrap();
+    let shown = |harness: &str, executable: bool| {
+        let body = json!({"model_choice": {"kind": "values", "harness": harness, "project": null}});
+        match readable(send(&root, body).unwrap(), executable) {
+            Reply::Values { models } => models,
+            other => panic!("not values: {other:?}"),
+        }
+    };
+    let installed = shown("codex", true);
+    assert!(installed.live_retry, "a reader and an executable");
+    assert_eq!(installed.live_note, None);
+    let missing = shown("codex", false);
+    assert!(!missing.live_retry, "no executable to read");
+    assert_eq!(
+        missing.live_note.as_deref(),
+        Some("live list not reported by Codex"),
+        "nothing can report the kept list now"
+    );
+    let claude = shown("claude-code", true);
+    assert!(!claude.live_retry, "no list command");
+    assert_eq!(
+        claude.live_note.as_deref(),
+        Some("live list not reported by Claude Code")
+    );
+    let reply = Reply::Added {
+        added: Added::Pending,
+        models: values(&root, None),
+    };
+    match readable(reply, true) {
+        Reply::Added { models, .. } => assert!(models.live_retry),
+        other => panic!("not added: {other:?}"),
+    }
 }
 
 #[test]

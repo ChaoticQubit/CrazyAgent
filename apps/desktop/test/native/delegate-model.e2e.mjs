@@ -41,10 +41,10 @@ function standInHarness(root) {
 /** Sets one app-wide Codex model slot through the app's own command, naming the version the
  * engine holds. Inputs: the bridge, the slot and the value. */
 async function setCodexSlot(bridge, slot, value_) {
-  const page = await value(bridge, "desktop_model_choice", { harness: "codex", projectId: null, fresh: false });
+  const page = await value(bridge, "desktop_model_choice", { harness: "codex", projectId: null, fresh: false, retry: false });
   const version = page.models.rows.find((row) => row.slot === slot).version;
   await value(bridge, "desktop_set_model_choice", { harness: "codex", projectId: null, slot, value: value_, version });
-  const held = (await value(bridge, "desktop_model_choice", { harness: "codex", projectId: null, fresh: false })).models.rows.find((row) => row.slot === slot).here;
+  const held = (await value(bridge, "desktop_model_choice", { harness: "codex", projectId: null, fresh: false, retry: false })).models.rows.find((row) => row.slot === slot).here;
   assert.deepEqual(held, value_, `the engine holds the app-wide Codex ${slot} slot`);
 }
 

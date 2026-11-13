@@ -61,6 +61,8 @@ enum Action {
         project: Option<ProjectId>,
         #[serde(default)]
         fresh: bool,
+        #[serde(default)]
+        retry: bool,
     },
     Set {
         harness: String,
@@ -185,19 +187,22 @@ fn scope(project: Option<ProjectId>) -> Scope {
 impl OwnerClient {
     /// Reads a harness's Models section app-wide or for one project (DEC-150): the master,
     /// agent and allowed slots with their versions, and every candidate id. `fresh` marks a
-    /// Models view opening, which reads the harness's own list once first. Inputs: the
-    /// harness, the project, none for the app, and `fresh`. Output: the section, or a
-    /// `MODEL_CHOICE_PROTOCOL_CODES` refusal.
+    /// Models view opening, which reads the harness's own list first unless its last read
+    /// came back unreported within `live::BACKOFF`; `retry` marks the owner asking again,
+    /// which reads it anyway. Inputs: the harness, the project, none for the app, `fresh`
+    /// and `retry`. Output: the section, or a `MODEL_CHOICE_PROTOCOL_CODES` refusal.
     pub async fn model_choice_values(
         &self,
         harness: &str,
         project: Option<ProjectId>,
         fresh: bool,
+        retry: bool,
     ) -> Result<Models, EngineError> {
         let action = Action::Values {
             harness: harness.into(),
             project,
             fresh,
+            retry,
         };
         match self.model_choice_exchange(action).await? {
             Reply::Values { models } => Ok(models),
@@ -534,6 +539,20 @@ fn live_due(action: &Action) -> Option<&str> {
         } => Some(harness),
         _ => None,
     }
+}
+
+/// Says whether a Models open asked for the harness's list again. Input: the action.
+/// Output: the flag.
+fn retried(action: &Action) -> bool {
+    let _ = action;
+    false
+}
+
+/// Says on a Models reply whether its harness's list can be read again. Inputs: the reply
+/// and whether an executable is registered. Output: the reply.
+fn readable(reply: Reply, executable: bool) -> Reply {
+    let _ = executable;
+    reply
 }
 
 /// Reads one model choice request from an owner frame body, at most `REQUEST_BYTES_MAX`
