@@ -1,9 +1,10 @@
+import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { connect } from "node:net";
-import { constants } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { constants, tmpdir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { createElement } from "react";
@@ -343,7 +344,11 @@ async function main() {
   const tmuxBinary = tmuxPath();
   const approved = approvedHome();
   process.umask(0o077);
-  const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), ROOT_PREFIX)));
+  const base = realpathSync(tmpdir());
+  for (let at = base; at !== dirname(at); at = dirname(at)) {
+    assert((statSync(at).mode & 0o002) === 0, `${at} is writable by every user, so the engine refuses a harness under it: set TMPDIR to a private folder`);
+  }
+  const root = realpathSync(mkdtempSync(join(base, ROOT_PREFIX)));
   const evidence = process.env.SMOKE_EVIDENCE && isAbsolute(process.env.SMOKE_EVIDENCE) ? process.env.SMOKE_EVIDENCE : join(root, "evidence");
   const keep = Boolean(process.env.SMOKE_EVIDENCE) && evidence === join(root, "evidence");
   const crazyHome = join(root, "h");
