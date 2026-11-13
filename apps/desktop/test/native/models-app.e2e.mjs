@@ -256,7 +256,7 @@ describe("Settings, Harnesses, Claude Code: the Models section on the real deskt
   });
 
   it("a Codex list read that came back unreported waits its backoff, and Check again reads it at once", async () => {
-    const lists = join(process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE, "bin", "codex.lists");
+    const lists = join(process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE, "codex.lists");
     const runs = () => existsSync(lists) ? readFileSync(lists, "utf8").split("\n").filter(Boolean).length : 0;
     const codex = async (label) => {
       await browser.execute((hash) => { location.hash = hash; }, "#/settings/harnesses?harness=codex");

@@ -1813,7 +1813,12 @@ impl Screen for ModelsPage {
             None => {}
         }
         hints.push(hint(&moves, "Move"));
-        hints.push(hint("r", "Read again"));
+        let again = if models.live_retry && models.live_note.is_some() {
+            "Check again"
+        } else {
+            "Read again"
+        };
+        hints.push(hint("r", again));
         hints.push(hint("Esc", "Back"));
         hints
     }

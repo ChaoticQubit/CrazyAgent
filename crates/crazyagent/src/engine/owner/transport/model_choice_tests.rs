@@ -391,6 +391,27 @@ fn only_an_ask_again_reads_the_live_list_inside_its_backoff() {
 }
 
 #[test]
+fn an_ask_again_asks_for_the_version_again_at_once_and_a_plain_open_keeps_the_backoff() {
+    let action = |body: Value| parse(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let again = action(json!({"model_choice": {
+        "kind": "values", "harness": "codex", "project": null, "fresh": true, "retry": true
+    }}));
+    assert_eq!(
+        version_backoff(&again),
+        std::time::Duration::ZERO,
+        "Check again or r asks --version again inside the backoff"
+    );
+    let open = action(
+        json!({"model_choice": {"kind": "values", "harness": "codex", "project": null, "fresh": true}}),
+    );
+    assert_eq!(
+        version_backoff(&open),
+        crate::model_choice::live::BACKOFF,
+        "a plain open keeps a failed --version for the backoff"
+    );
+}
+
+#[test]
 fn a_models_reply_says_whether_the_harness_list_can_be_read_again() {
     let (_tmp, root) = engine();
     let db = versioned::open(&root).unwrap();
