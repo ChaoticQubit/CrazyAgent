@@ -1433,7 +1433,9 @@ fn one_n_installs_node_for_the_harnesses_that_need_it_and_they_read_again_once_i
         vec![Sent::Setup],
         "a harness that needs Node reads setup's Node row"
     );
-    shell.arrive(setup_node(DependencyState::Missing));
+    shell.arrive(setup_node(DependencyState::Missing {
+        line: String::new(),
+    }));
     let help = footer(&mut shell);
     assert_eq!(help.matches("n Install Node.js").count(), 1, "{help}");
     shell.key(Key::Char('n'));
@@ -1528,7 +1530,9 @@ fn a_harness_the_catalog_lists_cant_run_shows_its_line_and_node_settling_reads_t
 
     deliver(&mut shell, codex_needing("node", NEEDS_LINE));
     sent(&mut shell.ctx);
-    shell.arrive(setup_node(DependencyState::Missing));
+    shell.arrive(setup_node(DependencyState::Missing {
+        line: String::new(),
+    }));
     shell.key(Key::Char('n'));
     assert_eq!(sent(&mut shell.ctx), vec![Sent::InstallNode]);
     shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
@@ -1630,7 +1634,9 @@ fn a_node_row_still_checking_is_read_again_until_it_settles_and_r_reads_it_again
         vec![Sent::Setup],
         "a Node row still checking is read again on the next refresh"
     );
-    shell.arrive(setup_node(DependencyState::Missing));
+    shell.arrive(setup_node(DependencyState::Missing {
+        line: String::new(),
+    }));
     assert_eq!(footer(&mut shell).matches("n Install Node.js").count(), 1);
     shell.refresh();
     assert_eq!(

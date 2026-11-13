@@ -163,7 +163,9 @@ fn answer(
         codex,
         claude,
         queued,
-        DependencyState::Missing,
+        DependencyState::Missing {
+            line: String::new(),
+        },
     );
 }
 
@@ -661,13 +663,17 @@ fn the_node_offer_follows_the_node_setup_row_while_a_harness_needs_node() {
     let cases = [
         (
             false,
-            Some(DependencyState::Missing),
+            Some(DependencyState::Missing {
+                line: String::new(),
+            }),
             false,
             NodeOffer::None,
         ),
         (
             true,
-            Some(DependencyState::Missing),
+            Some(DependencyState::Missing {
+                line: String::new(),
+            }),
             false,
             NodeOffer::Offer,
         ),
@@ -706,7 +712,9 @@ fn the_node_offer_follows_the_node_setup_row_while_a_harness_needs_node() {
         ),
         (
             true,
-            Some(DependencyState::Missing),
+            Some(DependencyState::Missing {
+                line: String::new(),
+            }),
             true,
             NodeOffer::Installing,
         ),
@@ -723,7 +731,14 @@ fn the_node_offer_follows_the_node_setup_row_while_a_harness_needs_node() {
             true,
             NodeOffer::None,
         ),
-        (false, Some(DependencyState::Missing), true, NodeOffer::None),
+        (
+            false,
+            Some(DependencyState::Missing {
+                line: String::new(),
+            }),
+            true,
+            NodeOffer::None,
+        ),
     ];
     for (needed, node, busy, offer) in cases {
         assert_eq!(
@@ -832,7 +847,12 @@ fn a_running_setup_keeps_the_node_install_shown_and_read_until_its_row_settles()
     ))));
     assert_eq!(sent(&mut shell), reads());
     answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
-    shell.arrive(setup(DependencyState::Missing, true));
+    shell.arrive(setup(
+        DependencyState::Missing {
+            line: String::new(),
+        },
+        true,
+    ));
     let rows = render(&mut shell, 120, 36);
     assert!(shows(&rows, INSTALLING_NODE), "{rows:#?}");
     assert!(!bar(&rows).contains(INSTALL_NODE), "{rows:#?}");
@@ -886,7 +906,13 @@ fn the_step_reads_again_while_the_node_row_is_checked_or_settled_but_a_harness_s
             Some(DependencyState::Installed { version: version() }),
             true,
         ),
-        (true, Some(DependencyState::Missing), false),
+        (
+            true,
+            Some(DependencyState::Missing {
+                line: String::new(),
+            }),
+            false,
+        ),
         (
             true,
             Some(DependencyState::Failed {
@@ -1001,7 +1027,14 @@ fn a_screen_with_the_node_offer_reads_again_while_node_installs_or_the_step_wait
     };
     for (needed, node, busy, again) in [
         (true, Some(DependencyState::Installing), false, true),
-        (true, Some(DependencyState::Missing), true, true),
+        (
+            true,
+            Some(DependencyState::Missing {
+                line: String::new(),
+            }),
+            true,
+            true,
+        ),
         (true, None, true, true),
         (true, Some(DependencyState::Checking), false, true),
         (
@@ -1010,7 +1043,14 @@ fn a_screen_with_the_node_offer_reads_again_while_node_installs_or_the_step_wait
             false,
             true,
         ),
-        (true, Some(DependencyState::Missing), false, false),
+        (
+            true,
+            Some(DependencyState::Missing {
+                line: String::new(),
+            }),
+            false,
+            false,
+        ),
         (true, None, false, false),
         (true, Some(failed()), true, false),
         (false, Some(DependencyState::Installing), true, false),

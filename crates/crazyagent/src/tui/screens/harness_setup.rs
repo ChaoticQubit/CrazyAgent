@@ -169,7 +169,7 @@ pub(super) fn node_offer(needed: bool, node: Option<&DependencyState>, busy: boo
             | DependencyState::Unsupported,
         ) => NodeOffer::None,
         _ if busy => NodeOffer::Installing,
-        None | Some(DependencyState::Missing) => NodeOffer::Offer,
+        None | Some(DependencyState::Missing { .. }) => NodeOffer::Offer,
         Some(DependencyState::Checking) => NodeOffer::None,
     }
 }
