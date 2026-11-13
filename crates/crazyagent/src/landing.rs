@@ -1517,7 +1517,7 @@ pub fn accept(
 /// once its files are written and before its branch moves, where a test changes what the
 /// accept gate reads. Inputs: as [`accept`] without the message, plus `between`. Output:
 /// as [`accept`].
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn accept_between(
     db: &Connection,
     owner_home: &Path,
