@@ -1169,6 +1169,14 @@ test("prune reads every page, then deletes the oldest builds and orphan tags pas
   assert.deepEqual(run.releases.map((item) => item.tag_name), ["dev", "v2.3.2", ...old.slice(5).map((build) => build.release.tag_name), BUILD]);
 });
 
+test("prune with no more builds than it keeps passes and deletes nothing", FLOW, async () => {
+  const builds = [stored(2, "dev", {}), ...Array.from({ length: 8 }, (_, index) => stored(10 + index, `build-0.0.0-dev.${202611120000 + index}`, {})), stored(5, BUILD, {})];
+  const run = runSteps(await pruneBodies(), { builds, refs: builds.map((build) => build.release.tag_name) });
+  assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+  assert.deepEqual(pruneDeletes(run), []);
+  assert.equal(run.releases.length, builds.length);
+});
+
 test("prune deletes nothing when a list read fails, and stops at its first failed delete", FLOW, async () => {
   const bodies = await pruneBodies();
   const { builds, refs, old, orphan } = pruneState();
