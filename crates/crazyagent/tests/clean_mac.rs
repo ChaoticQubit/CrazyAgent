@@ -101,7 +101,11 @@ impl Report {
     }
 
     fn saw(&mut self, outcome: &Live) {
-        self.seen.push(format!("{outcome:?}"));
+        self.seen.push(match outcome {
+            Live::Ran { node, script } => format!("ran with node {node:?} and script {script:?}"),
+            Live::Stopped(line) => format!("stopped with {line:?}"),
+            Live::Waiting(last) => format!("still waiting, last line {last:?}"),
+        });
     }
 
     fn step(&mut self, step: &str) {
@@ -150,6 +154,21 @@ fn host_tmux() -> PathBuf {
         .unwrap_or_else(|| panic!("{REFUSED}: the tmux stand-in needs a tmux on this Mac"))
 }
 
+/// Whether the engine binary the gate starts has the system-root remap: only a build with
+/// the `clean-mac-gate` feature holds the remap's variable name. Output: the answer; panics
+/// when the binary can't be read.
+fn engine_has_remap() -> bool {
+    let status = Command::new("/usr/bin/grep")
+        .args(["-q", "-F", "--", SYSTEM_ROOT_VARIABLE, ENGINE])
+        .status()
+        .unwrap();
+    assert!(
+        matches!(status.code(), Some(0 | 1)),
+        "grep could not read {ENGINE}: {status}"
+    );
+    status.success()
+}
+
 fn write_program(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, text).unwrap();
@@ -193,7 +212,6 @@ fn node_text() -> String {
 /// `/opt/homebrew` and `/usr/local` folders are mapped into, the engine root, and the
 /// gate folder its logs are kept in. Dropping it stops the engine and its tmux server.
 struct Mac {
-    shape: Shape,
     _temp: tempfile::TempDir,
     run: PathBuf,
     home: PathBuf,
@@ -207,8 +225,8 @@ struct Mac {
 impl Mac {
     fn new(shape: Shape) -> Self {
         assert!(
-            cfg!(feature = "clean-mac-gate"),
-            "{REFUSED}: this build has no system-root remap, so the engine would see this Mac's real Homebrew; run scripts/gate/clean-mac.sh, which builds with --features clean-mac-gate"
+            engine_has_remap(),
+            "{REFUSED}: the engine at {ENGINE} has no system-root remap, so it would see this Mac's real Homebrew; run scripts/gate/clean-mac.sh, which builds with --features clean-mac-gate"
         );
         let temp = tempfile::Builder::new()
             .prefix("cm-")
@@ -242,7 +260,6 @@ impl Mac {
         let _ = fs::remove_dir_all(&kept);
         fs::create_dir_all(&kept).unwrap();
         let mac = Self {
-            shape,
             _temp: temp,
             run,
             home,
