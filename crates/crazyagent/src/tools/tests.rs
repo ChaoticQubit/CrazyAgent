@@ -502,6 +502,31 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
     }
 }
 
+/// 2.4.1 R3: an engine data folder inside a project, as a dev layout inside a repo has it,
+/// keeps its `setup/bin` refused, since agents of any engine that has the project may write
+/// there, and a tool found there is named in a plain refusal, never reported as missing.
+#[test]
+fn a_tool_in_the_setup_folder_of_an_engine_folder_inside_a_project_is_refused_by_name() {
+    let (_folder, home) = scratch();
+    let root = project(&home.join("work/repo")).join(".local-state/engine");
+    let planted = program(&root.join("setup/bin/crazyagent-dev-tool"), NODE);
+    let engine = Places::engine(Some(&root), None, Some(home), Some(OsStr::new("")));
+    assert!(
+        !engine.folders().contains(&root.join("setup/bin")),
+        "{:?}",
+        engine.folders()
+    );
+    let missing = resolve("crazyagent-dev-tool", &engine).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+    assert_eq!(
+        missing.refused,
+        Some(Refused {
+            file: planted,
+            why: Refusal::AgentsCanWrite
+        })
+    );
+}
+
 /// R-M1: the engine's data folder holds the agents' HOMEs, worktrees and team state, which
 /// agents write. A PATH folder there is refused while the engine's own `setup/bin` is kept,
 /// and a file found in `setup/bin` whose real file sits in an agent's HOME is passed over.
