@@ -541,7 +541,7 @@ pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 /// profile reads: the Setup note, and a refused agent git step.
 pub const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
 
-const REASONS: [(&str, &str); 27] = [
+const REASONS: [(&str, &str); 34] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -634,6 +634,34 @@ const REASONS: [(&str, &str); 27] = [
     (
         "setup_local_app_data_missing",
         "Windows did not say where your local app data folder is, so setup can't install here.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_OFF,
+        "Fixing permissions from CrazyAgent is turned off in Settings. Run the command shown instead.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_NOT_NEEDED,
+        "This tool can run now, so nothing needed fixing.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE,
+        "Changing permissions can't fix why this tool is not used. Follow the line shown.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_CHANGED,
+        "What blocks this tool changed since you looked, so nothing was changed. Check the row again.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_REFUSED,
+        "CrazyAgent only fixes folders you own inside your home folder, never system, Homebrew, project or app data folders. Run the command yourself if you are sure.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_TOO_LARGE,
+        "That folder is too large to fix from CrazyAgent. Run the command shown instead.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_FAILED,
+        "The permissions could not be changed. Run the command shown instead.",
     ),
 ];
 
@@ -1091,5 +1119,43 @@ mod tests {
             serde_json::to_value(&action).unwrap(),
             serde_json::json!({"kind": "install", "name": "node"})
         );
+    }
+
+    /// DEC-162: the permission fix request names the dependency and the target the row
+    /// showed, and the setting names the owner's choice, each reaching the engine as its
+    /// setup action.
+    #[test]
+    fn the_permission_fix_and_refused_tool_requests_have_one_wire_shape() {
+        let fix = crate::engine::owner::OwnerMutation::FixToolPermissions {
+            name: Dependency::Graphify,
+            tree: "/h/t".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&fix).unwrap(),
+            serde_json::json!({"kind": "FixToolPermissions", "name": "graphify", "tree": "/h/t"})
+        );
+        let action = SetupAction::FixPermissions {
+            name: Dependency::Graphify,
+            tree: "/h/t".into(),
+        };
+        assert!(matches!(
+            fix.command().unwrap(),
+            crate::protocol::Command::OwnerSetup { action: mapped } if mapped == action
+        ));
+        let choice = crate::engine::owner::OwnerMutation::SetRefusedTool {
+            choice: RefusedTool::CommandOnly,
+        };
+        assert_eq!(
+            serde_json::to_value(&choice).unwrap(),
+            serde_json::json!({"kind": "SetRefusedTool", "choice": "command_only"})
+        );
+        assert!(matches!(
+            choice.command().unwrap(),
+            crate::protocol::Command::OwnerSetup {
+                action: SetupAction::SetRefusedTool {
+                    choice: RefusedTool::CommandOnly
+                }
+            }
+        ));
     }
 }

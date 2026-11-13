@@ -731,6 +731,8 @@ impl NativeBridge {
             OwnerMutation::SetPackEntry { .. } => ("pack_set", None, None),
             OwnerMutation::RemovePackEntry { .. } => ("pack_remove", None, None),
             OwnerMutation::InstallDependency { .. } => ("install_dependency", None, None),
+            OwnerMutation::FixToolPermissions { .. } => ("fix_tool_permissions", None, None),
+            OwnerMutation::SetRefusedTool { .. } => ("refused_tool", None, None),
             OwnerMutation::Knowledge {
                 review: crazyagent::memory::HumanReview::Review { .. },
             } => ("memory_review", None, None),
