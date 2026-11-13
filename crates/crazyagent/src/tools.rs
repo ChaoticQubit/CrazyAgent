@@ -701,10 +701,18 @@ pub(crate) fn homebrew_folders() -> Vec<PathBuf> {
 /// Inputs: the probed folders, the gate's root and HOME. Output: the folders kept.
 fn probed_kept(
     probed: Vec<PathBuf>,
-    _gate_root: Option<&Path>,
-    _home: Option<&Path>,
+    gate_root: Option<&Path>,
+    home: Option<&Path>,
 ) -> Vec<PathBuf> {
+    let Some(root) = gate_root else {
+        return probed;
+    };
     probed
+        .into_iter()
+        .filter(|folder| {
+            folder.starts_with(root) || home.is_some_and(|home| folder.starts_with(home))
+        })
+        .collect()
 }
 
 /// The clean-Mac gate's stand-in system root, from `CRAZYAGENT_GATE_SYSTEM_ROOT` when it
