@@ -7,9 +7,8 @@ use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::protocol::CredentialRef;
 use crate::scheduling::{Candidate, Choice};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
@@ -21,6 +20,12 @@ pub(crate) const PROFILE_BUSY: &str = "native_profile_in_use";
 /// How long a pick counts an account as held when its hold could not be read, before the
 /// pick reads again (V3-HOLD-FAILOPEN, DEC-150 addendum 9j).
 pub(crate) const HOLD_UNREAD_RETRY_MS: i64 = 60_000;
+
+/// When a pick last logged a hold read that failed (HFO-L1), for every resolver and thread.
+static READ_FAILED_LOGGED: AtomicI64 = AtomicI64::new(i64::MIN);
+
+/// When a pick last logged a hold it could not read with no engine database (HFO-L1).
+static NO_DATABASE_LOGGED: AtomicI64 = AtomicI64::new(i64::MIN);
 
 /// The account a research job should run on, or why it has to wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,7 +328,6 @@ impl SettingsResolver {
             .ok()?,
             None => Choice::default(),
         };
-        let logged = Cell::new(false);
         let pick = pick_scheduled(
             &access,
             project,
@@ -336,7 +340,7 @@ impl SettingsResolver {
                     }
                 })
             },
-            |connection| hold_end(database.as_ref(), project, connection, &logged),
+            |connection| hold_end(database.as_ref(), project, connection),
             &choice,
         );
         Some((folder, pick))
@@ -430,9 +434,8 @@ impl SettingsResolver {
                     Err(code) => code == PROFILE_BUSY,
                 })
         };
-        let logged = Cell::new(false);
         let paused_until =
-            |connection: &CredentialRef| hold_end(database.as_ref(), project, connection, &logged);
+            |connection: &CredentialRef| hold_end(database.as_ref(), project, connection);
         let mut waiting = AccountPick::NoUsableAccount;
         for harness in harnesses {
             match members_pick(
@@ -473,34 +476,39 @@ impl SettingsResolver {
 
 /// Tells until when `connection` stays held for `project` in one pick, failing closed
 /// (V3-HOLD-FAILOPEN, DEC-150 addendum 9j): with no engine database or a hold read that
-/// fails, the account counts as held for `HOLD_UNREAD_RETRY_MS`, logged once per pick.
-/// Takes the engine database, the project, the account and the pick's logged flag.
+/// fails, the account counts as held for `HOLD_UNREAD_RETRY_MS`, logged once per cause per
+/// `HOLD_UNREAD_RETRY_MS` (HFO-L1). Takes the engine database, the project and the account.
 /// Returns the hold's end, or none when the account is free.
 fn hold_end(
     database: Option<&Connection>,
     project: &str,
     connection: &CredentialRef,
-    logged: &Cell<bool>,
 ) -> Option<i64> {
-    let cause =
+    let (cause, logged) =
         match database.map(|database| crate::team::held_until(database, project, connection)) {
             Some(Ok(until)) => return until,
-            Some(Err(_)) => "read_failed",
-            None => "no_database",
+            Some(Err(_)) => ("read_failed", &READ_FAILED_LOGGED),
+            None => ("no_database", &NO_DATABASE_LOGGED),
         };
-    if !logged.replace(true) {
+    let now = crate::team::now_ms();
+    if unread_log_due(logged, now) {
         eprintln!("account_hold_unread cause={cause}");
     }
-    let now = crate::team::now_ms();
     let until = now.saturating_add(HOLD_UNREAD_RETRY_MS);
     assert!(until > now);
     Some(until)
 }
 
-/// Tells whether an unread hold seen at `now` is logged (HFO-L1). Takes the cause's last
-/// logged time and the time. Returns whether to log; today every read that fails logs.
-fn unread_log_due(_logged: &AtomicI64, _now: i64) -> bool {
-    true
+/// Tells whether an unread hold seen at `now` is logged (HFO-L1): once per
+/// `HOLD_UNREAD_RETRY_MS` for one cause however many picks, resolvers and threads see it,
+/// and again at once after the clock went back. Takes the cause's last logged time, set to
+/// `now` when this one logs, and the time. Returns whether to log.
+fn unread_log_due(logged: &AtomicI64, now: i64) -> bool {
+    let last = logged.load(Ordering::Relaxed);
+    let due = now < last || now.saturating_sub(last) >= HOLD_UNREAD_RETRY_MS;
+    due && logged
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
 }
 
 /// The folder the engine recorded for a set-up project, such as its folder
