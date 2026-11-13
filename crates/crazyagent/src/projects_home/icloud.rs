@@ -237,7 +237,7 @@ type List = dyn Fn(&Path) -> Result<Placeholders, EngineError> + Sync;
 
 /// The download loop behind [`download`], with its ask, its listing and its poll given so a
 /// test can stand in for iCloud. A second thread asks for the batches in order while this one
-/// lists the folder every `poll` and records progress, because from the engine each ask takes
+/// lists the folder every `poll` and records progress, because an ask from the engine can take
 /// seconds and files land while later batches still wait to be asked. Inputs: the real
 /// folder, the download, the ask, the listing and the time between listings. Output: as
 /// [`download`]; the asking thread has ended when it returns.
@@ -368,8 +368,8 @@ pub fn brctl(batch: &[PathBuf]) -> Command {
     command
 }
 
-/// Asks macOS to download one batch. brctl hands the batch to iCloud and returns; from a
-/// launchd agent, which runs at utility priority, that takes seconds per batch, so it gets
+/// Asks macOS to download one batch. brctl hands the batch to iCloud and returns, usually
+/// within a second, though from the engine it has taken up to 30 s per batch, so it gets
 /// `BRCTL_TIME_MAX` before it is stopped. Inputs: the batch and the stop check, which ends
 /// the wait. Output: Ok once brctl took the batch.
 fn request(batch: &[PathBuf], stop: &dyn Fn() -> bool) -> Result<(), EngineError> {

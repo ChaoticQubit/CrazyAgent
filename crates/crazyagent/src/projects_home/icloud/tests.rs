@@ -394,32 +394,37 @@ fn a_copy_or_move_meeting_a_placeholder_refuses_and_leaves_the_source_as_it_was(
 }
 
 /// Downloads an evicted folder of iCloud Drive that the runner names in
-/// `CRAZYAGENT_ICLOUD_SCRATCH` and checks that the recorded progress never trails the files on
-/// disk by more than two polls, also while later batches still wait to be asked. Run with
-/// `--ignored` under `taskpolicy -c utility`, which slows each ask as launchd does. The folder
-/// is kept; its files are local afterwards.
+/// `CRAZYAGENT_ICLOUD_SCRATCH` through the real brctl, each ask held `SLOW_ASK` first as the
+/// engine's asks took seconds in the owner's run, and checks that the recorded progress never
+/// trails the files on disk by more than two polls while later batches still wait to be asked.
+/// Run with `--ignored` by its exact name. The folder is kept; its files are local afterwards.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "needs an evicted folder of iCloud Drive named in CRAZYAGENT_ICLOUD_SCRATCH"]
 fn progress_follows_files_landing_from_icloud_within_two_polls() {
+    const SLOW_ASK: Duration = Duration::from_secs(3);
     let folder = PathBuf::from(std::env::var_os("CRAZYAGENT_ICLOUD_SCRATCH").unwrap());
     let drive = PathBuf::from(std::env::var_os("HOME").unwrap())
         .join("Library/Mobile Documents/com~apple~CloudDocs");
+    let root = folder.canonicalize().unwrap();
     assert!(folder.starts_with(&drive) && folder != drive);
-    let total = placeholders(&folder).unwrap().paths.len() as u64;
-    assert!(total > 2 * BATCH_PATHS_MAX as u64, "evict the folder first");
-    let samples_max = 30 * 60 * 4;
+    let total = placeholders(&root).unwrap().paths.len() as u64;
+    assert!(total > 8 * BATCH_PATHS_MAX as u64, "evict the folder first");
+    let slow = |batch: &[PathBuf], stop: &dyn Fn() -> bool| {
+        std::thread::sleep(SLOW_ASK);
+        request(batch, stop)
+    };
     let download = Download::default();
     let mut landed: Vec<(Instant, u64)> = Vec::new();
-    let mut moved_early = false;
+    let (mut moved_early, mut trailed) = (false, None);
     let outcome = std::thread::scope(|scope| {
-        let running = scope.spawn(|| super::download(folder.to_str().unwrap(), &download));
-        for _ in 0..samples_max {
-            if running.is_finished() {
+        let running = scope.spawn(|| run(&root, &download, &slow, &placeholders, POLL_EVERY));
+        for _ in 0..30 * 60 * 4 {
+            if running.is_finished() || trailed.is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(250));
-            let left = placeholders(&folder).unwrap().paths.len() as u64;
+            let left = placeholders(&root).unwrap().paths.len() as u64;
             let now = Instant::now();
             let shown = download.progress();
             landed.push((now, total.saturating_sub(left)));
@@ -429,16 +434,19 @@ fn progress_follows_files_landing_from_icloud_within_two_polls() {
                 .map(|(_, done)| *done)
                 .max()
                 .unwrap_or(0);
-            assert!(
-                shown.done >= floor,
-                "shown {shown:?}, on disk two polls ago {floor}"
-            );
+            if shown.done < floor {
+                trailed = Some((shown, floor));
+            }
             moved_early |= shown.done > 0 && shown.done < total;
         }
         download.cancel();
         running.join().unwrap()
     });
+    assert_eq!(
+        trailed, None,
+        "shown progress, files on disk two polls earlier"
+    );
     assert_eq!(outcome.unwrap(), total);
     assert!(moved_early, "progress moved only at the end");
-    assert_eq!(placeholders(&folder).unwrap(), Placeholders::default());
+    assert_eq!(placeholders(&root).unwrap(), Placeholders::default());
 }
