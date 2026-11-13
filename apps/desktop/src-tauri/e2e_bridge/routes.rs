@@ -3829,12 +3829,13 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 harness: String,
                 model: String,
+                provider: Option<String>,
             }
-            let Args { harness, model } = match parse(args) {
+            let Args { harness, model, provider } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.add_model(harness, model)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.add_model(harness, model, provider)?; call.await }.await;
             routed(result)
         }
         "desktop_remove_model" => {

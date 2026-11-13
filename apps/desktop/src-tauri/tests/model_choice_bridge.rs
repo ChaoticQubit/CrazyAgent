@@ -308,11 +308,13 @@ async fn app_flow(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
         "a pending id cannot be chosen before its test launch passes"
     );
     assert_eq!(
-        bridge.add_model(HARNESS.into(), "opus".into())?.await?,
+        bridge
+            .add_model(HARNESS.into(), "opus".into(), None)?
+            .await?,
         ModelAdded::Listed
     );
     let invalid = bridge
-        .add_model(HARNESS.into(), "bad id!".into())?
+        .add_model(HARNESS.into(), "bad id!".into(), None)?
         .await
         .unwrap_err();
     assert_eq!(invalid.code, "model_choice_value_invalid");
@@ -391,7 +393,9 @@ async fn app_flow(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
         bridge
             .set_model_choice(HARNESS.into(), None, "allowed".into(), json!("opus"), 0)
             .err(),
-        bridge.add_model(HARNESS.into(), "a".repeat(257)).err(),
+        bridge
+            .add_model(HARNESS.into(), "a".repeat(257), None)
+            .err(),
         bridge
             .set_model_rule("pick".into(), "sometimes".into(), 0)
             .err(),

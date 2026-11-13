@@ -2398,7 +2398,12 @@ mod models {
 
         fn add(&self, model: &'static str) {
             self.owner(move |controller| {
-                Box::pin(async move { controller.model_choice_add(HARNESS, model).await.unwrap() })
+                Box::pin(async move {
+                    controller
+                        .model_choice_add(HARNESS, model, None)
+                        .await
+                        .unwrap()
+                })
             });
         }
 
