@@ -323,6 +323,51 @@ fn a_handed_launch_refuses_a_changed_file_and_every_other_shape() {
     }
 }
 
+/// A handed launch of exactly the most words a launch holds, a pinned file first and last
+/// with first-line words between, is read, pinned and started with every word in order, so
+/// the bound refuses only a longer launch.
+#[test]
+fn a_handed_launch_of_the_most_words_is_read_pinned_and_started_in_order() {
+    let max = super::launch::LAUNCH_WORDS_MAX;
+    let root = tempfile::tempdir().unwrap();
+    let node = executable(root.path(), "node");
+    let pinned_node = RegisteredNativeAuthHost::capture(&node).unwrap();
+    let sha256 = pinned_node.verified_sha256().unwrap();
+    let file: Vec<std::ffi::OsString> = vec![
+        "--launch-file".into(),
+        node.clone().into_os_string(),
+        "--launch-sha256".into(),
+        sha256.into(),
+    ];
+    let between: Vec<String> = (0..max - 2).map(|n| format!("-w{n}")).collect();
+    let handed: Vec<std::ffi::OsString> = file
+        .iter()
+        .cloned()
+        .chain(between.iter().flat_map(|word| {
+            [
+                std::ffi::OsString::from("--launch-argument"),
+                std::ffi::OsString::from(word),
+            ]
+        }))
+        .chain(file.iter().cloned())
+        .collect();
+    let parsed = super::handed_words(&handed).unwrap();
+    assert_eq!(parsed.len(), max);
+    let launch = super::launch::pinned(&parsed).unwrap();
+    assert_eq!(launch.len(), max);
+    let words = RegisteredNativeAuthHost::capture(&node)
+        .unwrap()
+        .with_launch(launch)
+        .launch_words()
+        .unwrap();
+    let real = pinned_node.verified_path().unwrap().as_os_str().to_owned();
+    let expected: Vec<std::ffi::OsString> = std::iter::once(real.clone())
+        .chain(between.iter().map(Into::into))
+        .chain(std::iter::once(real))
+        .collect();
+    assert_eq!(words, expected);
+}
+
 /// A harness whose interpreter the engine's resolver cannot find gets no launch, so its
 /// custodian is handed no harness and the sign-in settles unavailable, never the resolver's
 /// sentence as a code.
