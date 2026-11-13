@@ -214,3 +214,24 @@ late.event({ type: "run:error", error: "OpenAI request failed (HTTP 429): limite
 end(late, "sdk-two", "cancelled");
 assert.deepEqual(late.complete("two", "cancelled"), [{ kind: "completed", turn_id: "two", status: "cancelled" }]);
 });
+test("a keyed account's hashed provider label names the provider limit or rejected key whether it starts with a letter or a digit", () => {
+for (const label of ["fd1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6a1b", "0d1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6d1e2f3a4b5c6a1b"]) {
+for (const [message, failure] of [
+[`${label} request failed (HTTP 429): Rate limit reached for requests`, "rate_limited"],
+[`${label} request failed (HTTP 429): You exceeded your current quota, please check your plan and billing details.`, "quota_exhausted"],
+[`${label} request failed: HTTP 402`, "quota_exhausted"],
+[`${label} request failed (HTTP 401): invalid x-api-key`, "invalid_authentication"],
+[`${label} request failed: HTTP 403`, "invalid_authentication"],
+[`${label}0 request failed (HTTP 429): one character past the label bound`, undefined],
+[`${label} request failed (HTTP 500): server error`, undefined],
+]) {
+const state = new SdkTurnProjection();
+state.admit(prompt("one")); start(state, "one");
+assert.equal(state.event({ type: "run:error", error: message }).length, 1, message);
+end(state, "sdk-one", "failed");
+const expected = { kind: "completed", turn_id: "one", status: "failed" };
+if (failure) expected.failure = failure;
+assert.deepEqual(state.complete("one", "failed"), [expected], message);
+}
+}
+});
