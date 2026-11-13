@@ -3373,12 +3373,6 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-/// The plain reason a read-only agent stopped with an error: Codex's own
-/// message from its last `turn.failed` event, else its last `error` event,
-/// else the generic reason; a message that is a provider's JSON error body
-/// gives its inner message. Takes the agent's stdout log, its harness and
-/// the log bound; the log is read bounded and never through a link.
-#[cfg(unix)]
 /// Reads a streamed Claude Code run's answer (MG-M1): the text of its last result line when
 /// that result is a success the harness did not mark an error, trimmed. Input: the run's
 /// stream-json output. Output: the answer, or none for an error, no result line or no text.
@@ -3396,6 +3390,12 @@ fn claude_result(output: &str) -> Option<String> {
     (!answer.is_empty()).then(|| answer.to_owned())
 }
 
+/// The plain reason a read-only agent stopped with an error: Codex's own
+/// message from its last `turn.failed` event, else its last `error` event,
+/// else the generic reason; a message that is a provider's JSON error body
+/// gives its inner message. Takes the agent's stdout log, its harness and
+/// the log bound; the log is read bounded and never through a link.
+#[cfg(unix)]
 fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     const GENERIC: &str = "Agent stopped with an error";
     if harness != ResearchHarness::Codex {
