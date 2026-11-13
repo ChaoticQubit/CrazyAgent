@@ -1882,3 +1882,147 @@ fn every_app_settings_hint_stays_on_the_bar_from_80_by_24_to_240_columns() {
         );
     }
 }
+
+fn refused_status(choice: crate::setup::RefusedTool) -> SetupStatus {
+    let mut status = installed_status();
+    assert_eq!(status.dependencies[2].name, Dependency::Graphify);
+    status.dependencies[2].state = DependencyState::Refused {
+        line: "graphify can't start: /h/g/bin/python3 is not used because another user or group can change /h/py/bin/python3.13.".into(),
+        file: "/h/g/bin/python3".into(),
+        part: Some("/h/py/bin/python3.13".into()),
+        fix: Some(crate::setup::ToolFix {
+            tree: "/h/py".into(),
+            recursive: true,
+            command: "chmod -R go-w '/h/py'".into(),
+        }),
+        fix_failed: None,
+    };
+    status.refused_tool = choice;
+    status
+}
+
+fn fix_sent(shell: &mut Shell) -> (Dependency, String) {
+    let sent = jobs(shell);
+    let [
+        AppSetupJob::FixPermissions {
+            name,
+            tree,
+            generation,
+        },
+    ] = sent.as_slice()
+    else {
+        panic!("one permission fix required, got {} jobs", sent.len())
+    };
+    assert!(*generation > 0);
+    (*name, tree.clone())
+}
+
+#[test]
+fn a_refused_tool_reads_found_not_used_and_p_fixes_only_the_tree_the_confirm_named() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    let rows = render(&mut shell, 120, 60);
+    assert!(find(&rows, "Graphify command").contains("Found, not used"));
+    find(&rows, "graphify can't start");
+    find(
+        &rows,
+        "Press p to remove write access for others from /h/py.",
+    );
+    assert!(bar(&rows).contains("p Fix permissions"), "{}", bar(&rows));
+
+    shell.key(Key::Char('p'));
+    assert!(jobs(&mut shell).is_empty());
+    let rows = render(&mut shell, 120, 60);
+    find(&rows, "Fix permissions for Graphify command?");
+    find(&rows, "chmod -R go-w '/h/py'");
+    assert!(bar(&rows).contains("y Fix"), "{}", bar(&rows));
+    shell.key(Key::Char('n'));
+    assert!(jobs(&mut shell).is_empty());
+
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    assert_eq!(fix_sent(&mut shell), (Dependency::Graphify, "/h/py".into()));
+    shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+    assert_eq!(lead(&shell), "Fixing permissions on /h/py.");
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Status))
+    );
+    assert!(shell.busy());
+
+    let mut running = refused_status(crate::setup::RefusedTool::FixButton);
+    running.running = true;
+    shell.arrive(event(AppSetupEvent::Status(Ok(running))));
+    assert_eq!(lead(&shell), "Fixing permissions on /h/py.");
+    shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
+    assert_eq!(
+        lead(&shell),
+        "Permissions fixed. Graphify command can run now."
+    );
+    assert!(!shell.busy());
+}
+
+#[test]
+fn a_failed_permission_fix_shows_its_sentence_on_the_row_and_as_the_message() {
+    let mut shell = first_run(120, 36);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    fix_sent(&mut shell);
+    shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+    jobs(&mut shell);
+    let failed = crate::setup::plain_reason(crate::tools::permission_fix::TOOL_FIX_FAILED);
+    let mut after = refused_status(crate::setup::RefusedTool::FixButton);
+    if let DependencyState::Refused { fix_failed, .. } = &mut after.dependencies[2].state {
+        *fix_failed = Some(failed.to_owned());
+    }
+    shell.arrive(event(AppSetupEvent::Status(Ok(after))));
+    assert_eq!(lead(&shell), failed);
+    find(
+        &render(&mut shell, 120, 36),
+        "The permissions could not be changed.",
+    );
+    assert_eq!(shell.place(), Some(Place::Setup { first_run: true }));
+}
+
+#[test]
+fn command_only_shows_the_command_and_p_sends_nothing() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::CommandOnly,
+    )))));
+    let rows = render(&mut shell, 120, 60);
+    find(&rows, "To fix it, run in Terminal: chmod -R go-w '/h/py'");
+    assert!(!bar(&rows).contains("Fix permissions"), "{}", bar(&rows));
+    shell.key(Key::Char('p'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(
+        lead(&shell),
+        crate::setup::plain_reason(crate::tools::permission_fix::TOOL_FIX_OFF)
+    );
+}
+
+#[test]
+fn the_unused_tools_setting_saves_the_command_only_choice() {
+    let mut shell = settings(120, 60);
+    let rows = render(&mut shell, 120, 60);
+    assert!(find(&rows, "Unused tools").contains("Show a fix button"));
+    assert!(bar(&rows).contains("u Unused tools"), "{}", bar(&rows));
+    shell.key(Key::Char('u'));
+    find(&render(&mut shell, 120, 60), "> Show a fix button");
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let sent = jobs(&mut shell);
+    let [AppSetupJob::SetRefusedTool { choice, generation }] = sent.as_slice() else {
+        panic!("one unused tools change required, got {} jobs", sent.len())
+    };
+    assert_eq!(*choice, crate::setup::RefusedTool::CommandOnly);
+    assert!(*generation > 0);
+    shell.arrive(event(AppSetupEvent::RefusedToolSet(Ok(()))));
+    assert_eq!(lead(&shell), "Unused tools: Show the command only.");
+}
