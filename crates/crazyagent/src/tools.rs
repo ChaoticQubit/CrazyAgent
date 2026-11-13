@@ -413,14 +413,14 @@ pub struct Refused {
 
 /// A tool that cannot run: which one, why, the interpreter it needs when that is what is
 /// missing, the folders looked in and the first file passed over when no usable one was
-/// found, kept apart from the owner line so the line is fixed.
+/// found, boxed so the error stays small, kept apart from the owner line so it is fixed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Missing {
     pub tool: String,
     pub reason: Reason,
     pub needs: Option<String>,
     pub looked: Vec<PathBuf>,
-    pub refused: Option<Refused>,
+    pub refused: Option<Box<Refused>>,
 }
 
 impl Missing {
@@ -502,7 +502,7 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
         return Err(match refused {
             Some(refused) => Missing {
                 reason: Reason::Refused,
-                refused: Some(refused),
+                refused: Some(Box::new(refused)),
                 ..not_found()
             },
             None => not_found(),
@@ -537,10 +537,10 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         Some(Err(why)) => {
             return Err(Missing {
                 reason: Reason::Refused,
-                refused: Some(Refused {
+                refused: Some(Box::new(Refused {
                     file: entry.to_path_buf(),
                     why,
-                }),
+                })),
                 ..not_there()
             });
         }

@@ -593,10 +593,10 @@ fn a_refused_tool_names_its_file_and_why_and_never_says_it_is_missing() {
     assert_eq!(missing.reason, Reason::Refused);
     assert_eq!(
         missing.refused,
-        Some(Refused {
+        Some(Box::new(Refused {
             file: tmux.clone(),
             why: Refusal::OthersCanChange(bin.clone()),
-        })
+        }))
     );
     let line = missing.line();
     assert_ne!(line, TMUX_MISSING);
@@ -628,10 +628,10 @@ fn a_tool_file_the_staff_group_can_write_is_passed_over() {
     assert_eq!(missing.reason, Reason::Refused);
     assert_eq!(
         missing.refused,
-        Some(Refused {
+        Some(Box::new(Refused {
             file: tool.clone(),
             why: Refusal::OthersCanChange(tool.clone()),
-        })
+        }))
     );
     assert!(missing.line().contains(&tool.display().to_string()));
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
