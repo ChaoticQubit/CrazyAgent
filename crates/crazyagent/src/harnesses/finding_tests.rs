@@ -513,7 +513,7 @@ fn the_engine_search_finds_a_harness_in_the_engine_npm_prefix_after_the_owners_f
     );
     let owned = case.file("tools/codex", 0o755);
     let path = std::env::join_paths([owned.parent().unwrap()]).unwrap();
-    let both = Search::engine(Some(&path), &[], None).with_engine(&case.engine);
+    let both = Search::engine_in(Some(&path), &[], None, &[]).with_engine(&case.engine);
     assert_eq!(both.find("codex"), Some(owned));
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert_eq!(
