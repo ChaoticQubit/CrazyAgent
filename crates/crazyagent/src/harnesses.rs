@@ -76,23 +76,27 @@ pub enum AccountKind {
 }
 
 /// States whether a harness can be used from CrazyAgent on this machine.
-/// Limited carries a plain reason the app shows to the owner.
+/// Limited carries a plain reason the app shows to the owner; CantRun carries the tool
+/// resolver's owner line for a found harness that cannot start, so it is never counted ready.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HarnessStatus {
     Ready,
     NotInstalled,
     Limited { reason: String },
+    CantRun { reason: String },
 }
 
 impl HarnessStatus {
     /// Renders the status in the plain words the clients show.
-    /// Input: the status. Output: "Ready", "Not installed" or "Limited control: <reason>".
+    /// Input: the status. Output: "Ready", "Not installed", "Limited control: <reason>" or
+    /// "Can't run: <reason>".
     pub fn label(&self) -> String {
         match self {
             Self::Ready => "Ready".into(),
             Self::NotInstalled => "Not installed".into(),
             Self::Limited { reason } => format!("Limited control: {reason}"),
+            Self::CantRun { reason } => format!("Can't run: {reason}"),
         }
     }
 }
@@ -562,6 +566,14 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
         })
         .collect();
     assert_eq!(entries.len(), specs().len());
+    entries
+}
+
+/// Marks each found harness the tool resolver can't start, read as a launch reads it, as
+/// Can't run with the resolver's owner line, over any other status, so no client counts it
+/// ready. Nothing is run. Inputs: the catalog rows and the resolver's places. Output: the
+/// rows in the same order.
+pub fn with_needs(entries: Vec<HarnessEntry>, _places: &crate::tools::Places) -> Vec<HarnessEntry> {
     entries
 }
 

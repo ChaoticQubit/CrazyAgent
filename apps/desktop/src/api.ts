@@ -948,7 +948,7 @@ export type HarnessAccountKind = "subscription" | "api_key" | "open_ai_compatibl
 export interface HarnessEntry {
   id: string;
   name: string;
-  status: { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string };
+  status: { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string } | { kind: "cant_run"; reason: string };
   status_label: string;
   executable: string | null;
   headless: string;

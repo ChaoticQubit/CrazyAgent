@@ -321,6 +321,26 @@ test("with harness updates off a harness that can't run still reads Can't run, a
   assert.doesNotMatch(runs, /Try again/);
 });
 
+test("a harness the engine lists as Can't run is grouped under Can't run, never Ready, and reads the engine's line and Try again before its versions arrive", () => {
+  const blocked = entry("codex", "Codex", { kind: "cant_run", reason: NEEDS_LINE });
+  const groups = view.harnessGroups([ready("claude-code", "Claude Code"), blocked, limited("cursor", "Cursor CLI"), missing("gemini-cli", "Gemini CLI")]);
+  assert.deepEqual(groups.map((group) => [group.title, group.entries.map((item) => item.id)]), [
+    ["Ready", ["claude-code"]],
+    ["Limited control", ["cursor"]],
+    ["Can't run", ["codex"]],
+    ["Not installed", ["gemini-cli"]],
+  ]);
+  const html = row({ entry: blocked, versions: null, mode: "check_and_update", onRetry: quiet });
+  assert.match(html, />Can't run</);
+  assert.match(html, /<span class="[^"]*pj-error[^"]*">codex needs node, which is missing\./);
+  assert.match(html, /<button[^>]*aria-label="Try again: Codex"[^>]*>Try again<\/button>/);
+  assert.doesNotMatch(html, />Ready</);
+  assert.doesNotMatch(html, /Limited control/);
+  const runs = row({ entry: blocked, versions: { ...codexNeeds, needs: null, installed: "0.167.1" }, mode: "check_and_update", onRetry: quiet });
+  assert.match(runs, />Ready</, "a fresh read that runs wins over the catalog's older word");
+  assert.doesNotMatch(runs, /Can't run|Try again/);
+});
+
 test("a harness that is not installed never reads Can't run", () => {
   const html = row({ entry: missing("codex", "Codex"), versions: { ...codexNeeds, install: "/opt/homebrew/bin/npm install -g @openai/codex" }, mode: "check_and_update", onRetry: quiet });
   assert.match(html, />Not installed</);

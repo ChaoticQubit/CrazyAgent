@@ -156,7 +156,7 @@ export function status(): Promise<ConnectionStatus> {
   return invoke<ConnectionStatus>("desktop_status");
 }
 
-export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string };
+export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string } | { kind: "cant_run"; reason: string };
 
 export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
 

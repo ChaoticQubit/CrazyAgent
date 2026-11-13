@@ -392,24 +392,27 @@ fn row_word(entry: &HarnessEntry, versions: Option<&HarnessVersions>) -> &'stati
 }
 
 /// The Status cell word of a harness.
-/// Input: the catalog entry. Output: "Ready", "Not installed", or "Can't start"
-/// for one that is installed but has no CrazyAgent launcher.
+/// Input: the catalog entry. Output: "Ready", "Not installed", "Can't start" for one that is
+/// installed but has no CrazyAgent launcher, or "Can't run" for one the resolver can't start.
 pub fn status_word(entry: &HarnessEntry) -> &'static str {
     match entry.status {
         HarnessStatus::Ready => "Ready",
         HarnessStatus::NotInstalled => "Not installed",
         HarnessStatus::Limited { .. } => "Can't start",
+        HarnessStatus::CantRun { .. } => CANT_RUN,
     }
 }
 
 /// The Control cell word of a harness.
 /// Input: the catalog entry. Output: "Full control", "Limited control" or
-/// "Unknown" while it is not installed and nothing limits it.
+/// "Unknown" while it is not installed or can't run and nothing limits it.
 pub fn control_word(entry: &HarnessEntry) -> &'static str {
     match (&entry.status, &entry.tools) {
         (HarnessStatus::Limited { .. }, _) | (_, ToolControl::Limited { .. }) => "Limited control",
         (HarnessStatus::Ready, ToolControl::Switchable) => "Full control",
-        (HarnessStatus::NotInstalled, ToolControl::Switchable) => "Unknown",
+        (HarnessStatus::NotInstalled | HarnessStatus::CantRun { .. }, ToolControl::Switchable) => {
+            "Unknown"
+        }
     }
 }
 

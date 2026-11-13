@@ -1472,3 +1472,59 @@ fn with_updates_off_a_harness_that_cant_run_still_reads_cant_run_and_no_version_
     assert!(table_row(&text, "Codex").contains("Ready"), "{text}");
     assert!(!text.contains("Version unknown."), "{text}");
 }
+
+/// v241 HR-L1: a harness the engine lists as Can't run reads Can't run with the engine's line
+/// and Try again before its versions arrive, and once a Node.js install the page waited on
+/// settles, the page reads the catalog again too, so its status and the Home count follow.
+#[test]
+fn a_harness_the_catalog_lists_cant_run_shows_its_line_and_node_settling_reads_the_catalog_again() {
+    let mut found = found();
+    let codex = found
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == "codex")
+        .unwrap();
+    codex.status = HarnessStatus::CantRun {
+        reason: NEEDS_LINE.into(),
+    };
+    codex.status_label = codex.status.label();
+    let mut shell = on(&found, "codex");
+    let text = frame(&mut shell);
+    let row = table_row(&text, "Codex");
+    assert!(row.contains("Can't run"), "{row}");
+    assert!(!row.contains("Ready"), "{row}");
+    assert!(
+        text.contains("codex needs node, which is missing."),
+        "{text}"
+    );
+    assert!(footer(&mut shell).contains("r Try again"));
+
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    sent(&mut shell.ctx);
+    shell.arrive(setup_node(DependencyState::Missing));
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    sent(&mut shell.ctx);
+    shell.arrive(setup_node(DependencyState::Installed {
+        version: Version::parse("26.13.1").unwrap(),
+    }));
+    let calls = sent(&mut shell.ctx);
+    assert!(
+        calls.contains(&Sent::Catalog),
+        "once Node settles the catalog is read again: {calls:?}"
+    );
+    assert!(
+        calls.contains(&Sent::Versions("codex".into(), false)),
+        "{calls:?}"
+    );
+    deliver(&mut shell, codex_runs(Some("0.167.1")));
+    let row = table_row(&frame(&mut shell), "Codex");
+    assert!(
+        row.contains("Ready"),
+        "a fresh read that runs wins over the catalog's older word: {row}"
+    );
+    assert!(!row.contains("Can't run"), "{row}");
+}
