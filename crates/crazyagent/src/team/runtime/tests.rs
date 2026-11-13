@@ -2737,6 +2737,83 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
     );
 }
 
+/// A hard link to the engine file and its removal, as a rebuild of the same bytes, Time
+/// Machine or a backup tool leave it, move only its change time and link count, so a team
+/// master still starts with the engine's delegate server. Other bytes written over the file,
+/// with its modify time set back, still stop the start.
+#[test]
+fn a_team_master_still_starts_after_only_the_engine_file_s_change_time_moved() {
+    use std::os::unix::fs::MetadataExt;
+    let fixture = Fixture::new(1);
+    let folder = fixture.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let runtime = fixture.runtime().with_delegation_tool(&engine).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    assert_eq!(
+        fixture.agent(AgentRole::Master, "codex", AgentStatus::Starting),
+        1
+    );
+    let before = std::fs::metadata(&engine).unwrap();
+    let link = folder.join("crazyagent-linked");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::hard_link(&engine, &link).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::remove_file(&link).unwrap();
+    let after = std::fs::metadata(&engine).unwrap();
+    assert_eq!(
+        (
+            after.ino(),
+            after.nlink(),
+            after.mtime(),
+            after.mtime_nsec()
+        ),
+        (before.ino(), 1, before.mtime(), before.mtime_nsec())
+    );
+    assert_ne!(
+        (after.ctime(), after.ctime_nsec()),
+        (before.ctime(), before.ctime_nsec())
+    );
+    let master = runtime
+        .context(&project, 1, AgentRole::Master, true, Layout::Linked)
+        .unwrap_or_else(|problem| panic!("a moved change time stopped the master: {problem}"));
+    let delegate: Vec<&crate::plugins::LaunchServer> = master
+        .plugins()
+        .servers
+        .iter()
+        .filter(|server| server.name == tool::SERVER_NAME)
+        .collect();
+    assert_eq!(delegate.len(), 1);
+    let crate::plugins::ServerSpec::Stdio { command, .. } = &delegate[0].spec else {
+        panic!("the delegate server is a stdio server");
+    };
+    assert_eq!(Some(command.as_str()), engine.to_str());
+
+    let modified = after.modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&engine)
+        .unwrap();
+    std::io::Write::write_all(&mut file, b"#!/bin/no\n").unwrap();
+    file.set_modified(modified).unwrap();
+    drop(file);
+    assert_eq!(std::fs::metadata(&engine).unwrap().len(), before.len());
+    assert_eq!(
+        std::fs::metadata(&engine).unwrap().modified().unwrap(),
+        modified
+    );
+    let Err(tampered) = runtime.context(&project, 1, AgentRole::Master, true, Layout::Linked)
+    else {
+        panic!("a master context was built on rewritten engine bytes");
+    };
+    assert!(
+        tampered.contains("native_auth_host_executable_changed"),
+        "{tampered}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_prepared_agent_renews_its_credential_through_the_harness_entry_after_an_update() {

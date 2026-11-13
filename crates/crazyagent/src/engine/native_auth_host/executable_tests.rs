@@ -502,3 +502,85 @@ fn native_auth_executable_bound_admits_large_harness_builds_and_refuses_beyond_i
         "native_auth_host_executable_unsafe"
     );
 }
+
+/// Rewrites a pinned file in place with other bytes of the same length and sets its modify
+/// time back to the one it had, so only its change time shows the write, as a tamperer who
+/// restores the time would leave it. Inputs: the file and the new bytes. Output: none.
+fn rewrite_keeping_modify_time(path: &Path, bytes: &[u8]) {
+    let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+    assert_eq!(std::fs::metadata(path).unwrap().len(), bytes.len() as u64);
+    let mut file = OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all(bytes).unwrap();
+    file.set_modified(modified).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert_eq!(
+        std::fs::metadata(path).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
+/// The engine pins its own file with no entry. A hard link to it, or its removal, moves
+/// only the change time and the link count, as Time Machine, Spotlight, a backup tool or a
+/// rebuild of the same bytes do, so the same host keeps verifying. A later write of other
+/// bytes, even one that restores the modify time, is still refused.
+#[test]
+fn a_host_whose_change_time_alone_moved_keeps_verifying_and_a_later_write_is_still_refused() {
+    use std::os::unix::fs::MetadataExt;
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "crazyagent");
+    let registered = Arc::new(RegisteredNativeAuthHost::capture(&path).unwrap());
+    let before = std::fs::metadata(&path).unwrap();
+    let link = root.path().join("crazyagent-linked");
+    for linked in [true, false] {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        if linked {
+            std::fs::hard_link(&path, &link).unwrap();
+        } else {
+            std::fs::remove_file(&link).unwrap();
+        }
+        let now = std::fs::metadata(&path).unwrap();
+        assert_eq!(now.nlink(), if linked { 2 } else { 1 });
+        assert_eq!(
+            (
+                now.ino(),
+                now.len(),
+                now.mode(),
+                now.mtime(),
+                now.mtime_nsec()
+            ),
+            (
+                before.ino(),
+                before.len(),
+                before.mode(),
+                before.mtime(),
+                before.mtime_nsec()
+            )
+        );
+        assert_ne!(
+            (now.ctime(), now.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec()),
+            "a link count change moves the change time"
+        );
+        assert_eq!(
+            registered.verified_path().unwrap(),
+            path,
+            "linked: {linked}"
+        );
+        assert!(Arc::ptr_eq(&registered, &registered.current().unwrap()));
+    }
+    assert_eq!(
+        registered.verified_sha256().unwrap(),
+        format!("{:x}", Sha256::digest(b"registered-host-bytes"))
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    rewrite_keeping_modify_time(&path, b"tampered-host-bytes!!");
+    assert_eq!(
+        registered.verified_path().unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
+    assert_eq!(
+        registered.current().map(|_| ()).unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
+}
