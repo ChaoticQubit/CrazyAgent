@@ -739,14 +739,13 @@ fn an_answer_after_the_team_message_ended_still_reaches_the_asker_once() {
 /// is named by none, so each client says "Agent <id>"; an answered question holds no mark.
 #[test]
 fn a_linked_team_question_carries_its_asker_s_name_and_its_urgent_and_paused_marks_while_they_hold()
- {
+{
     let mut engine = Engine::new();
     engine.register();
     let project = engine.project.clone();
     let named = engine.agent("working");
     let unnamed = engine.agent("working");
-    let persona =
-        super::super::names::assign_persona(&engine.connection, &project, named).unwrap();
+    let persona = super::super::names::assign_persona(&engine.connection, &project, named).unwrap();
     engine
         .connection
         .execute(
@@ -769,7 +768,10 @@ fn a_linked_team_question_carries_its_asker_s_name_and_its_urgent_and_paused_mar
     );
     assert!(urgent.urgent && urgent.paused, "{urgent:?}");
     assert_eq!(normal.asker, format!("agent:{unnamed}"));
-    assert_eq!(normal.asker_name, None, "no kept name: the client says Agent <id>");
+    assert_eq!(
+        normal.asker_name, None,
+        "no kept name: the client says Agent <id>"
+    );
     assert!(!normal.urgent && !normal.paused, "{normal:?}");
 
     engine
@@ -780,7 +782,10 @@ fn a_linked_team_question_carries_its_asker_s_name_and_its_urgent_and_paused_mar
         )
         .unwrap();
     let lifted = &engine.linked()[0];
-    assert!(lifted.urgent && !lifted.paused, "the pause no longer holds: {lifted:?}");
+    assert!(
+        lifted.urgent && !lifted.paused,
+        "the pause no longer holds: {lifted:?}"
+    );
 
     engine
         .connection

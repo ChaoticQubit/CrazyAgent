@@ -320,6 +320,45 @@ fn link_questions(tx: &Transaction<'_>) -> Result<Vec<ProjectId>, EngineError> {
     Ok(changed)
 }
 
+/// Whether one team question to the owner is urgent and whether the asker it paused still
+/// waits on it (S4-R1): urgent at high severity, paused while the asker's question wait is
+/// the one this question began. Takes the connection and the team message id. Returns both
+/// marks, neither for a message that is gone.
+pub(crate) fn marks(connection: &Connection, message: i64) -> Result<(bool, bool), EngineError> {
+    let severity: Option<Option<String>> = connection
+        .query_row(
+            "SELECT q_severity FROM coord_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(severity) = severity else {
+        return Ok((false, false));
+    };
+    let urgent = severity.as_deref().and_then(Severity::parse) == Some(Severity::High);
+    let alert: Option<(i64, i64)> = connection
+        .query_row(
+            &format!(
+                "SELECT agent, paused FROM team_owner_alerts
+                 WHERE source='{QUESTION}' AND ref=?1 AND paused IS NOT NULL"
+            ),
+            [message],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let paused = match alert {
+        Some((agent, since)) => waiting_now(connection, agent)? == Some((Waiting::Question, since)),
+        None => false,
+    };
+    assert!(
+        urgent || !paused,
+        "only an urgent question pauses its asker"
+    );
+    Ok((urgent, paused))
+}
+
 /// Settles each pending linked question whose team message ended or is gone (F12), at most
 /// `ALERTS_PER_TICK_MAX` a tick: answered with the owner's latest team reply to it, else
 /// dismissed. Takes the tick's transaction. Returns the projects whose page changed.

@@ -1,8 +1,8 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState, type Ref } from "react";
 import type { Failure, Result } from "../../api";
-import { ANSWER_BYTES_MAX, BULK_DISMISS_MAX, COMMENT_BYTES_MAX, COMMENT_LABEL, OPTIONS_MAX, answerQuestion, askedInTerminal, askerLabel, bulkDismissNote, bulkDismissedLine, dismissNote, dismissQuestion, dismissQuestions, isRecommended, loadQuestions, notReady, orderQuestions, questionsRefusal, settledNote, statusBadge, typedAnswer } from "../../api-questions";
+import { ANSWER_BYTES_MAX, BULK_DISMISS_MAX, COMMENT_BYTES_MAX, COMMENT_LABEL, OPTIONS_MAX, PAUSED_NOTE, URGENT_WORD, answerQuestion, askedInTerminal, askerLabel, bulkDismissNote, bulkDismissedLine, dismissNote, dismissQuestion, dismissQuestions, isRecommended, loadQuestions, notReady, orderQuestions, questionsRefusal, settledNote, statusBadge, typedAnswer } from "../../api-questions";
 import type { OwnerQuestion, QuestionChoice, QuestionKind, QuestionPage } from "../../api-questions";
-import { Button, ConfirmDialog, TextArea } from "../../ui";
+import { Button, ConfirmDialog, TextArea, navigate } from "../../ui";
 import { displayText } from "../conversation";
 import { ago } from "./research";
 import { Badge, NotReady, ProjectEmpty } from "./shared";
@@ -10,6 +10,8 @@ import type { ProjectData } from "./shared";
 import "./questions.css";
 
 export const LIST_POLL_MS = 5000;
+/** The section an urgent question's toast opens the Questions tab at (S4-R1). */
+export const URGENT_SECTION = "urgent";
 
 function refusalOf(failure: Failure): string {
   return failure.kind === "error" ? questionsRefusal({ code: failure.code, cause: failure.cause }) : "";
@@ -55,18 +57,38 @@ export function picksAfter(kind: QuestionKind, picks: readonly number[], index: 
   return next;
 }
 
+/** The question the keyboard goes to when an urgent question's toast opens the tab: the
+ * first urgent question waiting, else the first waiting, as the old drawer started on the
+ * most urgent. Input: the shown questions, pending first. Output: its id, or null when none
+ * waits. */
+export function focusTarget(questions: readonly OwnerQuestion[]): number | null {
+  const waiting = questions.filter((question) => question.status === "pending");
+  return (waiting.find((question) => question.urgent === true) ?? waiting[0])?.id ?? null;
+}
+
+/** Whether a question read after the toast's Open may take the keyboard: only while the
+ * owner has not put it anywhere, so it is on nothing, the page, or the toast whose Open was
+ * just pressed. Input: the focused element. Output: true when the question may take it. */
+export function keyboardFreeOnTab(active: Element | null): boolean {
+  if (active === null || active === active.ownerDocument.body) return true;
+  return active.closest(".toast") !== null;
+}
+
 /** One question: who asked and when, the question, its context and, while it waits, its
  * choices: radios for a single question, checkboxes for a multi one, the recommended option
  * marked, then an Add a comment checkbox outside that group, which opens the comment box and
  * moves the keyboard into it; a text question shows only its answer box. A question asked in an agent's terminal is answered there, so it offers only
- * Dismiss. A settled question shows its status and answer. Inputs: the question, now, whether
- * an action runs and the handlers. Output: the card. */
-export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
+ * Dismiss. A settled question shows its status and answer. A team question names its asker
+ * by the name the engine sent and says Urgent and that its asker is paused while each holds
+ * (S4-R1). Inputs: the question, now, whether an action runs, the handlers and, for the card
+ * a toast's Open sends the keyboard to, its ref. Output: the card. */
+export function QuestionCard({ question, now, busy, onAnswer, onDismiss, focusRef }: {
   question: OwnerQuestion;
   now: number;
   busy: boolean;
   onAnswer: (question: OwnerQuestion, choice: QuestionChoice) => void;
   onDismiss: (question: OwnerQuestion) => void;
+  focusRef?: Ref<HTMLElement>;
 }) {
   const [picks, setPicks] = useState<number[]>([]);
   const [commenting, setCommenting] = useState(false);
@@ -84,15 +106,20 @@ export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
   const answerLabel = question.closed_by === "relay" ? "The master reports: " : "Answer: ";
   const suggested = typing ? question.recommended : null;
   const input = question.kind === "multi" ? "checkbox" : "radio";
+  const asker = askerLabel(question.asker, question.asker_name);
   useEffect(() => {
     if (commenting) document.getElementById(field)?.focus();
   }, [commenting, field]);
-  return <section className="pj-stack-s qs-card" aria-label={`Question from ${askerLabel(question.asker)}`}>
+  return <section ref={focusRef} className="pj-stack-s qs-card" aria-label={`Question from ${asker}`} tabIndex={focusRef ? -1 : undefined}>
     <div className="pj-row between">
-      <strong>{askerLabel(question.asker)}</strong>
-      <Badge word={badge.word} tone={badge.tone} />
+      <strong>{asker}</strong>
+      <span className="pj-row">
+        {question.urgent === true && <Badge word={URGENT_WORD} tone="danger" />}
+        <Badge word={badge.word} tone={badge.tone} />
+      </span>
     </div>
     <p className="pj-small pj-secondary">{ago(question.created_ms, now)}</p>
+    {question.paused === true && <p className="pj-small">{PAUSED_NOTE}</p>}
     <p className="qs-question">{displayText(question.question)}</p>
     {question.context && <details className="qs-context">
       <summary>Context</summary>
@@ -206,13 +233,36 @@ export function dismissAllOf(questions: readonly OwnerQuestion[]): OwnerQuestion
 }
 
 /** Questions tab: every question the project's agents and engine steps asked the owner,
- * pending first, with Answer and Dismiss, and Dismiss all while two or more wait. Input: the
- * project data. Output: the tab; the list rereads every few seconds while it is open. */
-export function QuestionsTab({ data }: { data: ProjectData }) {
+ * pending first, with Answer and Dismiss, and Dismiss all while two or more wait. Opened at
+ * the urgent section by a toast's Open, the keyboard goes once to the first urgent question
+ * waiting, as soon as it is read, unless the owner put the keyboard somewhere (S4-R1).
+ * Inputs: the project data and the route's section. Output: the tab; the list rereads every
+ * few seconds while it is open. */
+export function QuestionsTab({ data, section }: { data: ProjectData; section?: string }) {
   const [first, setFirst] = useState<Result<QuestionPage>>();
   const [older, setOlder] = useState<OlderPages>({ items: [], next: null });
   const [round, setRound] = useState(0);
   const [dismissingAll, setDismissingAll] = useState<OwnerQuestion[] | null>(null);
+  const [wanted, setWanted] = useState(false);
+  const [focus, setFocus] = useState<{ id: number } | null>(null);
+  const target = useRef<HTMLElement>(null);
+  useEffect(() => { setWanted(false); setFocus(null); }, [data.id]);
+  useEffect(() => {
+    if (section !== URGENT_SECTION) return;
+    setWanted(true);
+    navigate({ name: "project", id: data.id, tab: "questions" }, true);
+  }, [section, data.id]);
+  useEffect(() => {
+    if (!wanted || first?.kind !== "ok") return;
+    const id = focusTarget(mergedQuestions(first.value, older.items));
+    if (id === null) return;
+    setWanted(false);
+    setFocus({ id });
+  }, [wanted, first, older]);
+  useEffect(() => {
+    if (focus === null || target.current === null) return;
+    if (keyboardFreeOnTab(document.activeElement)) target.current.focus();
+  }, [focus]);
   const reread = () => {
     setOlder((shown) => olderAfter(shown, { kind: "settled" }));
     setRound((value) => value + 1);
@@ -266,7 +316,7 @@ export function QuestionsTab({ data }: { data: ProjectData }) {
     </div>}
     {questions.length > 0 && <div className="pj-stack-s qs-list">
       {questions.map((question) => <QuestionCard key={`${question.id}:${question.version}`} question={question} now={data.now} busy={busy}
-        onAnswer={answer} onDismiss={askDismiss} />)}
+        onAnswer={answer} onDismiss={askDismiss} focusRef={focus?.id === question.id ? target : undefined} />)}
     </div>}
     {older.next !== null && <span><Button disabled={busy} onClick={() => void showOlder()}>Show older questions</Button></span>}
     {dialog}

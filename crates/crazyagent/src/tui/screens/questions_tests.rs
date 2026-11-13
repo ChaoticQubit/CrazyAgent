@@ -768,7 +768,10 @@ fn a_team_question_names_its_asker_and_says_urgent_and_paused_only_while_they_ho
         "{first}"
     );
     assert!(first.contains("Urgent"), "{first}");
-    assert!(first.contains("The agent is paused until you answer."), "{first}");
+    assert!(
+        first.contains("The agent is paused until you answer."),
+        "{first}"
+    );
 
     assert!(screen.questions.key(key(KeyCode::Down)));
     let second = shown(&mut screen, 120, 34);

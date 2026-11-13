@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 /// One question an agent or an engine step asked the owner, as the window shows it: how it
 /// is answered (`single`, `multi` or `text`), plain status words, who closed it when the
-/// owner did not (`master`, `replaced` or `relay`) and the version an answer or dismissal
-/// sends back.
+/// owner did not (`master`, `replaced` or `relay`), the version an answer or dismissal
+/// sends back, the name the team keeps for a sub-agent asker and whether a waiting team
+/// question is urgent and its asker paused (S4-R1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QuestionRow {
     pub id: u64,
@@ -29,6 +30,9 @@ pub struct QuestionRow {
     pub closed_by: Option<ClosedBy>,
     pub created_ms: u64,
     pub settled_ms: Option<u64>,
+    pub asker_name: Option<String>,
+    pub urgent: bool,
+    pub paused: bool,
 }
 
 impl From<Question> for QuestionRow {
@@ -53,6 +57,9 @@ impl From<Question> for QuestionRow {
             closed_by: question.closed_by,
             created_ms: question.created_ms,
             settled_ms: question.settled_ms,
+            asker_name: question.asker_name,
+            urgent: question.urgent,
+            paused: question.paused,
         }
     }
 }
