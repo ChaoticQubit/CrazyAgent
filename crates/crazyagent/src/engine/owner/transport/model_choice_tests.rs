@@ -562,3 +562,45 @@ fn an_rcli_id_is_added_with_its_provider_and_its_test_runs_on_that_provider() {
     });
     tested(&root, "codex", "gpt-a", Some(&pool()), None, codex).unwrap();
 }
+
+/// DEC-150 addendum 9e: an RCLI id added again under another provider while its test ran
+/// is never recorded on a provider it was not tested on; it stays pending under the new
+/// provider, saying it changed.
+#[test]
+fn an_rcli_id_added_again_under_another_provider_while_tested_stays_pending() {
+    let (_tmp, root) = engine();
+    let add = |provider: &str| {
+        send(
+            &root,
+            json!({"model_choice": {"kind": "add", "harness": "rcli", "model": "my-model", "provider": provider}}),
+        )
+        .unwrap()
+    };
+    add("openrouter");
+    let launch: Launch<'_> = Box::new(|_, provider| {
+        assert_eq!(provider, Some("openrouter"));
+        add("anthropic");
+        Ok((Tested::Verified, None))
+    });
+    match tested(&root, "rcli", "my-model", Some(&pool()), None, launch).unwrap() {
+        Reply::Tested { tested, reason, .. } => {
+            assert_eq!(tested, Tested::Pending);
+            assert_eq!(
+                reason.as_deref(),
+                Some("The id changed while it was tested; add it again to test it.")
+            );
+        }
+        other => panic!("not tested: {other:?}"),
+    }
+    let db = versioned::open(&root).unwrap();
+    assert_eq!(
+        store::custom_provider(&db, "rcli", "my-model").unwrap(),
+        None
+    );
+    assert_eq!(
+        store::pending_provider(&db, "rcli", "my-model")
+            .unwrap()
+            .as_deref(),
+        Some("anthropic")
+    );
+}
