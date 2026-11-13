@@ -434,13 +434,15 @@ impl Reason {
 }
 
 /// Why the resolver passed over a file it found: a part another user or group can change,
-/// named so the owner knows what to fix, a file agents can write, or a version-manager shim
-/// with no real install found behind it.
+/// named so the owner knows what to fix, a file agents can write, a version-manager shim
+/// with no real install found behind it, or a file in a temp folder the engine's places
+/// refuse, which agents with the owner's temp folder grant or other users write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     OthersCanChange(PathBuf),
     AgentsCanWrite,
     Shim,
+    InTemp,
 }
 
 /// A file the resolver found and passed over, and why.
@@ -821,6 +823,9 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
         ),
         Refusal::Shim => format!(
             "{tool} can't start: {file} is a version manager shim with no install found behind it. Add a version with that version manager, then try again."
+        ),
+        Refusal::InTemp => format!(
+            "{tool} can't start: {file} is not used because it is in a temp folder, which agents or other users can change. Install it outside temp folders, then try again."
         ),
     }
 }
