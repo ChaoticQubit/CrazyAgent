@@ -17,7 +17,7 @@ const PROBE_POLL: Duration = Duration::from_millis(50);
 /// or reads, pinned by its real path, identity and hash, or a word the harness's first line
 /// gives its interpreter.
 pub(crate) enum LaunchWord {
-    File(RegisteredNativeAuthHost),
+    File(Box<RegisteredNativeAuthHost>),
     Argument(String),
 }
 
@@ -55,7 +55,9 @@ pub(super) fn resolved(harness: &RegisteredNativeAuthHost) -> Option<Vec<LaunchW
     let mut launch = Vec::with_capacity(words.len());
     for word in &words {
         launch.push(match real(word) {
-            Some(file) => LaunchWord::File(RegisteredNativeAuthHost::capture(&file).ok()?),
+            Some(file) => {
+                LaunchWord::File(Box::new(RegisteredNativeAuthHost::capture(&file).ok()?))
+            }
             None => LaunchWord::Argument(argument(word.to_str()?)?.to_owned()),
         });
     }
@@ -180,7 +182,7 @@ pub(super) fn pinned(handed: &[HandedWord<'_>]) -> Result<Vec<LaunchWord>, Engin
                 if file.verified_sha256()? != *sha256 {
                     return Err(EngineError("native_auth_host_executable_changed".into()));
                 }
-                Ok(LaunchWord::File(file))
+                Ok(LaunchWord::File(Box::new(file)))
             }
             HandedWord::Argument(argument) => Ok(LaunchWord::Argument((*argument).to_owned())),
         })

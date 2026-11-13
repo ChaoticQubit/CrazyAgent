@@ -226,9 +226,13 @@ fn native_auth_custodian_command_hands_the_pinned_launch_with_no_environment() {
     std::fs::write(&node_path, b"interpreter-bytes").unwrap();
     let codex = RegisteredNativeAuthHost::capture(&codex_path).unwrap();
     let launch = vec![
-        super::LaunchWord::File(RegisteredNativeAuthHost::capture(&node_path).unwrap()),
+        super::LaunchWord::File(Box::new(
+            RegisteredNativeAuthHost::capture(&node_path).unwrap(),
+        )),
         super::LaunchWord::Argument("--no-warnings".into()),
-        super::LaunchWord::File(RegisteredNativeAuthHost::capture(&codex_path).unwrap()),
+        super::LaunchWord::File(Box::new(
+            RegisteredNativeAuthHost::capture(&codex_path).unwrap(),
+        )),
     ];
     let command =
         super::custodian_command(&path, root.path(), Some(("codex", &codex, &launch))).unwrap();
