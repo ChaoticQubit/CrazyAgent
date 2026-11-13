@@ -79,7 +79,7 @@ fn documents_part(folder: &Path) -> String {
     for (name, body) in &found.manifests {
         text.push_str(&format!("\n## {name}\n\n```\n{body}\n```\n"));
     }
-    text.push_str(&draft::documents::section(
+    text.push_str(&draft::documents_section(
         &found.documents,
         &found.unread,
         found.ignores_unknown,
