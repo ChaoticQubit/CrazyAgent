@@ -35,6 +35,10 @@ const TEAMMATES_PIN_BYTES_MAX: usize = TEAMMATES_NAME_BYTES + 1 + 10;
 /// answers.
 #[cfg(unix)]
 const TEAMMATES_PIN_PENDING: &str = "pending";
+/// The most digits a lead's servers' deadline record holds, as a server keeper
+/// reads it: every time a system clock gives fits (FBTMUX-P1-R1-L1).
+#[cfg(unix)]
+const SERVERS_DEADLINE_DIGITS_MAX: usize = 19;
 const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
@@ -634,7 +638,8 @@ pub const RENEW_EVERY: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 /// The engine's renewal of its terminal servers' deadlines while it runs (FBTMUX-P1). Each
 /// pass reads the owner's agents on quit setting again and sets every server's deadline that
-/// far ahead, so the holder in a server whose engine never comes back ends it once the time
+/// far ahead, so the holder in a server whose engine never comes back, and for a native
+/// lead's servers their keepers outside the sandboxes (FBTMUX-P1-R1-L1), end it once the time
 /// is up, and an engine that comes back in time renews it before adopting its agents.
 pub struct Renewal {
     stop: Arc<(Mutex<bool>, Condvar)>,
@@ -971,6 +976,32 @@ fn keep_teammates_server_pid(
     )
 }
 
+/// Moves a native lead's servers' deadline (FBTMUX-P1-R1-L1): keeps it, in whole seconds
+/// since the epoch, in the record beside the lead's profiles that no agent writes and that
+/// each of its servers' keepers reads outside the sandboxes. Takes the engine root, the lead
+/// and the deadline. Returns Ok, `terminal_unavailable` for a time before the epoch, or
+/// `terminal_own_server_unavailable` when the record cannot be kept.
+#[cfg(unix)]
+fn keep_servers_deadline(
+    engine_root: &Path,
+    lead: &AgentId,
+    until: SystemTime,
+) -> Result<(), HostError> {
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let seconds = until
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| failure("terminal_unavailable"))?
+        .as_secs();
+    let text = seconds.to_string();
+    assert!(!text.is_empty() && text.len() <= SERVERS_DEADLINE_DIGITS_MAX);
+    keep_record(
+        &crate::team::runtime::agent_servers_deadline(&engine_root.join("team"), id),
+        &text,
+    )
+}
+
 /// Whether a text is a teammates' socket name as [`renew_teammates_socket`] makes one.
 /// Takes the text, read from a file. Returns the answer.
 #[cfg(unix)]
@@ -998,6 +1029,24 @@ fn lead_temp_socket(engine_root: &Path, lead: &AgentId, name: &str) -> Result<Pa
     let socket = crate::sandbox::toolchains::tmp_path(&home).join(name);
     assert!(socket.is_absolute() && socket.as_os_str().len() <= HARNESS_SOCKET_BYTES_MAX);
     Ok(socket)
+}
+
+/// Opens the engine's terminal host as [`tmux_host`] does, with every server it starts
+/// reading its deadline every `loops` holder loops and ending after `late` passed reads, so
+/// a row sees the quit limit within seconds. Takes the engine root, the program, the spacing
+/// and the count. Returns the host.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn tmux_host_checking(
+    engine_root: &Path,
+    program: Option<PathBuf>,
+    loops: u32,
+    late: u32,
+) -> Arc<dyn Host> {
+    let engine = tmux::Tmux::open(program.clone(), &engine_root.join(FOLDER))
+        .with_deadline_checks(loops, late);
+    Arc::new(kept::LastScreenHost::new(
+        tmux::Servers::new(engine, engine_root, program).with_deadline_checks(loops, late),
+    ))
 }
 
 /// Opens this platform's terminal host for an engine: the ConPTY host on Windows, keeping the

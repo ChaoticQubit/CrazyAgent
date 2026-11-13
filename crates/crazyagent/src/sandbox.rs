@@ -560,16 +560,28 @@ pub const PANE_SHIM: [&str; 5] = [
 /// of their own included, and it exits only once the warden confirmed that or found
 /// signals not confined; otherwise it keeps the pane open, ignoring terminate, until a
 /// hangup. A confining profile keeps every agent signal from it, and the terminal keys
-/// that signal the pane's group do not end it.
+/// that signal the pane's group do not end it. Given [`KEEPER_DEADLINE`], as a native lead's
+/// server keeper is, it also reads the engine's deadline record and, once one read found the
+/// deadline ahead, stops after that many reads in a row found it passed or unreadable
+/// (FBTMUX-P1-R1-L1): it kills its command, the server, itself from outside the sandbox, so
+/// a killed warden cannot keep the server, then has the warden end the rest, and exits
+/// with status 3 when the warden does not confirm.
 #[cfg(target_os = "macos")]
 pub const KEEPER: [&str; 6] = [
     "/usr/bin/perl",
     "-mPOSIX",
     "-MSocket",
     "-e",
-    r#"$^F = 1023; my $why = ""; $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE); $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD); close($keep); $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { select(undef, undef, undef, 1) } shutdown($keep, 1); my ($report, $wanted) = ("", ""); vec($wanted, fileno($keep), 1) = 1; my $until = time + 4; while (time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } POSIX::_exit(0) if $report eq "AF" || $report eq "U" || $why eq "HUP"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
+    r#"$^F = 1023; my $why = ""; my ($every, $late, $record) = split(/ /, delete($ENV{CRAZYAGENT_KEEPER_DEADLINE}) // "", 3); !defined($record) || ($every =~ /\A[1-9][0-9]{0,3}\z/ && $late =~ /\A[1-9][0-9]{0,2}\z/ && $record =~ m{\A/}) or die "crazyagent: no deadline\n"; my ($tick, $armed, $missed) = (0, 0, 0); $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE); $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD); close($keep); $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { select(undef, undef, undef, 1); next unless defined($record) && ++$tick >= $every; $tick = 0; my $ahead = 0; if (my @at = lstat($record)) { if (-f _ && $at[4] == $< && $at[7] <= 19 && open(my $in, "<", $record)) { $ahead = (<$in> // "") =~ /\A([0-9]{1,19})\z/ && time < $1 } } if ($ahead) { ($armed, $missed) = (1, 0) } elsif ($armed && ++$missed >= $late) { $why = "LATE" } } kill("KILL", $harness) if $why eq "LATE"; shutdown($keep, 1); my ($report, $wanted) = ("", ""); vec($wanted, fileno($keep), 1) = 1; my $until = time + 4; while (time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } POSIX::_exit(0) if $report eq "AF" || $report eq "U" || $why eq "HUP"; POSIX::_exit(3) if $why eq "LATE"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
     "--",
 ];
+
+/// The variable a native lead's server keeper takes its deadline reads from
+/// (FBTMUX-P1-R1-L1): the seconds between two reads, how many reads in a row past the
+/// deadline end the server, and the engine's absolute deadline record, separated by single
+/// spaces. The [`KEEPER`] removes it before the command starts; a kept pane has none.
+#[cfg(target_os = "macos")]
+pub const KEEPER_DEADLINE: &str = "CRAZYAGENT_KEEPER_DEADLINE";
 
 /// Puts a pane's sandboxed command under the [`KEEPER`] and the [`PANE_SHIM`], so stopping
 /// the pane ends every process its agent started. Input: the argv `sandbox-exec -f
