@@ -417,9 +417,10 @@ impl Installer for PinnedInstaller {
     }
 
     fn lookup(&self, dep: Dependency) -> super::Lookup {
-        Ok(self.resolved(dep)?.map(|(_, version)| super::Located {
+        let bundled = self.places.bundled(dep.program());
+        Ok(self.resolved(dep)?.map(|(entry, version)| super::Located {
+            bundled: bundled.as_ref() == Some(&entry),
             version,
-            bundled: false,
         }))
     }
 

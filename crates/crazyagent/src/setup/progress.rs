@@ -64,6 +64,11 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
             let state = match (progress.dependencies.get(dep), seen) {
                 (Some(step), _) => step.clone(),
                 (None, None) => DependencyState::Checking,
+                (None, Some(Some(Ok(Ok(located))))) if located.bundled => {
+                    DependencyState::Bundled {
+                        version: located.version.clone(),
+                    }
+                }
                 (None, Some(Some(Ok(Ok(located))))) => DependencyState::Found {
                     version: located.version.clone(),
                 },

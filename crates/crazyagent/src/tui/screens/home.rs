@@ -241,7 +241,7 @@ fn checking(status: &SetupStatus) -> bool {
 
 /// Names the tools the setup check did not find, in its order. Home's short line
 /// calls the Graphify command just Graphify, as there is no pack row beside it.
-/// Input: the setup status. Output: the names of tools neither found nor installed.
+/// Input: the setup status. Output: the names of tools neither found, bundled nor installed.
 fn missing_tools(status: &SetupStatus) -> Vec<String> {
     status
         .dependencies
@@ -249,7 +249,9 @@ fn missing_tools(status: &SetupStatus) -> Vec<String> {
         .filter(|tool| {
             !matches!(
                 tool.state,
-                DependencyState::Found { .. } | DependencyState::Installed { .. }
+                DependencyState::Found { .. }
+                    | DependencyState::Bundled { .. }
+                    | DependencyState::Installed { .. }
             )
         })
         .map(|tool| match tool.name {

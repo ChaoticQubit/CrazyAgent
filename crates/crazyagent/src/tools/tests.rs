@@ -705,7 +705,10 @@ fn the_bundled_tmux_beside_the_engine_wins_over_a_homebrew_tmux() {
     assert_eq!(tmux.argv(), vec![sidecar.clone().into_os_string()]);
     let grants = tmux.grants();
     assert_eq!(grants[0], sidecar);
-    assert!(!grants.contains(&brew), "the Homebrew tmux is never granted");
+    assert!(
+        !grants.contains(&brew),
+        "the Homebrew tmux is never granted"
+    );
 }
 
 /// The engine adds the probed folders to its places before any launch

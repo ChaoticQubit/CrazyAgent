@@ -27,6 +27,9 @@ const TEMP_FOLDERS: [&str; 7] = [
 ];
 const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+/// The file name of the tmux the app ships beside the engine (DEC-157), which the name
+/// `tmux` finds before every folder ([`Places::bundled`]).
+pub const BUNDLED_TMUX: &str = "crazyagent-tmux";
 /// Linux package folders often missing from the engine's PATH: Linuxbrew, where setup
 /// installs tmux, and the NixOS system and default profiles. They are looked in before the
 /// system folders, under the same entry checks as every other place.
@@ -80,11 +83,13 @@ pub const TMUX_MISSING: &str =
 /// program is run, no shell file is read and every folder is absolute and bounded. No
 /// folder agents can write is kept ([`Places::agent_writable`]); the engine's data folder,
 /// which holds the agents' HOMEs and worktrees, is kept here so its files are refused too.
+/// The app's folder is kept on its own for the tools the app ships ([`Places::bundled`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Places {
     folders: Vec<PathBuf>,
     home: Option<PathBuf>,
     engine_roots: Vec<PathBuf>,
+    app_folder: Option<PathBuf>,
 }
 
 impl Places {
@@ -107,6 +112,7 @@ impl Places {
                 .into_iter()
                 .filter(|root| usable(root))
                 .collect(),
+            app_folder: None,
         };
         for folder in folders {
             if places.folders.len() == PLACES_MAX {
@@ -130,8 +136,9 @@ impl Places {
     /// folders the harness catalog uses (nvm, fnm, pnpm, ~/.local/bin, ~/.cargo/bin and
     /// more), the real installs of volta, asdf, mise and fnm, each harness's own install
     /// folders under HOME, then the system folders last. A folder agents can write is never
-    /// kept ([`Places::agent_writable`]). Inputs: the engine root, the app's folder, HOME and
-    /// the PATH value. Output: the bounded places.
+    /// kept ([`Places::agent_writable`]); the app's folder is also kept for the tools it
+    /// ships ([`Places::bundled`]). Inputs: the engine root, the app's folder, HOME and the
+    /// PATH value. Output: the bounded places.
     pub fn engine(
         engine_root: Option<&Path>,
         app_folder: Option<&Path>,
@@ -163,7 +170,12 @@ impl Places {
         #[cfg(target_os = "linux")]
         folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
         folders.extend(system);
-        Self::kept(folders, home, engine_roots(engine_root))
+        Self {
+            app_folder: app_folder
+                .filter(|folder| usable(folder))
+                .map(Path::to_path_buf),
+            ..Self::kept(folders, home, engine_roots(engine_root))
+        }
     }
 
     /// Builds the engine's places from this process's HOME and PATH and the folder of the
@@ -205,7 +217,8 @@ impl Places {
     /// global prefix and the login shell's PATH, after every folder known without running a
     /// program and before the system folders; folders agents can write are dropped. The
     /// probes keep only folders [`probe::kept`] passes, which also drops shared temp folders
-    /// others can change. Input: the probed folders. Output: the places.
+    /// others can change. The app's folder stays as it was. Input: the probed folders.
+    /// Output: the places.
     pub fn with_probed(self, probed: Vec<PathBuf>) -> Self {
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
         let (last, mut folders): (Vec<PathBuf>, Vec<PathBuf>) = self
@@ -214,12 +227,29 @@ impl Places {
             .partition(|folder| system.contains(folder));
         folders.extend(probed.into_iter().filter(|folder| !system.contains(folder)));
         folders.extend(last);
-        Self::kept(folders, self.home, self.engine_roots)
+        Self {
+            app_folder: self.app_folder,
+            ..Self::kept(folders, self.home, self.engine_roots)
+        }
     }
 
     /// The folders looked in, in order. Output: the folders.
     pub fn folders(&self) -> &[PathBuf] {
         &self.folders
+    }
+
+    /// The copy of a tool the app ships beside the engine, looked at before every folder and
+    /// checked as any file found: [`BUNDLED_TMUX`] in the app's folder for the name `tmux`
+    /// (DEC-157), none for any other name or with no app folder. Input: the program name.
+    /// Output: the file, which may not exist.
+    pub fn bundled(&self, name: &str) -> Option<PathBuf> {
+        let file = match name {
+            "tmux" => BUNDLED_TMUX,
+            _ => return None,
+        };
+        let bundled = self.app_folder.as_ref()?.join(file);
+        assert!(bundled.is_absolute());
+        Some(bundled)
     }
 
     /// HOME, for the shim checks. Output: HOME, or none.
@@ -453,11 +483,12 @@ impl Missing {
     }
 }
 
-/// Finds a tool by its program name wherever the places look, passing over version-manager
-/// shims, files agents can write and files others can change, then reads how it runs; a
-/// miss names the first file passed over, if any ([`Refused`]), and asks the background
-/// probes to look again ([`probe::missed`]). Harness launches call [`resolve_entry`].
-/// Inputs: the program name and the places. Output: the tool, or why it cannot run.
+/// Finds a tool by its program name, first the copy the app ships ([`Places::bundled`]),
+/// then wherever the places look, passing over version-manager shims, files agents can
+/// write and files others can change, then reads how it runs; a miss names the first file
+/// passed over, if any ([`Refused`]), and asks the background probes to look again
+/// ([`probe::missed`]). Harness launches call [`resolve_entry`]. Inputs: the program name
+/// and the places. Output: the tool, or why it cannot run.
 pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
     resolve_at(name, places, 0)
 }
@@ -483,20 +514,21 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
         return Err(not_found());
     }
     let mut refused = None;
-    let found =
-        places.folders.iter().map(|folder| folder.join(name)).find(
-            |candidate| match check_candidate(places, candidate) {
-                Some(Ok(())) => true,
-                Some(Err(why)) => {
-                    refused.get_or_insert_with(|| Refused {
-                        file: candidate.clone(),
-                        why,
-                    });
-                    false
-                }
-                None => false,
-            },
-        );
+    let found = places
+        .bundled(name)
+        .into_iter()
+        .chain(places.folders.iter().map(|folder| folder.join(name)))
+        .find(|candidate| match check_candidate(places, candidate) {
+            Some(Ok(())) => true,
+            Some(Err(why)) => {
+                refused.get_or_insert_with(|| Refused {
+                    file: candidate.clone(),
+                    why,
+                });
+                false
+            }
+            None => false,
+        });
     let Some(found) = found else {
         probe::missed();
         return Err(match refused {
