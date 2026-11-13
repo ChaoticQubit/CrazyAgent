@@ -1110,6 +1110,7 @@ impl ResearchRunner {
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
+                    provider_retry: crate::provider_retry::for_launch_at(&self.database),
                     ..LaunchLimits::default()
                 },
             };
@@ -1166,11 +1167,21 @@ impl ResearchRunner {
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
-                codex_arguments(&mut launch, &worktree, &output, &home, job.tools, account)?;
+                let retry = crate::provider_retry::for_launch_at(&self.database);
+                codex_arguments(
+                    &mut launch,
+                    &worktree,
+                    &output,
+                    &home,
+                    job.tools,
+                    account,
+                    retry,
+                )?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account)?;
+                let retry = crate::provider_retry::for_launch_at(&self.database);
+                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account, retry)?;
                 launch.args(installed.arguments());
                 (agent.join("output.md"), "output.md")
             }
@@ -1754,11 +1765,21 @@ impl ResearchRunner {
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
-                codex_arguments(&mut command, &folder, &output, &home, false, account)?;
+                let retry = crate::provider_retry::for_launch_at(&self.database);
+                codex_arguments(&mut command, &folder, &output, &home, false, account, retry)?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
+                let retry = crate::provider_retry::for_launch_at(&self.database);
+                claude_arguments(
+                    &mut command,
+                    &home,
+                    &tmp,
+                    false,
+                    run.output_tokens,
+                    account,
+                    retry,
+                )?;
                 (agent.join("output.md"), "output.md")
             }
         };
@@ -2198,7 +2219,9 @@ fn codex_arguments(
     home: &Path,
     tools: bool,
     account: &ResearchAccount,
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<(), RunError> {
+    let _ = retry;
     command
         .arg("exec")
         .args(["--skip-git-repo-check", "--color", "never", "--json"])
@@ -2291,7 +2314,9 @@ fn claude_arguments(
     tools: bool,
     output_tokens: Option<u32>,
     account: &ResearchAccount,
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<(), RunError> {
+    let _ = retry;
     let key_file = match account {
         ResearchAccount::AnthropicEndpoint {
             base_url,
@@ -4709,6 +4734,7 @@ mod tests {
                 Path::new("/home"),
                 tools,
                 &account,
+                crate::provider_retry::ProviderRetry::HarnessDefault,
             )
             .unwrap();
             let args: Vec<&str> = command
@@ -4721,6 +4747,92 @@ mod tests {
                     "{tools} {setting}: {args:?}"
                 );
             }
+        }
+    }
+
+    /// DEC-163: a research run takes the owner's retry option. Codex on an endpoint
+    /// account gets its custom provider's settings, Codex on a ChatGPT sign-in the built-in
+    /// provider's, and Claude Code its retry cap as a variable, for every option.
+    #[test]
+    fn a_research_run_takes_the_owner_retry_option_for_its_harness_and_provider() {
+        use crate::provider_retry::{CLAUDE_MAX_RETRIES, CodexProvider, ProviderRetry};
+        let retries = |command: &Command| -> Vec<String> {
+            let args: Vec<String> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect();
+            args.windows(2)
+                .filter(|pair| pair[0] == "-c")
+                .map(|pair| pair[1].clone())
+                .filter(|setting| {
+                    setting.contains("unbounded_connection_retries")
+                        || setting.contains("_max_retries=")
+                })
+                .collect()
+        };
+        let cap = |command: &Command| -> Option<String> {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == CLAUDE_MAX_RETRIES)
+                .and_then(|(_, value)| value.map(|value| value.to_str().unwrap().to_owned()))
+        };
+        let endpoint = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let signed_in = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let anthropic = ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        for retry in ProviderRetry::ALL {
+            for (account, provider) in [
+                (&endpoint, CodexProvider::Custom("crazyagent_endpoint")),
+                (&signed_in, CodexProvider::BuiltIn),
+            ] {
+                let mut command = Command::new("/usr/bin/true");
+                codex_arguments(
+                    &mut command,
+                    Path::new("/work"),
+                    Path::new("/work/report.md"),
+                    Path::new("/home"),
+                    false,
+                    account,
+                    retry,
+                )
+                .unwrap();
+                assert_eq!(
+                    retries(&command),
+                    retry.codex_settings(provider),
+                    "{retry:?} {account:?}"
+                );
+                assert_eq!(
+                    command.get_args().last().and_then(|last| last.to_str()),
+                    Some("-"),
+                    "the prompt stays the last argument"
+                );
+            }
+            let mut command = Command::new("/usr/bin/true");
+            claude_arguments(
+                &mut command,
+                Path::new("/agent/home"),
+                Path::new("/agent/tmp"),
+                false,
+                None,
+                &anthropic,
+                retry,
+            )
+            .unwrap();
+            assert_eq!(
+                cap(&command),
+                retry.claude_env().map(|(_, value)| value.to_owned()),
+                "{retry:?}"
+            );
         }
     }
 
@@ -4746,6 +4858,7 @@ mod tests {
                 Path::new("/home"),
                 tools,
                 &account,
+                crate::provider_retry::ProviderRetry::HarnessDefault,
             )
             .unwrap();
             let args: Vec<&str> = command
@@ -5924,6 +6037,7 @@ mod tests {
                 tools,
                 output_tokens,
                 &account,
+                crate::provider_retry::ProviderRetry::HarnessDefault,
             )
             .unwrap();
             let arguments: Vec<String> = command

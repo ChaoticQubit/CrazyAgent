@@ -230,6 +230,7 @@ pub struct LaunchLimits {
     pub run_time: Duration,
     pub stop_grace: Duration,
     pub stale_turn: Duration,
+    pub provider_retry: crate::provider_retry::ProviderRetry,
 }
 
 impl Default for LaunchLimits {
@@ -238,6 +239,7 @@ impl Default for LaunchLimits {
             run_time: Duration::from_secs(600),
             stop_grace: Duration::from_secs(2),
             stale_turn: Duration::from_secs(600),
+            provider_retry: crate::provider_retry::ProviderRetry::HarnessDefault,
         }
     }
 }

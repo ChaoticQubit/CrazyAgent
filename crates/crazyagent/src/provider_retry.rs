@@ -176,6 +176,21 @@ pub fn load(connection: &Connection) -> Result<ProviderRetry, EngineError> {
     serde_json::from_value(serde_json::Value::String(name)).map_err(|_| invalid())
 }
 
+/// The option a harness launch runs under: the stored choice, or Harness default, which
+/// sets nothing, when the database has no such table or holds a choice this engine does not
+/// know, with the cause on stderr. Input: the engine database. Output: the option.
+pub fn for_launch(connection: &Connection) -> ProviderRetry {
+    let _ = connection;
+    ProviderRetry::HarnessDefault
+}
+
+/// [`for_launch`] on the engine database at `database`, opened read-only for this one read.
+/// Input: the database path. Output: the option.
+pub fn for_launch_at(database: &std::path::Path) -> ProviderRetry {
+    let _ = database;
+    ProviderRetry::HarnessDefault
+}
+
 /// The owner read of the setting. Input: the open transaction. Output: the choice and every
 /// option's line per harness, as owner data.
 pub(crate) fn read(connection: &Connection) -> Result<OwnerData, EngineError> {

@@ -188,3 +188,33 @@ fn every_harness_has_a_line_for_every_option_in_the_owner_view() {
 fn a_custom_codex_provider_named_openai_is_a_bug() {
     let _ = ProviderRetry::StopAtOnce.codex_settings(CodexProvider::Custom("openai"));
 }
+
+/// A launch runs under the stored choice. A database without the setting's table, or with a
+/// choice this engine does not know, gives Harness default, which sets nothing, so a
+/// launch never fails or guesses over the setting; the path form reads the same.
+#[test]
+fn a_launch_runs_under_the_stored_choice_or_sets_nothing() {
+    let (folder, connection) = engine();
+    let path = folder.path().join("engine.db");
+    assert_eq!(for_launch(&connection), ProviderRetry::RetryBriefly);
+    assert_eq!(for_launch_at(&path), ProviderRetry::RetryBriefly);
+    save(&connection, ProviderRetry::StopAtOnce).unwrap();
+    assert_eq!(for_launch(&connection), ProviderRetry::StopAtOnce);
+    assert_eq!(for_launch_at(&path), ProviderRetry::StopAtOnce);
+    let bare = tempfile::tempdir().unwrap();
+    let bare_path = bare.path().join("research.sqlite3");
+    let without = Connection::open(&bare_path).unwrap();
+    assert_eq!(for_launch(&without), ProviderRetry::HarnessDefault);
+    assert_eq!(for_launch_at(&bare_path), ProviderRetry::HarnessDefault);
+    assert_eq!(
+        for_launch_at(&bare.path().join("missing.db")),
+        ProviderRetry::HarnessDefault
+    );
+    without
+        .execute_batch(
+            "CREATE TABLE provider_retry_settings (singleton INTEGER PRIMARY KEY, choice TEXT NOT NULL);
+             INSERT INTO provider_retry_settings VALUES(1,'retry_forever');",
+        )
+        .unwrap();
+    assert_eq!(for_launch(&without), ProviderRetry::HarnessDefault);
+}

@@ -2036,3 +2036,41 @@ fn a_pinned_harness_inside_a_project_is_refused_by_name_not_reported_missing() {
     assert!(line.contains("agents can change it"), "{line}");
     assert!(!line.contains("missing"), "{line}");
 }
+
+/// DEC-163: a Claude Code terminal launch, the master's or a team agent's, takes the owner's
+/// retry cap as a variable under Stop at once and leaves its own retries under the other
+/// options, on a signed-in account and on an address account alike.
+#[test]
+fn a_claude_terminal_launch_takes_the_owner_retry_cap() {
+    use crate::provider_retry::{CLAUDE_MAX_RETRIES, ProviderRetry};
+    let case = Case::new();
+    for retry in ProviderRetry::ALL {
+        for account in [
+            case.subscription(),
+            case.keyed(Some("http://127.0.0.1:11434")),
+        ] {
+            let mut request = case.request("claude-code", account, true);
+            request.limits.provider_retry = retry;
+            let environment = claude_environment(
+                &request,
+                "/tmp/ca-retry-home",
+                None,
+                TerminalDisplay::default(),
+            );
+            let cap: Vec<&str> = environment
+                .iter()
+                .filter(|(name, _)| name == CLAUDE_MAX_RETRIES)
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(
+                cap,
+                retry
+                    .claude_env()
+                    .map(|(_, value)| value)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                "{retry:?}"
+            );
+        }
+    }
+}
