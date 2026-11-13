@@ -471,3 +471,50 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
         );
     }
 }
+
+/// DEC-157: a harness the app installs with npm lives in the engine's prefix inside its setup
+/// folder, `<root>/setup/harnesses`, the one part of the engine data the resolver accepts as
+/// the engine's own. The engine places look in its `bin`, Codex there resolves with the app's
+/// Node, and the old `<root>/harnesses` is never looked in.
+#[test]
+fn an_app_installed_npm_harness_in_the_setup_prefix_resolves_and_the_old_prefix_is_never_looked_in()
+{
+    let (_folder, root) = scratch();
+    let prefix = root.join("setup").join("harnesses");
+    let script = npm_codex(&prefix);
+    let node = program(&root.join("setup/bin/node"), NODE);
+    program(&root.join("harnesses/bin/codex"), "#!/bin/sh\n");
+    let engine = Places::engine(Some(&root), None, None, Some(OsStr::new("")));
+    assert!(
+        engine.folders().contains(&prefix.join("bin")),
+        "{:?}",
+        engine.folders()
+    );
+    assert!(
+        !engine
+            .folders()
+            .iter()
+            .any(|folder| folder.starts_with(root.join("harnesses"))),
+        "{:?}",
+        engine.folders()
+    );
+    let places = Places::new(
+        engine
+            .folders()
+            .iter()
+            .filter(|folder| folder.starts_with(&root))
+            .cloned()
+            .collect(),
+        None,
+    );
+    let codex = resolve("codex", &places).unwrap();
+    assert_eq!(codex.entry, prefix.join("bin/codex"));
+    assert_eq!(codex.program, script);
+    assert_eq!(
+        codex
+            .interpreter()
+            .expect("a script names its interpreter")
+            .program,
+        node
+    );
+}
