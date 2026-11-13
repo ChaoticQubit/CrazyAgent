@@ -527,9 +527,7 @@ fn choose(root: &Path, id: &str, path: Option<&str>) -> Result<WireReply, Engine
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let space = finding::AgentSpace::read(root, &db)?;
     let checked = finding::check(id, Path::new(text), &space, home.as_deref())?;
-    let host = crate::engine::RegisteredNativeAuthHost::capture_entry(&checked)?;
-    host.verified_path()?;
-    drop(host);
+    crate::engine::RegisteredNativeAuthHost::capture_entry(&checked)?.verified_path()?;
     finding::set_chosen(&db, id, Some(&checked))?;
     Ok(WireReply::Started)
 }
