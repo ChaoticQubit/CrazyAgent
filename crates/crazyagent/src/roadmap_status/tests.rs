@@ -1072,6 +1072,7 @@ fn a_status_run_names_only_its_own_folder_and_profile_for_removal() {
             account: &account,
             wall_time: std::time::Duration::from_secs(5),
             output_tokens: Some(OUTPUT_TOKENS),
+            stream: false,
         };
         run::asked(&runner, &run, &|| false)
     };

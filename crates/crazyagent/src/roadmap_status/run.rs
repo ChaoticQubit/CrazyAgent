@@ -142,6 +142,7 @@ fn answer(
         account,
         wall_time: AGENT_TIME,
         output_tokens: Some(OUTPUT_TOKENS),
+        stream: false,
     };
     let asked_at = Cell::new(Instant::now());
     let lost = Cell::new(false);

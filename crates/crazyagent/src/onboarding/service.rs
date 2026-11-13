@@ -1029,6 +1029,8 @@ fn mapping_step(
             wall_time: work.limits.mapping_try_time.min(left),
             #[cfg(unix)]
             output_tokens: Some(MAPPING_OUTPUT_TOKENS),
+            #[cfg(unix)]
+            stream: false,
         };
         let cause = match work.runner.run_read_only(&run, beat) {
             #[cfg(unix)]
