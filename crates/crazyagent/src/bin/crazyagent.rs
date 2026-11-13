@@ -1131,16 +1131,18 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             let another = service.runs_another_program();
             if another && service.may_replace() {
                 let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+                let executable = crazyagent::service::persistable(
+                    &service.executable,
+                    &layout,
+                    appdir.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
                 crazyagent::service::Service {
-                    executable: crazyagent::service::persistable(
-                        &service.executable,
-                        &layout,
-                        appdir.as_deref(),
-                    )
-                    .map_err(|e| e.to_string())?,
+                    executable: executable.clone(),
                     ..service.clone()
                 }
                 .install()
+                .map(|()| crazyagent::service::retire_old_copies(&layout, &executable))
             } else {
                 if another {
                     eprintln!(

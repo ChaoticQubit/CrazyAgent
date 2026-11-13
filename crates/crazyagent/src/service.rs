@@ -881,8 +881,9 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// of the release executables beside it ([`crate::update::BINARIES`]) in
 /// `<data root>/setup/bin`, which the tool resolver trusts so the bundled tmux there is used
 /// (leader 20:15), one stable path across versions, each file refreshed by an atomic rename
-/// whenever it differs; the copy an older version kept in `<data root>/bin` is retired
-/// ([`retire_old_copies`]). Nothing is ever copied from another folder, so an engine other
+/// whenever it differs. The copy an older version kept in `<data root>/bin` stays, since a
+/// login service may still name it; `service start` retires it after the service names this
+/// one ([`retire_old_copies`]). Nothing is ever copied from another folder, so an engine other
 /// users can change is returned as it is and refused where it would be kept. Inputs: the
 /// bundled engine, the layout and the AppImage mount folder when there is one. Output: the
 /// executable to keep.
@@ -890,21 +891,6 @@ pub fn persistable(
     executable: &Path,
     layout: &Layout,
     appdir: Option<&Path>,
-) -> Result<PathBuf, ServiceError> {
-    let cli = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(|home| PathBuf::from(home).join(".local").join("bin"));
-    persistable_with(executable, layout, appdir, cli.as_deref())
-}
-
-/// [`persistable`] with the folder that holds the command line link given, so the old copy's
-/// link is named by the caller. Inputs: the bundled engine, the layout, the AppImage mount
-/// folder when there is one and the link folder. Output: the executable to keep.
-fn persistable_with(
-    executable: &Path,
-    layout: &Layout,
-    appdir: Option<&Path>,
-    cli: Option<&Path>,
 ) -> Result<PathBuf, ServiceError> {
     let mounted = appdir
         .filter(|folder| folder.is_absolute())
@@ -944,7 +930,6 @@ fn persistable_with(
     }
     let installed = copies.join(main);
     assert!(installed.starts_with(&copies) && installed.is_file());
-    retire_old_copies_with(layout, &installed, cli);
     Ok(installed)
 }
 
