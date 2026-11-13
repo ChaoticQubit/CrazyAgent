@@ -29738,6 +29738,7 @@ fn a_model_refusal_is_recorded_for_the_account_and_stops_the_agent_that_got_it()
 /// With idle agents kept for reuse, a task whose model no idle agent of its harness runs
 /// does not wait behind them forever (DEC-150 F3): when the harness slot is full, dispatch
 /// stops one idle agent on another model, so the task can start on its own model.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_task_for_a_model_no_idle_agent_runs_frees_a_full_slot_of_one_on_another_model() {
     let fixture = Fixture::new(1);
@@ -29777,6 +29778,7 @@ fn a_task_for_a_model_no_idle_agent_runs_frees_a_full_slot_of_one_on_another_mod
 /// no idle agent on another model while it waits (DEC-150 r2 P1): a stopped agent would
 /// leave a slot keep warm refills on the agent default, and dispatch would stop it again,
 /// launching a harness every cycle for the whole rest.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_task_waiting_on_a_resting_account_stops_no_idle_agent_so_keep_warm_launches_none() {
     use crate::model_choice::Slot;

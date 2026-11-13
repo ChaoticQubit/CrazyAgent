@@ -2333,6 +2333,7 @@ mod tests {
                 &executable,
                 &ModelEndpoint::Native {},
                 &AgentPolicy::default(),
+                crate::trust::Trust::Reviewed,
                 listed,
             )
             .map(drop)
