@@ -69,6 +69,17 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
                         version: located.version.clone(),
                     }
                 }
+                (
+                    None,
+                    Some(Some(Ok(Ok(super::Located {
+                        version,
+                        note: Some(note),
+                        ..
+                    })))),
+                ) => DependencyState::System {
+                    version: version.clone(),
+                    note: note.line().to_owned(),
+                },
                 (None, Some(Some(Ok(Ok(located))))) => DependencyState::Found {
                     version: located.version.clone(),
                 },

@@ -1505,6 +1505,9 @@ impl AppSetup {
                 DependencyState::Missing { line } if !line.is_empty() => {
                     Some(super::new_project_view::printable(line.clone()))
                 }
+                DependencyState::System { note, .. } => {
+                    Some(super::new_project_view::printable(note.clone()))
+                }
                 _ => None,
             };
             if let Some(detail) = detail {

@@ -252,6 +252,15 @@ impl Places {
         Some(bundled)
     }
 
+    /// The same places with no copy the app ships, for the usual order once that copy cannot
+    /// run. Output: the places.
+    pub fn without_bundled(&self) -> Self {
+        Self {
+            app_folder: None,
+            ..self.clone()
+        }
+    }
+
     /// The same places with the app's folder set, as an engine started from that folder
     /// would hold it, for rows that build their own folders. Input: the app's folder.
     /// Output: the places.
@@ -543,8 +552,24 @@ pub fn resolve_tmux(
     ships_bundle: bool,
     runs: impl Fn(&Resolved) -> bool,
 ) -> Result<(Resolved, Option<BundleNote>), Missing> {
-    let _ = (ships_bundle, &runs);
-    resolve("tmux", places).map(|found| (found, None))
+    let Some(bundled) = places.bundled("tmux") else {
+        return resolve("tmux", places).map(|found| (found, None));
+    };
+    let note = if std::fs::symlink_metadata(&bundled).is_ok() {
+        Some(BundleNote::CannotRun)
+    } else if ships_bundle {
+        Some(BundleNote::Missing)
+    } else {
+        None
+    };
+    match resolve("tmux", places) {
+        Ok(found) if found.entry == bundled && runs(&found) => Ok((found, None)),
+        Ok(found) if found.entry != bundled => Ok((found, note)),
+        _ => resolve("tmux", &places.without_bundled()).map(|found| {
+            assert_ne!(found.entry, bundled);
+            (found, note)
+        }),
+    }
 }
 
 /// Reads how an entry already chosen runs, such as a harness file the engine pinned: its

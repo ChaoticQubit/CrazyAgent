@@ -104,6 +104,7 @@ jobs:
       CHANNEL: ${{ needs.prepare.outputs.channel }}
       TARGET: ${{ matrix.target }}
       PLATFORM: ${{ matrix.os }}
+      CRAZYAGENT_BUNDLES_TMUX: ${{ matrix.os != 'windows' && '1' || '0' }}
     steps:
       - name: Refuse to run under Rosetta
         if: matrix.os == 'macos'

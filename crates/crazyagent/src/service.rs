@@ -878,17 +878,23 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// The engine executable a login service or the command line link may keep naming: the
 /// bundled `executable` itself, unless it sits inside the running AppImage's mount folder
 /// `appdir`, which goes away when the app exits. Then it is a copy, private to this user,
-/// of the release executables beside it ([`crate::update::BINARIES`]) in `<data root>/bin`,
-/// one stable path across versions, each file refreshed by an atomic rename whenever it
-/// differs. Nothing is ever copied from another folder, so an engine other users can change
-/// is returned as it is and refused where it would be kept. Inputs: the bundled engine, the
-/// layout and the AppImage mount folder when there is one. Output: the executable to keep.
+/// of the release executables beside it ([`crate::update::BINARIES`]) in
+/// `<data root>/setup/bin`, which the tool resolver trusts so the bundled tmux there is used
+/// (leader 20:15), one stable path across versions, each file refreshed by an atomic rename
+/// whenever it differs; the copy an older version kept in `<data root>/bin` is retired
+/// ([`retire_old_copies`]). Nothing is ever copied from another folder, so an engine other
+/// users can change is returned as it is and refused where it would be kept. Inputs: the
+/// bundled engine, the layout and the AppImage mount folder when there is one. Output: the
+/// executable to keep.
 pub fn persistable(
     executable: &Path,
     layout: &Layout,
     appdir: Option<&Path>,
 ) -> Result<PathBuf, ServiceError> {
-    persistable_with(executable, layout, appdir, None)
+    let cli = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".local").join("bin"));
+    persistable_with(executable, layout, appdir, cli.as_deref())
 }
 
 /// [`persistable`] with the folder that holds the command line link given, so the old copy's
@@ -900,7 +906,6 @@ fn persistable_with(
     appdir: Option<&Path>,
     cli: Option<&Path>,
 ) -> Result<PathBuf, ServiceError> {
-    let _ = cli;
     let mounted = appdir
         .filter(|folder| folder.is_absolute())
         .is_some_and(|folder| canonical(executable).starts_with(canonical(folder)));
@@ -922,7 +927,7 @@ fn persistable_with(
         )));
     }
     layout.prepare()?;
-    let copies = layout.root().join("bin");
+    let copies = layout.root().join("setup").join("bin");
     crate::paths::private_folder(&copies)?;
     for name in &names {
         let copy = copies.join(name);
@@ -939,7 +944,32 @@ fn persistable_with(
     }
     let installed = copies.join(main);
     assert!(installed.starts_with(&copies) && installed.is_file());
+    retire_old_copies(&layout.root().join("bin"), &installed, cli);
     Ok(installed)
+}
+
+/// Retires the copy an older version kept in `<data root>/bin`, a folder the tool resolver
+/// refuses as one agents can write: the command line link in `cli` that names the old engine
+/// is pointed at the new one first, then every release file there is removed and the folder
+/// goes once empty. A link that cannot be moved keeps the old copy, so it never dangles;
+/// anything CrazyAgent did not put there stays. Inputs: the old folder, the new engine and
+/// the link folder.
+fn retire_old_copies(old: &Path, installed: &Path, cli: Option<&Path>) {
+    assert!(installed.is_absolute() && !installed.starts_with(old));
+    let main = format!("crazyagent{}", std::env::consts::EXE_SUFFIX);
+    if let Some(cli) = cli
+        && std::fs::read_link(cli.join("crazyagent")).is_ok_and(|named| named == old.join(&main))
+        && link_cli(installed, cli).is_err()
+    {
+        return;
+    }
+    for name in crate::update::BINARIES {
+        let file = old.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        if std::fs::symlink_metadata(&file).is_ok_and(|metadata| metadata.is_file()) {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+    let _ = std::fs::remove_dir(old);
 }
 
 /// Whether `copy` is a regular file with exactly the bytes of `source`, private to this

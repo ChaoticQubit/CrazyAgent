@@ -23,6 +23,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
 const HOLDER: &str = "_crazyagent";
+/// How long a tmux may take to report its version, as setup allows.
+const VERSION_READ_TIME: Duration = Duration::from_secs(10);
 /// How many 2 second holder loops pass between two reads of the server's deadline: the
 /// modification time of its socket, which the running engine keeps ahead (FBTMUX-P1).
 const DEADLINE_CHECK_LOOPS: u32 = 30;
@@ -202,12 +204,69 @@ pub fn installed(engine_root: &Path) -> Option<PathBuf> {
     installed_at(&crate::tools::Places::from_environment(Some(engine_root)))
 }
 
-/// Finds the tmux program the engine uses in the given places, the answer setup shows.
+/// Finds the tmux program the engine uses in the given places, the answer setup shows: the
+/// bundled copy when it runs, else the usual order ([`crate::tools::resolve_tmux`]).
 /// Takes the places. Returns the real program, or none when tmux is not installed.
 pub fn installed_at(places: &crate::tools::Places) -> Option<PathBuf> {
-    crate::tools::resolve("tmux", places)
+    crate::tools::resolve_tmux(places, crate::tools::SHIPS_BUNDLED_TMUX, runs)
         .ok()
-        .map(|tmux| tmux.program)
+        .map(|(tmux, _)| tmux.program)
+}
+
+/// The file a tmux last ran from, as (path, device, inode, size, change seconds and
+/// nanoseconds), so a file replaced in place is read again.
+type RanFile = (PathBuf, u64, u64, u64, i64, i64);
+
+/// The last tmux file whose version read passed, so setup and every terminal start do not
+/// each run it again. Only a pass is kept: a failed or slow read is asked again next time.
+static RAN: Mutex<Option<RanFile>> = Mutex::new(None);
+
+/// Whether a tmux runs: `-V` reports a version within the bound and that version is one the
+/// terminal supports (3.2 or later). A read that runs out of time counts as running, since a
+/// new file can wait behind the system's first-run checks; the version read setup does next
+/// reports it. Takes the tmux. Returns the answer.
+pub fn runs(tmux: &crate::tools::Resolved) -> bool {
+    let Ok(metadata) = std::fs::metadata(&tmux.program) else {
+        return false;
+    };
+    let file: RanFile = (
+        tmux.program.clone(),
+        metadata.dev(),
+        metadata.ino(),
+        metadata.size(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    );
+    let last = || {
+        RAN.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if last().as_ref() == Some(&file) {
+        return true;
+    }
+    let words = tmux.argv();
+    let Some((program, rest)) = words.split_first() else {
+        return false;
+    };
+    let mut arguments = rest.to_vec();
+    arguments.push("-V".into());
+    let read = crate::setup::process::run(
+        Path::new(program),
+        &arguments,
+        &[],
+        &std::env::temp_dir(),
+        VERSION_READ_TIME,
+    );
+    let passed = match read {
+        Err(crate::setup::InstallError(code)) => return code == "setup_timeout",
+        Ok((false, _)) => false,
+        Ok((true, output)) => crate::setup::process::version_from(&output)
+            .is_ok_and(|version| supported(version.as_str()) == Some(true)),
+    };
+    if passed {
+        *last() = Some(file);
+    }
+    passed
 }
 
 impl Tmux {
