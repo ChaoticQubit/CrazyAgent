@@ -1280,20 +1280,33 @@ impl TeamRuntime {
 
     /// Makes `host` the terminal team agents run in, at engine start or when a live master
     /// start finds one the engine started without, and takes over or ends the panes an
-    /// earlier engine left there ([`TeamRuntime::with_terminal`]). Takes the host. Returns
-    /// the host's plain code when it cannot list its panes, with no host kept.
+    /// earlier engine left there ([`TeamRuntime::with_terminal`]). The host is set before
+    /// frozen native leads thaw, since their native teammates are checked against it, and
+    /// they thaw before the host lists its panes, since stopped servers would not answer.
+    /// Takes the host. Returns the host's plain code when it cannot list its panes, or the
+    /// thaw's error, with no host kept.
     fn attach_terminal(&mut self, host: Arc<dyn Host>) -> Result<(), EngineError> {
         let records = self.pane_records()?;
         let access = (self.access)().unwrap_or_default();
-        let (mut thawed, ended) = self.thaw_frozen_leads(&records, &access)?;
-        for (id, reason) in ended {
-            if let Some(record) = records.get(&id) {
-                record.remove_context_files();
-            }
-            self.closed_note(id, &reason)?;
-        }
-        let alive = host.alive()?;
         self.terminal = Some(host.clone());
+        let listed = self
+            .thaw_frozen_leads(&records, &access)
+            .and_then(|(thawed, ended)| {
+                for (id, reason) in ended {
+                    if let Some(record) = records.get(&id) {
+                        record.remove_context_files();
+                    }
+                    self.closed_note(id, &reason)?;
+                }
+                Ok((thawed, host.alive()?))
+            });
+        let (mut thawed, alive) = match listed {
+            Ok(listed) => listed,
+            Err(problem) => {
+                self.terminal = None;
+                return Err(problem);
+            }
+        };
         let panes: BTreeMap<i64, AgentId> = alive
             .into_iter()
             .filter_map(|agent| agent.team_agent().map(|id| (id, agent)))
