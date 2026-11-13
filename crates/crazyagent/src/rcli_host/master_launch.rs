@@ -154,15 +154,18 @@ impl RcliMasterLaunch {
 
     /// Names the `--model` value a chosen master model adds (DEC-150 M-5): the profile's
     /// provider and the id, as `<provider>/<id>`, none with no chosen model or the account's
-    /// own. Takes the launch. Returns the value, or `rcli_master_model_unserved` for an id
+    /// own. An owner's id is served only by the provider the store verified it on (addendum
+    /// 9e). Takes the launch. Returns the value, or `rcli_master_model_unserved` for an id
     /// the store would not save or the account's provider does not serve.
     fn model_flag(&self) -> Result<Option<String>, ProtocolError> {
         let Some(model) = &self.model else {
             return Ok(None);
         };
         let connection = &self.binding.connection;
+        let custom = self.model_provider.as_deref();
         if !crate::model_choice::model_valid("rcli", model)
-            || !crate::model_choice::rcli_serves(model, connection, None)
+            || custom.is_some_and(|named| !crate::model_choice::rcli_providers().contains(&named))
+            || !crate::model_choice::rcli_serves(model, connection, custom)
         {
             return Err(error("rcli_master_model_unserved"));
         }

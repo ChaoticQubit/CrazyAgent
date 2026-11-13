@@ -2197,16 +2197,19 @@ fn candidates<'a>(
         return Ok(members);
     };
     assert_eq!(session.selection.backend, MasterBackend::Rcli);
+    let custom = crate::model_choice::store::custom_provider(tx, "rcli", model)?;
     Ok(members
         .into_iter()
         .map(|(connection, gap, chosen)| {
             let gap = gap.or_else(|| {
-                (!crate::model_choice::rcli_serves(model, connection, None)).then(|| {
-                    (
-                        MasterReason::ModelUnserved,
-                        "master_model_unserved".to_owned(),
-                    )
-                })
+                (!crate::model_choice::rcli_serves(model, connection, custom.as_deref())).then(
+                    || {
+                        (
+                            MasterReason::ModelUnserved,
+                            "master_model_unserved".to_owned(),
+                        )
+                    },
+                )
             });
             (connection, gap, chosen)
         })
@@ -3058,8 +3061,11 @@ fn bundle(
         steps: crate::master_step_limit::load(tx)?.limit,
         time: crate::master_time_limit::load(tx)?.limit,
         frames: crate::master_frame_limit::load(tx)?.limit,
+        model_provider: match record.model.as_deref() {
+            Some(model) => crate::model_choice::store::custom_provider(tx, "rcli", model)?,
+            None => None,
+        },
         model: record.model,
-        model_provider: None,
     };
     assert_eq!(
         prepared.attempt.request.task_id,
