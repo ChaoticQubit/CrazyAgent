@@ -701,6 +701,40 @@ fn an_answer_without_json_takes_about_from_its_first_paragraph() {
     assert!(answer.platforms.is_empty());
 }
 
+/// DEC-160: an answer cut to its last part, a JSON tail closed by a fence, or one that sent
+/// a cut json block again, leaves a code fence open; such text is no overview, so the
+/// mapping step fails into its next try and writes nothing.
+#[test]
+fn a_cut_mapping_answer_is_no_overview() {
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let base = Drafted::new("demo".into(), &pool());
+    let tail = "\", \"Later\"], \"recommended\": \"Later\"}]}\n```\n";
+    let resent = concat!(
+        "## Structure\n\nA CLI that greets people.\n\n",
+        "```json\n{\"about\": \"A CLI th\n",
+        "```json\n{\"about\": \"A CLI that greets people.\"}\n```\n",
+    );
+    assert_eq!(draft::parse_answer(tail).overview, "");
+    let answer = draft::parse_answer(resent);
+    assert_eq!(answer.overview, "");
+    assert_eq!(answer.about, "A CLI that greets people.");
+    for text in [tail, resent] {
+        let (step, _, wrote, asks) =
+            service::answered(&layout, &base, text, &MappingFacts::default(), &[]);
+        assert_eq!(wrote, None, "{text}");
+        assert_eq!(
+            step,
+            Step::Failed {
+                reason: service::MAPPING_NO_OVERVIEW.into()
+            }
+        );
+        assert!(asks.is_empty());
+        assert!(draft::overview(&layout).is_none());
+    }
+}
+
 #[test]
 fn merging_fills_only_the_gaps_and_keeps_research_off() {
     let mut base = Drafted::new("demo".into(), &pool());
@@ -785,6 +819,43 @@ fn only_an_overview_this_engine_wrote_is_shown_as_the_mapping_agents() {
         shown(&mut database),
         (None, Some("# Changed by hand".to_owned()))
     );
+}
+
+/// DEC-160 Q1: an overview this engine wrote before R2 from a cut answer stays in the
+/// folder, as the engine never replaces it, but is not shown, nor given to a later mapping
+/// as the existing overview.
+#[test]
+fn a_sealed_overview_that_leaves_a_fence_open_is_not_shown_or_reused() {
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let mut database = Connection::open_in_memory().unwrap();
+    crate::storage::plugins::initialize(&database).unwrap();
+    crate::storage::setup::initialize(&database).unwrap();
+    crate::project_setup::initialize(&database).unwrap();
+    initialize(&database).unwrap();
+    database
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
+             VALUES ('demo',?1,'main','done','done',?2,1,1)",
+            params![
+                dir.path().to_str().unwrap(),
+                serde_json::to_string(&Drafted::new("demo".into(), &pool())).unwrap()
+            ],
+        )
+        .unwrap();
+    let cut = "# Project overview\n\n\", \"Later\"], \"recommended\": \"Later\"}]}\n```";
+    std::fs::write(layout.join("overview.md"), cut).unwrap();
+    seal_overview(&database, dir.path(), cut).unwrap();
+    let tx = database.transaction().unwrap();
+    let view = status(&tx, &ProjectId::new("demo").unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!((view.overview, view.folder_overview), (None, None));
+    drop(tx);
+    assert_eq!(draft::gather(dir.path(), &[]).overview, None);
+    std::fs::write(layout.join("overview.md"), "# Kept\n\nGreets people.\n").unwrap();
+    assert!(draft::gather(dir.path(), &[]).overview.is_some());
 }
 
 #[test]
