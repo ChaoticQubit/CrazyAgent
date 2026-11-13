@@ -2,15 +2,15 @@ import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { intakeCopy, loadFoundProjects, loadProjectsHome, startOnboarding } from "../../api-intake";
 import { loadPools, receiptState, removeProject, type PoolChoice } from "../../api-projects";
-import type { FoundProject, ProjectsHome } from "../../engine-client";
+import type { FoundProject, IntakeJob, IntakeJobState, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Dialog, Icon, RadioCard, StatusBadge, formatRoute, navigate, type IconName } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Icon, RadioCard, StatusBadge, formatRoute, navigate, type IconName, type Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
 import { NotReady } from "../project/shared";
 import { HomeFolderPicker } from "./home-folder";
-import { FOUND_POLL_MS, foundRow, homeLine, pendingFolders, startedProject, type FoundAction } from "./intake";
+import { FOUND_POLL_MS, folderName, foundRow, homeLine, jobActions, jobLine, pendingFolders, startedProject, type FoundAction } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -21,6 +21,37 @@ const ACTION_LABELS: Record<Exclude<FoundAction, null>, string> = {
 const ACTION_ICONS: Record<Exclude<FoundAction, null>, IconName> = {
   setup: "list-checks", continue: "arrow-right", open: "folder-open", remove: "trash",
 };
+
+const JOB_BADGES: Record<IntakeJobState["state"], { word: string; tone: Tone }> = {
+  downloading: { word: "Downloading", tone: "info" }, copying: { word: "Adding", tone: "info" }, clearing: { word: "Finishing", tone: "info" },
+  done: { word: "Added", tone: "ok" }, failed: { word: "Failed", tone: "danger" }, cancelled: { word: "Stopped", tone: "neutral" },
+  needs_answer: { word: "Needs answer", tone: "warn" },
+};
+
+const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", dismiss: "Dismiss" };
+
+/** Home's row for the engine's intake job: the folder, a badge for its state, its line with the
+ * counts as files land, and only the actions its state allows. Inputs: the job, a busy flag and
+ * the four action handlers. Output: the row. */
+export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss }: {
+  job: IntakeJob;
+  busy: boolean;
+  onStop: () => void;
+  onRetry: () => void;
+  onAnswer: () => void;
+  onDismiss: () => void;
+}) {
+  const badge = JOB_BADGES[job.state.state];
+  const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, dismiss: onDismiss };
+  return <div className="in-row">
+    <span className="in-row-main">
+      <span className="pj-row"><Icon name="folder" size={14} /><strong>{displayText(folderName(job.source))}</strong><StatusBadge word={badge.word} tone={badge.tone} /></span>
+      <span className="pj-small pj-secondary" role="status">{displayText(jobLine(job))}</span>
+    </span>
+    <span className="pj-row">{jobActions(job).map((action) => <Button key={action} size="small" variant={action === "answer" ? "primary" : "secondary"}
+      disabled={busy} onClick={handlers[action]}>{JOB_LABELS[action]}</Button>)}</span>
+  </div>;
+}
 
 /** Home's projects folder section as a view of its reads: the chooser while no folder is set, then
  * the found, setting up and missing folders with one action each. Inputs: the two reads, an

@@ -106,7 +106,7 @@ test("the sidebar lists folders not set up at once, and the folder being added, 
     found("gamma", "ready", { project_id: "p3" }), found("delta", "found", { project_id: "p1" }), found("shop", "found")];
   assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: folders }, null, new Set(["p1"])).map((entry) => [entry.name, entry.note, entry.href]),
     [["alpha", "Not set up", HOME], ["shop", "Not set up", HOME], ["zeta", "Not set up", HOME]]);
-  const adding = intake.sidebarFolders({ kind: "ok", value: folders }, job(copying(4)), new Set());
+  const adding = intake.sidebarFolders({ kind: "ok", value: folders }, job(copying(4)), new Set(["p1"]));
   assert.deepEqual(adding.map((entry) => [entry.id, entry.name, entry.note]),
     [["intake:add-1", "shop", "Adding..."], [`found:${folders[1].path}`, "alpha", "Not set up"], [`found:${folders[0].path}`, "zeta", "Not set up"]]);
   assert.deepEqual(intake.sidebarFolders({ kind: "loading" }, job({ state: "done" }), new Set()), []);

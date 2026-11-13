@@ -6,7 +6,7 @@ import type {
   MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
-import type { IconName, Tone } from "../../ui";
+import { formatRoute, type IconName, type SidebarProject, type Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { draftOf, formatBytes, researchChoices, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
@@ -288,6 +288,25 @@ export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dism
 export function jobEndLine(before: IntakeJob | null, after: IntakeJob | null): string | null {
   if (before === null || after === null || before.id !== after.id) return null;
   return jobRunning(before) && !jobRunning(after) ? jobLine(after) : null;
+}
+
+/** The most folders not set up the sidebar lists; the rest stay on Home. */
+export const SIDEBAR_FOLDERS_MAX = 16;
+
+/** The sidebar rows for folders that are not projects yet, each opening Home: the folder the
+ * intake job is adding while it runs, then the folders found in the projects folder and not set
+ * up, by name, at most `SIDEBAR_FOLDERS_MAX`, none that is already a listed project. Inputs: the
+ * found read, the intake job and the listed project ids. Output: the rows. */
+export function sidebarFolders(found: Loaded<FoundProject[]>, job: IntakeJob | null, projects: ReadonlySet<string>): SidebarProject[] {
+  const href = formatRoute({ name: "home" });
+  const adding = job !== null && jobRunning(job) ? folderName(job.source) : null;
+  const rows: SidebarProject[] = adding === null || job === null ? [] : [{ id: `intake:${job.id}`, name: adding, note: "Adding...", href }];
+  const folders = found.kind === "ok" ? found.value : [];
+  const fresh = folders.filter((folder) => folder.state === "found" && folder.name !== adding && !(folder.project_id && projects.has(folder.project_id)))
+    .sort((left, right) => left.name.localeCompare(right.name)).slice(0, SIDEBAR_FOLDERS_MAX);
+  rows.push(...fresh.map((folder) => ({ id: `found:${folder.path}`, name: folder.name, note: "Not set up", href })));
+  if (rows.length > SIDEBAR_FOLDERS_MAX + 1) throw new Error(`sidebar folders ${rows.length} past ${SIDEBAR_FOLDERS_MAX + 1}`);
+  return rows;
 }
 
 const ANSWER_ISSUES: Record<string, AnywayIssue> = {
