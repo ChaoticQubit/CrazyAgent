@@ -373,7 +373,7 @@ fn in_project(home: Option<&Path>, path: &Path) -> bool {
 /// temp folder grant can replace; a file whose place is itself in a temp folder (a test HOME,
 /// an engine root, a mounted app) does not. Inputs: the file as written, its real path and
 /// the temp folders. Output: the answer.
-fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
+pub(crate) fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
     let inside = |path: &Path| temps.iter().any(|temp| path.starts_with(temp));
     !inside(written) && inside(real)
 }
@@ -381,7 +381,7 @@ fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
 /// The temp folders: the shared ones and this user's own, as given and with its links
 /// resolved, so a path matches however it is written; an owner temp folder of `/` is
 /// dropped. Output: the absolute folders.
-fn temp_roots() -> Vec<PathBuf> {
+pub(crate) fn temp_roots() -> Vec<PathBuf> {
     let owner = std::env::temp_dir();
     let real = owner.canonicalize().ok();
     let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();

@@ -413,6 +413,17 @@ pub fn harness_candidates(
 /// Output: the entry's real file; when an entry in a PATH folder is gone, the first PATH
 /// match for its name; else NotFound, which a launch reports as not installed.
 pub fn launch_executable(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
+    launch_executable_in(entry, path, &crate::tools::temp_roots())
+}
+
+/// Resolves a harness entry as [`launch_executable`] does with the temp folders given, so a
+/// row can name a folder outside every temp folder while each folder it makes lies in the
+/// real one. Inputs: the entry, the PATH value and the temp folders. Output: the real file.
+fn launch_executable_in(
+    entry: &Path,
+    path: Option<&OsStr>,
+    _temps: &[PathBuf],
+) -> std::io::Result<PathBuf> {
     assert!(entry.is_absolute(), "harness entry {}", entry.display());
     let on_path = || {
         let folder = entry.parent()?;
@@ -960,6 +971,101 @@ mod tests {
             assert_eq!(codex.is_some(), found, "{folder}");
             std::fs::remove_file(&entry).unwrap();
         }
+    }
+
+    /// V241-HARNESS-TEMP door 2 (DEC-157): the PATH walk harness_entry adds after the engine's
+    /// search never takes a match in a temp folder, nor one in a kept folder whose real file
+    /// lies in one; an explicit search still takes it.
+    #[test]
+    fn harness_entry_on_the_engine_search_never_takes_a_temp_path_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let temps = vec![root.join("tmp")];
+        let in_temp = root.join("tmp/bin");
+        let kept = root.join("kept/bin");
+        program(&in_temp.join("claude"), 0o755);
+        program(&root.join("tmp/real/codex"), 0o755);
+        std::fs::create_dir_all(&kept).unwrap();
+        std::os::unix::fs::symlink(root.join("tmp/real/codex"), kept.join("codex")).unwrap();
+        let path = std::env::join_paths([in_temp.clone(), kept.clone()]).unwrap();
+        let engine = crate::harnesses::Search::engine_in(None, &[], None, &temps);
+        assert_eq!(harness_entry("claude-code", &engine, Some(&path)), None);
+        assert_eq!(harness_entry("codex", &engine, Some(&path)), None);
+        assert_eq!(
+            harness_entry("claude-code", &on_path(&path), Some(&path)),
+            Some(in_temp.join("claude"))
+        );
+    }
+
+    /// V241-HARNESS-TEMP door 2 (DEC-157): every candidate a pin checks on the engine's
+    /// search leaves out a PATH match in a temp folder and one leading into a temp folder;
+    /// an explicit search still lists them.
+    #[test]
+    fn harness_candidates_on_the_engine_search_never_list_a_temp_path_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let temps = vec![root.join("tmp")];
+        let in_temp = root.join("tmp/bin");
+        let kept = root.join("kept/bin");
+        program(&in_temp.join("claude"), 0o755);
+        program(&root.join("tmp/real/codex"), 0o755);
+        std::fs::create_dir_all(&kept).unwrap();
+        std::os::unix::fs::symlink(root.join("tmp/real/codex"), kept.join("codex")).unwrap();
+        let path = std::env::join_paths([in_temp.clone(), kept.clone()]).unwrap();
+        let engine = crate::harnesses::Search::engine_in(None, &[], None, &temps);
+        assert_eq!(
+            harness_candidates("claude-code", &engine, Some(&path)),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(
+            harness_candidates("codex", &engine, Some(&path)),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(
+            harness_candidates("claude-code", &on_path(&path), Some(&path)),
+            vec![in_temp.join("claude")]
+        );
+        assert_eq!(
+            harness_candidates("codex", &on_path(&path), Some(&path)),
+            vec![kept.join("codex")]
+        );
+    }
+
+    /// V241-HARNESS-TEMP door 3 (DEC-157): when a pinned entry outside temp is gone, the launch
+    /// fallback skips a PATH match in a temp folder and takes a later one outside temp, or
+    /// none; an entry already in a temp folder keeps its fallback there.
+    #[test]
+    fn a_launch_fallback_never_moves_from_outside_temp_to_a_temp_path_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let temps = vec![root.join("tmp")];
+        let kept = root.join("kept/bin");
+        std::fs::create_dir_all(&kept).unwrap();
+        let entry = kept.join("codex");
+        let in_temp = root.join("tmp/bin/codex");
+        program(&in_temp, 0o755);
+        let path = std::env::join_paths([kept.clone(), root.join("tmp/bin")]).unwrap();
+        assert_eq!(
+            launch_executable_in(&entry, Some(&path), &temps)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let later = root.join("later/bin/codex");
+        program(&later, 0o755);
+        let path =
+            std::env::join_paths([kept, root.join("tmp/bin"), root.join("later/bin")]).unwrap();
+        assert_eq!(
+            launch_executable_in(&entry, Some(&path), &temps).unwrap(),
+            later
+        );
+        let old = root.join("tmp/old");
+        std::fs::create_dir_all(&old).unwrap();
+        let path = std::env::join_paths([old.clone(), root.join("tmp/bin")]).unwrap();
+        assert_eq!(
+            launch_executable_in(&old.join("codex"), Some(&path), &temps).unwrap(),
+            in_temp
+        );
     }
 
     #[cfg(target_os = "macos")]

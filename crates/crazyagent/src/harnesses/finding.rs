@@ -21,6 +21,10 @@ pub const PATH_UNREADABLE: &str = "harness_path_unreadable";
 pub const LOOKED_MAX: usize = 48;
 pub const LOOKED_BYTES_MAX: usize = 256;
 const SHIM_SKIPPED: &str = " (shim, skipped)";
+/// The mark on a folder the engine's search passed over for a temp folder, in the words the
+/// tool resolver uses for the same refusal.
+pub const TEMP_SKIPPED: &str =
+    " (skipped: in a temp folder or links to one, which agents or other users can change)";
 #[cfg(target_os = "macos")]
 const AGENT_TMP: &str = "/private/tmp/ca-";
 #[cfg(not(target_os = "macos"))]

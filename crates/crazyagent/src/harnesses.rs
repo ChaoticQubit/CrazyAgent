@@ -198,6 +198,19 @@ impl Search {
     /// (see [`home_places`]). Inputs: the PATH value, the system folders and HOME.
     /// Output: the bounded search.
     pub fn engine(path: Option<&OsStr>, system: &[PathBuf], home: Option<PathBuf>) -> Self {
+        Self::engine_in(path, system, home, &crate::tools::temp_roots())
+    }
+
+    /// Builds the engine search as [`Search::engine`] does with the temp folders given, so a
+    /// row can name a folder outside every temp folder while each folder it makes lies in the
+    /// real one. Inputs: the PATH value, the system folders, HOME and the temp folders.
+    /// Output: the bounded search.
+    pub(crate) fn engine_in(
+        path: Option<&OsStr>,
+        system: &[PathBuf],
+        home: Option<PathBuf>,
+        _temps: &[PathBuf],
+    ) -> Self {
         let mut directories: Vec<PathBuf> = path
             .map(|path| std::env::split_paths(path).collect())
             .unwrap_or_default();
