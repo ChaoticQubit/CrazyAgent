@@ -8,7 +8,7 @@ use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 const SF_DATALESS: u32 = 0x4000_0000;
@@ -17,10 +17,9 @@ pub const BATCH_PATHS_MAX: usize = 128;
 pub const STALL_MAX: Duration = Duration::from_secs(10 * 60);
 const STALL_FLOOR_BYTES_PER_SEC: u64 = 1024 * 1024;
 pub const DOWNLOAD_TIME_MAX: Duration = Duration::from_secs(4 * 60 * 60);
-const POLL_EVERY: Duration = Duration::from_secs(2);
+const POLL_EVERY: Duration = Duration::from_secs(1);
 const CANCEL_EVERY: Duration = Duration::from_millis(100);
 const BRCTL_TIME_MAX: Duration = Duration::from_secs(60);
-const PASSES_MAX: u64 = DOWNLOAD_TIME_MAX.as_secs() / POLL_EVERY.as_secs() + 1;
 const NOT_DOWNLOADED: &str = "home_icloud_not_downloaded";
 
 const _: () = assert!(BATCH_PATHS_MAX * 4096 < 1024 * 1024);
@@ -207,14 +206,14 @@ pub fn placeholders(root: &Path) -> Result<Placeholders, EngineError> {
 }
 
 /// Downloads every placeholder in a folder: asks macOS once per placeholder through
-/// `brctl download`, in batches, then lists the folder again every `POLL_EVERY` until no
-/// placeholder is left, recording progress as it goes.
+/// `brctl download`, in batches, from a second thread, while this one lists the folder every
+/// `POLL_EVERY` until no placeholder is left and records progress as files land.
 /// Inputs: the owner's folder text and the claimed download. Output: how many placeholders
 /// were downloaded, `home_icloud_not_downloaded` when cancelled, when no file arrives for
 /// `STALL_MAX` plus the largest file's time at 1 MiB/s, after `DOWNLOAD_TIME_MAX` or when
-/// brctl fails, `home_permission_denied` when macOS keeps the folder from CrazyAgent, or the
-/// folder check's code. The folder's files are never moved or changed; downloads macOS
-/// already started may still finish after a stop.
+/// brctl fails, `home_copy_too_large` past the copy bounds, `home_permission_denied` when
+/// macOS keeps the folder from CrazyAgent, or the folder check's code. The folder's files are
+/// never moved or changed; downloads macOS already started may still finish after a stop.
 pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
     path_text(path, "icloud_path_invalid")?;
     let root = real_folder(
@@ -237,8 +236,11 @@ type Ask = dyn Fn(&[PathBuf], &dyn Fn() -> bool) -> Result<(), EngineError> + Sy
 type List = dyn Fn(&Path) -> Result<Placeholders, EngineError> + Sync;
 
 /// The download loop behind [`download`], with its ask, its listing and its poll given so a
-/// test can stand in for iCloud. Inputs: the real folder, the download, the ask, the listing
-/// and the time between listings. Output: as [`download`].
+/// test can stand in for iCloud. A second thread asks for the batches in order while this one
+/// lists the folder every `poll` and records progress, because from the engine each ask takes
+/// seconds and files land while later batches still wait to be asked. Inputs: the real
+/// folder, the download, the ask, the listing and the time between listings. Output: as
+/// [`download`]; the asking thread has ended when it returns.
 fn run(
     root: &Path,
     download: &Download,
@@ -248,12 +250,44 @@ fn run(
 ) -> Result<u64, EngineError> {
     assert!(root.is_absolute());
     assert!(poll > Duration::ZERO && poll <= POLL_EVERY);
+    let ended = AtomicBool::new(false);
+    let failed: Mutex<Option<EngineError>> = Mutex::new(None);
+    let stop = || ended.load(Ordering::SeqCst) || download.cancelled();
+    let (batches, queue) = mpsc::channel::<Vec<PathBuf>>();
+    let outcome = std::thread::scope(|scope| {
+        let asking = {
+            let (stop, failed) = (&stop, &failed);
+            move || send(queue, ask, stop, failed)
+        };
+        scope.spawn(asking);
+        let outcome = count(root, download, list, poll, &batches, &failed);
+        ended.store(true, Ordering::SeqCst);
+        drop(batches);
+        outcome
+    });
+    assert!(ended.load(Ordering::SeqCst));
+    outcome
+}
+
+/// Lists the folder every `poll`, records how many placeholders it has seen and how many of
+/// them are on this Mac now, and queues each placeholder for the asking thread once.
+/// Inputs: the real folder, the download, the listing, the poll, the queue and the asking
+/// thread's failure slot. Output: as [`download`], the asking thread's failure included.
+fn count(
+    root: &Path,
+    download: &Download,
+    list: &List,
+    poll: Duration,
+    batches: &mpsc::Sender<Vec<PathBuf>>,
+    failed: &Mutex<Option<EngineError>>,
+) -> Result<u64, EngineError> {
     let started = Instant::now();
     let mut watch = Watch::new(started, started + DOWNLOAD_TIME_MAX);
     let mut asked: HashSet<u64> = HashSet::new();
     let hasher = BuildHasherDefault::<DefaultHasher>::default();
-    let stop = || download.cancelled();
-    for _ in 0..PASSES_MAX {
+    let passes_max = DOWNLOAD_TIME_MAX.as_millis() / poll.as_millis().max(1) + 1;
+    assert!(passes_max > 1);
+    for _ in 0..passes_max {
         let left = list(root)?;
         let fresh: Vec<PathBuf> = left
             .paths
@@ -262,6 +296,9 @@ fn run(
             .cloned()
             .collect();
         let total = asked.len() as u64;
+        if total > COPY_BOUNDS.entries {
+            return Err(refused("home_copy_too_large"));
+        }
         let done = total.saturating_sub(left.paths.len() as u64);
         download.record(total, done);
         if left.paths.is_empty() {
@@ -270,8 +307,13 @@ fn run(
         if download.cancelled() {
             return Err(stopped("cancelled"));
         }
+        if let Some(error) = failed.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            return Err(error);
+        }
         for batch in fresh.chunks(BATCH_PATHS_MAX) {
-            ask(batch, &stop)?;
+            if batches.send(batch.to_vec()).is_err() {
+                break;
+            }
         }
         match watch.observe(done, left.largest_bytes, Instant::now()) {
             Verdict::Wait => pause(download, poll)?,
@@ -280,6 +322,33 @@ fn run(
         }
     }
     Err(stopped("timed_out"))
+}
+
+/// The asking thread: asks for each queued batch in order until the queue closes or the stop
+/// check holds, and keeps its first failure for the counting loop, then asks nothing more.
+/// Inputs: the queue, the ask, the stop check and the failure slot.
+fn send(
+    queue: mpsc::Receiver<Vec<PathBuf>>,
+    ask: &Ask,
+    stop: &(dyn Fn() -> bool + Sync),
+    failed: &Mutex<Option<EngineError>>,
+) {
+    while let Ok(batch) = queue.recv() {
+        assert!(!batch.is_empty());
+        assert!(batch.len() <= BATCH_PATHS_MAX);
+        if stop() {
+            return;
+        }
+        if let Err(error) = ask(&batch, stop) {
+            let mut slot = failed.lock().unwrap_or_else(PoisonError::into_inner);
+            assert!(
+                slot.is_none(),
+                "the asking thread stops at its first failure"
+            );
+            *slot = Some(error);
+            return;
+        }
+    }
 }
 
 /// Builds the `brctl download` command for one batch: the absolute program, the paths as
@@ -328,8 +397,10 @@ fn request(batch: &[PathBuf], stop: &dyn Fn() -> bool) -> Result<(), EngineError
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let cause = if stop() { "stopped" } else { "brctl_wait" };
-                return Err(stopped(cause));
+                if stop() {
+                    return Err(refused(NOT_DOWNLOADED));
+                }
+                return Err(stopped("brctl_wait"));
             }
         }
     }
