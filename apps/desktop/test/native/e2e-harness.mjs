@@ -242,7 +242,7 @@ export const INTERNALS = `(() => {
  * opening a fold by its label, and opening the Agents toolbar's questions drawer. Input: the
  * page's evaluate and send. Output: the helpers. */
 export function owner({ evaluate, send }, evidence) {
-  const seen = () => evaluate("document.body.innerText");
+  const seen = () => evaluate("document.body?.innerText ?? \"\"");
   let shots = 0;
   const capture = async (label) => {
     shots += 1;
