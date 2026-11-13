@@ -18,6 +18,7 @@ const ALERT_MS = 60000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const QUESTION = "Should the menu list prices in dollars or in euros?";
+const TAB_CARD = ".qs-list section.qs-card";
 const ANSWER = "Dollars, with no cents.";
 
 /** Runs git in a folder with no system or user config. Inputs: the folder and git's
@@ -166,7 +167,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.click("Open", "div.toast[role=status] button");
         await me.waitFor("the question on the Questions tab Open opened", (text) => text.includes(QUESTION) && text.includes("Your answer"));
         assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/questions`), "Open goes to the project's Questions tab, where a linked team question waits (S4-R1)");
-        const cards = await page.evaluate(`[...document.querySelectorAll("section.qs-card")].map((card) => ({ name: card.getAttribute("aria-label"), text: card.innerText }))`);
+        const cards = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(TAB_CARD)})].map((card) => ({ name: card.getAttribute("aria-label"), text: card.innerText }))`);
         assert.equal(cards.length, 1, `one question card: ${JSON.stringify(cards)}`);
         assert.equal(cards[0].name, `Question from Agent ${agent}`, "the card names the agent that asked");
         for (const part of [`Agent ${agent}`, "Waiting for you", QUESTION, "Your answer", "Answer", "Dismiss"]) {
@@ -174,8 +175,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         }
         await me.capture("questions-inbox");
 
-        await me.type("section.qs-card textarea", ANSWER);
-        await me.click("Answer", "section.qs-card button");
+        await me.type(`${TAB_CARD} textarea`, ANSWER);
+        await me.click("Answer", `${TAB_CARD} button`);
         await me.waitFor("the answered question", (text) => text.includes(`Answer: ${ANSWER}`) && !text.includes("Your answer"));
         await me.capture("questions-answered");
         const sent = log.trail.filter((call) => call.cmd === "desktop_answer_question");
