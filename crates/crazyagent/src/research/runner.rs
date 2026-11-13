@@ -76,6 +76,8 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
+/// How long [`unreached_provider`] waits for a loopback model provider to take a connection.
+const PROVIDER_REACH_TIME: Duration = Duration::from_secs(2);
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 /// The `RunError::Invalid` text of a run whose agent state folder already exists,
@@ -2084,8 +2086,37 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
 /// caller can fail at once with a plain line in place of a harness retrying it for minutes.
 /// Managed accounts and remote endpoints are not checked. Input: the account. Output: the
 /// owner's line naming the provider's host and port when nothing listens there, else none.
-pub(crate) fn unreached_provider(_account: &ResearchAccount) -> Option<String> {
-    None
+pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
+    let (ResearchAccount::Endpoint { base_url, .. }
+    | ResearchAccount::AnthropicEndpoint { base_url, .. }) = account
+    else {
+        return None;
+    };
+    let Ok(SandboxRemote::Loopback(port)) = model_remote(account) else {
+        return None;
+    };
+    let url = endpoint_url(base_url).ok()?;
+    let addresses: Vec<std::net::SocketAddr> = match url.host()? {
+        url::Host::Ipv4(address) => vec![(address, port).into()],
+        url::Host::Ipv6(address) => vec![(address, port).into()],
+        url::Host::Domain(_) => vec![
+            (std::net::Ipv4Addr::LOCALHOST, port).into(),
+            (std::net::Ipv6Addr::LOCALHOST, port).into(),
+        ],
+    };
+    assert!(
+        !addresses.is_empty() && addresses.iter().all(|address| address.ip().is_loopback()),
+        "a loopback endpoint is checked on loopback addresses only"
+    );
+    let reached = addresses.iter().any(|address| {
+        crate::spawn_gate::connect_tcp_std_timeout(address, PROVIDER_REACH_TIME).is_ok()
+    });
+    let host = url.host_str()?;
+    (!reached).then(|| {
+        format!(
+            "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then retry setup."
+        )
+    })
 }
 
 /// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
