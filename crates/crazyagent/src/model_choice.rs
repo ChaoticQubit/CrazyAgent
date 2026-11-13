@@ -197,8 +197,9 @@ pub struct Row {
 /// candidate id, the catalog's first, then the owner's, whether the shipped catalog was
 /// checked on the installed harness version, with the reason when it was not (an unchecked
 /// version keeps the catalog ids, DEC-150 G1), whether a test launch runs on the harness,
-/// so the owner can add and test an id (MUG2-L1), and the line shown while no list the
-/// harness reported itself is in use (DEC-150 addendum 11).
+/// so the owner can add and test an id (MUG2-L1), the line shown while no list the
+/// harness reported itself is in use (DEC-150 addendum 11), and whether the owner can ask
+/// the harness for its list again now: it has a list command and a registered executable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Models {
@@ -211,6 +212,8 @@ pub struct Models {
     pub live_note: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderChoice>,
+    #[serde(default)]
+    pub live_retry: bool,
 }
 
 /// What a set or reset did: saved as the next version, refused as stale with the current

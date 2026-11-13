@@ -1511,6 +1511,7 @@ fn composer_models(
         testable: true,
         live_note: None,
         providers: Vec::new(),
+        live_retry: false,
     }
 }
 
@@ -1534,6 +1535,7 @@ fn claude_read() -> ModelChoiceQuery {
         harness: "claude-code".into(),
         project: Some(project()),
         fresh: false,
+        retry: false,
     }
 }
 
@@ -1635,11 +1637,13 @@ fn the_composer_keeps_default_without_a_usable_read_and_a_new_harness_starts_fro
         harness: "codex".into(),
         project: Some(project()),
         fresh: false,
+        retry: false,
     };
     let other = ModelChoiceQuery::Read {
         harness: "claude-code".into(),
         project: Some(ProjectId::new("other-project").unwrap()),
         fresh: false,
+        retry: false,
     };
     for query in [&codex, &other] {
         view.take_models(&models_answer(
@@ -1795,7 +1799,7 @@ async fn engine_with_claude_models(
         (Slot::Allowed, serde_json::json!(["opus", "sonnet"])),
     ] {
         let version = controller
-            .model_choice_values("claude-code", None, false)
+            .model_choice_values("claude-code", None, false, false)
             .await
             .unwrap()
             .rows
@@ -1834,13 +1838,14 @@ async fn hand_over_on_engine(
         harness,
         project,
         fresh,
+        ..
     } = &query
     else {
         panic!("the composer only reads models: {query:?}");
     };
     assert!(!fresh, "the composer starts no harness for its live list");
     let result = controller
-        .model_choice_values(harness, project.clone(), *fresh)
+        .model_choice_values(harness, project.clone(), *fresh, false)
         .await
         .map(|models| ModelChoiceReply::Read {
             models,

@@ -136,6 +136,48 @@ fn aider_lists_the_dashed_lines_under_its_banner() {
 }
 
 #[test]
+fn a_pi_table_with_a_line_off_its_columns_reports_nothing() {
+    let footer = b"provider   model              context  max-out  thinking  images\n\
+anthropic  claude-sonnet-5-5  1M       64K      yes       yes\n\
+\n\
+Use pi --model provider/model to pick one.\n";
+    assert_eq!(
+        parse("pi", Shape::PiTable, footer),
+        None,
+        "a prose footer adds no Use/pi id and drops the read"
+    );
+    let shifted = b"provider   model              context  max-out  thinking  images\n\
+anthropic  claude-sonnet-5-5  1M       64K      yes       yes\n\
+openai  gpt-6-sol  400K  128K  yes  yes\n";
+    assert_eq!(parse("pi", Shape::PiTable, shifted), None);
+    let header_only = b"provider   model              context  max-out  thinking  images\n";
+    assert_eq!(parse("pi", Shape::PiTable, header_only), None);
+}
+
+#[test]
+fn an_aider_list_takes_only_dashed_lines_after_its_match_line() {
+    let trailing =
+        b"Aider v0.86.0\nModels which match \"\":\n- gpt-4o\nSee the docs for model settings.\n";
+    assert_eq!(
+        parse("aider", Shape::Dashed, trailing),
+        None,
+        "a prose line after the list drops the read"
+    );
+    assert_eq!(
+        parse("aider", Shape::Dashed, b"- gpt-4o\n- o3\n"),
+        None,
+        "no match line, no list"
+    );
+    let banner =
+        b"Aider v0.86.0\n- note: newer version available\nModels which match \"\":\n- gpt-4o\n\n";
+    assert_eq!(
+        parse("aider", Shape::Dashed, banner),
+        Some(ids(&["gpt-4o"])),
+        "banner lines before the match line are not read"
+    );
+}
+
+#[test]
 fn json_ids_come_from_strings_or_an_id_field() {
     let array = json!([{"id": "a-1"}, {"model_id": "b-2"}, "c-3", {"modelId": "d-4"}, {"slug": "e-5"}, {"name": "no id"}, 7]);
     assert_eq!(
@@ -446,4 +488,111 @@ fn the_section_says_live_list_not_reported_until_a_list_is_reported() {
         "a harness with no reader"
     );
     assert!(!claude.candidates.is_empty(), "the shipped list stays");
+}
+
+/// The stored time of one harness's last live list read. Inputs: the database and the
+/// harness id. Output: the time in ms.
+fn read_ms(db: &Connection, harness: &str) -> i64 {
+    db.query_row(
+        "SELECT read_ms FROM model_live WHERE harness = ?1",
+        [harness],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_list_read_that_came_back_unreported_waits_the_backoff_unless_the_owner_asks_again() {
+    let (_tmp, root, db) = engine();
+    let executable = root.join("codex");
+    let reads = std::cell::Cell::new(0_usize);
+    let read = |answer: Option<Vec<String>>| {
+        let (reads, executable) = (&reads, &executable);
+        move |path: &Path| {
+            assert_eq!(path, executable.as_path());
+            reads.set(reads.get() + 1);
+            answer
+        }
+    };
+    assert_eq!(BACKOFF, Duration::from_secs(10 * 60));
+    let backoff = i64::try_from(BACKOFF.as_millis()).unwrap();
+    let open = |retry: bool, now: i64, answer: Option<Vec<String>>| {
+        refresh(
+            &db,
+            "codex",
+            Some(executable.as_path()),
+            retry,
+            now,
+            read(answer),
+        )
+        .unwrap()
+    };
+    assert!(
+        open(false, crate::team::now_ms(), None),
+        "never read before"
+    );
+    assert_eq!(reads.get(), 1);
+    let failed = read_ms(&db, "codex");
+    for later in [failed, failed + 1, failed + backoff - 1] {
+        assert!(!open(false, later, None), "{later}");
+    }
+    assert_eq!(
+        reads.get(),
+        1,
+        "a plain open inside the backoff starts no harness"
+    );
+    assert_eq!(
+        values(&db).live_note.as_deref(),
+        Some("live list not reported by Codex"),
+        "the open shows the note at once"
+    );
+    assert!(open(true, failed + 1, Some(ids(&["live-a"]))));
+    assert_eq!(reads.get(), 2, "asking again reads at once");
+    assert_eq!(values(&db).live_note, None);
+    let reported = read_ms(&db, "codex");
+    assert!(open(false, reported + 1, None));
+    assert_eq!(reads.get(), 3, "a reported list is read on every open");
+    let failed = read_ms(&db, "codex");
+    assert!(open(false, failed + backoff, None));
+    assert_eq!(reads.get(), 4, "the backoff ends");
+    let failed = read_ms(&db, "codex");
+    assert!(open(false, failed - 1, None));
+    assert_eq!(reads.get(), 5, "a clock set back reads");
+}
+
+#[test]
+fn no_list_is_read_or_kept_without_an_executable_or_a_reader() {
+    let (_tmp, root, db) = engine();
+    let now = crate::team::now_ms();
+    let never = |_: &Path| -> Option<Vec<String>> { panic!("nothing may be read") };
+    assert!(!refresh(&db, "codex", None, true, now, never).unwrap());
+    assert!(
+        !refresh(
+            &db,
+            "claude-code",
+            Some(root.join("claude").as_path()),
+            true,
+            now,
+            never
+        )
+        .unwrap()
+    );
+    let reads = std::cell::Cell::new(0_usize);
+    let counted = |_: &Path| {
+        reads.set(reads.get() + 1);
+        None
+    };
+    assert!(
+        refresh(
+            &db,
+            "codex",
+            Some(root.join("codex").as_path()),
+            false,
+            now,
+            counted
+        )
+        .unwrap(),
+        "an open with no executable began no backoff"
+    );
+    assert_eq!(reads.get(), 1);
 }

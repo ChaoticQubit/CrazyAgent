@@ -92,7 +92,7 @@ fn the_window_passes_only_the_harness_project_slot_value_model_rule_and_version(
     let model = ["harness: String,", "model: String,"];
     assert_eq!(
         parameters("desktop_model_choice"),
-        [&window[..], &page[..], &["fresh: bool,"]].concat()
+        [&window[..], &page[..], &["fresh: bool,", "retry: bool,"]].concat()
     );
     assert_eq!(
         parameters("desktop_set_model_choice"),
@@ -167,7 +167,7 @@ fn slot(page: &ModelsPage, slot: Slot) -> &Row {
 
 async fn read(bridge: &NativeBridge, project: Option<&str>) -> Result<ModelsPage, Box<dyn Error>> {
     Ok(bridge
-        .model_choice(HARNESS.into(), project.map(str::to_owned), false)?
+        .model_choice(HARNESS.into(), project.map(str::to_owned), false, false)?
         .await?)
 }
 
@@ -353,7 +353,9 @@ async fn app_flow(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
     assert!(after.pick_version > rules.pick_version);
     assert!(after.fallback_version > rules.fallback_version);
 
-    let other = bridge.model_choice("opencode".into(), None, false)?.await?;
+    let other = bridge
+        .model_choice("opencode".into(), None, false, false)?
+        .await?;
     assert!(other.qualified_versions.is_empty() && other.sources.is_empty());
     for row in &other.models.rows {
         assert_eq!(
@@ -374,9 +376,11 @@ async fn app_flow(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
 
     let too_many: Vec<String> = (0..=ALLOWED_MAX).map(|n| format!("m{n}")).collect();
     let refused = [
-        bridge.model_choice("Claude".into(), None, false).err(),
         bridge
-            .model_choice(HARNESS.into(), Some(String::new()), false)
+            .model_choice("Claude".into(), None, false, false)
+            .err(),
+        bridge
+            .model_choice(HARNESS.into(), Some(String::new()), false, false)
             .err(),
         bridge
             .set_model_choice(HARNESS.into(), None, "boss".into(), json!("opus"), 0)

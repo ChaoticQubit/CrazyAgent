@@ -4538,11 +4538,12 @@ async fn desktop_model_choice(
     harness: String,
     project_id: Option<String>,
     fresh: bool,
+    retry: bool,
 ) -> Result<ModelsPage, BridgeError> {
     main_window(&webview)?;
     let call = read(&state)
         .await?
-        .model_choice(harness, project_id, fresh)?;
+        .model_choice(harness, project_id, fresh, retry)?;
     call.await
 }
 

@@ -63,6 +63,8 @@ enum Action {
         project: Option<ProjectId>,
         #[serde(default)]
         fresh: bool,
+        #[serde(default)]
+        retry: bool,
     },
     Set {
         harness: String,
@@ -189,19 +191,22 @@ fn scope(project: Option<ProjectId>) -> Scope {
 impl OwnerClient {
     /// Reads a harness's Models section app-wide or for one project (DEC-150): the master,
     /// agent and allowed slots with their versions, and every candidate id. `fresh` marks a
-    /// Models view opening, which reads the harness's own list once first. Inputs: the
-    /// harness, the project, none for the app, and `fresh`. Output: the section, or a
-    /// `MODEL_CHOICE_PROTOCOL_CODES` refusal.
+    /// Models view opening, which reads the harness's own list first unless its last read
+    /// came back unreported within `live::BACKOFF`; `retry` marks the owner asking again,
+    /// which reads it anyway. Inputs: the harness, the project, none for the app, `fresh`
+    /// and `retry`. Output: the section, or a `MODEL_CHOICE_PROTOCOL_CODES` refusal.
     pub async fn model_choice_values(
         &self,
         harness: &str,
         project: Option<ProjectId>,
         fresh: bool,
+        retry: bool,
     ) -> Result<Models, EngineError> {
         let action = Action::Values {
             harness: harness.into(),
             project,
             fresh,
+            retry,
         };
         match self.model_choice_exchange(action).await? {
             Reply::Values { models } => Ok(models),
@@ -469,6 +474,8 @@ async fn handle(
         engine: engine.clone(),
         authority: authority.clone(),
     };
+    let retry = retried(&action);
+    let registered = executable.is_some();
     let harnesses = match &action {
         Action::Test { .. } => {
             let (codex, claude) = authority
@@ -482,16 +489,31 @@ async fn handle(
     };
     tokio::task::spawn_blocking(move || {
         if let Some(harness) = live {
-            let read = executable
-                .as_deref()
-                .and_then(|path| crate::model_choice::live::read(harness, path, &root));
-            let _ = versioned::open(&root)
-                .and_then(|db| store::live_record(&db, harness, read.as_deref()));
+            let _ = versioned::open(&root).and_then(|db| {
+                crate::model_choice::live::refresh(
+                    &db,
+                    harness,
+                    executable.as_deref(),
+                    retry,
+                    crate::team::now_ms(),
+                    |path| crate::model_choice::live::read(harness, path, &root),
+                )
+            });
         }
-        let installed = executable
-            .as_deref()
-            .and_then(|path| installed::version_cached(path, installed::LIMIT));
-        match action {
+        let backoff = if retry {
+            std::time::Duration::ZERO
+        } else {
+            crate::model_choice::live::BACKOFF
+        };
+        let installed = executable.as_deref().and_then(|path| {
+            installed::version_for_models(
+                path,
+                installed::LIMIT,
+                backoff,
+                std::time::Instant::now(),
+            )
+        });
+        let reply = match action {
             Action::Test {
                 harness,
                 model,
@@ -538,7 +560,8 @@ async fn handle(
                 )
             }
             action => run(&root, action, installed.as_deref()),
-        }
+        };
+        reply.map(|reply| readable(reply, registered))
     })
     .await
     .map_err(|_| failure("model_choice_unavailable"))?
@@ -556,6 +579,31 @@ fn live_due(action: &Action) -> Option<&str> {
         } => Some(harness),
         _ => None,
     }
+}
+
+/// Says whether a Models open asked for the harness's list again past its backoff: the
+/// owner's Check again in the desktop or r in the TUI. Input: the action. Output: the flag.
+fn retried(action: &Action) -> bool {
+    matches!(action, Action::Values { retry: true, .. })
+}
+
+/// Says on a Models reply whether the owner can ask its harness for the list again now: a
+/// list command and a registered executable. A harness with a list command but no
+/// executable shows the not-reported line, since nothing can report its list. Inputs: the
+/// reply and whether an executable is registered. Output: the reply.
+fn readable(mut reply: Reply, executable: bool) -> Reply {
+    if let Reply::Values { models }
+    | Reply::Added { models, .. }
+    | Reply::Removed { models, .. }
+    | Reply::Tested { models, .. } = &mut reply
+    {
+        let reader = crate::model_choice::live::reader(&models.harness).is_some();
+        models.live_retry = reader && executable;
+        if reader && !executable {
+            models.live_note = Some(crate::model_choice::live::not_reported(&models.harness));
+        }
+    }
+    reply
 }
 
 /// Reads one model choice request from an owner frame body, at most `REQUEST_BYTES_MAX`

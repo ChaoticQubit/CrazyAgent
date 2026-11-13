@@ -211,20 +211,22 @@ impl NativeBridge {
 
     /// Reads one harness's Models section app-wide or for one project, run without the
     /// bridge lock (DEC-150); `fresh` marks the section opening, which reads the harness's
-    /// own list once first. Inputs: the harness id, the project id, None for the app, and
-    /// `fresh`. Output: the page, or the engine's refusal.
+    /// own list first, and `retry` Retry or Check again, which reads it past the engine's
+    /// backoff. Inputs: the harness id, the project id, None for the app, `fresh` and
+    /// `retry`. Output: the page, or the engine's refusal.
     pub fn model_choice(
         &self,
         harness: String,
         project_id: Option<String>,
         fresh: bool,
+        retry: bool,
     ) -> Result<Unlocked<ModelsPage>, BridgeError> {
         let harness = window_harness(harness)?;
         let project = window_project(project_id.clone())?;
         let client = self.model_choice_client()?;
         Ok(Box::pin(async move {
             let models = client
-                .model_choice_values(&harness, project, fresh)
+                .model_choice_values(&harness, project, fresh, retry)
                 .await
                 .map_err(model_choice_error)?;
             page_of(models, &harness, project_id)
@@ -586,6 +588,7 @@ mod tests {
             testable: true,
             live_note: None,
             providers: Vec::new(),
+            live_retry: false,
         };
         let all = || Slot::ALL.into_iter().map(row).collect::<Vec<_>>();
         let page = page_of(models(all(), "claude-code", 2), "claude-code", None).unwrap();

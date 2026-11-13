@@ -2260,14 +2260,15 @@ mod models {
     }
 
     /// Writes a Codex stand-in that prints its version and, asked for its bundled model
-    /// catalog, one listed and one hidden model, adding a line to `lists` each time.
-    /// Inputs: the path and the count file.
+    /// catalog, one listed and one hidden model, adding a line to `lists` each time; while
+    /// a `.fail` file sits beside `lists`, the list command fails instead. Inputs: the path
+    /// and the count file.
     fn codex_stand_in(path: &Path, lists: &Path) {
         std::fs::write(
             path,
             format!(
-                "#!/bin/sh\nif [ \"$1 $2 $3\" = 'debug models --bundled' ]; then\n  echo run >> '{}'\n  echo '{{\"models\": [{{\"slug\": \"gpt-e2e-live\", \"visibility\": \"list\"}}, {{\"slug\": \"gpt-e2e-hidden\", \"visibility\": \"hide\"}}]}}'\n  exit 0\nfi\necho 'codex-cli 0.167.1'\n",
-                lists.display()
+                "#!/bin/sh\nif [ \"$1 $2 $3\" = 'debug models --bundled' ]; then\n  echo run >> '{lists}'\n  if [ -e '{lists}.fail' ]; then exit 1; fi\n  echo '{{\"models\": [{{\"slug\": \"gpt-e2e-live\", \"visibility\": \"list\"}}, {{\"slug\": \"gpt-e2e-hidden\", \"visibility\": \"hide\"}}]}}'\n  exit 0\nfi\necho 'codex-cli 0.167.1'\n",
+                lists = lists.display()
             ),
         )
         .unwrap();
@@ -2394,7 +2395,7 @@ mod models {
             self.owner(move |controller| {
                 Box::pin(async move {
                     controller
-                        .model_choice_values(harness, project.then(project_id), false)
+                        .model_choice_values(harness, project.then(project_id), false, false)
                         .await
                         .unwrap()
                 })
@@ -3078,6 +3079,42 @@ mod models {
         tui.pty.keys(&["r"]);
         tui.pty
             .until("r reads the list again", |_| list_runs(&tui.lists) == 2);
+        tui.finish();
+    }
+
+    #[test]
+    fn a_codex_list_that_came_back_unreported_waits_its_backoff_and_r_reads_it_again_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m25-");
+        std::fs::write(tui.lists.with_extension("fail"), "").unwrap();
+        tui.app_page("Codex", "Codex models");
+        tui.says("live list not reported by Codex.");
+        assert_eq!(list_runs(&tui.lists), 1, "one read for the open");
+        let reopened = tui.owner(|controller| {
+            Box::pin(async move {
+                controller
+                    .model_choice_values("codex", None, true, false)
+                    .await
+                    .unwrap()
+            })
+        });
+        assert_eq!(
+            reopened.live_note.as_deref(),
+            Some("live list not reported by Codex")
+        );
+        assert!(
+            reopened.live_retry,
+            "Codex has a list command and an executable"
+        );
+        assert_eq!(
+            list_runs(&tui.lists),
+            1,
+            "a plain open inside the backoff starts no harness"
+        );
+        tui.pty.keys(&["r"]);
+        tui.pty
+            .until("r reads the list again past the backoff", |_| {
+                list_runs(&tui.lists) == 2
+            });
         tui.finish();
     }
 
