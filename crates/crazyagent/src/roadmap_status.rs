@@ -491,6 +491,7 @@ fn read_at(
     };
     let items = stored_items(&body.ok_or_else(|| unavailable(()))?)?;
     let note = |text: Option<String>| text.map(|text| cut(text, NOTE_BYTES_MAX));
+    let problem = note(problem);
     Ok(RoadmapStatus {
         items,
         checked_ms,
@@ -498,8 +499,8 @@ fn read_at(
         stale,
         refresh,
         source: note(source),
-        problem: note(problem),
-        waiting_for_account: false,
+        waiting_for_account: problem.as_deref().is_some_and(waits_for_account),
+        problem,
     })
 }
 
@@ -1040,6 +1041,13 @@ pub fn account_found(
         .map_err(unavailable)?;
     assert!(cleared <= 1);
     Ok(cleared == 1)
+}
+
+/// Tells whether a stored problem is the wait for an account that [`wait_for_account`]
+/// writes and [`account_found`] drops, so the views show it as a wait and any other problem
+/// as a failure (IW-L1). Input: the stored problem. Output: the answer.
+fn waits_for_account(stored: &str) -> bool {
+    stored == line(NO_ACCOUNT, NOTE_BYTES_MAX)
 }
 
 /// Whether a run still holds its claim: no longer once `tick` closed it, the owner switched

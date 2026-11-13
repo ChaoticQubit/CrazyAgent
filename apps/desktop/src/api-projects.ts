@@ -937,8 +937,8 @@ export interface RoadmapItemState {
 }
 
 /** A project's roadmap status: the items of the last check, when it ran, whether one runs now
- * or is due after a landing, the refresh setting, the roadmap file read and why the last check
- * failed, if it did. */
+ * or is due after a landing, the refresh setting, the roadmap file read, why the last check
+ * failed, if it did, and whether that line is the engine's wait for an account. */
 export interface RoadmapStatus {
   items: RoadmapItemState[];
   checked_ms: number | null;
@@ -947,6 +947,7 @@ export interface RoadmapStatus {
   refresh: RoadmapRefresh;
   source: string | null;
   problem: string | null;
+  waiting_for_account: boolean;
 }
 
 const ROADMAP_STATUSES: readonly string[] = ["pending", "in_progress", "done", "tested"];
@@ -968,7 +969,7 @@ export function isRoadmapStatus(value: unknown): value is RoadmapStatus {
   return listed && (status.checked_ms === null || typeof status.checked_ms === "number")
     && typeof status.running === "boolean" && typeof status.stale === "boolean"
     && typeof status.refresh === "string" && ROADMAP_REFRESHES.includes(status.refresh)
-    && text(status.source) && text(status.problem);
+    && text(status.source) && text(status.problem) && typeof status.waiting_for_account === "boolean";
 }
 
 /** Reads a project's roadmap status. Input: the project id. Output: the status, or
