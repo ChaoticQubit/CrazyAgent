@@ -1227,3 +1227,23 @@ fn a_file_an_untrusted_group_can_write_is_changeable_like_a_folder() {
         );
     }
 }
+
+/// 2.4.1 R2: on Linux the egid's group is trusted for a group-writable folder only when it is
+/// this user's private group, named as the user and listing no other member; a shared
+/// primary group such as openSUSE's `users`, or a group listing another user, is not.
+#[test]
+fn only_a_user_private_group_counts_as_the_user_own_group() {
+    let listed =
+        |names: &[&str]| -> Vec<String> { names.iter().map(|name| (*name).to_owned()).collect() };
+    assert!(private_group("ana", &listed(&[]), "ana"));
+    assert!(private_group("ana", &listed(&["ana"]), "ana"));
+    assert!(
+        !private_group("users", &listed(&[]), "ana"),
+        "a shared primary group"
+    );
+    assert!(
+        !private_group("ana", &listed(&["ana", "bo"]), "ana"),
+        "a group listing another user"
+    );
+    assert!(!private_group("", &listed(&[]), ""), "no names at all");
+}

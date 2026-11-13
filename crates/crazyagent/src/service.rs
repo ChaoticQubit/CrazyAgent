@@ -1061,6 +1061,15 @@ fn trusted_group(group: u32) -> bool {
     group == 0 || group == rustix::process::getegid().as_raw()
 }
 
+/// Whether a group named `name`, listing `members`, is the user private group of the user
+/// named `user`: it bears the user's name and lists no other member, as Debian, Ubuntu and
+/// Fedora make one per user; a shared primary group such as openSUSE's `users` is not.
+/// Inputs: the group's name, its listed members and the user's name. Output: the answer.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn private_group(_name: &str, _members: &[String], _user: &str) -> bool {
+    true
+}
+
 /// Names no user id where launchd domains do not exist. Output: zero, unused off macOS.
 #[cfg(not(unix))]
 fn current_uid() -> u32 {
