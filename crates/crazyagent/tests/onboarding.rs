@@ -1880,6 +1880,52 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
     bench.stop().await;
 }
 
+/// A mapping step whose loopback provider refuses connections stops at once with one plain
+/// line naming the provider and the way out: no try runs and no agent is made, so the owner
+/// never waits through three tries of a harness that retries a dead port for minutes.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mapping_step_whose_provider_refuses_connections_stops_at_once_with_the_reach_line() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let closed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "e2e-model".into(),
+        key: None,
+    };
+    let (runner, agents) = bench.runner();
+    let started = Instant::now();
+    let service = OnboardingService::start(
+        runner,
+        move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        || None,
+        OnboardingLimits {
+            graph_time: Duration::from_secs(60),
+            mapping_time: Duration::from_secs(30),
+            mapping_try_time: Duration::from_secs(30),
+        },
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(90)).await;
+    let took = started.elapsed();
+    stop_service(service).await;
+    assert_eq!(
+        view.mapping,
+        failed(&format!(
+            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then retry setup."
+        )),
+        "{view:?}"
+    );
+    assert_eq!(view.mapping_try, None);
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
 /// Makes the agent state folder `name` under `agents` with a file in it, as an
 /// earlier onboarding of a project with the same id left it.
 #[cfg(target_os = "macos")]
