@@ -42,7 +42,8 @@ function restingAgent(runtime, project) {
     const id = Number(store.prepare("INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,turns,parent) VALUES (?,'sub','codex',1,'idle',?,?,1,NULL)")
       .run(project, now, now).lastInsertRowid);
     assert.ok(Number.isSafeInteger(id) && id > 0, "the engine numbers the team agent");
-    store.prepare("INSERT INTO team_names(agent,project,persona,handle) VALUES (?,?,?,?)").run(id, project, PERSONA, HANDLE);
+    store.prepare("INSERT INTO team_names(agent,project,persona,handle) VALUES (?,?,?,?) ON CONFLICT(agent) DO UPDATE SET project=excluded.project, persona=excluded.persona, handle=excluded.handle")
+      .run(id, project, PERSONA, HANDLE);
     return id;
   } finally {
     store.close();

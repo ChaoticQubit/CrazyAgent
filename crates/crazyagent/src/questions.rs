@@ -1862,7 +1862,8 @@ fn shown(tx: &Transaction<'_>, question: &mut Question) -> Result<(), EngineErro
         .strip_prefix("agent:")
         .and_then(|id| id.parse::<i64>().ok());
     if let Some(agent) = agent {
-        question.asker_name = crate::team::names::kept_label(tx, &question.project, agent)?
+        question.asker_name = crate::team::names::kept_label(tx, &question.project, agent)
+            .map_err(unavailable)?
             .map(|name| bound_text(&name, ASKER_NAME_BYTES_MAX));
     }
     if question.status != QuestionStatus::Pending {
@@ -1876,7 +1877,8 @@ fn shown(tx: &Transaction<'_>, question: &mut Question) -> Result<(), EngineErro
         )
         .map_err(unavailable)?;
     if let Some(message) = message {
-        (question.urgent, question.paused) = crate::team::questions::marks(tx, message)?;
+        (question.urgent, question.paused) =
+            crate::team::questions::marks(tx, message).map_err(unavailable)?;
     }
     assert!(
         question

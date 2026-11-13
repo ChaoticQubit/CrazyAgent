@@ -389,7 +389,7 @@ test("Open on an urgent question's toast puts the keyboard on the first urgent q
     question({ id: 4, urgent: true }),
   ];
   assert.equal(view.focusTarget(waiting), 3, "the first urgent question waiting");
-  assert.equal(view.focusTarget(waiting.slice(0, 2)), 2, "none urgent: the first waiting");
+  assert.equal(view.focusTarget(waiting.slice(0, 2)), null, "a read from before the urgent question names none, so the tab waits for the next read");
   assert.equal(view.focusTarget(waiting.slice(0, 1)), null, "none waiting: nothing to focus");
   const body = { closest: () => null };
   const doc = { body };

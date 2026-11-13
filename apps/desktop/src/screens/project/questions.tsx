@@ -58,12 +58,11 @@ export function picksAfter(kind: QuestionKind, picks: readonly number[], index: 
 }
 
 /** The question the keyboard goes to when an urgent question's toast opens the tab: the
- * first urgent question waiting, else the first waiting, as the old drawer started on the
- * most urgent. Input: the shown questions, pending first. Output: its id, or null when none
- * waits. */
+ * first urgent question waiting, as the old drawer started on the most urgent. A list read
+ * before that question arrived names none, so the tab waits for the next read. Input: the
+ * shown questions, pending first. Output: its id, or null while none urgent waits. */
 export function focusTarget(questions: readonly OwnerQuestion[]): number | null {
-  const waiting = questions.filter((question) => question.status === "pending");
-  return (waiting.find((question) => question.urgent === true) ?? waiting[0])?.id ?? null;
+  return questions.find((question) => question.status === "pending" && question.urgent === true)?.id ?? null;
 }
 
 /** Whether a question read after the toast's Open may take the keyboard: only while the
@@ -234,8 +233,9 @@ export function dismissAllOf(questions: readonly OwnerQuestion[]): OwnerQuestion
 
 /** Questions tab: every question the project's agents and engine steps asked the owner,
  * pending first, with Answer and Dismiss, and Dismiss all while two or more wait. Opened at
- * the urgent section by a toast's Open, the keyboard goes once to the first urgent question
- * waiting, as soon as it is read, unless the owner put the keyboard somewhere (S4-R1).
+ * the urgent section by a toast's Open, the list is read again and the keyboard goes once to
+ * the first urgent question waiting, as soon as it is read, unless the owner put the
+ * keyboard somewhere (S4-R1).
  * Inputs: the project data and the route's section. Output: the tab; the list rereads every
  * few seconds while it is open. */
 export function QuestionsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -250,6 +250,7 @@ export function QuestionsTab({ data, section }: { data: ProjectData; section?: s
   useEffect(() => {
     if (section !== URGENT_SECTION) return;
     setWanted(true);
+    setRound((value) => value + 1);
     navigate({ name: "project", id: data.id, tab: "questions" }, true);
   }, [section, data.id]);
   useEffect(() => {
