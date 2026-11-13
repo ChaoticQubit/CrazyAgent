@@ -228,6 +228,7 @@ test("without a restart control the block keeps its words and has no menu", () =
 test("a click on the name opens the menu and never leaves the page", async () => {
   await onSidebar({}, async ({ shown, hover, click, key }) => {
     await hover(FOOT);
+    assert.equal((await shown()).menu, true, "hovering opened the menu");
     await key("Escape", 27);
     assert.equal((await shown()).menu, false, "Esc closed the hovered menu");
     await click(NAME);
