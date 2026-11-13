@@ -137,3 +137,111 @@ fn a_move_removes_every_hard_link_of_a_file_it_checked() {
         );
     }
 }
+
+/// A source of `folders` folders holding `files` small files each, under `root/source`.
+fn small_tree(root: &Path, folders: usize, files: usize) -> PathBuf {
+    let source = root.join("source");
+    for folder in 0..folders {
+        let path = source.join(format!("d{folder}"));
+        fs::create_dir_all(&path).unwrap();
+        for file in 0..files {
+            fs::write(
+                path.join(format!("f{file}.txt")),
+                format!("{folder} {file}\n"),
+            )
+            .unwrap();
+        }
+    }
+    source
+}
+
+#[test]
+fn a_copy_stopped_by_its_tally_ends_cancelled_with_no_staging_and_the_source_whole() {
+    let root = tempfile::tempdir().unwrap();
+    let source = small_tree(root.path(), 3, 5);
+    let home = root.path().join("home");
+    fs::create_dir(&home).unwrap();
+    for mode in [AddMode::Copy, AddMode::Move] {
+        let tally = Tally::default();
+        tally.stop();
+        let plan = AddPlan::new(source.clone(), home.join("source"), mode, COPY_BOUNDS);
+        let placed = match mode {
+            AddMode::Copy => plan.run_tallied(&tally),
+            AddMode::Move => plan.place_by_copy(&tally).map(drop),
+        };
+        assert_eq!(placed.unwrap_err().0, "home_add_cancelled", "{mode:?}");
+        assert_eq!(
+            fs::read_dir(&home).unwrap().count(),
+            0,
+            "no copy, no staging"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("d2/f4.txt")).unwrap(),
+            "2 4\n"
+        );
+        assert!(!tally.clearing());
+    }
+}
+
+#[test]
+fn a_copy_counts_each_entry_it_copies_and_each_it_checks() {
+    let root = tempfile::tempdir().unwrap();
+    let source = small_tree(root.path(), 3, 5);
+    let home = root.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let tally = Tally::default();
+    let plan = AddPlan::new(
+        source.clone(),
+        home.join("source"),
+        AddMode::Move,
+        COPY_BOUNDS,
+    );
+    let Placed::Copied(old) = plan.place_by_copy(&tally).unwrap() else {
+        panic!("a copy leaves the source to clear");
+    };
+    assert_eq!(tally.copied(), 18, "3 folders and 15 files");
+    assert_eq!(tally.checked(), 19, "the folder itself and each entry");
+    assert!(!tally.clearing());
+    old.clear().unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join("source/d0/f0.txt")).unwrap(),
+        "0 0\n"
+    );
+}
+
+#[test]
+fn a_stop_asked_while_a_move_copies_ends_it_between_entries_and_keeps_the_source() {
+    let root = tempfile::tempdir().unwrap();
+    let source = small_tree(root.path(), 20, 100);
+    let home = root.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let tally = Tally::default();
+    let plan = AddPlan::new(
+        source.clone(),
+        home.join("source"),
+        AddMode::Move,
+        COPY_BOUNDS,
+    );
+    let placed = std::thread::scope(|scope| {
+        let copying = scope.spawn(|| plan.place_by_copy(&tally).map(drop));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while tally.copied() < 10 && Instant::now() < deadline && !copying.is_finished() {
+            std::hint::spin_loop();
+        }
+        tally.stop();
+        copying.join().unwrap()
+    });
+    assert_eq!(placed.unwrap_err().0, "home_add_cancelled");
+    assert!(tally.copied() >= 10, "the stop came after the copy began");
+    assert!(tally.checked() < 2021, "the check never finished");
+    assert_eq!(
+        fs::read_dir(&home).unwrap().count(),
+        0,
+        "no copy, no staging"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("d19/f99.txt")).unwrap(),
+        "19 99\n"
+    );
+    assert!(!tally.clearing());
+}
