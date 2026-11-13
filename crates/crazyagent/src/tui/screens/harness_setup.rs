@@ -165,6 +165,8 @@ pub(super) fn node_offer(needed: bool, node: Option<&DependencyState>, busy: boo
         },
         Some(
             DependencyState::Found { .. }
+            | DependencyState::Bundled { .. }
+            | DependencyState::System { .. }
             | DependencyState::Installed { .. }
             | DependencyState::Unsupported,
         ) => NodeOffer::None,
