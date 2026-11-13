@@ -1428,7 +1428,7 @@ impl TeamRuntime {
         };
         self.connection
             .execute(
-                "UPDATE team_agents SET status='starting', task=NULL, error=NULL, stopped_ms=NULL, heartbeat_ms=?2 WHERE id=?1",
+                "UPDATE team_agents SET status='starting', task=NULL, error=NULL, stopped_ms=NULL, heartbeat_ms=?2, process_group=NULL WHERE id=?1",
                 params![id, now_ms()],
             )
             .map_err(error)?;
