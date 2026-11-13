@@ -805,6 +805,8 @@ pub enum SetupAction {
     Set { id: String, on: bool, version: u64 },
     Remove { id: String, version: u64 },
     Install { name: Dependency },
+    FixPermissions { name: Dependency, tree: String },
+    SetRefusedTool { choice: RefusedTool },
 }
 
 const PACK_ID_BYTES_MAX: usize = 64;
@@ -832,7 +834,9 @@ impl SetupAction {
                         .all(|(index, id)| !pack[..index].contains(id))
             }
             Self::Set { id, .. } | Self::Remove { id, .. } => valid_pack_id(id),
-            Self::Install { .. } => true,
+            Self::Install { .. } | Self::FixPermissions { .. } | Self::SetRefusedTool { .. } => {
+                true
+            }
         };
         if !valid {
             return Err(InstallError("pack_unknown"));

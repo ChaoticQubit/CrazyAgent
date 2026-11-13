@@ -593,6 +593,9 @@ pub(crate) fn apply_owner(
             }
             Ok(Outcome::Applied)
         }
+        SetupAction::FixPermissions { .. } | SetupAction::SetRefusedTool { .. } => {
+            Ok(Outcome::Applied)
+        }
         SetupAction::Remove { id, version } => {
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));
