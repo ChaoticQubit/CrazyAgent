@@ -417,8 +417,9 @@ fn a_file_in_an_agent_short_temp_folder_is_refused_even_through_an_owner_link() 
 }
 
 /// R-L1 and F2: an interpreter named by path goes through the same checks as a tool found by
-/// name: one inside a project's `.crazyagent` folder, or inside a project, is refused as a
-/// missing interpreter, and a pinned entry inside a project is refused too.
+/// name: one inside a project's `.crazyagent` folder, or inside a project, is reported as
+/// refused with its own file and why, never as a missing interpreter, and a pinned entry
+/// inside a project is refused too.
 #[test]
 fn an_interpreter_or_entry_inside_a_project_is_refused() {
     let (_folder, home) = scratch();
@@ -429,17 +430,19 @@ fn an_interpreter_or_entry_inside_a_project_is_refused() {
         &format!("#!{}\n", planted.display()),
     );
     let missing = resolve("agentic", &home_only(&home)).unwrap_err();
-    assert_eq!(missing.reason, Reason::NeedsInterpreter);
-    assert_eq!(missing.needs.as_deref(), Some("node"));
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused.map(|refused| (refused.file, refused.why)),
+        Some((planted, Refusal::AgentsCanWrite))
+    );
     let inside = program(&work.join("tools/node"), NODE);
     program(
         &home.join(".local/bin/inside"),
         &format!("#!/usr/bin/env {}\n", inside.display()),
     );
-    assert_eq!(
-        resolve("inside", &home_only(&home)).unwrap_err().reason,
-        Reason::NeedsInterpreter
-    );
+    let missing = resolve("inside", &home_only(&home)).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(missing.refused.map(|refused| refused.file), Some(inside));
     let pinned = program(&work.join("bin/codex"), NODE);
     assert!(resolve_entry(&pinned, &home_only(&home)).is_err());
 }
