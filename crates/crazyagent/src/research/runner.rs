@@ -6186,6 +6186,61 @@ mod tests {
         assert_eq!(again.text(), Some("1234"));
     }
 
+    /// A tool result past the line bound, such as a large PDF the agent read, which Claude
+    /// Code prints twice in one line, is still the main thread's tool result or a sub-agent's
+    /// line, so the answer the run ends with after it is kept whole (rv-code F1 r1).
+    #[test]
+    fn a_finished_claude_report_survives_a_tool_result_line_past_the_line_bound() {
+        let long = |parent: &str| {
+            let data = "A".repeat(CLAUDE_LINE_BYTES_MAX / 2);
+            format!(
+                concat!(
+                    "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{",
+                    "\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",",
+                    "\"content\":\"{data}\"}}]}},\"parent_tool_use_id\":{parent},",
+                    "\"tool_use_result\":{{\"file\":\"{data}\"}}}}\n",
+                ),
+                data = data,
+                parent = parent,
+            )
+        };
+        let read = |lines: &[&str]| {
+            let mut stream = ClaudeStream::new(1024);
+            for part in lines.concat().as_bytes().chunks(8192) {
+                stream.read(part);
+            }
+            stream.close();
+            stream
+        };
+        let numbers = Some("## Numbers\n\n1. one\n2. two\n3. three\n");
+        let main = long("null");
+        assert!(main.len() > CLAUDE_LINE_BYTES_MAX);
+        let after = read(&[
+            STREAM_START,
+            STREAM_NARRATION,
+            STREAM_TOOL,
+            &main,
+            STREAM_FIRST,
+            STREAM_CONTINUE,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]);
+        assert_eq!(after.answer(), numbers);
+        let helper = long("\"toolu_2\"");
+        assert!(helper.len() > CLAUDE_LINE_BYTES_MAX);
+        let during = read(&[
+            STREAM_START,
+            STREAM_TOOL,
+            STREAM_TOOL_RESULT,
+            STREAM_FIRST,
+            &helper,
+            STREAM_CONTINUE,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]);
+        assert_eq!(during.answer(), numbers);
+    }
+
     /// A Claude Code stream is read as its bytes arrive, lines split over reads and a last
     /// line with no break included; a line past the line bound leaves the run with no
     /// answer rather than a guess; a limit line Claude Code ends on is told from other errors.
