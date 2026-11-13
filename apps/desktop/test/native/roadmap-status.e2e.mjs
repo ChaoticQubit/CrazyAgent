@@ -139,6 +139,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       assert.ok(Date.now() < deadline, `onboarding still running: ${JSON.stringify(view)}`);
     }
     assert.ok(existsSync(join(runtime, "engine.db")), "the engine keeps its database in its root");
+    assert.equal((await value(bridge, "desktop_open_project", { id: project })).project_id, project, "the new project opens");
+    const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
+    assert.equal(pools.writable, true, "the test engine's settings are writable");
+    const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 4 });
+    assert.equal(assigned.outcome, "applied", `the project gets the pool its checks run on, as the app's onboarding does: ${JSON.stringify(assigned)}`);
     const first = await value(bridge, "desktop_roadmap_status", { id: project });
     assert.deepEqual([first.items, first.checked_ms, first.running, first.stale, first.refresh], [[], null, false, false, "after_landing"], "a new project has no status and follows landings");
 
