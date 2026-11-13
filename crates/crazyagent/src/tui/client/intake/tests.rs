@@ -189,3 +189,71 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
 
     service.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
+    let root = private_root("ca-tjob-");
+    let work = private_root("ca-tjob-work-");
+    let home = std::fs::canonicalize(work.path()).unwrap().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let outside = home.parent().unwrap().join("site");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("index.html"), "<p>hi</p>").unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let mut native = NativeOwner::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    );
+    let (_, access) = native.attach().await;
+    assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+    let set = IntakeQuery::SetHome {
+        path: home.to_str().unwrap().to_owned(),
+        generation: 1,
+    };
+    let event = native.intake(IntakeJob::Query(set), |_| {}).await;
+    assert_eq!(event.result, Ok(IntakeView::Changed(OwnerResult::Applied)));
+
+    let source = outside.to_str().unwrap().to_owned();
+    let start = IntakeQuery::JobStart {
+        source: source.clone(),
+        mode: AddMode::Copy,
+        overrides: Vec::new(),
+    };
+    let event = native.intake(IntakeJob::Query(start.clone()), |_| {}).await;
+    assert_eq!(event.query, start);
+    let Ok(IntakeView::Job(Some(started))) = event.result else {
+        panic!("a started job required: {:?}", event.result);
+    };
+    assert_eq!(started.source, source);
+    let mut done = None;
+    for _ in 0..200 {
+        let event = native
+            .intake(IntakeJob::Query(IntakeQuery::JobStatus), |_| {})
+            .await;
+        let Ok(IntakeView::Job(Some(job))) = event.result else {
+            panic!("the job's status required: {:?}", event.result);
+        };
+        if job.state == crate::projects_home::job::JobState::Done {
+            done = Some(job);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let done = done.expect("the copy job ends done");
+    assert_eq!(done.id, started.id);
+    assert!(home.join("site").join("index.html").exists(), "the copy landed");
+    assert!(outside.join("index.html").exists(), "a copy leaves the source");
+    let dismiss = IntakeQuery::JobDismiss { id: done.id };
+    let event = native.intake(IntakeJob::Query(dismiss), |_| {}).await;
+    assert_eq!(event.result, Ok(IntakeView::JobDismissed(true)));
+    let event = native
+        .intake(IntakeJob::Query(IntakeQuery::JobStatus), |_| {})
+        .await;
+    assert_eq!(event.result, Ok(IntakeView::Job(None)));
+
+    service.shutdown().await.unwrap();
+}
