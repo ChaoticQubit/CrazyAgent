@@ -367,6 +367,14 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
         .filter(|id| matches!(*id, "codex" | "claude-code"))
 }
 
+/// The line a team start shows when no account of the project's pool can run its harness.
+/// Takes the harness as the plan names it and the launch adapter `launch_harness` gave it.
+/// Returns the plain line.
+pub(crate) fn no_account_line(harness: &str, launch: &str) -> String {
+    assert!(launch_harness(launch) == Some(launch));
+    format!("No account in this project's pool can run {harness}")
+}
+
 /// What the Coordination rows of a harness kind no sub-agent runs on say instead of a live
 /// control (DEC-141 PA-15), word for word in the TUI and the desktop (PALOW-L2), short enough
 /// for a TUI row at 80 columns.

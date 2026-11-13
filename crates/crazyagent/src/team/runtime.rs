@@ -3502,9 +3502,7 @@ impl TeamRuntime {
             return Err("Needs a pool".into());
         };
         if fitting.is_empty() {
-            return Err(format!(
-                "No account in this project's pool can run {harness}"
-            ));
+            return Err(super::no_account_line(harness, launch));
         }
         let mut refused = Vec::new();
         let accounts: Vec<TeamAccount> = fitting
