@@ -77,7 +77,7 @@ impl RunLeft {
 
 /// How a check ended without a status: with words for the owner, or too early to say, so it
 /// runs again later.
-enum Unchecked {
+pub(super) enum Unchecked {
     Failed(String),
     Later,
 }
@@ -116,7 +116,7 @@ pub(crate) fn check(
 /// once the run no longer holds its claim. Inputs: the runner, the engine connection, the
 /// project, the claim, its folder, the account and where to put what the run left. Output:
 /// the item states and the roadmap file they came from, or how the check ended without them.
-fn answer(
+pub(super) fn answer(
     runner: &ResearchRunner,
     db: &Connection,
     project: &ProjectId,

@@ -853,7 +853,8 @@ test("a proposal that changes nothing says so and offers no Accept; one too long
 test("every Edit with AI refusal reads as a plain sentence that says nothing changed or what to do", () => {
   const codes = ["instructions_cleanup_pool_needed", "instructions_cleanup_pool_not_asked", "instructions_cleanup_pool_unknown", "instructions_cleanup_project_pool_missing",
     "instructions_cleanup_no_account", "instructions_cleanup_paused", "instructions_cleanup_busy", "instructions_cleanup_empty", "instructions_cleanup_failed",
-    "instructions_cleanup_timed_out", "instructions_cleanup_no_proposal", "instructions_cleanup_too_large", "instructions_cleanup_off", "instructions_cleanup_unavailable"];
+    "instructions_cleanup_timed_out", "instructions_cleanup_no_proposal", "instructions_cleanup_too_large", "instructions_cleanup_off", "instructions_cleanup_unavailable",
+    "instructions_cleanup_provider_unreachable"];
   for (const code of codes) {
     assert.ok(client.PROCESS_REFUSALS.includes(code), `${code} has its own words`);
     const words = client.processMessage({ kind: "error", code, message: "raw engine words" });
@@ -864,6 +865,14 @@ test("every Edit with AI refusal reads as a plain sentence that says nothing cha
   const listed = engine.slice(engine.indexOf("PROCESS_CODES: &[&str] = &["), engine.indexOf("];"));
   for (const code of codes) assert.ok(listed.includes(`"${code}"`), `${code} is a code the engine lets through`);
   assert.equal(client.processMessage({ kind: "error", code: "instructions_cleanup_timed_out", message: "" }), "The model took longer than 5 minutes, so nothing changed. Try again.");
+});
+
+test("an Edit with AI run whose provider refuses connections says nothing was sent and to start it, as the TUI does", () => {
+  const code = "instructions_cleanup_provider_unreachable";
+  const words = "Can't reach this pool's model provider, so nothing was sent. Start it or pick another account, then try again.";
+  assert.equal(client.processMessage({ kind: "error", code, message: "" }), words);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/process.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${code}" => "${words}"`), `${code} reads the same in the TUI`);
 });
 
 test("Edit with AI is a project setting, On unless the owner turned it off, and its row says what Off does", () => {

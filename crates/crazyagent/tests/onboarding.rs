@@ -1915,7 +1915,7 @@ async fn a_mapping_step_whose_provider_refuses_connections_stops_at_once_with_th
     assert_eq!(
         view.mapping,
         failed(&format!(
-            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then retry setup."
+            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
         )),
         "{view:?}"
     );

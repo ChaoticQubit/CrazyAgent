@@ -1748,3 +1748,59 @@ fn a_project_outside_the_projects_home_never_shows_a_run_failure_or_a_due_run() 
     assert!(overview.failure.is_none());
     assert!(!overview.stale && !overview.running);
 }
+
+/// A writing run whose loopback provider refuses connections fails at once with the plain
+/// reach line, before its evidence is read or any agent folder is made, in place of a
+/// harness retrying the dead port until the run's time is over.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach_line() {
+    use crate::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
+    use std::os::unix::fs::PermissionsExt;
+    let private = |path: &Path| {
+        std::fs::create_dir(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("ca-reach-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let engine = base.join("engine");
+    private(&engine);
+    let database = engine.join("engine.db");
+    let sqlite = Connection::open(&database).unwrap();
+    sqlite.execute_batch("PRAGMA user_version=1").unwrap();
+    drop(sqlite);
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let state = engine.join("research");
+    private(&state);
+    let root = base.join("repo");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    let runner =
+        ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
+    let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "local-model".into(),
+        key: None,
+    };
+    let line = format!(
+        "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
+    );
+    let db = Connection::open_in_memory().unwrap();
+    let project = ProjectId::new("plant-shop").unwrap();
+    match agent::answer(&runner, &db, &project, &root, &account) {
+        Err(agent::Unwritten::Failed(words)) => assert_eq!(words, line),
+        _ => panic!("the writing run did not fail with the reach line"),
+    }
+    assert!(
+        std::fs::read_dir(state.join("agents"))
+            .map_or(true, |mut entries| entries.next().is_none()),
+        "no agent folder was made"
+    );
+}

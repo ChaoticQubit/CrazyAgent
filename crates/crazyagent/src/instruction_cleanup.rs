@@ -36,6 +36,8 @@ pub const TIMED_OUT: &str = "instructions_cleanup_timed_out";
 pub const OFF: &str = "instructions_cleanup_off";
 /// This engine cannot run a cleanup: no harness, no settings files or no confined runs.
 pub const UNAVAILABLE: &str = "instructions_cleanup_unavailable";
+/// The pool's loopback model provider refused every connect, so nothing was sent.
+pub const PROVIDER_UNREACHABLE: &str = "instructions_cleanup_provider_unreachable";
 
 /// The longest one cleanup may take, every try included.
 pub const WALL_TIME: Duration = Duration::from_secs(5 * 60);

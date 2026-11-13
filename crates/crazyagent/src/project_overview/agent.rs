@@ -36,7 +36,7 @@ const _: () = assert!(RETRY_MS < crate::roadmap_status::QUIET_MS);
 
 /// How a run ended without a reply: with words for the owner, with nothing to do, or too
 /// early to say, so it runs again later.
-enum Unwritten {
+pub(super) enum Unwritten {
     Failed(String),
     Skipped,
     Later,
@@ -115,7 +115,7 @@ pub(super) fn research(db: &Connection, project: &ProjectId, root: &Path) -> Opt
 /// with tools off on the project's account. Inputs: the runner, the engine connection, the
 /// project, its folder and the account. Output: the reply and whether competitor research
 /// was in its evidence, or how the run ended without one.
-fn answer(
+pub(super) fn answer(
     runner: &ResearchRunner,
     db: &Connection,
     project: &ProjectId,
