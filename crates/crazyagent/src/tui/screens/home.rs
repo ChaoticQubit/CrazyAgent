@@ -279,6 +279,7 @@ pub struct Home {
     folder: Load<ProjectsHome>,
     found: Load<Vec<FoundProject>>,
     sent: Option<IntakeQuery>,
+    job_card: bool,
 }
 
 impl Default for Home {
@@ -304,6 +305,7 @@ impl Home {
             folder: Load::Idle,
             found: Load::Idle,
             sent: None,
+            job_card: false,
         }
     }
 
@@ -509,6 +511,23 @@ impl Home {
             return Flow::Ignored;
         }
         self.job_action(&job, JobAction::Dismiss, ctx)
+    }
+
+    /// Keeps the same card picked when the job card comes first or goes, since it is always
+    /// the first card. Input: the context with the intake job read. Output: none.
+    fn follow_job_card(&mut self, ctx: &Ctx) {
+        let card = ctx.store.intake.is_some();
+        if card == self.job_card {
+            return;
+        }
+        self.job_card = card;
+        self.selected = if card {
+            self.selected + 1
+        } else {
+            self.selected.saturating_sub(1)
+        };
+        self.keep_in_range(ctx);
+        assert_eq!(self.job_card, ctx.store.intake.is_some());
     }
 
     /// Keeps the picked card inside the list after it changed, and in view. Input: the
@@ -1375,6 +1394,7 @@ impl Screen for Home {
             }
         }
         if let Some(reply) = event(arrival) {
+            self.follow_job_card(ctx);
             if self.sent.as_ref() == Some(&reply.query) {
                 self.sent = None;
                 if let Err(code) = &reply.result {
@@ -1423,6 +1443,7 @@ impl Screen for Home {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
+        self.job_card = ctx.store.intake.is_some();
         ctx.request(Request::Projects);
         ctx.request(Request::Pools);
         let ready = ctx
