@@ -107,6 +107,15 @@ export function pageNodeReads(ids: readonly string[], reads: Reads, setup: Setup
   return nodeReadsAgain(nodeNeeded(ids.map((id) => reads[id] ?? null)), node, setup?.running ?? false);
 }
 
+/** Whether a row's fresh read reads the catalog again: an installed harness whose read no
+ * longer needs a program while the catalog lists it as Can't run, or the other way round, so
+ * the row shows the engine's real word (Limited included, never a stale Ready). A read of a
+ * running update is followed first. Inputs: the catalog entry and the read. Output: the answer. */
+export function catalogReadAgain(entry: HarnessEntry, versions: HarnessVersions): boolean {
+  if (versions.running || entry.status.kind === "not_installed") return false;
+  return (entry.status.kind === "cant_run") !== Boolean(versions.needs);
+}
+
 function statusWord(entry: HarnessEntry): string {
   switch (entry.status.kind) {
     case "ready": return "Ready";
@@ -365,7 +374,7 @@ function HarnessRow({ entry, settings, again, onCatalog, onRead, onNodeAgain }: 
     show(read);
     if (!alive.current || read.kind !== "ok") return;
     if (read.value.running) { void follow(); return; }
-    if (installed && (entry.status.kind === "cant_run") !== Boolean(read.value.needs)) onCatalog();
+    if (catalogReadAgain(entry, read.value)) onCatalog();
   };
   useEffect(() => {
     if (!known) return;

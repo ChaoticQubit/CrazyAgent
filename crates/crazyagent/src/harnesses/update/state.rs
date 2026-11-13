@@ -510,8 +510,10 @@ impl Updates {
     /// The versions row of an installed harness. With updates off nothing is started and
     /// nothing is checked. The harness is asked for its version only when the table
     /// recognizes its install or CrazyAgent starts that harness itself, so a look-alike
-    /// program with a catalog name is never run. Inputs: the catalog spec, the executable,
-    /// the roots, the settings and whether to check now. Output: the row without the job fields.
+    /// program with a catalog name is never run, and only once it `runs`: one that still
+    /// needs a program is neither asked nor checked. Inputs: the catalog spec, the executable,
+    /// the roots, the settings, whether to check now and whether it runs. Output: the row
+    /// without the job fields.
     fn present(
         &self,
         spec: &'static harnesses::HarnessSpec,
@@ -519,6 +521,7 @@ impl Updates {
         roots: &Roots,
         settings: UpdateSettings,
         look: bool,
+        runs: bool,
     ) -> HarnessVersions {
         let id = spec.id;
         let real = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
@@ -530,14 +533,14 @@ impl Updates {
             Method::Unknown => spec.launch.is_none(),
             _ => true,
         };
-        let installed = if off || !asked {
+        let installed = if off || !asked || !runs {
             None
         } else {
             version_of(executable, &roots.home)
         };
         let latest = if off {
             Latest::NotChecked
-        } else if look {
+        } else if look && runs {
             let version = installed.as_deref().unwrap_or(NO_VERSION);
             let found = self.looked(id, &method, &real, roots, settings, version);
             let mut state = self.state();
@@ -569,8 +572,9 @@ impl Updates {
 
     /// Everything a client shows about one harness's versions. A check for a newer version
     /// runs only with `look`, and a vendor pointer is read only then, only for a
-    /// self-updating install and only with online lookups on. Inputs: the engine database,
-    /// the catalog entry, the roots and whether to check now. Output: the row.
+    /// self-updating install and only with online lookups on. A harness that still needs a
+    /// program is never run, so the reads that wait on Node start nothing. Inputs: the engine
+    /// database, the catalog entry, the roots and whether to check now. Output: the row.
     pub fn versions(
         &self,
         db: &Connection,
@@ -585,12 +589,18 @@ impl Updates {
             return unknown;
         };
         let mut versions = match &entry.executable {
-            Some(executable) => HarnessVersions {
-                needs: needs(executable, &roots.places),
-                ..self.present(spec, executable, roots, settings, look)
-            },
+            Some(executable) => {
+                let needs = needs(executable, &roots.places);
+                let runs = needs.is_none();
+                HarnessVersions {
+                    needs,
+                    ..self.present(spec, executable, roots, settings, look, runs)
+                }
+            }
             None => missing(spec.id, roots, settings),
         };
+        assert!(versions.needs.is_none() || versions.installed.is_none());
+        assert!(versions.needs.is_none() || entry.executable.is_some());
         let state = self.state();
         versions.running = state.running == Some(spec.id);
         versions.last = state.last.get(spec.id).cloned();

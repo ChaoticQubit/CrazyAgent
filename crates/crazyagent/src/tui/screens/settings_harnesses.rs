@@ -662,10 +662,6 @@ impl Harnesses {
             return;
         };
         let waited = self.node_offer() == NodeOffer::Installing;
-        let was_settled = matches!(
-            self.node,
-            Some(DependencyState::Found { .. } | DependencyState::Installed { .. })
-        );
         self.setup_busy = status.running;
         self.node = status
             .dependencies
@@ -679,10 +675,23 @@ impl Harnesses {
         let needed = self.versions.values().any(node_needed);
         if settled && (waited || needed) {
             self.read_where(|_, versions| node_needed(versions), ctx);
-            if !was_settled {
-                self.reload(ctx);
-            }
         }
+    }
+
+    /// Whether a harness needed a program before this read: the catalog lists it as Can't run
+    /// or its last read said so. A read that clears it reads the catalog again, so the row
+    /// shows the engine's real word, Limited included, never a stale Ready.
+    /// Input: the catalog id. Output: true when the catalog or the last read held a need.
+    fn needed_before(&self, id: &str) -> bool {
+        let entry = self.entries.iter().find(|entry| entry.id == id);
+        assert!(entry.is_some(), "a read is kept only for a listed harness");
+        let listed =
+            entry.is_some_and(|entry| matches!(entry.status, HarnessStatus::CantRun { .. }));
+        listed
+            || self
+                .versions
+                .get(id)
+                .is_some_and(|versions| versions.needs.is_some())
     }
 
     fn arrive_node(&mut self, result: &Result<(), String>, ctx: &mut Ctx) {
@@ -1033,10 +1042,14 @@ impl Harnesses {
                 return;
             }
         };
+        let cleared = versions.needs.is_none() && !versions.running && self.needed_before(id);
         self.versions.insert(id.to_owned(), versions.clone());
         assert!(self.versions.len() <= self.entries.len());
         if self.node.is_none() && node_needed(versions) {
             self.read_setup(ctx);
+        }
+        if cleared {
+            self.reload(ctx);
         }
         let stale = self.confirm.take_if(|open| {
             open.id == id
