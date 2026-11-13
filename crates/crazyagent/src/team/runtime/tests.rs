@@ -24472,7 +24472,7 @@ fn adopt_refuses_per_turn_pane_with_reason() {
             .unwrap();
         let record = fixture.pane(&host, id);
         assert_eq!(
-            team.adopt(&host, id, &record, &access).unwrap(),
+            team.adopt(&host, id, &record, &access, None).unwrap(),
             Err(reason.to_owned())
         );
         let status: String = fixture
