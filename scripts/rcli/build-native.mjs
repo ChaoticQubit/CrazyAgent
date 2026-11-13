@@ -6,7 +6,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MAX_BYTES = 128 * 1024 * 1024;
-const LOCK_SHA256 = "2e57d4f5fc5657b4de1a9e55695964d8916273a7c119b985285f57e18b383381";
+const LOCK_SHA256 = "97078942c206fd69c593efb1f0c9a875c37e723dfa389f9dbe37a2d62da456a7";
 
 function fail(message) {
   throw new Error(message);
