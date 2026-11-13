@@ -98,11 +98,17 @@ impl Downloads {
     /// Takes the slot for a new download. Output: the claim, which cancels the download and
     /// frees the slot when dropped, or `icloud_download_busy` while another one runs.
     pub fn claim(&self) -> Result<Claim<'_>, EngineError> {
+        self.claim_for(Arc::new(Download::default()))
+    }
+
+    /// Takes the slot for a download whose state another holder reads too, an intake job;
+    /// one already cancelled stops at its first check. Input: the download. Output: as
+    /// [`Downloads::claim`].
+    pub fn claim_for(&self, download: Arc<Download>) -> Result<Claim<'_>, EngineError> {
         let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.is_some() {
             return Err(refused("icloud_download_busy"));
         }
-        let download = Arc::new(Download::default());
         *slot = Some(Arc::clone(&download));
         assert!(slot.is_some());
         Ok(Claim {
@@ -215,6 +221,15 @@ pub fn placeholders(root: &Path) -> Result<Placeholders, EngineError> {
 /// macOS keeps the folder from CrazyAgent, or the folder check's code. The folder's files are
 /// never moved or changed; downloads macOS already started may still finish after a stop.
 pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
+    let root = folder(path)?;
+    run(&root, download, &request, &placeholders, POLL_EVERY)
+}
+
+/// The real folder a download or an intake job may work on, checked without reading its
+/// files. Input: the owner's folder text. Output: the real folder, or
+/// `icloud_path_invalid`, `icloud_folder_missing` or `icloud_folder_unsafe` for a folder
+/// that holds the owner's home.
+pub fn folder(path: &str) -> Result<PathBuf, EngineError> {
     path_text(path, "icloud_path_invalid")?;
     let root = real_folder(
         Path::new(path),
@@ -224,7 +239,8 @@ pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
     if holds_owner_home(&root, &owner_home()?) {
         return Err(refused("icloud_folder_unsafe"));
     }
-    run(&root, download, &request, &placeholders, POLL_EVERY)
+    assert!(root.is_absolute());
+    Ok(root)
 }
 
 /// Asks macOS for one batch of placeholders. Inputs: the batch and a stop check that ends

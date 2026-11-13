@@ -65,7 +65,7 @@ pub struct IntakeJob {
     mode: AddMode,
     overrides: Vec<AddOverride>,
     download: Arc<Download>,
-    tally: Tally,
+    tally: Arc<Tally>,
     stage: Mutex<Stage>,
 }
 
@@ -89,7 +89,7 @@ impl IntakeJob {
             mode,
             overrides,
             download: Arc::new(Download::default()),
-            tally: Tally::default(),
+            tally: Arc::new(Tally::default()),
             stage: Mutex::new(Stage::Downloading),
         }
     }
@@ -124,9 +124,9 @@ impl IntakeJob {
         Arc::clone(&self.download)
     }
 
-    /// The tally the job's add reports into and obeys.
-    pub fn tally(&self) -> &Tally {
-        &self.tally
+    /// The tally the job's add reports into and obeys, to hand to the thread that copies.
+    pub fn tally(&self) -> Arc<Tally> {
+        Arc::clone(&self.tally)
     }
 
     /// Marks the download over and the add started.

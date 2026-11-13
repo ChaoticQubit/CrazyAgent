@@ -51,6 +51,7 @@ mod icloud;
 pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
+mod intake;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod overview;
@@ -503,6 +504,7 @@ struct Authority {
     ide: Arc<crate::ide::bridge::Grants>,
     reproving: Arc<std::sync::atomic::AtomicBool>,
     icloud: crate::projects_home::icloud::Downloads,
+    intake: intake::Intake,
 }
 
 impl Authority {
@@ -1351,6 +1353,7 @@ impl OwnerServer {
                 ide,
                 reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 icloud: crate::projects_home::icloud::Downloads::default(),
+                intake: intake::Intake::default(),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1656,6 +1659,7 @@ impl OwnerServer {
         while tasks.custody.join_next().await.is_some() {}
         while tasks.clients.join_next().await.is_some() {}
         while tasks.refusals.join_next().await.is_some() {}
+        self.authority.intake.stop_all(self.timeout).await;
         log_panic(&upkeep.await, "landing_upkeep_panicked");
         log_panic(&sweep.await, "finished_agents_sweep_panicked");
         let drained = self
@@ -2479,8 +2483,9 @@ async fn serve_admitted(
     };
     match deferred {
         Deferred::ProjectsHome(a, request) => {
+            let sink = projects_home::Sink::Client(stream);
             let _ =
-                projects_home::serve(stream, engine, authority, auth, &a, *request, deadline).await;
+                projects_home::serve(sink, engine, authority, auth, &a, *request, deadline).await;
         }
         Deferred::GitHub(a) => {
             let _ = github::serve(stream, engine, authority, auth, &a, body).await;

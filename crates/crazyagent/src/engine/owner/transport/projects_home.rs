@@ -2,12 +2,12 @@ use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
 use crate::projects_home::{
     AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, Moved, OldSource, Placed,
-    ProjectMove, folder_size,
+    ProjectMove, Tally, folder_size,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
-const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
+pub(super) const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
 const UNSETTLED: [&str; 2] = [UNKNOWN, "owner_actor_stopped_outcome_unknown"];
 const OLD_FOLDER_LEFT: &str = "move_project_old_folder_left";
 const SETTLE_TRIES: usize = 3;
@@ -18,38 +18,52 @@ static EXCHANGES: AtomicU64 = AtomicU64::new(1);
 /// or a check of one still running answers `InProgress` instead of planning it again.
 pub(super) type RunningSet = Mutex<std::collections::HashSet<(String, RequestId)>>;
 
-/// One owner change's claim on its request id while this exchange runs it. Dropping it,
-/// after the record and the reply, lets a later resend reach the recorded result.
-struct Running<'a> {
-    set: &'a RunningSet,
+/// The most owner changes running at once: one per deferred place and the one intake job,
+/// which holds no deferred place.
+const RUNNING_MAX: usize = DEFERRED_MAX + 1;
+
+/// One owner change's claim on its request id while this exchange or the intake job runs
+/// it. Dropping it, after the record and the reply, lets a later resend reach the recorded
+/// result.
+pub(super) struct Running {
+    authority: Arc<Authority>,
     key: (String, RequestId),
 }
 
-impl<'a> Running<'a> {
-    /// Claims a request id for this run. Inputs: the set, the owner and the request id.
-    /// Output: the claim, or None while another exchange runs the same id.
-    fn claim(set: &'a RunningSet, owner_id: &str, id: &RequestId) -> Option<Self> {
+impl Running {
+    /// Claims a request id for this run. Inputs: the authority, the owner and the request
+    /// id. Output: the claim, or None while another exchange or the job runs the same id.
+    pub(super) fn claim(
+        authority: &Arc<Authority>,
+        owner_id: &str,
+        id: &RequestId,
+    ) -> Option<Self> {
         assert!(!owner_id.is_empty());
         let key = (owner_id.to_owned(), id.clone());
-        let mut held = set
+        let mut held = authority
+            .running
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
-            held.len() < DEFERRED_MAX,
-            "each run holds one deferred place"
+            held.len() < RUNNING_MAX,
+            "each run holds a deferred place or is the job"
         );
         if !held.insert(key.clone()) {
             return None;
         }
         assert!(held.contains(&key));
-        Some(Self { set, key })
+        Some(Self {
+            authority: Arc::clone(authority),
+            key,
+        })
     }
 }
 
-impl Drop for Running<'_> {
+impl Drop for Running {
     fn drop(&mut self) {
         let mut held = self
-            .set
+            .authority
+            .running
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let removed = held.remove(&self.key);
@@ -64,7 +78,7 @@ pub(super) fn running(authority: &Authority, a: &Admission, id: &RequestId) -> b
         .running
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!(held.len() <= DEFERRED_MAX);
+    assert!(held.len() <= RUNNING_MAX);
     held.contains(&(a.owner_id.clone(), id.clone()))
 }
 
@@ -86,6 +100,42 @@ pub(super) async fn still_running(
         }),
         Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
         Err(e) => Err(e),
+    }
+}
+
+/// Where a served change's reply goes: the client that asked, or the intake job that runs
+/// the add, which keeps the reply and lends its tally to the copy.
+pub(super) enum Sink<'a> {
+    Client(&'a mut UnixStream),
+    Job(Arc<Tally>, &'a mut Option<Result<OwnerReply, EngineError>>),
+}
+
+impl Sink<'_> {
+    /// The tally the disk work reports into: the job's, or a fresh one for a client.
+    fn tally(&self) -> Arc<Tally> {
+        match self {
+            Self::Client(_) => Arc::new(Tally::default()),
+            Self::Job(tally, _) => Arc::clone(tally),
+        }
+    }
+
+    /// Hands over the reply: written to the client, or kept for the job. Inputs: the
+    /// result, the request id and whether it was a change. Output: Ok once written or kept.
+    async fn reply(
+        &mut self,
+        result: Result<OwnerReply, EngineError>,
+        id: RequestId,
+        mutation: bool,
+    ) -> Result<(), EngineError> {
+        match self {
+            Self::Client(stream) => write_owner_reply(stream, result, id, mutation).await,
+            Self::Job(_, kept) => {
+                assert!(mutation, "a job runs a change");
+                assert!(kept.is_none(), "one reply per serve");
+                **kept = Some(result);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -117,13 +167,17 @@ impl Work {
         }
     }
 
-    /// Runs the disk work. Output: the step to record and, for a project move, what it
-    /// leaves for after the record.
-    fn run(self) -> (Step, After) {
+    /// Runs the disk work. Input: the tally an add reports into and obeys. Output: the step
+    /// to record and, for a project move, what it leaves for after the record.
+    fn run(self, tally: &Tally) -> (Step, After) {
         let step = match self {
             Self::Add(plan) => {
                 let source = plan.source().to_path_buf();
-                Step::Record(plan.run().map(|()| Some(source)).map_err(|e| e.0))
+                Step::Record(
+                    plan.run_tallied(tally)
+                        .map(|()| Some(source))
+                        .map_err(|e| e.0),
+                )
             }
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::MoveProject(plan) => {
@@ -206,10 +260,11 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 }
 
 /// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
-/// and FolderSize for one owner. A change claims its request id first: a resend of one this
-/// engine still runs answers `InProgress` and plans nothing (DEC-159). Input: the stream,
-/// engine, authority, owner packet and admission, the validated request and the exchange
-/// deadline. Output: the
+/// and FolderSize for one owner. A client's change claims its request id first: a resend of
+/// one this engine still runs answers `InProgress` and plans nothing (DEC-159); the intake
+/// job holds its own claim. Input: the sink (the client's stream, or the intake job, which
+/// keeps the reply and lends its tally to the copy), engine, authority, owner packet and
+/// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
 /// the replay check, the plan, a grant check under the owner barrier and, for a
 /// home move, a recheck of agent work under the move's hold just before the disk
@@ -233,7 +288,7 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// The exchange number is unique within the engine process; engine start finishes
 /// any move and forgets any delete plan left by an earlier process before serving.
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    mut sink: Sink<'_>,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -246,8 +301,9 @@ pub(super) async fn serve(
     let mutation = matches!(request.operation, OwnerOperation::Apply { .. });
     let exchange = EXCHANGES.fetch_add(1, Ordering::Relaxed);
     assert!(exchange > 0);
-    let _running = match mutation {
-        true => match Running::claim(&authority.running, &a.owner_id, &id) {
+    let client = matches!(sink, Sink::Client(_));
+    let _running = match mutation && client {
+        true => match Running::claim(authority, &a.owner_id, &id) {
             Some(running) => Some(running),
             None => {
                 let reply =
@@ -257,7 +313,7 @@ pub(super) async fn serve(
                             request_id: id.clone(),
                             response,
                         });
-                return write_owner_reply(stream, reply, id, mutation).await;
+                return sink.reply(reply, id, mutation).await;
             }
         },
         false => None,
@@ -322,7 +378,8 @@ pub(super) async fn serve(
                             Some(authority.ide_servers.hold_for_delete(plan.project()).await);
                     }
                     let interrupted = work.interrupted();
-                    let step = tokio::task::spawn_blocking(move || work.run())
+                    let tally = sink.tally();
+                    let step = tokio::task::spawn_blocking(move || work.run(&tally))
                         .await
                         .map_err(|_| failure(interrupted))
                         .map(|(step, left)| {
@@ -385,7 +442,7 @@ pub(super) async fn serve(
                 if operation.result == OwnerResult::Applied && !operation.historical_replay
         );
         let forgotten = deleting && settle_delete(engine, exchange).await;
-        let written = write_owner_reply(stream, result, id, mutation).await;
+        let written = sink.reply(result, id, mutation).await;
         drop(barrier);
         (written, removed, forgotten)
     };
