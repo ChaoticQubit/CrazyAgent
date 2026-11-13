@@ -163,7 +163,11 @@ pub(super) fn node_offer(needed: bool, node: Option<&DependencyState>, busy: boo
         Some(DependencyState::Failed { reason }) => NodeOffer::Failed {
             reason: reason.clone(),
         },
-        Some(DependencyState::Found { .. } | DependencyState::Installed { .. }) => NodeOffer::None,
+        Some(
+            DependencyState::Found { .. }
+            | DependencyState::Installed { .. }
+            | DependencyState::Unsupported,
+        ) => NodeOffer::None,
         _ if busy => NodeOffer::Installing,
         None | Some(DependencyState::Missing) => NodeOffer::Offer,
         Some(DependencyState::Checking) => NodeOffer::None,

@@ -178,7 +178,8 @@ export function nodeOffer(needed: boolean, node: DependencyState | null, busy: b
     case "failed": return { kind: "failed", reason: displayText(node.reason) };
     case "found":
     case "installed":
-    case "bundled": return { kind: "none" };
+    case "bundled":
+    case "unsupported": return { kind: "none" };
     default:
       if (busy) return { kind: "installing" };
       return node === null || node.state === "missing" ? { kind: "offer" } : { kind: "none" };
