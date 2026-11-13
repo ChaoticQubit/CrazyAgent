@@ -254,11 +254,10 @@ impl OwnerClient {
         model: &str,
         provider: Option<&str>,
     ) -> Result<(Added, Models), EngineError> {
-        let _ = provider;
         let action = Action::Add {
             harness: harness.into(),
             model: model.into(),
-            provider: None,
+            provider: provider.map(str::to_owned),
         };
         match self.model_choice_exchange(action).await? {
             Reply::Added { added, models } => Ok((added, models)),

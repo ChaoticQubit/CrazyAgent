@@ -37,6 +37,9 @@ const TESTING: &str = "Testing. This can take up to 2 minutes.";
 /// Why the owner cannot add a model id on a harness the engine says has no test launch,
 /// word for word on the desktop (MUG2-L1).
 const NO_TEST_LAUNCH: &str = "An id you add needs a test launch, and this harness has none.";
+/// The question an added id asks on a section that offers providers, RCLI's, word for word
+/// on the desktop (DEC-150 addendum 9e).
+const PROVIDER_ASK: &str = "Which provider runs this id?";
 const PAGE_STEP: isize = 10;
 pub(in crate::tui) const ACCOUNT_MODEL: &str = "Account's own model";
 const APP_VALUE: &str = "Use the app value";
@@ -125,12 +128,45 @@ enum Edit {
         at: usize,
         index: usize,
     },
+    Provider {
+        at: usize,
+        model: String,
+    },
 }
 
 enum Step {
     Stay,
     Close,
+    Open(Edit),
     Send(ModelChoiceQuery),
+}
+
+/// The rows of a list the owner picks one entry from, the picked one marked and the list
+/// scrolled so it shows. Inputs: the non-empty names, the picked index, the width and the
+/// context. Output: at most `POOL_ROWS` lines.
+fn pick_lines(names: &[String], at: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    assert!(!names.is_empty());
+    let at = at.min(names.len() - 1);
+    let first = at.saturating_sub(POOL_ROWS - 1);
+    let picked: Vec<Line<'static>> = names
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(POOL_ROWS)
+        .map(|(index, name)| {
+            let marker = if index == at { ">" } else { " " };
+            let role = if index == at {
+                Role::Accent
+            } else {
+                Role::Muted
+            };
+            let name = printable(name);
+            let text = cut(&format!("{marker} {name}"), limit, ctx.glyphs.ellipsis);
+            styled(text, role, &ctx.theme)
+        })
+        .collect();
+    assert!(!picked.is_empty() && picked.len() <= POOL_ROWS);
+    picked
 }
 
 /// The plain sentence for a model choice problem code, the same words the desktop app
@@ -146,6 +182,10 @@ fn message(code: &str) -> String {
         }
         "model_choice_harness_unknown" => "CrazyAgent doesn't know this harness.",
         "model_choice_not_supported" => return format!("{NOT_SUPPORTED}."),
+        "model_choice_provider_needed" => "Pick the provider this id runs on.",
+        "model_choice_provider_unknown" => {
+            "This harness doesn't offer that provider. Pick one from the list."
+        }
         "model_choice_pool_needed" => {
             "Pick a pool with at least one account to run the test launch."
         }
@@ -790,6 +830,8 @@ impl ModelsPage {
                 } else if !model_valid(&self.harness, &id) {
                     field.error = Some(ID_RULE.into());
                     Step::Stay
+                } else if !models.providers.is_empty() {
+                    Step::Open(Edit::Provider { at: 0, model: id })
                 } else {
                     Step::Send(ModelChoiceQuery::Add {
                         harness: self.harness.clone(),
@@ -798,6 +840,22 @@ impl ModelsPage {
                     })
                 }
             }
+            (Edit::Provider { at, .. }, Key::Up) => {
+                *at = at.saturating_sub(1);
+                Step::Stay
+            }
+            (Edit::Provider { at, .. }, Key::Down) => {
+                *at = (*at + 1).min(models.providers.len().saturating_sub(1));
+                Step::Stay
+            }
+            (Edit::Provider { at, model }, Key::Enter) => match models.providers.get(*at) {
+                Some(choice) => Step::Send(ModelChoiceQuery::Add {
+                    harness: self.harness.clone(),
+                    model: model.clone(),
+                    provider: Some(choice.id.clone()),
+                }),
+                None => Step::Close,
+            },
             (Edit::Field(field), key) => {
                 if field.key(key) {
                     field.error = None;
@@ -829,12 +887,13 @@ impl ModelsPage {
         match step {
             Step::Stay => {}
             Step::Close => self.edit = None,
+            Step::Open(edit) => self.edit = Some(edit),
             Step::Send(_) if self.pending.is_some() => {
                 ctx.say(Message::warning(
                     "One change at a time.",
                     "Wait for the last one to finish, then try again.",
                 ));
-                if !matches!(self.edit, Some(Edit::Field(_))) {
+                if !matches!(self.edit, Some(Edit::Field(_) | Edit::Provider { .. })) {
                     self.edit = None;
                 }
             }
@@ -1204,6 +1263,15 @@ impl ModelsPage {
                     cursor = at;
                     out.extend(field_lines);
                 }
+                Some(Edit::Provider { at, .. }) if !models.providers.is_empty() => {
+                    out.extend(lines(PROVIDER_ASK, None));
+                    let names: Vec<String> = models
+                        .providers
+                        .iter()
+                        .map(|choice| choice.name.clone())
+                        .collect();
+                    out.extend(pick_lines(&names, *at, limit, ctx));
+                }
                 _ if !models.testable => {
                     out.extend(lines(&format!("{NOT_SUPPORTED}."), None));
                     out.extend(lines(NO_TEST_LAUNCH, Some(Role::Muted)));
@@ -1270,27 +1338,8 @@ impl ModelsPage {
                 Role::Warning,
             )],
             Load::Ready(pools) => {
-                let at = at.min(pools.len() - 1);
-                let first = at.saturating_sub(POOL_ROWS - 1);
-                pools
-                    .iter()
-                    .enumerate()
-                    .skip(first)
-                    .take(POOL_ROWS)
-                    .map(|(index, pool)| {
-                        let marker = if index == at { ">" } else { " " };
-                        let role = if index == at {
-                            Role::Accent
-                        } else {
-                            Role::Muted
-                        };
-                        let name = printable(&pool.name);
-                        say(
-                            &cut(&format!("{marker} {name}"), limit, ctx.glyphs.ellipsis),
-                            role,
-                        )
-                    })
-                    .collect()
+                let names: Vec<String> = pools.iter().map(|pool| pool.name.clone()).collect();
+                pick_lines(&names, at, limit, ctx)
             }
             Load::Failed(_) | Load::NotReady => vec![say(
                 "The pools couldn't be read. Press Esc, then try again.",
@@ -1550,6 +1599,13 @@ impl Screen for ModelsPage {
                     hint("Esc", "Cancel"),
                 ];
             }
+            Some(Edit::Provider { .. }) => {
+                return vec![
+                    hint(&moves, "Pick"),
+                    hint("Enter", "Add"),
+                    hint("Esc", "Cancel"),
+                ];
+            }
             None => {}
         }
         match self.state {
@@ -1658,7 +1714,7 @@ impl Screen for ModelsPage {
     }
 
     fn draft(&self) -> bool {
-        matches!(self.edit, Some(Edit::Field(_)))
+        matches!(self.edit, Some(Edit::Field(_) | Edit::Provider { .. }))
     }
 
     fn loss(&self) -> &'static str {

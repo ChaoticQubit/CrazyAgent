@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { poolSummaries, type Result } from "../../api";
 import type { SettingScope } from "../../api-harness-settings";
 import {
-  ALLOWED_MAX, FALLBACK_HELP, FALLBACK_OPTIONS, MODEL_BYTES_MAX, MODEL_STALE_LINE, NOT_SUPPORTED, NO_TEST_LAUNCH, PICK_HELP, PICK_OPTIONS,
+  ALLOWED_MAX, FALLBACK_HELP, FALLBACK_OPTIONS, MODEL_BYTES_MAX, MODEL_STALE_LINE, NOT_SUPPORTED, NO_TEST_LAUNCH, PICK_HELP, PICK_OPTIONS, PROVIDER_ASK,
   SLOT_HELP, SLOT_LABELS, addModel, addedLine, allowedChange, allowedDraft, canResetModel, catalogLine, choiceChange, choiceDraft, choiceOptions,
   loadModelRules, loadModels, modelChoiceRefusal, modelSourceLine, modelsNotReady, modelsStale, originWord, ownWord, passedOverLine,
   removeModel, removedLine, resetModelChoice, resetModelLabel, setModelChoice, setModelRule, testModel, tickable,
   toggleAllowed, uncheckedLine, valueText,
 } from "../../api-model-choice";
-import type { FallbackRule, ModelCandidate, ModelRow, ModelRules, ModelSlot, ModelTested, ModelsPage, PickRule } from "../../api-model-choice";
+import type { FallbackRule, ModelCandidate, ModelRow, ModelRules, ModelSlot, ModelTested, ModelsPage, PickRule, ProviderChoice } from "../../api-model-choice";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, LoadError, NotReady, Notice, Segmented, Select, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
@@ -178,22 +178,36 @@ export function TestPoolView({ model, pools, picked, busy, onPick, onRun, onCanc
 /** The owner's own model ids for one harness and the field to add one, without engine
  * calls: each id with its state, a Test for a pending id, and a remove; an empty field adds
  * nothing. Where the engine says the harness has no test launch, Add and a pending id say
- * Not supported, as the TUI does (MUG2-L1). Input: the props. Output: the section. */
-export function OwnIdsView({ candidates, field, busy, note, onField, onAdd, onRemove, testable, testing = null, onTest = () => {} }: {
+ * Not supported, as the TUI does (MUG2-L1). Where it offers providers, RCLI's, Add asks
+ * which one runs the id, in the TUI's words, and adds only once one is picked (DEC-150
+ * addendum 9e). Input: the props. Output: the section. */
+export function OwnIdsView({ candidates, field, busy, note, onField, onAdd, onRemove, testable, testing = null, onTest = () => {},
+  providers = [], provider = null, onProvider = () => {} }: {
   candidates: readonly ModelCandidate[]; field: string; busy: string | null; note: string;
   onField: (field: string) => void; onAdd: () => void; onRemove: (id: string) => void;
   testable: boolean; testing?: string | null; onTest?: (id: string) => void;
+  providers?: readonly ProviderChoice[]; provider?: string | null; onProvider?: (provider: string) => void;
 }) {
   const own = candidates.filter((candidate) => candidate.origin !== "catalog");
+  const unpicked = providers.length > 0 && !providers.some((choice) => choice.id === provider);
   return <SettingSection title="Your model ids" about="Add a model id this harness's list doesn't have yet. It waits for a test launch and can be chosen once that passes.">
     {testable
-      ? <SettingLine label="Model id" htmlFor="models-add-id" help="Letters, digits and - _ . : / @ +, starting with a letter or digit.">
-        <span className="models-add">
-          <input id="models-add-id" className="input mono" value={field} maxLength={MODEL_BYTES_MAX} autoComplete="off" spellCheck={false}
-            onChange={(event) => onField(event.target.value)} />
-          <Button variant="secondary" size="small" pending={busy === "add"} pendingLabel="Adding..." disabled={field.trim() === ""} onClick={onAdd}>Add</Button>
-        </span>
-      </SettingLine>
+      ? <>
+        <SettingLine label="Model id" htmlFor="models-add-id" help="Letters, digits and - _ . : / @ +, starting with a letter or digit.">
+          <span className="models-add">
+            <input id="models-add-id" className="input mono" value={field} maxLength={MODEL_BYTES_MAX} autoComplete="off" spellCheck={false}
+              onChange={(event) => onField(event.target.value)} />
+            <Button variant="secondary" size="small" pending={busy === "add"} pendingLabel="Adding..." disabled={field.trim() === "" || unpicked} onClick={onAdd}>Add</Button>
+          </span>
+        </SettingLine>
+        {providers.length > 0 && <fieldset className="pr-ai-pools">
+          <legend>{PROVIDER_ASK}</legend>
+          {providers.map((choice) => <label key={choice.id} className="pr-ai-pool">
+            <input type="radio" name="models-add-provider" value={choice.id} checked={provider === choice.id} disabled={busy === "add"} onChange={() => onProvider(choice.id)} />
+            <span>{displayText(choice.name)}</span>
+          </label>)}
+        </fieldset>}
+      </>
       : <SettingLine label="Model id" help={NO_TEST_LAUNCH}><span className="muted">{`${NOT_SUPPORTED}.`}</span></SettingLine>}
     {own.length === 0 && <p className="small muted">You haven't added a model id to this harness.</p>}
     {own.map((candidate) => <SettingLine key={candidate.id} label={displayText(candidate.id)} help={testing === candidate.id ? TESTING_LINE : ownWord(candidate.origin, testable)}>
@@ -240,6 +254,7 @@ export function modelNote(result: Result<unknown>): string {
 function AppOnly({ harness, page, onChanged }: { harness: string; page: Loaded<ModelsPage>; onChanged: () => void }) {
   const [rules, reloadRules] = useLoad(loadModelRules, []);
   const [field, setField] = useState("");
+  const [provider, setProvider] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [ruleBusy, setRuleBusy] = useState<"pick" | "fallback" | null>(null);
@@ -272,11 +287,12 @@ function AppOnly({ harness, page, onChanged }: { harness: string; page: Loaded<M
     const id = field.trim();
     if (id === "") return;
     setBusy("add");
-    const result = await addModel(harness, id);
+    const result = await addModel(harness, id, provider);
     setBusy(null);
     setNote(result.kind === "ok" ? addedLine(result.value, id) : modelNote(result));
     if (result.kind !== "ok") return;
     setField("");
+    setProvider(null);
     onChanged();
   }
 
@@ -300,7 +316,8 @@ function AppOnly({ harness, page, onChanged }: { harness: string; page: Loaded<M
   return <>
     {page.kind === "ok" && <OwnIdsView candidates={page.value.models.candidates} field={field} busy={busy} note={note}
       onField={setField} onAdd={() => void add()} onRemove={(id) => void remove(id)}
-      testable={page.value.models.testable} testing={testing} onTest={(id) => void askPool(id)} />}
+      testable={page.value.models.testable} testing={testing} onTest={(id) => void askPool(id)}
+      providers={page.value.models.providers ?? []} provider={provider} onProvider={setProvider} />}
     {asking !== null && <TestPoolView model={asking.model} pools={asking.pools} picked={asking.picked} busy={testing !== null}
       onPick={(pool) => setAsking({ ...asking, picked: pool })} onRun={() => void runTest()} onCancel={() => setAsking(null)} />}
     <ModelRulesView rules={rules} busy={ruleBusy} note={ruleNote} onRule={(name, value) => void rule(name, value)} onRetry={reloadRules} />
