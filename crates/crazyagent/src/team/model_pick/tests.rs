@@ -31,7 +31,7 @@ fn owner_models(db: &Connection, ids: &[&str], allowed: &[&str], agent: Option<&
     let catalog = crate::model_choice::catalog("codex");
     for id in ids {
         assert_eq!(
-            custom_begin(db, "codex", &catalog, id).unwrap(),
+            custom_begin(db, "codex", &catalog, id, None).unwrap(),
             Begun::Pending
         );
         custom_checked(db, "codex", id, true).unwrap();

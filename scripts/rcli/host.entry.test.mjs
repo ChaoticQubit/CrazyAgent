@@ -62,6 +62,22 @@ function packets(chunks) {
   return result;
 }
 
+test("launch takes one provider-qualified --model, the RCLI master model the engine chose (DEC-150 M-5)", () => {
+  const base = { sessionId: "session", instanceId: "instance", homeDir: "/private/entry/home", cwd: "/private/entry/project" };
+  assert.deepEqual(parseLaunch([...argv, "--model", "local-a/claude-opus-5-5"]), { ...base, model: "local-a/claude-opus-5-5" });
+  const hashed = `${"0123456789abcdef".repeat(4)}/anthropic/claude-opus-5.5`;
+  assert.equal(parseLaunch([...argv, "--model", hashed]).model, hashed, "an OpenRouter id keeps its own slash");
+  const file = "/private/entry/runtime/instructions.md";
+  assert.deepEqual(parseLaunch([...argv, "--instructions-file", file, "--model", "local-a/gpt-6.1-sol"]),
+    { ...base, instructionsFile: file, model: "local-a/gpt-6.1-sol" });
+  assert.equal(parseLaunch(argv).model, undefined, "no model keeps each account's own");
+  for (const model of ["anything", "/claude-opus-5-5", "local-a/", "-local/claude", "local-a/-claude", "Local-A/claude", "local-a/claude opus", "local-a/claude\u0000", `local-a/${"a".repeat(257)}`, `${"a".repeat(65)}/claude`]) {
+    assert.throws(() => parseLaunch([...argv, "--model", model]), /host_launch_rejected/, model);
+  }
+  assert.throws(() => parseLaunch([...argv, "--model", "local-a/x", "--model", "local-a/y"]), /host_launch_rejected/);
+  assert.throws(() => parseLaunch([...argv, "--model"]), /host_launch_rejected/);
+});
+
 test("launch accepts only exact identities and explicit absolute private paths", () => {
   assert.deepEqual(parseLaunch(argv), { sessionId: "session", instanceId: "instance", homeDir: "/private/entry/home", cwd: "/private/entry/project" });
   for (const args of [[], [...argv, "--model", "anything"], [...argv.slice(0, 6), "--home-dir", "/private/entry/project"], argv.map((x) => x === "session" ? ".." : x), argv.map((x) => x === "/private/entry/home" ? "relative" : x), argv.map((x) => x === "/private/entry/home" ? "/private/entry/../home" : x), argv.map((x) => x === "/private/entry/home" ? "/private/entry/\u0000home" : x)]) {

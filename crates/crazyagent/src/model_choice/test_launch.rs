@@ -50,15 +50,23 @@ pub const POOL_NEEDED: &str = "model_choice_pool_needed";
 pub const POOL_UNKNOWN: &str = "model_choice_pool_unknown";
 
 /// Tells whether a harness has a test launch: the harnesses whose model a read-only run
-/// can set. Input: the catalog harness id. Output: true for Claude Code and Codex.
+/// can set, and RCLI, whose closed host runs one turn (DEC-150 addendum 9e). Input: the
+/// catalog harness id. Output: true for Claude Code, Codex and RCLI.
 pub fn supported(harness: &str) -> bool {
+    matches!(harness, "claude-code" | "codex" | "rcli")
+}
+
+/// Tells whether a harness's test launch is a read-only research run: Claude Code and
+/// Codex; RCLI's is decided by `rcli_outcome`. Input: the catalog harness id. Output: the
+/// answer.
+fn read_only(harness: &str) -> bool {
     matches!(harness, "claude-code" | "codex")
 }
 
 /// Names the provider whose refusal a test launch reads, for the pending reason when the
-/// provider gave none. Input: a supported harness. Output: the provider's name.
+/// provider gave none. Input: Claude Code or Codex. Output: the provider's name.
 pub fn provider(harness: &str) -> &'static str {
-    assert!(supported(harness));
+    assert!(read_only(harness));
     match harness {
         "claude-code" => "Anthropic",
         _ => "OpenAI",
@@ -69,10 +77,10 @@ pub fn provider(harness: &str) -> &'static str {
 /// harness writes itself (DEC-150 F8, MG-M1, Q-6): a Claude Code stream-json assistant line
 /// whose `error` is `model_not_found`, or a Codex `exec --json` error whose provider body
 /// code is `model_not_found` or whose `codexErrorInfo` is `modelNotFound`; the model's own
-/// text never counts. Inputs: the supported harness and the output. Output: the answer.
+/// text never counts. Inputs: Claude Code or Codex and the output. Output: the answer.
 pub fn refused(harness: &str, output: &str) -> bool {
     use crate::harnesses::launch::CLAUDE_MODEL_REFUSED;
-    assert!(supported(harness));
+    assert!(read_only(harness));
     output
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -105,10 +113,10 @@ fn codex_refusal(event: &serde_json::Value) -> bool {
 }
 
 /// Decides a test launch from how its run ended and, for a failed run, its output.
-/// Inputs: the supported harness, the ending and the output when it could be read.
+/// Inputs: Claude Code or Codex, the ending and the output when it could be read.
 /// Output: the decision and, for a pending one, its reason of at most `REASON_BYTES_MAX`.
 pub fn outcome(harness: &str, ended: Ended, output: Option<&str>) -> (Tested, Option<String>) {
-    assert!(supported(harness));
+    assert!(read_only(harness));
     let decided = match ended {
         Ended::Answered => (Tested::Verified, None),
         Ended::Failed if output.is_some_and(|output| refused(harness, output)) => {
@@ -140,10 +148,10 @@ pub fn outcome(harness: &str, ended: Ended, output: Option<&str>) -> (Tested, Op
     decided
 }
 
-/// Words the pending reason of a test launch that started no run. Inputs: the supported
-/// harness and why. Output: the reason, at most `REASON_BYTES_MAX` bytes.
+/// Words the pending reason of a test launch that started no run. Inputs: Claude Code or
+/// Codex and why. Output: the reason, at most `REASON_BYTES_MAX` bytes.
 pub fn not_started(harness: &str, why: NotStarted) -> String {
-    assert!(supported(harness));
+    assert!(read_only(harness));
     let name = crate::harnesses::spec(harness).map_or(harness, |spec| spec.name);
     let reason = match why {
         NotStarted::NotInstalled => format!("{name} is not installed, so the id was not tested."),
@@ -167,6 +175,108 @@ pub enum Target<'a> {
     Connection(&'a CredentialRef),
 }
 
+/// How an RCLI test launch's run ended (DEC-150 addendum 9e): the host's answer, a failed
+/// turn with the provider failure the host named, if any, no answer in time, or stopped by
+/// the engine. The host's error text is never kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RcliEnded {
+    Answered,
+    Failed(Option<crate::rcli_host::RcliProviderFailure>),
+    TimedOut,
+    Stopped,
+}
+
+/// Decides an RCLI test launch by the provider of the account it ran on (DEC-150 addendum
+/// 9e): an answer verifies the id, a 404 from OpenAI or Anthropic fails it, and anything
+/// else, an OpenRouter 404 included, leaves it pending with a fixed reason. Inputs: the
+/// RCLI provider id and the ending. Output: the decision and its pending reason.
+pub fn rcli_outcome(provider: &str, ended: RcliEnded) -> (Tested, Option<String>) {
+    use crate::rcli_host::RcliProviderFailure;
+    let name = super::rcli_provider_name(provider).expect("a keyed RCLI provider");
+    let refuses = matches!(provider, "openai" | "anthropic");
+    let decided = match ended {
+        RcliEnded::Answered => (Tested::Verified, None),
+        RcliEnded::Failed(Some(RcliProviderFailure::NotFound)) if refuses => (Tested::Failed, None),
+        RcliEnded::Failed(_) => (
+            Tested::Pending,
+            Some(format!(
+                "Not reported by {name}: the test launch ended without an answer or a refusal."
+            )),
+        ),
+        RcliEnded::TimedOut => (
+            Tested::Pending,
+            Some("The test launch timed out.".to_owned()),
+        ),
+        RcliEnded::Stopped => (
+            Tested::Pending,
+            Some("The engine stopped the test launch.".to_owned()),
+        ),
+    };
+    assert_eq!(decided.0 == Tested::Pending, decided.1.is_some());
+    assert!(
+        decided
+            .1
+            .as_ref()
+            .is_none_or(|reason| reason.len() <= REASON_BYTES_MAX)
+    );
+    decided
+}
+
+/// Words the pending reason of an RCLI test launch that started no run, by the provider
+/// the id is tested on. Inputs: the RCLI provider id and why. Output: the reason, at most
+/// `REASON_BYTES_MAX` bytes.
+pub fn rcli_not_started(provider: &str, why: NotStarted) -> String {
+    let name = super::rcli_provider_name(provider).expect("a keyed RCLI provider");
+    let reason = match why {
+        NotStarted::NotInstalled => "RCLI is not installed, so the id was not tested.".to_owned(),
+        NotStarted::NoAccount => format!("No set-up {name} account in this pool."),
+        NotStarted::Paused => {
+            format!("Every {name} account in this pool is paused after a limit.")
+        }
+        NotStarted::UrlAccount | NotStarted::CouldNotStart => {
+            format!("The RCLI test launch on {name} could not start.")
+        }
+    };
+    assert!(!reason.is_empty() && reason.len() <= REASON_BYTES_MAX);
+    reason
+}
+
+/// Picks the account an RCLI test launch runs on (DEC-150 addendum 9e, leader 19:01): the
+/// pool's first RCLI account of the id's keyed provider that account setup finished and no
+/// limit paused. Inputs: the pool's member accounts in pool order, the RCLI provider id,
+/// whether an account is set up and whether it is paused. Output: the account, or why none
+/// runs: `Paused` when every set-up one is paused, else `NoAccount`.
+pub fn rcli_pick<'a>(
+    members: &[&'a crate::config::ModelConnection],
+    provider: &str,
+    set_up: impl Fn(&crate::config::ModelConnection) -> bool,
+    paused: impl Fn(&crate::config::ModelConnection) -> bool,
+) -> Result<&'a crate::config::ModelConnection, NotStarted> {
+    assert!(super::rcli_provider_name(provider).is_some());
+    assert!(members.len() <= crate::config::POOL_MEMBERS_MAX);
+    let mut paused_seen = false;
+    for &connection in members {
+        let keyed = matches!(
+            connection.auth,
+            crate::config::ModelAuthentication::ApiKey { .. }
+        );
+        if !keyed || super::rcli_provider_of(connection) != Some(provider) || !set_up(connection) {
+            continue;
+        }
+        if paused(connection) {
+            paused_seen = true;
+            continue;
+        }
+        assert_eq!(connection.harness.as_str(), "rcli");
+        return Ok(connection);
+    }
+    Err(if paused_seen {
+        NotStarted::Paused
+    } else {
+        NotStarted::NoAccount
+    })
+}
+
 /// One test launch to run: the engine's data folder, the two settings files, the
 /// installed harness executables, the harness, the model id and the accounts to run it on.
 pub struct Request<'a> {
@@ -183,7 +293,7 @@ pub struct Request<'a> {
 mod run {
     use super::{
         BUSY, Ended, NotStarted, OUTPUT_TOKENS, POOL_UNKNOWN, PROMPT, Request, Target, Tested,
-        WALL_TIME, not_started, outcome, supported,
+        WALL_TIME, not_started, outcome, read_only,
     };
     use crate::instruction_cleanup::private_folder;
     use crate::research::accounts::{AccountPick, SettingsResolver};
@@ -201,12 +311,12 @@ mod run {
     static RUNNING: Mutex<Vec<(PathBuf, &'static str)>> = Mutex::new(Vec::new());
 
     /// Holds the one test slot of a harness in an engine data folder until dropped.
-    struct Slot(PathBuf, &'static str);
+    pub(crate) struct Slot(PathBuf, &'static str);
 
     impl Slot {
         /// Takes the test slot of a harness. Inputs: the canonical engine folder and the
-        /// research harness id. Output: the slot, or none while another test holds it.
-        fn take(root: &Path, harness: &'static str) -> Option<Self> {
+        /// harness id. Output: the slot, or none while another test holds it.
+        pub(crate) fn take(root: &Path, harness: &'static str) -> Option<Self> {
             let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
             let held = |(folder, id): &(PathBuf, &str)| folder == root && *id == harness;
             if running.len() >= RUNNING_MAX || running.iter().any(held) {
@@ -233,7 +343,7 @@ mod run {
     /// The run's folder is removed once its output is read. Input: the request. Output:
     /// the decision and its pending reason, or `BUSY`, `POOL_UNKNOWN` or unavailable.
     pub(crate) fn run(request: &Request<'_>) -> Result<(Tested, Option<String>), &'static str> {
-        assert!(supported(request.harness));
+        assert!(read_only(request.harness));
         let harness = match request.harness {
             "claude-code" => ResearchHarness::ClaudeCode,
             _ => ResearchHarness::Codex,
@@ -322,7 +432,7 @@ mod run {
 }
 
 #[cfg(unix)]
-pub(crate) use run::run;
+pub(crate) use run::{Slot, run};
 
 /// Refuses a test launch where confined model runs do not exist. Input: the request,
 /// unused. Output: unavailable.

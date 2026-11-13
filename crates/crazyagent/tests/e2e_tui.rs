@@ -2229,8 +2229,8 @@ fn the_tui_saves_the_days_done_items_stay() {
 }
 
 /// The Models page rows (DEC-150): each model choice option the TUI offers, on a real engine
-/// whose PATH starts with stand-in `claude` and `opencode` files and whose HOME is scratch,
-/// checked on screen and in the engine.
+/// whose PATH starts with stand-in `claude`, `opencode` and `crazyagent-rcli` files and whose
+/// HOME is scratch, checked on screen and in the engine.
 mod models {
     use super::*;
     use crazyagent::client_controller::OwnerController;
@@ -2246,7 +2246,8 @@ mod models {
     const CLAUDE_CODE: &str = "Claude Code";
     const OPENCODE: &str = "OpenCode";
     const CODEX: &str = "Codex";
-    const RCLI: &str = "RCLI";
+    const RCLI: &str = "rcli";
+    const RCLI_NAME: &str = "RCLI";
 
     /// A TUI on Home with the engine it talks to, the runtime the owner reads run on and the
     /// scratch folders that hold the stand-ins, HOME and the projects home.
@@ -2337,7 +2338,7 @@ mod models {
             stand_in(&bin.join("opencode"), "1.0.0");
             let lists = disk.path().join("codex-lists");
             codex_stand_in(&bin.join("codex"), &lists);
-            stand_in(&bin.join("crazyagent-rcli"), "crazyagent-rcli 0.1.0");
+            stand_in(&bin.join("crazyagent-rcli"), "3.0.4");
             let inherited = std::env::var_os("PATH").unwrap_or_default();
             let mut engine = Engine::new(prefix);
             engine.home = Some(home);
@@ -2433,7 +2434,12 @@ mod models {
 
         fn add(&self, model: &'static str) {
             self.owner(move |controller| {
-                Box::pin(async move { controller.model_choice_add(HARNESS, model).await.unwrap() })
+                Box::pin(async move {
+                    controller
+                        .model_choice_add(HARNESS, model, None)
+                        .await
+                        .unwrap()
+                })
             });
         }
 
@@ -2991,7 +2997,7 @@ mod models {
                 reason: NOT_SUPPORTED.into()
             }
         );
-        tui.app_page(RCLI, "RCLI models");
+        tui.app_page(RCLI_NAME, "RCLI models");
         to_native(&tui);
         let screen = tui.says(NOT_SUPPORTED);
         assert!(
@@ -3084,6 +3090,104 @@ mod models {
             screen.contains("Checked against"),
             "the shipped list stays: {screen}"
         );
+        tui.finish();
+    }
+
+    /// Picks one RCLI catalog id as the master model on the TUI's RCLI Models page, with
+    /// Right once per choice before it, and checks the engine saved it app-wide (DEC-150
+    /// M-5). Inputs: the scratch prefix, the provider the catalog names for it and the id.
+    fn rcli_master_saves(prefix: &str, provider: &str, model: &str) {
+        let catalog = crazyagent::model_choice::shipped(RCLI).expect("RCLI ships a model catalog");
+        assert_eq!(
+            catalog.providers.get(model).map(String::as_str),
+            Some(provider)
+        );
+        let at = catalog
+            .models
+            .iter()
+            .position(|id| id == model)
+            .expect("the RCLI catalog lists the id");
+        let tui = Tui::start(prefix);
+        tui.app_page(RCLI_NAME, "RCLI models");
+        let mut keys = vec!["Enter"];
+        keys.extend(std::iter::repeat_n("Right", at + 1));
+        keys.push("Enter");
+        tui.pty.keys(&keys);
+        tui.says("Saved.");
+        let master = row(&tui.models(RCLI, false), Slot::Master);
+        assert_eq!(
+            (master.here, master.effective, master.source),
+            (Some(json!(model)), json!(model), Source::App)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_rcli_models_page_offers_only_the_master_model_on_each_account_s_own() {
+        let tui = Tui::start("ca-e2e-m23-");
+        let models = tui.models(RCLI, false);
+        let master = row(&models, Slot::Master);
+        assert_eq!(
+            (master.here, master.effective, master.access),
+            (None, Value::Null, Access::Editable)
+        );
+        for slot in [Slot::Agent, Slot::Allowed] {
+            assert_eq!(
+                row(&models, slot).access,
+                Access::ReadOnly {
+                    reason: NOT_SUPPORTED.into()
+                }
+            );
+        }
+        tui.app_page(RCLI_NAME, "RCLI models");
+        let versions = crazyagent::model_choice::shipped(RCLI)
+            .expect("RCLI ships a model catalog")
+            .qualified_versions
+            .join(", ");
+        let screen = tui.says(&format!("Checked against {versions}"));
+        assert!(screen.contains("Account's own model"), "{screen}");
+        assert!(
+            screen.matches(NOT_SUPPORTED).count() >= 2,
+            "the agent default and the allowed list give the reason:\n{screen}"
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn an_anthropic_model_saves_as_the_rcli_master_model_in_the_tui() {
+        rcli_master_saves("ca-e2e-m24-", "anthropic", "claude-opus-5-5");
+    }
+
+    #[test]
+    fn an_openai_model_saves_as_the_rcli_master_model_in_the_tui() {
+        rcli_master_saves("ca-e2e-m25-", "openai", "gpt-6.1-sol");
+    }
+
+    #[test]
+    fn an_openrouter_model_saves_as_the_rcli_master_model_in_the_tui() {
+        rcli_master_saves("ca-e2e-m26-", "openrouter", "anthropic/claude-opus-5.5");
+    }
+
+    #[test]
+    fn x_on_the_rcli_master_model_goes_back_to_each_account_s_own_model_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m27-");
+        let version = row(&tui.models(RCLI, false), Slot::Master).version;
+        let written = tui.owner(move |controller| {
+            Box::pin(async move {
+                controller
+                    .model_choice_set(RCLI, None, Slot::Master, json!("claude-opus-5-5"), version)
+                    .await
+                    .unwrap()
+            })
+        });
+        assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+        let before = row(&tui.models(RCLI, false), Slot::Master).version;
+        tui.app_page(RCLI_NAME, "RCLI models");
+        tui.pty.keys(&["x"]);
+        tui.says("Saved.");
+        let master = row(&tui.models(RCLI, false), Slot::Master);
+        assert_eq!((master.here, master.effective), (None, Value::Null));
+        assert!(master.version > before, "the reset is a new version");
         tui.finish();
     }
 }

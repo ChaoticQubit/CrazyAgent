@@ -618,6 +618,7 @@ const STOPPED_WHY = new Map<string, string>([
   ["capacity_unavailable", "another turn is still running"],
   ["profile_busy", "its account is busy signing in or out"],
   ["scope_revoked", "it no longer has access to this project"],
+  ["model_unserved", "no account in its pool can run its master model. Change the master model in Settings, Harnesses, RCLI, Models"],
   ["runtime_unavailable", "it could not start. Check it in Settings, Harnesses"],
   ["capture_incomplete", "its reply was cut off"],
   ["no_reply", "it ended its turn without writing a reply"],
@@ -658,10 +659,12 @@ export function minutesOfCause(cause: string | null | undefined): number | null 
  * turn ends with its code. Input: the turn. Output: the line. */
 export function turnLine(turn: MasterTurn): string {
   const code = ` (${stopCode(turn)})`;
+  if (turn.cause === "rcli_master_key_setup_required" && turn.detail) return `${turn.detail}${code}`;
   const steps = turn.reason === "step_limit" ? stepsOfCause(turn.cause) : null;
   if (steps !== null) return `Stopped after ${steps} steps; reply with 'continue' to go on.${code}`;
   const minutes = turn.reason === "time_limit" ? minutesOfCause(turn.cause) : null;
   if (minutes !== null) return `Stopped after ${minutes} minutes; reply with 'continue' to go on.${code}`;
+  if (turn.phase === "blocked" && turn.reason === "model_unserved") return `${turn.detail ?? `The master stopped: ${STOPPED_WHY.get("model_unserved")}.`}${code}`;
   if (turn.phase === "blocked" && (turn.accounts ?? []).length > 0) return `No account in this master's pool can run it now.${code}`;
   if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return `Not signed in. Sign in again in Settings, Accounts, then send again.${code}`;
   if (turn.phase === "blocked" && turn.reason === "readiness_stale") return `Sign-in is out of date. Sign in again in Settings, Accounts, then send again.${code}`;
@@ -691,6 +694,7 @@ const accountReasons: Record<string, string> = {
   transient_failure: "sign-in could not be renewed just now, available again in a minute",
   profile_busy: "busy with a sign-in or sign-out",
   scope_revoked: "not allowed by settings",
+  model_unserved: "its provider does not serve the master model",
   connection_changed: "settings changed",
 };
 

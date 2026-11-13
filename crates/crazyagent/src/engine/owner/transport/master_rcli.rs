@@ -23,6 +23,27 @@ use tokio::time::Instant;
 #[path = "master_rcli_custody.rs"]
 mod custody;
 
+#[cfg(unix)]
+#[path = "master_rcli_model_test.rs"]
+pub(super) mod model_test;
+
+/// Refuses an RCLI test launch where confined model runs do not exist.
+#[cfg(not(unix))]
+pub(super) mod model_test {
+    /// Refuses the test launch. Inputs: the runtime handle, engine folder, settings files,
+    /// id, provider and pool, all unused. Output: unavailable.
+    pub(in crate::engine::owner::transport) fn run(
+        _host: &super::OwnerRuntimeHandle,
+        _root: &std::path::Path,
+        _settings: (&std::path::Path, &std::path::Path),
+        _model: &str,
+        _provider: &str,
+        _pool: &crate::protocol::CredentialRef,
+    ) -> Result<(crate::model_choice::test_launch::Tested, Option<String>), &'static str> {
+        Err("model_choice_unavailable")
+    }
+}
+
 use custody::RcliCustody;
 
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
@@ -75,7 +96,9 @@ fn failed_turn_code(failure: Option<crate::rcli_host::RcliProviderFailure>) -> &
         Some(crate::rcli_host::RcliProviderFailure::InvalidAuthentication) => {
             "gateway_invalid_authentication"
         }
-        None => "rcli_master_execution_failed",
+        Some(crate::rcli_host::RcliProviderFailure::NotFound) | None => {
+            "rcli_master_execution_failed"
+        }
     }
 }
 
@@ -136,12 +159,14 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         TURN_DEADLINE => MasterReason::TimeLimit,
         code if minutes_of_cause(code).is_some() => MasterReason::TimeLimit,
         "rcli_master_profile_changed"
+        | crate::master_session::RCLI_KEY_SETUP_CAUSE
         | "rcli_master_profile_mismatch"
         | "native_profile_binding_conflict"
         | "native_profile_identity_changed"
         | "gateway_connection_changed_or_denied" => MasterReason::ConnectionChanged,
         "owner_runtime_stale" | "master_runtime_scope_revoked" => MasterReason::ScopeRevoked,
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
+        "rcli_master_model_unserved" => MasterReason::ModelUnserved,
         "native_profile_in_use" => MasterReason::ProfileBusy,
         "gateway_invalid_authentication" => MasterReason::InvalidAuthentication,
         "gateway_health_unknown" => MasterReason::ReadinessUnknown,
@@ -215,6 +240,7 @@ impl OwnerRuntimeHandle {
         let run_time = prepared.time.run_time();
         let deadline = run_time.map(|time| Instant::now() + time);
         assert_eq!(deadline.is_none(), prepared.time.minutes().is_none());
+        self.set_up_master_key(prepared).await?;
         let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let current = self
             .inspect_master_turn(

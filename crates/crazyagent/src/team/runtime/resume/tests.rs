@@ -1215,7 +1215,7 @@ done
         let catalog = crate::model_choice::catalog("codex");
         let scope = crate::harness_settings::Scope::App;
         assert_eq!(
-            store::custom_begin(&fixture.connection, "codex", &catalog, "gpt-a").unwrap(),
+            store::custom_begin(&fixture.connection, "codex", &catalog, "gpt-a", None).unwrap(),
             Begun::Pending
         );
         store::custom_checked(&fixture.connection, "codex", "gpt-a", true).unwrap();

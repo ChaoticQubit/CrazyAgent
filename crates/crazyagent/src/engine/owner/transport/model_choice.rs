@@ -33,6 +33,8 @@ pub const MODEL_CHOICE_PROTOCOL_CODES: &[&str] = &[
     "model_choice_pool_needed",
     "model_choice_pool_unknown",
     "model_choice_project_unknown",
+    "model_choice_provider_needed",
+    "model_choice_provider_unknown",
     "model_choice_reply_bounds",
     "model_choice_request_bounds",
     "model_choice_request_invalid",
@@ -78,6 +80,8 @@ enum Action {
     Add {
         harness: String,
         model: String,
+        #[serde(default)]
+        provider: Option<String>,
     },
     Remove {
         harness: String,
@@ -246,16 +250,19 @@ impl OwnerClient {
     }
 
     /// Adds a model id the owner typed for a harness; it waits for its test launch before
-    /// it can be chosen. Inputs: the harness and the id. Output: what was done with the
+    /// it can be chosen. An RCLI id names the keyed provider it runs on (DEC-150 addendum
+    /// 9e). Inputs: the harness, the id and the provider. Output: what was done with the
     /// harness's app-wide section, or a refusal.
     pub async fn model_choice_add(
         &self,
         harness: &str,
         model: &str,
+        provider: Option<&str>,
     ) -> Result<(Added, Models), EngineError> {
         let action = Action::Add {
             harness: harness.into(),
             model: model.into(),
+            provider: provider.map(str::to_owned),
         };
         match self.model_choice_exchange(action).await? {
             Reply::Added { added, models } => Ok((added, models)),
@@ -458,6 +465,10 @@ async fn handle(
     let live = live_due(&action)
         .and_then(crate::model_choice::harness_id)
         .filter(|harness| crate::model_choice::live::reader(harness).is_some());
+    let host = OwnerRuntimeHandle {
+        engine: engine.clone(),
+        authority: authority.clone(),
+    };
     let harnesses = match &action {
         Action::Test { .. } => {
             let (codex, claude) = authority
@@ -488,8 +499,19 @@ async fn handle(
             } => {
                 let (settings, codex, claude) =
                     harnesses.ok_or_else(|| failure("model_choice_unavailable"))?;
-                let launch: Launch<'_> = Box::new(|pool| {
+                let launch: Launch<'_> = Box::new(|pool, provider| {
                     let (global, local) = settings.as_ref().ok_or("model_choice_unavailable")?;
+                    if harness == "rcli" {
+                        let provider = provider.ok_or("model_choice_provider_needed")?;
+                        return super::master_rcli::model_test::run(
+                            &host,
+                            &root,
+                            (global, local),
+                            &model,
+                            provider,
+                            pool,
+                        );
+                    }
                     let path = |host: &Option<Arc<RegisteredNativeAuthHost>>| match host {
                         Some(host) => host.verified_path().map(|path| Some(path.to_path_buf())),
                         None => Ok(None),
@@ -605,9 +627,18 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
             version,
         )?
         .into()),
-        Action::Add { harness, model } => {
-            let begun =
-                store::custom_begin(&db, &harness, &store::catalog(&db, &harness)?, &model)?;
+        Action::Add {
+            harness,
+            model,
+            provider,
+        } => {
+            let begun = store::custom_begin(
+                &db,
+                &harness,
+                &store::catalog(&db, &harness)?,
+                &model,
+                provider.as_deref(),
+            )?;
             Ok(Reply::Added {
                 added: begun.into(),
                 models: app(&harness)?,
@@ -631,10 +662,12 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
     }
 }
 
-/// The launch a test hands its checked pool to: one read-only run on that pool's account,
-/// answering the decision and its pending reason, or a plain refusal code.
-type Launch<'a> =
-    Box<dyn FnOnce(&CredentialRef) -> Result<(Tested, Option<String>), &'static str> + 'a>;
+/// The launch a test hands its checked pool and, for an RCLI id, the provider it is tested
+/// on: one run on that pool's account, answering the decision and its pending reason, or a
+/// plain refusal code.
+type Launch<'a> = Box<
+    dyn FnOnce(&CredentialRef, Option<&str>) -> Result<(Tested, Option<String>), &'static str> + 'a,
+>;
 
 /// Runs one owner id's test launch once it may run (DEC-150 addendum 7): a supported
 /// harness, a named pool and an id that waits for its test, so no run is spent otherwise.
@@ -659,9 +692,19 @@ fn tested(
     if !store::custom_pending(&db, harness, model)? {
         return Err(failure("model_choice_custom_not_pending"));
     }
-    let (mut tested, mut reason) = launch(pool).map_err(failure)?;
+    let provider = store::pending_provider(&db, harness, model)?;
+    if (harness == "rcli") != provider.is_some() {
+        return Err(failure("model_choice_provider_needed"));
+    }
+    let (mut tested, mut reason) = launch(pool, provider.as_deref()).map_err(failure)?;
     if tested != Tested::Pending {
-        match store::custom_checked(&db, harness, model, tested == Tested::Verified) {
+        match store::custom_tested(
+            &db,
+            harness,
+            model,
+            provider.as_deref(),
+            tested == Tested::Verified,
+        ) {
             Ok(()) => {}
             Err(error) if error.0 == "model_choice_custom_not_pending" => {
                 tested = Tested::Pending;

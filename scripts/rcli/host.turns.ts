@@ -21,10 +21,10 @@ messages: SdkMessageProjection | null;
 input: PendingInput | null;
 failure: ProviderFailure | null;
 };
-const SDK_PROVIDER_ERROR = /^[A-Za-z][A-Za-z0-9 ._-]{0,63} request failed(?: \(HTTP (\d{3})\)|: HTTP (\d{3}))(?:: ([\s\S]*))?$/;
+const SDK_PROVIDER_ERROR = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63} request failed(?: \(HTTP (\d{3})\)|: HTTP (\d{3}))(?:: ([\s\S]*))?$/;
 /** Names the provider failure in an SDK turn error: the exact message the SDK's provider
  * clients write for an HTTP refusal, never text that only contains one. Input: the error
- * text. Output: the rate limit, spent quota or rejected key, or null for anything else. */
+ * text. Output: the rate limit, spent quota, rejected key or HTTP 404, or null otherwise. */
 export function providerFailure(message: unknown): ProviderFailure | null {
 if (typeof message !== "string" || message.length > FRAME_TEXT_MAX) return null;
 const match = SDK_PROVIDER_ERROR.exec(message);
@@ -34,6 +34,7 @@ const detail = match[3] ?? "";
 assert(Number.isInteger(status) && status >= 0 && status <= 999, "host_turn_state_invariant");
 if (status === 401 || status === 403) return "invalid_authentication";
 if (status === 402) return "quota_exhausted";
+if (status === 404) return "not_found";
 if (status === 429) return /quota|credit|billing|balance|insufficient/i.test(detail) ? "quota_exhausted" : "rate_limited";
 if (status === 400 && /credit balance|quota|billing/i.test(detail)) return "quota_exhausted";
 return null;

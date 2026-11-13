@@ -124,6 +124,8 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
     "The master stopped: its account is busy signing in or out. (native_profile_in_use)");
   assert.equal(research.turnLine(turn("failed", "connection_changed", "native_profile_connection_missing")),
     "The master stopped: its settings changed while it was open. (native_profile_connection_missing)");
+  const keySetup = "The master could not set this account's API key up for agents. Set it up again: in the app, Settings, Pools, Get ready for agents; in the terminal app, Model access, k Private profile setup.";
+  assert.equal(research.turnLine(turn("failed", "connection_changed", "rcli_master_key_setup_required", keySetup)), `${keySetup} (rcli_master_key_setup_required)`);
   assert.equal(research.turnLine(turn("failed", "transient_failure", "native_profile_renewal_failed")),
     "The master stopped: the account's sign-in could not be renewed just now, so it is unavailable for a moment. Your next message uses the next account in the pool, or this one after a minute. (native_profile_renewal_failed)");
   assert.equal(research.turnLine(turn("failed", "instructions_too_large", "master_instructions_too_large")),
@@ -169,6 +171,18 @@ test("a master turn names its account, and a turn no account could run names eac
     "Work Codex is ready on codex: change the master to codex to use it.",
   ]);
   assert.ok(![...told, ...research.accountLines(blocked)].some((line) => /work-claude|home-claude|spare-claude|work-codex/u.test(line)), "no line shows a sign-in reference");
+});
+
+test("a turn no pool account can run on the RCLI master model shows the engine's line naming the model (DEC-150 M-5)", () => {
+  const line = "No account in this master's pool can run claude-opus-5-5. Add an account whose provider serves it to the pool, or change the master model in Settings, Harnesses, RCLI, Models.";
+  const blocked = {
+    id: "t4", ordinal: 4, phase: "blocked", reason: "model_unserved", cause: "master_model_unserved", detail: line, reply: null, attempt: null,
+    accounts: [{ account_ref: "home-local", connection: "local-a", harness: "rcli", reason: "model_unserved" }],
+  };
+  assert.equal(research.turnLine(blocked), `${line} (master_model_unserved)`);
+  assert.deepEqual(research.accountLines(blocked), ["local-a: its provider does not serve the master model"]);
+  assert.equal(research.turnLine({ ...blocked, detail: null }),
+    "The master stopped: no account in its pool can run its master model. Change the master model in Settings, Harnesses, RCLI, Models. (master_model_unserved)");
 });
 
 test("two accounts with the same name show their ids, an account with its own name does not (OB4-F1)", async () => {

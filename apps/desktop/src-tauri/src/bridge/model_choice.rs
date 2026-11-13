@@ -128,6 +128,26 @@ pub fn window_rule(rule: &str, value: &str) -> Result<Rule, BridgeError> {
     Ok(rule)
 }
 
+/// The most bytes a provider name from the window may have.
+const PROVIDER_BYTES_MAX: usize = 64;
+
+/// The provider an RCLI id runs on as the window names it (DEC-150 addendum 9e): none, or
+/// one plain name of lowercase letters, digits and dashes of at most `PROVIDER_BYTES_MAX`
+/// bytes; the engine checks it is one it offers. Input: the provider. Output: it, or
+/// `model_choice_provider_unknown`.
+fn window_provider(provider: Option<String>) -> Result<Option<String>, BridgeError> {
+    let plain = |name: &str| {
+        (1..=PROVIDER_BYTES_MAX).contains(&name.len())
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    };
+    match provider {
+        Some(name) if !plain(&name) => Err(failure("model_choice_provider_unknown")),
+        provider => Ok(provider),
+    }
+}
+
 fn window_harness(harness: String) -> Result<String, BridgeError> {
     super::harness_settings::window_harness(harness)
         .map_err(|_| failure("model_choice_request_invalid"))
@@ -270,13 +290,15 @@ impl NativeBridge {
         &self,
         harness: String,
         model: String,
+        provider: Option<String>,
     ) -> Result<Unlocked<ModelAdded>, BridgeError> {
         let harness = window_harness(harness)?;
         let model = window_model(model)?;
+        let provider = window_provider(provider)?;
         let client = self.model_choice_client()?;
         Ok(Box::pin(async move {
             let (added, _) = client
-                .model_choice_add(&harness, &model)
+                .model_choice_add(&harness, &model, provider.as_deref())
                 .await
                 .map_err(model_choice_error)?;
             Ok(added)
@@ -563,6 +585,7 @@ mod tests {
             reason: None,
             testable: true,
             live_note: None,
+            providers: Vec::new(),
         };
         let all = || Slot::ALL.into_iter().map(row).collect::<Vec<_>>();
         let page = page_of(models(all(), "claude-code", 2), "claude-code", None).unwrap();

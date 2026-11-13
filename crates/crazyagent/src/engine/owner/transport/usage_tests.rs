@@ -452,7 +452,7 @@ async fn the_extras_read_answers_each_saved_account_with_its_stored_resets_and_c
             kinds: vec![crate::usage::extras::ResetKind::Weekly],
             next_expiry_ms: Some(now + 86_400_000),
         }),
-        credits: crate::usage::extras::Field::Known("$4.20 left".into()),
+        credits: crate::usage::extras::Field::Known("4.20 USD left".into()),
     };
     crate::usage::extras::record_extras(&db, &added.id, &read, now).unwrap();
     drop(db);
@@ -465,7 +465,7 @@ async fn the_extras_read_answers_each_saved_account_with_its_stored_resets_and_c
         (resets.count, resets.kinds),
         (2, vec![crate::usage::extras::ResetKind::Weekly])
     );
-    assert_eq!(stored[0].extras.credits.as_deref(), Some("$4.20 left"));
+    assert_eq!(stored[0].extras.credits.as_deref(), Some("4.20 USD left"));
     usage.stop().await;
 }
 

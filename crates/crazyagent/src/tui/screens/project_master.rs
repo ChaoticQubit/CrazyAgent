@@ -358,10 +358,20 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         ));
     }
     let retry = if latest { " Press r to try again." } else { "" };
+    if turn.cause.as_deref() == Some(crate::master_session::RCLI_KEY_SETUP_CAUSE)
+        && let Some(detail) = &turn.detail
+    {
+        return Some(format!("{detail} ({code}){retry}"));
+    }
     if turn.reason == Some(MasterReason::RepositoryConfigRefused)
         && let Some(detail) = &turn.detail
     {
         return Some(format!("{harness} stopped: {detail} ({code}){retry}"));
+    }
+    if turn.reason == Some(MasterReason::ModelUnserved)
+        && let Some(detail) = &turn.detail
+    {
+        return Some(format!("{detail} ({code}){retry}"));
     }
     let why = match turn.reason {
         Some(MasterReason::ReadinessUnknown | MasterReason::ReadinessStale) => {
@@ -385,6 +395,9 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::ProfileBusy) => "its account is busy signing in or out.",
         Some(MasterReason::ConnectionChanged) => "its settings changed while it was open.",
         Some(MasterReason::ScopeRevoked) => "it no longer has access to this project.",
+        Some(MasterReason::ModelUnserved) => {
+            "no account in its pool can run its master model. Change the master model in Settings, Harnesses, RCLI, Models."
+        }
         Some(MasterReason::RuntimeUnavailable) => {
             "it could not start. Check it in Settings, Harnesses."
         }
@@ -1227,6 +1240,7 @@ mod tests {
         let configured = Some(MasterSessionPhase::Configured);
         let inputs = [entry(3, "Go.")];
         let refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";
+        const KEY_SETUP: &str = "The master could not set this account's API key up for agents. Set it up again: in the app, Settings, Pools, Get ready for agents; in the terminal app, Model access, k Private profile setup.";
         let cases = [
             (
                 MasterReason::RuntimeUnavailable,
@@ -1246,7 +1260,29 @@ mod tests {
                 "repository_config_refused:core_hookspath",
                 format!("Codex stopped: {refused} (repository_config_refused:core_hookspath) Press r to try again."),
             ),
+            (
+                MasterReason::ConnectionChanged,
+                Some(KEY_SETUP),
+                "rcli_master_key_setup_required",
+                format!("{KEY_SETUP} (rcli_master_key_setup_required) Press r to try again."),
+            ),
         ];
+        let unserved: MasterReason =
+            serde_json::from_value(serde_json::json!("model_unserved")).unwrap();
+        let named = "No account in this master's pool can run claude-opus-5-5. Add an account whose provider serves it to the pool, or change the master model in Settings, Harnesses, RCLI, Models.";
+        let mut cases = cases.to_vec();
+        cases.push((
+            unserved,
+            Some(named),
+            "master_model_unserved",
+            format!("{named} (master_model_unserved) Press r to try again."),
+        ));
+        cases.push((
+            unserved,
+            None,
+            "master_model_unserved",
+            "Codex stopped: no account in its pool can run its master model. Change the master model in Settings, Harnesses, RCLI, Models. (master_model_unserved) Press r to try again.".to_owned(),
+        ));
         for (reason, detail, cause, line) in cases {
             let mut stopped = turn(1, 3, MasterTurnPhase::Blocked, Some(reason));
             stopped.detail = detail.map(str::to_owned);

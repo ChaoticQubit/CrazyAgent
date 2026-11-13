@@ -19,12 +19,12 @@ const USAGE = "desktop_usage_report";
 const POOLS_READ = "desktop_pool_summaries";
 const ACCOUNTS_READ = "desktop_list_accounts";
 
-test("the screen shows the title and purpose, Your pools with New pool on the left, and the first pool selected on the right", async () => {
+test("the screen shows the title and purpose, Your pools with New pool on the left, the first pool selected on the right, and Free resets below", async () => {
   const seen = await onPools({}, async (page) => ({ top: await page.evaluate("Fixture.top()"), sections: await read(page), items: await items(page), cap: await page.evaluate("Fixture.wordsOf('.pool-cap')") }));
   assert.deepEqual(seen.top?.heading, "Pools", JSON.stringify(seen.top));
   assert.match(seen.top.purpose, /A pool is a group of accounts for a project\. When one account runs out, agents move to the next one in the pool\./);
   assert.deepEqual(seen.top.actions, []);
-  assert.deepEqual(seen.sections.map((section) => [section.heading, section.actions]), [["Your pools", ["New pool"]], ["Main pool", ["Get ready for agents", "Delete pool"]]]);
+  assert.deepEqual(seen.sections.map((section) => [section.heading, section.actions]), [["Your pools", ["New pool"]], ["Main pool", ["Get ready for agents", "Delete pool"]], ["Free resets", []]]);
   assert.equal(seen.sections[1].about, "Used by 2 projects. 3 ready. Shown on each project's pool picker.");
   assert.deepEqual(seen.items.map((item) => [item.name, item.count, item.about, item.current]), [["Main pool", "3 of 15", "3 ready. Used by 2 projects.", "true"], ["Spare", "1 of 15", "1 ready. Not used.", null]]);
   assert.equal(seen.cap, "3 of 15Add account");

@@ -26,6 +26,7 @@ test("extraction preserves the existing closed event codec", () => {
     { kind: "completed", turn_id: "turn-a", status: "failed", failure: "rate_limited" },
     { kind: "completed", turn_id: "turn-a", status: "failed", failure: "quota_exhausted" },
     { kind: "completed", turn_id: "turn-a", status: "failed", failure: "invalid_authentication" },
+    { kind: "completed", turn_id: "turn-a", status: "failed", failure: "not_found" },
   ]) {
     assert.deepEqual(unpack(encodeEvent("session-a", "instance-a", 1n, body)), {
       protocol_version: 1, session_id: "session-a", instance_id: "instance-a", sequence: 1, event: body,

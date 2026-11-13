@@ -35,7 +35,7 @@ mod native_profiles;
 pub(crate) use native_profiles::MAX_PROFILES;
 pub(crate) use native_profiles::{
     AgentCredential, ConfiguredRcliProfileMetadata, NativeProfileCustody, NativeProfileUse,
-    NativeProfileUsePurpose,
+    NativeProfileUsePurpose, generated_home_needs_key,
 };
 #[cfg(unix)]
 pub(crate) use native_profiles::{remove_generated_home, remove_sign_in};

@@ -182,6 +182,8 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) steps: crate::master_step_limit::StepLimit,
     pub(crate) time: crate::master_time_limit::TimeLimit,
     pub(crate) frames: crate::master_frame_limit::FrameSize,
+    pub(crate) model: Option<String>,
+    pub(crate) model_provider: Option<String>,
 }
 
 impl PreparedMasterTurn {
@@ -297,6 +299,8 @@ struct Preparation {
     auth: MasterBootstrapAuth,
     worktree_lease: RequestId,
     lease: WorktreeLease,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2178,14 +2182,75 @@ fn master_members<'a>(config: &'a EffectiveConfig, session: &MasterSessionView) 
 }
 
 /// Lists the members a turn may try, in the owner's schedule order, the same for every
-/// master harness (PA-6, DEC-091). Inputs: the transaction, settings and session.
-/// Output: each member with its settings or schedule gap and whether the owner chose it.
+/// master harness (PA-6, DEC-091). With an RCLI master model, a member whose provider does
+/// not serve it gets a ModelUnserved gap; settings and schedule gaps come first (DEC-150
+/// M-5). Inputs: the transaction, settings, session and the master model. Output: each
+/// member with its gap and whether the owner chose it.
 fn candidates<'a>(
     tx: &Transaction<'_>,
     config: &'a EffectiveConfig,
     session: &MasterSessionView,
+    model: Option<&str>,
 ) -> Result<Vec<Member<'a>>, EngineError> {
-    scheduled(tx, config, session, master_members(config, session))
+    let members = scheduled(tx, config, session, master_members(config, session))?;
+    let Some(model) = model else {
+        return Ok(members);
+    };
+    assert_eq!(session.selection.backend, MasterBackend::Rcli);
+    let custom = crate::model_choice::store::custom_provider(tx, "rcli", model)?;
+    Ok(members
+        .into_iter()
+        .map(|(connection, gap, chosen)| {
+            let gap = gap.or_else(|| {
+                (!crate::model_choice::rcli_serves(model, connection, custom.as_deref())).then(
+                    || {
+                        (
+                            MasterReason::ModelUnserved,
+                            "master_model_unserved".to_owned(),
+                        )
+                    },
+                )
+            });
+            (connection, gap, chosen)
+        })
+        .collect())
+}
+
+/// Reads the master model a turn of an RCLI master runs on (DEC-150 M-5): the project's
+/// master slot, then the app's, none for each account's own model or another backend.
+/// Read once per preparation, in its transaction. Inputs: the transaction and session.
+/// Output: the model, or `model_choice_unavailable`.
+fn master_model(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+) -> Result<Option<String>, EngineError> {
+    if session.selection.backend != MasterBackend::Rcli {
+        return Ok(None);
+    }
+    let model = crate::model_choice::store::launch_model(
+        tx,
+        "rcli",
+        &crate::model_choice::catalog("rcli"),
+        Some(&session.project_id),
+        crate::model_choice::Slot::Master,
+    )?;
+    assert!(
+        model
+            .as_deref()
+            .is_none_or(|id| crate::model_choice::model_valid("rcli", id))
+    );
+    Ok(model)
+}
+
+/// The plain line a turn blocked on a master model no pool account serves shows, the same
+/// on desktop and TUI (DEC-141). Input: the model id. Output: the line.
+pub(crate) fn unserved_line(model: &str) -> String {
+    assert!(crate::model_choice::model_valid("rcli", model));
+    let line = format!(
+        "No account in this master's pool can run {model}. Add an account whose provider serves it to the pool, or change the master model in Settings, Harnesses, RCLI, Models."
+    );
+    assert!(line.len() <= 256 + crate::model_choice::MODEL_BYTES_MAX);
+    line
 }
 
 /// Orders a native master's pool members by the owner's schedule (DEC-096 item 8): the
@@ -2411,9 +2476,11 @@ fn other_ready(
 
 /// Blocks a queued turn that no member of its harness can run, naming each member and
 /// why plus the ready accounts of other harnesses. Inputs: the transaction, settings,
-/// host, session, turn and the members' gaps in member order. Output: the blocked turn,
-/// persisted with the owner-chosen member's reason and code, or ConnectionChanged with
-/// native_profile_connection_missing when that member is gone.
+/// host, session, turn, the members' gaps in member order and the RCLI master model.
+/// Output: the blocked turn, persisted with the owner-chosen member's reason and code,
+/// ModelUnserved when no member serves the master model, or ConnectionChanged with
+/// native_profile_connection_missing when the chosen member is gone. A ModelUnserved turn
+/// carries the line naming the model.
 fn block_on_gaps(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2421,17 +2488,30 @@ fn block_on_gaps(
     session: &mut MasterSessionView,
     turn: &mut MasterTurnView,
     gaps: &[(&ModelConnection, Gap, bool)],
+    model: Option<&str>,
 ) -> Result<(), EngineError> {
     assert_eq!(turn.phase, MasterTurnPhase::Queued);
+    let unserved = !gaps.is_empty()
+        && gaps
+            .iter()
+            .all(|(_, (reason, _), _)| *reason == MasterReason::ModelUnserved);
     let (reason, cause) = gaps.iter().find(|(_, _, chosen)| *chosen).map_or_else(
-        || {
-            (
+        || match unserved {
+            true => (
+                MasterReason::ModelUnserved,
+                "master_model_unserved".to_owned(),
+            ),
+            false => (
                 MasterReason::ConnectionChanged,
                 "native_profile_connection_missing".to_owned(),
-            )
+            ),
         },
         |(_, gap, _)| gap.clone(),
     );
+    assert!(reason != MasterReason::ModelUnserved || model.is_some());
+    if let (MasterReason::ModelUnserved, Some(model)) = (reason, model) {
+        turn.detail = Some(unserved_line(model));
+    }
     let mut accounts: Vec<_> = gaps
         .iter()
         .map(|(connection, (reason, _), _)| MasterAccountState {
@@ -2981,6 +3061,11 @@ fn bundle(
         steps: crate::master_step_limit::load(tx)?.limit,
         time: crate::master_time_limit::load(tx)?.limit,
         frames: crate::master_frame_limit::load(tx)?.limit,
+        model_provider: match record.model.as_deref() {
+            Some(model) => crate::model_choice::store::custom_provider(tx, "rcli", model)?,
+            None => None,
+        },
+        model: record.model,
     };
     assert_eq!(
         prepared.attempt.request.task_id,
@@ -3082,8 +3167,9 @@ fn prepare_turn(
     if !preflight_turn(tx, config, session, turn)? {
         return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
     }
+    let model = master_model(tx, session)?;
     let mut gaps = Vec::new();
-    for (member, gap, chosen) in candidates(tx, config, session)? {
+    for (member, gap, chosen) in candidates(tx, config, session, model.as_deref())? {
         let auth = match member_auth(tx, config, host, session, custody, member, gap)? {
             Ok(auth) => auth,
             Err(gap) => {
@@ -3117,6 +3203,7 @@ fn prepare_turn(
             auth,
             worktree_lease,
             lease,
+            model: model.clone(),
         };
         let inserted = tx
             .execute(
@@ -3135,7 +3222,7 @@ fn prepare_turn(
         current_scope(tx, config, sources, host, session, turn)?;
         return bundle(tx, config, session.clone(), turn);
     }
-    block_on_gaps(tx, config, host, session, turn, &gaps)?;
+    block_on_gaps(tx, config, host, session, turn, &gaps, model.as_deref())?;
     Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())))
 }
 
@@ -3344,6 +3431,9 @@ fn observe_turn(
             turn.phase = MasterTurnPhase::Failed;
             turn.reason = Some(reason);
             turn.cause = Some(cause_code(&cause));
+            if cause == crate::master_session::RCLI_KEY_SETUP_CAUSE {
+                turn.detail = Some(crate::master_session::RCLI_KEY_SETUP_LINE.into());
+            }
             if pauses(reason)
                 && let Some(attempt) = &turn.attempt
             {
@@ -3419,9 +3509,10 @@ fn provision_bootstrap(
         tx.commit().map_err(error)?;
         return Ok(None);
     }
+    let model = master_model(&tx, &session)?;
     let mut gaps = Vec::new();
     let mut ready = None;
-    for (member, gap, chosen) in candidates(&tx, config, &session)? {
+    for (member, gap, chosen) in candidates(&tx, config, &session, model.as_deref())? {
         match member_auth(&tx, config, host, &session, custody, member, gap)? {
             Ok(auth) => {
                 ready = Some(auth);
@@ -3431,7 +3522,15 @@ fn provision_bootstrap(
         }
     }
     let Some(auth) = ready else {
-        block_on_gaps(&tx, config, host, &mut session, &mut turn, &gaps)?;
+        block_on_gaps(
+            &tx,
+            config,
+            host,
+            &mut session,
+            &mut turn,
+            &gaps,
+            model.as_deref(),
+        )?;
         tx.commit().map_err(error)?;
         return Ok(None);
     };
@@ -3909,7 +4008,13 @@ fn register_generated_rcli_profile(
                 member: Some(&member),
                 configured_home: &home,
             };
-            register_rcli_profile(db, config, sources, custody, registration).map(|_| ())
+            let repaired = custody
+                .as_mut()
+                .map_err(|failure| failure.clone())
+                .and_then(|custody| custody.repair_legacy_configured_home(host, &member, &account));
+            repaired.and_then(|()| {
+                register_rcli_profile(db, config, sources, custody, registration).map(|_| ())
+            })
         } else if let Some(record) = stale {
             refresh_rcli_profile(db, config, sources, custody, host, &member, record)
         } else {
@@ -5594,6 +5699,19 @@ auth = { method = "none" }"#;
         crate::config::configured_profile_ref(&spare_connection()).unwrap()
     }
 
+    /// The pool's RCLI key as a keyed OpenAI account saved before DEC-150 addendum 9a,
+    /// under the builtin provider id rcli keeps, as Fixture::legacy_keyed's settings hold
+    /// it. The key reference is synthetic. Output: the connection.
+    fn legacy_keyed_connection() -> ModelConnection {
+        ModelConnection {
+            provider: reference("openai"),
+            auth: ModelAuthentication::ApiKey {
+                credential_ref: reference("synthetic-key-ref-legacy"),
+            },
+            ..local_connection()
+        }
+    }
+
     struct Fixture {
         storage: Storage,
         config: EffectiveConfig,
@@ -5778,6 +5896,22 @@ auth = { method = "none" }"#;
             ] {
                 assert!(config.contains(&replaced), "{replaced}");
             }
+            Self::build_with(&config, true, false, PROMPT).await
+        }
+
+        /// A master whose pool's RCLI key is legacy_keyed_connection: a keyed OpenAI
+        /// account saved before DEC-150 addendum 9a under the builtin provider id.
+        async fn legacy_keyed() -> Self {
+            let provider = "id = \"local-connection\"\nprovider = \"openai\"";
+            let auth =
+                r#"auth = { method = "api_key", credential_ref = "synthetic-key-ref-legacy" }"#;
+            let config = CONFIG
+                .replace(
+                    "id = \"local-connection\"\nprovider = \"local-provider\"",
+                    provider,
+                )
+                .replace(r#"auth = { method = "none" }"#, auth);
+            assert!(config.contains(provider) && config.contains(auth));
             Self::build_with(&config, true, false, PROMPT).await
         }
 
@@ -6313,6 +6447,42 @@ auth = { method = "none" }"#;
         home
     }
 
+    /// Writes the SDK home account setup generated for a keyed RCLI key before DEC-150
+    /// addendum 9a: the engine's own config naming the builtin provider id, and no profile
+    /// slot, as a save refused at its profile step left it. Inputs: the fixture, the key
+    /// and the model id the config names. Output: the config's path.
+    fn legacy_generated_home(case: &Fixture, connection: &ModelConnection, model: &str) -> PathBuf {
+        let profile = super::super::account_profile::configured_profile_ref(connection).unwrap();
+        let homes = case.root.path().join("configured-sdk-homes");
+        if !homes.exists() {
+            std::fs::create_dir(&homes).unwrap();
+            std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let home = homes.join(format!("{:x}", Sha256::digest(profile.as_str().as_bytes())));
+        let sdk = home.join(".backboard");
+        std::fs::create_dir_all(&sdk).unwrap();
+        for directory in [&home, &sdk] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let ModelEndpoint::Http { url } = &connection.endpoint else {
+            panic!("a keyed RCLI key has an HTTP endpoint");
+        };
+        let config = sdk.join("config.json");
+        private_file(
+            &config,
+            &serde_json::to_vec(&serde_json::json!({
+                "model": { "provider": connection.provider.as_str(), "model": model },
+                "providers": [{
+                    "id": connection.provider.as_str(), "name": "Configured provider",
+                    "protocol": connection.protocol.as_str(), "baseUrl": url,
+                    "auth": { "type": "apiKey" }
+                }]
+            }))
+            .unwrap(),
+        );
+        config
+    }
+
     /// Queues the fixture session's next turn and names it. Inputs: the fixture and the
     /// send's id. Output: the queued turn's prepare command.
     async fn next_turn(case: &Fixture, id: &str) -> MasterRuntimeCommand {
@@ -6669,6 +6839,101 @@ auth = { method = "none" }"#;
             case.session.selection.target_profile_ref
         );
         drop(tx);
+        case.close().await;
+    }
+
+    /// KY-M1 (DEC-150 addendum 9a): a keyed RCLI key saved under an rcli builtin provider id
+    /// before the fix, already in the pool, left a slot-less generated home naming that id.
+    /// The next master turn rewrites it to the hashed id, registers it and prepares, with no
+    /// owner action.
+    #[tokio::test]
+    async fn a_pooled_keyed_rcli_key_saved_before_the_builtin_id_fix_prepares_the_master_unaided() {
+        let case = Fixture::legacy_keyed().await;
+        let connection = legacy_keyed_connection();
+        assert_eq!(
+            case.config
+                .settings
+                .model_access
+                .as_ref()
+                .unwrap()
+                .connections[0],
+            connection
+        );
+        let config = legacy_generated_home(&case, &connection, &connection.model.id);
+        let result = case.runtime(case.prepare()).await.unwrap();
+        let MasterRuntimeResult::Prepared(prepared) = result else {
+            panic!("the legacy keyed home must be repaired and prepare the first turn");
+        };
+        assert_eq!(prepared.attempt.connection, connection);
+        let hashed = crate::rcli_host::configured_sdk_connection(&connection)
+            .unwrap()
+            .provider;
+        assert_ne!(hashed, connection.provider);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        assert_eq!(written["model"]["provider"], hashed.as_str());
+        assert_eq!(written["providers"][0]["id"], hashed.as_str());
+        case.close().await;
+    }
+
+    /// KY-M1: only the engine's exact old config for the key is repaired; a slot-less home
+    /// holding anything else still stops the master and is left as it was.
+    #[tokio::test]
+    async fn a_slotless_keyed_home_that_is_not_the_engine_s_old_config_still_stops_the_master() {
+        let case = Fixture::legacy_keyed().await;
+        let connection = legacy_keyed_connection();
+        let config = legacy_generated_home(&case, &connection, "another-model");
+        let before = std::fs::read(&config).unwrap();
+        let Err(refused) = case.runtime(case.prepare()).await else {
+            panic!("a slot-less home that is not the engine's old config must stop the master");
+        };
+        assert_eq!(refused.0, "rcli_profile_configuration_invalid");
+        assert_eq!(std::fs::read(&config).unwrap(), before);
+        case.close().await;
+    }
+
+    /// KY-M1: a master turn stopped because the engine could not write its keyed account's
+    /// saved key keeps the reason a changed profile gets, so pausing and failover stay as
+    /// they are, and carries the line naming each app's way to set the account up again.
+    #[tokio::test]
+    async fn a_master_turn_stopped_for_its_key_setup_names_each_way_to_set_it_up_again() {
+        let case = Fixture::new(true).await;
+        case.register().await;
+        let MasterRuntimeResult::Prepared(prepared) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("the registered key must prepare the first turn");
+        };
+        case.runtime(MasterRuntimeCommand::Observe {
+            host: case.started.host.clone(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            attempt_id: prepared.attempt.request.id.clone(),
+            observation: MasterRuntimeObservation::Failed {
+                reason: MasterReason::ConnectionChanged,
+                cause: crate::master_session::RCLI_KEY_SETUP_CAUSE.into(),
+            },
+        })
+        .await
+        .unwrap();
+        let (_, turns) = case.view().await;
+        let stopped = turns.iter().find(|turn| turn.id == case.turn.id).unwrap();
+        assert_eq!(
+            (
+                stopped.phase,
+                stopped.reason,
+                stopped.cause.as_deref(),
+                stopped.detail.as_deref()
+            ),
+            (
+                MasterTurnPhase::Failed,
+                Some(MasterReason::ConnectionChanged),
+                Some("rcli_master_key_setup_required"),
+                Some(
+                    "The master could not set this account's API key up for agents. Set it up again: in the app, Settings, Pools, Get ready for agents; in the terminal app, Model access, k Private profile setup."
+                )
+            )
+        );
         case.close().await;
     }
 

@@ -7,9 +7,10 @@ import { validateObservationFrame, type ObservationFrame } from "./host.observat
 const FRAME_MAX = 65_536;
 export const FRAME_TEXT_MAX = FRAME_MAX - 1_024;
 /** The provider failures a failed turn can name: the model provider's rate limit, its
- * spent quota or credit, or its refusal of the key. The engine moves an rcli master to the
- * next pool account on each, as it does for the other harnesses (PA-6, DEC-091). */
-export const PROVIDER_FAILURES = ["rate_limited", "quota_exhausted", "invalid_authentication"] as const;
+ * spent quota or credit, its refusal of the key, or an HTTP 404 (not_found). The engine
+ * moves an rcli master to the next pool account on the first three (PA-6, DEC-091) and reads
+ * not_found by the account's provider (DEC-150 addendum 9e). */
+export const PROVIDER_FAILURES = ["rate_limited", "quota_exhausted", "invalid_authentication", "not_found"] as const;
 export type ProviderFailure = (typeof PROVIDER_FAILURES)[number];
 const QUEUE_MAX = 64;
 const QUEUE_BYTES_MAX = 1_048_576;

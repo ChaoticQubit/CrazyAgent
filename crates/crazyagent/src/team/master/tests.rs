@@ -6063,7 +6063,7 @@ fn owner_models(
     let catalog = crate::model_choice::catalog(harness);
     for id in ids {
         assert_eq!(
-            store::custom_begin(db, harness, &catalog, id).unwrap(),
+            store::custom_begin(db, harness, &catalog, id, None).unwrap(),
             Begun::Pending
         );
         store::custom_checked(db, harness, id, true).unwrap();

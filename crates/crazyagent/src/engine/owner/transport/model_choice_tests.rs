@@ -329,6 +329,7 @@ fn the_largest_models_section_fits_one_owner_frame() {
         reason: Some("r".repeat(crate::model_choice::UNQUALIFIED_REASON_BYTES_MAX)),
         testable: true,
         live_note: Some(crate::model_choice::live::not_reported("claude-code")),
+        providers: Vec::new(),
     };
     for reply in [
         Reply::Values {
@@ -398,7 +399,7 @@ fn pool() -> CredentialRef {
 
 /// A launch that must not run: the checks before it refused the test.
 fn never<'a>() -> Launch<'a> {
-    Box::new(|_| panic!("a refused test spends no run"))
+    Box::new(|_, _| panic!("a refused test spends no run"))
 }
 
 /// A launch that answers the given decision once, recording the pool it was handed.
@@ -406,7 +407,7 @@ fn answers<'a>(
     decision: (Tested, Option<String>),
     handed: &'a std::cell::RefCell<Option<CredentialRef>>,
 ) -> Launch<'a> {
-    Box::new(move |pool| {
+    Box::new(move |pool, _| {
         *handed.borrow_mut() = Some(pool.clone());
         Ok(decision)
     })
@@ -522,7 +523,7 @@ fn a_test_records_verified_and_failed_and_leaves_a_pending_id_pending_with_its_r
 fn a_test_whose_id_was_removed_while_it_ran_stays_undecided_and_a_busy_test_is_refused() {
     let (_tmp, root) = engine();
     added(&root, "gpt-a");
-    let removing: Launch<'_> = Box::new(|_| {
+    let removing: Launch<'_> = Box::new(|_, _| {
         let db = versioned::open(&root).unwrap();
         assert!(store::custom_remove(&db, "codex", "gpt-a").unwrap());
         Ok((Tested::Verified, None))
@@ -539,11 +540,124 @@ fn a_test_whose_id_was_removed_while_it_ran_stays_undecided_and_a_busy_test_is_r
     assert!(reason.unwrap().contains("changed"));
 
     added(&root, "gpt-b");
-    let busy: Launch<'_> = Box::new(|_| Err(test_launch::BUSY));
+    let busy: Launch<'_> = Box::new(|_, _| Err(test_launch::BUSY));
     assert_eq!(
         tested(&root, "codex", "gpt-b", Some(&pool()), None, busy)
             .unwrap_err()
             .0,
         test_launch::BUSY
+    );
+}
+
+/// DEC-150 addendum 9e (leader 19:01): the owner adds an RCLI id naming one keyed provider,
+/// RCLI's Models section offers those providers and a test launch, and the test hands the
+/// launch the pool and the id's provider; a Codex test hands no provider.
+#[test]
+fn an_rcli_id_is_added_with_its_provider_and_its_test_runs_on_that_provider() {
+    let (_tmp, root) = engine();
+    let add = |provider: Option<&str>| {
+        let mut body =
+            json!({"model_choice": {"kind": "add", "harness": "rcli", "model": "my-model"}});
+        if let Some(provider) = provider {
+            body["model_choice"]["provider"] = json!(provider);
+        }
+        send(&root, body)
+    };
+    assert_eq!(add(None).unwrap_err().0, "model_choice_provider_needed");
+    assert_eq!(
+        add(Some("local")).unwrap_err().0,
+        "model_choice_provider_unknown"
+    );
+    match add(Some("openrouter")).unwrap() {
+        Reply::Added { added, models } => {
+            assert_eq!(added, Added::Pending);
+            assert!(models.testable);
+            assert_eq!(
+                models.providers,
+                crate::model_choice::provider_choices("rcli")
+            );
+            assert!(!models.providers.is_empty());
+        }
+        other => panic!("not added: {other:?}"),
+    }
+    assert_eq!(
+        send(
+            &root,
+            json!({"model_choice": {"kind": "add", "harness": "codex", "model": "gpt-a", "provider": "openai"}})
+        )
+        .unwrap_err()
+        .0,
+        "model_choice_provider_unknown"
+    );
+    let handed = std::cell::RefCell::new(None);
+    let named = std::cell::RefCell::new(None);
+    let launch: Launch<'_> = Box::new(|pool, provider| {
+        *handed.borrow_mut() = Some(pool.clone());
+        *named.borrow_mut() = provider.map(str::to_owned);
+        Ok((Tested::Verified, None))
+    });
+    match tested(&root, "rcli", "my-model", Some(&pool()), None, launch).unwrap() {
+        Reply::Tested { tested, reason, .. } => {
+            assert_eq!((tested, reason), (Tested::Verified, None));
+        }
+        other => panic!("not tested: {other:?}"),
+    }
+    assert_eq!(handed.take(), Some(pool()));
+    assert_eq!(named.take().as_deref(), Some("openrouter"));
+    let db = versioned::open(&root).unwrap();
+    assert_eq!(
+        store::custom_provider(&db, "rcli", "my-model")
+            .unwrap()
+            .as_deref(),
+        Some("openrouter")
+    );
+    let (state, _) = added(&root, "gpt-a");
+    assert_eq!(state, Added::Pending);
+    let codex: Launch<'_> = Box::new(|_, provider| {
+        assert_eq!(provider, None, "a Codex id names no provider");
+        Ok((Tested::Failed, None))
+    });
+    tested(&root, "codex", "gpt-a", Some(&pool()), None, codex).unwrap();
+}
+
+/// DEC-150 addendum 9e: an RCLI id added again under another provider while its test ran
+/// is never recorded on a provider it was not tested on; it stays pending under the new
+/// provider, saying it changed.
+#[test]
+fn an_rcli_id_added_again_under_another_provider_while_tested_stays_pending() {
+    let (_tmp, root) = engine();
+    let add = |provider: &str| {
+        send(
+            &root,
+            json!({"model_choice": {"kind": "add", "harness": "rcli", "model": "my-model", "provider": provider}}),
+        )
+        .unwrap()
+    };
+    add("openrouter");
+    let launch: Launch<'_> = Box::new(|_, provider| {
+        assert_eq!(provider, Some("openrouter"));
+        add("anthropic");
+        Ok((Tested::Verified, None))
+    });
+    match tested(&root, "rcli", "my-model", Some(&pool()), None, launch).unwrap() {
+        Reply::Tested { tested, reason, .. } => {
+            assert_eq!(tested, Tested::Pending);
+            assert_eq!(
+                reason.as_deref(),
+                Some("The id changed while it was tested; add it again to test it.")
+            );
+        }
+        other => panic!("not tested: {other:?}"),
+    }
+    let db = versioned::open(&root).unwrap();
+    assert_eq!(
+        store::custom_provider(&db, "rcli", "my-model").unwrap(),
+        None
+    );
+    assert_eq!(
+        store::pending_provider(&db, "rcli", "my-model")
+            .unwrap()
+            .as_deref(),
+        Some("anthropic")
     );
 }

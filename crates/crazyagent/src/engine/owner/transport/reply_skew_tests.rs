@@ -527,7 +527,7 @@ fn every_exchange_names_its_reads_and_only_its_reads() {
         ("questions", &["List", "Counts"]),
         ("recovery", &["List"]),
         ("roadmap", &["ReadStatus"]),
-        ("usage", &["Report", "Metrics"]),
+        ("usage", &["Report", "Metrics", "Extras"]),
     ];
     assert_eq!(sources.len(), expected.len());
     let head = "fn read_kind(action: &Action) -> Option<&'static str> {\n";

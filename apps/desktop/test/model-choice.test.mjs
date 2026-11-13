@@ -218,7 +218,7 @@ test("every call names its command once with exactly the window's arguments", ()
   assert.match(source, /call<ModelsPage>\("desktop_model_choice", \{ harness, projectId, fresh \}\)/);
   assert.match(source, /call<void>\("desktop_set_model_choice", \{ harness, projectId, slot, value, version \}\)/);
   assert.match(source, /call<void>\("desktop_reset_model_choice", \{ harness, projectId, slot, version \}\)/);
-  assert.match(source, /call<ModelAdded>\("desktop_add_model", \{ harness, model \}\)/);
+  assert.match(source, /call<ModelAdded>\("desktop_add_model", \{ harness, model, provider \}\)/);
   assert.match(source, /call<boolean>\("desktop_remove_model", \{ harness, model \}\)/);
   assert.match(source, /call<ModelRules>\("desktop_model_rules"\)/);
   assert.match(source, /call<void>\("desktop_set_model_rule", \{ rule, value, version \}\)/);

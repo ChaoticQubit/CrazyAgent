@@ -50,6 +50,8 @@ impl OwnerRuntimeHandle {
             cwd: prepared.cwd.clone(),
             profile_config_sha256,
             instructions: None,
+            model: prepared.model.clone(),
+            model_provider: prepared.model_provider.clone(),
         })
     }
 }
@@ -318,6 +320,41 @@ fallback_allowed = false
         async fn start_with_timeout(timeout_ms: u64) -> Self {
             let config = CONFIG.replace("timeout_ms = 2000", &format!("timeout_ms = {timeout_ms}"));
             assert!(config.contains(&format!("timeout_ms = {timeout_ms}\n")));
+            let home_config = serde_json::json!({
+                "model": {"provider": "local-provider", "model": "local-model"},
+                "providers": [{"id": "local-provider", "name": "Local provider",
+                    "protocol": "openai-chat", "baseUrl": "http://127.0.0.1:11434/v1",
+                    "auth": {"type": "none"}}]
+            });
+            Self::build(&config, &home_config).await
+        }
+
+        /// A master whose pool's RCLI key is keyed_connection: a keyed OpenAI account saved
+        /// before DEC-150 addendum 9a, registered on an owner home naming its hashed id.
+        async fn keyed() -> Self {
+            let provider = "id = \"local-connection\"\nprovider = \"openai\"";
+            let auth =
+                r#"auth = { method = "api_key", credential_ref = "synthetic-key-ref-legacy" }"#;
+            let config = CONFIG
+                .replace(
+                    "id = \"local-connection\"\nprovider = \"local-provider\"",
+                    provider,
+                )
+                .replace(r#"auth = { method = "none" }"#, auth);
+            assert!(config.contains(provider) && config.contains(auth));
+            let hashed = crate::rcli_host::configured_sdk_connection(&keyed_connection())
+                .unwrap()
+                .provider;
+            let home_config = serde_json::json!({
+                "model": {"provider": hashed.as_str(), "model": "local-model"},
+                "providers": [{"id": hashed.as_str(), "name": "Local provider",
+                    "protocol": "openai-chat", "baseUrl": "http://127.0.0.1:11434/v1",
+                    "auth": {"type": "apiKey"}}]
+            });
+            Self::build(&config, &home_config).await
+        }
+
+        async fn build(config: &str, home_config: &serde_json::Value) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-mrl-")
                 .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -332,13 +369,7 @@ fallback_allowed = false
             private_directory(&home.join(".backboard"));
             private_file(
                 &home.join(".backboard/config.json"),
-                &serde_json::to_vec(&serde_json::json!({
-                    "model": {"provider": "local-provider", "model": "local-model"},
-                    "providers": [{"id": "local-provider", "name": "Local provider",
-                        "protocol": "openai-chat", "baseUrl": "http://127.0.0.1:11434/v1",
-                        "auth": {"type": "none"}}]
-                }))
-                .unwrap(),
+                &serde_json::to_vec(home_config).unwrap(),
             );
             let repository = root.path().join("repository");
             private_directory(&repository);
@@ -539,6 +570,264 @@ fallback_allowed = false
         }
     }
 
+    /// The pool's RCLI key of Fixture::keyed, as its settings hold it. The key reference is
+    /// synthetic. Output: the connection.
+    fn keyed_connection() -> crate::config::ModelConnection {
+        crate::config::ModelConnection {
+            id: reference("local-connection"),
+            provider: reference("openai"),
+            harness: reference("rcli"),
+            protocol: reference("openai-chat"),
+            account_ref: reference("local-account"),
+            endpoint: crate::config::ModelEndpoint::Http {
+                url: "http://127.0.0.1:11434/v1".into(),
+            },
+            model: crate::config::ModelReference {
+                id: "local-model".into(),
+                author: reference("local-author"),
+            },
+            auth: crate::config::ModelAuthentication::ApiKey {
+                credential_ref: reference("synthetic-key-ref-legacy"),
+            },
+        }
+    }
+
+    /// Writes the generated SDK home of a keyed account with the fixture's config and no key
+    /// file, as a keyed account saved before DEC-150 addendum 9a has it once the master start
+    /// repaired it. Inputs: the fixture and the account's connection. Output: the home.
+    fn generated_home(case: &Fixture, connection: &crate::config::ModelConnection) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        let profile = crate::config::configured_profile_ref(connection).unwrap();
+        let homes = case.host.authority.root.path.join("configured-sdk-homes");
+        if !homes.exists() {
+            private_directory(&homes);
+        }
+        let home = homes.join(format!("{:x}", Sha256::digest(profile.as_str().as_bytes())));
+        private_directory(&home);
+        private_directory(&home.join(".backboard"));
+        private_file(
+            &home.join(".backboard/config.json"),
+            &std::fs::read(case.home.join(".backboard/config.json")).unwrap(),
+        );
+        home
+    }
+
+    /// Counts the account setups the engine reserved or started and never settled. Input:
+    /// the fixture. Output: the count, zero before any setup made the table.
+    fn unsettled_setups(case: &Fixture) -> i64 {
+        let db =
+            rusqlite::Connection::open(case.host.authority.root.path.join("engine.db")).unwrap();
+        let table: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='account_profile_operations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if table == 0 {
+            return 0;
+        }
+        db.query_row(
+            "SELECT count(*) FROM account_profile_operations WHERE phase IN ('reserved','running')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// KY-M1: a pooled keyed account saved before DEC-150 addendum 9a has a generated home
+    /// holding its config but no key file. When the engine cannot write the saved key there,
+    /// the launch stops with the key setup cause and leaves no setup unsettled.
+    #[tokio::test]
+    async fn a_keyed_master_whose_generated_home_lacks_its_key_stops_with_the_key_setup_cause() {
+        let case = Fixture::keyed().await;
+        assert_eq!(case.prepared.attempt.connection, keyed_connection());
+        let generated = generated_home(&case, &keyed_connection());
+        let refused = case
+            .host
+            .set_up_master_key(&case.prepared)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "rcli_master_key_setup_required");
+        assert!(!generated.join(".backboard/keys.json").exists());
+        assert_eq!(unsettled_setups(&case), 0);
+        case.close().await;
+    }
+
+    /// KY-M1: a keyless master, and a keyed one whose generated home already holds its key
+    /// file, launch with no key setup.
+    #[tokio::test]
+    async fn a_master_with_no_key_missing_launches_with_no_key_setup() {
+        let case = Fixture::start().await;
+        case.host.set_up_master_key(&case.prepared).await.unwrap();
+        assert_eq!(unsettled_setups(&case), 0);
+        case.close().await;
+        let case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        private_file(&generated.join(".backboard/keys.json"), b"{}");
+        case.host.set_up_master_key(&case.prepared).await.unwrap();
+        assert_eq!(unsettled_setups(&case), 0);
+        case.close().await;
+    }
+
+    /// Saves a synthetic key for an account in the engine's account key store, beside the
+    /// engine root, as adding a keyed account does. Inputs: the fixture and the account's
+    /// credential reference. Output: none.
+    fn saved_account_key(case: &Fixture, credential: &str) {
+        let keys = case
+            .host
+            .authority
+            .root
+            .path
+            .parent()
+            .unwrap()
+            .join(crate::storage::accounts::ACCOUNT_KEYS);
+        private_directory(&keys);
+        private_file(&keys.join(credential), b"synthetic-key-not-a-real-key");
+    }
+
+    /// Registers a private key writer stand-in that fails if it ever runs: a private script
+    /// owned by the user, as a pinned host must be. Input: the fixture. Output: none.
+    fn failing_key_writer(case: &Fixture) {
+        let path = case.root.path().join("synthetic-key-writer");
+        std::fs::write(&path, b"#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        case.host
+            .register_rcli_private_key_executable(
+                crate::engine::RegisteredNativeAuthHost::capture(&path).unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// The account setup operations the engine recorded, as (phase, count) by phase.
+    /// Input: the fixture. Output: the pairs, empty before any setup made the table.
+    fn setup_phases(case: &Fixture) -> Vec<(String, i64)> {
+        let db =
+            rusqlite::Connection::open(case.host.authority.root.path.join("engine.db")).unwrap();
+        let table: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='account_profile_operations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if table == 0 {
+            return vec![];
+        }
+        let mut phases = db
+            .prepare("SELECT phase, count(*) FROM account_profile_operations GROUP BY phase ORDER BY phase")
+            .unwrap();
+        phases
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// KY-M1 follow-up (rv-v3sec): with the account's key saved but no private key writer
+    /// registered, the master's key setup refuses before it reserves any operation, writes
+    /// no key file, and the turn stops with the key setup cause.
+    #[tokio::test]
+    async fn a_master_key_setup_with_no_key_writer_reserves_nothing() {
+        let case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        saved_account_key(&case, "synthetic-key-ref-legacy");
+        let refused = case
+            .host
+            .configure_saved_key(&case.prepared)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "native_auth_host_unavailable");
+        let refused = case
+            .host
+            .set_up_master_key(&case.prepared)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "rcli_master_key_setup_required");
+        assert!(!generated.join(".backboard/keys.json").exists());
+        assert!(setup_phases(&case).is_empty());
+        case.close().await;
+    }
+
+    /// KY-M1 follow-up (rv-v3sec): with the key saved and a key writer registered, a key
+    /// setup whose Apply refuses the account's generated home (it holds a file the engine
+    /// never writes) settles its one operation as uncertain, leaves nothing reserved or
+    /// running, never runs the writer and writes no key file.
+    #[tokio::test]
+    async fn a_master_key_setup_that_apply_refuses_leaves_no_open_operation() {
+        let case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        private_file(&generated.join(".backboard/notes.txt"), b"not the engine's");
+        saved_account_key(&case, "synthetic-key-ref-legacy");
+        failing_key_writer(&case);
+        let refused = case
+            .host
+            .configure_saved_key(&case.prepared)
+            .await
+            .unwrap_err();
+        assert_ne!(refused.0, "native_auth_host_unavailable");
+        assert_ne!(refused.0, "account_profile_secret_required_or_unexpected");
+        assert!(!generated.join(".backboard/keys.json").exists());
+        assert_eq!(unsettled_setups(&case), 0);
+        assert_eq!(setup_phases(&case), vec![("uncertain".to_owned(), 1)]);
+        let refused = case
+            .host
+            .set_up_master_key(&case.prepared)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "rcli_master_key_setup_required");
+        assert_eq!(unsettled_setups(&case), 0);
+        case.close().await;
+    }
+
+    /// M-5 (DEC-150 addendum 9e): an RCLI test launch refuses a provider RCLI does not key,
+    /// waits as not installed with no RCLI host registered, and waits for a set-up account
+    /// while the pool's only keyed account lacks its key file or serves another provider.
+    /// None of these starts a runtime folder, and each leaves the RCLI test slot free.
+    #[tokio::test]
+    async fn an_rcli_test_launch_waits_without_its_host_or_a_set_up_account() {
+        use crate::model_choice::test_launch::{NotStarted, Slot, Tested, rcli_not_started};
+        let case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        let root = case.host.authority.root.path.clone();
+        let global = case.root.path().join("global.toml");
+        let project = case.root.path().join("project.toml");
+        let pool = reference("local-pool");
+        let test = |provider: &str| {
+            super::super::master_rcli::model_test::run(
+                &case.host,
+                &root,
+                (&global, &project),
+                "owner-model",
+                provider,
+                &pool,
+            )
+        };
+        let waiting =
+            |provider: &str, why| Ok((Tested::Pending, Some(rcli_not_started(provider, why))));
+        let before = case.names();
+        assert_eq!(test("local-provider"), Err("model_choice_provider_unknown"));
+        assert_eq!(test("openai"), waiting("openai", NotStarted::NotInstalled));
+        let standin = case.root.path().join("synthetic-rcli");
+        std::fs::write(&standin, b"#!/bin/sh\nexit 3\n").unwrap();
+        std::fs::set_permissions(&standin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        case.host
+            .register_rcli_master_executable(
+                crate::engine::RegisteredNativeAuthHost::capture(&standin).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(test("openai"), waiting("openai", NotStarted::NoAccount));
+        assert_eq!(
+            test("anthropic"),
+            waiting("anthropic", NotStarted::NoAccount)
+        );
+        assert!(!generated.join(".backboard/keys.json").exists());
+        assert_eq!(case.names(), before);
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert!(Slot::take(&canonical, "rcli").is_some());
+        case.close().await;
+    }
+
     fn copy_prepared(prepared: &PreparedMasterTurn) -> PreparedMasterTurn {
         PreparedMasterTurn {
             text: prepared.text.clone(),
@@ -560,6 +849,8 @@ fallback_allowed = false
             steps: prepared.steps,
             time: prepared.time,
             frames: prepared.frames,
+            model: prepared.model.clone(),
+            model_provider: prepared.model_provider.clone(),
         }
     }
 

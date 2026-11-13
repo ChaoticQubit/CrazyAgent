@@ -111,7 +111,7 @@ fn the_window_passes_only_the_harness_project_slot_value_model_rule_and_version(
     );
     assert_eq!(
         parameters("desktop_add_model"),
-        [&window[..], &model[..]].concat()
+        [&window[..], &model[..], &["provider: Option<String>,"]].concat()
     );
     assert_eq!(
         parameters("desktop_remove_model"),
@@ -274,9 +274,17 @@ async fn app_flow(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
     );
 
     let added = bridge
-        .add_model(HARNESS.into(), "my-model-1".into())?
+        .add_model(HARNESS.into(), "my-model-1".into(), None)?
         .await?;
     assert_eq!(added, ModelAdded::Pending);
+    let rcli = bridge
+        .add_model(
+            "rcli".into(),
+            "my-model-2".into(),
+            Some("openrouter".into()),
+        )?
+        .await?;
+    assert_eq!(rcli, ModelAdded::Pending);
     let page = read(&bridge, None).await?;
     let mine = page
         .models
@@ -300,11 +308,13 @@ async fn app_flow(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
         "a pending id cannot be chosen before its test launch passes"
     );
     assert_eq!(
-        bridge.add_model(HARNESS.into(), "opus".into())?.await?,
+        bridge
+            .add_model(HARNESS.into(), "opus".into(), None)?
+            .await?,
         ModelAdded::Listed
     );
     let invalid = bridge
-        .add_model(HARNESS.into(), "bad id!".into())?
+        .add_model(HARNESS.into(), "bad id!".into(), None)?
         .await
         .unwrap_err();
     assert_eq!(invalid.code, "model_choice_value_invalid");
@@ -383,7 +393,9 @@ async fn app_flow(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
         bridge
             .set_model_choice(HARNESS.into(), None, "allowed".into(), json!("opus"), 0)
             .err(),
-        bridge.add_model(HARNESS.into(), "a".repeat(257)).err(),
+        bridge
+            .add_model(HARNESS.into(), "a".repeat(257), None)
+            .err(),
         bridge
             .set_model_rule("pick".into(), "sometimes".into(), 0)
             .err(),

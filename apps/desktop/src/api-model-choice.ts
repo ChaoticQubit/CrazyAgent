@@ -36,11 +36,18 @@ export interface ModelCandidate {
   origin: ModelOrigin;
 }
 
+/** One provider an RCLI id can run on, as the engine names it (DEC-150 addendum 9e). */
+export interface ProviderChoice {
+  id: string;
+  name: string;
+}
+
 /** A harness's Models section from the engine: its three slots in page order, every
  * candidate, the harness's list first, then the owner's ids, whether the list was checked
  * on the installed harness version, with the reason when it was not, whether a test launch
- * runs on the harness, so the owner can add and test an id, and the engine's line while the
- * harness reported no live list of its own. */
+ * runs on the harness, so the owner can add and test an id, the engine's line while the
+ * harness reported no live list of its own, and the providers an added id picks one of,
+ * absent where the account decides it. */
 export interface Models {
   harness: string;
   rows: ModelRow[];
@@ -49,6 +56,7 @@ export interface Models {
   reason: string | null;
   testable: boolean;
   live_note: string | null;
+  providers?: ProviderChoice[];
 }
 
 /** The Models page: the section, the project it was read for (null on the app page) and the
@@ -101,6 +109,9 @@ export const NOT_SUPPORTED = "Not supported by this harness";
 /** Why the owner cannot add a model id on a harness the engine says has no test launch,
  * word for word in the TUI (MUG2-L1). */
 export const NO_TEST_LAUNCH = "An id you add needs a test launch, and this harness has none.";
+/** The question an added id asks on a harness that offers providers, RCLI's, word for word
+ * in the TUI (DEC-150 addendum 9e). */
+export const PROVIDER_ASK = "Which provider runs this id?";
 /** The choice that runs the account's own model on the app page. */
 export const ACCOUNT_MODEL = "Account's own model";
 /** The choice that keeps the app value on a project page. */
@@ -179,6 +190,8 @@ const REFUSALS: Record<string, string> = {
   model_choice_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the page before you try again.",
   model_choice_pool_needed: "Pick a pool with at least one account to run the test launch.",
   model_choice_pool_unknown: "That pool no longer exists, so nothing was tested. Pick another one.",
+  model_choice_provider_needed: "Pick the provider this id runs on.",
+  model_choice_provider_unknown: "This harness doesn't offer that provider. Pick one from the list.",
   model_choice_project_unknown: "This project is no longer in CrazyAgent.",
   model_choice_reply_bounds: "The engine's answer was too large to read. Open the page again.",
   model_choice_request_bounds: "This change is too large for the engine. Choose fewer models.",
@@ -479,10 +492,11 @@ export function resetModelChoice(harness: string, projectId: string | null, slot
   return call<void>("desktop_reset_model_choice", { harness, projectId, slot, version });
 }
 
-/** Adds a model id the owner typed for a harness. Inputs: the harness and the id. Output: what
- * the engine did, or the refusal. */
-export function addModel(harness: string, model: string): Promise<Result<ModelAdded>> {
-  return call<ModelAdded>("desktop_add_model", { harness, model });
+/** Adds a model id the owner typed for a harness. Inputs: the harness, the id and, for a
+ * harness that offers providers, the one it runs on. Output: what the engine did, or the
+ * refusal. */
+export function addModel(harness: string, model: string, provider: string | null = null): Promise<Result<ModelAdded>> {
+  return call<ModelAdded>("desktop_add_model", { harness, model, provider });
 }
 
 /** Removes a model id the owner added. Inputs: the harness and the id. Output: whether it was

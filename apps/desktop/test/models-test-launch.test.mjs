@@ -76,3 +76,19 @@ test("a harness the engine says has no test launch says Not supported on Add and
   assert.ok(!offered.includes("Not supported by this harness"), offered);
   assert.ok(offered.includes("It waits for a test launch and can be chosen once that passes."), offered);
 });
+
+test("an RCLI id names the provider it runs on: Add asks which in the TUI's words and adds only once one is picked (DEC-150 addendum 9e)", () => {
+  const providers = [{ id: "openrouter", name: "OpenRouter" }, { id: "openai", name: "OpenAI API" }];
+  const none = ownIds({ testable: true, providers, provider: null, field: "my-model" });
+  assert.ok(none.includes("Which provider runs this id?"), none);
+  assert.ok(none.includes(">OpenRouter<") && none.includes(">OpenAI API<"), none);
+  assert.match(none, /<button[^>]*disabled=""[^>]*>Add<\/button>/);
+  const picked = ownIds({ testable: true, providers, provider: "openai", field: "my-model" });
+  assert.ok(/value="openai" checked=""/.test(picked), picked);
+  assert.match(picked, /<button(?![^>]*disabled)[^>]*>Add<\/button>/);
+  const plain = ownIds({ testable: true, providers: [], provider: null, field: "my-model" });
+  assert.ok(!plain.includes("Which provider runs this id?"), plain);
+  assert.match(plain, /<button(?![^>]*disabled)[^>]*>Add<\/button>/);
+  assert.equal(client.modelChoiceRefusal({ code: "model_choice_provider_needed" }), "Pick the provider this id runs on.");
+  assert.equal(client.modelChoiceRefusal({ code: "model_choice_provider_unknown" }), "This harness doesn't offer that provider. Pick one from the list.");
+});

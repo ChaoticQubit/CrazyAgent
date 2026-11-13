@@ -52,6 +52,8 @@ pub struct RcliMasterLaunch {
     pub cwd: PathBuf,
     pub profile_config_sha256: String,
     pub instructions: Option<PathBuf>,
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +122,7 @@ impl RcliMasterLaunch {
         self.validate_paths()?;
         pinned_file(&self.executable, &self.artifact_sha256, true)?;
         self.validate_profile()?;
+        let model = self.model_flag()?;
         let mut command = Command::new(&self.executable);
         command
             .args(["--session-id", self.binding.session_id.as_str()])
@@ -138,12 +141,42 @@ impl RcliMasterLaunch {
         if let Some(instructions) = &self.instructions {
             command.arg("--instructions-file").arg(instructions);
         }
+        if let Some(model) = &model {
+            command.arg("--model").arg(model);
+        }
         assert_eq!(command.get_program(), self.executable.as_os_str());
         assert_eq!(
             command.get_args().count(),
-            if self.instructions.is_some() { 10 } else { 8 }
+            8 + 2 * usize::from(self.instructions.is_some()) + 2 * usize::from(model.is_some())
         );
         Ok(command)
+    }
+
+    /// Names the `--model` value a chosen master model adds (DEC-150 M-5): the profile's
+    /// provider and the id, as `<provider>/<id>`, none with no chosen model or the account's
+    /// own. An owner's id is served only by the provider the store verified it on (addendum
+    /// 9e). Takes the launch. Returns the value, or `rcli_master_model_unserved` for an id
+    /// the store would not save or the account's provider does not serve.
+    fn model_flag(&self) -> Result<Option<String>, ProtocolError> {
+        let Some(model) = &self.model else {
+            return Ok(None);
+        };
+        let connection = &self.binding.connection;
+        let custom = self.model_provider.as_deref();
+        if !crate::model_choice::model_valid("rcli", model)
+            || custom.is_some_and(|named| !crate::model_choice::rcli_providers().contains(&named))
+            || !crate::model_choice::rcli_serves(model, connection, custom)
+        {
+            return Err(error("rcli_master_model_unserved"));
+        }
+        if *model == connection.model.id {
+            return Ok(None);
+        }
+        let provider = configured_sdk_connection(connection)?.provider;
+        let flag = format!("{}/{model}", provider.as_str());
+        assert!(flag.len() <= 65 + crate::model_choice::MODEL_BYTES_MAX);
+        assert!(!flag.starts_with('-'));
+        Ok(Some(flag))
     }
 
     #[cfg(unix)]
@@ -200,24 +233,47 @@ impl RcliMasterLaunch {
     }
 }
 
-/// Projects a logical connection into the supported isolated SDK selection.
-/// Takes the complete connection without configuration or project revisions.
-/// Returns a physical selection while retaining the original connection.
+/// The provider ids rcli keeps for its own builtin providers and refuses for a configured
+/// one (`RESERVED_CUSTOM_PROVIDER_IDS` in rcli's src/config/providers.ts, 3.0.4). A profile
+/// naming one is never a valid master selection.
+pub(crate) const RESERVED_PROVIDER_IDS: &[&str] = &[
+    "openai",
+    "anthropic",
+    "google",
+    "openrouter",
+    "gemini",
+    "google-gemini",
+];
+
+/// Projects a logical connection into the supported isolated SDK selection. An
+/// OpenAI-compatible connection, and a keyed one saved under a provider id rcli keeps for a
+/// builtin, get a provider id hashed from the whole connection, so none shadows a builtin.
+/// Takes the complete connection without configuration or project revisions. Returns a
+/// physical selection while retaining the original connection.
 pub(crate) fn configured_sdk_connection(
     connection: &ModelConnection,
 ) -> Result<ModelConnection, ProtocolError> {
     let mut selection = connection.clone();
+    let hashed = || -> Result<CredentialRef, ProtocolError> {
+        let bytes =
+            serde_json::to_vec(connection).map_err(|_| error("rcli_master_profile_mismatch"))?;
+        CredentialRef::new(hash_bytes(&bytes))
+    };
     match connection.protocol.as_str() {
         "openai-compatible" => {
-            let bytes = serde_json::to_vec(connection)
-                .map_err(|_| error("rcli_master_profile_mismatch"))?;
-            selection.provider = CredentialRef::new(hash_bytes(&bytes))?;
+            selection.provider = hashed()?;
             selection.protocol = CredentialRef::new("openai-chat")?;
             assert_eq!(selection.provider.as_str().len(), 64);
         }
-        "openai-chat" | "openai-responses" | "anthropic-messages" => {}
+        "openai-chat" | "openai-responses" | "anthropic-messages" => {
+            if RESERVED_PROVIDER_IDS.contains(&connection.provider.as_str()) {
+                selection.provider = hashed()?;
+                assert_eq!(selection.provider.as_str().len(), 64);
+            }
+        }
         _ => return Err(error("rcli_master_profile_mismatch")),
     }
+    assert!(!RESERVED_PROVIDER_IDS.contains(&selection.provider.as_str()));
     assert_eq!(selection.id, connection.id);
     assert_eq!(selection.account_ref, connection.account_ref);
     Ok(selection)
@@ -488,15 +544,7 @@ fn validate_selection(
         || !provider.id.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
         })
-        || [
-            "openai",
-            "anthropic",
-            "google",
-            "openrouter",
-            "gemini",
-            "google-gemini",
-        ]
-        .contains(&provider.id.as_str())
+        || RESERVED_PROVIDER_IDS.contains(&provider.id.as_str())
         || provider.name.trim().is_empty()
         || provider.enabled == Some(false)
         || provider.protocol != connection.protocol.as_str()

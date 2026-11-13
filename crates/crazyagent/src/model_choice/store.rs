@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS model_custom (
     model TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'verified', 'failed')),
     checked_ms INTEGER NOT NULL,
+    provider TEXT,
     PRIMARY KEY (harness, model)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS model_live (
@@ -98,6 +99,7 @@ pub fn values(
         reason,
         testable: super::test_launch::supported(harness),
         live_note: (!reported).then(|| super::live::not_reported(harness)),
+        providers: super::provider_choices(harness),
     })
 }
 
@@ -444,14 +446,18 @@ fn terms(
 
 /// Adds one model id the owner typed for a harness with a test launch, waiting for it,
 /// unless the harness's catalog lists it or it already passed. A failed id may be tried
-/// again. Inputs: the engine database, the harness name, its model catalog and the id.
-/// Output: what was done, or `model_choice_not_supported`, `model_choice_value_invalid`,
-/// `model_choice_custom_full`, `model_choice_harness_unknown` or `model_choice_unavailable`.
+/// again. An RCLI id names the keyed provider its test runs on (DEC-150 addendum 9e); no
+/// other harness takes one. Inputs: the engine database, the harness name, its model
+/// catalog, the id and the provider. Output: what was done, or `model_choice_not_supported`,
+/// `model_choice_value_invalid`, `model_choice_provider_needed`,
+/// `model_choice_provider_unknown`, `model_choice_custom_full`,
+/// `model_choice_harness_unknown` or `model_choice_unavailable`.
 pub fn custom_begin(
     db: &Connection,
     harness: &str,
     catalog: &[String],
     model: &str,
+    provider: Option<&str>,
 ) -> Result<Begun, EngineError> {
     let harness = known(harness)?;
     if !super::test_launch::supported(harness) {
@@ -461,11 +467,18 @@ pub fn custom_begin(
     if !model_valid(harness, model) {
         return Err(failure("model_choice_value_invalid"));
     }
+    match (harness, provider) {
+        ("rcli", None) => return Err(failure("model_choice_provider_needed")),
+        ("rcli", Some(named)) if super::rcli_providers().contains(&named) => {}
+        (_, Some(_)) => return Err(failure("model_choice_provider_unknown")),
+        (_, None) => {}
+    }
+    assert_eq!(provider.is_some(), harness == "rcli");
     if catalog.iter().any(|id| id == model) {
         return Ok(Begun::Listed);
     }
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)?;
-    tx.execute_batch(SCHEMA).map_err(unavailable)?;
+    ready(&tx)?;
     let state: Option<String> = tx
         .query_row(
             "SELECT state FROM model_custom WHERE harness = ?1 AND model = ?2",
@@ -490,11 +503,12 @@ pub fn custom_begin(
     }
     let changed = tx
         .execute(
-            "INSERT INTO model_custom(harness, model, state, checked_ms)
-             VALUES (?1, ?2, 'pending', ?3)
+            "INSERT INTO model_custom(harness, model, state, checked_ms, provider)
+             VALUES (?1, ?2, 'pending', ?3, ?4)
              ON CONFLICT(harness, model)
-             DO UPDATE SET state = 'pending', checked_ms = excluded.checked_ms",
-            params![harness, model, crate::team::now_ms()],
+             DO UPDATE SET state = 'pending', checked_ms = excluded.checked_ms,
+             provider = excluded.provider",
+            params![harness, model, crate::team::now_ms(), provider],
         )
         .map_err(unavailable)?;
     assert_eq!(changed, 1);
@@ -502,26 +516,44 @@ pub fn custom_begin(
     Ok(Begun::Pending)
 }
 
-/// Records the test launch of one pending owner id: passed makes it usable, failed keeps
-/// it shown as failed and never usable. Inputs: the engine database, the harness name,
-/// the id and whether the launch passed. Output: Ok, or `model_choice_custom_not_pending`
-/// for an id that is not waiting, `model_choice_harness_unknown` or
-/// `model_choice_unavailable`.
+/// Records a pending owner id as tested, on whatever provider it waits on, for rows that
+/// set up a verified or failed id. Inputs: the engine database, the harness name, the id
+/// and whether it passed. Output: as `custom_tested`.
+#[cfg(test)]
 pub fn custom_checked(
     db: &Connection,
     harness: &str,
     model: &str,
     passed: bool,
 ) -> Result<(), EngineError> {
+    let provider = pending_provider(db, harness, model)?;
+    custom_tested(db, harness, model, provider.as_deref(), passed)
+}
+
+/// Records the test launch of one pending owner id: passed makes it usable, failed keeps
+/// it shown as failed and never usable. The id must still wait on the provider it was
+/// tested on, so one added again under another provider meanwhile is never recorded
+/// (DEC-150 addendum 9e). Inputs: the engine database, the harness name, the id, the
+/// provider it was tested on, none for a harness that names none, and whether the launch
+/// passed. Output: Ok, or `model_choice_custom_not_pending` for an id that is not waiting
+/// on that provider, `model_choice_harness_unknown` or `model_choice_unavailable`.
+pub fn custom_tested(
+    db: &Connection,
+    harness: &str,
+    model: &str,
+    provider: Option<&str>,
+    passed: bool,
+) -> Result<(), EngineError> {
     let harness = known(harness)?;
+    assert_eq!(provider.is_some(), harness == "rcli");
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)?;
-    tx.execute_batch(SCHEMA).map_err(unavailable)?;
+    ready(&tx)?;
     let state = if passed { "verified" } else { "failed" };
     let changed = tx
         .execute(
             "UPDATE model_custom SET state = ?3, checked_ms = ?4
-             WHERE harness = ?1 AND model = ?2 AND state = 'pending'",
-            params![harness, model, state, crate::team::now_ms()],
+             WHERE harness = ?1 AND model = ?2 AND state = 'pending' AND provider IS ?5",
+            params![harness, model, state, crate::team::now_ms(), provider],
         )
         .map_err(unavailable)?;
     assert!(changed <= 1);
@@ -547,6 +579,62 @@ pub fn custom_pending(db: &Connection, harness: &str, model: &str) -> Result<boo
         |row| row.get(0),
     )
     .map_err(unavailable)
+}
+
+/// Names the provider one owner id passed its test launch on, the only provider whose
+/// accounts run it (DEC-150 addendum 9e). Inputs: the engine database, the harness name and
+/// the id. Output: the provider, none for an id that is not verified or was saved before
+/// ids kept one, or `model_choice_harness_unknown` or `model_choice_unavailable`.
+pub fn custom_provider(
+    db: &Connection,
+    harness: &str,
+    model: &str,
+) -> Result<Option<String>, EngineError> {
+    provider_in(db, known(harness)?, model, "verified")
+}
+
+/// Names the provider one owner id waiting for its test launch is tested on. Inputs: the
+/// engine database, the harness name and the id. Output: the provider, none for an id that
+/// is not pending or names none, or `model_choice_harness_unknown` or
+/// `model_choice_unavailable`.
+pub fn pending_provider(
+    db: &Connection,
+    harness: &str,
+    model: &str,
+) -> Result<Option<String>, EngineError> {
+    provider_in(db, known(harness)?, model, "pending")
+}
+
+/// Reads the provider one owner id in a state names, refusing a stored provider that is not
+/// a keyed RCLI provider or sits on another harness. Inputs: the engine database, the
+/// harness id, the id and the state. Output: the provider, none without a row in that state
+/// or a provider column, or `model_choice_unavailable`.
+fn provider_in(
+    db: &Connection,
+    harness: &str,
+    model: &str,
+    state: &str,
+) -> Result<Option<String>, EngineError> {
+    assert!(matches!(state, "pending" | "verified"));
+    if !exists(db)? || !has_provider(db)? {
+        return Ok(None);
+    }
+    let provider: Option<String> = db
+        .query_row(
+            "SELECT provider FROM model_custom WHERE harness = ?1 AND model = ?2 AND state = ?3",
+            params![harness, model, state],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?
+        .flatten();
+    if provider
+        .as_deref()
+        .is_some_and(|named| harness != "rcli" || !super::rcli_providers().contains(&named))
+    {
+        return Err(unavailable(()));
+    }
+    Ok(provider)
 }
 
 /// Removes one owner id from a harness. A slot that names it passes it over from then on
@@ -602,7 +690,7 @@ fn write(
             });
         }
     };
-    tx.execute_batch(SCHEMA).map_err(unavailable)?;
+    ready(&tx)?;
     let (scope_text, project) = columns(scope);
     let changed = match value {
         Some(value) => {
@@ -887,6 +975,30 @@ pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), E
         }
     }
     Ok(())
+}
+
+/// Makes the model choice tables ready for a write in one transaction: created as they are
+/// now, and an owner id table an earlier engine made without a provider column given one,
+/// every row kept with none. Input: the open transaction. Output: Ok, or unavailable.
+fn ready(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    tx.execute_batch(SCHEMA).map_err(unavailable)?;
+    if !has_provider(tx)? {
+        tx.execute_batch("ALTER TABLE model_custom ADD COLUMN provider TEXT")
+            .map_err(unavailable)?;
+    }
+    assert!(has_provider(tx)?);
+    Ok(())
+}
+
+/// Tells whether the owner id table has its provider column. Input: the engine database,
+/// whose table exists. Output: the answer, or unavailable.
+fn has_provider(db: &Connection) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('model_custom') WHERE name = 'provider')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
 }
 
 fn exists(db: &Connection) -> Result<bool, EngineError> {

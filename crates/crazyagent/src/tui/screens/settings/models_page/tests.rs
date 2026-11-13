@@ -71,6 +71,7 @@ fn with_native(rows: [Row; 3], native: Row, owned: &[(&str, Origin)]) -> Models 
         reason: None,
         testable: true,
         live_note: None,
+        providers: Vec::new(),
     }
 }
 
@@ -474,6 +475,7 @@ fn typing_an_id_adds_it_and_an_id_the_rule_refuses_never_leaves() {
     let add = ModelChoiceQuery::Add {
         harness: HARNESS.into(),
         model: "my-model-1".into(),
+        provider: None,
     };
     assert_eq!(requests(&mut shell), vec![add.clone()]);
     let after = models(
@@ -596,6 +598,7 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
         reason: None,
         testable: false,
         live_note: None,
+        providers: Vec::new(),
     };
     let page = ModelsPage::new("opencode".into(), "OpenCode".into(), Scope::App);
     let mut shell = Shell::with(ctx(80, 24), Box::new(page));
@@ -1055,6 +1058,7 @@ fn only_a_pending_id_offers_a_test_launch() {
 fn a_harness_without_a_test_launch_says_not_supported_on_add_and_on_a_pending_id() {
     let mut shell = app_page(Models {
         testable: false,
+        providers: Vec::new(),
         ..with_own(Origin::Pending)
     });
     shell.ctx.store.pools = crate::tui::ctx::Load::Ready(vec![pool("main")]);
@@ -1083,5 +1087,59 @@ fn a_harness_without_a_test_launch_says_not_supported_on_add_and_on_a_pending_id
     assert_eq!(
         NO_TEST_LAUNCH,
         "An id you add needs a test launch, and this harness has none."
+    );
+}
+
+/// DEC-150 addendum 9e (leader 18:58): a section that offers providers, RCLI's, asks which
+/// provider runs a typed id, in the desktop app's words and with every provider's name, and
+/// the Add names the one picked; Esc leaves without adding.
+#[test]
+fn a_typed_id_on_a_section_with_providers_is_added_with_the_provider_picked() {
+    let choices = crate::model_choice::provider_choices("rcli");
+    assert!(choices.len() >= 2);
+    let mut section = plain_models();
+    section.providers = choices.clone();
+    let mut shell = app_page(section);
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    typed(&mut shell, "my-model-1");
+    shell.key(Key::Enter);
+    assert_eq!(requests(&mut shell), vec![]);
+    let text = screen(&mut shell);
+    assert!(text.contains("Which provider runs this id?"), "{text}");
+    for choice in &choices {
+        assert!(text.contains(&choice.name), "{text}");
+    }
+    shell.key(Key::Esc);
+    assert_eq!(requests(&mut shell), vec![]);
+    assert!(!screen(&mut shell).contains("Which provider runs this id?"));
+    shell.key(Key::Enter);
+    typed(&mut shell, "my-model-1");
+    shell.key(Key::Enter);
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    assert_eq!(
+        requests(&mut shell),
+        vec![ModelChoiceQuery::Add {
+            harness: HARNESS.into(),
+            model: "my-model-1".into(),
+            provider: Some(choices[1].id.clone()),
+        }]
+    );
+}
+
+/// DEC-150 addendum 9e: an Add with no provider or one the harness does not offer says so in
+/// the desktop app's words.
+#[test]
+fn a_missing_or_unknown_provider_says_so_in_the_desktop_app_s_words() {
+    assert_eq!(
+        message("model_choice_provider_needed"),
+        "Pick the provider this id runs on."
+    );
+    assert_eq!(
+        message("model_choice_provider_unknown"),
+        "This harness doesn't offer that provider. Pick one from the list."
     );
 }

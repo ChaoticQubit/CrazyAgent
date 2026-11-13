@@ -295,3 +295,21 @@ fn statuses_have_plain_labels() {
     assert_eq!(AccountStatus::Unreachable.label(), "Can't reach this URL");
     assert_eq!(AccountStatus::SigningIn.label(), "Signing in...");
 }
+
+/// DEC-150 addendum 9e (leader 19:01): the providers an owner names for an RCLI model id
+/// come from the account catalog, every keyed RCLI provider once, with the names the
+/// account screens show, so a keyed provider added there is offered without a second list.
+#[test]
+fn rcli_runs_a_chosen_model_on_every_keyed_provider_of_the_account_catalog_once() {
+    let keyed = rcli_keyed_providers();
+    let ids: Vec<&str> = keyed.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, ["openrouter", "openai", "anthropic"]);
+    let names: Vec<&str> = keyed
+        .iter()
+        .map(|(_, provider)| provider_name(*provider))
+        .collect();
+    assert_eq!(names, ["OpenRouter", "OpenAI API", "Anthropic API"]);
+    for (_, provider) in &keyed {
+        assert_eq!(methods(*provider), [SignInMethod::ApiKey]);
+    }
+}

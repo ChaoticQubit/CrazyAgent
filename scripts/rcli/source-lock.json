@@ -383,18 +383,18 @@
     },
     {
       "path": "scripts/rcli/host.runtime.ts",
-      "sha256": "808f5f1591230787920fe10c166e8ee7b22499d67df13994300590776247a2af",
-      "bytes": 13666
+      "sha256": "47cedde5aba9641c7c99d1cb2dbc9a3febd8918e331e9e7bed5360e3d107a39d",
+      "bytes": 14074
     },
     {
       "path": "scripts/rcli/host.codec.ts",
-      "sha256": "05db281ecf74124d0bedc03beeb2fe3ca7d42ae1f03dfcbcd59bcb016d3b8779",
-      "bytes": 14743
+      "sha256": "89ed79dad0815dcccf86cc4a6a296290cbf92f08c160443eac7847beb485043d",
+      "bytes": 14827
     },
     {
       "path": "scripts/rcli/host.turns.ts",
-      "sha256": "4809101d3c4385e483136ee16edcc3c6b6f29c1038c6ccf00da177eb21543c66",
-      "bytes": 11024
+      "sha256": "c4c3d89afec43997686d1e7b70743ba37606ff7d5a824b4df394995bbf124cdf",
+      "bytes": 11069
     },
     {
       "path": "scripts/rcli/host.messages.ts",
@@ -438,8 +438,8 @@
     "executable": true,
     "contract": {
       "path": "scripts/rcli/host.entry.test.mjs",
-      "sha256": "3b7ea0b7230dc5f1430ff35b2b70b92cfbe118e748192eb3d982051f7855b48d",
-      "bytes": 10195
+      "sha256": "45efbcd55ba99b0105a90fa51a8f4a2f2028e0180fc246dbfd5f5d7b7334b768",
+      "bytes": 11618
     }
   },
   "closure": {

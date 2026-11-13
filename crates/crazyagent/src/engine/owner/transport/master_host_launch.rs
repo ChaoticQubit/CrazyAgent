@@ -1099,6 +1099,72 @@ pub(super) fn master_tools_sandbox(
     )
 }
 
+/// Builds the sandbox an RCLI model test launch (DEC-150 addendum 9e) runs its closed host
+/// in: narrower than any master turn's, writing only its empty work folder, its home and its
+/// temp folder, reading the harness install folder and its turn directory, and reaching only
+/// the account's endpoint, with no project, toolchain, tool cache or shared folder. Inputs:
+/// the owner root, the turn reference, the work folder, home, executable and endpoint.
+/// Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
+#[cfg(unix)]
+pub(super) fn model_test_sandbox(
+    root: &Root,
+    runtime_ref: &RequestId,
+    worktree: &Path,
+    home: &Path,
+    executable: &Path,
+    endpoint: &ModelEndpoint,
+) -> Result<InstalledSandbox, EngineError> {
+    let refused = |_: SandboxError| failure("master_sandbox_unavailable");
+    let ModelEndpoint::Http { url } = endpoint else {
+        return Err(failure("master_runtime_backend_unsupported"));
+    };
+    let remote = SandboxRemote::for_endpoint(url).map_err(refused)?;
+    let name = format!("master-runtime-{}", runtime_ref.as_str());
+    let runtime = Root::open(&root.path.join(&name))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    if !worktree.starts_with(&runtime.path) || worktree == runtime.path.as_path() {
+        return Err(failure("master_sandbox_unavailable"));
+    }
+    let tmp = runtime.path.join(MASTER_TMP);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&tmp)
+        .map_err(io_error)?;
+    let home = std::fs::canonicalize(home).map_err(io_error)?;
+    let program = std::fs::canonicalize(executable).map_err(io_error)?;
+    let install = program
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| failure("master_sandbox_unavailable"))?;
+    let tools = Toolchains::grant(&ToolHomes::owner().map_err(refused)?, &[]);
+    let sandbox = ProjectSandbox::new(worktree, &home, &tmp, SandboxNetwork::Only(vec![remote]))
+        .and_then(|sandbox| sandbox.allow_read(&install))
+        .and_then(|sandbox| sandbox.allow_exec(&program))
+        .and_then(|sandbox| sandbox.allow_read(&runtime.path))
+        .and_then(|sandbox| sandbox.allow_tools(&tools))
+        .and_then(|sandbox| sandbox.guard_engine(&root.path))
+        .map_err(refused)?;
+    #[cfg(target_os = "linux")]
+    let sandbox = {
+        let sandbox = sandbox.limit_sockets(stored_sandbox_settings(root)?.linux_sockets);
+        if let Some(code) = sandbox.linux_refusal(executable) {
+            return Err(failure(code));
+        }
+        sandbox
+    };
+    let installed =
+        InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
+    verify_master_runtime(root, &runtime, &name)?;
+    assert!(installed.profile().starts_with(&runtime.path));
+    assert!(
+        !installed
+            .sandbox()
+            .writable_roots()
+            .any(|writable| installed.profile().starts_with(writable))
+    );
+    Ok(installed)
+}
+
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn turn_sandbox(

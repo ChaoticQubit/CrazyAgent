@@ -1510,6 +1510,7 @@ fn composer_models(
         reason: None,
         testable: true,
         live_note: None,
+        providers: Vec::new(),
     }
 }
 
