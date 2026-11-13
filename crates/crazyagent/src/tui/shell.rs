@@ -1843,9 +1843,15 @@ mod tests {
     }
 
     fn intake_asks(shell: &mut Shell) -> Vec<String> {
-        drain(shell)
-            .into_iter()
-            .filter(|request| request.starts_with("Intake("))
+        use crate::tui::client::intake::IntakeJob;
+        std::iter::from_fn(|| shell.ctx.next_request())
+            .filter_map(|request| match request {
+                Request::Intake(job) => match *job {
+                    IntakeJob::Query(query) => Some(format!("{query:?}")),
+                    IntakeJob::GitHubToken(_) => Some("GitHubToken".to_owned()),
+                },
+                _ => None,
+            })
             .collect()
     }
 
