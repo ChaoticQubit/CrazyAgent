@@ -278,6 +278,13 @@ export function useToolsStatus(): Loaded<SetupStatus> {
   return tools;
 }
 
+/** The toast a Hide guide that did not save shows: the TUI's own lead, "Your learning progress
+ * was not saved.", then the plain reason (DEC-141 same words). Input: the skip mark's result.
+ * Output: the text, or undefined when it saved or this build has no learning marks. */
+export function hideGuideNote(result: Result<void>): string | undefined {
+  return result.kind === "error" ? `Your learning progress was not saved. ${result.message}` : undefined;
+}
+
 /** Home: loads accounts, pools, harnesses, tool setup and the learning steps for the side panel,
  * each project's live work and the suggested memories for Needs you, and renders HomeView with
  * the session's projects. Hide guide, or the guide brought back from Profile, reads the steps
@@ -292,8 +299,8 @@ export function Home({ alerts }: { alerts?: Map<string, number> } = {}) {
   const shownAgain = useGuideShownAgain();
   useEffect(() => { if (shownAgain > 0) reloadLearning(); }, [shownAgain]);
   const hideLearning = async () => {
-    const hidden = await setLearningMark("skipped", true);
-    if (hidden.kind === "error") session.showToast(hidden.message);
+    const note = hideGuideNote(await setLearningMark("skipped", true));
+    if (note) session.showToast(note);
     reloadLearning();
   };
   const projects = session.projects.kind === "ok" ? session.projects.value : [];
