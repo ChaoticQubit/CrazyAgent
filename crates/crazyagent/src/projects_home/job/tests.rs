@@ -122,6 +122,24 @@ fn a_job_ends_once() {
 }
 
 #[test]
+fn a_view_shows_the_overrides_the_job_goes_past_so_an_answer_keeps_them() {
+    let job = IntakeJob::new(
+        RequestId::new("add-2").unwrap(),
+        "owner".into(),
+        "/Users/someone/site".into(),
+        AddMode::Copy,
+        vec![AddOverride::TooLarge],
+    );
+    assert_eq!(job.view().overrides, vec![AddOverride::TooLarge]);
+    job.copying();
+    job.end(failure("home_copy_linked_checkout"));
+    let view = job.view();
+    assert_eq!(view.overrides, vec![AddOverride::TooLarge]);
+    assert!(matches!(view.state, JobState::NeedsAnswer { .. }));
+    assert!(self::job().view().overrides.is_empty());
+}
+
+#[test]
 fn a_view_crosses_the_wire_as_tagged_json() {
     let job = job();
     job.copying();
