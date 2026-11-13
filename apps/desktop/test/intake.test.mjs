@@ -350,6 +350,12 @@ test("setup lists each tool's state in plain words", () => {
   assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "  ")).title, "uv");
 });
 
+test("a tmux that comes with the app says Bundled with CrazyAgent, and a missing bundle shows its reason", () => {
+  assert.deepEqual(intake.dependencyView(dep("tmux", { state: "bundled", version: "3.5a" })),
+    { title: "tmux", about: "Runs each agent in a live terminal.", word: "Bundled", tone: "ok", line: "Bundled with CrazyAgent, version 3.5a." });
+  assert.equal(intake.dependencyView(dep("tmux", { state: "failed", reason: "Reinstall CrazyAgent." })).line, "Reinstall CrazyAgent.");
+});
+
 const entry = (id, kind, group, on_by_default, state, extra = {}) => ({ id, kind, group, source: `github.com/example/${id}`, license: "MIT", on_by_default, state, ...extra });
 const pack = [
   entry("graphify", "skill", "graph", true, { state: "available" }),
@@ -407,6 +413,8 @@ test("setup progress counts every tool and only the ticked pack, so an unticked 
   };
   assert.deepEqual(intake.setupProgress(status, ["superpowers"]), { done: 2, total: 4, failed: 1 });
   assert.deepEqual(intake.setupProgress(status, []), { done: 2, total: 3, failed: 1 });
+  const bundled = { ...status, dependencies: [dep("tmux", { state: "bundled", version: "3.5a" }), ...status.dependencies.slice(1)] };
+  assert.deepEqual(intake.setupProgress(bundled, []), { done: 2, total: 3, failed: 1 });
 });
 
 test("the graphify command and the graphify pack entry have names that can't be confused", () => {

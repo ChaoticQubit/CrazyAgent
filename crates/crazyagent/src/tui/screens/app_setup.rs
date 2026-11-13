@@ -293,6 +293,7 @@ fn tool_word(state: &DependencyState) -> String {
         DependencyState::Checking => "Checking".into(),
         DependencyState::Missing { .. } => "Not installed".into(),
         DependencyState::Found { version } => format!("Found {}", version.as_str()),
+        DependencyState::Bundled { version } => format!("Found {}", version.as_str()),
         DependencyState::Installing => "Installing".into(),
         DependencyState::Installed { version } => format!("Installed {}", version.as_str()),
         DependencyState::Failed { .. } => "Failed".into(),

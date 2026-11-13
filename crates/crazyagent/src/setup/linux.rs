@@ -246,7 +246,10 @@ mod tests {
         std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
             installer.lookup(Dependency::Tmux).unwrap(),
-            Ok(Version::parse("3.5a").unwrap())
+            Ok(crate::setup::Located {
+                version: Version::parse("3.5a").unwrap(),
+                bundled: false,
+            })
         );
         assert_eq!(
             installer.find(Dependency::Tmux),

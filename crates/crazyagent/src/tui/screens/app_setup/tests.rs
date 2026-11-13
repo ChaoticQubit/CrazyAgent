@@ -245,6 +245,17 @@ fn typed(shell: &mut Shell, text: &str) {
     }
 }
 
+/// DEC-157, desktop parity with intake.ts: a tmux the app ships reads Bundled with
+/// CrazyAgent and its version, with the ready glyph.
+#[test]
+fn a_bundled_tmux_reads_bundled_with_crazyagent_and_its_version() {
+    let word = tool_word(&DependencyState::Bundled {
+        version: version("3.8"),
+    });
+    assert_eq!(word, "Bundled with CrazyAgent 3.8");
+    assert_eq!(Status::of(&word), Some(Status::Ok));
+}
+
 #[test]
 fn setup_status_words_carry_a_glyph() {
     assert_eq!(Status::of("Found 3.5a"), Some(Status::Ok));

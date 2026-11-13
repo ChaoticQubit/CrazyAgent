@@ -413,11 +413,14 @@ mod tests;
 
 impl Installer for PinnedInstaller {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError> {
-        Ok(self.lookup(dep)?.ok())
+        Ok(self.lookup(dep)?.ok().map(|located| located.version))
     }
 
     fn lookup(&self, dep: Dependency) -> super::Lookup {
-        Ok(self.resolved(dep)?.map(|(_, version)| version))
+        Ok(self.resolved(dep)?.map(|(_, version)| super::Located {
+            version,
+            bundled: false,
+        }))
     }
 
     fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {

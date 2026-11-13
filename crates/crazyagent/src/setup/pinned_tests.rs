@@ -38,7 +38,10 @@ fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
     );
     assert_eq!(
         installer.lookup(Dependency::Tmux).unwrap(),
-        Ok(Version::parse("3.5a").unwrap())
+        Ok(crate::setup::Located {
+            version: Version::parse("3.5a").unwrap(),
+            bundled: false,
+        })
     );
     script(
         "graphify",
@@ -50,6 +53,38 @@ fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
         needs,
         crate::tools::resolve("graphify", &places).unwrap_err()
     );
+}
+
+/// DEC-157: setup finds the tmux the engine uses, the `crazyagent-tmux` the app ships beside
+/// the engine, reads its version through the same words and marks it bundled, so its row says
+/// Bundled with CrazyAgent; with the file gone it is never marked bundled.
+#[test]
+fn setup_marks_the_tmux_the_app_ships_beside_the_engine_as_bundled() {
+    let root = private_root();
+    let app = root.path().join("CrazyAgent.app/Contents/MacOS");
+    std::fs::create_dir_all(&app).unwrap();
+    let sidecar = app.join("crazyagent-tmux");
+    std::fs::write(&sidecar, "#!/bin/sh\necho 'tmux 3.8'\n").unwrap();
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let places = crate::tools::Places::engine(
+        None,
+        Some(&app),
+        Some(root.path().join("home")),
+        Some(std::ffi::OsStr::new("")),
+    );
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places);
+    assert_eq!(
+        installer.lookup(Dependency::Tmux).unwrap(),
+        Ok(crate::setup::Located {
+            version: Version::parse("3.8").unwrap(),
+            bundled: true,
+        })
+    );
+    std::fs::remove_file(&sidecar).unwrap();
+    assert!(!matches!(
+        installer.lookup(Dependency::Tmux),
+        Ok(Ok(crate::setup::Located { bundled: true, .. }))
+    ));
 }
 
 /// Setup reads the version of the copy the tool resolver finds first, the one a launch runs,

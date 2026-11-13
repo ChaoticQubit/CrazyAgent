@@ -1666,6 +1666,17 @@ pub(in crate::tui) mod tests {
         assert_eq!(missing_tools(&status), ["uv", "Graphify"]);
     }
 
+    /// DEC-157, desktop parity with toolsStep: a tmux the app ships counts as installed, so
+    /// Get set up never asks to install tmux on a Mac that has it bundled.
+    #[test]
+    fn a_bundled_tmux_counts_as_installed() {
+        let mut status = tools(&[]);
+        status.dependencies[0].state = DependencyState::Bundled {
+            version: Version::parse("3.8").unwrap(),
+        };
+        assert_eq!(missing_tools(&status), Vec::<String>::new());
+    }
+
     #[test]
     fn get_set_up_stays_until_tools_are_found_and_opens_setup() {
         let mut ctx = ctx(80, 24);

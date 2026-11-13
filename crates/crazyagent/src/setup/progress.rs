@@ -64,8 +64,8 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
             let state = match (progress.dependencies.get(dep), seen) {
                 (Some(step), _) => step.clone(),
                 (None, None) => DependencyState::Checking,
-                (None, Some(Some(Ok(Ok(version))))) => DependencyState::Found {
-                    version: version.clone(),
+                (None, Some(Some(Ok(Ok(located))))) => DependencyState::Found {
+                    version: located.version.clone(),
                 },
                 (None, Some(Some(Err(code)))) => DependencyState::Failed {
                     reason: super::plain_reason(code.0).to_owned(),
@@ -141,7 +141,42 @@ pub fn source_label(source: &super::pack::PackSource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::setup::{InstallError, Version};
+    use crate::setup::{InstallError, Located, Version};
+
+    /// DEC-157: a tmux found as the copy the app ships shows Bundled with its version, which
+    /// clients read as `{"state":"bundled","version":...}`; any other copy stays Found.
+    #[test]
+    fn a_bundled_tmux_row_is_bundled_with_its_version_on_the_wire() {
+        let located = |bundled| {
+            Ok(Ok(Located {
+                version: Version::parse("3.8").unwrap(),
+                bundled,
+            }))
+        };
+        let progress = Progress {
+            checked: Some(Checked {
+                at: Instant::now(),
+                found: vec![
+                    (Dependency::Tmux, located(true)),
+                    (Dependency::Uv, located(false)),
+                ],
+            }),
+            ..Progress::default()
+        };
+        let rows = dependency_rows(&progress);
+        let version = Version::parse("3.8").unwrap();
+        assert_eq!(
+            rows[0].state,
+            DependencyState::Bundled {
+                version: version.clone()
+            }
+        );
+        assert_eq!(rows[1].state, DependencyState::Found { version });
+        assert_eq!(
+            serde_json::to_value(&rows[0].state).unwrap(),
+            serde_json::json!({"state": "bundled", "version": "3.8"})
+        );
+    }
 
     #[test]
     fn a_system_setup_cannot_install_on_shows_its_own_plain_reason() {
@@ -181,7 +216,13 @@ mod tests {
                 at: Instant::now(),
                 found: vec![
                     (Dependency::Tmux, Ok(Err(Dependency::Tmux.not_found()))),
-                    (Dependency::Uv, Ok(Ok(Version::parse("0.13.5").unwrap()))),
+                    (
+                        Dependency::Uv,
+                        Ok(Ok(Located {
+                            version: Version::parse("0.13.5").unwrap(),
+                            bundled: false,
+                        })),
+                    ),
                     (Dependency::Graphify, Ok(Err(needs.clone()))),
                 ],
             }),

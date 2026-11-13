@@ -281,6 +281,16 @@ test("Get set up keeps Install tools until tmux, uv and graphify are found; the 
   assert.equal(failedRead.body, "Couldn't check tmux, uv and graphify. Open setup to try again.");
 });
 
+test("Install tools counts a tmux bundled with CrazyAgent as installed, so a 2.4.1 Mac never asks to install tmux (DEC-157)", () => {
+  const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
+  const item = (tools) => setupSteps(ok([account({})]), ok([pool]), ok([]), tools).items.find((entry) => entry.id === "tools");
+  const bundled = { state: "bundled", version: "3.8" };
+  assert.equal(item(toolsRead(bundled, found, found)).done, true);
+  assert.equal(item(toolsRead(bundled, found, found)).body, "tmux, uv and graphify are installed.");
+  assert.equal(item(toolsRead(bundled, found, { state: "missing" })).body,
+    "graphify isn't installed. Live terminals and the team graph need tmux; setting up a project needs graphify.");
+});
+
 test("Home keeps the Get set up panel with Set up tools after a skipped tools step", () => {
   const props = { projects: ok([{ id: "p1", name: "Harbor", repository_count: 0 }]), accounts: ok([account({})]),
     pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]), harnesses: ok([]), onRetryProjects: () => {} };
