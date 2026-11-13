@@ -190,18 +190,18 @@ function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void })
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState(false);
   if (job === null) return null;
-  const run = async (call: () => Promise<Result<unknown>>) => {
+  const run = async <T,>(call: () => Promise<Result<T>>, started: (value: T) => IntakeJob | undefined = () => undefined) => {
     if (busy) return;
     setBusy(true);
     const result = await call();
     setBusy(false);
     if (result.kind === "error") session.showToast(result.message);
     if (result.kind === "not_ready") session.showToast("Adding a folder isn't in this build.");
-    session.refreshIntake();
+    session.refreshIntake(result.kind === "ok" ? started(result.value) : undefined);
   };
   const restart = (overrides: AddOverride[]) => {
     setAnswering(false);
-    void run(() => startIntake(job.source, job.mode, overrides));
+    void run(() => startIntake(job.source, job.mode, overrides), (view) => view);
   };
   const question = job.state.state === "needs_answer" ? jobQuestion(job) : null;
   const name = folderName(job.source);

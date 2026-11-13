@@ -115,9 +115,9 @@ function inOrder(body, lines, what) {
   }
 }
 
-/** The Add folder calls the page sent for one folder. Input: the folder. Output: their trail entries. */
+/** The intake job starts the page sent for one folder. Input: the folder. Output: their trail entries. */
 function addsOf(source) {
-  return run.log.trail.filter((entry) => entry.cmd === "desktop_add_existing_folder" && entry.args?.source === source);
+  return run.log.trail.filter((entry) => entry.cmd === "desktop_intake_start" && entry.args?.path === source);
 }
 
 /** Opens the Add folder page in a fresh browser context on the served app, runs the owner's steps,
@@ -190,16 +190,19 @@ async function landedOnHome(page, me, landed, hasGit, ms) {
   assert.equal(found[0].git, hasGit, `the engine reads git in ${landed}`);
 }
 
-/** Requires one applied Move of a folder with exactly the overrides the question sent.
- * Inputs: the source folder and the overrides. Output: none. */
-function movedOnce(source, overrides) {
+/** Requires one intake job that moved a folder with exactly the overrides the question sent, and
+ * that the engine reads that job as done. Inputs: the source folder and the overrides. Output:
+ * none. */
+async function movedOnce(source, overrides) {
   const adds = addsOf(source);
-  assert.equal(adds.length, 1, `one Add folder call for ${source}: ${JSON.stringify(adds)}`);
-  assert.equal(adds[0].args.mode, "move", "the call moves the folder");
-  assert.deepEqual(adds[0].args.overrides, overrides, "the call sends only the overrides for issues the engine refuses");
-  const receipt = adds[0].answer?.value;
-  assert.ok(receipt && receipt.outcome === "applied" && receipt.pending === false && receipt.rejection === null,
-    `the engine applied the move: ${JSON.stringify(adds[0].answer)}`);
+  assert.equal(adds.length, 1, `one intake job start for ${source}: ${JSON.stringify(adds)}`);
+  assert.equal(adds[0].args.mode, "move", "the job moves the folder");
+  assert.deepEqual(adds[0].args.overrides, overrides, "the start sends only the overrides for issues the engine refuses");
+  const started = adds[0].answer?.value;
+  assert.ok(started && started.source === source && started.mode === "move", `the engine started the move job: ${JSON.stringify(adds[0].answer)}`);
+  const job = await value(run.bridge, "desktop_intake_status");
+  assert.equal(job?.id, started.id, `the engine still shows the started job: ${JSON.stringify(job)}`);
+  assert.equal(job.state.state, "done", `the engine reads the move job as done: ${JSON.stringify(job)}`);
 }
 
 before(async () => {
@@ -287,7 +290,7 @@ test("Move anyway moves a folder with no git into the projects folder after the 
   });
   assert.ok(!existsSync(real), `${real} is gone from its old place`);
   assert.equal(readFileSync(join(landed, "notes", "todo.md"), "utf8"), notes, "every file moved with its content");
-  movedOnce(real, []);
+  await movedOnce(real, []);
 });
 
 /** Use where it is in the Move anyway question (DEC-115 addendum): the owner
@@ -320,7 +323,7 @@ test("Use where it is in the Move anyway question sets the folder up where it is
   });
   assert.equal(readFileSync(join(real, "notes", "todo.md"), "utf8"), notes, "the folder stays where it is with its files");
   assert.ok(!existsSync(join(run.projects, name)), `nothing named ${name} lands in the projects folder`);
-  assert.deepEqual(addsOf(real), [], "Use where it is sends no Add folder call");
+  assert.deepEqual(addsOf(real), [], "Use where it is starts no intake job");
   const listed = (await value(run.bridge, "desktop_project_list")).items.filter((item) => item.id === id);
   assert.equal(listed.length, 1, `the engine lists the project ${id} the page set up once`);
   const setup = await value(run.bridge, "desktop_project_setup", { id });
@@ -348,7 +351,7 @@ test("the Move anyway question names linked worktrees, and closing it changes no
     assert.equal(await question(page, me, repoName), repoBody, "asking to move again after Close asks the same question again");
     await me.click("Close", "dialog[open] button");
     await me.waitFor("the asked again question closed", (text) => !text.includes(`Move ${repoName} anyway?`) && text.includes(`${repoName} goes to `));
-    assert.deepEqual(addsOf(made.repo), [], "asking to move again after Close sends no Add folder call");
+    assert.deepEqual(addsOf(made.repo), [], "asking to move again after Close starts no intake job");
 
     await askMove(me, made.worktree);
     const treeBody = await question(page, me, treeName);
@@ -359,8 +362,8 @@ test("the Move anyway question names linked worktrees, and closing it changes no
     await me.waitFor("the second question closed", (text) => !text.includes(`Move ${treeName} anyway?`) && text.includes(`${treeName} goes to `));
     await me.capture("worktrees-closed");
   });
-  assert.deepEqual(addsOf(made.repo), [], "closing the question sends no Add folder call for the repository");
-  assert.deepEqual(addsOf(made.worktree), [], "closing the question sends no Add folder call for the worktree");
+  assert.deepEqual(addsOf(made.repo), [], "closing the question starts no intake job for the repository");
+  assert.deepEqual(addsOf(made.worktree), [], "closing the question starts no intake job for the worktree");
   assert.ok(existsSync(join(made.repo, ".git")), "the repository stays where it is with its git");
   assert.deepEqual(linkedWorktrees(made.repo), [made.worktree], "the repository keeps its linked worktree");
   assert.equal(git(made.worktree, ["rev-parse", "--abbrev-ref", "HEAD"]), "trial4-side", "git still works in the worktree on its branch");
@@ -401,7 +404,7 @@ test("Move anyway moves a very large folder from another disk after the copy war
     assert.equal(statSync(join(landed, "archive.bin")).size, LARGE_BYTES, "the large file moved whole");
     assert.deepEqual(bytesAt(join(landed, "archive.bin"), MARKS), MARKS.map((mark) => mark.bytes), "the large file's bytes at its start, middle and end moved unchanged");
     assert.equal(git(landed, ["rev-parse", "HEAD"]), head, "git works in the moved folder at the same commit");
-    movedOnce(folder, []);
+    await movedOnce(folder, []);
   } finally {
     const left = releaseDisk(disk);
     if (left.length > 0) t.diagnostic(`scratch disk left behind: ${left.join("; ")}`);

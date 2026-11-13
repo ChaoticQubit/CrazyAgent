@@ -118,7 +118,7 @@ export interface Session {
   intake: IntakeJob | null;
   found: Loaded<FoundProject[]>;
   retry: () => void;
-  refreshIntake: () => void;
+  refreshIntake: (started?: IntakeJob) => void;
   refreshFound: () => void;
   checkUnconfirmed: () => Promise<void>;
   checkProfile: () => Promise<void>;
@@ -312,7 +312,13 @@ export function useSession(): Session {
   return {
     engine, unconfirmed, profileCheck, stuckSignIn, profile, projects, projectsMore, toast, toastOpen, revision, intake, found,
     retry: () => { void start(); },
-    refreshIntake: () => setIntakeTick((value) => value + 1),
+    refreshIntake: (started?: IntakeJob) => {
+      if (started) {
+        intakeSeen.current = started;
+        setIntake(started);
+      }
+      setIntakeTick((value) => value + 1);
+    },
     refreshFound: () => setFoundTick((value) => value + 1),
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
     checkProfile: async () => { await checkProfile(); },

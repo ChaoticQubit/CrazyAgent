@@ -240,7 +240,7 @@ export function AddFolder() {
     const same = running?.kind === "ok" ? running.value : null;
     const attached = same !== null && same.source === source && (jobRunning(same) || same.state.state === "done");
     if (result.kind === "error" && !attached) { setProblem(result.message); return; }
-    session.refreshIntake();
+    session.refreshIntake(result.kind === "ok" ? result.value : undefined);
     session.showToast(`Adding ${folderName(source)}. Follow it on Home; you can keep working.`, { name: "home" });
     navigate({ name: "home" });
   };
