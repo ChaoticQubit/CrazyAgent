@@ -339,6 +339,41 @@ fn a_tools_on_sandbox_keeps_every_loopback_app_plugin_port_and_fails_closed_on_a
     guarded(&case);
 }
 
+/// Q-8 (leader 19:12 refuse): on Linux a loopback plugin on a port this Linux hands out is
+/// refused alone, so an open-network Landlock launch still starts instead of refusing every
+/// launch for a port it cannot keep free.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_plugin_on_a_port_linux_hands_out_never_stops_an_open_network_launch() {
+    use crazyagent::sandbox::linux::{LinuxBackend, LinuxSandbox};
+    use std::os::unix::fs::PermissionsExt;
+    let text = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    let low: u16 = text
+        .split_ascii_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let case = case();
+    let folder = plugins_folder(&case, 0o700);
+    let handed = folder.join("handed.yaml");
+    fs::write(
+        &handed,
+        NEAR_PLUGIN
+            .replace("name: near", "name: handed")
+            .replace("127.0.0.1:9000", &format!("127.0.0.1:{low}")),
+    )
+    .unwrap();
+    fs::set_permissions(&handed, fs::Permissions::from_mode(0o600)).unwrap();
+    let open = open_sandbox(&case).guard_engine(&case.runtime).unwrap();
+    let helper = std::env::current_exe().unwrap();
+    let launch = LinuxSandbox::new(open, LinuxBackend::Landlock { helper });
+    assert!(
+        launch.is_ok(),
+        "a plugin port Linux hands out stopped the launch: {launch:?}"
+    );
+}
+
 #[test]
 fn plugin_ports_have_their_own_room_so_full_owner_ports_and_a_port_zero_plugin_still_launch() {
     use std::os::unix::fs::PermissionsExt;

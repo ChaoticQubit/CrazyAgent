@@ -277,9 +277,10 @@ fn picked_ports(text: &str) -> Option<RangeInclusive<u16>> {
     (numbers.next().is_none() && low <= high).then_some(low..=high)
 }
 
-/// Reads [`picked_ports`] for the network this process is in. No input. Output: the range,
-/// or none when the setting cannot be read.
-fn read_picked_ports() -> Option<RangeInclusive<u16>> {
+/// Reads [`picked_ports`] for the network this process is in; app plugins read it too, to
+/// refuse a loopback plugin port inside it (Q-8). No input. Output: the range, or none when
+/// the setting cannot be read.
+pub(crate) fn read_picked_ports() -> Option<RangeInclusive<u16>> {
     let mut text = String::new();
     fs::File::open(PICKED_PORTS_FILE)
         .ok()?
