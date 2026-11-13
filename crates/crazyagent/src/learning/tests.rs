@@ -110,6 +110,51 @@ fn a_count_stops_at_its_cap() {
 }
 
 #[test]
+fn a_message_typed_into_the_live_master_terminal_ticks_talk_to_the_master_but_engine_words_do_not()
+{
+    let mut db = Connection::open_in_memory().unwrap();
+    tables(&db);
+    let project = crate::protocol::ProjectId::new("p1").unwrap();
+    assert_eq!(
+        count(&read(&mut db), StepId::Master),
+        0,
+        "a database with no live conversation yet still reads"
+    );
+    crate::master_sessions::mark_live_turn(
+        &db,
+        &project,
+        "live-1",
+        "claude",
+        Some(&crate::master_sessions::Fed::Engine(
+            "The owner answered a question.".into(),
+        )),
+    )
+    .unwrap();
+    assert_eq!(
+        count(&read(&mut db), StepId::Master),
+        0,
+        "words the engine typed are not the owner's"
+    );
+    crate::master_sessions::mark_owner_turn(&db, &project, "live-1", "claude").unwrap();
+    assert_eq!(
+        count(&read(&mut db), StepId::Master),
+        1,
+        "the owner's own turn typed into the live master terminal"
+    );
+    db.execute_batch(
+        "INSERT INTO conversation_entries VALUES ('p1','message','Hi.');
+         INSERT INTO session_messages(session,seq,project,speaker,mode,harness,text,at_ms,source,source_key)
+         VALUES('one-1',1,'p1','owner','one_turn','claude','Hi.',2000,'turn','turn-1');",
+    )
+    .unwrap();
+    assert_eq!(
+        count(&read(&mut db), StepId::Master),
+        2,
+        "a composer message counts once, though its turn is kept in both stores, and a live turn counts too"
+    );
+}
+
+#[test]
 fn the_read_carries_counts_and_fixed_words_only_never_row_text() {
     let mut db = Connection::open_in_memory().unwrap();
     tables(&db);
