@@ -267,6 +267,9 @@ pub enum OwnerMutation {
     SetQuitSettings {
         settings: crate::quit_settings::QuitSettings,
     },
+    SetProviderRetry {
+        choice: crate::provider_retry::ProviderRetry,
+    },
     SetMasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,
     },
@@ -592,6 +595,7 @@ impl OwnerMutation {
             Self::SetQuitSettings { settings } => Command::OwnerAgentQuit {
                 settings: *settings,
             },
+            Self::SetProviderRetry { choice } => Command::OwnerProviderRetry { choice: *choice },
             Self::SetMasterStepSettings { settings } => Command::OwnerMasterSteps {
                 settings: *settings,
             },
@@ -806,6 +810,7 @@ pub enum OwnerRead {
     SandboxSettings,
     CleanupSettings,
     QuitSettings,
+    ProviderRetry,
     MasterStepSettings,
     MasterTimeSettings,
     MasterFrameSettings,
@@ -911,6 +916,7 @@ impl OwnerRead {
             | Self::SandboxSettings
             | Self::CleanupSettings
             | Self::QuitSettings
+            | Self::ProviderRetry
             | Self::MasterStepSettings
             | Self::MasterTimeSettings
             | Self::MasterFrameSettings
@@ -1360,6 +1366,9 @@ pub enum OwnerData {
     },
     QuitSettings {
         settings: crate::quit_settings::QuitSettings,
+    },
+    ProviderRetry {
+        settings: crate::provider_retry::ProviderRetryView,
     },
     MasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,
