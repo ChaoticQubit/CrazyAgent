@@ -116,8 +116,48 @@ pub fn notice(project: Option<&str>, question: &Question) -> Notice {
 /// folder's name and what happened in plain words, never an engine code. Input: the job.
 /// Output: the notice, or None while the job still runs.
 pub fn intake_notice(job: &JobView) -> Option<Notice> {
-    let _ = job;
-    None
+    use crazyagent::projects_home::job::{JobState, Phase};
+    let folder = std::path::Path::new(&job.source)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = match plain_line(&folder, TITLE_CHARS_MAX - 40) {
+        shown if shown.is_empty() => "The folder".to_owned(),
+        shown => shown,
+    };
+    let way = match job.mode {
+        crazyagent::projects_home::AddMode::Move => "moved",
+        crazyagent::projects_home::AddMode::Copy => "copied",
+    };
+    let landed = format!("{name} is in your projects folder");
+    let (title, body) = match &job.state {
+        JobState::Done => (landed, "Set it up from Home.".to_owned()),
+        JobState::Failed {
+            phase: Phase::Clearing,
+            ..
+        } => (
+            landed,
+            "Part of its old place could not be removed. Check it on Home.".to_owned(),
+        ),
+        JobState::Failed { .. } => (
+            format!("Adding {name} failed"),
+            "Open Home in CrazyAgent to see why.".to_owned(),
+        ),
+        JobState::Cancelled { .. } => (
+            format!("Adding {name} stopped"),
+            "Nothing was moved or copied.".to_owned(),
+        ),
+        JobState::NeedsAnswer { .. } => (
+            format!("{name} needs your answer"),
+            format!("Open Home in CrazyAgent to decide before it is {way}."),
+        ),
+        JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing => {
+            return None;
+        }
+    };
+    assert!(title.chars().count() <= TITLE_CHARS_MAX);
+    assert!(body.chars().count() <= BODY_CHARS_MAX);
+    Some(Notice { title, body })
 }
 
 /// Maps an engine refusal to the code the window shows: every Questions code as itself,
@@ -204,6 +244,20 @@ struct Shown {
     last: i32,
 }
 
+impl Shown {
+    fn next_id(&mut self) -> i32 {
+        self.last = if self.last == i32::MAX {
+            1
+        } else {
+            self.last + 1
+        };
+        assert!(self.last > 0);
+        assert!(!self.order.iter().any(|(_, id)| *id == self.last));
+        assert!(!self.jobs.iter().any(|(_, id)| *id == self.last));
+        self.last
+    }
+}
+
 impl Notices {
     fn shown(&self) -> std::sync::MutexGuard<'_, Shown> {
         self.shown.lock().unwrap_or_else(PoisonError::into_inner)
@@ -219,16 +273,10 @@ impl Notices {
         if shown.order.iter().any(|(known, _)| *known == question) {
             return Ok(None);
         }
-        if shown.order.len() >= SHOWN_MAX {
+        if shown.order.len() + shown.jobs.len() >= SHOWN_MAX {
             return Err(failure("notifications_full"));
         }
-        shown.last = if shown.last == i32::MAX {
-            1
-        } else {
-            shown.last + 1
-        };
-        let id = shown.last;
-        assert!(id > 0);
+        let id = shown.next_id();
         shown.order.push_back((question, id));
         shown.projects.insert(id, project.to_owned());
         assert!(shown.order.len() <= SHOWN_MAX && shown.projects.len() == shown.order.len());
@@ -240,8 +288,18 @@ impl Notices {
     /// front. Input: the job id. Output: the notification id, None when the job was already
     /// notified, or `notifications_full`.
     pub fn claim_job(&self, job: &str) -> Result<Option<i32>, BridgeError> {
-        let _ = job;
-        Ok(None)
+        let mut shown = self.shown();
+        if shown.jobs.iter().any(|(known, _)| known == job) {
+            return Ok(None);
+        }
+        if shown.order.len() + shown.jobs.len() >= SHOWN_MAX {
+            return Err(failure("notifications_full"));
+        }
+        let id = shown.next_id();
+        shown.jobs.push_back((job.to_owned(), id));
+        assert!(shown.order.len() + shown.jobs.len() <= SHOWN_MAX);
+        assert!(!shown.projects.contains_key(&id));
+        Ok(Some(id))
     }
 
     /// Gives a job claim back after its notification could not be shown. Inputs: the job id
@@ -263,10 +321,14 @@ impl Notices {
         shown.projects.remove(&id);
     }
 
-    /// Records a click on a notification: its project becomes the one the window opens
-    /// next. Input: the notification id. Output: whether it was one of these notifications.
+    /// Records a click on a notification: a question's project becomes the one the window
+    /// opens next; an intake job's names none, so the window only comes to the front.
+    /// Input: the notification id. Output: whether it was one of these notifications.
     pub fn clicked(&self, id: i32) -> bool {
         let mut shown = self.shown();
+        if shown.jobs.iter().any(|(_, claimed)| *claimed == id) {
+            return true;
+        }
         let Some(project) = shown.projects.get(&id).cloned() else {
             return false;
         };
