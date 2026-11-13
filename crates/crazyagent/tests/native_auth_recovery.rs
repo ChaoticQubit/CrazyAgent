@@ -63,8 +63,10 @@ impl Case {
     /// Starts the engine with a scratch HOME in this user's own temp folder, which no other
     /// user can change, and a Codex stand-in whose first line asks `env` for
     /// `crazyagent-test-login-shell`, an interpreter only the login shell's PATH names: the
-    /// scratch login files wait 5 s, then add its folder, so the engine's first probe run is
-    /// still going when the first sign-in starts. Output: the case.
+    /// scratch login files wait until the test opens [`Self::release_probe`], at most 9 s so
+    /// a failed test still lets the shell end inside the probe's 10 s limit, then leave
+    /// `login-probe-done` in that HOME and add its folder, so the first probe run is still
+    /// going when the first sign-in starts.
     #[cfg(target_os = "macos")]
     fn with_interpreter_on_login_path() -> Self {
         let temp = crazyagent::spawn_gate::output(
@@ -92,7 +94,7 @@ impl Case {
         for login in [".zprofile", ".bash_profile", ".profile"] {
             std::fs::write(
                 home.path().join(login),
-                "/bin/sleep 5\nPATH=\"$HOME/login-only/bin:$PATH\"\nexport PATH\n",
+                "i=0\nwhile [ ! -e \"$HOME/release-probe\" ] && [ \"$i\" -lt 180 ]; do /bin/sleep 0.05; i=$((i+1)); done\n: > \"$HOME/login-probe-done\"\nPATH=\"$HOME/login-only/bin:$PATH\"\nexport PATH\n",
             )
             .unwrap();
         }
@@ -125,6 +127,11 @@ impl Case {
         stand_in(
             bin.path(),
             "codex-unstartable",
+            "#!/nonexistent/crazyagent-test-interpreter\n",
+        );
+        stand_in(
+            bin.path(),
+            "claude-unstartable",
             "#!/nonexistent/crazyagent-test-interpreter\n",
         );
         let server = format!(
@@ -236,8 +243,29 @@ done
         self.engine.as_ref().unwrap().id()
     }
 
+    /// Opens the gate the scratch login files of [`Self::with_interpreter_on_login_path`]
+    /// wait on, so the login shell's probe goes on to its end. Input: the case. Output: none.
+    #[cfg(target_os = "macos")]
+    fn release_probe(&self) {
+        std::fs::write(self.home.path().join("release-probe"), b"").unwrap();
+    }
+
     fn log(&self) -> String {
         std::fs::read_to_string(self.root().join("engine.log")).unwrap_or_default()
+    }
+
+    /// Waits until the engine's log holds one line exactly, at most 10 s. Input: the line.
+    /// Output: none; it fails the test with the log when the line never comes.
+    async fn logged(&self, line: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.log().lines().any(|logged| logged == line) {
+            assert!(
+                Instant::now() < deadline,
+                "the engine never logged {line}: {}",
+                self.log()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     fn logins(&self) -> Vec<Pid> {
@@ -804,6 +832,40 @@ async fn a_codex_sign_in_whose_harness_cannot_start_settles_unavailable_and_free
     }
 }
 
+/// A Claude Code sign-in whose harness the engine cannot resolve settles Unavailable with the
+/// plain code and frees the account, twice in a row, as a Codex one does: the custodian is
+/// handed no harness and ends the action without effect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claude_sign_in_whose_harness_cannot_start_settles_unavailable_and_frees_the_account() {
+    let case = Case::started("codex-unstartable", "claude-unstartable", None);
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Claude, "Work Claude").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    for _ in 0..2 {
+        let begun = start(&client, &scope, NativeAuthMethod::ClaudeOfficial)
+            .await
+            .unwrap();
+        let settled = settle(&client, &scope, &begun, ended).await;
+        assert_eq!(
+            (settled.phase, settled.code.as_deref()),
+            (
+                NativeAuthPhase::Unavailable,
+                Some("native_auth_host_unavailable")
+            ),
+            "{}",
+            case.log()
+        );
+        assert!(
+            case.log()
+                .lines()
+                .any(|line| line == "native_auth_harness_unresolved harness=claude"),
+            "{}",
+            case.log()
+        );
+        case.no_fence().await;
+    }
+}
+
 /// A harness whose first line asks `env` for an interpreter found only in a folder under
 /// the engine's HOME, as nvm, fnm or volta keep node, signs in: the engine resolves and pins
 /// the words, and the custodian, which has no HOME and no PATH, starts them as handed. Codex
@@ -860,6 +922,9 @@ async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_inte
     let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
         .await
         .unwrap();
+    case.logged("native_auth_harness_waiting harness=codex")
+        .await;
+    case.release_probe();
     let challenge = settle(&client, &scope, &begun, shown).await;
     assert_eq!(
         (challenge.phase, challenge.code.as_deref()),
@@ -873,8 +938,10 @@ async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_inte
     case.no_fence().await;
 }
 
-/// Cancelling the first sign-in while the engine still waits for its first probe run settles
-/// Cancelled and frees the account, as a cancel before the harness starts does.
+/// Cancelling the first sign-in while the engine waits for its first probe run settles
+/// Cancelled and frees the account: the engine has logged that it waits and the login
+/// shell's probe has not ended yet when the cancel is sent, so the cancel lands inside the
+/// wait, and the engine never goes on to call the harness unresolved.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_a_sign_in_while_the_engine_waits_for_its_first_probe_run_settles_cancelled() {
@@ -885,11 +952,19 @@ async fn cancelling_a_sign_in_while_the_engine_waits_for_its_first_probe_run_set
     let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
         .await
         .unwrap();
+    case.logged("native_auth_harness_waiting harness=codex")
+        .await;
     assert_eq!(
         read(&client, &scope, &begun).await.phase,
         NativeAuthPhase::Starting
     );
+    assert!(
+        !case.home.path().join("login-probe-done").exists(),
+        "the probe ended before the cancel: {}",
+        case.log()
+    );
     cancel(&client, &scope, &begun).await;
+    case.release_probe();
     let finished = settle(&client, &scope, &begun, ended).await;
     assert_eq!(
         (finished.phase, finished.code.as_deref()),
@@ -898,6 +973,11 @@ async fn cancelling_a_sign_in_while_the_engine_waits_for_its_first_probe_run_set
         case.log()
     );
     case.no_fence().await;
+    assert!(
+        !case.log().contains("native_auth_harness_unresolved"),
+        "{}",
+        case.log()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
