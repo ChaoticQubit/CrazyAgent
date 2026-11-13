@@ -63,8 +63,10 @@ impl Case {
     /// Starts the engine with a scratch HOME in this user's own temp folder, which no other
     /// user can change, and a Codex stand-in whose first line asks `env` for
     /// `crazyagent-test-login-shell`, an interpreter only the login shell's PATH names: the
-    /// scratch login files wait 5 s, leave `login-probe-done` in that HOME, then add its
-    /// folder, so the first probe run is still going when the first sign-in starts.
+    /// scratch login files wait until the test opens [`Self::release_probe`], at most 9 s so
+    /// a failed test still lets the shell end inside the probe's 10 s limit, then leave
+    /// `login-probe-done` in that HOME and add its folder, so the first probe run is still
+    /// going when the first sign-in starts.
     #[cfg(target_os = "macos")]
     fn with_interpreter_on_login_path() -> Self {
         let temp = crazyagent::spawn_gate::output(
@@ -92,7 +94,7 @@ impl Case {
         for login in [".zprofile", ".bash_profile", ".profile"] {
             std::fs::write(
                 home.path().join(login),
-                "/bin/sleep 5\n: > \"$HOME/login-probe-done\"\nPATH=\"$HOME/login-only/bin:$PATH\"\nexport PATH\n",
+                "i=0\nwhile [ ! -e \"$HOME/release-probe\" ] && [ \"$i\" -lt 180 ]; do /bin/sleep 0.05; i=$((i+1)); done\n: > \"$HOME/login-probe-done\"\nPATH=\"$HOME/login-only/bin:$PATH\"\nexport PATH\n",
             )
             .unwrap();
         }
@@ -239,6 +241,13 @@ done
 
     fn engine_pid(&self) -> u32 {
         self.engine.as_ref().unwrap().id()
+    }
+
+    /// Opens the gate the scratch login files of [`Self::with_interpreter_on_login_path`]
+    /// wait on, so the login shell's probe goes on to its end. Input: the case. Output: none.
+    #[cfg(target_os = "macos")]
+    fn release_probe(&self) {
+        std::fs::write(self.home.path().join("release-probe"), b"").unwrap();
     }
 
     fn log(&self) -> String {
@@ -913,6 +922,9 @@ async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_inte
     let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
         .await
         .unwrap();
+    case.logged("native_auth_harness_waiting harness=codex")
+        .await;
+    case.release_probe();
     let challenge = settle(&client, &scope, &begun, shown).await;
     assert_eq!(
         (challenge.phase, challenge.code.as_deref()),
@@ -920,8 +932,6 @@ async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_inte
         "{}",
         case.log()
     );
-    case.logged("native_auth_harness_waiting harness=codex")
-        .await;
     cancel(&client, &scope, &challenge).await;
     let finished = settle(&client, &scope, &challenge, ended).await;
     assert_eq!(finished.phase, NativeAuthPhase::Cancelled, "{}", case.log());
@@ -954,6 +964,7 @@ async fn cancelling_a_sign_in_while_the_engine_waits_for_its_first_probe_run_set
         case.log()
     );
     cancel(&client, &scope, &begun).await;
+    case.release_probe();
     let finished = settle(&client, &scope, &begun, ended).await;
     assert_eq!(
         (finished.phase, finished.code.as_deref()),
