@@ -28,6 +28,7 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
             "Saved",
             "Replied",
             "Found",
+            "Bundled",
             "Installed",
         ],
     ),

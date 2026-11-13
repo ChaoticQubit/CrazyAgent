@@ -245,6 +245,40 @@ fn typed(shell: &mut Shell, text: &str) {
     }
 }
 
+/// DEC-157, desktop parity with intake.ts: a tmux the app ships reads Bundled with
+/// CrazyAgent and its version, with the ready glyph.
+#[test]
+fn a_bundled_tmux_reads_bundled_with_crazyagent_and_its_version() {
+    let word = tool_word(&DependencyState::Bundled {
+        version: version("3.8"),
+    });
+    assert_eq!(word, "Bundled with CrazyAgent 3.8");
+    assert_eq!(Status::of(&word), Some(Status::Ok));
+}
+
+/// Leader 20:08, desktop parity with intake.ts: a system tmux used in place of the bundled
+/// one reads Found and its version, with the note under it, at every width.
+#[test]
+fn a_system_tmux_in_place_of_the_bundled_one_reads_found_with_its_note_under_it() {
+    for (width, height) in [(80, 24), (120, 36)] {
+        let mut status = first_run_status();
+        status.dependencies[0].state = DependencyState::System {
+            version: version("3.5a"),
+            note: crate::tools::BundleNote::CannotRun.line().to_owned(),
+        };
+        let mut shell = Shell::with(ctx(width, height), Box::new(AppSetup::new(true)));
+        assert!(matches!(jobs(&mut shell).as_slice(), [AppSetupJob::Status]));
+        shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+        let rows = render(&mut shell, width, height);
+        assert!(find(&rows, "tmux").contains("Found 3.5a"));
+        find(&rows, "Using the system tmux,");
+        assert!(
+            rows.iter()
+                .all(|row| row.chars().count() <= usize::from(width))
+        );
+    }
+}
+
 #[test]
 fn setup_status_words_carry_a_glyph() {
     assert_eq!(Status::of("Found 3.5a"), Some(Status::Ok));

@@ -356,6 +356,13 @@ test("a tmux that comes with the app says Bundled with CrazyAgent, and a missing
   assert.equal(intake.dependencyView(dep("tmux", { state: "failed", reason: "Reinstall CrazyAgent." })).line, "Reinstall CrazyAgent.");
 });
 
+test("a system tmux used in place of the bundled one reads Found with the engine's note, as the TUI does (leader 20:08)", () => {
+  for (const note of ["Using the system tmux, the bundled one can't run; reinstall CrazyAgent.", "Using the system tmux, the bundled one is missing; reinstall CrazyAgent."]) {
+    assert.deepEqual(intake.dependencyView(dep("tmux", { state: "system", version: "3.5a", note })),
+      { title: "tmux", about: "Runs each agent in a live terminal.", word: "Found", tone: "ok", line: note });
+  }
+});
+
 const entry = (id, kind, group, on_by_default, state, extra = {}) => ({ id, kind, group, source: `github.com/example/${id}`, license: "MIT", on_by_default, state, ...extra });
 const pack = [
   entry("graphify", "skill", "graph", true, { state: "available" }),
@@ -415,6 +422,8 @@ test("setup progress counts every tool and only the ticked pack, so an unticked 
   assert.deepEqual(intake.setupProgress(status, []), { done: 2, total: 3, failed: 1 });
   const bundled = { ...status, dependencies: [dep("tmux", { state: "bundled", version: "3.5a" }), ...status.dependencies.slice(1)] };
   assert.deepEqual(intake.setupProgress(bundled, []), { done: 2, total: 3, failed: 1 });
+  const system = { ...status, dependencies: [dep("tmux", { state: "system", version: "3.5a", note: "Using the system tmux, the bundled one can't run; reinstall CrazyAgent." }), ...status.dependencies.slice(1)] };
+  assert.deepEqual(intake.setupProgress(system, []), { done: 2, total: 3, failed: 1 });
 });
 
 test("the graphify command and the graphify pack entry have names that can't be confused", () => {

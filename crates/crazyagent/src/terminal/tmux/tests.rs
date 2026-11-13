@@ -1927,3 +1927,61 @@ fn the_server_pid_comes_only_from_a_listener_bound_at_the_socket_itself() {
         "a link at the socket path redirected the probe to another listener"
     );
 }
+
+/// Writes an `sh` stand-in for tmux that adds a line to `ran` each time it starts, then does
+/// `rest`. Takes the folder, the counting file and the rest of the script. Returns the tmux
+/// as the resolver gives it.
+fn counted_tmux(
+    folder: &std::path::Path,
+    ran: &std::path::Path,
+    rest: &str,
+) -> crate::tools::Resolved {
+    use std::os::unix::fs::PermissionsExt;
+    let program = folder.join(crate::tools::BUNDLED_TMUX);
+    let script = format!("#!/bin/sh\necho ran >> '{}'\n{rest}\n", ran.display());
+    std::fs::write(&program, script).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::tools::Resolved {
+        entry: program.clone(),
+        program,
+        kind: crate::tools::Kind::Native,
+    }
+}
+
+/// How many times a [`counted_tmux`] started. Takes its counting file. Returns the count.
+fn started(ran: &std::path::Path) -> usize {
+    std::fs::read_to_string(ran).map_or(0, |text| text.lines().count())
+}
+
+#[test]
+fn a_tmux_whose_version_read_runs_out_of_time_is_not_read_again_while_the_file_is_unchanged() {
+    let folder = tempfile::tempdir().unwrap();
+    let ran = folder.path().join("ran.txt");
+    let tmux = counted_tmux(folder.path(), &ran, "exec /bin/sleep 30");
+    let bound = std::time::Duration::from_secs(1);
+    assert!(
+        runs_within(&tmux, bound),
+        "a read that runs out of time counts as running"
+    );
+    let first = started(&ran);
+    assert!(first <= 1);
+    let again = std::time::Instant::now();
+    assert!(runs_within(&tmux, bound));
+    assert_eq!(
+        started(&ran),
+        first,
+        "every terminal start waited the whole bound again for the same file"
+    );
+    assert!(again.elapsed() < bound);
+}
+
+#[test]
+fn a_tmux_whose_version_read_fails_is_asked_again_so_a_fix_outside_the_file_counts() {
+    let folder = tempfile::tempdir().unwrap();
+    let ran = folder.path().join("ran.txt");
+    let tmux = counted_tmux(folder.path(), &ran, "exit 1");
+    assert!(!runs(&tmux));
+    assert_eq!(started(&ran), 1);
+    assert!(!runs(&tmux));
+    assert_eq!(started(&ran), 2, "a failed read is not kept");
+}

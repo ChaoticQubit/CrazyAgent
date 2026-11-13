@@ -718,7 +718,7 @@ fn persistable_runs_an_engine_outside_the_mount_in_place_and_copies_one_from_the
         bundled
     );
     assert!(!layout.root().exists());
-    let copies = layout.root().join("bin");
+    let copies = layout.root().join("setup").join("bin");
     let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
     assert_eq!(installed, copies.join("crazyagent"));
     assert_eq!(changeable_by_others(&installed), None);
@@ -789,6 +789,152 @@ fn persistable_runs_an_engine_outside_the_mount_in_place_and_copies_one_from_the
     assert!(persistable(&stranger, &layout, Some(&mount)).is_err());
 }
 
+/// Leader 20:15: the AppImage's persisted copy lives in `<data root>/setup/bin`, which the
+/// tool resolver trusts, so the engine run from there finds the `crazyagent-tmux` beside it
+/// and never refuses it as a file agents can write, as it did in `<data root>/bin`.
+#[cfg(unix)]
+#[test]
+fn an_appimage_persisted_tmux_is_found_beside_the_engine_not_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mount = root.join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(root.join("data").join("engine")).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    let app = installed.parent().unwrap();
+    assert_eq!(app, layout.root().join("setup").join("bin"));
+    let places = crate::tools::Places::engine(Some(layout.root()), Some(app), None, None);
+    let tmux = crate::tools::resolve("tmux", &places).unwrap();
+    assert_eq!(tmux.entry, app.join("crazyagent-tmux"));
+}
+
+/// The copy a 2.4.0 AppImage kept in `<data root>/bin`, a private folder (700) holding the
+/// release files and a stranger file. Input: the layout. Output: the old engine executable.
+#[cfg(unix)]
+fn old_copy(layout: &Layout) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let old = layout.root().join("bin");
+    let engine = bundle(&old);
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o700)).unwrap();
+    engine
+}
+
+/// rv-code F1: retiring removes files only from a `<data root>/bin` that is a real folder,
+/// not a link, owned by this user and private (700), as 2.4.0 made it; through a link, or
+/// in a folder others can read, a release-named file stays, wherever it sits.
+#[cfg(unix)]
+#[test]
+fn retiring_never_follows_a_linked_or_shared_old_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = layout.root().join("bin");
+    let elsewhere = bundle(&temp.path().join("elsewhere"));
+    std::os::unix::fs::symlink(elsewhere.parent().unwrap(), &old).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    retire_old_copies_with(&layout, &installed, None);
+    assert!(elsewhere.is_file(), "a file outside the data root stays");
+    assert!(
+        std::fs::symlink_metadata(&old)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    std::fs::remove_file(&old).unwrap();
+    let shared = bundle(&old);
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+    retire_old_copies_with(&layout, &installed, None);
+    assert!(
+        shared.is_file(),
+        "a folder that is not private is left alone"
+    );
+}
+
+/// Leader 20:15: the first start after the move retires the old `<data root>/bin` copy: the
+/// command line link that named it names the new copy, every release file there is removed,
+/// a file CrazyAgent did not put there stays, and the folder goes once it is empty.
+#[cfg(unix)]
+#[test]
+fn a_first_start_retires_the_old_appimage_copy_and_repoints_the_command_line_link() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = layout.root().join("bin");
+    old_copy(&layout);
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::os::unix::fs::symlink(old.join("crazyagent"), cli.join("crazyagent")).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    assert_eq!(
+        installed,
+        layout.root().join("setup").join("bin").join("crazyagent")
+    );
+    retire_old_copies_with(&layout, &installed, Some(&cli));
+    assert_eq!(
+        std::fs::read_link(cli.join("crazyagent")).unwrap(),
+        installed
+    );
+    for name in crate::update::BINARIES {
+        assert!(
+            std::fs::symlink_metadata(old.join(name)).is_err(),
+            "{name} is retired"
+        );
+    }
+    assert!(old.join("notes.txt").is_file(), "a stranger file stays");
+    std::fs::remove_file(old.join("notes.txt")).unwrap();
+    retire_old_copies_with(&layout, &installed, Some(&cli));
+    assert!(!old.exists(), "the empty old folder goes");
+}
+
+/// `service link-cli` keeps the engine too, but a login service a 2.4.0 AppImage installed
+/// names the old `<data root>/bin` copy until a replacing `service start` rewrites it, so
+/// keeping the engine never removes that copy; retiring it is the start's step after the
+/// service names the new copy, and an engine outside `<data root>/setup/bin` retires nothing.
+#[cfg(unix)]
+#[test]
+fn keeping_the_engine_leaves_the_old_copy_a_login_service_may_still_name() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = old_copy(&layout);
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    assert_ne!(installed, old);
+    assert!(
+        old.is_file(),
+        "a service naming the old copy would not start"
+    );
+    retire_old_copies_with(&layout, &old, None);
+    assert!(old.is_file(), "an engine outside setup/bin retires nothing");
+    retire_old_copies_with(&layout, &installed, None);
+    assert!(!old.exists());
+}
+
+/// A command line link that names anything but the old copy is never touched.
+#[cfg(unix)]
+#[test]
+fn retiring_the_old_appimage_copy_leaves_a_link_to_another_engine_alone() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    old_copy(&layout);
+    let other = bundle(&temp.path().join("other"));
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::os::unix::fs::symlink(&other, cli.join("crazyagent")).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    retire_old_copies_with(&layout, &installed, Some(&cli));
+    assert_eq!(std::fs::read_link(cli.join("crazyagent")).unwrap(), other);
+}
+
 #[cfg(unix)]
 #[test]
 fn persistable_never_copies_from_a_folder_other_users_can_change_and_install_refuses_it() {
@@ -827,7 +973,7 @@ fn link_cli_refuses_an_engine_other_users_can_change_and_links_the_private_copy(
     let link = link_cli(&copy, &bin).unwrap();
     assert_eq!(
         std::fs::read_link(&link).unwrap(),
-        layout.root().join("bin").join("crazyagent")
+        layout.root().join("setup").join("bin").join("crazyagent")
     );
 }
 

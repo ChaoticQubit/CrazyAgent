@@ -953,6 +953,201 @@ fn a_launch_looks_in_the_engine_setup_folder_like_setup_does() {
     assert_eq!(started.argv()[0], node.into_os_string());
 }
 
+/// The app's folder as a release lays it out, holding the engine and the bundled
+/// `crazyagent-tmux` beside it (DEC-157), plus a Homebrew-like folder with its own `tmux`.
+/// The places look only in that folder, past the app's folder, so no row reads the host's
+/// own tmux. Input: HOME. Output: the places, the sidecar and the Homebrew-like tmux.
+fn bundled_layout(home: &Path) -> (Places, PathBuf, PathBuf) {
+    let app = home.join("Applications/CrazyAgent.app/Contents/MacOS");
+    program(&app.join("crazyagent"), "#!/bin/sh\n");
+    let sidecar = program(&app.join("crazyagent-tmux"), "#!/bin/sh\necho tmux 3.8\n");
+    let brew = program(
+        &home.join("opt/homebrew/bin/tmux"),
+        "#!/bin/sh\necho tmux 3.5a\n",
+    );
+    let places = Places {
+        app_folder: Some(app),
+        ..Places::new(
+            vec![brew.parent().unwrap().to_path_buf()],
+            Some(home.to_path_buf()),
+        )
+    };
+    assert_eq!(places.folders().len(), 1);
+    (places, sidecar, brew)
+}
+
+/// DEC-157, leader 15:41 and 18:31: the engine uses the tmux it ships. The name `tmux` finds
+/// `<app folder>/crazyagent-tmux` before Homebrew or anything on PATH, read as any entry is,
+/// and its words and the sandbox grants start from that file, never the Homebrew one.
+#[test]
+fn the_bundled_tmux_beside_the_engine_wins_over_a_homebrew_tmux() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    let tmux = resolve("tmux", &places).unwrap();
+    assert_eq!(tmux.entry, sidecar);
+    assert_eq!(tmux.program, sidecar.canonicalize().unwrap());
+    assert_eq!(tmux.argv(), vec![sidecar.clone().into_os_string()]);
+    let grants = tmux.grants();
+    assert_eq!(grants[0], sidecar);
+    assert!(
+        !grants.contains(&brew),
+        "the Homebrew tmux is never granted"
+    );
+}
+
+/// The engine adds the probed folders to its places before any launch
+/// ([`Places::with_probed`]), which rebuilds them; the bundled tmux stays first through that
+/// step, so the shipped engine and the sandbox grant use it, not only places built by hand.
+#[test]
+fn the_bundled_tmux_stays_first_once_the_probed_folders_are_added() {
+    let (_folder, home) = scratch();
+    let (_places, sidecar, brew) = bundled_layout(&home);
+    let app = sidecar.parent().unwrap();
+    let engine = Places::engine(None, Some(app), Some(home.clone()), None);
+    let probed = engine.with_probed(vec![
+        brew.parent().unwrap().to_path_buf(),
+        home.join("probed/bin"),
+    ]);
+    assert_eq!(probed.bundled("tmux"), Some(sidecar.clone()));
+    assert_eq!(resolve("tmux", &probed).unwrap().entry, sidecar);
+}
+
+/// With no bundled tmux beside the engine, such as a 2.4.0 install or a dev build, the name
+/// `tmux` finds what the usual search order finds, here the Homebrew-like one, and no other
+/// tool name ever gets the bundled file.
+#[test]
+fn a_missing_bundled_tmux_falls_back_to_the_usual_search_order() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::remove_file(&sidecar).unwrap();
+    assert_eq!(resolve("tmux", &places).unwrap().entry, brew);
+    let (_other, home) = scratch();
+    let (places, sidecar, _brew) = bundled_layout(&home);
+    for name in ["uv", "node", "screen"] {
+        assert!(
+            !matches!(resolve(name, &places), Ok(found) if found.entry == sidecar),
+            "{name} never resolves to the bundled tmux"
+        );
+    }
+}
+
+/// rv-secreview (leader 16:05): the bundled tmux passes the same checks as any file found.
+/// One others can change, or one that cannot run, is passed over for the usual search order.
+#[test]
+fn a_bundled_tmux_others_can_change_or_that_cannot_run_is_passed_over_for_the_usual_search() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o757)).unwrap();
+    let found = resolve("tmux", &places).unwrap();
+    assert_ne!(
+        found.entry, sidecar,
+        "a world-writable bundled tmux is never used"
+    );
+    assert_eq!(found.entry, brew);
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let found = resolve("tmux", &places).unwrap();
+    assert_ne!(
+        found.entry, sidecar,
+        "a bundled tmux that cannot run is never used"
+    );
+    assert_eq!(found.entry, brew);
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(resolve("tmux", &places).unwrap().entry, sidecar);
+}
+
+/// Leader 20:08: a bundled tmux whose version read fails is passed over for the usual order,
+/// which says the bundled one can't run; only the bundled copy is ever asked whether it runs.
+#[test]
+fn a_bundled_tmux_that_cannot_run_falls_back_to_the_usual_order_and_says_so() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    let asked = std::cell::RefCell::new(Vec::new());
+    let (found, note) = resolve_tmux(&places, true, |tmux| {
+        asked.borrow_mut().push(tmux.entry.clone());
+        false
+    })
+    .unwrap();
+    assert_eq!(found.entry, brew);
+    assert_eq!(note, Some(BundleNote::CannotRun));
+    assert_eq!(asked.into_inner(), vec![sidecar]);
+}
+
+/// A bundled tmux that runs is the one used, with no note, whether or not the build is
+/// marked as shipping one.
+#[test]
+fn a_bundled_tmux_that_runs_is_used_with_no_note() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, _brew) = bundled_layout(&home);
+    for ships in [true, false] {
+        let (found, note) = resolve_tmux(&places, ships, |_| true).unwrap();
+        assert_eq!(found.entry, sidecar);
+        assert_eq!(note, None);
+    }
+}
+
+/// A build that ships tmux and has lost it uses the usual order and says the bundled one is
+/// missing; a build that ships none, such as a dev build, says nothing.
+#[test]
+fn a_lost_bundled_tmux_says_it_is_missing_only_in_a_build_that_ships_one() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::remove_file(&sidecar).unwrap();
+    let never = |_: &Resolved| -> bool { panic!("nothing to run") };
+    assert_eq!(
+        resolve_tmux(&places, true, never).unwrap(),
+        (resolve("tmux", &places).unwrap(), Some(BundleNote::Missing))
+    );
+    let (found, note) = resolve_tmux(&places, false, never).unwrap();
+    assert_eq!((found.entry, note), (brew, None));
+}
+
+/// A bundled file the entry checks pass over, one others can change or one that is not
+/// executable, is there but cannot run: the usual order runs and says so.
+#[test]
+fn a_refused_bundled_tmux_says_it_cannot_run() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    for mode in [0o757, 0o644] {
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (found, note) = resolve_tmux(&places, false, |_| true).unwrap();
+        assert_eq!(found.entry, brew, "mode {mode:o}");
+        assert_eq!(note, Some(BundleNote::CannotRun), "mode {mode:o}");
+    }
+}
+
+/// Leader 20:08: with no other tmux, a bundled one that cannot run or is refused ends in
+/// today's install offer, the plain tmux-missing line, never the refused file's line.
+#[test]
+fn with_no_other_tmux_a_bundled_one_that_cannot_run_ends_in_the_install_offer() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::remove_file(&brew).unwrap();
+    let missing = resolve_tmux(&places, true, |_| false).unwrap_err();
+    assert_eq!(
+        (missing.reason, missing.line()),
+        (Reason::NotFound, TMUX_MISSING.to_owned())
+    );
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o757)).unwrap();
+    let missing = resolve_tmux(&places, true, |_| true).unwrap_err();
+    assert_eq!(
+        (missing.reason, missing.line()),
+        (Reason::NotFound, TMUX_MISSING.to_owned())
+    );
+}
+
+/// The two notes, word for word as the TUI and the desktop app show them.
+#[test]
+fn the_bundle_notes_name_the_system_tmux_and_the_reinstall() {
+    assert_eq!(
+        BundleNote::Missing.line(),
+        "Using the system tmux, the bundled one is missing; reinstall CrazyAgent."
+    );
+    assert_eq!(
+        BundleNote::CannotRun.line(),
+        "Using the system tmux, the bundled one can't run; reinstall CrazyAgent."
+    );
+}
+
 /// rv-v3sec M16-S1: an engine started with a non-default `--home`, `CRAZYAGENT_HOME` unset,
 /// refuses a harness file agents can write under that root, such as one in an agent's
 /// home: a launch takes the root the engine recorded, given here explicitly.

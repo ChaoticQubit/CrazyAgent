@@ -1541,6 +1541,7 @@ export type DependencyState =
   | { state: "installing" }
   | { state: "installed"; version: string }
   | { state: "bundled"; version: string }
+  | { state: "system"; version: string; note: string }
   | { state: "failed"; reason: string }
   | { state: "unsupported" };
 

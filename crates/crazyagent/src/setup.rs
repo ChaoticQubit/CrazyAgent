@@ -260,6 +260,13 @@ pub enum DependencyState {
     Found {
         version: Version,
     },
+    Bundled {
+        version: Version,
+    },
+    System {
+        version: Version,
+        note: String,
+    },
     Installing,
     Installed {
         version: Version,
@@ -416,7 +423,17 @@ pub fn locked_tool_args(
 /// Implementations never use sudo and never change global configuration.
 /// What looking for one dependency found: its version, why it cannot run
 /// ([`crate::tools::Missing`]), or the check's code.
-pub type Lookup = Result<Result<Version, crate::tools::Missing>, InstallError>;
+pub type Lookup = Result<Result<Located, crate::tools::Missing>, InstallError>;
+
+/// A dependency setup found: the version it reports, whether it is the copy the app ships
+/// beside the engine (DEC-157), which setup shows as bundled and never installs, and why
+/// another tmux runs in place of that copy, if one does ([`crate::tools::BundleNote`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    pub version: Version,
+    pub bundled: bool,
+    pub note: Option<crate::tools::BundleNote>,
+}
 
 pub trait Installer: Send + Sync {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError>;
@@ -425,7 +442,14 @@ pub trait Installer: Send + Sync {
     /// missing ([`crate::tools::Missing`]), the answer the setup screen shows. Input: the
     /// dependency. Output: its version, why it cannot run, or the check's code.
     fn lookup(&self, dep: Dependency) -> Lookup {
-        Ok(self.find(dep)?.ok_or_else(|| dep.not_found()))
+        Ok(self
+            .find(dep)?
+            .map(|version| Located {
+                version,
+                bundled: false,
+                note: None,
+            })
+            .ok_or_else(|| dep.not_found()))
     }
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError>;
 

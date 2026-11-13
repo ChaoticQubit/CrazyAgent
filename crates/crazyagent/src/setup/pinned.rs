@@ -18,6 +18,10 @@ const UV_TOOL_TIME: Duration = Duration::from_secs(900);
 const UV_RECEIPT: &str = "uv-receipt.toml";
 const NAME_BYTES_MAX: usize = 64;
 
+/// A dependency setup found: its entry, its version and why the bundled tmux is not the one
+/// used, if it is not.
+type Chosen = (PathBuf, Version, Option<crate::tools::BundleNote>);
+
 /// The folders searched after `setup/bin` on a Unix system: the owner's `~/.local/bin`,
 /// the engine's own absolute `PATH` folders, then the platform's fixed folders.
 /// Input: the fixed folders. Output: the folders in search order.
@@ -97,24 +101,36 @@ impl PinnedInstaller {
     /// Finds a program where the tool resolver looks and its version. Input: the
     /// dependency. Output: its entry and version, or none when it is missing or reports none.
     pub fn locate(&self, dep: Dependency) -> Option<(PathBuf, Version)> {
-        self.resolved(dep).ok()?.ok()
+        self.resolved(dep)
+            .ok()?
+            .ok()
+            .map(|(entry, version, _)| (entry, version))
     }
 
     /// Finds a dependency wherever the tool resolver looks ([`crate::tools::resolve`]), the
-    /// file a launch that needs it runs, and reads its version through the same words.
-    /// Input: the dependency. Output: its entry and version, why it cannot run, or the
-    /// version check's code.
+    /// file a launch that needs it runs, and reads its version through the same words; tmux
+    /// is the one the terminal uses ([`crate::tools::resolve_tmux`]), with why the bundled
+    /// copy is not, if it is not. Input: the dependency. Output: its entry, version and note,
+    /// why it cannot run, or the version check's code.
     fn resolved(
         &self,
         dep: Dependency,
-    ) -> Result<Result<(PathBuf, Version), crate::tools::Missing>, InstallError> {
-        let found = match crate::tools::resolve(dep.program(), &self.places) {
+    ) -> Result<Result<Chosen, crate::tools::Missing>, InstallError> {
+        let found = match dep {
+            Dependency::Tmux => crate::tools::resolve_tmux(
+                &self.places,
+                crate::tools::SHIPS_BUNDLED_TMUX,
+                crate::terminal::tmux::runs,
+            ),
+            _ => crate::tools::resolve(dep.program(), &self.places).map(|found| (found, None)),
+        };
+        let (found, note) = match found {
             Ok(found) => found,
             Err(missing) => return Ok(Err(missing)),
         };
         let version = self.version(dep, &found.argv())?;
         assert!(found.entry.is_absolute());
-        Ok(Ok((found.entry, version)))
+        Ok(Ok((found.entry, version, note)))
     }
 
     /// Returns the `PATH` value that puts `setup/bin` first, for programs the engine runs.
@@ -453,14 +469,30 @@ mod tests;
 
 impl Installer for PinnedInstaller {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError> {
-        Ok(self.lookup(dep)?.ok())
+        Ok(self.lookup(dep)?.ok().map(|located| located.version))
     }
 
     fn lookup(&self, dep: Dependency) -> super::Lookup {
         if dep == Dependency::Node {
-            return Ok(self.node().ok_or_else(|| dep.not_found()));
+            return Ok(self
+                .node()
+                .map(|version| super::Located {
+                    version,
+                    bundled: false,
+                    note: None,
+                })
+                .ok_or_else(|| dep.not_found()));
         }
-        Ok(self.resolved(dep)?.map(|(_, version)| version))
+        let bundled = self.places.bundled(dep.program());
+        Ok(self.resolved(dep)?.map(|(entry, version, note)| {
+            let located = super::Located {
+                bundled: bundled.as_ref() == Some(&entry),
+                version,
+                note,
+            };
+            assert!(!(located.bundled && located.note.is_some()));
+            located
+        }))
     }
 
     fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {

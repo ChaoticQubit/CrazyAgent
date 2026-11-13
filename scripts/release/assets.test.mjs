@@ -29,10 +29,10 @@ async function executable(path, text) {
   await chmod(path, 0o755);
 }
 
-test("each target ships the engine, the rcli host and its own helpers", () => {
-  assert.deepEqual(sidecars("aarch64-apple-darwin"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner"]);
-  assert.deepEqual(sidecars("x86_64-apple-darwin"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner"]);
-  assert.deepEqual(sidecars("x86_64-unknown-linux-gnu"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-landlock"]);
+test("each target ships the engine, the rcli host and its own helpers, and macOS and Linux their own tmux (DEC-157)", () => {
+  assert.deepEqual(sidecars("aarch64-apple-darwin"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux"]);
+  assert.deepEqual(sidecars("x86_64-apple-darwin"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux"]);
+  assert.deepEqual(sidecars("x86_64-unknown-linux-gnu"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux", "crazyagent-landlock"]);
   assert.deepEqual(sidecars("x86_64-pc-windows-msvc"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-win-boundary"]);
   assert.throws(() => sidecars("aarch64-unknown-linux-gnu"), /release_target_rejected/);
   assert.equal(cliArchiveName(VERSION, "x86_64-unknown-linux-gnu"), `crazyagent-${VERSION}-x86_64-unknown-linux-gnu.tar.gz`);
@@ -57,6 +57,29 @@ test("staging names sidecars with the target triple and writes the release confi
     assert.deepEqual(JSON.parse(await readFile(config, "utf8")), { bundle: { externalBin: sidecars(target).map((name) => `binaries/${name}`) } });
     await rm(join(cargo, "crazyagent-win-boundary.exe"));
     await assert.rejects(stageSidecars({ target, cargoDir: cargo, rcli: join(root, "crazyagent-rcli.exe"), tauriDir: tauri }), /release_sidecar_missing:crazyagent-win-boundary/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("staging takes the bundled tmux from its own build, never from Cargo, and refuses a macOS or Linux stage without it", async () => {
+  const root = await scratch("release-stage-tmux-");
+  try {
+    const cargo = join(root, "cargo");
+    const tauri = join(root, "src-tauri");
+    await mkdir(cargo);
+    await mkdir(tauri);
+    for (const name of ["crazyagent", "crazyagent-runner", "crazyagent-tmux"]) await executable(join(cargo, name), `cargo-${name}`);
+    await executable(join(root, "crazyagent-rcli"), "rcli");
+    await executable(join(root, "built-tmux"), "tmux");
+    const target = "aarch64-apple-darwin";
+    const given = { target, cargoDir: cargo, rcli: join(root, "crazyagent-rcli"), tmux: join(root, "built-tmux"), tauriDir: tauri };
+    const { staged, config } = await stageSidecars(given);
+    assert.deepEqual(staged.map((path) => path.slice(tauri.length + 1)), sidecars(target).map((name) => `binaries/${name}-${target}`));
+    assert.equal(await readFile(join(tauri, `binaries/crazyagent-tmux-${target}`), "utf8"), "#!/bin/sh\necho tmux\n");
+    assert.deepEqual(JSON.parse(await readFile(config, "utf8")).bundle.externalBin.filter((name) => name.includes("tmux")), ["binaries/crazyagent-tmux"]);
+    await assert.rejects(stageSidecars({ ...given, tmux: undefined }), /release_sidecar_missing:crazyagent-tmux/);
+    await assert.rejects(stageSidecars({ ...given, tmux: join(root, "absent") }), /release_sidecar_missing:crazyagent-tmux/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

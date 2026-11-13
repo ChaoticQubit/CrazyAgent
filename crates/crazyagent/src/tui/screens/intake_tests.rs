@@ -1259,6 +1259,8 @@ fn tools_found(status: &crate::setup::SetupStatus) -> bool {
         matches!(
             tool.state,
             crate::setup::DependencyState::Found { .. }
+                | crate::setup::DependencyState::Bundled { .. }
+                | crate::setup::DependencyState::System { .. }
                 | crate::setup::DependencyState::Installed { .. }
         )
     })

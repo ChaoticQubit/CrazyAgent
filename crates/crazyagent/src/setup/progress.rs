@@ -64,8 +64,24 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
             let state = match (progress.dependencies.get(dep), seen) {
                 (Some(step), _) => step.clone(),
                 (None, None) => DependencyState::Checking,
-                (None, Some(Some(Ok(Ok(version))))) => DependencyState::Found {
+                (None, Some(Some(Ok(Ok(located))))) if located.bundled => {
+                    DependencyState::Bundled {
+                        version: located.version.clone(),
+                    }
+                }
+                (
+                    None,
+                    Some(Some(Ok(Ok(super::Located {
+                        version,
+                        note: Some(note),
+                        ..
+                    })))),
+                ) => DependencyState::System {
                     version: version.clone(),
+                    note: note.line().to_owned(),
+                },
+                (None, Some(Some(Ok(Ok(located))))) => DependencyState::Found {
+                    version: located.version.clone(),
                 },
                 (None, Some(Some(Err(code)))) => DependencyState::refused(code.0),
                 (None, Some(Some(Ok(Err(missing))))) => DependencyState::Missing {
@@ -139,7 +155,78 @@ pub fn source_label(source: &super::pack::PackSource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::setup::{InstallError, Version};
+    use crate::setup::{InstallError, Located, Version};
+
+    /// DEC-157: a tmux found as the copy the app ships shows Bundled with its version, which
+    /// clients read as `{"state":"bundled","version":...}`; any other copy stays Found.
+    #[test]
+    fn a_bundled_tmux_row_is_bundled_with_its_version_on_the_wire() {
+        let located = |bundled| {
+            Ok(Ok(Located {
+                version: Version::parse("3.8").unwrap(),
+                bundled,
+                note: None,
+            }))
+        };
+        let progress = Progress {
+            checked: Some(Checked {
+                at: Instant::now(),
+                found: vec![
+                    (Dependency::Tmux, located(true)),
+                    (Dependency::Uv, located(false)),
+                ],
+            }),
+            ..Progress::default()
+        };
+        let rows = dependency_rows(&progress);
+        let version = Version::parse("3.8").unwrap();
+        assert_eq!(
+            rows[0].state,
+            DependencyState::Bundled {
+                version: version.clone()
+            }
+        );
+        assert_eq!(rows[1].state, DependencyState::Found { version });
+        assert_eq!(
+            serde_json::to_value(&rows[0].state).unwrap(),
+            serde_json::json!({"state": "bundled", "version": "3.8"})
+        );
+    }
+
+    /// Leader 20:08: a system tmux used in place of the bundled one is found with the note
+    /// that says why, which clients read as `{"state":"system","version":...,"note":...}`.
+    #[test]
+    fn a_system_tmux_used_in_place_of_the_bundled_one_carries_its_note_on_the_wire() {
+        use crate::tools::BundleNote;
+        for note in [BundleNote::Missing, BundleNote::CannotRun] {
+            let progress = Progress {
+                checked: Some(Checked {
+                    at: Instant::now(),
+                    found: vec![(
+                        Dependency::Tmux,
+                        Ok(Ok(Located {
+                            version: Version::parse("3.5a").unwrap(),
+                            bundled: false,
+                            note: Some(note),
+                        })),
+                    )],
+                }),
+                ..Progress::default()
+            };
+            let rows = dependency_rows(&progress);
+            assert_eq!(
+                rows[0].state,
+                DependencyState::System {
+                    version: Version::parse("3.5a").unwrap(),
+                    note: note.line().to_owned(),
+                }
+            );
+            assert_eq!(
+                serde_json::to_value(&rows[0].state).unwrap(),
+                serde_json::json!({"state": "system", "version": "3.5a", "note": note.line()})
+            );
+        }
+    }
 
     #[test]
     fn a_tool_setup_cannot_install_on_this_system_is_unsupported_not_failed() {
@@ -191,7 +278,14 @@ mod tests {
                 at: Instant::now(),
                 found: vec![
                     (Dependency::Tmux, Ok(Err(Dependency::Tmux.not_found()))),
-                    (Dependency::Uv, Ok(Ok(Version::parse("0.13.5").unwrap()))),
+                    (
+                        Dependency::Uv,
+                        Ok(Ok(Located {
+                            version: Version::parse("0.13.5").unwrap(),
+                            bundled: false,
+                            note: None,
+                        })),
+                    ),
                     (Dependency::Graphify, Ok(Err(needs.clone()))),
                 ],
             }),

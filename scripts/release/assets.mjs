@@ -32,11 +32,13 @@ export function targetInfo(target) {
 
 /**
  * Lists the executables shipped beside the desktop app and in the CLI archive for `target`:
- * the engine, the rcli host, the runner, plus the Linux Landlock or Windows boundary helper.
+ * the engine, the rcli host, the runner, the bundled tmux on macOS and Linux (DEC-157), plus
+ * the Linux Landlock or Windows boundary helper.
  */
 export function sidecars(target) {
   const { os } = targetInfo(target);
   const names = ["crazyagent", "crazyagent-rcli", "crazyagent-runner"];
+  if (os !== "windows") names.push("crazyagent-tmux");
   if (os === "linux") names.push("crazyagent-landlock");
   if (os === "windows") names.push("crazyagent-win-boundary");
   return names;
@@ -71,15 +73,17 @@ function run(command, args, options = {}) {
 }
 
 /**
- * Copies the built executables for `target` from `cargoDir` and the rcli host from `rcli` into
- * `<tauriDir>/binaries/<name>-<target>[.exe]`, and writes `binaries/release.conf.json`, the
- * `tauri build --config` overlay naming them as `bundle.externalBin`. Output: staged paths and overlay path.
+ * Copies the built executables for `target` from `cargoDir`, the rcli host from `rcli` and the
+ * tmux build-tmux.sh made from `tmux` into `<tauriDir>/binaries/<name>-<target>[.exe]`, and writes
+ * `binaries/release.conf.json`, the `tauri build --config` overlay naming them as
+ * `bundle.externalBin`. Output: staged paths and overlay path.
  */
-export async function stageSidecars({ target, cargoDir, rcli, tauriDir }) {
+export async function stageSidecars({ target, cargoDir, rcli, tmux, tauriDir }) {
   const { exe } = targetInfo(target);
   const names = sidecars(target);
-  const sources = names.map((name) => (name === "crazyagent-rcli" ? rcli : join(cargoDir, `${name}${exe}`)));
-  for (const [index, source] of sources.entries()) if (!(await isFile(source))) fail(`release_sidecar_missing:${names[index]}`);
+  const given = { "crazyagent-rcli": rcli, "crazyagent-tmux": tmux };
+  const sources = names.map((name) => (Object.hasOwn(given, name) ? given[name] : join(cargoDir, `${name}${exe}`)));
+  for (const [index, source] of sources.entries()) if (typeof source !== "string" || !(await isFile(source))) fail(`release_sidecar_missing:${names[index]}`);
   const out = join(tauriDir, "binaries");
   await mkdir(out, { recursive: true });
   const staged = [];
@@ -221,13 +225,13 @@ export async function collectDesktop({ target, version, bundleDir, out, env = pr
   return assets;
 }
 
-function options(args, names, flags = []) {
+function options(args, names, flags = [], optional = []) {
   const parsed = {};
   for (let index = 0; index < args.length; index += 1) {
     const name = args[index].replace(/^--/, "");
     if (!args[index].startsWith("--") || Object.hasOwn(parsed, name)) fail("release_arguments_rejected");
     if (flags.includes(name)) parsed[name] = true;
-    else if (names.includes(name) && index + 1 < args.length) parsed[name] = args[++index];
+    else if ((names.includes(name) || optional.includes(name)) && index + 1 < args.length) parsed[name] = args[++index];
     else fail("release_arguments_rejected");
   }
   for (const name of names) if (!Object.hasOwn(parsed, name)) fail(`release_argument_missing:--${name}`);
@@ -236,8 +240,9 @@ function options(args, names, flags = []) {
 
 async function main([command, ...args]) {
   if (command === "stage") {
-    const given = options(args, ["target", "cargo-dir", "rcli", "tauri-dir"]);
-    return (await stageSidecars({ target: given.target, cargoDir: resolve(given["cargo-dir"]), rcli: resolve(given.rcli), tauriDir: resolve(given["tauri-dir"]) })).config;
+    const given = options(args, ["target", "cargo-dir", "rcli", "tauri-dir"], [], ["tmux"]);
+    const tmux = given.tmux === undefined ? undefined : resolve(given.tmux);
+    return (await stageSidecars({ target: given.target, cargoDir: resolve(given["cargo-dir"]), rcli: resolve(given.rcli), tmux, tauriDir: resolve(given["tauri-dir"]) })).config;
   }
   if (command === "package") {
     const given = options(args, ["target", "version", "source", "out"], ["suffixed", "sign"]);
