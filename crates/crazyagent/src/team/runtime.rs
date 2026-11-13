@@ -10782,8 +10782,9 @@ impl TeamRuntime {
     /// refusal expires, and stops the agent so its next start picks again; a master starts
     /// again at once. Nothing is recorded for an account's own model. Takes the agent.
     /// Claims the engine's own check of a model refusal agent `id`'s pane said (DEC-150
-    /// addendum 9g, 9h), for a profile account with an explicit model on a harness with a
-    /// read-only test launch; a check that already refused marks the project from its own time.
+    /// addendum 9g, 9h, 9i), for a profile account with an explicit model on a harness with
+    /// a read-only test launch and an account the project does not hold; a check that
+    /// already refused marks the project from its own time.
     /// Takes the agent. Returns the check to run off this thread, none when none runs.
     fn said_check(&self, id: i64) -> Result<Option<Check>, EngineError> {
         let worker = &self.workers[&id];
@@ -10797,7 +10798,10 @@ impl TeamRuntime {
             return Ok(None);
         };
         let (project, connection) = (&worker.project, &worker.connection);
-        match super::model_pick::claim_check(&self.connection, connection, model, now_ms())? {
+        let held = super::held_until(&self.connection, project.as_str(), connection)
+            .map_err(error)?
+            .is_some();
+        match super::model_pick::claim_check(&self.connection, connection, model, now_ms(), held)? {
             Claim::Held => Ok(None),
             Claim::Refused { checked_ms } => {
                 let now = now_ms();
@@ -12647,7 +12651,10 @@ fn run_check(check: &Check) -> Result<(Tested, Option<String>), String> {
         claude: executable("claude-code"),
         harness: &check.harness,
         model: &check.model,
-        target: test_launch::Target::Connection(&check.connection),
+        target: test_launch::Target::Connection {
+            connection: &check.connection,
+            project: check.project.as_str(),
+        },
     };
     let asked = Instant::now();
     let (tested, reason) = loop {

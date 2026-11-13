@@ -425,28 +425,40 @@ fn a_model_check_runs_once_per_account_and_model_in_its_window() {
     let a = CredentialRef::new("account-a").unwrap();
     let b = CredentialRef::new("account-b").unwrap();
     let other = ProjectId::new("other").unwrap();
-    assert_eq!(claim_check(&db, &a, "gpt-a", 1_000).unwrap(), Claim::Run);
-    assert_eq!(claim_check(&db, &a, "gpt-a", 1_001).unwrap(), Claim::Held);
-    assert_eq!(claim_check(&db, &a, "gpt-b", 1_001).unwrap(), Claim::Run);
-    assert_eq!(claim_check(&db, &b, "gpt-a", 1_001).unwrap(), Claim::Run);
+    assert_eq!(
+        claim_check(&db, &a, "gpt-a", 1_000, false).unwrap(),
+        Claim::Run
+    );
+    assert_eq!(
+        claim_check(&db, &a, "gpt-a", 1_001, false).unwrap(),
+        Claim::Held
+    );
+    assert_eq!(
+        claim_check(&db, &a, "gpt-b", 1_001, false).unwrap(),
+        Claim::Run
+    );
+    assert_eq!(
+        claim_check(&db, &b, "gpt-a", 1_001, false).unwrap(),
+        Claim::Run
+    );
     check_refused(&db, &other, &a, "gpt-a", 2_000).unwrap();
     assert!(refused(&db, &other, &a, "gpt-a", 2_001).unwrap());
     assert!(!refused(&db, &project(), &a, "gpt-a", 2_001).unwrap());
     assert_eq!(
-        claim_check(&db, &a, "gpt-a", 3_000).unwrap(),
+        claim_check(&db, &a, "gpt-a", 3_000, false).unwrap(),
         Claim::Refused { checked_ms: 1_000 }
     );
     assert_eq!(
-        claim_check(&db, &a, "gpt-b", 3_000).unwrap(),
+        claim_check(&db, &a, "gpt-b", 3_000, false).unwrap(),
         Claim::Held,
         "only the refused model answers refused"
     );
     assert_eq!(
-        claim_check(&db, &a, "gpt-a", 1_000 + MODEL_REFUSAL_MS).unwrap(),
+        claim_check(&db, &a, "gpt-a", 1_000 + MODEL_REFUSAL_MS, false).unwrap(),
         Claim::Run
     );
     assert_eq!(
-        claim_check(&db, &a, "gpt-a", 1_001 + MODEL_REFUSAL_MS).unwrap(),
+        claim_check(&db, &a, "gpt-a", 1_001 + MODEL_REFUSAL_MS, false).unwrap(),
         Claim::Held,
         "a new claim starts unrefused"
     );
@@ -462,7 +474,7 @@ fn a_full_table_of_live_model_checks_holds_a_new_one_and_drops_none() {
     for n in 0..CHECKS_MAX {
         let model = format!("m-{n}");
         assert_eq!(
-            claim_check(&db, &a, &model, 1_000 + n as i64).unwrap(),
+            claim_check(&db, &a, &model, 1_000 + n as i64, false).unwrap(),
             Claim::Run
         );
     }
@@ -472,11 +484,17 @@ fn a_full_table_of_live_model_checks_holds_a_new_one_and_drops_none() {
         })
         .unwrap()
     };
-    assert_eq!(claim_check(&db, &a, "m-new", 2_000).unwrap(), Claim::Held);
-    assert_eq!(rows(), CHECKS_MAX as i64);
-    assert_eq!(claim_check(&db, &a, "m-0", 2_000).unwrap(), Claim::Held);
     assert_eq!(
-        claim_check(&db, &a, "m-new", 1_000 + MODEL_REFUSAL_MS).unwrap(),
+        claim_check(&db, &a, "m-new", 2_000, false).unwrap(),
+        Claim::Held
+    );
+    assert_eq!(rows(), CHECKS_MAX as i64);
+    assert_eq!(
+        claim_check(&db, &a, "m-0", 2_000, false).unwrap(),
+        Claim::Held
+    );
+    assert_eq!(
+        claim_check(&db, &a, "m-new", 1_000 + MODEL_REFUSAL_MS, false).unwrap(),
         Claim::Run,
         "the claim on m-0 ended and made room"
     );

@@ -30045,8 +30045,14 @@ fn a_said_refusal_an_engine_check_already_refused_marks_the_project_with_no_new_
     let account = reference(ENDPOINT);
     let checked = now_ms() - 60_000;
     assert_eq!(
-        super::super::model_pick::claim_check(&fixture.connection, &account, "gpt-a", checked)
-            .unwrap(),
+        super::super::model_pick::claim_check(
+            &fixture.connection,
+            &account,
+            "gpt-a",
+            checked,
+            false
+        )
+        .unwrap(),
         super::super::model_pick::Claim::Run
     );
     super::super::model_pick::check_refused(
@@ -30093,6 +30099,81 @@ fn a_said_refusal_an_engine_check_already_refused_marks_the_project_with_no_new_
     team.workers.clear();
 }
 
+/// A said refusal on an account the said project holds after a limit claims no engine
+/// check, since the test would start no run there and its claim would stand 6 h; a check
+/// that already refused the model still marks the held project at once (V3Q6B-S1,
+/// DEC-150 addendum 9i).
+#[test]
+fn a_said_refusal_on_an_account_the_project_holds_claims_no_check_and_a_refused_one_still_marks() {
+    let fixture = Fixture::new(1);
+    ledger::initialize(&fixture.connection).unwrap();
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    team.settings = Some((
+        fixture.base.join("global.toml"),
+        fixture.base.join("project.toml"),
+    ));
+    let account = reference(ENDPOINT);
+    crate::team::hold_for_project(
+        &fixture.connection,
+        project.as_str(),
+        &account,
+        std::time::Duration::from_secs(600),
+    )
+    .unwrap();
+    let said = |model: &str| {
+        let mut worker = between_turns(&project, AgentRole::Sub, true, false);
+        worker.model = Some(model.to_owned());
+        worker
+    };
+    let held = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers.insert(held, said("gpt-a"));
+    assert_eq!(team.said_check(held).unwrap(), None, "held");
+    assert_eq!(model_checks(&fixture), Vec::new());
+
+    let checked = now_ms() - 60_000;
+    assert_eq!(
+        super::super::model_pick::claim_check(
+            &fixture.connection,
+            &account,
+            "gpt-b",
+            checked,
+            false
+        )
+        .unwrap(),
+        super::super::model_pick::Claim::Run
+    );
+    super::super::model_pick::check_refused(
+        &fixture.connection,
+        &ProjectId::new("other").unwrap(),
+        &account,
+        "gpt-b",
+        checked,
+    )
+    .unwrap();
+    let refused = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers.insert(refused, said("gpt-b"));
+    assert_eq!(team.said_check(refused).unwrap(), None, "refused");
+    let until: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT until_ms FROM team_model_refusals WHERE project=?1 AND connection=?2 AND model='gpt-b'",
+            params![PROJECT, ENDPOINT],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert_eq!(
+        until,
+        Some(checked + super::super::model_pick::MODEL_REFUSAL_MS)
+    );
+    assert_eq!(
+        model_checks(&fixture),
+        vec![(ENDPOINT.to_owned(), "gpt-b".to_owned(), checked, true)]
+    );
+    team.workers.clear();
+}
+
 /// Only a refusal the engine's own check read marks the account's model (DEC-150 addendum
 /// 9g): an answer and a pending test leave the model unmarked and the claim held, a refused
 /// test marks the check's project and makes its claim answer refused.
@@ -30108,7 +30189,7 @@ fn only_a_refused_engine_check_marks_the_account_s_model() {
     {
         let model = format!("gpt-{n}");
         assert_eq!(
-            claim_check(&fixture.connection, &account, &model, 1_000).unwrap(),
+            claim_check(&fixture.connection, &account, &model, 1_000, false).unwrap(),
             Claim::Run
         );
         let check = Check {
@@ -30136,7 +30217,7 @@ fn only_a_refused_engine_check_marks_the_account_s_model() {
             Claim::Held
         };
         assert_eq!(
-            claim_check(&fixture.connection, &account, &model, 3_000).unwrap(),
+            claim_check(&fixture.connection, &account, &model, 3_000, false).unwrap(),
             claim,
             "{tested:?}"
         );

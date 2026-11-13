@@ -310,3 +310,59 @@ fn an_rcli_test_runs_on_the_pool_s_first_set_up_account_of_the_id_s_provider() {
         Err(NotStarted::NoAccount)
     );
 }
+
+/// A test launch on one named account reads the said project's hold after a limit
+/// (V3Q6B-S1, DEC-150 addendum 9g item 3, 9i): held for that project it starts no run and
+/// says the account is paused, while a hold for another project leaves it to the pick.
+#[cfg(unix)]
+#[test]
+fn a_test_launch_on_one_account_reads_the_said_project_s_hold() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-test-launch-hold-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let db = rusqlite::Connection::open(base.join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    std::fs::create_dir(base.join(crate::project_setup::PROJECTS_DIRECTORY)).unwrap();
+    let global = base.join("global.toml");
+    std::fs::write(
+        &global,
+        "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\nconnections = [{ id = \"local\", provider = \"openai-compatible\", harness = \"rcli\", protocol = \"openai-chat\", account_ref = \"local-account\", endpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }, model = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }, auth = { method = \"none\" } }]\npools = [{ id = \"local-pool\", members = [\"local\"], projects = [], roles = [], fallback_allowed = false }]\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let codex = base.join("codex");
+    std::fs::write(&codex, "").unwrap();
+    let project_settings = base.join("project.toml");
+    let account = CredentialRef::new("local").unwrap();
+    let launch = || {
+        run(&Request {
+            root: &base,
+            settings: (&global, &project_settings),
+            codex: Some(&codex),
+            claude: None,
+            harness: "codex",
+            model: "gpt-a",
+            target: Target::Connection {
+                connection: &account,
+                project: "team-panes",
+            },
+        })
+    };
+    let pending = |why: NotStarted| -> Result<(Tested, Option<String>), &'static str> {
+        Ok((Tested::Pending, Some(not_started("codex", why))))
+    };
+    let hold = Duration::from_secs(600);
+
+    crate::team::hold_for_project(&db, "other", &account, hold).unwrap();
+    assert_eq!(
+        launch(),
+        pending(NotStarted::UrlAccount),
+        "another project's hold"
+    );
+
+    crate::team::hold_for_project(&db, "team-panes", &account, hold).unwrap();
+    assert_eq!(launch(), pending(NotStarted::Paused));
+}
