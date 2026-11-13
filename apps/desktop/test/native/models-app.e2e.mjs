@@ -13,17 +13,45 @@ async function choose(selector, value) {
   await until(async () => await (await $(selector)).getValue() === value, UI_MS, `${selector} did not keep ${value}`);
 }
 
-/** Waits until the engine holds what the row expects. Inputs: the check on the engine read
- * and the label. Output: the read. */
-async function engineHolds(check, label) {
+/** Waits until the engine holds what the row expects for one harness. Inputs: the harness id,
+ * the check on the engine read and the label. Output: the read. */
+async function harnessHolds(harness, check, label) {
   let read = null;
-  await until(async () => { read = await observeModelChoice(HARNESS); return check(read); }, UI_MS, label);
+  await until(async () => { read = await observeModelChoice(harness); return check(read); }, UI_MS, label);
   return read;
+}
+
+/** Waits until the engine holds what the row expects for Claude Code. Inputs: the check on
+ * the engine read and the label. Output: the read. */
+async function engineHolds(check, label) {
+  return harnessHolds(HARNESS, check, label);
 }
 
 async function openPage() {
   await browser.execute((hash) => { location.hash = hash; }, PAGE);
   await until(async () => (await text("main")).includes("Model list checked against Claude Code"), 30000, "the Models section did not open");
+}
+
+/** Picks one Native sub-agent model option, saves it and waits until the engine holds it
+ * app-wide as a new version. Inputs: the harness id and the option value. Output: the read. */
+async function saveNative(harness, value) {
+  const before = (await observeModelChoice(harness)).rows.native.version;
+  await choose("#models-native", value);
+  await click('button[aria-label="Save Native sub-agent model"]');
+  const read = await harnessHolds(harness, (read) => read.rows.native.here === value, `the engine did not hold ${value} for ${harness}`);
+  assert.deepEqual([read.rows.native.effective, read.rows.native.source], [value, "app"]);
+  assert(read.rows.native.version > before, "the choice saved as a new version");
+  return read;
+}
+
+/** Clears the Native sub-agent model with Use the default and waits until the engine holds
+ * nothing, so native sub-agents follow the agent's model again. Input: the harness id. */
+async function clearNative(harness) {
+  await click('button[aria-label="Use the default, Native sub-agent model"]');
+  const read = await harnessHolds(harness, (read) => read.rows.native.here === null, `the engine still held a native sub-agent model for ${harness}`);
+  assert.deepEqual([read.rows.native.effective, read.rows.native.source], ["follow", "default"]);
+  assert.equal(await (await $("#models-native")).getValue(), "follow");
+  await until(async () => (await text("main")).includes("Nothing set: native sub-agents follow the agent's model."), UI_MS, "the page did not say the default");
 }
 
 async function rule(label, option, field) {
@@ -154,11 +182,64 @@ describe("Settings, Harnesses, Claude Code: the Models section on the real deskt
     await shot("models-app-rules");
   });
 
+  it("Claude Code: the Native sub-agent model starts on Follow the agent's model with nothing set", async () => {
+    assert.equal(await (await $("#models-native")).getValue(), "follow");
+    assert.match(await text("main"), /Nothing set: native sub-agents follow the agent's model\./);
+    const read = await observeModelChoice(HARNESS);
+    assert.deepEqual([read.rows.native.here, read.rows.native.effective, read.rows.native.source], [null, "follow", "default"]);
+  });
+
+  it("Claude Code: the Native sub-agent model Let the harness choose saves as harness", async () => {
+    await saveNative(HARNESS, "harness");
+    await until(async () => (await text("main")).includes("so one may run a model your allowed list leaves out"), UI_MS, "the option's help did not show");
+    await shot("models-app-native-harness");
+  });
+
+  it("Claude Code: the Native sub-agent model Follow the agent's model saves as follow", async () => {
+    await saveNative(HARNESS, "follow");
+    await until(async () => (await text("main")).includes("Every sub-agent a native lead starts runs on the lead's model."), UI_MS, "the option's help did not show");
+  });
+
+  it("Claude Code: Use the default clears the Native sub-agent model", async () => {
+    await saveNative(HARNESS, "harness");
+    await clearNative(HARNESS);
+  });
+
+  it("Codex: the Native sub-agent model starts on Follow the agent's model and Let the harness choose saves as harness", async () => {
+    await browser.execute(() => { location.hash = "#/settings/harnesses?harness=codex"; });
+    await until(async () => (await text("main")).includes("Model list checked against Codex"), 30000, "the Codex Models section did not open");
+    assert.equal(await (await $("#models-native")).getValue(), "follow", "Codex starts on Follow the agent's model");
+    await saveNative("codex", "harness");
+    assert.equal((await observeModelChoice(HARNESS)).rows.native.here, null, "Claude Code keeps its own value");
+    await shot("models-app-native-codex");
+  });
+
+  it("Codex: the Native sub-agent model Follow the agent's model saves as follow", async () => {
+    await saveNative("codex", "follow");
+  });
+
+  it("Codex: Use the default clears the Native sub-agent model", async () => {
+    await clearNative("codex");
+  });
+
+  it("RCLI shows the Native sub-agent model as Not supported by this harness, with no choice", async () => {
+    await browser.execute(() => { location.hash = "#/settings/harnesses?harness=rcli"; });
+    await until(async () => (await text("main")).includes("CrazyAgent has no model list for RCLI"), 30000, "the RCLI Models section did not open");
+    assert.match(await text("main"), /Native sub-agent model/);
+    assert.match(await text("main"), /Not supported by this harness/);
+    assert.equal(await $("#models-native").isExisting(), false, "no native choice");
+    assert.equal(await $('button[aria-label="Save Native sub-agent model"]').isExisting(), false, "no Save");
+    const read = await observeModelChoice("rcli");
+    assert.deepEqual([read.rows.native.here, read.rows.native.source], [null, "not_applied"]);
+    await shot("models-app-native-rcli");
+  });
+
   it("a harness whose model CrazyAgent does not choose shows the reason and no control", async () => {
     await browser.execute(() => { location.hash = "#/settings/harnesses?harness=opencode"; });
     await until(async () => (await text("main")).includes("CrazyAgent has no model list for"), 30000, "the OpenCode Models section did not open");
     const words = await text("main");
-    assert((words.match(/Not supported by this harness/g) ?? []).length >= 3, "each slot gives the reason");
+    assert((words.match(/Not supported by this harness/g) ?? []).length >= 4, "each slot gives the reason");
+    assert.equal(await $("#models-native").isExisting(), false, "no native choice");
     assert.equal(await $("#models-master").isExisting(), false, "no master choice");
     assert.equal(await $('button[aria-label="Save Allowed models"]').isExisting(), false, "no Save");
     await shot("models-app-not-supported");

@@ -2065,3 +2065,261 @@ fn each_kind_s_display_switches_are_of_the_shape_its_launch_carries() {
         assert!(!claude.variables.is_empty(), "{display:?}");
     }
 }
+
+/// Lists the values one variable has in a built command, in order, so a row can say it is
+/// set once with one value or not at all. Inputs: the command and the variable's name.
+/// Output: the values.
+fn variable_values(built: &InteractiveCommand, name: &str) -> Vec<String> {
+    built
+        .env
+        .iter()
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
+/// Lists the `-c` settings a built Codex command carries whose key is `key`, in order.
+/// Inputs: the command and the dotted key. Output: the whole settings.
+fn codex_settings_named(built: &InteractiveCommand, key: &str) -> Vec<String> {
+    let prefix = format!("{key}=");
+    built
+        .argv
+        .windows(2)
+        .filter(|pair| pair[0] == "-c" && pair[1].starts_with(&prefix))
+        .map(|pair| pair[1].clone())
+        .collect()
+}
+
+/// M-11 (DEC-150), Follow the agent's model, the default: a native Claude Code lead runs
+/// with `CLAUDE_CODE_SUBAGENT_MODEL=inherit` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`, so
+/// Claude Code 2.1.322 drops the Agent tool's model and every agent definition's model and
+/// gives each teammate the lead's model; the teammate script carries both.
+#[test]
+fn a_native_claude_lead_and_its_teammates_run_sub_agents_on_the_lead_s_model() {
+    let case = Case::new();
+    let mut request = case.request("claude-code", case.subscription(), true);
+    request.model = Some("opus".into());
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    assert!(installed.native_follows());
+
+    let lead = command(&request, Some(&installed), &run(None)).unwrap();
+
+    assert_eq!(
+        variable_values(&lead, "CLAUDE_CODE_SUBAGENT_MODEL"),
+        ["inherit"],
+        "{:?}",
+        lead.env
+    );
+    assert_eq!(
+        variable_values(&lead, "CLAUDE_CODE_SUBAGENT_MODEL_FORCE"),
+        ["1"],
+        "{:?}",
+        lead.env
+    );
+    write_teammate_command(&case.home(), &lead, &request, installed.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    assert!(
+        written.contains(" 'CLAUDE_CODE_SUBAGENT_MODEL=inherit' "),
+        "{written}"
+    );
+    assert!(
+        written.contains(" 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1' "),
+        "{written}"
+    );
+    drop(installed);
+}
+
+/// M-11 (DEC-150), Let the harness choose: a native Claude Code lead whose owner picked it
+/// keeps its agent team but gets neither sub-agent model variable, so Claude Code's own
+/// rules pick each sub-agent's model.
+#[test]
+fn a_native_claude_lead_set_to_let_the_harness_choose_gets_no_sub_agent_model_variables() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .with_native_model(crate::model_choice::NativeModel::Harness)
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    assert!(installed.native_team());
+    assert!(!installed.native_follows());
+
+    let lead = command(&request, Some(&installed), &run(None)).unwrap();
+
+    assert_eq!(
+        variable_values(&lead, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+        ["1"]
+    );
+    assert!(variable_values(&lead, "CLAUDE_CODE_SUBAGENT_MODEL").is_empty());
+    assert!(variable_values(&lead, "CLAUDE_CODE_SUBAGENT_MODEL_FORCE").is_empty());
+    drop(installed);
+}
+
+/// M-11 (DEC-150): a Claude Code agent outside a native team keeps the Agent tool denied
+/// and gets neither sub-agent model variable, whatever the setting says.
+#[test]
+fn a_claude_agent_outside_a_native_team_gets_no_sub_agent_model_variables() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let installed = project_context(&case, "data")
+        .with_native_model(crate::model_choice::NativeModel::Follow)
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    assert!(!installed.native_follows());
+
+    let agent = command(&request, Some(&installed), &run(None)).unwrap();
+
+    assert!(variable_values(&agent, "CLAUDE_CODE_SUBAGENT_MODEL").is_empty());
+    assert!(variable_values(&agent, "CLAUDE_CODE_SUBAGENT_MODEL_FORCE").is_empty());
+    drop(installed);
+}
+
+/// M-11 (DEC-150), Follow the agent's model, the default: a native Codex lead on a chosen
+/// model names it once as `agents.default_subagent_model`, so every child thread Codex
+/// starts without a role of its own runs on the lead's model.
+#[test]
+fn a_native_codex_lead_on_a_chosen_model_gives_its_sub_agents_that_model() {
+    let case = Case::new();
+    let mut request = case.request("codex", case.subscription(), true);
+    request.model = Some("gpt-5.5".into());
+    let installed = project_context(&case, "data")
+        .with_native_sub_agents(3)
+        .install("codex", &case.home(), true)
+        .unwrap();
+    assert!(installed.native_follows());
+
+    let lead = command(&request, Some(&installed), &run(None)).unwrap();
+
+    assert_eq!(
+        codex_settings_named(&lead, "agents.default_subagent_model"),
+        ["agents.default_subagent_model=\"gpt-5.5\""],
+        "{:?}",
+        lead.argv
+    );
+    assert_eq!(codex_settings_named(&lead, "model"), ["model=\"gpt-5.5\""]);
+    drop(installed);
+}
+
+/// M-11 (DEC-150): a native Codex lead on the account's own model has no id to name, so it
+/// sets no sub-agent model and its child threads take the lead's model, Codex's default.
+#[test]
+fn a_native_codex_lead_on_the_account_s_own_model_names_no_sub_agent_model() {
+    let case = Case::new();
+    let request = case.request("codex", case.subscription(), true);
+    let installed = project_context(&case, "data")
+        .with_native_sub_agents(3)
+        .install("codex", &case.home(), true)
+        .unwrap();
+    assert!(installed.native_follows());
+
+    let lead = command(&request, Some(&installed), &run(None)).unwrap();
+
+    assert!(
+        codex_settings_named(&lead, "agents.default_subagent_model").is_empty(),
+        "{:?}",
+        lead.argv
+    );
+    drop(installed);
+}
+
+/// M-11 (DEC-150), Let the harness choose: a native Codex lead on a chosen model whose
+/// owner picked it names no sub-agent model, so Codex's own roles and defaults decide.
+#[test]
+fn a_native_codex_lead_set_to_let_the_harness_choose_names_no_sub_agent_model() {
+    let case = Case::new();
+    let mut request = case.request("codex", case.subscription(), true);
+    request.model = Some("gpt-5.5".into());
+    let installed = project_context(&case, "data")
+        .with_native_sub_agents(3)
+        .with_native_model(crate::model_choice::NativeModel::Harness)
+        .install("codex", &case.home(), true)
+        .unwrap();
+    assert!(installed.native_threads());
+    assert!(!installed.native_follows());
+
+    let lead = command(&request, Some(&installed), &run(None)).unwrap();
+
+    assert!(
+        codex_settings_named(&lead, "agents.default_subagent_model").is_empty(),
+        "{:?}",
+        lead.argv
+    );
+    drop(installed);
+}
+
+/// M-11 (DEC-150): a Codex agent outside native mode, on a chosen model, keeps multi-agent
+/// v2 off and names no sub-agent model.
+#[test]
+fn a_codex_agent_outside_native_mode_names_no_sub_agent_model() {
+    let case = Case::new();
+    let mut request = case.request("codex", case.subscription(), true);
+    request.model = Some("gpt-5.5".into());
+    let installed = project_context(&case, "data")
+        .install("codex", &case.home(), true)
+        .unwrap();
+    assert!(!installed.native_follows());
+
+    let agent = command(&request, Some(&installed), &run(None)).unwrap();
+
+    assert!(
+        codex_settings_named(&agent, "agents.default_subagent_model").is_empty(),
+        "{:?}",
+        agent.argv
+    );
+    drop(installed);
+}
+
+/// M-11 (DEC-150), macOS only like every agent launch: the installed Codex accepts a native
+/// lead's settings with `agents.default_subagent_model` set, so the key exists in the
+/// installed version and the lead's launch is not refused at its first config read.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_installed_codex_accepts_a_native_lead_s_sub_agent_model_setting() {
+    let installed_codex = crate::harnesses::catalog(&crate::harnesses::Search::from_environment())
+        .into_iter()
+        .find(|entry| entry.id == "codex")
+        .and_then(|entry| entry.executable)
+        .expect("installed codex");
+    let case = Case::new();
+    let mut request = case.request("codex", case.subscription(), true);
+    request.model = Some("gpt-5.5".into());
+    let installed = project_context(&case, "data")
+        .with_native_sub_agents(2)
+        .install("codex", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&installed), &run(None)).unwrap();
+    assert_eq!(
+        codex_settings_named(&built, "agents.default_subagent_model").len(),
+        1
+    );
+    let settings: Vec<&String> = built
+        .argv
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| &pair[1])
+        .collect();
+    let mut features = std::process::Command::new(&installed_codex);
+    features
+        .args(settings.iter().flat_map(|setting| ["-c", setting.as_str()]))
+        .args(["features", "list"])
+        .env_clear()
+        .env("HOME", case.home())
+        .env("CODEX_HOME", case.home())
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(case.path().join("work"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = crate::spawn_gate::output(&mut features).unwrap();
+
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{errors}");
+    assert!(!errors.contains("unknown configuration field"), "{errors}");
+    drop(installed);
+}

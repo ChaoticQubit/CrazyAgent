@@ -63,24 +63,34 @@ const _: () = assert!(
     ITEM_PREFIX.len() + HARNESS_BYTES_MAX + ":project:".len() + PROJECT_BYTES_MAX + 1 + 8
         <= ITEM_BYTES_MAX
 );
+/// The longest Native sub-agent model value as JSON: the longer option name, quoted.
+const NATIVE_VALUE_JSON_MAX: usize = 16;
+const NATIVE_ROW_JSON_MAX: usize = 2 * NATIVE_VALUE_JSON_MAX + 512;
+
+const _: () = assert!(Slot::ALL.len() == 4);
 const _: () = assert!(
-    (CATALOG_MODELS_MAX + CUSTOM_MAX) * CANDIDATE_JSON_MAX + 3 * ROW_JSON_MAX + 1024
+    (CATALOG_MODELS_MAX + CUSTOM_MAX) * CANDIDATE_JSON_MAX
+        + 3 * ROW_JSON_MAX
+        + NATIVE_ROW_JSON_MAX
+        + 1024
         <= crate::protocol::FRAME_BYTES_MAX
 );
 
 /// One model choice of a harness at one scope: the model the master runs on, the default
-/// model of the agents it starts, and the models the master may pick from for an agent.
+/// model of the agents it starts, the models the master may pick from for an agent, and
+/// what a native lead's own sub-agents run on (DEC-150 M-11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Slot {
     Master,
     Agent,
     Allowed,
+    Native,
 }
 
 impl Slot {
     /// Every slot in page order.
-    pub const ALL: [Slot; 3] = [Slot::Master, Slot::Agent, Slot::Allowed];
+    pub const ALL: [Slot; 4] = [Slot::Master, Slot::Agent, Slot::Allowed, Slot::Native];
 
     /// Names the slot as the store and the owner protocol write it.
     pub fn as_str(self) -> &'static str {
@@ -88,7 +98,40 @@ impl Slot {
             Slot::Master => "master",
             Slot::Agent => "agent",
             Slot::Allowed => "allowed",
+            Slot::Native => "native",
         }
+    }
+}
+
+/// What a native lead's own sub-agents run on (DEC-150 M-11): the lead's model, so the
+/// owner's model choice and allowed list hold for them too, or whatever the harness picks,
+/// such as a Claude Code agent definition's model or a Codex role's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeModel {
+    Follow,
+    Harness,
+}
+
+impl NativeModel {
+    /// Names the option as the store and the owner protocol write it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NativeModel::Follow => "follow",
+            NativeModel::Harness => "harness",
+        }
+    }
+
+    /// Reads a stored or sent value: exactly one option name. Input: the value. Output:
+    /// the option, none for anything else.
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let model = match value.as_str()? {
+            "follow" => NativeModel::Follow,
+            "harness" => NativeModel::Harness,
+            _ => return None,
+        };
+        assert_eq!(Value::from(model.as_str()), *value);
+        Some(model)
     }
 }
 
@@ -279,18 +322,23 @@ pub fn harness_id(name: &str) -> Option<&'static str> {
 }
 
 /// Tells whether CrazyAgent chooses this harness's model in one slot: the master runs on
-/// Claude Code and Codex with a chosen model, and team agents start only on those two.
+/// Claude Code and Codex with a chosen model, team agents start only on those two, and
+/// only harnesses with native sub-agents (Claude Code teams, Codex threads) have a Native
+/// sub-agent model.
 /// Inputs: the catalog harness id and the slot. Output: the answer.
 pub fn supported(harness: &str, slot: Slot) -> bool {
     match slot {
         Slot::Master => matches!(harness, "claude-code" | "codex"),
         Slot::Agent | Slot::Allowed => crate::team::launch_harness(harness).is_some(),
+        Slot::Native => crate::coord::settings::HarnessKind::from_harness(harness)
+            .is_some_and(crate::coord::settings::native_supported),
     }
 }
 
 /// Checks one value for a slot: a usable model id for the master and agent slots, a list
-/// of at most `ALLOWED_MAX` distinct usable ids for the allowed slot. Inputs: the harness
-/// id, the slot, the value and the usable ids. Output: true when the value may be saved.
+/// of at most `ALLOWED_MAX` distinct usable ids for the allowed slot, one option name for
+/// the native slot. Inputs: the harness id, the slot, the value and the usable ids.
+/// Output: true when the value may be saved.
 pub(crate) fn value_ok(harness: &str, slot: Slot, value: &Value, usable: &[String]) -> bool {
     let known = |id: &str| model_valid(harness, id) && usable.iter().any(|one| one == id);
     match slot {
@@ -302,15 +350,18 @@ pub(crate) fn value_ok(harness: &str, slot: Slot, value: &Value, usable: &[Strin
                     .iter()
                     .all(|id| id.as_str().is_some_and(|id| known(id) && seen.insert(id)))
         }),
+        Slot::Native => NativeModel::from_value(value).is_some(),
     }
 }
 
 /// The value a slot falls back to when nothing usable is set: null for a model, so the
-/// account's own model runs, and an empty list for the allowed slot.
+/// account's own model runs, an empty list for the allowed slot and Follow the agent's
+/// model for the native slot.
 pub(crate) fn fallback(slot: Slot) -> Value {
     match slot {
         Slot::Master | Slot::Agent => Value::Null,
         Slot::Allowed => Value::Array(Vec::new()),
+        Slot::Native => Value::String(NativeModel::Follow.as_str().to_owned()),
     }
 }
 
@@ -327,7 +378,7 @@ pub(crate) fn layered(
 ) -> (Value, Source) {
     let kept = |value: &Value| -> Option<Value> {
         match slot {
-            Slot::Master | Slot::Agent => {
+            Slot::Master | Slot::Agent | Slot::Native => {
                 value_ok(harness, slot, value, usable).then(|| value.clone())
             }
             Slot::Allowed => {

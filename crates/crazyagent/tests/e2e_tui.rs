@@ -2245,6 +2245,8 @@ mod models {
     const HARNESS: &str = "claude-code";
     const CLAUDE_CODE: &str = "Claude Code";
     const OPENCODE: &str = "OpenCode";
+    const CODEX: &str = "Codex";
+    const RCLI: &str = "RCLI";
 
     /// A TUI on Home with the engine it talks to, the runtime the owner reads run on and the
     /// scratch folders that hold the stand-ins, HOME and the projects home.
@@ -2311,6 +2313,16 @@ mod models {
                 &format!("{} (Claude Code)", qualified_versions()[0]),
             );
             stand_in(&bin.join("opencode"), "1.0.0");
+            stand_in(
+                &bin.join("codex"),
+                &format!(
+                    "codex-cli {}",
+                    crazyagent::model_choice::shipped("codex")
+                        .expect("Codex ships a model catalog")
+                        .qualified_versions[0]
+                ),
+            );
+            stand_in(&bin.join("crazyagent-rcli"), "crazyagent-rcli 0.1.0");
             let inherited = std::env::var_os("PATH").unwrap_or_default();
             let mut engine = Engine::new(prefix);
             engine.home = Some(home);
@@ -2381,16 +2393,26 @@ mod models {
         /// Seeds one Claude Code slot through the owner protocol, naming the version held.
         /// Inputs: whether it is the project's, the slot and the value.
         fn set(&self, project: bool, slot: Slot, value: Value) {
-            let version = row(&self.models(HARNESS, project), slot).version;
+            self.set_on(HARNESS, project, slot, value);
+        }
+
+        /// Seeds one slot of one harness through the owner protocol, naming the version
+        /// held. Inputs: the harness id, whether it is the project's, the slot and the value.
+        fn set_on(&self, harness: &'static str, project: bool, slot: Slot, value: Value) {
+            let version = row(&self.models(harness, project), slot).version;
             let written = self.owner(move |controller| {
                 Box::pin(async move {
                     controller
-                        .model_choice_set(HARNESS, project.then(project_id), slot, value, version)
+                        .model_choice_set(harness, project.then(project_id), slot, value, version)
                         .await
                         .unwrap()
                 })
             });
             assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+            assert!(
+                row(&self.models(harness, project), slot).here.is_some(),
+                "the engine holds the seeded {slot:?}"
+            );
         }
 
         fn add(&self, model: &'static str) {
@@ -2608,7 +2630,7 @@ mod models {
         let tui = Tui::start("ca-e2e-m08-");
         tui.app_page(CLAUDE_CODE, "Claude Code models");
         tui.pty
-            .keys(&["Down", "Down", "Down", "Down", "Down", "Enter"]);
+            .keys(&["Down", "Down", "Down", "Down", "Down", "Down", "Enter"]);
         tui.says("Model id");
         tui.pty.text("my-model-1");
         tui.pty.keys(&["Enter"]);
@@ -2626,7 +2648,7 @@ mod models {
         let tui = Tui::start("ca-e2e-m09-");
         tui.app_page(CLAUDE_CODE, "Claude Code models");
         tui.pty
-            .keys(&["Down", "Down", "Down", "Down", "Down", "Enter"]);
+            .keys(&["Down", "Down", "Down", "Down", "Down", "Down", "Enter"]);
         tui.says("Model id");
         tui.pty.text("opus");
         tui.pty.keys(&["Enter"]);
@@ -2640,7 +2662,7 @@ mod models {
         let tui = Tui::start("ca-e2e-m10-");
         tui.app_page(CLAUDE_CODE, "Claude Code models");
         tui.pty
-            .keys(&["Down", "Down", "Down", "Down", "Down", "Enter"]);
+            .keys(&["Down", "Down", "Down", "Down", "Down", "Down", "Enter"]);
         tui.says("Model id");
         tui.pty.text("bad id!");
         tui.pty.keys(&["Enter"]);
@@ -2655,7 +2677,7 @@ mod models {
         tui.add("my-model-1");
         tui.app_page(CLAUDE_CODE, "Claude Code models");
         tui.pty
-            .keys(&["Down", "Down", "Down", "Down", "Down", "Down", "x"]);
+            .keys(&["Down", "Down", "Down", "Down", "Down", "Down", "Down", "x"]);
         tui.says("Removed my-model-1.");
         assert_eq!(own(&tui.models(HARNESS, false)), vec![]);
         tui.finish();
@@ -2689,14 +2711,14 @@ mod models {
     #[test]
     fn the_tui_pick_rule_any_offered_model_saves_hint() {
         let tui = Tui::start("ca-e2e-m12-");
-        rule_row(&tui, 3, &["Right"], Rule::Pick(PickRule::Hint));
+        rule_row(&tui, 4, &["Right"], Rule::Pick(PickRule::Hint));
         tui.finish();
     }
 
     #[test]
     fn the_tui_pick_rule_always_the_default_saves_default() {
         let tui = Tui::start("ca-e2e-m13-");
-        rule_row(&tui, 3, &["Right", "Right"], Rule::Pick(PickRule::Default));
+        rule_row(&tui, 4, &["Right", "Right"], Rule::Pick(PickRule::Default));
         tui.finish();
     }
 
@@ -2704,14 +2726,14 @@ mod models {
     fn the_tui_pick_rule_only_the_allowed_list_saves_strict() {
         let tui = Tui::start("ca-e2e-m14-");
         tui.set_rule(Rule::Pick(PickRule::Hint));
-        rule_row(&tui, 3, &["Left"], Rule::Pick(PickRule::Strict));
+        rule_row(&tui, 4, &["Left"], Rule::Pick(PickRule::Strict));
         tui.finish();
     }
 
     #[test]
     fn the_tui_fallback_rule_stop_and_say_why_saves_stop() {
         let tui = Tui::start("ca-e2e-m15-");
-        rule_row(&tui, 4, &["Right"], Rule::Fallback(FallbackRule::Stop));
+        rule_row(&tui, 5, &["Right"], Rule::Fallback(FallbackRule::Stop));
         tui.finish();
     }
 
@@ -2720,7 +2742,7 @@ mod models {
         let tui = Tui::start("ca-e2e-m16-");
         rule_row(
             &tui,
-            4,
+            5,
             &["Right", "Right"],
             Rule::Fallback(FallbackRule::Silent),
         );
@@ -2731,7 +2753,7 @@ mod models {
     fn the_tui_fallback_rule_tell_me_saves_notice() {
         let tui = Tui::start("ca-e2e-m17-");
         tui.set_rule(Rule::Fallback(FallbackRule::Stop));
-        rule_row(&tui, 4, &["Left"], Rule::Fallback(FallbackRule::Notice));
+        rule_row(&tui, 5, &["Left"], Rule::Fallback(FallbackRule::Notice));
         tui.finish();
     }
 
@@ -2750,7 +2772,7 @@ mod models {
         tui.app_page(OPENCODE, "OpenCode models");
         let screen = tui.says("No model list");
         assert!(
-            screen.matches(NOT_SUPPORTED).count() >= 3,
+            screen.matches(NOT_SUPPORTED).count() >= 4,
             "each slot gives the reason:\n{screen}"
         );
         tui.pty.keys(&["Enter"]);
@@ -2828,6 +2850,176 @@ mod models {
         assert_eq!(
             (master.here, master.effective, master.source),
             (None, json!("opus"), Source::App)
+        );
+        tui.finish();
+    }
+
+    /// Moves from the first row of a Models page to the Native sub-agent model, the fourth
+    /// slot. Input: the TUI.
+    fn to_native(tui: &Tui) {
+        tui.pty.keys(&["Down", "Down", "Down"]);
+        tui.says("What the sub-agents a native lead starts itself run on.");
+    }
+
+    #[test]
+    fn the_tui_native_sub_agent_model_let_the_harness_choose_saves_harness_for_claude_code() {
+        let tui = Tui::start("ca-e2e-m23-");
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        to_native(&tui);
+        tui.says("Nothing set: native sub-agents follow the agent's model.");
+        let before = row(&tui.models(HARNESS, false), Slot::Native).version;
+        tui.pty.keys(&["Enter", "Right"]);
+        tui.says("The harness picks each sub-agent's model");
+        tui.pty.keys(&["Enter"]);
+        tui.says("Saved.");
+        let native = row(&tui.models(HARNESS, false), Slot::Native);
+        assert_eq!(
+            (native.here, native.effective, native.source),
+            (Some(json!("harness")), json!("harness"), Source::App)
+        );
+        assert!(native.version > before, "the choice is a new version");
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_native_sub_agent_model_follow_the_agent_s_model_saves_follow_for_claude_code() {
+        let tui = Tui::start("ca-e2e-m24-");
+        tui.set(false, Slot::Native, json!("harness"));
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        to_native(&tui);
+        tui.pty.keys(&["Enter", "Right"]);
+        tui.says("Every sub-agent a native lead starts runs on the lead's model.");
+        tui.pty.keys(&["Enter"]);
+        tui.says("Saved.");
+        let native = row(&tui.models(HARNESS, false), Slot::Native);
+        assert_eq!(
+            (native.here, native.effective, native.source),
+            (Some(json!("follow")), json!("follow"), Source::App)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn x_on_the_native_sub_agent_model_goes_back_to_the_default_for_claude_code() {
+        let tui = Tui::start("ca-e2e-m25-");
+        tui.set(false, Slot::Native, json!("harness"));
+        tui.app_page(CLAUDE_CODE, "Claude Code models");
+        to_native(&tui);
+        tui.pty.keys(&["x"]);
+        tui.says("Saved.");
+        let native = row(&tui.models(HARNESS, false), Slot::Native);
+        assert_eq!(
+            (native.here, native.effective, native.source),
+            (None, json!("follow"), Source::Default)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_native_sub_agent_model_let_the_harness_choose_saves_harness_for_codex() {
+        let tui = Tui::start("ca-e2e-m26-");
+        tui.app_page(CODEX, "Codex models");
+        to_native(&tui);
+        tui.says("Follow the agent's model");
+        tui.pty.keys(&["Enter", "Right", "Enter"]);
+        tui.says("Saved.");
+        let native = row(&tui.models("codex", false), Slot::Native);
+        assert_eq!(
+            (native.here, native.source),
+            (Some(json!("harness")), Source::App)
+        );
+        let claude = row(&tui.models(HARNESS, false), Slot::Native);
+        assert_eq!(claude.here, None, "Claude Code keeps its own value");
+        tui.finish();
+    }
+
+    #[test]
+    fn the_tui_native_sub_agent_model_follow_the_agent_s_model_saves_follow_for_codex() {
+        let tui = Tui::start("ca-e2e-m27-");
+        tui.set_on("codex", false, Slot::Native, json!("harness"));
+        tui.app_page(CODEX, "Codex models");
+        to_native(&tui);
+        tui.pty.keys(&["Enter", "Right", "Enter"]);
+        tui.says("Saved.");
+        let native = row(&tui.models("codex", false), Slot::Native);
+        assert_eq!(
+            (native.here, native.source),
+            (Some(json!("follow")), Source::App)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn x_on_the_native_sub_agent_model_goes_back_to_the_default_for_codex() {
+        let tui = Tui::start("ca-e2e-m28-");
+        tui.set_on("codex", false, Slot::Native, json!("harness"));
+        tui.app_page(CODEX, "Codex models");
+        to_native(&tui);
+        tui.pty.keys(&["x"]);
+        tui.says("Saved.");
+        let native = row(&tui.models("codex", false), Slot::Native);
+        assert_eq!(
+            (native.here, native.effective, native.source),
+            (None, json!("follow"), Source::Default)
+        );
+        tui.finish();
+    }
+
+    #[test]
+    fn rcli_shows_the_native_sub_agent_model_not_supported_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m29-");
+        let before = tui.models("rcli", false);
+        assert_eq!(
+            row(&before, Slot::Native).access,
+            Access::ReadOnly {
+                reason: NOT_SUPPORTED.into()
+            }
+        );
+        tui.app_page(RCLI, "RCLI models");
+        to_native(&tui);
+        let screen = tui.says(NOT_SUPPORTED);
+        assert!(
+            !screen.contains("Follow the agent's model"),
+            "no option shows for RCLI:\n{screen}"
+        );
+        tui.pty.keys(&["Enter"]);
+        tui.says("CrazyAgent does not choose this model here.");
+        assert_eq!(tui.models("rcli", false), before);
+        tui.finish();
+    }
+
+    #[test]
+    fn follow_for_a_project_overrides_the_app_native_sub_agent_model_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m30-");
+        tui.set(false, Slot::Native, json!("harness"));
+        tui.project_page();
+        to_native(&tui);
+        tui.says("Uses the app value: Let the harness choose.");
+        tui.pty.keys(&["Enter", "Right", "Enter"]);
+        tui.says("Saved.");
+        let native = row(&tui.models(HARNESS, true), Slot::Native);
+        assert_eq!(
+            (native.here, native.effective, native.source),
+            (Some(json!("follow")), json!("follow"), Source::Project)
+        );
+        let app = row(&tui.models(HARNESS, false), Slot::Native);
+        assert_eq!(app.here, Some(json!("harness")), "the app value stays");
+        tui.finish();
+    }
+
+    #[test]
+    fn x_on_a_project_s_native_sub_agent_model_goes_back_to_the_app_value_in_the_tui() {
+        let tui = Tui::start("ca-e2e-m31-");
+        tui.set(false, Slot::Native, json!("harness"));
+        tui.set(true, Slot::Native, json!("follow"));
+        tui.project_page();
+        to_native(&tui);
+        tui.pty.keys(&["x"]);
+        tui.says("Saved.");
+        let native = row(&tui.models(HARNESS, true), Slot::Native);
+        assert_eq!(
+            (native.here, native.effective, native.source),
+            (None, json!("harness"), Source::App)
         );
         tui.finish();
     }

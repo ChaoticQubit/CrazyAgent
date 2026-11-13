@@ -86,4 +86,35 @@ describe("Project Settings, Harnesses, Claude Code: project model overrides on t
     assert.deepEqual([read.rows.allowed.effective, read.rows.allowed.source], [["opus"], "app"]);
     await until(async () => (await text("main")).includes("Uses the app value: opus."), UI_MS, "the page did not go back to the app value");
   });
+
+  it("Let the harness choose for the project's Native sub-agent model overrides the app for this project only", async () => {
+    await openProjectHarnesses();
+    assert.equal(await (await $("#models-native")).getValue(), "", "the choice starts on Use the app value");
+    await choose("#models-native", "harness");
+    await click('button[aria-label="Save Native sub-agent model"]');
+    const read = await engineHolds(project, (read) => read.rows.native.here === "harness", "the engine did not hold the project's native sub-agent model");
+    assert.deepEqual([read.rows.native.effective, read.rows.native.source], ["harness", "project"]);
+    assert.equal((await observeModelChoice(HARNESS)).rows.native.here, null, "the app value stays");
+    await until(async () => (await text("main")).includes("Set for this project."), UI_MS, "the page did not say the value is the project's");
+    await shot("models-project-native-harness");
+  });
+
+  it("Follow the agent's model for the project saves as follow while the app lets the harness choose", async () => {
+    await setApp("native", "harness");
+    await openProjectHarnesses();
+    assert.equal(await (await $("#models-native")).getValue(), "harness", "the choice starts on the project's own value");
+    await choose("#models-native", "follow");
+    await click('button[aria-label="Save Native sub-agent model"]');
+    const read = await engineHolds(project, (read) => read.rows.native.here === "follow", "the engine did not hold follow for the project");
+    assert.deepEqual([read.rows.native.effective, read.rows.native.source], ["follow", "project"]);
+    assert.equal((await observeModelChoice(HARNESS)).rows.native.here, "harness", "the app value stays");
+  });
+
+  it("Use the app value clears the project's Native sub-agent model", async () => {
+    await click('button[aria-label="Use the app value, Native sub-agent model"]');
+    const read = await engineHolds(project, (read) => read.rows.native.here === null, "the project's native sub-agent model was not cleared");
+    assert.deepEqual([read.rows.native.effective, read.rows.native.source], ["harness", "app"]);
+    assert.equal(await (await $("#models-native")).getValue(), "", "the choice goes back to Use the app value");
+    await until(async () => (await text("main")).includes("Uses the app value: Let the harness choose."), UI_MS, "the page did not go back to the app value");
+  });
 });

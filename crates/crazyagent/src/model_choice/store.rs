@@ -1,8 +1,8 @@
 use super::rules::PickRule;
 use super::{
-    CUSTOM_MAX, Candidate, Models, NOT_SUPPORTED, Origin, Row, Slot, VALUE_JSON_MAX, Written,
-    assert_catalog, fallback, harness_id, item, layered, model_valid, supported, unavailable,
-    value_ok,
+    CUSTOM_MAX, Candidate, Models, NOT_SUPPORTED, NativeModel, Origin, Row, Slot, VALUE_JSON_MAX,
+    Written, assert_catalog, fallback, harness_id, item, layered, model_valid, supported,
+    unavailable, value_ok,
 };
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
@@ -133,7 +133,7 @@ pub fn launch_model(
     project: Option<&ProjectId>,
     slot: Slot,
 ) -> Result<Option<String>, EngineError> {
-    assert_ne!(slot, Slot::Allowed);
+    assert!(matches!(slot, Slot::Master | Slot::Agent), "{slot:?}");
     let Some(harness) = harness_id(harness).filter(|id| supported(id, slot)) else {
         return Ok(None);
     };
@@ -144,6 +144,27 @@ pub fn launch_model(
     let (value, _) = effective(tx, harness, project, slot, &usable)?;
     assert!(value.is_null() || value.is_string());
     Ok(value.as_str().map(str::to_owned))
+}
+
+/// Reads what a native lead's own sub-agents run on, the owner's Native sub-agent model
+/// setting (DEC-150 M-11): the project's value, then the app's, else Follow the agent's
+/// model. A harness without native sub-agents always follows. Inputs: the engine database,
+/// the harness name and the project, none for an app-level start. Output: the setting, or
+/// `model_choice_unavailable`.
+pub fn native_model(
+    db: &Connection,
+    harness: &str,
+    project: Option<&ProjectId>,
+) -> Result<NativeModel, EngineError> {
+    let Some(harness) = harness_id(harness).filter(|id| supported(id, Slot::Native)) else {
+        return Ok(NativeModel::Follow);
+    };
+    let own = snapshot(db)?;
+    let tx = own.as_deref().unwrap_or(db);
+    let (value, _) = effective(tx, harness, project, Slot::Native, &[])?;
+    let model = NativeModel::from_value(&value).expect("a layered native value passed value_ok");
+    assert!(supported(harness, Slot::Native));
+    Ok(model)
 }
 
 /// Checks the model the master or a lead picked for a new agent under the owner's pick

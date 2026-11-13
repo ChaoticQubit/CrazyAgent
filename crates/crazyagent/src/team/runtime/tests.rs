@@ -15249,6 +15249,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         continues: true,
         native: false,
         native_threads: None,
+        native_model: crate::model_choice::NativeModel::Follow,
         tmux: None,
         hookless: false,
         scratch_pin: None,
@@ -22894,6 +22895,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         continues: true,
         native: false,
         native_threads: None,
+        native_model: crate::model_choice::NativeModel::Follow,
         tmux: None,
         hookless,
         scratch_pin: None,
@@ -24624,6 +24626,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         native: true,
         tmux: Some(PathBuf::from("/opt/homebrew/bin/tmux")),
         native_threads: None,
+        native_model: crate::model_choice::NativeModel::Follow,
         hookless: false,
         scratch_pin: None,
         toolchains: Vec::new(),
@@ -33520,5 +33523,104 @@ fn the_team_runtime_refuses_a_store_that_keeps_a_rollback_journal() {
     match opened {
         Err(EngineError(code)) => assert_eq!(code, "database_wal_refused: delete"),
         Ok(_) => panic!("the team runtime opened a store that keeps a rollback journal"),
+    }
+}
+
+/// M-11 (DEC-150): a native lead's start reads the owner's Native sub-agent model for its
+/// project and harness: Follow the agent's model with nothing saved, Let the harness choose
+/// once the project saves it, and the other harness keeps its own.
+#[test]
+fn a_native_lead_reads_the_owner_s_native_sub_agent_model_for_its_project() {
+    use crate::harness_settings::Scope;
+    use crate::model_choice::{NativeModel, Slot};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    assert_eq!(
+        team.native_model(&project, "codex"),
+        Ok(NativeModel::Follow)
+    );
+
+    let saved = crate::model_choice::store::set(
+        &fixture.connection,
+        "codex",
+        &crate::model_choice::catalog("codex"),
+        &Scope::Project(project.clone()),
+        Slot::Native,
+        &serde_json::json!("harness"),
+        0,
+    )
+    .unwrap();
+    assert!(
+        matches!(saved, crate::model_choice::Written::Saved { .. }),
+        "{saved:?}"
+    );
+
+    assert_eq!(
+        team.native_model(&project, "codex"),
+        Ok(NativeModel::Harness)
+    );
+    assert_eq!(
+        team.native_model(&project, "claude-code"),
+        Ok(NativeModel::Follow)
+    );
+    team.shutdown().unwrap();
+}
+
+/// M-11 (DEC-150): a native plan hands its launch context the Native sub-agent model it
+/// was built with, so a Claude Code team lead and a Codex threads lead follow their model
+/// on Follow the agent's model and leave it to the harness on Let the harness choose.
+#[test]
+fn a_native_plan_gives_its_launch_the_native_sub_agent_model_it_was_built_with() {
+    use crate::model_choice::NativeModel;
+    use std::os::unix::fs::DirBuilderExt;
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let context = || {
+        crate::launch_context::for_project(&fixture.connection, &project, Layout::Linked).unwrap()
+    };
+    let home = |name: &str| {
+        let home = fixture.base.join(name);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&home)
+            .unwrap();
+        home
+    };
+    for (name, model, follows) in [
+        ("team-follow", NativeModel::Follow, true),
+        ("team-harness", NativeModel::Harness, false),
+    ] {
+        let plan = Plan {
+            working_dir: fixture.base.join("project"),
+            native: true,
+            tmux: Some(fixture.tmux.clone()),
+            native_model: model,
+            ..hooks_plan("claude-code", false)
+        };
+        let installed = plan
+            .team_context(context())
+            .install("claude-code", &home(name), true)
+            .unwrap();
+        assert!(installed.native_team(), "{name}");
+        assert_eq!(installed.native_follows(), follows, "{name}");
+        drop(installed);
+    }
+    for (name, model, follows) in [
+        ("threads-follow", NativeModel::Follow, true),
+        ("threads-harness", NativeModel::Harness, false),
+    ] {
+        let plan = Plan {
+            native_threads: Some(2),
+            native_model: model,
+            ..hooks_plan("codex", false)
+        };
+        let installed = plan
+            .team_context(context())
+            .install("codex", &home(name), true)
+            .unwrap();
+        assert!(installed.native_threads(), "{name}");
+        assert_eq!(installed.native_follows(), follows, "{name}");
+        drop(installed);
     }
 }

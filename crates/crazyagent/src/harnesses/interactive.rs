@@ -66,6 +66,15 @@ const CLAUDE_AGENT_TEAMS: (&str, &str) = ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 /// a lead without them cannot share its team's tasks (OP-3).
 const CLAUDE_TODO_TOOLS: (&str, &str) = ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1");
 const CLAUDE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
+/// Keeps a native-team lead's sub-agents and teammates on the lead's model (DEC-150 M-11).
+/// In Claude Code 2.1.322 FORCE drops the Agent tool's model and every agent definition's,
+/// `inherit` then resolves each to the lead's model, and either one being set stops Claude
+/// Code's own model mix from moving sub-agents to a worker model. The teammate script copies
+/// both from the lead's variables.
+const CLAUDE_SUBAGENT_MODEL: [(&str, &str); 2] = [
+    ("CLAUDE_CODE_SUBAGENT_MODEL", "inherit"),
+    ("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "1"),
+];
 #[cfg(unix)]
 const CLAUDE_INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 const CLAUDE_BARE: &str = "--bare";
@@ -425,6 +434,7 @@ pub fn command(
                 request,
                 &home,
                 teammates.as_deref(),
+                installed.is_some_and(Installed::native_follows),
                 display,
             ));
             let folder = claude_project_folder(&cwd)
@@ -655,8 +665,10 @@ fn claude_environment(
     request: &LaunchRequest,
     home: &str,
     teammates: Option<&str>,
+    follows: bool,
     display: TerminalDisplay,
 ) -> Vec<(String, String)> {
+    assert!(!follows || teammates.is_some());
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR".to_owned(), home.to_owned()),
         (
@@ -694,6 +706,13 @@ fn claude_environment(
             CLAUDE_TODO_TOOLS.1.to_owned(),
         ));
         environment.push((CLAUDE_TEAMMATE_COMMAND.to_owned(), command.to_owned()));
+        if follows {
+            environment.extend(
+                CLAUDE_SUBAGENT_MODEL
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+            );
+        }
     }
     if matches!(request.account, AccountBinding::Subscription { .. }) {
         return environment;

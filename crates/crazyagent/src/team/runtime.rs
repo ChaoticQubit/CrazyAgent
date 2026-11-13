@@ -278,6 +278,7 @@ struct Plan {
     native: bool,
     tmux: Option<PathBuf>,
     native_threads: Option<u8>,
+    native_model: crate::model_choice::NativeModel,
     hookless: bool,
     #[cfg(unix)]
     scratch_pin: Option<(u64, u64)>,
@@ -347,6 +348,7 @@ impl Plan {
             Some(cap) => context.with_native_sub_agents(cap),
             None => context,
         };
+        let context = context.with_native_model(self.native_model);
         match &self.tmux {
             Some(tmux) => context.with_native_team(tmux, &self.working_dir),
             None => context,
@@ -8021,6 +8023,24 @@ impl TeamRuntime {
         Ok(Some(cap))
     }
 
+    /// Reads what a native lead's own sub-agents run on, the owner's Native sub-agent model
+    /// setting for the project and harness (DEC-150 M-11). Takes the project and the launch
+    /// harness. Returns the setting, or the plain reason it could not be read.
+    fn native_model(
+        &self,
+        project: &ProjectId,
+        launch: &str,
+    ) -> Result<crate::model_choice::NativeModel, String> {
+        crate::model_choice::store::native_model(&self.connection, launch, Some(project)).map_err(
+            |e| {
+                with_code(
+                    "the project's Native sub-agent model could not be read",
+                    Some(&e.0),
+                )
+            },
+        )
+    }
+
     /// Binds a native lead's caller socket in its short temp folder, where its team servers
     /// find it from their mailbox (DEC-111 Q18), in the folder `pinned` names when given.
     /// Takes the lead and the folder pin. Returns the socket, or the failure, which leaves
@@ -9155,6 +9175,11 @@ impl TeamRuntime {
         } else {
             None
         };
+        let native_model = if native || native_threads.is_some() {
+            self.native_model(&stored.project_id, launch)?
+        } else {
+            crate::model_choice::NativeModel::Follow
+        };
         if native && hookless {
             return Err(with_code(
                 NATIVE_NEEDS_HOOKS,
@@ -9542,6 +9567,7 @@ impl TeamRuntime {
             native,
             tmux: native_tmux,
             native_threads,
+            native_model,
             hookless,
             #[cfg(unix)]
             scratch_pin,

@@ -34,14 +34,24 @@ fn row(slot: Slot, here: Option<Value>, effective: Value, source: Source) -> Row
 fn unset(slot: Slot) -> Row {
     let effective = match slot {
         Slot::Allowed => json!([]),
+        Slot::Native => json!("follow"),
         _ => Value::Null,
     };
     row(slot, None, effective, Source::Default)
 }
 
-/// The Claude Code section with the shipped list and the owner ids given. Inputs: the three
-/// rows and the owner ids. Output: the section.
+/// The Claude Code section with the shipped list and the owner ids given, its Native
+/// sub-agent model unset. Inputs: the three model rows and the owner ids. Output: the
+/// section.
 fn models(rows: [Row; 3], owned: &[(&str, Origin)]) -> Models {
+    with_native(rows, unset(Slot::Native), owned)
+}
+
+/// The Claude Code section with the shipped list, the owner ids and the Native sub-agent
+/// model row given. Inputs: the three model rows, the native row and the owner ids.
+/// Output: the section.
+fn with_native(rows: [Row; 3], native: Row, owned: &[(&str, Origin)]) -> Models {
+    assert_eq!(native.slot, Slot::Native);
     let mut candidates: Vec<Candidate> = crate::model_choice::catalog(HARNESS)
         .into_iter()
         .map(|id| Candidate {
@@ -55,7 +65,7 @@ fn models(rows: [Row; 3], owned: &[(&str, Origin)]) -> Models {
     }));
     Models {
         harness: HARNESS.into(),
-        rows: rows.into(),
+        rows: rows.into_iter().chain([native]).collect(),
         candidates,
         qualified: true,
         reason: None,
@@ -439,7 +449,7 @@ fn the_project_page_offers_the_app_value_and_says_where_each_value_comes_from() 
 #[test]
 fn typing_an_id_adds_it_and_an_id_the_rule_refuses_never_leaves() {
     let mut shell = app_page(plain_models());
-    for _ in 0..5 {
+    for _ in 0..6 {
         shell.key(Key::Down);
     }
     shell.key(Key::Enter);
@@ -489,7 +499,7 @@ fn x_on_an_own_id_removes_it() {
         &[("my-model-1", Origin::Pending)],
     );
     let mut shell = app_page(section);
-    for _ in 0..6 {
+    for _ in 0..7 {
         shell.key(Key::Down);
     }
     shell.key(Key::Char('x'));
@@ -513,7 +523,7 @@ fn x_on_an_own_id_removes_it() {
 fn each_pick_and_fallback_option_sends_its_rule_with_the_version_read() {
     let mut shell = app_page(plain_models());
     let mut current = rules(PickRule::Strict, FallbackRule::Notice);
-    press(&mut shell, &[Key::Down, Key::Down, Key::Down]);
+    press(&mut shell, &[Key::Down, Key::Down, Key::Down, Key::Down]);
     let steps = [
         (Rule::Pick(PickRule::Hint), "Any offered model"),
         (Rule::Pick(PickRule::Default), "Always the default"),
@@ -575,6 +585,7 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
             read_only(Slot::Master),
             read_only(Slot::Agent),
             read_only(Slot::Allowed),
+            read_only(Slot::Native),
         ],
         candidates: vec![],
         qualified: true,
@@ -680,4 +691,168 @@ fn the_page_stands_for_its_place_and_m_on_the_harness_page_opens_it() {
     }
     let opened = crate::tui::screens::open(&place, &mut context);
     assert_eq!(opened.place(), Some(place));
+}
+
+fn native_query(project: Option<ProjectId>, value: &str) -> ModelChoiceQuery {
+    ModelChoiceQuery::Set {
+        harness: HARNESS.into(),
+        project,
+        slot: Slot::Native,
+        value: json!(value),
+        version: 4,
+    }
+}
+
+fn to_native(shell: &mut Shell) {
+    press(shell, &[Key::Down, Key::Down, Key::Down]);
+}
+
+/// M-11 (DEC-150): the app page shows the Native sub-agent model on Follow the agent's
+/// model with nothing set, with its help and where the value comes from in the desktop
+/// app's words.
+#[test]
+fn the_app_page_shows_the_native_sub_agent_model_on_follow_the_agent_s_model() {
+    let mut shell = app_page(plain_models());
+    to_native(&mut shell);
+    let text = screen(&mut shell);
+    for words in [
+        "Native sub-agent model",
+        "Follow the agent's model",
+        "What the sub-agents a native lead starts itself run on.",
+        "Nothing set: native sub-agents follow the agent's model.",
+    ] {
+        assert!(text.contains(words), "{words}\n{text}");
+    }
+}
+
+/// M-11 (DEC-150), Let the harness choose: Enter, Right and Enter send it with the version
+/// read.
+#[test]
+fn enter_and_the_arrows_choose_let_the_harness_choose_and_enter_sends_it() {
+    let mut shell = app_page(plain_models());
+    to_native(&mut shell);
+    press(&mut shell, &[Key::Enter, Key::Right]);
+    let text = screen(&mut shell);
+    assert!(text.contains("Let the harness choose"), "{text}");
+    assert!(
+        text.contains("The harness picks each sub-agent's model"),
+        "the option's help shows:\n{text}"
+    );
+    shell.key(Key::Enter);
+    assert_eq!(requests(&mut shell), vec![native_query(None, "harness")]);
+}
+
+/// M-11 (DEC-150), Follow the agent's model: from a saved Let the harness choose, the
+/// choice starts on it and one Right sends Follow the agent's model as its own value.
+#[test]
+fn choosing_follow_the_agent_s_model_after_let_the_harness_choose_sends_follow() {
+    let section = with_native(
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
+        row(
+            Slot::Native,
+            Some(json!("harness")),
+            json!("harness"),
+            Source::App,
+        ),
+        &[],
+    );
+    let mut shell = app_page(section);
+    to_native(&mut shell);
+    assert!(screen(&mut shell).contains("Let the harness choose"));
+    press(&mut shell, &[Key::Enter, Key::Right, Key::Enter]);
+    assert_eq!(requests(&mut shell), vec![native_query(None, "follow")]);
+    press(&mut shell, &[Key::Enter, Key::Enter]);
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "an unchanged choice sends nothing"
+    );
+}
+
+/// M-11 (DEC-150): a project page offers Use the app value first; a project's own choice
+/// starts on itself and choosing the app value sends a reset, never a null.
+#[test]
+fn a_project_page_offers_the_app_value_for_the_native_sub_agent_model_and_sends_a_reset() {
+    let inherit = with_native(
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
+        row(Slot::Native, None, json!("harness"), Source::App),
+        &[],
+    );
+    let mut shell = opened(project_scope(), inherit);
+    to_native(&mut shell);
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("Uses the app value: Let the harness choose."),
+        "{text}"
+    );
+    press(&mut shell, &[Key::Enter, Key::Right, Key::Enter]);
+    assert_eq!(
+        requests(&mut shell),
+        vec![native_query(Some(alpha()), "follow")]
+    );
+
+    let own = with_native(
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
+        row(
+            Slot::Native,
+            Some(json!("follow")),
+            json!("follow"),
+            Source::Project,
+        ),
+        &[],
+    );
+    let mut shell = opened(project_scope(), own);
+    to_native(&mut shell);
+    press(&mut shell, &[Key::Enter, Key::Left, Key::Enter]);
+    assert_eq!(
+        requests(&mut shell),
+        vec![ModelChoiceQuery::Reset {
+            harness: HARNESS.into(),
+            project: Some(alpha()),
+            slot: Slot::Native,
+            version: 4,
+        }]
+    );
+}
+
+/// M-11 (DEC-150): a harness without native sub-agents shows Not supported by this harness
+/// on the Native sub-agent model row, never the stored word, and Enter changes nothing.
+#[test]
+fn a_harness_without_native_sub_agents_shows_the_native_row_not_supported() {
+    let read_only = Row {
+        access: Access::ReadOnly {
+            reason: NOT_SUPPORTED.into(),
+        },
+        source: Source::NotApplied,
+        ..unset(Slot::Native)
+    };
+    let section = with_native(
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
+        read_only,
+        &[],
+    );
+    let mut shell = app_page(section);
+    to_native(&mut shell);
+    let text = screen(&mut shell);
+    assert!(text.contains(NOT_SUPPORTED), "{text}");
+    assert!(!text.contains("Follow the agent's model"), "{text}");
+    shell.key(Key::Enter);
+    assert_eq!(lead(&shell), "Not supported by this harness.");
+    assert_eq!(requests(&mut shell), vec![]);
 }
