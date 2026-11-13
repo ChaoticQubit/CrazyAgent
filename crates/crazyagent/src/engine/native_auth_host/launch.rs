@@ -64,12 +64,13 @@ pub(super) fn resolved(harness: &RegisteredNativeAuthHost) -> Option<Vec<LaunchW
 
 /// Resolves a harness launch as [`resolved`] does and, when that misses while the engine's
 /// first probe run is still going, as on the first sign-in right after the app starts, waits
-/// for that run, at most as long as its own probes may take, and resolves once more. Input:
+/// for that run, at most as long as its own probes may take, and resolves once more. Each
+/// resolve, which hashes interpreters of hundreds of MB, runs off the async worker. Input:
 /// the pinned harness. Output: the pinned words, or none.
 pub(super) async fn resolved_after_probe(
     harness: &RegisteredNativeAuthHost,
 ) -> Option<Vec<LaunchWord>> {
-    if let Some(launch) = resolved(harness) {
+    if let Some(launch) = crate::engine::off_worker(|| resolved(harness)) {
         return Some(launch);
     }
     if !crate::tools::probe::first_run_going() {
@@ -79,7 +80,7 @@ pub(super) async fn resolved_after_probe(
     while crate::tools::probe::first_run_going() && Instant::now() < deadline {
         tokio::time::sleep(PROBE_POLL).await;
     }
-    resolved(harness)
+    crate::engine::off_worker(|| resolved(harness))
 }
 
 /// Names one pinned harness and the launch the engine resolved for it on a custodian's
