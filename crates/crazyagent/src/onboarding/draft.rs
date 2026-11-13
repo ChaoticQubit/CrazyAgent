@@ -177,7 +177,8 @@ impl Drafted {
 
 /// The bounded project files a mapping agent is given: top-level entry
 /// names, the README, the build manifests, the code graph report, an
-/// existing overview, the text of the project's own documents, the paths
+/// existing overview that leaves no code fence open, the text of the
+/// project's own documents, the paths
 /// and sizes of documents whose text is not read and whether the project's git
 /// could not say which files it ignores, so no document was read. No file is
 /// read through a link, and no `.env`, hidden, private, secret-named,
@@ -469,7 +470,8 @@ pub(crate) fn gather(repo: &Path, hidden: &[std::path::PathBuf]) -> Evidence {
     }
     if let Some(layout) = open_folder(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY)) {
         evidence.overview = open_in(&layout, OVERVIEW_FILE)
-            .and_then(|file| file_text(file, OVERVIEW_EVIDENCE_BYTES_MAX));
+            .and_then(|file| file_text(file, OVERVIEW_EVIDENCE_BYTES_MAX))
+            .filter(|text| fences_closed(text));
     }
     #[cfg(unix)]
     {
