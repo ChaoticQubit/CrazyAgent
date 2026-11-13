@@ -4390,9 +4390,7 @@ mod tests {
     /// never named, and no check waits on a remote host.
     #[test]
     fn a_loopback_provider_that_refuses_connections_is_named_at_once_and_a_listening_one_is_not() {
-        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
         let open = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let listening = open.local_addr().unwrap().port();
         let codex = |base_url: String| ResearchAccount::Endpoint {
@@ -4444,9 +4442,7 @@ mod tests {
     /// keeps its place.
     #[test]
     fn the_reach_check_here_names_a_refusing_provider_only_where_confined_runs_exist() {
-        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
         let account = ResearchAccount::Endpoint {
             base_url: format!("http://127.0.0.1:{port}/v1"),
             model: "local-model".into(),
