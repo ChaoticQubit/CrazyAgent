@@ -408,15 +408,21 @@ impl CustodianCause {
     }
 }
 
-/// The harness a custodian gets with the launch the engine resolved for it, waiting for the
-/// first probe run when that is still going ([`launch::resolved_after_probe`]), or none when
-/// it cannot start, so the custodian ends the sign-in without effect and it settles
-/// unavailable. Inputs: the pinned harness and its kind. Output: both, or none.
+/// The harness a custodian gets with the launch the engine resolved for it, a sign-in
+/// waiting for the first probe run when that is still going ([`launch::resolved_after_probe`]),
+/// or none when it cannot start, so the custodian ends the action without effect and it
+/// settles unavailable. Inputs: the pinned harness, its kind and the action. Output: both,
+/// or none.
 async fn handed(
     harness: Arc<RegisteredNativeAuthHost>,
     kind: &str,
+    action: &crate::engine::owner::NativeAuthAction,
 ) -> Option<(Arc<RegisteredNativeAuthHost>, Vec<LaunchWord>)> {
-    match launch::resolved_after_probe(&harness).await {
+    let may_wait = matches!(
+        action,
+        crate::engine::owner::NativeAuthAction::SignIn { .. }
+    );
+    match launch::resolved_after_probe(&harness, may_wait).await {
         Some(words) => Some((harness, words)),
         None => {
             eprintln!("native_auth_harness_unresolved harness={kind}");
@@ -437,7 +443,7 @@ pub(in crate::engine) async fn dispatch(
         _ => None,
     };
     let harness = match registered {
-        Some(harness) => handed(harness, &kind).await,
+        Some(harness) => handed(harness, &kind, &work.fact().action).await,
         None => None,
     };
     let runtime_dir = host.owner_runtime_dir()?;

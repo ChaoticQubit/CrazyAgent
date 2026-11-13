@@ -119,7 +119,7 @@ pub(crate) fn first_run_going() -> bool {
 #[cfg(unix)]
 pub(crate) fn first_run_bound() -> Duration {
     let bound = SHELL_LIMIT + NPM_LIMIT + OUTPUT_GRACE + OUTPUT_GRACE;
-    assert!(bound > SHELL_LIMIT);
+    assert!(bound > SHELL_LIMIT && bound < Duration::from_secs(60));
     bound
 }
 
@@ -189,7 +189,7 @@ impl Probes {
     }
 
     /// Whether the first run is going and none has finished yet. Output: the answer.
-    #[cfg(any(unix, test))]
+    #[cfg(unix)]
     pub(crate) fn first_run_going(&self) -> bool {
         self.running && self.last.is_none()
     }
