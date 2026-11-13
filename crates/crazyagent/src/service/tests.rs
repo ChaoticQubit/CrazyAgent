@@ -824,11 +824,12 @@ fn a_first_start_retires_the_old_appimage_copy_and_repoints_the_command_line_lin
     let cli = temp.path().join("home").join(".local").join("bin");
     std::fs::create_dir_all(&cli).unwrap();
     std::os::unix::fs::symlink(old.join("crazyagent"), cli.join("crazyagent")).unwrap();
-    let installed = persistable_with(&bundled, &layout, Some(&mount), Some(&cli)).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
     assert_eq!(
         installed,
         layout.root().join("setup").join("bin").join("crazyagent")
     );
+    retire_old_copies_with(&layout, &installed, Some(&cli));
     assert_eq!(
         std::fs::read_link(cli.join("crazyagent")).unwrap(),
         installed
@@ -841,8 +842,33 @@ fn a_first_start_retires_the_old_appimage_copy_and_repoints_the_command_line_lin
     }
     assert!(old.join("notes.txt").is_file(), "a stranger file stays");
     std::fs::remove_file(old.join("notes.txt")).unwrap();
-    persistable_with(&bundled, &layout, Some(&mount), Some(&cli)).unwrap();
+    retire_old_copies_with(&layout, &installed, Some(&cli));
     assert!(!old.exists(), "the empty old folder goes");
+}
+
+/// `service link-cli` keeps the engine too, but a login service a 2.4.0 AppImage installed
+/// names the old `<data root>/bin` copy until a replacing `service start` rewrites it, so
+/// keeping the engine never removes that copy; retiring it is the start's step after the
+/// service names the new copy, and an engine outside `<data root>/setup/bin` retires nothing.
+#[cfg(unix)]
+#[test]
+fn keeping_the_engine_leaves_the_old_copy_a_login_service_may_still_name() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = bundle(&layout.root().join("bin"));
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    assert_ne!(installed, old);
+    assert!(
+        old.is_file(),
+        "a service naming the old copy would not start"
+    );
+    retire_old_copies_with(&layout, &old, None);
+    assert!(old.is_file(), "an engine outside setup/bin retires nothing");
+    retire_old_copies_with(&layout, &installed, None);
+    assert!(!old.exists());
 }
 
 /// A command line link that names anything but the old copy is never touched.
@@ -859,7 +885,8 @@ fn retiring_the_old_appimage_copy_leaves_a_link_to_another_engine_alone() {
     let cli = temp.path().join("home").join(".local").join("bin");
     std::fs::create_dir_all(&cli).unwrap();
     std::os::unix::fs::symlink(&other, cli.join("crazyagent")).unwrap();
-    persistable_with(&bundled, &layout, Some(&mount), Some(&cli)).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    retire_old_copies_with(&layout, &installed, Some(&cli));
     assert_eq!(std::fs::read_link(cli.join("crazyagent")).unwrap(), other);
 }
 

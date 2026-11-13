@@ -944,17 +944,31 @@ fn persistable_with(
     }
     let installed = copies.join(main);
     assert!(installed.starts_with(&copies) && installed.is_file());
-    retire_old_copies(&layout.root().join("bin"), &installed, cli);
+    retire_old_copies_with(layout, &installed, cli);
     Ok(installed)
 }
 
+/// Retires the copy an older version kept in `<data root>/bin` once the login service names
+/// the engine [`persistable`] keeps in `<data root>/setup/bin`, with the command line link in
+/// `~/.local/bin`. Inputs: the layout and the engine the service now runs.
+pub fn retire_old_copies(layout: &Layout, installed: &Path) {
+    let cli = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".local").join("bin"));
+    retire_old_copies_with(layout, installed, cli.as_deref());
+}
+
 /// Retires the copy an older version kept in `<data root>/bin`, a folder the tool resolver
-/// refuses as one agents can write: the command line link in `cli` that names the old engine
-/// is pointed at the new one first, then every release file there is removed and the folder
-/// goes once empty. A link that cannot be moved keeps the old copy, so it never dangles;
-/// anything CrazyAgent did not put there stays. Inputs: the old folder, the new engine and
-/// the link folder.
-fn retire_old_copies(old: &Path, installed: &Path, cli: Option<&Path>) {
+/// refuses as one agents can write, when `installed` is the copy in `<data root>/setup/bin`:
+/// the command line link in `cli` that names the old engine is pointed at the new one first,
+/// then every release file there is removed and the folder goes once empty. A link that
+/// cannot be moved keeps the old copy, so it never dangles; anything CrazyAgent did not put
+/// there stays. Inputs: the layout, the engine kept and the link folder.
+fn retire_old_copies_with(layout: &Layout, installed: &Path, cli: Option<&Path>) {
+    if !installed.starts_with(layout.root().join("setup").join("bin")) {
+        return;
+    }
+    let old = &layout.root().join("bin");
     assert!(installed.is_absolute() && !installed.starts_with(old));
     let main = format!("crazyagent{}", std::env::consts::EXE_SUFFIX);
     if let Some(cli) = cli
