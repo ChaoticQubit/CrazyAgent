@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::ops::RangeInclusive;
 
 pub mod http;
 pub mod manifest;
@@ -44,6 +45,29 @@ impl Problem {
         }
     }
 }
+
+impl Problem {
+    /// A loopback plugin port inside the ports this Linux hands out by itself, where an agent
+    /// could listen before the plugin's server does (Q-8): the field, the port and the range
+    /// named, the same words on every screen. Inputs: the port and the range holding it.
+    /// Output: the problem.
+    pub fn port_handed_out(port: u16, handed: &RangeInclusive<u16>) -> Self {
+        assert!(handed.contains(&port));
+        let (low, high) = (handed.start(), handed.end());
+        let mut problem = Self::new(PORT_HANDED_OUT, None, Some("http.url"));
+        problem.message = format!(
+            "http.url: port {port} is one this Linux hands out by itself (ports {low} to \
+             {high}), so an agent could listen on it; run the plugin on a port outside that \
+             range, or have an administrator move net.ipv4.ip_local_port_range away from port \
+             {port}."
+        );
+        assert!(problem.message.starts_with("http.url: port "));
+        problem
+    }
+}
+
+/// The code of a loopback plugin port inside the ports this Linux hands out by itself.
+pub const PORT_HANDED_OUT: &str = "app_plugin_port_handed_out";
 
 fn upper_first(text: &str) -> String {
     let mut chars = text.chars();
@@ -289,6 +313,10 @@ const PLAIN: &[(&str, &str)] = &[
     (
         "app_plugin_port_invalid",
         "the URL's port must be 1 to 65535.",
+    ),
+    (
+        PORT_HANDED_OUT,
+        "the URL's port is one this Linux hands out by itself, so an agent could listen on it; run the plugin on a port outside that range.",
     ),
     (
         "app_plugin_url_not_https",

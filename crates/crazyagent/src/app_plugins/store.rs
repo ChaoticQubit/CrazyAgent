@@ -7,6 +7,7 @@ use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use crate::storage::accounts::{self, ACCOUNT_KEYS, PLUGIN_KEYS};
 use rusqlite::{Connection, OptionalExtension, params};
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS app_plugin_trust (
@@ -146,9 +147,57 @@ fn user_found(stem: String, read: Result<Vec<u8>, Problem>) -> Found {
     }
 }
 
+/// The ports this machine hands out by itself, where an agent could listen on a loopback
+/// plugin port before the plugin's server does (Q-8): Linux reads net.ipv4.ip_local_port_range.
+/// macOS keeps every plugin port free of agents in its profile, so none there. An unread
+/// range refuses no plugin, since no open-network Linux agent starts then.
+/// Output: the range, or none.
+#[cfg(target_os = "linux")]
+fn handed_out() -> Option<RangeInclusive<u16>> {
+    crate::sandbox::linux::read_picked_ports()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn handed_out() -> Option<RangeInclusive<u16>> {
+    None
+}
+
+/// Refuses a plugin whose loopback port lies in the ports this machine hands out, that
+/// plugin alone with `app_plugin_port_handed_out`, so it never runs and no launch keeps its
+/// port (DEC-156 15:35 addendum: plugin files never stop launches). Inputs: the plugin read
+/// and the range, none when nothing is handed out. Output: the same plugin, refused or not.
+fn outside_handed_out(found: Found, handed: Option<&RangeInclusive<u16>>) -> Found {
+    let Found {
+        name,
+        origin,
+        parsed,
+        sha256,
+    } = found;
+    let parsed = parsed.and_then(|manifest| match handed_problem(&manifest, handed) {
+        Some(problem) => Err(problem),
+        None => Ok(manifest),
+    });
+    Found {
+        name,
+        origin,
+        parsed,
+        sha256,
+    }
+}
+
+fn handed_problem(manifest: &Manifest, handed: Option<&RangeInclusive<u16>>) -> Option<Problem> {
+    let port = loopback_port(manifest)?;
+    let range = handed.filter(|range| range.contains(&port))?;
+    Some(Problem::port_handed_out(port, range))
+}
+
 fn find(root: &Path, name: &str) -> Result<Option<Found>, EngineError> {
+    let handed = handed_out();
     if let Some((bundled, text)) = BUNDLED.iter().find(|(bundled, _)| *bundled == name) {
-        return Ok(Some(bundled_found(bundled, text)));
+        return Ok(Some(outside_handed_out(
+            bundled_found(bundled, text),
+            handed.as_ref(),
+        )));
     }
     if !manifest::valid_name(name) {
         return Ok(None);
@@ -161,7 +210,10 @@ fn find(root: &Path, name: &str) -> Result<Option<Found>, EngineError> {
     } else {
         Err(Problem::new("app_plugin_past_cap", None, None))
     };
-    Ok(Some(user_found(name.to_owned(), read)))
+    Ok(Some(outside_handed_out(
+        user_found(name.to_owned(), read),
+        handed.as_ref(),
+    )))
 }
 
 fn found(root: &Path, name: &str) -> Result<Found, EngineError> {
@@ -359,15 +411,18 @@ pub const LOOPBACK_PORTS_MAX: usize = BUNDLED.len() + USER_PLUGINS_MAX;
 
 /// The loopback ports every plugin that can run would send to, trusted or not, on or off,
 /// for a tools-on sandbox to keep free of agent listeners (rv-code V3-PLUGINS-1 F1). Files
-/// past the listed cap are skipped, since `ready` refuses them. Input: the engine root.
-/// Output: the nonzero ports sorted once each, at most `LOOPBACK_PORTS_MAX`, or the
-/// folder's refusal, so a launch fails closed instead of missing a port.
+/// past the listed cap and plugins on a port this machine hands out are skipped, since
+/// `ready` refuses them. Input: the engine root. Output: the nonzero ports sorted once
+/// each, at most `LOOPBACK_PORTS_MAX`, none inside the handed-out range, or the folder's
+/// refusal, so a launch fails closed instead of missing a port.
 pub fn loopback_ports(root: &Path) -> Result<Vec<u16>, EngineError> {
     let (files, _) = folder::entries(root)?;
+    let handed = handed_out();
     let mut ports: Vec<u16> = BUNDLED
         .iter()
         .map(|(name, text)| bundled_found(name, text))
         .chain(files.into_iter().map(|(stem, read)| user_found(stem, read)))
+        .map(|found| outside_handed_out(found, handed.as_ref()))
         .filter_map(|found| found.parsed.ok())
         .filter_map(|manifest| loopback_port(&manifest))
         .collect();
@@ -375,6 +430,12 @@ pub fn loopback_ports(root: &Path) -> Result<Vec<u16>, EngineError> {
     ports.dedup();
     assert!(ports.len() <= LOOPBACK_PORTS_MAX);
     assert!(!ports.contains(&0), "a manifest refuses port 0");
+    assert!(
+        handed
+            .as_ref()
+            .is_none_or(|range| ports.iter().all(|port| !range.contains(port))),
+        "a plugin on a handed-out port is refused"
+    );
     Ok(ports)
 }
 
@@ -384,13 +445,16 @@ pub fn loopback_ports(root: &Path) -> Result<Vec<u16>, EngineError> {
 /// folder's refusal (`app_plugin_folder_unsafe` for a folder that is not this user's 0700).
 pub fn list(db: &Connection, root: &Path) -> Result<Listing, EngineError> {
     tables(db)?;
+    let handed = handed_out();
     let mut plugins = Vec::with_capacity(BUNDLED.len() + USER_PLUGINS_MAX);
     for (name, text) in BUNDLED {
-        plugins.push(view(db, root, bundled_found(name, text))?);
+        let found = outside_handed_out(bundled_found(name, text), handed.as_ref());
+        plugins.push(view(db, root, found)?);
     }
     let (files, more) = folder::entries(root)?;
     for (stem, read) in files {
-        plugins.push(view(db, root, user_found(stem, read))?);
+        let found = outside_handed_out(user_found(stem, read), handed.as_ref());
+        plugins.push(view(db, root, found)?);
     }
     Ok(Listing { plugins, more })
 }
@@ -407,6 +471,9 @@ pub fn preview(root: &Path, text: &str) -> Result<Preview, EngineError> {
         return Ok(Preview::Refused {
             problem: Problem::new("app_plugin_name_taken", None, Some("name")),
         });
+    }
+    if let Some(problem) = handed_problem(&manifest, handed_out().as_ref()) {
+        return Ok(Preview::Refused { problem });
     }
     let replaces = folder::read(root, &manifest.name)?.is_some();
     Ok(Preview::Ready {
