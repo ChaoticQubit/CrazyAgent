@@ -29,7 +29,7 @@ struct Case {
     bin: tempfile::TempDir,
     codex: &'static str,
     claude: &'static str,
-    home: Option<tempfile::TempDir>,
+    home: tempfile::TempDir,
 }
 
 impl Case {
@@ -99,9 +99,11 @@ impl Case {
         Self::started("codex-by-login-name", "claude-login", Some(home))
     }
 
-    /// Writes every stand-in and starts the engine with the named ones. Inputs: the Codex and
-    /// Claude Code stand-ins' file names and the scratch HOME, if any. Output: the case.
+    /// Writes every stand-in and starts the engine with the named ones and a scratch HOME,
+    /// a fresh empty one unless given, never the owner's. Inputs: the Codex and Claude Code
+    /// stand-ins' file names and the scratch HOME, if any. Output: the case.
     fn started(codex: &'static str, claude: &'static str, home: Option<tempfile::TempDir>) -> Self {
+        let home = home.unwrap_or_else(|| scratch("ca-nar-home-"));
         let root = scratch("ca-nar-");
         let bin = scratch("ca-nar-bin-");
         std::fs::write(
@@ -203,14 +205,11 @@ done
             .arg("--codex-executable")
             .arg(self.bin.path().join(self.codex))
             .env("CRAZYAGENT_DEBUG_CUSTODIAN", "1")
+            .env("HOME", self.home.path())
+            .env("PATH", "/usr/bin:/bin")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log));
-        if let Some(home) = &self.home {
-            command
-                .env("HOME", home.path())
-                .env("PATH", "/usr/bin:/bin");
-        }
         let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
         let stdout = child.stdout.take().unwrap();
         self.engine = Some(child);
@@ -866,6 +865,33 @@ async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_inte
     cancel(&client, &scope, &challenge).await;
     let finished = settle(&client, &scope, &challenge, ended).await;
     assert_eq!(finished.phase, NativeAuthPhase::Cancelled, "{}", case.log());
+    case.no_fence().await;
+}
+
+/// Cancelling the first sign-in while the engine still waits for its first probe run settles
+/// Cancelled and frees the account, as a cancel before the harness starts does.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_a_sign_in_while_the_engine_waits_for_its_first_probe_run_settles_cancelled() {
+    let case = Case::with_interpreter_on_login_path();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&client, &scope, &begun).await.phase,
+        NativeAuthPhase::Starting
+    );
+    cancel(&client, &scope, &begun).await;
+    let finished = settle(&client, &scope, &begun, ended).await;
+    assert_eq!(
+        (finished.phase, finished.code.as_deref()),
+        (NativeAuthPhase::Cancelled, None),
+        "{}",
+        case.log()
+    );
     case.no_fence().await;
 }
 
