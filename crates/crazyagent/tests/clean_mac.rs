@@ -158,10 +158,14 @@ fn host_tmux() -> PathBuf {
 /// the `clean-mac-gate` feature holds the remap's variable name. Output: the answer; panics
 /// when the binary can't be read.
 fn engine_has_remap() -> bool {
-    let status = Command::new("/usr/bin/grep")
-        .args(["-q", "-F", "--", SYSTEM_ROOT_VARIABLE, ENGINE])
-        .status()
-        .unwrap();
+    let status = crazyagent::spawn_gate::status(Command::new("/usr/bin/grep").args([
+        "-q",
+        "-F",
+        "--",
+        SYSTEM_ROOT_VARIABLE,
+        ENGINE,
+    ]))
+    .unwrap();
     assert!(
         matches!(status.code(), Some(0 | 1)),
         "grep could not read {ENGINE}: {status}"
