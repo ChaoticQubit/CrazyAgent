@@ -40,6 +40,10 @@ pub(crate) use native_profiles::{
 #[cfg(unix)]
 pub(crate) use native_profiles::{remove_generated_home, remove_sign_in};
 
+/// The folder in the engine root that holds every native sign-in profile, one per account,
+/// with its credentials. Agent sandboxes deny it as an engine secret.
+pub(crate) const NATIVE_PROFILES_FOLDER: &str = "native-profiles";
+
 const LOCATOR: &str = "owner-current";
 #[cfg(unix)]
 const LOCATOR_MAX: usize = 2048;

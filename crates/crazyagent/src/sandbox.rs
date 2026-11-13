@@ -311,8 +311,12 @@ const ENGINE_SECRET_FILES: &[&str] = &[
     "github.toml",
 ];
 
-const ENGINE_SECRET_FOLDERS: &[&str] =
-    &["account-keys", crate::terminal::FOLDER, crate::ide::FOLDER];
+const ENGINE_SECRET_FOLDERS: &[&str] = &[
+    "account-keys",
+    crate::terminal::FOLDER,
+    crate::ide::FOLDER,
+    crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
+];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
 
@@ -1145,9 +1149,9 @@ impl ProjectSandbox {
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
     /// the engine database, the owner socket, the GitHub sign-in and settings files, the
-    /// saved account keys, the terminal server folder and every engine socket and socket
-    /// folder found in it now. The agent's own home and temp dirs may sit inside it, but no
-    /// root granted so far may hold or sit inside one of those secrets.
+    /// saved account keys, the native sign-in profiles, the terminal and IDE server folders
+    /// and every engine socket and socket folder found in it now. The agent's own home and
+    /// temp dirs may sit inside it, but no granted root may hold or sit inside a secret.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
         let runtime = canonical(runtime)?;
