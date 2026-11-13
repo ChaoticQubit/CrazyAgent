@@ -61,6 +61,8 @@ test("a memory an agent asked to keep is approved in Context, Project memory, Sh
     await me.click("Project memory", "button.pj-titem");
     const shown = await me.waitFor("the waiting count in Project memory", (text) => text.includes("1 memory waits for your approval."));
     assert.ok(!shown.includes("Settings, Memory"), "the project never sends the owner to Settings, Memory");
+    const memoryHash = await page.evaluate("location.hash");
+    assert.ok(memoryHash.endsWith("/context?file=%40memory"), `Project memory opens in Context: ${memoryHash}`);
     const waiting = await noteRow(page, ASKED);
     assert.ok(waiting.found && waiting.approve, `the agent's memory offers Approve in its row: ${JSON.stringify(waiting)}`);
     assert.match(waiting.words, /Needs approval/u);
@@ -81,7 +83,7 @@ test("a memory an agent asked to keep is approved in Context, Project memory, Sh
       await until("Show older never finished loading", () => page.evaluate("document.querySelector('section[aria-labelledby=pj-mem-notes] [aria-busy=true]') !== null"), (loading) => !loading);
     }
     assert.ok((await noteRow(page, ASKED)).found, "the newest notes stay above the older ones");
-    assert.ok((await page.evaluate("location.hash")).endsWith("/context"), "Show older pages in place");
+    assert.equal(await page.evaluate("location.hash"), memoryHash, "Show older pages in place");
     await me.capture("project-memory-older");
 
     await me.click("Memory settings", "button");
