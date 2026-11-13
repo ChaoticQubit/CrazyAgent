@@ -175,6 +175,10 @@ fn a_broken_first_copy_shows_failed_and_a_later_good_copy_is_not_used() {
         checked: Some(crate::setup::progress::Checked {
             at: std::time::Instant::now(),
             found: vec![(Dependency::Tmux, installer.lookup(Dependency::Tmux))],
+            probe: crate::tools::probe::Mark {
+                generation: 1,
+                first_run_pending: false,
+            },
         }),
         ..crate::setup::progress::Progress::default()
     };
@@ -185,6 +189,30 @@ fn a_broken_first_copy_shows_failed_and_a_later_good_copy_is_not_used() {
             reason: crate::setup::plain_reason("setup_version_unreadable").to_owned()
         }
     );
+}
+
+/// SETUP-PROBE-GAP: setup's tmux row and the terminal read the same places, so a tmux only
+/// in a folder the login-shell probe found, such as MacPorts' `/opt/local/bin`, is the file
+/// setup shows and the one a terminal starts, never found by one and missing for the other.
+#[test]
+fn a_tmux_only_on_the_login_path_is_the_one_setup_shows_and_the_terminal_starts() {
+    let root = private_root();
+    let login = root.path().join("opt/local/bin");
+    std::fs::create_dir_all(&login).unwrap();
+    let tmux = login.join("tmux");
+    std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.5a'\n").unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let before = crate::tools::Places::new(Vec::new(), None);
+    assert_eq!(crate::terminal::tmux::installed_at(&before), None);
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), before.clone());
+    assert_eq!(installer.locate(Dependency::Tmux), None);
+    let places = before.with_probed(vec![login]);
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
+    let (entry, version) = installer.locate(Dependency::Tmux).unwrap();
+    assert_eq!(version, Version::parse("3.5a").unwrap());
+    let started = crate::terminal::tmux::installed_at(&places).unwrap();
+    assert_eq!(started, entry.canonicalize().unwrap());
+    assert_eq!(started, tmux.canonicalize().unwrap());
 }
 
 fn found(name: &str) -> PathBuf {

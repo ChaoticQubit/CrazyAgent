@@ -19,7 +19,6 @@ struct Prepared {
     plugin: Option<PathBuf>,
 }
 
-const RECHECK_AFTER: Duration = Duration::from_secs(30);
 const FIRST_CHECK_WAIT: Duration = Duration::from_millis(500);
 const CHECK_POLL: Duration = Duration::from_millis(20);
 
@@ -165,11 +164,9 @@ fn follow_saved_levels(authority: &Arc<Authority>) {
 fn follow_saved_levels(_authority: &Arc<Authority>) {}
 
 fn start_check(root: &Path) {
+    let mark = crate::tools::probe::mark();
     let begin = progress::with(root, |state| {
-        let stale = state
-            .checked
-            .as_ref()
-            .is_none_or(|checked| checked.at.elapsed() >= RECHECK_AFTER);
+        let stale = progress::check_due(state.checked.as_ref(), mark, std::time::Instant::now());
         let begin = stale && !state.checking;
         if begin {
             state.checking = true;
@@ -191,6 +188,7 @@ fn start_check(root: &Path) {
                 state.checked = Some(progress::Checked {
                     at: std::time::Instant::now(),
                     found: found.to_vec(),
+                    probe: mark,
                 });
             });
         }
