@@ -2,7 +2,7 @@ use super::events::{
     INSTRUCTIONS_RESTARTED, LEAD_STOPPED_AGENT, MASTER_STOPPED_AGENT, OWNER_RESTARTED,
     OWNER_STOPPED_AGENT, OWNER_WOKE,
 };
-use super::model_pick::Fallen;
+use super::model_pick::{Claim, Fallen};
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, CancelBy, CancelPath,
     DELEGATIONS_PER_REPLY_MAX, Delegation, MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy,
@@ -29,7 +29,7 @@ use crate::harnesses::terminal_session::{
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
 use crate::master_sessions::ResumePlan;
-use crate::model_choice::test_launch::Tested;
+use crate::model_choice::test_launch::{self, Tested};
 use crate::model_gateway::relay::Relay;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
@@ -10067,6 +10067,11 @@ impl TeamRuntime {
                 if end == TurnEnd::RateLimited {
                     self.pause(&project, &connection)?;
                 }
+                if end == TurnEnd::ModelRefusalSaid
+                    && let Some(check) = self.said_check(id)?
+                {
+                    spawn_check(check);
+                }
                 self.count_turn(id, &project, master)?;
                 if team_tool {
                     self.log_master_asks(&project, id)?;
@@ -10685,8 +10690,39 @@ impl TeamRuntime {
     /// test launch; a check that already refused marks the project from its own time.
     /// Takes the agent. Returns the check to run off this thread, none when none runs.
     fn said_check(&self, id: i64) -> Result<Option<Check>, EngineError> {
-        let _ = id;
-        Ok(None)
+        let worker = &self.workers[&id];
+        let (Some(model), Some((global, local))) = (worker.model.as_deref(), &self.settings) else {
+            return Ok(None);
+        };
+        if !worker.managed || !test_launch::supported(&worker.harness) {
+            return Ok(None);
+        }
+        let Some(executable) = self.harness(&worker.harness) else {
+            return Ok(None);
+        };
+        let (project, connection) = (&worker.project, &worker.connection);
+        match super::model_pick::claim_check(&self.connection, connection, model, now_ms())? {
+            Claim::Held => Ok(None),
+            Claim::Refused { checked_ms } => {
+                super::model_pick::refuse(
+                    &self.connection,
+                    project,
+                    connection,
+                    model,
+                    checked_ms,
+                )?;
+                Ok(None)
+            }
+            Claim::Run => Ok(Some(Check {
+                root: self.root.clone(),
+                settings: (global.clone(), local.clone()),
+                harness: worker.harness.clone(),
+                executable,
+                connection: connection.clone(),
+                model: model.to_owned(),
+                project: project.clone(),
+            })),
+        }
     }
 
     fn model_refused(&mut self, id: i64) -> Result<(), EngineError> {
@@ -12428,8 +12464,65 @@ fn check_ended(
     tested: Tested,
     now: i64,
 ) -> Result<(), EngineError> {
-    let _ = (db, check, tested, now);
-    Ok(())
+    if tested != Tested::Failed {
+        return Ok(());
+    }
+    super::model_pick::check_refused(db, &check.project, &check.connection, &check.model, now)
+}
+
+/// How long a check of a said refusal waits for its harness's one test slot, held by a
+/// Models page test or another check, before it gives up with no mark (DEC-150 addendum 9h).
+const CHECK_WAIT: Duration = Duration::from_secs(3 * test_launch::WALL_TIME.as_secs());
+/// How often a waiting check of a said refusal asks for the test slot again.
+const CHECK_POLL: Duration = Duration::from_secs(5);
+
+/// Starts the engine's check of a said refusal on its own named thread, so the runtime
+/// never waits on the test launch (DEC-150 addendum 9g); its claim bounds the threads.
+/// Logs one code line naming only the harness and the result. Takes the check.
+fn spawn_check(check: Check) {
+    let harness = check.harness.clone();
+    let spawned = std::thread::Builder::new()
+        .name("model-check".into())
+        .spawn(move || {
+            let result = match run_check(&check) {
+                Ok(tested) => format!("{tested:?}").to_lowercase(),
+                Err(code) => code,
+            };
+            eprintln!("model_check harness={} result={result}", check.harness);
+        });
+    if spawned.is_err() {
+        eprintln!("model_check harness={harness} result=not_started");
+    }
+}
+
+/// Runs the engine's check of a said refusal: one test launch of the model on the said
+/// turn's account only, waiting at most `CHECK_WAIT` for the harness's test slot, and
+/// records a refusal the engine read itself. Takes the check. Returns the decision, or the
+/// test launch's or the database's code.
+fn run_check(check: &Check) -> Result<Tested, String> {
+    let executable = |id: &str| (check.harness == id).then_some(check.executable.as_path());
+    let request = test_launch::Request {
+        root: &check.root,
+        settings: (&check.settings.0, &check.settings.1),
+        codex: executable("codex"),
+        claude: executable("claude-code"),
+        harness: &check.harness,
+        model: &check.model,
+        target: test_launch::Target::Connection(&check.connection),
+    };
+    let asked = Instant::now();
+    let tested = loop {
+        match test_launch::run(&request) {
+            Ok((tested, _)) => break tested,
+            Err(test_launch::BUSY) if asked.elapsed() < CHECK_WAIT => {
+                std::thread::sleep(CHECK_POLL)
+            }
+            Err(code) => return Err(code.to_owned()),
+        }
+    };
+    let db = crate::storage::versioned::open(&check.root).map_err(|problem| problem.0)?;
+    check_ended(&db, check, tested, now_ms()).map_err(|problem| problem.0)?;
+    Ok(tested)
 }
 
 /// The problem a sub-agent's turn leaves on its agent: the closed process with the turn's

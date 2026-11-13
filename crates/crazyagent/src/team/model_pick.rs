@@ -2,7 +2,7 @@ use super::tool::ModelPick;
 use crate::engine::EngineError;
 use crate::model_choice::store::{self, Pick};
 use crate::protocol::{CredentialRef, ProjectId};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_task_models (
     task INTEGER PRIMARY KEY,
@@ -583,8 +583,48 @@ pub(crate) fn claim_check(
     model: &str,
     now: i64,
 ) -> Result<Claim, EngineError> {
-    let _ = (db, connection, model, now, CHECK_SCHEMA);
-    Ok(Claim::Held)
+    assert!(!model.is_empty() && model.len() <= crate::model_choice::MODEL_BYTES_MAX);
+    let tx =
+        Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(super::error)?;
+    tx.execute_batch(CHECK_SCHEMA).map_err(super::error)?;
+    tx.execute(
+        "DELETE FROM team_model_checks WHERE checked_ms<=?1",
+        [now - MODEL_REFUSAL_MS],
+    )
+    .map_err(super::error)?;
+    let live: Option<(i64, bool)> = tx
+        .query_row(
+            "SELECT checked_ms,refused FROM team_model_checks WHERE connection=?1 AND model=?2",
+            params![connection.as_str(), model],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(super::error)?;
+    let count = |tx: &Transaction<'_>| -> Result<i64, EngineError> {
+        tx.query_row("SELECT COUNT(*) FROM team_model_checks", [], |row| {
+            row.get(0)
+        })
+        .map_err(super::error)
+    };
+    let full = live.is_none() && count(&tx)? >= CHECKS_MAX as i64;
+    let claim = match live {
+        Some((checked_ms, true)) => Claim::Refused { checked_ms },
+        Some(_) => Claim::Held,
+        None if full => Claim::Held,
+        None => {
+            tx.execute(
+                "INSERT INTO team_model_checks(connection,model,checked_ms,refused) VALUES (?1,?2,?3,0)",
+                params![connection.as_str(), model, now],
+            )
+            .map_err(super::error)?;
+            Claim::Run
+        }
+    };
+    let kept = count(&tx)?;
+    assert!(kept <= CHECKS_MAX as i64);
+    assert!(claim != Claim::Run || kept >= 1);
+    tx.commit().map_err(super::error)?;
+    Ok(claim)
 }
 
 /// Records that the engine's check of an account's model was refused (DEC-150 addendum
@@ -598,8 +638,13 @@ pub(crate) fn check_refused(
     model: &str,
     now: i64,
 ) -> Result<(), EngineError> {
-    let _ = (db, project, connection, model, now);
-    Ok(())
+    db.execute_batch(CHECK_SCHEMA).map_err(super::error)?;
+    db.execute(
+        "UPDATE team_model_checks SET refused=1 WHERE connection=?1 AND model=?2",
+        params![connection.as_str(), model],
+    )
+    .map_err(super::error)?;
+    refuse(db, project, connection, model, now)
 }
 
 /// Drops a removed project's model records (DEC-150 F6): its tasks' pinned picks, its

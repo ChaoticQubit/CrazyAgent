@@ -364,10 +364,58 @@ impl SettingsResolver {
         let Some(chosen) = access.pools.iter().find(|candidate| &candidate.id == pool) else {
             return AccountPick::NeedsPool;
         };
+        self.members_pick_for(project, &access, &chosen.members, &[pool], harnesses)
+    }
+
+    /// The account one named member gives the first of `harnesses` for `project`, with the
+    /// same sign-in check, account pauses, project holds and schedule rules as
+    /// [`Self::pool_pick`], read over every pool that names it (DEC-150 addendum 9h).
+    /// Rereads the settings. Returns [`AccountPick::NeedsPool`] for unreadable settings and
+    /// [`AccountPick::NoUsableAccount`] for an account no pool names or no harness can use.
+    pub fn connection_pick(
+        &self,
+        project: &str,
+        connection: &CredentialRef,
+        harnesses: &[ResearchHarness],
+    ) -> AccountPick {
+        let Ok(config) = crate::config::resolve_config(&self.global, &self.project) else {
+            return AccountPick::NeedsPool;
+        };
+        let access = config.settings.model_access.unwrap_or_default();
+        let pools: Vec<&CredentialRef> = access
+            .pools
+            .iter()
+            .filter(|pool| pool.members.contains(connection))
+            .map(|pool| &pool.id)
+            .collect();
+        if pools.is_empty() {
+            return AccountPick::NoUsableAccount;
+        }
+        let members = std::slice::from_ref(connection);
+        let pick = self.members_pick_for(project, &access, members, &pools, harnesses);
+        assert!(
+            !matches!(&pick, AccountPick::Account { connection: picked, .. } if picked != connection)
+        );
+        pick
+    }
+
+    /// Picks the first of `members` the first of `harnesses` can use for `project`, with
+    /// the engine's sign-ins, account pauses, project holds and the schedule choice read
+    /// over `pools`. Takes the project, the model access, the members, their pools and the
+    /// harnesses. Returns the account, else the earliest pause, else no usable account;
+    /// [`AccountPick::NeedsPool`] when the schedule cannot be read.
+    fn members_pick_for(
+        &self,
+        project: &str,
+        access: &ModelAccess,
+        members: &[CredentialRef],
+        pools: &[&CredentialRef],
+        harnesses: &[ResearchHarness],
+    ) -> AccountPick {
         let database = self.engine();
         let choice = match database.as_ref() {
             Some(database) => {
-                match Choice::read(database, &access, None, &[pool], crate::team::now_ms()) {
+                match Choice::read(database, access, None, pools, crate::team::now_ms()) {
                     Ok(choice) => choice,
                     Err(_) => return AccountPick::NeedsPool,
                 }
@@ -391,8 +439,8 @@ impl SettingsResolver {
         let mut waiting = AccountPick::NoUsableAccount;
         for harness in harnesses {
             match members_pick(
-                &access,
-                &chosen.members,
+                access,
+                members,
                 harness.id(),
                 &signed_in,
                 &paused_until,
@@ -409,21 +457,6 @@ impl SettingsResolver {
             }
         }
         waiting
-    }
-
-    /// The account one named member gives the first of `harnesses` for `project`, with the
-    /// same sign-in check, account pauses, project holds and schedule rules as
-    /// [`Self::pool_pick`], read over every pool that names it (DEC-150 addendum 9h).
-    /// Rereads the settings. Returns [`AccountPick::NeedsPool`] for unreadable settings and
-    /// [`AccountPick::NoUsableAccount`] for an account no pool names or no harness can use.
-    pub fn connection_pick(
-        &self,
-        project: &str,
-        connection: &CredentialRef,
-        harnesses: &[ResearchHarness],
-    ) -> AccountPick {
-        let _ = (project, connection, harnesses);
-        AccountPick::NeedsPool
     }
 
     /// Opens the engine database for one resolve, or `None` when it cannot be

@@ -158,8 +158,17 @@ pub fn not_started(harness: &str, why: NotStarted) -> String {
     reason
 }
 
+/// The accounts a test launch may run on: the first fitting member of the owner's pool, as
+/// the Models page tests an id, or only one account, as the engine checks a model refusal
+/// a pane said on that account (DEC-150 addendum 9g).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target<'a> {
+    Pool(&'a CredentialRef),
+    Connection(&'a CredentialRef),
+}
+
 /// One test launch to run: the engine's data folder, the two settings files, the
-/// installed harness executables, the harness, the owner's id and the pool to run it on.
+/// installed harness executables, the harness, the model id and the accounts to run it on.
 pub struct Request<'a> {
     pub root: &'a Path,
     pub settings: (&'a Path, &'a Path),
@@ -167,14 +176,14 @@ pub struct Request<'a> {
     pub claude: Option<&'a Path>,
     pub harness: &'a str,
     pub model: &'a str,
-    pub pool: &'a CredentialRef,
+    pub target: Target<'a>,
 }
 
 #[cfg(unix)]
 mod run {
     use super::{
-        BUSY, Ended, NotStarted, OUTPUT_TOKENS, POOL_UNKNOWN, PROMPT, Request, Tested, WALL_TIME,
-        not_started, outcome, supported,
+        BUSY, Ended, NotStarted, OUTPUT_TOKENS, POOL_UNKNOWN, PROMPT, Request, Target, Tested,
+        WALL_TIME, not_started, outcome, supported,
     };
     use crate::instruction_cleanup::private_folder;
     use crate::research::accounts::{AccountPick, SettingsResolver};
@@ -219,8 +228,8 @@ mod run {
     }
 
     /// Runs one test launch: a tools-off read-only run of the fixed prompt on the first
-    /// fitting account of the owner's pool, with the owner's id as its model, in an empty
-    /// engine-owned folder. A URL account runs only its own model, so it is not tried.
+    /// fitting account of the owner's pool, or on the one named account, with the id as
+    /// its model, in an empty engine-owned folder. A URL account runs only its own model, so it is not tried.
     /// The run's folder is removed once its output is read. Input: the request. Output:
     /// the decision and its pending reason, or `BUSY`, `POOL_UNKNOWN` or unavailable.
     pub(crate) fn run(request: &Request<'_>) -> Result<(Tested, Option<String>), &'static str> {
@@ -253,7 +262,11 @@ mod run {
         let projects = root.join(crate::project_setup::PROJECTS_DIRECTORY);
         let resolver = SettingsResolver::new(global, project, &projects, &database)
             .map_err(|_| UNAVAILABLE)?;
-        let account = match resolver.pool_pick("", request.pool, &[harness]) {
+        let picked = match request.target {
+            Target::Pool(pool) => resolver.pool_pick("", pool, &[harness]),
+            Target::Connection(connection) => resolver.connection_pick("", connection, &[harness]),
+        };
+        let account = match picked {
             AccountPick::NeedsPool => return Err(POOL_UNKNOWN),
             AccountPick::NoUsableAccount => return pending(NotStarted::NoAccount),
             AccountPick::Paused { .. } => return pending(NotStarted::Paused),
