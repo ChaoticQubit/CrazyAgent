@@ -229,11 +229,11 @@ pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
 
 /// Asks macOS for one batch of placeholders. Inputs: the batch and a stop check that ends
 /// the wait for the asking process. Output: Ok once macOS took the batch, else the code.
-type Ask = dyn Fn(&[PathBuf], &dyn Fn() -> bool) -> Result<(), EngineError> + Sync;
+type Ask<'a> = dyn Fn(&[PathBuf], &dyn Fn() -> bool) -> Result<(), EngineError> + Sync + 'a;
 
 /// Lists the placeholders still under a folder. Input: the real folder. Output: as
 /// [`placeholders`].
-type List = dyn Fn(&Path) -> Result<Placeholders, EngineError> + Sync;
+type List<'a> = dyn Fn(&Path) -> Result<Placeholders, EngineError> + Sync + 'a;
 
 /// The download loop behind [`download`], with its ask, its listing and its poll given so a
 /// test can stand in for iCloud. A second thread asks for the batches in order while this one
@@ -244,8 +244,8 @@ type List = dyn Fn(&Path) -> Result<Placeholders, EngineError> + Sync;
 fn run(
     root: &Path,
     download: &Download,
-    ask: &Ask,
-    list: &List,
+    ask: &Ask<'_>,
+    list: &List<'_>,
     poll: Duration,
 ) -> Result<u64, EngineError> {
     assert!(root.is_absolute());
@@ -276,7 +276,7 @@ fn run(
 fn count(
     root: &Path,
     download: &Download,
-    list: &List,
+    list: &List<'_>,
     poll: Duration,
     batches: &mpsc::Sender<Vec<PathBuf>>,
     failed: &Mutex<Option<EngineError>>,
@@ -329,7 +329,7 @@ fn count(
 /// Inputs: the queue, the ask, the stop check and the failure slot.
 fn send(
     queue: mpsc::Receiver<Vec<PathBuf>>,
-    ask: &Ask,
+    ask: &Ask<'_>,
     stop: &(dyn Fn() -> bool + Sync),
     failed: &Mutex<Option<EngineError>>,
 ) {
