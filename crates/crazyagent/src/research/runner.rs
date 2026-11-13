@@ -4482,9 +4482,7 @@ mod tests {
     /// and every connect to it is refused, so the row never finds a provider it did not start.
     #[test]
     fn a_port_kept_for_a_down_provider_refuses_connects_and_no_other_socket_can_take_it() {
-        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
         let taken = crate::spawn_gate::bind_tcp_std(("127.0.0.1", port));
         assert_eq!(
             taken.as_ref().map(drop).map_err(std::io::Error::kind),

@@ -330,6 +330,28 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
     bind_tcp_std(address)
 }
 
+/// Holds a free loopback TCP port with a close-on-exec socket that is bound but never
+/// listens, as a model provider that is down: while the socket is kept no other socket is
+/// given the port and every connect to it is refused. Input: none. Output: the socket,
+/// which frees the port when dropped, and the port.
+#[cfg(unix)]
+pub fn refusing_tcp_port() -> io::Result<(std::os::fd::OwnedFd, u16)> {
+    use nix::sys::socket::{
+        AddressFamily, SockFlag, SockType, SockaddrIn, bind, getsockname, socket,
+    };
+    use std::os::fd::AsRawFd;
+    let socket = guarded(|| -> io::Result<std::os::fd::OwnedFd> {
+        let socket = socket(AddressFamily::Inet, SockType::Stream, SockFlag::empty(), None)?;
+        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
+        Ok(socket)
+    })?;
+    let any = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
+    bind(socket.as_raw_fd(), &SockaddrIn::from(any))?;
+    let port = getsockname::<SockaddrIn>(socket.as_raw_fd())?.port();
+    assert!(port != 0, "a bound socket holds a port");
+    Ok((socket, port))
+}
+
 /// Binds a blocking UDP socket inside the gate.
 /// Input: the address. Output: the socket.
 #[allow(clippy::disallowed_methods)]
