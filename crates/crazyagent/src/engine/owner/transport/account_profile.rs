@@ -448,7 +448,7 @@ impl OwnerRuntimeHandle {
     /// as the session's owner, still admitted before Finish, and waits for the writer, which
     /// runs on even if the turn is dropped. Input: the prepared turn. Output: Ok once the
     /// key is written and the operation settled; any refusal otherwise.
-    async fn configure_saved_key(
+    pub(super) async fn configure_saved_key(
         &self,
         prepared: &crate::storage::PreparedMasterTurn,
     ) -> Result<(), EngineError> {

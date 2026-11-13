@@ -670,6 +670,116 @@ fallback_allowed = false
         case.close().await;
     }
 
+    /// Saves a synthetic key for an account in the engine's account key store, beside the
+    /// engine root, as adding a keyed account does. Inputs: the fixture and the account's
+    /// credential reference. Output: none.
+    fn saved_account_key(case: &Fixture, credential: &str) {
+        let keys = case
+            .host
+            .authority
+            .root
+            .path
+            .parent()
+            .unwrap()
+            .join(crate::storage::accounts::ACCOUNT_KEYS);
+        private_directory(&keys);
+        private_file(&keys.join(credential), b"synthetic-key-not-a-real-key");
+    }
+
+    /// Registers a private key writer stand-in that fails if it ever runs: a private script
+    /// owned by the user, as a pinned host must be. Input: the fixture. Output: none.
+    fn failing_key_writer(case: &Fixture) {
+        let path = case.root.path().join("synthetic-key-writer");
+        std::fs::write(&path, b"#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        case.host
+            .register_rcli_private_key_executable(
+                crate::engine::RegisteredNativeAuthHost::capture(&path).unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// The account setup operations the engine recorded, as (phase, count) by phase.
+    /// Input: the fixture. Output: the pairs, empty before any setup made the table.
+    fn setup_phases(case: &Fixture) -> Vec<(String, i64)> {
+        let db =
+            rusqlite::Connection::open(case.host.authority.root.path.join("engine.db")).unwrap();
+        let table: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='account_profile_operations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if table == 0 {
+            return vec![];
+        }
+        let mut phases = db
+            .prepare("SELECT phase, count(*) FROM account_profile_operations GROUP BY phase ORDER BY phase")
+            .unwrap();
+        phases
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// KY-M1 follow-up (rv-v3sec): with the account's key saved but no private key writer
+    /// registered, the master's key setup refuses before it reserves any operation, writes
+    /// no key file, and the turn stops with the key setup cause.
+    #[tokio::test]
+    async fn a_master_key_setup_with_no_key_writer_reserves_nothing() {
+        let case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        saved_account_key(&case, "synthetic-key-ref-legacy");
+        let refused = case
+            .host
+            .configure_saved_key(&case.prepared)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "native_auth_host_unavailable");
+        let refused = case
+            .host
+            .set_up_master_key(&case.prepared)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "rcli_master_key_setup_required");
+        assert!(!generated.join(".backboard/keys.json").exists());
+        assert!(setup_phases(&case).is_empty());
+        case.close().await;
+    }
+
+    /// KY-M1 follow-up (rv-v3sec): with the key saved and a key writer registered, a key
+    /// setup whose Apply refuses the account's generated home (it holds a file the engine
+    /// never writes) settles its one operation as uncertain, leaves nothing reserved or
+    /// running, never runs the writer and writes no key file.
+    #[tokio::test]
+    async fn a_master_key_setup_that_apply_refuses_leaves_no_open_operation() {
+        let case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        private_file(&generated.join(".backboard/notes.txt"), b"not the engine's");
+        saved_account_key(&case, "synthetic-key-ref-legacy");
+        failing_key_writer(&case);
+        let refused = case
+            .host
+            .configure_saved_key(&case.prepared)
+            .await
+            .unwrap_err();
+        assert_ne!(refused.0, "native_auth_host_unavailable");
+        assert_ne!(refused.0, "account_profile_secret_required_or_unexpected");
+        assert!(!generated.join(".backboard/keys.json").exists());
+        assert_eq!(unsettled_setups(&case), 0);
+        assert_eq!(setup_phases(&case), vec![("uncertain".to_owned(), 1)]);
+        let refused = case
+            .host
+            .set_up_master_key(&case.prepared)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "rcli_master_key_setup_required");
+        assert_eq!(unsettled_setups(&case), 0);
+        case.close().await;
+    }
+
     fn copy_prepared(prepared: &PreparedMasterTurn) -> PreparedMasterTurn {
         PreparedMasterTurn {
             text: prepared.text.clone(),
