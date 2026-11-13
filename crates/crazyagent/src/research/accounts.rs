@@ -7,6 +7,7 @@ use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::protocol::CredentialRef;
 use crate::scheduling::{Candidate, Choice};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -321,6 +322,7 @@ impl SettingsResolver {
             .ok()?,
             None => Choice::default(),
         };
+        let logged = Cell::new(false);
         let pick = pick_scheduled(
             &access,
             project,
@@ -333,14 +335,7 @@ impl SettingsResolver {
                     }
                 })
             },
-            |connection| {
-                database
-                    .as_ref()
-                    .and_then(|database| {
-                        crate::team::held_until(database, project, connection).ok()
-                    })
-                    .flatten()
-            },
+            |connection| hold_end(database.as_ref(), project, connection, &logged),
             &choice,
         );
         Some((folder, pick))
@@ -434,12 +429,9 @@ impl SettingsResolver {
                     Err(code) => code == PROFILE_BUSY,
                 })
         };
-        let paused_until = |connection: &CredentialRef| {
-            database
-                .as_ref()
-                .and_then(|database| crate::team::held_until(database, project, connection).ok())
-                .flatten()
-        };
+        let logged = Cell::new(false);
+        let paused_until =
+            |connection: &CredentialRef| hold_end(database.as_ref(), project, connection, &logged);
         let mut waiting = AccountPick::NoUsableAccount;
         for harness in harnesses {
             match members_pick(
@@ -476,6 +468,32 @@ impl SettingsResolver {
         database.busy_timeout(DATABASE_WAIT).ok()?;
         Some(database)
     }
+}
+
+/// Tells until when `connection` stays held for `project` in one pick, failing closed
+/// (V3-HOLD-FAILOPEN, DEC-150 addendum 9j): with no engine database or a hold read that
+/// fails, the account counts as held for `HOLD_UNREAD_RETRY_MS`, logged once per pick.
+/// Takes the engine database, the project, the account and the pick's logged flag.
+/// Returns the hold's end, or none when the account is free.
+fn hold_end(
+    database: Option<&Connection>,
+    project: &str,
+    connection: &CredentialRef,
+    logged: &Cell<bool>,
+) -> Option<i64> {
+    let cause =
+        match database.map(|database| crate::team::held_until(database, project, connection)) {
+            Some(Ok(until)) => return until,
+            Some(Err(_)) => "read_failed",
+            None => "no_database",
+        };
+    if !logged.replace(true) {
+        eprintln!("account_hold_unread cause={cause}");
+    }
+    let now = crate::team::now_ms();
+    let until = now.saturating_add(HOLD_UNREAD_RETRY_MS);
+    assert!(until > now);
+    Some(until)
 }
 
 /// The folder the engine recorded for a set-up project, such as its folder
