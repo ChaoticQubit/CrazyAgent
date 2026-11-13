@@ -980,6 +980,7 @@ fn turn_sandbox(
     let name = format!("master-runtime-{}", runtime_ref.as_str());
     let runtime = Root::open(&root.path.join(&name))?;
     verify_master_runtime(root, &runtime, &name)?;
+    let engine_root = root.engine_root()?;
     let tmp = runtime.path.join(MASTER_TMP);
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -1011,11 +1012,12 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_read(&runtime.path))
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
+    .and_then(|sandbox| sandbox.guard_engine_around(engine_root, &root.path))
     .map_err(refused)?;
     #[cfg(target_os = "macos")]
     let sandbox = crate::sandbox::tool_cache::grant(
         sandbox,
-        root.engine_root()?,
+        engine_root,
         &std::fs::canonicalize(repository).map_err(io_error)?,
         policy,
         crate::sandbox::tool_cache::CacheShape::Worktree,

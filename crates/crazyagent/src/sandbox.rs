@@ -1167,6 +1167,47 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Adds the engine root's secrets for an agent whose runtime folder is one folder in it,
+    /// as an owner generation is for a master: every entry guard_engine would name for the
+    /// engine root except that folder itself, where the agent's home lives. Call it after
+    /// guard_engine on the runtime folder, whose secrets stay. Inputs: the engine root and
+    /// the runtime folder. Output: the guarded sandbox, or a refusal.
+    pub fn guard_engine_around(
+        mut self,
+        engine: &Path,
+        runtime: &Path,
+    ) -> Result<Self, SandboxError> {
+        let engine = canonical(engine)?;
+        let runtime = canonical(runtime)?;
+        if !clean_absolute(&engine)
+            || !engine.is_dir()
+            || runtime.parent() != Some(engine.as_path())
+        {
+            return Err(invalid(
+                "engine root must be the existing folder around the runtime",
+            ));
+        }
+        let secrets: Vec<PathBuf> = engine_secrets_in(&engine)?
+            .into_iter()
+            .filter(|secret| *secret != runtime)
+            .collect();
+        for root in self
+            .writable_roots()
+            .chain(self.read_roots.iter())
+            .chain(self.tool_roots.iter())
+            .chain(self.tool_files.iter())
+        {
+            clear_of_secrets(root, &secrets)?;
+        }
+        for secret in secrets {
+            if !self.engine_secrets.contains(&secret) {
+                self.engine_secrets.push(secret);
+            }
+        }
+        assert!(!self.engine_secrets.contains(&runtime));
+        Ok(self)
+    }
+
     /// Every path this sandbox denies to the agent although an allowed root might cover
     /// it: the owner's Keychains, SSH, GPG, cloud, gh, git, Codex and Claude credentials,
     /// the system Keychains and, once guarded, the engine runtime's secrets.
