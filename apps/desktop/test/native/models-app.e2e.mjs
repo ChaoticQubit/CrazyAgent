@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { click, finishWelcome, observeModelChoice, shot, shown, text, type, until } from "./settings-steps.mjs";
+import { click, finishWelcome, observeModelAccess, observeModelChoice, settingsTab, shot, shown, text, type, until } from "./settings-steps.mjs";
 
 const UI_MS = 15000;
 const HARNESS = "claude-code";
@@ -208,4 +208,40 @@ describe("Settings, Harnesses, RCLI: the master model on the real desktop app an
     assert.equal(await (await $("#models-master")).getValue(), "");
     await shot("models-rcli-own");
   });
+
+  const TEST_POOL = "Model tests";
+  let testPool = null;
+
+  it("an empty pool to run RCLI test launches on is saved", async () => {
+    await settingsTab("Pools");
+    await click("button=New pool");
+    await type("#pool-name", TEST_POOL);
+    await until(async () => (await observeModelAccess()).pools.some((pool) => pool.name === TEST_POOL), UI_MS, "the engine did not keep the test pool");
+    const pool = (await observeModelAccess()).pools.find((pool) => pool.name === TEST_POOL);
+    assert.deepEqual(pool.members, [], "the test pool holds no account");
+    testPool = pool.id;
+    await browser.execute((hash) => { location.hash = hash; }, `#/settings/harnesses?harness=${RCLI}`);
+    await until(async () => (await text("main")).includes("Model list checked against RCLI 3.0.4."), 30000, "the RCLI Models section did not open again");
+  });
+
+  for (const [name, provider] of [["Anthropic API", "anthropic"], ["OpenAI API", "openai"], ["OpenRouter", "openrouter"]]) {
+    it(`an id added on ${name} waits for a test launch on a ${name} account, and a pool without one says so (DEC-150 addendum 9e)`, async () => {
+      assert.notEqual(testPool, null, "the test pool was saved first");
+      const id = `my-${provider}-model`;
+      await type("#models-add-id", id);
+      assert((await text("main")).includes("Which provider runs this id?"), "Add asks which provider runs the id");
+      assert.equal(await (await $("button=Add")).isEnabled(), false, "Add waits for a provider");
+      await click(`input[name="models-add-provider"][value="${provider}"]`);
+      await click("button=Add");
+      await rcliHolds((read) => read.own.some((item) => item.id === id && item.origin === "pending"), `the engine did not keep ${id} waiting`);
+      await click(`button[aria-label="Test ${id}"]`);
+      await click(`input[name="models-test-pool"][value="${testPool}"]`);
+      await click("button=Run test");
+      await until(async () => (await text("main")).includes(`${id} still waits for its test launch. No set-up ${name} account in this pool.`), 30000,
+        `the test launch did not name ${name} as the provider with no account`);
+      const read = await observeModelChoice(RCLI);
+      assert.deepEqual(read.own.find((item) => item.id === id), { id, origin: "pending" }, "an untested id stays pending");
+      await shot(`models-rcli-test-${provider}`);
+    });
+  }
 });
