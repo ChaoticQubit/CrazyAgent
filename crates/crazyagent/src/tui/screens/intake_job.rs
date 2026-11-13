@@ -115,20 +115,41 @@ pub(in crate::tui) fn end_line(
 /// The word Home's job card shows beside the folder's name, in the desktop's words, with the
 /// status kind that colors it. Takes the job. Returns the kind and the word.
 pub(in crate::tui) fn badge(job: &JobView) -> (Status, &'static str) {
-    let _ = job;
-    (Status::Unknown, "")
+    let badge = match &job.state {
+        JobState::Downloading { .. } => (Status::Active, "Downloading"),
+        JobState::Copying { .. } => (Status::Active, "Adding"),
+        JobState::Clearing => (Status::Active, "Finishing"),
+        JobState::Done => (Status::Ok, "Added"),
+        JobState::Failed { .. } => (Status::Fail, "Failed"),
+        JobState::Cancelled { .. } => (Status::Off, "Stopped"),
+        JobState::NeedsAnswer { .. } => (Status::Needs, "Needs answer"),
+    };
+    assert_eq!(running(job), badge.0 == Status::Active);
+    badge
 }
 
 /// What Enter and d do on Home's job card, as the card's last line. Takes the job. Returns
 /// the line; a job that offers nothing yet asks the owner to wait.
 pub(in crate::tui) fn next(job: &JobView) -> &'static str {
-    let _ = job;
-    ""
+    let next = match actions(job).as_slice() {
+        [] => "Wait for it to finish.",
+        [JobAction::Stop] => "Enter stops it.",
+        [JobAction::Dismiss] => "Enter dismisses it.",
+        [JobAction::Retry, JobAction::Dismiss] => "Enter tries again. d dismisses it.",
+        [JobAction::Answer, JobAction::Dismiss] => "Enter answers. d dismisses it.",
+        other => panic!("no intake job offers {other:?}"),
+    };
+    assert!(next.ends_with('.'));
+    next
 }
 
 /// The hint word for one job action, the desktop's button word. Takes the action. Returns
 /// the word.
 pub(in crate::tui) fn label(action: JobAction) -> &'static str {
-    let _ = action;
-    ""
+    match action {
+        JobAction::Stop => "Stop",
+        JobAction::Retry => "Try again",
+        JobAction::Answer => "Answer",
+        JobAction::Dismiss => "Dismiss",
+    }
 }
