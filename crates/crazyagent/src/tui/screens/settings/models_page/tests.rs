@@ -865,7 +865,7 @@ fn a_harness_without_a_test_launch_says_not_supported_on_add_and_on_a_pending_id
     press(&mut shell, &[Key::End]);
     let text = screen(&mut shell);
     assert!(text.contains(&format!("{NOT_SUPPORTED}.")), "{text}");
-    assert!(text.contains(NO_TEST_LAUNCH), "{text}");
+    assert!(text.contains("An id you add needs"), "{text}");
     assert!(!text.contains("t Test"), "{text}");
     press(&mut shell, &[Key::Char('t'), Key::Enter]);
     assert_eq!(requests(&mut shell), vec![]);
@@ -873,7 +873,7 @@ fn a_harness_without_a_test_launch_says_not_supported_on_add_and_on_a_pending_id
 
     press(&mut shell, &[Key::Up]);
     let text = screen(&mut shell);
-    assert!(text.contains(NO_TEST_LAUNCH), "{text}");
+    assert!(text.contains("An id you add needs"), "{text}");
     assert!(!text.contains("Type an id"), "{text}");
     press(&mut shell, &[Key::Enter]);
     assert!(!screen(&mut shell).contains("Model id"), "no field opens");

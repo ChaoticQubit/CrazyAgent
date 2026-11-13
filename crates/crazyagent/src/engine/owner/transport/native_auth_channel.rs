@@ -3475,6 +3475,7 @@ fallback_allowed = false
 
         /// One master turn as the owner's clients read it from the engine. Inputs: the
         /// session and the turn's request id. Output: the stored turn.
+        #[cfg(target_os = "macos")]
         async fn master_turn(
             &self,
             session_id: &crate::protocol::SessionId,
@@ -3814,8 +3815,9 @@ fallback_allowed = false
 
     /// The stand-in Codex of the case folder (DEC-150 M-6, M-10). `exec` writes an answer
     /// where `-o` names for `good-model`, prints the provider's refusal code and fails for
-    /// `bad-model`, and fails for any other. `app-server` starts one master thread and turn
-    /// in Codex 0.164's shapes and refuses the turn's model with `modelNotFound`, then exits
+    /// `bad-model`, and fails for any other. `app-server` with a `-c model=` pair, as a
+    /// master turn starts it, runs one thread and turn in Codex 0.164's shapes: `modelNotFound`
+    /// for any model but the account's `model-a`, another turn error for that one, then exits
     /// once its input closes. Any other call exits at once.
     const TEST_LAUNCH_CODEX: &str = r#"#!/bin/sh
 mode=
@@ -3827,7 +3829,11 @@ while [ $# -gt 0 ]; do
     app-server) mode=server ;;
     -o) out=$2; shift ;;
     -m) model=$2; shift ;;
-    -c) shift ;;
+    -c)
+      case "$2" in
+        model=*) model=${2#model=}; model=${model#\"}; model=${model%\"} ;;
+      esac
+      shift ;;
   esac
   shift
 done
@@ -3838,7 +3844,7 @@ case "$mode" in
       bad-model) printf '%s\n' '{"type":"error","message":"model_not_found"}'; exit 1 ;;
     esac
     exit 1 ;;
-  server) ;;
+  server) [ -n "$model" ] || exit 0 ;;
   *) exit 0 ;;
 esac
 IFS= read -r line
@@ -3853,7 +3859,9 @@ cwd=$(pwd -P)
 printf '%s\n' "{\"id\":2,\"result\":{\"thread\":{\"id\":\"stand-in-thread\",\"cwd\":\"$cwd\",\"turns\":[],\"status\":{\"type\":\"idle\"}},\"cwd\":\"$cwd\",\"model\":\"stand-in-model\",\"modelProvider\":\"openai\",\"approvalPolicy\":\"$approval\",\"approvalsReviewer\":\"user\",\"sandbox\":$sandbox}}"
 IFS= read -r line
 printf '%s\n' '{"id":3,"result":{"turn":{"id":"stand-in-turn","items":[],"status":"inProgress"}}}'
-printf '%s\n' '{"method":"error","params":{"threadId":"stand-in-thread","turnId":"stand-in-turn","willRetry":false,"error":{"message":"The model does not exist.","codexErrorInfo":"modelNotFound"}}}'
+info=modelNotFound
+[ "$model" = model-a ] && info=badRequest
+printf '%s\n' "{\"method\":\"error\",\"params\":{\"threadId\":\"stand-in-thread\",\"turnId\":\"stand-in-turn\",\"willRetry\":false,\"error\":{\"message\":\"The turn failed.\",\"codexErrorInfo\":\"$info\"}}}"
 /bin/cat > /dev/null
 exit 0
 "#;
@@ -3961,6 +3969,7 @@ exit 0
     /// Checks a stored master turn ended as the provider's refusal of the master model, in
     /// the reason and cause the desktop's `turnLine` and the TUI's `turn_lines` word, with
     /// no reply from another model. Input: the turn as the clients read it.
+    #[cfg(target_os = "macos")]
     fn assert_model_refused(turn: &crate::master_session::MasterTurnView) {
         use crate::master_session::{MasterReason, MasterTurnPhase};
         assert_eq!(turn.phase, MasterTurnPhase::Failed);
@@ -3974,6 +3983,7 @@ exit 0
 
     /// Counts the model fallback notices the owner was given for the case's Codex master.
     /// Input: the engine database. Output: the count.
+    #[cfg(target_os = "macos")]
     fn fallback_notices(db: &rusqlite::Connection) -> i64 {
         db.query_row(
             "SELECT COUNT(*) FROM owner_notices WHERE kind='pool_failover' AND subject LIKE 'model_fallback:project-a:codex:%'",
@@ -3987,6 +3997,7 @@ exit 0
     /// refuses, saves the owner's fallback rule, and drives the first turn through the
     /// real owner runtime and the case's Codex (DEC-150 M-10). Input: the rule. Output: the
     /// case, the master session, the refused model and the engine database.
+    #[cfg(target_os = "macos")]
     async fn refused_master_turn(
         rule: crate::model_choice::rules::FallbackRule,
     ) -> (
