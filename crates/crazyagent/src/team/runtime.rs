@@ -490,6 +490,76 @@ struct Managed {
     executable: PathBuf,
 }
 
+/// What a kept pane is taken over with once every check passed: its project, role, team
+/// harness, tools switch, account, launch harness, the project's setup, whether it is a
+/// live master, what a signed-in account needs, and the account's reach.
+struct Admitted {
+    project: ProjectId,
+    role: AgentRole,
+    harness: String,
+    tools: bool,
+    connection: CredentialRef,
+    launch: &'static str,
+    stored: StoredSetup,
+    live: bool,
+    managed: Option<Managed>,
+    reach: TeamReach,
+}
+
+/// The native leads an engine start thawed (DEC-158), each with its model proxy and the
+/// keepers of its servers, until a worker takes it over. A lead still held when it is
+/// ended, or when the guard drops on an early return, is ended through its keepers before
+/// its proxy goes, so no thawed lead runs on with its proxy port free.
+#[derive(Default)]
+struct Thawed {
+    leads: BTreeMap<i64, (Arc<ModelProxy>, Vec<KeeperPin>)>,
+}
+
+impl Thawed {
+    /// The proxy bound for a thawed lead, shared, so the guard still holds it while the
+    /// lead is taken over. Takes the agent. Returns the proxy, none for any other agent.
+    fn proxy(&self, id: i64) -> Option<Arc<ModelProxy>> {
+        self.leads.get(&id).map(|(proxy, _)| proxy.clone())
+    }
+
+    /// Lets go of a lead a worker took over, whose worker now holds its proxy. Takes the
+    /// agent.
+    fn adopted(&mut self, id: i64) {
+        self.leads.remove(&id);
+    }
+
+    /// Ends a thawed lead not taken over through its keepers, then lets its proxy go.
+    /// Takes the agent; any other agent is left alone.
+    fn end(&mut self, id: i64) {
+        if let Some((proxy, pins)) = self.leads.remove(&id) {
+            end_lead(Some(proxy), &pins);
+        }
+    }
+
+    /// The thawed leads not yet taken over or ended.
+    fn ids(&self) -> Vec<i64> {
+        self.leads.keys().copied().collect()
+    }
+}
+
+impl Drop for Thawed {
+    fn drop(&mut self) {
+        for (proxy, pins) in std::mem::take(&mut self.leads).into_values() {
+            end_lead(Some(proxy), &pins);
+        }
+    }
+}
+
+/// Ends a frozen or thawed native lead through its server keepers and lets its model proxy
+/// go only once they all exited, so none of its processes runs with the port free. A
+/// proxy whose lead did not end in time stays bound for the engine's life. Takes the
+/// proxy, when one is bound, and the keepers, each proven current.
+fn end_lead(proxy: Option<Arc<ModelProxy>>, pins: &[KeeperPin]) {
+    if !end_keepers(pins) {
+        std::mem::forget(proxy);
+    }
+}
+
 /// Who one agent is in its team: the project, role, team harness, account and tools
 /// switch, with its entry in the engine's agent register when there is one.
 struct Seat {
@@ -1196,7 +1266,7 @@ impl TeamRuntime {
         let records = self.pane_records()?;
         self.terminal = Some(host.clone());
         let access = (self.access)().unwrap_or_default();
-        let (mut prebound, ended) = self.thaw_frozen_leads(&records, &access)?;
+        let (mut thawed, ended) = self.thaw_frozen_leads(&records, &access)?;
         for (id, reason) in ended {
             if let Some(record) = records.get(&id) {
                 record.remove_context_files();
@@ -1212,38 +1282,48 @@ impl TeamRuntime {
         for (id, agent) in panes {
             let refusal = match records.get(&id) {
                 Some(record) => self
-                    .adopt(&host, id, record, &access, prebound.remove(&id))?
+                    .adopt(&host, id, record, &access, thawed.proxy(id))?
                     .err(),
                 None => Some("the engine has no record of it".to_owned()),
             };
-            if let Some(reason) = refusal {
-                match end_left_pane(host.as_ref(), &agent, "team") {
-                    Ok(_) => {}
-                    Err(problem) if problem.0 == "terminal_agent_unknown" => {}
-                    Err(problem) => return Err(problem.into()),
-                }
-                if let Some(record) = records.get(&id) {
-                    record.remove_context_files();
-                }
-                self.closed_note(id, &reason)?;
+            let Some(reason) = refusal else {
+                thawed.adopted(id);
+                continue;
+            };
+            match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(_) => {}
+                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+                Err(problem) => return Err(problem.into()),
             }
+            thawed.end(id);
+            if let Some(record) = records.get(&id) {
+                record.remove_context_files();
+            }
+            self.closed_note(id, &reason)?;
+        }
+        for id in thawed.ids() {
+            thawed.end(id);
+            if let Some(record) = records.get(&id) {
+                record.remove_context_files();
+            }
+            self.closed_note(id, "it could not be continued after its freeze")?;
         }
         Ok(self)
     }
 
     /// Thaws, before any server is asked for its panes, each native lead an earlier engine
-    /// froze (DEC-158), whose stopped servers would not answer: only once its model proxy
-    /// holds both loopback addresses again, and only through server keepers whose start
-    /// still matches the record. A lead whose proxy cannot bind or whose servers do not all
-    /// continue is ended through those keepers, unresumed. Takes the kept records and the
-    /// live access. Returns the proxies bound for thawed leads and the ended leads with why.
-    #[allow(clippy::type_complexity)]
+    /// froze (DEC-158), whose stopped servers would not answer: only once every check that
+    /// takes a pane over passed, its model proxy holds both loopback addresses again, and
+    /// only through server keepers whose start still matches the record. A lead refused,
+    /// whose proxy cannot bind or whose servers do not all continue is ended through those
+    /// keepers before its proxy goes, unresumed. Takes the kept records and the live access.
+    /// Returns the thawed leads and the ended leads with why.
     fn thaw_frozen_leads(
-        &self,
+        &mut self,
         records: &BTreeMap<i64, PaneRecord>,
         access: &ModelAccess,
-    ) -> Result<(BTreeMap<i64, Arc<ModelProxy>>, Vec<(i64, String)>), EngineError> {
-        let mut bound = BTreeMap::new();
+    ) -> Result<(Thawed, Vec<(i64, String)>), EngineError> {
+        let mut thawed = Thawed::default();
         let mut ended = Vec::new();
         for (id, record) in records {
             let Some(pins) = record
@@ -1258,7 +1338,10 @@ impl TeamRuntime {
                 .filter(|pin| keeper_started(pin.pid).as_deref() == Some(pin.started.as_str()))
                 .cloned()
                 .collect();
-            let rebound = self.rebind(*id, record, access)?;
+            let rebound = match self.admitted(*id, record, access)? {
+                Ok(_) => self.rebind(*id, record, access)?,
+                Err(reason) => Err(reason),
+            };
             let reason = match &rebound {
                 Ok(Some(_))
                     if current.len() == pins.len()
@@ -1277,16 +1360,15 @@ impl TeamRuntime {
             };
             match (reason, rebound) {
                 (None, Ok(Some(proxy))) => {
-                    bound.insert(*id, proxy);
+                    thawed.leads.insert(*id, (proxy, current));
                 }
                 (reason, rebound) => {
-                    end_keepers(&current);
-                    drop(rebound);
+                    end_lead(rebound.ok().flatten(), &current);
                     ended.push((*id, reason.expect("a lead left frozen has its reason")));
                 }
             }
         }
-        Ok((bound, ended))
+        Ok((thawed, ended))
     }
 
     /// Reads and forgets the pane records an earlier engine kept, so each is used once.
@@ -1314,27 +1396,16 @@ impl TeamRuntime {
             .collect())
     }
 
-    /// Takes over one live team pane when its agent may still run: the project's setup and
-    /// team plan still hold its role and harness, a master on a harness the plan no longer
-    /// names included, as a saved harness change reaches it when idle or at its next start
-    /// (F06), the team is not paused, the project has
-    /// room, and its account is still in the project's pool, as an endpoint, or as a
-    /// signed-in account for a live master or a native-mode lead, whose worker hands the
-    /// credential to its home again before it serves. The pane keeps the access level its
-    /// record says it started at, Full access for a record without one, and the toolchains it
-    /// started with, every family for a record without them, so a level lowered or a
-    /// toolchain turned off while no engine ran stops it on the next tick. A pane with tools
-    /// whose record names a wider network than the saved one, Open for a record without one,
-    /// is not taken over (CS-2). Takes the host, the
-    /// agent id, its pane record and the live access. Returns Ok, or why the pane must end.
-    fn adopt(
+    /// Runs every check that takes a kept pane over, before anything of it runs again: the
+    /// ones [`TeamRuntime::adopt`] names, with no side effect, so a frozen native lead is
+    /// thawed only once it passed them. Takes the agent id, its pane record and the live
+    /// access. Returns what the pane is taken over with, or why it must end.
+    fn admitted(
         &mut self,
-        host: &Arc<dyn Host>,
         id: i64,
         record: &PaneRecord,
         access: &ModelAccess,
-        prebound: Option<Arc<ModelProxy>>,
-    ) -> Result<Result<(), String>, EngineError> {
+    ) -> Result<Result<Admitted, String>, EngineError> {
         let row: Option<(String, String, String, bool, String)> = self
             .connection
             .query_row(
@@ -1437,17 +1508,67 @@ impl TeamRuntime {
             }
             None => return Ok(Err("its account is no longer in the project's pool".into())),
         };
+        let Some(reach) = account_reach else {
+            return Ok(Err("its account is no longer in the project's pool".into()));
+        };
+        Ok(Ok(Admitted {
+            project,
+            role,
+            harness,
+            tools,
+            connection,
+            launch,
+            stored,
+            live,
+            managed,
+            reach,
+        }))
+    }
+
+    /// Takes over one live team pane when its agent may still run: the project's setup and
+    /// team plan still hold its role and harness, a master on a harness the plan no longer
+    /// names included, as a saved harness change reaches it when idle or at its next start
+    /// (F06), the team is not paused, the project has
+    /// room, and its account is still in the project's pool, as an endpoint, or as a
+    /// signed-in account for a live master or a native-mode lead, whose worker hands the
+    /// credential to its home again before it serves. The pane keeps the access level its
+    /// record says it started at, Full access for a record without one, and the toolchains it
+    /// started with, every family for a record without them, so a level lowered or a
+    /// toolchain turned off while no engine ran stops it on the next tick. A pane with tools
+    /// whose record names a wider network than the saved one, Open for a record without one,
+    /// is not taken over (CS-2). Takes the host, the
+    /// agent id, its pane record and the live access. Returns Ok, or why the pane must end.
+    fn adopt(
+        &mut self,
+        host: &Arc<dyn Host>,
+        id: i64,
+        record: &PaneRecord,
+        access: &ModelAccess,
+        prebound: Option<Arc<ModelProxy>>,
+    ) -> Result<Result<(), String>, EngineError> {
+        let Admitted {
+            project,
+            role,
+            harness,
+            tools,
+            connection,
+            launch,
+            stored,
+            live,
+            managed,
+            reach,
+        } = match self.admitted(id, record, access)? {
+            Ok(admitted) => admitted,
+            Err(problem) => return Ok(Err(problem)),
+        };
         let thawed = prebound.is_some();
-        let proxy = match (prebound, record.proxy, &account_reach) {
-            (Some(proxy), _, _) => Some(proxy),
-            (None, None, _) => None,
-            (None, Some(port), Some(reach)) => match bind_kept_proxy(id, port, launch, reach) {
+        let proxy = match (prebound, record.proxy) {
+            (Some(proxy), _) => Some(proxy),
+            (None, None) => None,
+            (None, Some(port)) => match bind_kept_proxy(id, port, launch, &reach) {
                 Ok(proxy) => Some(proxy),
                 Err(problem) => return Ok(Err(problem)),
             },
-            (None, Some(_), None) => {
-                return Ok(Err("its account is no longer in the project's pool".into()));
-            }
         };
         let Ok(agent) = AgentId::team(id) else {
             return Ok(Err("its record is not valid".into()));
@@ -2862,31 +2983,16 @@ impl TeamRuntime {
                     .is_some_and(|worker| worker.proxy.is_some())
             })
             .collect();
+        let mut failed = None;
         for id in proxied {
-            let record = self.kept_record(id)?;
-            let host = self.terminal.clone();
-            let held = match (&host, &record) {
-                (Some(host), Some(record)) => self.freeze_kept(host, id, record),
-                _ => None,
-            };
-            match held {
-                Some(record) => {
-                    if let Some(text) = record.encode() {
-                        self.connection
-                            .execute(
-                                "UPDATE team_panes SET record=?2 WHERE agent=?1",
-                                params![id, text],
-                            )
-                            .map_err(error)?;
-                    }
-                    frozen.insert(id);
-                }
-                None => {
-                    if let (Some(host), Ok(agent)) = (&host, AgentId::team(id)) {
-                        let _ = end_left_pane(host.as_ref(), &agent, "team");
-                    }
-                    kept.remove(&id);
-                }
+            let (held, problem) = self.freeze_or_end(id);
+            if held {
+                frozen.insert(id);
+            } else {
+                kept.remove(&id);
+            }
+            if failed.is_none() {
+                failed = problem;
             }
         }
         let now = now_ms();
@@ -2926,10 +3032,50 @@ impl TeamRuntime {
         )
         .map_err(error)?;
         tx.commit().map_err(error)?;
+        if let Some(problem) = failed {
+            return Err(problem);
+        }
         Ok(kept
             .into_iter()
             .filter_map(|id| AgentId::team(id).ok())
             .collect())
+    }
+
+    /// Freezes one kept pane whose model proxy ends with this engine and stores the record
+    /// that says so (DEC-158). A pane that cannot be frozen, whose record cannot be read or
+    /// stored, or whose frozen record no longer fits is ended instead, so none runs on with
+    /// its port free or stays frozen with nothing to thaw it by. Takes the agent. Returns
+    /// whether it stays frozen, and the store problem a pane was ended over.
+    fn freeze_or_end(&self, id: i64) -> (bool, Option<EngineError>) {
+        let host = self.terminal.clone();
+        let (record, mut problem) = match self.kept_record(id) {
+            Ok(record) => (record, None),
+            Err(failed) => (None, Some(failed)),
+        };
+        let held = match (&host, &record) {
+            (Some(host), Some(record)) => self.freeze_kept(host, id, record),
+            _ => None,
+        };
+        let stored = held.as_ref().and_then(PaneRecord::encode).map(|text| {
+            self.connection
+                .execute(
+                    "UPDATE team_panes SET record=?2 WHERE agent=?1",
+                    params![id, text],
+                )
+                .map_err(error)
+        });
+        match stored {
+            Some(Ok(_)) => return (true, problem),
+            Some(Err(failed)) => problem = Some(failed),
+            None => {}
+        }
+        if let Some(pins) = held.as_ref().and_then(|record| record.keepers.as_deref()) {
+            end_keepers(pins);
+        }
+        if let (Some(host), Ok(agent)) = (&host, AgentId::team(id)) {
+            let _ = end_left_pane(host.as_ref(), &agent, "team");
+        }
+        (false, problem)
     }
 
     /// Reads the pane record the engine keeps for a team agent. Takes the id. Returns the
@@ -13690,12 +13836,15 @@ fn keeper_started(_pid: u32) -> Option<String> {
     None
 }
 
-/// Asks each server keeper a frozen native lead holds to end its server, so its warden
-/// kills every process in the lead's sandbox, frozen ones included, and nothing resumes.
-/// Takes the keepers, each proven current. Returns nothing.
+/// Asks each server keeper a native lead holds to end its server, so its warden kills
+/// every process in the lead's sandbox, frozen ones included, and nothing resumes, then
+/// waits up to the keepers' bound for each to exit, which a keeper does only once its
+/// warden confirmed the kills. Only a keeper still running as its pin names is signalled.
+/// Takes the keepers. Returns whether they all exited in time.
 #[cfg(target_os = "macos")]
-fn end_keepers(pins: &[KeeperPin]) {
-    for pin in pins {
+fn end_keepers(pins: &[KeeperPin]) -> bool {
+    use crate::harnesses::terminal_session::{KEEPER_POLL, KEEPER_WAIT};
+    for pin in pins.iter().filter(|pin| keeper_runs(pin)) {
         if let Some(process) = i32::try_from(pin.pid)
             .ok()
             .filter(|pid| *pid > 1)
@@ -13704,11 +13853,47 @@ fn end_keepers(pins: &[KeeperPin]) {
             let _ = rustix::process::kill_process(process, rustix::process::Signal::TERM);
         }
     }
+    let deadline = Instant::now() + KEEPER_WAIT;
+    while pins.iter().any(keeper_runs) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(KEEPER_POLL);
+    }
+    true
 }
 
-/// Ends no keeper where no keeper runs (DEC-094). Takes unused. Returns nothing.
+/// Ends no keeper where no keeper runs (DEC-094). Takes unused. Returns true.
 #[cfg(not(target_os = "macos"))]
-fn end_keepers(_pins: &[KeeperPin]) {}
+fn end_keepers(_pins: &[KeeperPin]) -> bool {
+    true
+}
+
+/// Whether a server keeper still runs as its pin names: a process with the pin's start
+/// that is no zombie, as a keeper this engine started stays until it is reaped. A keeper
+/// whose state cannot be read counts as running. Takes the pin. Returns the answer.
+#[cfg(target_os = "macos")]
+fn keeper_runs(pin: &KeeperPin) -> bool {
+    let Ok(shown) = crate::spawn_gate::output(
+        std::process::Command::new("/bin/ps")
+            .env_clear()
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC0")
+            .args(["-o", "stat=,lstart=", "-p", &pin.pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    ) else {
+        return true;
+    };
+    let text = String::from_utf8_lossy(&shown.stdout);
+    let text = text.trim();
+    match (shown.status.success(), text.split_once(char::is_whitespace)) {
+        (false, None) if text.is_empty() => false,
+        (true, Some((state, started))) => !state.starts_with('Z') && started.trim() == pin.started,
+        _ => true,
+    }
+}
 
 /// Where the engine keeps the deadline a native-mode lead's own and teammates' tmux servers
 /// end at (FBTMUX-P1-R1-L1), beside the profiles no agent writes: each renewal pass moves
