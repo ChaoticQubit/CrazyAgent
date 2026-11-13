@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -153,7 +153,11 @@ async function onEngine(t, prefix, steps, { offline = false, codexAtStart = true
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
   process.umask(0o077);
-  const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const base = realpathSync(tmpdir());
+  for (let at = base; at !== dirname(at); at = dirname(at)) {
+    assert((statSync(at).mode & 0o002) === 0, `${at} is writable by every user, so the engine refuses a harness under it: set TMPDIR to a private folder`);
+  }
+  const root = realpathSync(mkdtempSync(join(base, prefix)));
   const runtime = join(root, "engine");
   const evidence = process.env.E2E_EVIDENCE && isAbsolute(process.env.E2E_EVIDENCE) ? join(process.env.E2E_EVIDENCE, prefix) : join(root, "evidence");
   const home = join(root, "home");
@@ -283,7 +287,7 @@ async function refused(bridge, cmd, id) {
 }
 
 test("Harness updates Check and update: Check shows the newer version, and Update after the confirm changes the version line with no engine restart", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-update-", async ({ bridge, me, open, name, rowShows, dialog, fakes, engine }) => {
+  onEngine(t, "cad-harness-update-", async ({ bridge, me, open, name, rowShows, dialog, fakes, engine }) => {
     await open();
     await rowShows("codex", "the installed version", "Version 0.0.1.");
     assert.deepEqual(npmCalls(fakes.codex.log), [], "Only when I choose: opening the page asked npm nothing");
@@ -314,7 +318,7 @@ test("Harness updates Check and update: Check shows the newer version, and Updat
   }));
 
 test("Harness updates Check only: Check stays, there is no Update button, and a direct bridge call answers harness_update_check_only", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-check-only-", async ({ bridge, open, name, rowShows, buttons, choose, fakes }) => {
+  onEngine(t, "cad-harness-check-only-", async ({ bridge, open, name, rowShows, buttons, choose, fakes }) => {
     await open();
     await choose("mode", "Check only", "check_only");
     await rowShows("codex", "the installed version", "Version 0.0.1.");
@@ -324,7 +328,7 @@ test("Harness updates Check only: Check stays, there is no Update button, and a 
   }));
 
 test("Harness updates Off: no Check or Update button, and a direct bridge call answers harness_update_off", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-off-", async ({ bridge, open, row, rowShows, buttons, shownChoice, choose, fakes }) => {
+  onEngine(t, "cad-harness-off-", async ({ bridge, open, row, rowShows, buttons, shownChoice, choose, fakes }) => {
     await open();
     await choose("mode", "Off", "off");
     await open();
@@ -337,7 +341,7 @@ test("Harness updates Off: no Check or Update button, and a direct bridge call a
   }));
 
 test("Check for harness updates Only when I choose: opening the page runs no check", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-on-button-", async ({ open, rowShows, fakes, proxy }) => {
+  onEngine(t, "cad-harness-on-button-", async ({ open, rowShows, fakes, proxy }) => {
     for (let visit = 0; visit < 2; visit += 1) {
       await open();
       await rowShows("codex", "the installed version", "Version 0.0.1.");
@@ -348,7 +352,7 @@ test("Check for harness updates Only when I choose: opening the page runs no che
   }, { offline: true }));
 
 test("Check for harness updates Each time this page opens: opening the page runs one check", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-on-open-", async ({ open, rowShows, choose, fakes }) => {
+  onEngine(t, "cad-harness-on-open-", async ({ open, rowShows, choose, fakes }) => {
     await open();
     await choose("when", "Each time this page opens", "on_open");
     await rowShows("codex", "the check the new choice ran on this page", "Version 0.0.1. Version 0.0.2 is available.");
@@ -359,7 +363,7 @@ test("Check for harness updates Each time this page opens: opening the page runs
   }));
 
 test("Cancel in the Update confirm runs nothing", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-cancel-", async ({ bridge, me, open, name, rowShows, dialog, fakes }) => {
+  onEngine(t, "cad-harness-cancel-", async ({ bridge, me, open, name, rowShows, dialog, fakes }) => {
     await open();
     await rowShows("codex", "the installed version", "Version 0.0.1.");
     await me.click(`Update ${name("codex")}`, "button");
@@ -373,7 +377,7 @@ test("Cancel in the Update confirm runs nothing", { timeout: 600000 }, (t) =>
   }));
 
 test("An install CrazyAgent can't tell shows the reason and the guide link, with no Check or Update", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-unknown-", async ({ bridge, page, open, name, rowShows, buttons }) => {
+  onEngine(t, "cad-harness-unknown-", async ({ bridge, page, open, name, rowShows, buttons }) => {
     await open();
     await rowShows("opencode", "why it won't update", UNKNOWN);
     const read = await versions(bridge, "opencode");
@@ -385,7 +389,7 @@ test("An install CrazyAgent can't tell shows the reason and the guide link, with
   }));
 
 test("Newer versions of self-updating installs Look them up on the vendor's site: Check reads the vendor's real pointer and Update stays", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-lookup-", async ({ me, open, name, rowShows, buttons }) => {
+  onEngine(t, "cad-harness-lookup-", async ({ me, open, name, rowShows, buttons }) => {
     await open();
     await rowShows("claude-code", "the installed version", "Version 0.0.1.");
     await me.click(`Check ${name("claude-code")} for updates`, "button");
@@ -394,7 +398,7 @@ test("Newer versions of self-updating installs Look them up on the vendor's site
   }));
 
 test("Newer versions of self-updating installs Look them up with the network cut: Check says it couldn't check and Update stays", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-lookup-offline-", async ({ me, open, name, rowShows, buttons, proxy }) => {
+  onEngine(t, "cad-harness-lookup-offline-", async ({ me, open, name, rowShows, buttons, proxy }) => {
     await open();
     await rowShows("claude-code", "the installed version", "Version 0.0.1.");
     await me.click(`Check ${name("claude-code")} for updates`, "button");
@@ -404,7 +408,7 @@ test("Newer versions of self-updating installs Look them up with the network cut
   }, { offline: true }));
 
 test("Newer versions of self-updating installs Don't look them up: Check says the install updates itself and the engine reaches no site", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-no-lookup-", async ({ me, open, name, rowShows, buttons, choose, proxy }) => {
+  onEngine(t, "cad-harness-no-lookup-", async ({ me, open, name, rowShows, buttons, choose, proxy }) => {
     await open();
     await choose("online", "Don't look them up", "off");
     await rowShows("claude-code", "the installed version", "Version 0.0.1.");
@@ -415,7 +419,7 @@ test("Newer versions of self-updating installs Don't look them up: Check says th
   }, { offline: true }));
 
 test("Install from the app Offer Install: a missing harness shows Install with the exact line, or the guide when no installer is here, and Cancel runs nothing", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-install-offer-", async ({ bridge, me, open, name, rowShows, buttons, dialog }) => {
+  onEngine(t, "cad-harness-install-offer-", async ({ bridge, me, open, name, rowShows, buttons, dialog }) => {
     await open();
     const read = await versions(bridge, "aider");
     if (read.install === null) {
@@ -440,7 +444,7 @@ test("Install from the app Offer Install: a missing harness shows Install with t
   }));
 
 test("Install from the app: fx by Vercel and OpenHands CLI have no installer, so no Install button and the guide link", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-install-guide-", async ({ bridge, page, open, name, rowShows, buttons }) => {
+  onEngine(t, "cad-harness-install-guide-", async ({ bridge, page, open, name, rowShows, buttons }) => {
     await open();
     for (const id of ["fx", "openhands"]) {
       const read = await versions(bridge, id);
@@ -453,7 +457,7 @@ test("Install from the app: fx by Vercel and OpenHands CLI have no installer, so
   }));
 
 test("Install from the app Don't offer Install: no Install button anywhere, and a direct bridge call answers harness_install_off", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-install-off-", async ({ bridge, page, open, rowShows, shownChoice, choose }) => {
+  onEngine(t, "cad-harness-install-off-", async ({ bridge, page, open, rowShows, shownChoice, choose }) => {
     await open();
     await choose("install", "Don't offer Install", "off");
     await open();
@@ -473,7 +477,7 @@ function lateCodex(path) {
 }
 
 test("Codex installed after the engine started: the Not installed row lists where CrazyAgent looked, and Check again pins it with no engine restart", { timeout: 600000 }, (t) =>
-  onEngine(t, "ca-harness-late-", async ({ bridge, me, open, rowShows, fakes }) => {
+  onEngine(t, "cad-harness-late-", async ({ bridge, me, open, rowShows, fakes }) => {
     await open();
     await me.waitFor("where CrazyAgent looked for codex", (text) => text.includes("CrazyAgent looked for codex in these folders and didn't find it:") && text.includes("~/.local/bin") && text.includes("/usr/bin"));
     assert.equal((await value(bridge, "desktop_harness_find", { id: "codex" })).kind, "missing", "the engine still has no Codex");
