@@ -695,8 +695,9 @@ fn a_harness_in_an_agent_home_under_a_custom_engine_root_is_refused() {
 /// root, keeps every probed folder as before.
 #[test]
 fn under_the_gate_root_a_probed_folder_outside_the_gate_mac_is_dropped() {
-    let (_folder, home) = scratch();
-    let root = home.join("system");
+    let (_folder, run) = scratch();
+    let home = run.join("home");
+    let root = run.join("system");
     let mapped = root.join("opt/homebrew/bin");
     let npm = home.join(".npm-global/bin");
     let host = PathBuf::from("/opt/homebrew/bin");
