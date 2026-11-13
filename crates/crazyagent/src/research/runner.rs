@@ -97,9 +97,14 @@ const CLAUDE_ARGUMENTS: [&str; 4] = ["--print", "--strict-mcp-config", "--settin
 const CLAUDE_EVENTS: [&str; 3] = ["--output-format", "stream-json", "--verbose"];
 /// The stdout log of a run that prints one JSON event per line.
 const EVENTS_LOG: &str = "events.jsonl";
-/// The longest Claude Code event line the engine reads: one line holds one message, tool
-/// call or tool result, which Claude Code keeps far below it.
+/// The longest Claude Code event line the engine parses. A longer one, such as a tool
+/// result that holds a large file, is told apart by its raw bytes ([`LongLine`]).
 const CLAUDE_LINE_BYTES_MAX: usize = 8 * 1024 * 1024;
+/// How a Claude Code user event line begins: Claude Code writes its type first.
+const CLAUDE_USER_LINE: &[u8] = b"{\"type\":\"user\"";
+/// The key that names the sub-agent a Claude Code event belongs to, as raw JSON: inside a
+/// string its quotes would be escaped, so in a line it can only be a key.
+const CLAUDE_PARENT_KEY: &[u8] = b"\"parent_tool_use_id\":";
 /// The model name Claude Code gives the messages it writes itself, such as its API errors.
 const CLAUDE_OWN_MODEL: &str = "<synthetic>";
 /// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
@@ -3449,12 +3454,12 @@ impl Reply {
 
 /// A Claude Code run's JSON event lines, read as they arrive into the [`Reply`] its main
 /// thread ends with: a sub-agent's events are skipped, and Claude Code's own error messages
-/// are kept apart from the model's words. A line past [`CLAUDE_LINE_BYTES_MAX`] leaves the
-/// run with no answer, as what it held is unknown.
+/// are kept apart from the model's words. A line past [`CLAUDE_LINE_BYTES_MAX`] is a main
+/// tool result, a sub-agent's line, or else leaves the run with no answer ([`LongLine`]).
 struct ClaudeStream {
     reply: Reply,
     line: Vec<u8>,
-    long: bool,
+    long: Option<LongLine>,
     unread: bool,
     finished: bool,
     limited: bool,
@@ -3466,7 +3471,7 @@ impl ClaudeStream {
         Self {
             reply: Reply::new(ResearchHarness::ClaudeCode, bytes_max),
             line: Vec::new(),
-            long: false,
+            long: None,
             unread: false,
             finished: false,
             limited: false,
@@ -3481,11 +3486,15 @@ impl ClaudeStream {
                 Some(body) => (body, true),
                 None => (part, false),
             };
-            if self.line.len().saturating_add(body.len()) > CLAUDE_LINE_BYTES_MAX {
-                self.long = true;
+            if let Some(long) = self.long.as_mut() {
+                long.pass(body);
+            } else if self.line.len().saturating_add(body.len()) > CLAUDE_LINE_BYTES_MAX {
+                let mut long = LongLine::default();
+                long.pass(&self.line);
+                long.pass(body);
+                self.long = Some(long);
                 self.line = Vec::new();
-            }
-            if !self.long {
+            } else {
                 self.line.extend_from_slice(body);
             }
             if ended {
@@ -3493,27 +3502,34 @@ impl ClaudeStream {
             }
         }
         assert!(self.line.len() <= CLAUDE_LINE_BYTES_MAX);
-        assert!(!self.long || self.line.is_empty());
+        assert!(self.long.is_none() || self.line.is_empty());
     }
 
     /// Reads the last line of a stream that ended without a line break. Output: none.
     fn close(&mut self) {
-        if self.long || !self.line.is_empty() {
+        if self.long.is_some() || !self.line.is_empty() {
             self.end_line();
         }
         assert!(self.line.is_empty());
-        assert!(!self.long);
+        assert!(self.long.is_none());
     }
 
-    /// Takes the line read so far as one event. Output: none.
+    /// Takes the line read so far as one event: a long line of a sub-agent is skipped, a long
+    /// user line of the main thread is its tool result, and any other long line leaves the
+    /// run with no answer. Output: none.
     fn end_line(&mut self) {
-        if self.long {
-            self.unread = true;
-        } else if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&self.line) {
-            self.event(&event);
+        match self.long.take() {
+            Some(long) if long.parent == Some(true) => {}
+            Some(long) if long.head.starts_with(CLAUDE_USER_LINE) => self.reply.tool(),
+            Some(_) => self.unread = true,
+            None => {
+                if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&self.line) {
+                    self.event(&event);
+                }
+            }
         }
         self.line.clear();
-        self.long = false;
+        assert!(self.long.is_none());
     }
 
     /// Takes one event of the run. Input: the event. Output: none.
@@ -3560,6 +3576,51 @@ impl ClaudeStream {
         assert!(self.line.is_empty());
         self.limited
     }
+}
+
+/// What the engine keeps of a Claude Code line past [`CLAUDE_LINE_BYTES_MAX`] as its bytes
+/// pass: how it begins, its last bytes, and whether its [`CLAUDE_PARENT_KEY`] names a
+/// sub-agent (`Some(true)`) or the main thread (`Some(false)`, a `null` value), once seen.
+#[derive(Default)]
+struct LongLine {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    parent: Option<bool>,
+}
+
+impl LongLine {
+    /// Takes the next bytes of the line. Input: the bytes. Output: none.
+    fn pass(&mut self, bytes: &[u8]) {
+        let room = CLAUDE_USER_LINE.len().saturating_sub(self.head.len());
+        self.head.extend_from_slice(&bytes[..room.min(bytes.len())]);
+        if self.parent.is_none() {
+            let reach = bytes.len().min(CLAUDE_PARENT_KEY.len());
+            let joint: Vec<u8> = self.tail.iter().chain(&bytes[..reach]).copied().collect();
+            self.parent = parent_named(&joint).or_else(|| parent_named(bytes));
+        }
+        self.tail
+            .extend_from_slice(&bytes[bytes.len().saturating_sub(CLAUDE_PARENT_KEY.len())..]);
+        let cut = self.tail.len().saturating_sub(CLAUDE_PARENT_KEY.len());
+        self.tail.drain(..cut);
+        assert!(self.head.len() <= CLAUDE_USER_LINE.len());
+        assert!(self.tail.len() <= CLAUDE_PARENT_KEY.len());
+    }
+}
+
+/// The first [`CLAUDE_PARENT_KEY`] in raw line bytes that its value's first byte follows.
+/// Input: the bytes. Output: true for a sub-agent, false for `null`, or `None` when no key
+/// with a value byte is in them.
+fn parent_named(bytes: &[u8]) -> Option<bool> {
+    let parent = bytes
+        .windows(CLAUDE_PARENT_KEY.len() + 1)
+        .filter(|window| window.starts_with(CLAUDE_PARENT_KEY))
+        .find_map(|window| match window[CLAUDE_PARENT_KEY.len()] {
+            b'"' => Some(true),
+            b'n' => Some(false),
+            _ => None,
+        });
+    assert!(parent.is_none() || bytes.len() > CLAUDE_PARENT_KEY.len());
+    parent
 }
 
 /// Whether a message's first line that holds words names a rate or usage limit. Input:
@@ -6184,6 +6245,37 @@ mod tests {
         again.tool();
         again.said("1234");
         assert_eq!(again.text(), Some("1234"));
+    }
+
+    /// A long line's parent key is found wherever the reads split it, and the same words
+    /// inside a string, where their quotes are escaped, are no key.
+    #[test]
+    fn a_long_claude_line_names_its_parent_however_its_bytes_are_split() {
+        let lines: [(&[u8], Option<bool>); 3] = [
+            (
+                br#"{"type":"user","message":{},"parent_tool_use_id":null}"#,
+                Some(false),
+            ),
+            (
+                br#"{"type":"user","message":{"text":"\"parent_tool_use_id\":\"x"},"parent_tool_use_id":"toolu_2"}"#,
+                Some(true),
+            ),
+            (br#"{"type":"assistant","message":{}}"#, None),
+        ];
+        for (line, parent) in lines {
+            for split in 0..=line.len() {
+                let mut long = LongLine::default();
+                long.pass(&line[..split]);
+                long.pass(&line[split..]);
+                assert_eq!(long.parent, parent, "split at {split}");
+                assert_eq!(long.head.starts_with(CLAUDE_USER_LINE), parent.is_some());
+            }
+            let mut bytewise = LongLine::default();
+            for byte in line {
+                bytewise.pass(std::slice::from_ref(byte));
+            }
+            assert_eq!(bytewise.parent, parent);
+        }
     }
 
     /// A tool result past the line bound, such as a large PDF the agent read, which Claude
