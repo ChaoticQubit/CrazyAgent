@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const WORKFLOWS = new URL("../../.github/workflows/", import.meta.url);
 
@@ -649,6 +649,8 @@ test("CI runs the price snapshot script's check on Linux, so a bad refresh fails
 });
 
 const SCRIPT_MS = 10_000;
+const STEP_MS = 30_000;
+const FLOW = Object.freeze({ timeout: 120_000 });
 const HDIUTIL_RETRY = fileURLToPath(new URL("./hdiutil-retry/", import.meta.url));
 const FAKE_GH = fileURLToPath(new URL("./fake-gh.mjs", import.meta.url));
 const DEV_BUILDS = fileURLToPath(new URL("./dev-builds.mjs", import.meta.url));
@@ -706,6 +708,29 @@ function standIns(folder, scripts) {
     writeFileSync(join(folder, name), `#!/bin/bash\n${body}`);
     chmodSync(join(folder, name), 0o755);
   }
+}
+
+/**
+ * Makes, once per test process, the stand-ins every release step run puts first on PATH: gh (the
+ * fake, run by node with no shell in between), node, curl and sleep. Fresh executables wait on
+ * macOS's first-run check, so the runs share one folder. Output: the folder, removed at exit.
+ */
+function fakeBin() {
+  const root = mkdtempSync(join(tmpdir(), "ca-relwf-bin-"));
+  process.on("exit", () => rmSync(root, { recursive: true, force: true }));
+  standIns(root, { curl: FAKE_CURL, sleep: FAKE_SLEEP });
+  writeFileSync(join(root, "gh"), `#!${process.execPath}\nimport(${JSON.stringify(pathToFileURL(FAKE_GH).href)});\n`);
+  chmodSync(join(root, "gh"), 0o755);
+  symlinkSync(process.execPath, join(root, "node"));
+  return root;
+}
+
+let sharedBin = null;
+
+/** The shared stand-in folder, made on first use. Output: its path. */
+function stepBin() {
+  sharedBin ??= fakeBin();
+  return sharedBin;
 }
 
 /** The lines a stand-in appended to one state file. Inputs: the state folder and the file name. Output: the lines, or none. */
@@ -787,7 +812,6 @@ function runSteps(bodies, { builds = [], refs = [], dist = distFiles(), config =
     writeFileSync(join(state, "stale"), `${stale}\n`);
     writeFileSync(join(state, "curl-fails"), `${curlFails}\n`);
     if (selected !== null) writeFileSync(join(temp, "selected.txt"), selected);
-    standIns(join(root, "bin"), { gh: `exec "${process.execPath}" "${FAKE_GH}" "$@"\n`, node: `exec "${process.execPath}" "$@"\n`, curl: FAKE_CURL, sleep: FAKE_SLEEP });
     const output = join(root, "output");
     writeFileSync(output, "");
     let status = 0;
@@ -798,13 +822,13 @@ function runSteps(bodies, { builds = [], refs = [], dist = distFiles(), config =
       const run = spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", join(root, "step.sh")], {
         cwd: work,
         encoding: "utf8",
-        timeout: SCRIPT_MS,
+        timeout: STEP_MS,
         env: {
-          PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: join(root, "home"), FAKE_STATE: state, GITHUB_REPOSITORY: "example/fake-repo", GITHUB_SHA: COMMIT,
+          PATH: `${stepBin()}:/usr/bin:/bin`, HOME: join(root, "home"), FAKE_STATE: state, GITHUB_REPOSITORY: "example/fake-repo", GITHUB_SHA: COMMIT,
           GITHUB_OUTPUT: output, RUNNER_TEMP: temp, VERSION, ASSET_TAG: BUILD, DEV_BUILDS_KEPT: "15",
         },
       });
-      assert.equal(run.error, undefined, `the step ends within ${SCRIPT_MS} ms`);
+      assert.equal(run.error, undefined, `the step ends within ${STEP_MS} ms`);
       stdout += run.stdout;
       stderr += run.stderr;
       status = run.status;
@@ -823,22 +847,21 @@ function runSteps(bodies, { builds = [], refs = [], dist = distFiles(), config =
 }
 
 /**
- * Runs prepare's version step for a push to master with the real version script and only a node
- * stand-in on PATH. Input: the step's shell. Output: the exit status, output and step outputs.
+ * Runs prepare's version step for a push to master with the real version script and the shared
+ * stand-ins on PATH. Input: the step's shell. Output: the exit status, output and step outputs.
  */
 function prepareDev(body) {
   const root = mkdtempSync(join(tmpdir(), "ca-relwf-"));
   try {
-    standIns(join(root, "bin"), { node: `exec "${process.execPath}" "$@"\n` });
     writeFileSync(join(root, "step.sh"), body);
     writeFileSync(join(root, "output"), "");
     const run = spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", join(root, "step.sh")], {
       cwd: REPO_ROOT,
       encoding: "utf8",
-      timeout: SCRIPT_MS,
-      env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, REF_TYPE: "branch", REF_NAME: "master", GITHUB_SHA: COMMIT, GITHUB_OUTPUT: join(root, "output") },
+      timeout: STEP_MS,
+      env: { PATH: `${stepBin()}:/usr/bin:/bin`, HOME: root, REF_TYPE: "branch", REF_NAME: "master", GITHUB_SHA: COMMIT, GITHUB_OUTPUT: join(root, "output") },
     });
-    assert.equal(run.error, undefined, `the step ends within ${SCRIPT_MS} ms`);
+    assert.equal(run.error, undefined, `the step ends within ${STEP_MS} ms`);
     return { status: run.status, stdout: run.stdout, stderr: run.stderr, outputs: stepOutputs(join(root, "output")) };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -925,7 +948,7 @@ function callsOf(run, prefix) {
   return run.calls.filter((call) => call.startsWith(prefix));
 }
 
-test("the dev publish tolerates a tag delete that finds the tag already gone and waits, bounded, until the tag reads gone before it creates the dev release", async () => {
+test("the dev publish tolerates a tag delete that finds the tag already gone and waits, bounded, until the tag reads gone before it creates the dev release", FLOW, async () => {
   const jq = spawnSync("/bin/bash", ["-c", "command -v jq"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
   assert.equal(jq.status, 0, "the stand-in gh runs the step's --jq filter with jq, which must be on /usr/bin:/bin");
   const body = await pointerBody();
@@ -949,7 +972,7 @@ test("the dev publish tolerates a tag delete that finds the tag already gone and
   assert.equal(created(broken), 0);
 });
 
-test("the dev publish fails at once with an error, deleting and publishing nothing, when a dev tag read gives anything but 0 or 1", async () => {
+test("the dev publish fails at once with an error, deleting and publishing nothing, when a dev tag read gives anything but 0 or 1", FLOW, async () => {
   const body = await pointerBody();
   for (const answer of ["2", "not-a-count"]) {
     const run = pointDev(body, { stale: 0, answer });
@@ -962,7 +985,7 @@ test("the dev publish fails at once with an error, deleting and publishing nothi
   }
 });
 
-test("a dev build's own tag is build-<version>, which no v* trigger, stable version check or dev tag read can take for theirs", async () => {
+test("a dev build's own tag is build-<version>, which no v* trigger, stable version check or dev tag read can take for theirs", FLOW, async () => {
   const release = await workflow("release.yml");
   assert.deepEqual(block(release, 0, "on").filter((line) => line.trim().startsWith("tags:")), ['    tags: ["v*"]']);
   assert(block(release, 2, "prepare").includes("      asset_tag: ${{ steps.version.outputs.asset_tag }}"), "prepare hands the build tag on");
@@ -986,7 +1009,7 @@ test("the update manifests name each build's own release: build-<version> on dev
   assert(block(await workflow("release.yml"), 2, "publish").includes("      ASSET_TAG: ${{ needs.prepare.outputs.asset_tag }}"));
 });
 
-test("a dev build is published as its own prerelease, never Latest, and only then does dev move to a copy of its three manifest files", async () => {
+test("a dev build is published as its own prerelease, never Latest, and only then does dev move to a copy of its three manifest files", FLOW, async () => {
   const run = runSteps(await devBodies(), { builds: [stored(1, "build-0.0.0-dev.202611131100", pointerFiles(distFiles(`${DOWNLOADS}/build-0.0.0-dev.202611131100`)))] });
   assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
   const made = run.releases.find((item) => item.tag_name === BUILD);
@@ -1009,7 +1032,7 @@ test("a dev build is published as its own prerelease, never Latest, and only the
   assert.deepEqual(releaseDeletes(run), []);
 });
 
-test("a failed upload deletes, by its id, the draft this step made, and never touches dev", async () => {
+test("a failed upload deletes, by its id, the draft this step made, and never touches dev", FLOW, async () => {
   const run = runSteps(await devBodies(), { config: { uploadFails: true } });
   assert.notEqual(run.status, 0);
   assert(run.calls.includes("api repos/example/fake-repo/releases/1001"), "the draft is read again before it is deleted");
@@ -1019,7 +1042,7 @@ test("a failed upload deletes, by its id, the draft this step made, and never to
   assert.deepEqual(devCalls(run), []);
 });
 
-test("the draft clean-up deletes nothing when its re-read fails or shows a published or renamed release", async () => {
+test("the draft clean-up deletes nothing when its re-read fails or shows a published or renamed release", FLOW, async () => {
   const bodies = await devBodies();
   for (const reread of ["fails", "published", "retagged"]) {
     const run = runSteps(bodies, { config: { uploadFails: true, reread } });
@@ -1031,7 +1054,7 @@ test("the draft clean-up deletes nothing when its re-read fails or shows a publi
   }
 });
 
-test("a dev build that fails after it is published, in the wait or the check, is never deleted, and dev keeps naming the build before it", async () => {
+test("a dev build that fails after it is published, in the wait or the check, is never deleted, and dev keeps naming the build before it", FLOW, async () => {
   const bodies = await devBodies();
   const waited = runSteps(bodies, { curlFails: 99 });
   assert.notEqual(waited.status, 0);
@@ -1048,7 +1071,7 @@ test("a dev build that fails after it is published, in the wait or the check, is
   }
 });
 
-test("a re-run reuses a published build of this commit with the same file digests, and dev gets the build's own manifests, not this attempt's", async () => {
+test("a re-run reuses a published build of this commit with the same file digests, and dev gets the build's own manifests, not this attempt's", FLOW, async () => {
   const first = distFiles(`${DOWNLOADS}/${BUILD}`, "2026-11-13T12:07:00Z");
   const again = distFiles(`${DOWNLOADS}/${BUILD}`, "2026-11-13T12:31:00Z");
   const run = runSteps(await devBodies(), { builds: [stored(7, BUILD, first)], dist: again });
@@ -1060,7 +1083,7 @@ test("a re-run reuses a published build of this commit with the same file digest
   assert.deepEqual(releaseDeletes(run), []);
 });
 
-test("a re-run refuses a published build of another commit or with other file bytes, uploading, deleting and moving nothing", async () => {
+test("a re-run refuses a published build of another commit or with other file bytes, uploading, deleting and moving nothing", FLOW, async () => {
   const bodies = await devBodies();
   const files = distFiles();
   for (const [label, build, error] of [
@@ -1076,7 +1099,7 @@ test("a re-run refuses a published build of another commit or with other file by
   }
 });
 
-test("a re-run that reuses a published build and then fails deletes nothing", async () => {
+test("a re-run that reuses a published build and then fails deletes nothing", FLOW, async () => {
   const run = runSteps(await devBodies(), { builds: [stored(7, BUILD, distFiles())], curlFails: 99 });
   assert.notEqual(run.status, 0);
   assert.deepEqual(releaseDeletes(run), []);
@@ -1084,7 +1107,7 @@ test("a re-run that reuses a published build and then fails deletes nothing", as
   assert.deepEqual(devCalls(run), []);
 });
 
-test("a re-run finishes this run's leftover draft found by its tag, and never deletes a draft this step did not make", async () => {
+test("a re-run finishes this run's leftover draft found by its tag, and never deletes a draft this step did not make", FLOW, async () => {
   const bodies = await devBodies();
   const left = stored(7, BUILD, {}, { draft: true });
   const done = runSteps(bodies, { builds: [left] });
@@ -1099,7 +1122,7 @@ test("a re-run finishes this run's leftover draft found by its tag, and never de
   assert.equal(failed.releases.length, 1);
 });
 
-test("a re-run of an older run publishes its build but never moves dev back to it, and leaves pruning to a newer run", async () => {
+test("a re-run of an older run publishes its build but never moves dev back to it, and leaves pruning to a newer run", FLOW, async () => {
   const newer = "build-0.0.0-dev.202611131300";
   const run = runSteps(await devBodies(), { builds: [stored(9, newer, pointerFiles(distFiles(`${DOWNLOADS}/${newer}`)))] });
   assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
@@ -1112,7 +1135,7 @@ test("a re-run of an older run publishes its build but never moves dev back to i
   assert(block(release, 2, "prune-dev-builds").includes("    if: needs.prepare.outputs.channel == 'dev' && needs.publish.outputs.pointer == 'moved'"));
 });
 
-test("dev never moves to manifests whose URLs name the dev release instead of the build's own", async () => {
+test("dev never moves to manifests whose URLs name the dev release instead of the build's own", FLOW, async () => {
   const run = runSteps(await devBodies(), { dist: distFiles(`${DOWNLOADS}/dev`) });
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /dev_build_pointer_url_rejected:https:\/\/github\.com\/example\/fake-repo\/releases\/download\/dev\//);
@@ -1135,7 +1158,7 @@ function pruneDeletes(run) {
   return run.calls.filter((call) => call.startsWith("release delete ") || call.startsWith("api -X DELETE "));
 }
 
-test("prune reads every page, then deletes the oldest builds and orphan tags past the newest 15, never dev or a v* release", async () => {
+test("prune reads every page, then deletes the oldest builds and orphan tags past the newest 15, never dev or a v* release", FLOW, async () => {
   const { builds, refs, old, orphan } = pruneState();
   const run = runSteps(await pruneBodies(), { builds, refs, config: { pageSize: 7 } });
   assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
@@ -1146,7 +1169,7 @@ test("prune reads every page, then deletes the oldest builds and orphan tags pas
   assert.deepEqual(run.releases.map((item) => item.tag_name), ["dev", "v2.3.2", ...old.slice(5).map((build) => build.release.tag_name), BUILD]);
 });
 
-test("prune deletes nothing when a list read fails, and stops at its first failed delete", async () => {
+test("prune deletes nothing when a list read fails, and stops at its first failed delete", FLOW, async () => {
   const bodies = await pruneBodies();
   const { builds, refs, old, orphan } = pruneState();
   for (const config of [{ listFails: true }, { refsFails: true }]) {
@@ -1162,7 +1185,7 @@ test("prune deletes nothing when a list read fails, and stops at its first faile
   ]);
 });
 
-test("the prune delete step refuses, before any gh call, a selected line that is not one well-formed old build", async () => {
+test("the prune delete step refuses, before any gh call, a selected line that is not one well-formed old build", FLOW, async () => {
   const [, , remove] = await pruneBodies();
   for (const line of ["release v2.3.2", "release dev", "tag build-2.4.0", `release ${BUILD}`, "release build-0.0.0-dev.202611120000 extra", "drop build-0.0.0-dev.202611120000", "release ../build-0.0.0-dev.202611120000", " "]) {
     const run = runSteps([remove], { selected: `${line}\n` });
