@@ -392,3 +392,53 @@ fn a_copy_or_move_meeting_a_placeholder_refuses_and_leaves_the_source_as_it_was(
     assert_eq!(fs::read_to_string(folder.join("a.txt")).unwrap(), "kept\n");
     assert!(fs::symlink_metadata(target.path().join("moved")).is_err());
 }
+
+/// Downloads an evicted folder of iCloud Drive that the runner names in
+/// `CRAZYAGENT_ICLOUD_SCRATCH` and checks that the recorded progress never trails the files on
+/// disk by more than two polls, also while later batches still wait to be asked. Run with
+/// `--ignored` under `taskpolicy -c utility`, which slows each ask as launchd does. The folder
+/// is kept; its files are local afterwards.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs an evicted folder of iCloud Drive named in CRAZYAGENT_ICLOUD_SCRATCH"]
+fn progress_follows_files_landing_from_icloud_within_two_polls() {
+    let folder = PathBuf::from(std::env::var_os("CRAZYAGENT_ICLOUD_SCRATCH").unwrap());
+    let drive = PathBuf::from(std::env::var_os("HOME").unwrap())
+        .join("Library/Mobile Documents/com~apple~CloudDocs");
+    assert!(folder.starts_with(&drive) && folder != drive);
+    let total = placeholders(&folder).unwrap().paths.len() as u64;
+    assert!(total > 2 * BATCH_PATHS_MAX as u64, "evict the folder first");
+    let samples_max = 30 * 60 * 4;
+    let download = Download::default();
+    let mut landed: Vec<(Instant, u64)> = Vec::new();
+    let mut moved_early = false;
+    let outcome = std::thread::scope(|scope| {
+        let running = scope.spawn(|| super::download(folder.to_str().unwrap(), &download));
+        for _ in 0..samples_max {
+            if running.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            let left = placeholders(&folder).unwrap().paths.len() as u64;
+            let now = Instant::now();
+            let shown = download.progress();
+            landed.push((now, total.saturating_sub(left)));
+            let floor = landed
+                .iter()
+                .filter(|(at, _)| now.duration_since(*at) >= 2 * POLL_EVERY)
+                .map(|(_, done)| *done)
+                .max()
+                .unwrap_or(0);
+            assert!(
+                shown.done >= floor,
+                "shown {shown:?}, on disk two polls ago {floor}"
+            );
+            moved_early |= shown.done > 0 && shown.done < total;
+        }
+        download.cancel();
+        running.join().unwrap()
+    });
+    assert_eq!(outcome.unwrap(), total);
+    assert!(moved_early, "progress moved only at the end");
+    assert_eq!(placeholders(&folder).unwrap(), Placeholders::default());
+}
