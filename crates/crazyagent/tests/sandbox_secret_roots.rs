@@ -161,6 +161,28 @@ fn a_root_inside_an_engine_secret_is_refused_in_either_order() {
     );
 }
 
+/// The engine's native sign-in profiles folder is an engine secret like the saved account
+/// keys: no read root or worktree may be it or sit inside one of its profiles, in either
+/// order, and the guarded sandbox names it among its secret paths.
+#[test]
+fn the_native_profiles_folder_is_an_engine_secret_no_root_may_cover() {
+    let case = case();
+    let profiles = case.runtime.join("native-profiles");
+    let profile = profiles.join("a".repeat(64));
+    fs::create_dir_all(profile.join("home")).unwrap();
+    for root in [&profiles, &profile] {
+        walled(guarded(&case).allow_read(root));
+        walled(guarded(&case).allow_worktree(root));
+        walled(
+            sandbox(&case)
+                .allow_read(root)
+                .unwrap()
+                .guard_engine(&case.runtime),
+        );
+    }
+    assert!(guarded(&case).secret_paths().contains(&profiles));
+}
+
 #[test]
 fn unrelated_roots_and_look_alike_names_still_pass() {
     let case = case();

@@ -219,6 +219,13 @@ fn guarded_engine_runtime_secrets_stay_unreadable_and_no_read_root_may_hold_them
         &secret_text,
     )
     .unwrap();
+    let profile_home = case
+        .runtime
+        .join("native-profiles")
+        .join("a".repeat(64))
+        .join("home");
+    fs::create_dir_all(&profile_home).unwrap();
+    fs::write(profile_home.join(".credentials.json"), &secret_text).unwrap();
     walled(
         sandbox(&case)
             .allow_read(&case.runtime)
@@ -239,6 +246,7 @@ fn guarded_engine_runtime_secrets_stay_unreadable_and_no_read_root_may_hold_them
         case.runtime.join("engine.db"),
         case.runtime.join("engine.db-wal"),
         case.runtime.join("account-keys").join("key-a"),
+        profile_home.join(".credentials.json"),
     ] {
         let output = shell(&sandbox, &profile, &format!("cat {}", quoted(&secret)));
         assert!(!output.status.success(), "{}", secret.display());
