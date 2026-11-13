@@ -191,14 +191,25 @@ impl IntakeJob {
     }
 }
 
-/// How a job that reached `phase` ended. Inputs: the phase, whether a stop was asked and
-/// the result. Output: the end state.
+/// How a job that reached `phase` ended. A landed folder is done even after a stop; the
+/// copy's own `home_add_cancelled`, or any failed download after a stop, is a cancel; a
+/// soft refusal waits for the owner's answer. Inputs: the phase, whether a stop was asked
+/// and the result. Output: the end state.
 fn ended(phase: Phase, stopped: bool, result: Result<(), EngineError>) -> JobState {
-    let _ = stopped;
-    match result {
-        Ok(()) => JobState::Done,
-        Err(e) => JobState::Failed { code: e.0, phase },
+    let code = match result {
+        Ok(()) => return JobState::Done,
+        Err(e) => e.0,
+    };
+    assert!(!code.is_empty());
+    let cancelled = code == "home_add_cancelled" || (stopped && phase == Phase::Downloading);
+    if cancelled {
+        assert!(phase != Phase::Clearing, "clearing never stops");
+        return JobState::Cancelled { phase };
     }
+    if NEEDS_ANSWER.contains(&code.as_str()) {
+        return JobState::NeedsAnswer { code };
+    }
+    JobState::Failed { code, phase }
 }
 
 #[cfg(test)]
