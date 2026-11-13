@@ -30166,6 +30166,95 @@ fn a_said_refusal_on_an_account_the_project_holds_claims_no_check_and_a_refused_
     team.workers.clear();
 }
 
+/// A said refusal whose hold read fails claims no engine check, as for an account the
+/// project holds, while a check that already refused still marks the project
+/// (V3-HOLD-FAILOPEN, DEC-150 addendum 9j).
+#[test]
+fn a_said_refusal_whose_hold_read_fails_claims_no_check_and_a_refused_one_still_marks() {
+    let fixture = Fixture::new(1);
+    ledger::initialize(&fixture.connection).unwrap();
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    team.settings = Some((
+        fixture.base.join("global.toml"),
+        fixture.base.join("project.toml"),
+    ));
+    let account = reference(ENDPOINT);
+    let checked = now_ms() - 60_000;
+    assert_eq!(
+        super::super::model_pick::claim_check(
+            &fixture.connection,
+            &account,
+            "gpt-b",
+            checked,
+            false
+        )
+        .unwrap(),
+        super::super::model_pick::Claim::Run
+    );
+    super::super::model_pick::check_refused(
+        &fixture.connection,
+        &ProjectId::new("other").unwrap(),
+        &account,
+        "gpt-b",
+        checked,
+    )
+    .unwrap();
+    let said = |model: &str| {
+        let mut worker = between_turns(&project, AgentRole::Sub, true, false);
+        worker.model = Some(model.to_owned());
+        worker
+    };
+    let unread = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers.insert(unread, said("gpt-a"));
+    let refused = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers.insert(refused, said("gpt-b"));
+    fixture
+        .connection
+        .execute_batch("DROP TABLE team_project_pauses")
+        .unwrap();
+
+    assert_eq!(team.said_check(unread).unwrap(), None, "hold unread");
+    assert_eq!(team.said_check(refused).unwrap(), None, "refused");
+    let until: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT until_ms FROM team_model_refusals WHERE project=?1 AND connection=?2 AND model='gpt-b'",
+            params![PROJECT, ENDPOINT],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert_eq!(
+        until,
+        Some(checked + super::super::model_pick::MODEL_REFUSAL_MS)
+    );
+    assert_eq!(
+        model_checks(&fixture),
+        vec![(ENDPOINT.to_owned(), "gpt-b".to_owned(), checked, true)],
+        "no claim for gpt-a"
+    );
+    team.workers.clear();
+}
+
+/// A hold row the team's own account pick cannot read fails that pick rather than leaving
+/// the account free (V3-HOLD-FAILOPEN, DEC-150 addendum 9j).
+#[test]
+fn a_hold_row_the_team_pick_cannot_read_fails_the_pick() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let team = fixture.runtime();
+    assert!(team.paused(&project).unwrap().is_empty());
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (CAST(?1 AS BLOB),?2)",
+            params![ENDPOINT, now_ms() + 600_000],
+        )
+        .unwrap();
+    assert!(team.paused(&project).is_err());
+}
+
 /// Only a refusal the engine's own check read marks the account's model (DEC-150 addendum
 /// 9g): an answer and a pending test leave the model unmarked and the claim held, a refused
 /// test marks the check's project and makes its claim answer refused.

@@ -184,3 +184,53 @@ fn a_connection_pick_takes_only_the_named_member_of_a_pool() {
         AccountPick::NoUsableAccount
     );
 }
+
+/// A pick whose hold read fails counts the account as held for that pick
+/// (V3-HOLD-FAILOPEN, DEC-150 addendum 9j): the pool pick, the one-account pick and the
+/// project resolve each answer paused for `HOLD_UNREAD_RETRY_MS`, never an account a hold
+/// they could not read might cover.
+#[cfg(unix)]
+#[test]
+fn a_hold_read_that_fails_counts_the_account_as_held_for_that_pick() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-hold-unread-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let db = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let projects = base.join("projects");
+    std::fs::create_dir_all(projects.join("team-panes")).unwrap();
+    let global = base.join("global.toml");
+    std::fs::write(
+        &global,
+        "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\nconnections = [{ id = \"first\", provider = \"openai-compatible\", harness = \"rcli\", protocol = \"openai-chat\", account_ref = \"local-account\", endpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }, model = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }, auth = { method = \"none\" } }]\npools = [{ id = \"local-pool\", members = [\"first\"], projects = [\"team-panes\"], roles = [], fallback_allowed = false }]\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let resolver =
+        SettingsResolver::new(&global, &base.join("project.toml"), &projects, &database).unwrap();
+    let codex = [ResearchHarness::Codex];
+    assert!(matches!(
+        resolver.pool_pick("team-panes", &reference("local-pool"), &codex),
+        AccountPick::Account { .. }
+    ));
+
+    db.execute_batch("DROP TABLE team_project_pauses").unwrap();
+    let before = crate::team::now_ms();
+    let picks = [
+        resolver.pool_pick("team-panes", &reference("local-pool"), &codex),
+        resolver.connection_pick("team-panes", &reference("first"), &codex),
+        resolver.resolve("team-panes", "codex").unwrap().1,
+    ];
+    let after = crate::team::now_ms();
+    let held = before + HOLD_UNREAD_RETRY_MS..=after + HOLD_UNREAD_RETRY_MS;
+    for pick in picks {
+        assert!(
+            matches!(pick, AccountPick::Paused { until_ms } if held.contains(&until_ms)),
+            "{pick:?}"
+        );
+    }
+}

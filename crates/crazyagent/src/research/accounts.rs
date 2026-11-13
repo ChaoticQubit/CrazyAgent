@@ -16,6 +16,10 @@ const DATABASE_WAIT: Duration = Duration::from_secs(5);
 /// The custody and sign-in code for a managed profile another launch holds.
 pub(crate) const PROFILE_BUSY: &str = "native_profile_in_use";
 
+/// How long a pick counts an account as held when its hold could not be read, before the
+/// pick reads again (V3-HOLD-FAILOPEN, DEC-150 addendum 9j).
+pub(crate) const HOLD_UNREAD_RETRY_MS: i64 = 60_000;
+
 /// The account a research job should run on, or why it has to wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountPick {
