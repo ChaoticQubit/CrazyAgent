@@ -88,6 +88,7 @@ pub struct Places {
     home: Option<PathBuf>,
     engine_roots: Vec<PathBuf>,
     temp_refused: bool,
+    temps: Vec<PathBuf>,
     refused_setup: Vec<PathBuf>,
     refused_temp: Vec<PathBuf>,
 }
@@ -119,6 +120,11 @@ impl Places {
                 .filter(|root| usable(root))
                 .collect(),
             temp_refused,
+            temps: if temp_refused {
+                temp_roots()
+            } else {
+                Vec::new()
+            },
             refused_setup: Vec::new(),
             refused_temp: Vec::new(),
         };
@@ -142,6 +148,16 @@ impl Places {
         assert!(places.refused_setup.len() <= PLACES_MAX);
         assert!(places.engine_roots.iter().all(|root| root.is_absolute()));
         places
+    }
+
+    /// Replaces the temp folders the engine's places refuse, so a row can name a folder
+    /// outside every temp folder while each folder it makes lies in the real one. Input: the
+    /// temp folders. Output: the places.
+    #[cfg(test)]
+    fn with_temps(mut self, temps: Vec<PathBuf>) -> Self {
+        assert!(self.temp_refused);
+        self.temps = temps;
+        self
     }
 
     /// Sets aside temp folders the engine's places refuse, never looked in, so [`resolve`]
@@ -923,7 +939,7 @@ fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refus
         Err(Refusal::AgentsCanWrite)
     } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
         Err(Refusal::OthersCanChange(part))
-    } else if places.temp_refused && leads_into_temp(candidate, &real, &temp_roots()) {
+    } else if places.temp_refused && leads_into_temp(candidate, &real, &places.temps) {
         Err(Refusal::InTemp)
     } else {
         Ok(())

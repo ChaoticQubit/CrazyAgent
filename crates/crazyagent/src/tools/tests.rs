@@ -737,6 +737,49 @@ fn a_tool_in_a_kept_place_inside_a_temp_folder_still_resolves() {
     assert!(resolve_entry(&plain, &engine).is_ok());
 }
 
+/// leader 23:11 (RH2-L1 residual): a script found outside every temp folder whose first line
+/// names an absolute interpreter inside one is refused with the temp folder line, naming the
+/// interpreter; the same script whose own place is in a temp folder, as a test HOME is, and
+/// the same script on places that refuse no temp folder still resolve.
+#[test]
+fn a_script_outside_temp_naming_an_interpreter_inside_temp_is_refused() {
+    let (_folder, home) = scratch();
+    let interpreter = program(&home.join("tmp/bin/crazyagent-temp-interpreter"), NODE);
+    let script = program(
+        &home.join(".local/bin/crazyagent-shebang-tool"),
+        &format!("#!{}\n", interpreter.display()),
+    );
+    let engine = || Places::engine(None, None, Some(home.clone()), Some(OsStr::new("")));
+    let missing = resolve(
+        "crazyagent-shebang-tool",
+        &engine().with_temps(vec![home.join("tmp")]),
+    )
+    .unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+    assert_eq!(missing.tool, "crazyagent-shebang-tool");
+    assert_eq!(
+        missing.refused,
+        Some(Box::new(Refused {
+            file: interpreter.clone(),
+            why: Refusal::InTemp,
+        }))
+    );
+    assert!(
+        missing.line().contains("in a temp folder"),
+        "{}",
+        missing.line()
+    );
+    let kept = resolve(
+        "crazyagent-shebang-tool",
+        &engine().with_temps(vec![home.clone()]),
+    )
+    .unwrap();
+    assert_eq!(kept.program, script);
+    assert!(matches!(kept.kind, Kind::Script { .. }));
+    let explicit = Places::new(vec![home.join(".local/bin")], Some(home.clone()));
+    assert!(resolve("crazyagent-shebang-tool", &explicit).is_ok());
+}
+
 /// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
 /// can replace a folder this user owns there, so test stand-ins and engines started from a
 /// `/tmp` folder resolve (leader 17:12, L8c).
