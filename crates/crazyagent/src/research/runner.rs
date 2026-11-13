@@ -5878,13 +5878,35 @@ mod tests {
     }
 
     const STREAM_START: &str = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n";
-    const STREAM_THINKING: &str = "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\"}]},\"parent_tool_use_id\":null}\n";
-    const STREAM_FIRST: &str = "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"## Numbers\\n\\n1. one\\n2. tw\"}]},\"parent_tool_use_id\":null}\n";
-    const STREAM_CONTINUE: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Output token limit hit. Resume directly\"}]}}\n";
-    const STREAM_SECOND: &str = "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"o\\n3. three\\n\"}]},\"parent_tool_use_id\":null}\n";
-    const STREAM_OWN_ERROR: &str = "{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"content\":[{\"type\":\"text\",\"text\":\"API Error: the response exceeded the output token maximum\"}]},\"is_api_error_message\":true,\"error\":\"max_output_tokens\"}\n";
-    const STREAM_DONE: &str = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"o\\n3. three\\n\"}\n";
-    const STREAM_FAILED: &str = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"result\":\"API Error\"}\n";
+    const STREAM_THINKING: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",",
+        "\"content\":[{\"type\":\"thinking\",\"thinking\":\"\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_FIRST: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"## Numbers\\n\\n1. one\\n2. tw\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_CONTINUE: &str = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"Output token limit hit. Resume directly\"}]}}\n",
+    );
+    const STREAM_SECOND: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"o\\n3. three\\n\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_OWN_ERROR: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"content\":[{",
+        "\"type\":\"text\",\"text\":\"API Error: the response exceeded the output token ",
+        "maximum\"}]},\"is_api_error_message\":true,\"error\":\"max_output_tokens\"}\n",
+    );
+    const STREAM_DONE: &str = concat!(
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,",
+        "\"result\":\"o\\n3. three\\n\"}\n",
+    );
+    const STREAM_FAILED: &str = concat!(
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,",
+        "\"result\":\"API Error\"}\n",
+    );
 
     /// DEC-160: Claude Code continues an answer cut at the output cap in new requests, and
     /// `--print` text kept only the last one, so the mapping stored a JSON tail as the
