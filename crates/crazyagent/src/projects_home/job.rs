@@ -200,3 +200,6 @@ fn ended(phase: Phase, stopped: bool, result: Result<(), EngineError>) -> JobSta
         Err(e) => JobState::Failed { code: e.0, phase },
     }
 }
+
+#[cfg(test)]
+mod tests;
