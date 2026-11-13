@@ -480,7 +480,8 @@ impl Team {
     /// checks the session too; a change refused as stale reads the switch again, and the first
     /// such start of this open stays wanted, keeping the owner's typed keys, until that read
     /// starts it once more; any other refusal keeps the switch; an Open that opened no session
-    /// is named.
+    /// is named; a read whose saved master is another harness than the last read's counts as
+    /// a new open, as the desktop's area does (DEC-161).
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
         &mut self,
@@ -530,6 +531,17 @@ impl Team {
                     self.want = None;
                 }
                 let off = switch.on != Some(true);
+                let moved = self
+                    .switch
+                    .as_ref()
+                    .and_then(|last| last.saved.as_deref())
+                    .zip(switch.saved.as_deref())
+                    .is_some_and(|(last, saved)| !crate::harnesses::same(last, saved));
+                if moved {
+                    self.asked = false;
+                    self.checked = false;
+                    self.retried = false;
+                }
                 self.switch = Some(switch);
                 if off && !self.asked && !self.paused {
                     self.start_live(ctx);
