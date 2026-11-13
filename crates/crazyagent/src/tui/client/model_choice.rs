@@ -11,13 +11,16 @@ use serde_json::Value;
 /// One model choice request a Models screen sends (DEC-150): read a harness's section at one
 /// scope, with the rules on the app page; set or reset one slot naming the version the owner
 /// read; add or remove an owner id; run a pending id's test launch on a pool the owner
-/// picked; or set one rule naming its version. No project means the app-wide values. Runs
-/// on the owner worker as a Settings job; a test launch holds it until the engine decides.
+/// picked; or set one rule naming its version. No project means the app-wide values; a read
+/// marked `fresh` is a Models page opening, which reads the harness's own list once first
+/// (DEC-150 addendum 11). Runs on the owner worker as a Settings job; a test launch holds it
+/// until the engine decides.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::tui) enum ModelChoiceQuery {
     Read {
         harness: String,
         project: Option<ProjectId>,
+        fresh: bool,
     },
     Set {
         harness: String,
@@ -111,7 +114,9 @@ async fn run(
     query: &ModelChoiceQuery,
 ) -> Result<ModelChoiceReply, EngineError> {
     match query {
-        ModelChoiceQuery::Read { harness, project } => {
+        ModelChoiceQuery::Read {
+            harness, project, ..
+        } => {
             let models = controller
                 .model_choice_values(harness, project.clone(), true)
                 .await?;

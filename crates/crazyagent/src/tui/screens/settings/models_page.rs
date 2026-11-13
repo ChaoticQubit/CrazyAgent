@@ -487,6 +487,7 @@ impl ModelsPage {
         let query = ModelChoiceQuery::Read {
             harness: self.harness.clone(),
             project: self.project(),
+            fresh: true,
         };
         self.ask(query, ctx);
     }

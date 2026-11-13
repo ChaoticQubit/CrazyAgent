@@ -105,10 +105,12 @@ fn requests(shell: &mut Shell) -> Vec<ModelChoiceQuery> {
     sent
 }
 
+/// The page's read: fresh, as a Models page opening or `r` reads the harness's own list.
 fn read_query(project: Option<ProjectId>) -> ModelChoiceQuery {
     ModelChoiceQuery::Read {
         harness: HARNESS.into(),
         project,
+        fresh: true,
     }
 }
 
@@ -589,6 +591,7 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
     let first = ModelChoiceQuery::Read {
         harness: "opencode".into(),
         project: None,
+        fresh: true,
     };
     assert_eq!(requests(&mut shell), vec![first.clone()]);
     shell.arrive(arrival(

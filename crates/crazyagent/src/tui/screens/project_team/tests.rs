@@ -1526,10 +1526,13 @@ fn models_answer(
     }
 }
 
+/// The composer's Models read: never fresh, so picking a harness starts no harness for its
+/// live list; only a Models page opening does (DEC-150 addendum 11).
 fn claude_read() -> ModelChoiceQuery {
     ModelChoiceQuery::Read {
         harness: "claude-code".into(),
         project: Some(project()),
+        fresh: false,
     }
 }
 
@@ -1630,10 +1633,12 @@ fn the_composer_keeps_default_without_a_usable_read_and_a_new_harness_starts_fro
     let codex = ModelChoiceQuery::Read {
         harness: "codex".into(),
         project: Some(project()),
+        fresh: false,
     };
     let other = ModelChoiceQuery::Read {
         harness: "claude-code".into(),
         project: Some(ProjectId::new("other-project").unwrap()),
+        fresh: false,
     };
     for query in [&codex, &other] {
         view.take_models(&models_answer(
@@ -1789,7 +1794,7 @@ async fn engine_with_claude_models(
         (Slot::Allowed, serde_json::json!(["opus", "sonnet"])),
     ] {
         let version = controller
-            .model_choice_values("claude-code", None)
+            .model_choice_values("claude-code", None, false)
             .await
             .unwrap()
             .rows
@@ -1824,11 +1829,17 @@ async fn hand_over_on_engine(
     let query = view
         .wants_models()
         .expect("picking Claude Code reads its models");
-    let ModelChoiceQuery::Read { harness, project } = &query else {
+    let ModelChoiceQuery::Read {
+        harness,
+        project,
+        fresh,
+    } = &query
+    else {
         panic!("the composer only reads models: {query:?}");
     };
+    assert!(!fresh, "the composer starts no harness for its live list");
     let result = controller
-        .model_choice_values(harness, project.clone())
+        .model_choice_values(harness, project.clone(), *fresh)
         .await
         .map(|models| ModelChoiceReply::Read {
             models,

@@ -427,6 +427,7 @@ impl TeamView {
         Some(ModelChoiceQuery::Read {
             harness,
             project: Some(self.project.clone()),
+            fresh: true,
         })
     }
 
@@ -437,6 +438,7 @@ impl TeamView {
         let ModelChoiceQuery::Read {
             harness,
             project: Some(project),
+            ..
         } = &event.query
         else {
             return;
