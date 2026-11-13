@@ -16,6 +16,7 @@ const ALL = [...USER_ITEMS.map(([, label]) => label), "Restart engine"];
 const TABS_MAX = 12;
 const WAIT_MS = 2000;
 const POLL_MS = 25;
+const ESC_ROUNDS = 5;
 const WORDS = "This stops the live master and every running agent. The engine comes back in a few seconds. Your projects, conversations and settings are kept.";
 const forbidden = () => { throw new Error("static rendering must not restart the engine"); };
 
@@ -59,7 +60,8 @@ function onSidebar(options, steps) {
       }
     };
     const update = (next) => evaluate(`Fixture.update(${JSON.stringify(next)})`);
-    return steps({ shown, hover, away, click, key, tabTo, update, until });
+    const escapeOnShow = () => evaluate("Fixture.escapeOnShow()");
+    return steps({ shown, hover, away, click, key, tabTo, update, until, escapeOnShow });
   });
 }
 
@@ -93,6 +95,18 @@ test("keyboard focus opens the same menu, Tab reaches its first item, and Esc cl
     assert.equal(closed.menu, false);
     assert.equal(closed.focus, "me", "focus goes back to the profile name, not to nothing");
     assert.deepEqual(closed.events, []);
+  });
+});
+
+test("Esc pressed the moment the hovered menu shows closes it, every time", async () => {
+  await onSidebar({}, async ({ hover, away, until, escapeOnShow }) => {
+    for (let round = 1; round <= ESC_ROUNDS; round += 1) {
+      await escapeOnShow();
+      await hover(FOOT);
+      await until((now) => now.events.length === round, `Esc at the menu's show, round ${round}`);
+      await until((now) => !now.menu, `the menu closed by the Esc pressed as it showed, round ${round}`);
+      await away();
+    }
   });
 });
 
