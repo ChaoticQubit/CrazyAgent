@@ -227,9 +227,10 @@ impl Creation {
         send_creation(&self.submission, delivery, ctx);
     }
 
-    /// Reads one reply to this creation: sends the follow-up a kept creation needs, or gives
-    /// the outcome. Takes the reply and the context. Returns none once a follow-up went out,
-    /// else Ok for a made project or the code it ended with.
+    /// Reads one reply to this creation: sends the follow-up a kept creation needs, or checks
+    /// one the engine still runs again on the next tick, or gives the outcome. Takes the reply
+    /// and the context. Returns none while a follow-up is out or due, else Ok for a made
+    /// project or the code it ended with.
     fn outcome(&mut self, event: &CreationEvent, ctx: &mut Ctx) -> Option<Result<(), String>> {
         assert!(
             self.submission == event.submission,
@@ -257,6 +258,15 @@ impl Creation {
                 {
                     self.recovered = true;
                     self.send(MutationDelivery::Reconcile, ctx);
+                    return None;
+                }
+                OwnerResponse::InProgress { .. } if event.retained => {
+                    self.delivery = MutationDelivery::Reconcile;
+                    self.again = true;
+                    ctx.say(Message::warning(
+                        "Still creating the project.",
+                        "CrazyAgent is still setting it up. It checks again in a moment.",
+                    ));
                     return None;
                 }
                 OwnerResponse::Rejected { code } => Err(code.clone()),

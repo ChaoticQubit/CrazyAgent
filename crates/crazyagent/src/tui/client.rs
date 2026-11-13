@@ -2325,7 +2325,9 @@ impl NativeOwner {
     }
 }
 
-/// The problem a creation job hands the loss check: the job's failure, if any.
+/// The problem a creation job hands the loss check: the job's failure, except a late answer
+/// on a creation the worker keeps, which the page checks by the same identity first; only
+/// that check's failed connection lets go of the engine (DEC-159).
 /// Input: the creation event. Output: the problem the loss check reads, or none.
 fn creation_loss(event: &CreationEvent) -> Option<&str> {
     let problem = event.result.as_ref().err().map(String::as_str);
@@ -2337,7 +2339,21 @@ fn creation_loss(event: &CreationEvent) -> Option<&str> {
         !event.retained || event.operation.is_some(),
         "a kept creation names its change"
     );
-    problem
+    problem.filter(|code| !(event.retained && answer_late(code)))
+}
+
+/// True for an owner change whose answer did not come in time or could not be read: the
+/// engine may still run it. The same codes as the desktop bridge's check.
+/// Input: the problem code. Output: whether it is that kind.
+fn answer_late(problem: &str) -> bool {
+    assert!(!problem.is_empty(), "every owner problem carries a code");
+    let late = problem.starts_with("owner_outcome_unknown")
+        || problem == "owner_actor_stopped_outcome_unknown";
+    assert!(
+        !late || job_lost(problem),
+        "a late answer is one the loss check counts"
+    );
+    late
 }
 
 /// Tells whether a failed owner job means the trusted connection is gone.
