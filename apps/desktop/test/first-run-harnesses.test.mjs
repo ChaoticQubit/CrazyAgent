@@ -172,3 +172,10 @@ test("a screen with the Node offer reads again while Node installs or the step w
     assert.equal(model.nodeReadsAgain(needed, node, busy), again, `needed ${needed}, ${JSON.stringify(node)}, busy ${busy}`);
   }
 });
+
+test("a Node setup cannot install on this system is never offered or read again for, even while a setup run goes on", () => {
+  for (const busy of [false, true]) {
+    assert.deepEqual(model.nodeOffer(true, { state: "unsupported" }, busy), { kind: "none" }, `busy ${busy}`);
+    assert.equal(model.nodeReadsAgain(true, { state: "unsupported" }, busy), false, `busy ${busy}`);
+  }
+});
