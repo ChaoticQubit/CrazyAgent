@@ -60,13 +60,15 @@ function catalogVersion() {
   return version;
 }
 
-/** Puts a stand-in Claude Code on PATH for the project Models suite, whose project page lists
- * installed harnesses only: it answers the catalog's first version and does nothing else.
+/** Puts a stand-in Claude Code for the project Models suite, whose project page lists installed
+ * harnesses only, in the engine's own `<engine root>/setup/bin`, a place the tool resolver keeps
+ * (it refuses folders in this repo, which holds a project, and the agents' `ca-` temp folders);
+ * it answers the catalog's first version and does nothing else.
  * Output: the folder to put first on PATH, or none for every other suite. */
 function standIns() {
   if (suite !== "models-project") return null;
-  const folder = join(evidence, "bin");
-  mkdirSync(folder, { mode: 0o700 });
+  const folder = join(engineRoot, "setup", "bin");
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
   writeFileSync(join(folder, "claude"), `#!/bin/sh\nprintf '${catalogVersion()} (Claude Code)\\n'\n`, { mode: 0o700 });
   return folder;
 }
