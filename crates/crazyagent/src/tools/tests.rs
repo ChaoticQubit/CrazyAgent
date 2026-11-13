@@ -384,8 +384,9 @@ fn a_link_into_a_project_is_refused() {
 }
 
 /// R-L1 and F2: an interpreter named by path goes through the same checks as a tool found by
-/// name: one inside a project's `.crazyagent` folder, or inside a project, is refused as a
-/// missing interpreter, and a pinned entry inside a project is refused too.
+/// name: one inside a project's `.crazyagent` folder, or inside a project, is reported as
+/// refused with its own file and why, never as a missing interpreter, and a pinned entry
+/// inside a project is refused too.
 #[test]
 fn an_interpreter_or_entry_inside_a_project_is_refused() {
     let (_folder, home) = scratch();
@@ -396,17 +397,19 @@ fn an_interpreter_or_entry_inside_a_project_is_refused() {
         &format!("#!{}\n", planted.display()),
     );
     let missing = resolve("agentic", &home_only(&home)).unwrap_err();
-    assert_eq!(missing.reason, Reason::NeedsInterpreter);
-    assert_eq!(missing.needs.as_deref(), Some("node"));
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused.map(|refused| (refused.file, refused.why)),
+        Some((planted, Refusal::AgentsCanWrite))
+    );
     let inside = program(&work.join("tools/node"), NODE);
     program(
         &home.join(".local/bin/inside"),
         &format!("#!/usr/bin/env {}\n", inside.display()),
     );
-    assert_eq!(
-        resolve("inside", &home_only(&home)).unwrap_err().reason,
-        Reason::NeedsInterpreter
-    );
+    let missing = resolve("inside", &home_only(&home)).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(missing.refused.map(|refused| refused.file), Some(inside));
     let pinned = program(&work.join("bin/codex"), NODE);
     assert!(resolve_entry(&pinned, &home_only(&home)).is_err());
 }
@@ -593,10 +596,10 @@ fn a_refused_tool_names_its_file_and_why_and_never_says_it_is_missing() {
     assert_eq!(missing.reason, Reason::Refused);
     assert_eq!(
         missing.refused,
-        Some(Refused {
+        Some(Box::new(Refused {
             file: tmux.clone(),
             why: Refusal::OthersCanChange(bin.clone()),
-        })
+        }))
     );
     let line = missing.line();
     assert_ne!(line, TMUX_MISSING);
@@ -628,10 +631,10 @@ fn a_tool_file_the_staff_group_can_write_is_passed_over() {
     assert_eq!(missing.reason, Reason::Refused);
     assert_eq!(
         missing.refused,
-        Some(Refused {
+        Some(Box::new(Refused {
             file: tool.clone(),
             why: Refusal::OthersCanChange(tool.clone()),
-        })
+        }))
     );
     assert!(missing.line().contains(&tool.display().to_string()));
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -856,4 +859,27 @@ fn the_bundle_notes_name_the_system_tmux_and_the_reinstall() {
         BundleNote::CannotRun.line(),
         "Using the system tmux, the bundled one can't run; reinstall CrazyAgent."
     );
+}
+
+/// rv-v3sec M16-S1: an engine started with a non-default `--home`, `CRAZYAGENT_HOME` unset,
+/// refuses a harness file agents can write under that root, such as one in an agent's
+/// home: a launch takes the root the engine recorded, given here explicitly.
+#[test]
+fn a_harness_in_an_agent_home_under_a_custom_engine_root_is_refused() {
+    let (_folder, home) = scratch();
+    let root = home.join("custom-engine");
+    let entry = program(
+        &root.join("team/agents/agent-1/home/.local/bin/codex"),
+        NODE,
+    );
+    let launch = Places::at_roots(None, Some(&root));
+    let missing = resolve_entry(&entry, &launch).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused.map(|refused| refused.why),
+        Some(Refusal::AgentsCanWrite)
+    );
+    let crate::harnesses::launch::LaunchError(line, _) =
+        crate::harnesses::interactive::launch_tool(&entry, &launch).unwrap_err();
+    assert!(line.contains(&entry.display().to_string()), "{line}");
 }
