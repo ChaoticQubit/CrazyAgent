@@ -197,6 +197,8 @@
     "allow-desktop-set-cleanup-settings",
     "allow-desktop-quit-settings",
     "allow-desktop-set-quit-settings",
+    "allow-desktop-provider-retry",
+    "allow-desktop-set-provider-retry",
     "allow-desktop-learning-progress",
     "allow-desktop-set-learning-mark",
     "allow-desktop-pool-summaries",
