@@ -352,7 +352,7 @@ async function main() {
   claimRoot(root, keep, [[tmuxBinary, engineTmux], [tmuxBinary, tuiTmux]]);
   console.log(`temp root ${root} (${keep ? "kept for SMOKE_EVIDENCE" : "removed on exit; SMOKE_EVIDENCE=1 keeps it"})`);
   const userHome = join(root, "u");
-  const bin = join(root, "bin");
+  const bin = join(userHome, ".local", "bin");
   const repo = join(root, "repos", REPO);
   const projects = join(root, "projects");
   for (const folder of [crazyHome, userHome, bin, repo, projects, evidence]) mkdirSync(folder, { recursive: true, mode: 0o700 });
