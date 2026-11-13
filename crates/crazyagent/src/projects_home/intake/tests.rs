@@ -245,3 +245,29 @@ fn a_stop_asked_while_a_move_copies_ends_it_between_entries_and_keeps_the_source
     );
     assert!(!tally.clearing());
 }
+
+#[test]
+fn a_move_on_one_disk_stopped_before_it_starts_ends_cancelled_and_moves_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let source = small_tree(root.path(), 2, 3);
+    let home = root.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let tally = Tally::default();
+    tally.stop();
+    let plan = AddPlan::new(
+        source.clone(),
+        home.join("source"),
+        AddMode::Move,
+        COPY_BOUNDS,
+    );
+    assert_eq!(
+        plan.run_tallied(&tally).unwrap_err().0,
+        "home_add_cancelled"
+    );
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0, "nothing moved in");
+    assert_eq!(
+        fs::read_to_string(source.join("d1/f2.txt")).unwrap(),
+        "1 2\n"
+    );
+    assert!(!tally.clearing());
+}
