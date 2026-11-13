@@ -1748,3 +1748,24 @@ fn a_project_outside_the_projects_home_never_shows_a_run_failure_or_a_due_run() 
     assert!(!overview.stale && !overview.running);
     assert!(!overview.waiting_for_account);
 }
+
+/// An Overview reply from an engine before IW-L1 has no `waiting_for_account` and still
+/// reads, as no wait for an account, so a newer client keeps its Overview during update
+/// skew (IW-L1 r1, DEC-147 addendum).
+#[test]
+fn an_overview_from_an_engine_without_the_wait_flag_reads_as_no_wait() {
+    let (db, project, folder) = case();
+    let mut overview = read(&db, &project, folder.path(), 0).unwrap();
+    overview.waiting_for_account = true;
+    let mut wire = serde_json::to_value(&overview).unwrap();
+    let fields = wire.as_object_mut().unwrap();
+    assert_eq!(fields.remove("waiting_for_account"), Some(true.into()));
+    let older: Overview = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        older,
+        Overview {
+            waiting_for_account: false,
+            ..overview
+        }
+    );
+}

@@ -134,8 +134,20 @@ test("a reply that is not a roadmap status is refused before it is shown", () =>
     status({ items: [{ item: { section: 1, text: "Sign in" }, status: "done", evidence: "" }] }),
     status({ items: Array.from({ length: api.ROADMAP_ITEMS_MAX + 1 }, () => status().items[0]) }),
     status({ running: "yes" }), status({ problem: 7 }), status({ waiting_for_account: "yes" }),
-    (({ waiting_for_account, ...rest }) => rest)(status()),
   ]) assert.equal(api.isRoadmapStatus(broken), false, JSON.stringify(broken)?.slice(0, 80));
+});
+
+test("a roadmap status from an engine before the wait flag reads as no wait for an account", async () => {
+  const { waiting_for_account, ...older } = status({ running: true, problem: "The roadmap check ended without a reply." });
+  assert.equal(waiting_for_account, false);
+  assert.equal(api.isRoadmapStatus(older), true);
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke() { return older; } } };
+  try {
+    assert.deepEqual(await api.roadmapStatus("p1"), { kind: "ok", value: { ...older, waiting_for_account: false } });
+  } finally {
+    globalThis.window = before;
+  }
 });
 
 test("every roadmap status code the engine or the bridge can answer has its own sentence", () => {

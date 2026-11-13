@@ -1230,3 +1230,24 @@ fn a_check_that_got_an_account_drops_the_no_account_problem_and_keeps_any_other(
     );
     assert_eq!(case.read(due + 4).problem.as_deref(), Some(UNFINISHED));
 }
+
+/// A roadmap status reply from an engine before IW-L1 has no `waiting_for_account` and
+/// still reads, as no wait for an account, so a newer client keeps its roadmap status
+/// during update skew (IW-L1 r1, DEC-147 addendum).
+#[test]
+fn a_roadmap_status_from_an_engine_without_the_wait_flag_reads_as_no_wait() {
+    let case = status_case(Refresh::AfterLanding);
+    let mut status = case.read(case.now);
+    status.waiting_for_account = true;
+    let mut wire = serde_json::to_value(&status).unwrap();
+    let fields = wire.as_object_mut().unwrap();
+    assert_eq!(fields.remove("waiting_for_account"), Some(true.into()));
+    let older: RoadmapStatus = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        older,
+        RoadmapStatus {
+            waiting_for_account: false,
+            ..status
+        }
+    );
+}
