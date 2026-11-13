@@ -2082,10 +2082,10 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
     }
 }
 
-/// Tells whether a loopback endpoint account's model provider takes no TCP connection, so a
+/// Tells whether a loopback endpoint account's model provider refuses every connect, so a
 /// caller can fail at once with a plain line in place of a harness retrying it for minutes.
-/// Managed accounts and remote endpoints are not checked. Input: the account. Output: the
-/// owner's line naming the provider's host and port when nothing listens there, else none.
+/// Managed accounts, remote endpoints and any other connect error are not named. Input: the
+/// account. Output: the owner's line naming the provider's host and port, else none.
 pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
     let (ResearchAccount::Endpoint { base_url, .. }
     | ResearchAccount::AnthropicEndpoint { base_url, .. }) = account
@@ -2119,10 +2119,11 @@ pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
     })
 }
 
-/// Tells whether one connect to a loopback model provider proves nothing listens there.
-/// Input: the connect's outcome. Output: true when it failed.
+/// Tells whether one connect to a loopback model provider proves nothing listens there:
+/// only a refused connect does, never a success, a timeout or another error such as too
+/// many open files. Input: the connect's outcome. Output: true only for a refusal.
 fn refused(outcome: std::io::Result<()>) -> bool {
-    outcome.is_err()
+    matches!(outcome, Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused)
 }
 
 /// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
