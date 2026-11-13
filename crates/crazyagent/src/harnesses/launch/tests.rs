@@ -889,6 +889,7 @@ fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_t
         unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crate::trust::Trust::Reviewed,
     };
     let command = super::command(&request).unwrap();
     let interpreter =
@@ -945,6 +946,7 @@ fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
         unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crate::trust::Trust::Reviewed,
     };
     let line = crate::tools::resolve_entry(&entry, &crate::tools::Places::from_environment(None))
         .unwrap_err()
