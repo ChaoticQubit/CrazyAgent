@@ -151,10 +151,14 @@ impl Proxied {
 /// The first letter of a process's state as `ps` shows it, `T` for stopped, or none for a
 /// process that is gone. Input: the process id. Output: the letter.
 fn state_of(pid: u32) -> Option<char> {
-    let shown = Command::new("/bin/ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .unwrap();
+    let shown = crate::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     String::from_utf8(shown.stdout)
         .unwrap()
         .trim()
@@ -172,7 +176,7 @@ fn hold(address: &str, port: u16) -> TcpListener {
 
 /// Tells whether a held listener took a connection. Input: the listener. Output: true then.
 fn requested(listener: &TcpListener) -> bool {
-    listener.accept().is_ok()
+    crate::spawn_gate::accept_tcp_std(listener).is_ok()
 }
 
 /// DEC-158: a kept pane with a model proxy is stopped once the engine quits, every process
@@ -449,10 +453,14 @@ impl NativeLead {
             .expect("a frozen native lead keeps its server keepers")
             .iter()
             .flat_map(|keeper| {
-                let shown = Command::new("/usr/bin/pgrep")
-                    .args(["-P", &keeper.pid.to_string()])
-                    .output()
-                    .unwrap();
+                let shown = crate::spawn_gate::output(
+                    Command::new("/usr/bin/pgrep")
+                        .args(["-P", &keeper.pid.to_string()])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null()),
+                )
+                .unwrap();
                 String::from_utf8(shown.stdout)
                     .unwrap()
                     .lines()
