@@ -80,7 +80,8 @@ pub const TMUX_MISSING: &str =
 /// program is run, no shell file is read and every folder is absolute and bounded. No
 /// folder agents can write is kept ([`Places::agent_writable`]), the engine's data folder
 /// included; one in the engine's `setup` folder is set aside so [`resolve`] names a tool
-/// there, and the engine's own places refuse a probed temp folder ([`Places::with_probed`]).
+/// there, and the engine's own places set aside a PATH or probed temp folder the same way
+/// ([`Places::set_aside_temp`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Places {
     folders: Vec<PathBuf>,
@@ -88,6 +89,7 @@ pub struct Places {
     engine_roots: Vec<PathBuf>,
     temp_refused: bool,
     refused_setup: Vec<PathBuf>,
+    refused_temp: Vec<PathBuf>,
 }
 
 impl Places {
@@ -118,6 +120,7 @@ impl Places {
                 .collect(),
             temp_refused,
             refused_setup: Vec::new(),
+            refused_temp: Vec::new(),
         };
         for folder in folders {
             if places.folders.len() == PLACES_MAX {
@@ -141,6 +144,23 @@ impl Places {
         places
     }
 
+    /// Sets aside temp folders the engine's places refuse, never looked in, so [`resolve`]
+    /// names a tool found only there instead of calling it missing; at most [`PLACES_MAX`].
+    /// Input: the folders, absolute ones kept. Output: the places.
+    fn set_aside_temp(mut self, folders: impl IntoIterator<Item = PathBuf>) -> Self {
+        for folder in folders {
+            if self.refused_temp.len() == PLACES_MAX {
+                break;
+            }
+            if usable(&folder) && !self.refused_temp.contains(&folder) {
+                self.refused_temp.push(folder);
+            }
+        }
+        assert!(self.refused_temp.len() <= PLACES_MAX);
+        assert!(self.temp_refused || self.refused_temp.is_empty());
+        self
+    }
+
     /// Whether a folder lies in an engine data folder's `setup` folder, which agents can
     /// write only when that data folder sits inside a project or a `.crazyagent` folder.
     /// Input: the folder. Output: the answer.
@@ -152,7 +172,7 @@ impl Places {
 
     /// Builds the engine's places: the app's own folder, the engine's setup folder, Homebrew
     /// on Apple silicon and Intel, all fixed and ahead of the PATH the engine inherited, then
-    /// the PATH folders other than the system ones and those in a temp folder, the HOME
+    /// the PATH folders other than the system ones, those in a temp folder set aside, the HOME
     /// folders the harness catalog uses (nvm, fnm, pnpm, ~/.local/bin, ~/.cargo/bin and
     /// more), the real installs of volta, asdf, mise and fnm, each harness's own install
     /// folders under HOME, then the system folders last. A folder agents can write is never
@@ -167,14 +187,20 @@ impl Places {
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
         let homebrew: Vec<PathBuf> = HOMEBREW_FOLDERS.iter().map(PathBuf::from).collect();
         let mut folders: Vec<PathBuf> = Vec::new();
+        let mut temp: Vec<PathBuf> = Vec::new();
         folders.extend(app_folder.map(Path::to_path_buf));
         folders.extend(engine_root.map(|root| root.join("setup").join("bin")));
         folders.extend(homebrew_folders());
         if let Some(path) = path {
-            folders.extend(
-                std::env::split_paths(path)
-                    .filter(|f| !system.contains(f) && !homebrew.contains(f) && !in_temp(f)),
-            );
+            for folder in
+                std::env::split_paths(path).filter(|f| !system.contains(f) && !homebrew.contains(f))
+            {
+                if in_temp(&folder) {
+                    temp.push(folder);
+                } else {
+                    folders.push(folder);
+                }
+            }
         }
         if let Some(home) = home.as_deref().filter(|home| home.is_absolute()) {
             folders.extend(crate::harnesses::home_places(home));
@@ -189,7 +215,7 @@ impl Places {
         #[cfg(target_os = "linux")]
         folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
         folders.extend(system);
-        Self::kept(folders, home, engine_roots(engine_root), true)
+        Self::kept(folders, home, engine_roots(engine_root), true).set_aside_temp(temp)
     }
 
     /// Builds the engine's places from this process's HOME and PATH and the folder of the
@@ -230,8 +256,9 @@ impl Places {
     /// Adds the folders the background probes found ([`probe::folders`]), such as npm's
     /// global prefix and the login shell's PATH, after every folder known without running a
     /// program and before the system folders; folders agents can write are dropped, and on
-    /// the engine's places ([`Places::engine`]) so is one in a temp folder, which agents with
-    /// the owner's temp folder grant or other users write. Input: the folders. Output: the places.
+    /// the engine's places ([`Places::engine`]) one in a temp folder, which agents with the
+    /// owner's temp folder grant or other users write, is set aside ([`Places::set_aside_temp`]).
+    /// Input: the folders. Output: the places.
     pub fn with_probed(self, probed: Vec<PathBuf>) -> Self {
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
         let temp_refused = self.temp_refused;
@@ -239,20 +266,21 @@ impl Places {
             .folders
             .into_iter()
             .partition(|folder| system.contains(folder));
-        folders.extend(
-            probed
-                .into_iter()
-                .filter(|folder| !system.contains(folder) && !(temp_refused && in_temp(folder))),
-        );
+        let (temp, probed): (Vec<PathBuf>, Vec<PathBuf>) = probed
+            .into_iter()
+            .filter(|folder| !system.contains(folder))
+            .partition(|folder| temp_refused && in_temp(folder));
+        folders.extend(probed);
         folders.extend(last);
         let set_aside = self.refused_setup;
+        let carried = self.refused_temp;
         let mut places = Self::kept(folders, self.home, self.engine_roots, temp_refused);
         for folder in set_aside {
             if !places.refused_setup.contains(&folder) && places.refused_setup.len() < PLACES_MAX {
                 places.refused_setup.push(folder);
             }
         }
-        places
+        places.set_aside_temp(carried.into_iter().chain(temp))
     }
 
     /// The folders looked in, in order. Output: the folders.
@@ -523,16 +551,26 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
     if !valid_name(name) {
         return Err(not_found());
     }
-    let mut refused = places
+    let in_setup = places
         .refused_setup
         .iter()
-        .map(|folder| folder.join(name))
-        .find_map(|candidate| match check_candidate(places, &candidate) {
-            Some(Err(why)) => Some(Refused {
+        .map(|folder| (folder.join(name), false));
+    let in_temp_folder = places
+        .refused_temp
+        .iter()
+        .map(|folder| (folder.join(name), true));
+    let mut refused = in_setup
+        .chain(in_temp_folder)
+        .find_map(|(candidate, temp)| {
+            let why = match check_candidate(places, &candidate)? {
+                Err(why) => why,
+                Ok(()) if temp => Refusal::InTemp,
+                Ok(()) => return None,
+            };
+            Some(Refused {
                 file: candidate,
                 why,
-            }),
-            _ => None,
+            })
         });
     let found =
         places.folders.iter().map(|folder| folder.join(name)).find(
