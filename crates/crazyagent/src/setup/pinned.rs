@@ -290,7 +290,9 @@ impl PinnedInstaller {
 
     /// Installs one Python tool exactly as its lock pins it: a fresh virtual environment
     /// under `setup/uv/tools/<package>`, into which uv installs only wheels whose SHA-256
-    /// the lock lists, then links to its programs in `setup/bin`. A tool already linked
+    /// the lock lists, then, with group and other write removed from setup's Pythons and the
+    /// environment (uv writes under the umask, DEC-162 R2), links to its programs in
+    /// `setup/bin`. A tool already linked
     /// from the same lock is kept. A failed install removes its environment and leaves
     /// the old links. Inputs: the lock and the Python version. Output: `setup_install_failed`
     /// when uv refuses a file or a program is missing, or another setup code.
@@ -331,7 +333,7 @@ impl PinnedInstaller {
         let mut env = self.env();
         env.extend([
             ("UV_CACHE_DIR", cache.into_os_string()),
-            ("UV_PYTHON_INSTALL_DIR", pythons.into_os_string()),
+            ("UV_PYTHON_INSTALL_DIR", pythons.clone().into_os_string()),
             ("UV_PYTHON_BIN_DIR", python_bin.into_os_string()),
             ("UV_NO_CONFIG", "1".into()),
             ("UV_NO_PROGRESS", "1".into()),
@@ -365,6 +367,10 @@ impl PinnedInstaller {
             });
             if !present {
                 return Err(InstallError("setup_install_failed"));
+            }
+            for tree in [&pythons, &staged] {
+                crate::tools::permission_fix::tighten_setup(&self.setup, tree)
+                    .map_err(|_| InstallError("setup_install_failed"))?;
             }
             for (program, name) in programs.iter().zip(lock.programs) {
                 link(program, &bin.join(name))?;
