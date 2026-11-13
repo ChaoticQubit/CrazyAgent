@@ -4052,11 +4052,15 @@ mod tests {
         let id = jobs
             .enqueue("alpha", "market_research", "codex", false)
             .unwrap();
+        let provider = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let project = ResearchProject {
             id: "alpha",
             root: &folder,
             account: Some(ResearchAccount::Endpoint {
-                base_url: "http://127.0.0.1:9/v1".into(),
+                base_url: format!(
+                    "http://127.0.0.1:{}/v1",
+                    provider.local_addr().unwrap().port()
+                ),
                 model: "local-model".into(),
                 key: None,
             }),
@@ -4377,6 +4381,67 @@ mod tests {
                 .is_none()
                 .then_some(line)
         );
+    }
+
+    /// A research job whose pool account's loopback provider refuses every connect ends
+    /// failed at once with the reach line, starts no harness process and spends no attempt,
+    /// so the owner's Retry finds it as it was before the claim (V241-REACH-RETRY, DEC-163).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_job_on_a_refusing_loopback_provider_fails_at_once_without_an_attempt_or_a_harness()
+     {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        repository_git(&folder, &["init", "-q"]);
+        repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+        register_project(&root.database, "alpha", &folder);
+        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits {
+                wall_time: Duration::from_secs(10),
+                ..ResearchLimits::default()
+            },
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                model: "local-model".into(),
+                key: None,
+            }),
+        };
+        let started = Instant::now();
+        let run = runner.run_once(&project).unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            (run.job, run.status, run.process_group),
+            (id, ResearchStatus::Failed, None)
+        );
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!(job.status, ResearchStatus::Failed);
+        assert_eq!(
+            job.error,
+            Some(format!(
+                "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
+            ))
+        );
+        assert_eq!((job.attempts, job.claimer), (0, None));
     }
 
     /// MR-L1: only a refused connect proves nothing listens on a loopback provider. A
