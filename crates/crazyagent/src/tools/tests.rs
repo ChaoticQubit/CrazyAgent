@@ -679,6 +679,64 @@ fn a_tool_only_in_a_refused_temp_folder_is_named_as_refused_not_missing() {
     }
 }
 
+/// 2.4.1 r2 RH2-L1: a file found through a place outside every temp folder whose real file
+/// lies in one, such as an owner link in `~/.local/bin` into the temp folder, leads into
+/// temp; one whose place is itself in a temp folder, or whose real file is not, does not.
+#[test]
+fn a_link_from_a_place_outside_temp_into_a_temp_folder_leads_into_temp() {
+    let temps = [
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/private/var/folders/xy/T"),
+    ];
+    let link = Path::new("/Users/ana/.local/bin/tool");
+    assert!(leads_into_temp(
+        link,
+        Path::new("/private/var/folders/xy/T/x/tool"),
+        &temps
+    ));
+    assert!(leads_into_temp(
+        link,
+        Path::new("/private/tmp/x/tool"),
+        &temps
+    ));
+    assert!(!leads_into_temp(link, Path::new("/opt/tools/tool"), &temps));
+    assert!(
+        !leads_into_temp(
+            Path::new("/private/tmp/home/.local/bin/tool"),
+            Path::new("/private/tmp/other/tool"),
+            &temps
+        ),
+        "a place itself in a temp folder"
+    );
+    assert!(!leads_into_temp(
+        Path::new("/private/var/folders/xy/T/home/bin/tool"),
+        Path::new("/private/tmp/x/tool"),
+        &temps
+    ));
+}
+
+/// 2.4.1 r2 RH2-L1: a kept place that is itself in a temp folder, as a test HOME is, still
+/// gives its tools on the engine's places, a link from it into another temp folder included,
+/// and an entry written there passes the launch check.
+#[test]
+fn a_tool_in_a_kept_place_inside_a_temp_folder_still_resolves() {
+    let (_folder, home) = scratch();
+    let other = tempfile::Builder::new()
+        .prefix("tools-other-")
+        .tempdir()
+        .unwrap();
+    let real = program(&other.path().join("crazyagent-linked-tool"), NODE);
+    let plain = program(&home.join(".local/bin/crazyagent-plain-tool"), NODE);
+    std::os::unix::fs::symlink(&real, home.join(".local/bin/crazyagent-linked-tool")).unwrap();
+    let engine = Places::engine(None, None, Some(home.clone()), Some(OsStr::new("")));
+    assert_eq!(
+        resolve("crazyagent-plain-tool", &engine).unwrap().program,
+        plain
+    );
+    assert!(resolve("crazyagent-linked-tool", &engine).is_ok());
+    assert!(resolve_entry(&plain, &engine).is_ok());
+}
+
 /// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
 /// can replace a folder this user owns there, so test stand-ins and engines started from a
 /// `/tmp` folder resolve (leader 17:12, L8c).

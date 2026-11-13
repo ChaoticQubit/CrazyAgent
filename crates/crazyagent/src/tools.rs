@@ -352,6 +352,15 @@ fn in_project(home: Option<&Path>, path: &Path) -> bool {
         })
 }
 
+/// Whether a file found through a place outside every temp folder really lies in one, as an
+/// owner link from `~/.local/bin` into the temp folder does, which agents with the owner's
+/// temp folder grant can replace; a file whose place is itself in a temp folder (a test HOME,
+/// an engine root, a mounted app) does not. Inputs: the file as written, its real path and
+/// the temp folders. Output: the answer.
+fn leads_into_temp(_written: &Path, _real: &Path, _temps: &[PathBuf]) -> bool {
+    false
+}
+
 /// Whether a folder is in a temp folder, which other users, or agents with the temp folder
 /// grant, can write: this user's temp folder or a shared one, as written and with its links
 /// resolved. Input: the folder. Output: the answer.
