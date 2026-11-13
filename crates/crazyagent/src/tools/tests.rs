@@ -887,18 +887,24 @@ fn a_tool_file_the_staff_group_can_write_is_passed_over() {
     }
 }
 
-/// r2 item 5: a tool only in the engine's `<root>/setup/bin`, such as the node an in-app
-/// setup installed, is found by setup and by a harness launch alike. A launch names no root
-/// of its own, so it uses the root this process's engine recorded, given here explicitly
-/// so no row records the global.
+/// r2 item 5: a tool only in the engine's `<root>/setup/bin`, like the node an in-app setup
+/// installed, is found by setup and by a harness launch alike. Its name is one no machine
+/// has, since the engine's folders come last and an owner's own node would win. A launch
+/// uses the root this process's engine recorded, given here so no row records the global.
 #[test]
 fn a_launch_looks_in_the_engine_setup_folder_like_setup_does() {
     let (_folder, home) = scratch();
     let root = home.join("engine");
-    let node = program(&root.join("setup/bin/node"), NODE);
-    let codex = program(&home.join("npm/bin/codex"), "#!/usr/bin/env node\n");
+    let node = program(&root.join("setup/bin/crazyagent-dev-node"), NODE);
+    let codex = program(
+        &home.join("npm/bin/codex"),
+        "#!/usr/bin/env crazyagent-dev-node\n",
+    );
     let setup = Places::from_environment(Some(&root));
-    assert_eq!(resolve("node", &setup).unwrap().program, node);
+    assert_eq!(
+        resolve("crazyagent-dev-node", &setup).unwrap().program,
+        node
+    );
     let launch = Places::at_roots(None, Some(&root));
     let started = crate::harnesses::interactive::launch_tool(&codex, &launch).unwrap();
     assert_eq!(started.argv()[0], node.into_os_string());
