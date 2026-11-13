@@ -9,6 +9,7 @@ pub(in crate::tui) mod first_run_accounts;
 pub mod home;
 pub mod home_folder;
 pub(in crate::tui) mod intake;
+pub(in crate::tui) mod intake_job;
 pub(in crate::tui) mod new_project;
 mod new_project_input;
 pub(in crate::tui) mod new_project_page;
