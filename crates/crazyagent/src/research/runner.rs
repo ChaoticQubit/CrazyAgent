@@ -766,6 +766,10 @@ impl ResearchRunner {
             let status = jobs.fail(&job, line, 1)?;
             return Ok(run(status, None, None));
         }
+        if let Some(line) = unreached_provider_here(account) {
+            let status = jobs.fail_unspent(&job, &line)?;
+            return Ok(run(status, None, None));
+        }
         match self.launch(jobs, &job, project, account) {
             Ok((Ending::Exited(true), group, output)) => {
                 let report = match self.publish(&job, harness, project.root, &output) {
