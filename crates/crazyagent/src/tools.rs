@@ -242,15 +242,16 @@ impl Places {
     }
 
     /// Whether agents can write a folder or file, read as written and with its links
-    /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]) or inside
-    /// the engine's data folder outside its `setup` folder. Input: the path. Output: the
-    /// answer.
+    /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside
+    /// the engine's data folder outside its `setup` folder, or inside an agent's short temp
+    /// folder ([`crate::sandbox::toolchains::in_agent_tmp`]). Input: the path. Output: the answer.
     pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
         std::iter::once(path).chain(real.as_deref()).any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
                 || in_project(self.home(), path)
                 || in_engine_data(&self.engine_roots, path)
+                || crate::sandbox::toolchains::in_agent_tmp(path)
         })
     }
 }
