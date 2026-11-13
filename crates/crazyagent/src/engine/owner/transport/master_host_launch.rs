@@ -1015,7 +1015,7 @@ fn turn_sandbox(
     #[cfg(target_os = "macos")]
     let sandbox = crate::sandbox::tool_cache::grant(
         sandbox,
-        &root.path,
+        root.engine_root()?,
         &std::fs::canonicalize(repository).map_err(io_error)?,
         policy,
         crate::sandbox::tool_cache::CacheShape::Worktree,
