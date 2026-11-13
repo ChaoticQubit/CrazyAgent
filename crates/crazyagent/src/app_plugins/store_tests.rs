@@ -692,3 +692,105 @@ fn removing_the_chosen_plugin_turns_search_back_to_full_text() {
     add(&case.db, &case.root, NEAR, &sha(NEAR), false, 2).unwrap();
     assert!(crate::semantic::settings::chosen(&case.db, &case.root).is_none());
 }
+
+fn near_on(port: u16) -> String {
+    NEAR.replace("name: near", "name: handed")
+        .replace("127.0.0.1:9000", &format!("127.0.0.1:{port}"))
+}
+
+/// Q-8 (DEC-156 15:35 Unresolved, leader 19:12 refuse): a loopback plugin port inside the
+/// ports Linux hands out refuses that plugin alone, with a plain reason naming the range;
+/// ports outside it, and hosts that are not loopback, stay usable.
+#[test]
+fn a_loopback_plugin_port_inside_the_handed_out_range_is_refused_alone_with_the_range_named() {
+    let usual = 32_768..=60_999;
+    let handed = |text: &str| {
+        let found = user_found("handed".into(), Ok(text.as_bytes().to_vec()));
+        outside_handed_out(found, Some(&usual)).parsed
+    };
+    for port in [32_768, 40_000, 60_999] {
+        let problem = handed(&near_on(port)).expect_err("inside the range");
+        assert_eq!(problem.code, "app_plugin_port_handed_out");
+        assert_eq!(problem.field.as_deref(), Some("http.url"));
+        assert_eq!(
+            problem.message,
+            format!(
+                "http.url: port {port} is one this Linux hands out by itself (ports 32768 to \
+                 60999), so an agent could listen on it; run the plugin on a port outside that \
+                 range, or have an administrator move net.ipv4.ip_local_port_range away from \
+                 port {port}."
+            )
+        );
+    }
+    for port in [9_000, 32_767, 61_000] {
+        assert!(handed(&near_on(port)).is_ok(), "{port}");
+    }
+    let remote = ACME.replace("api.acme.example/v1", "api.acme.example:40000/v1");
+    assert!(handed(&remote.replace("name: acme", "name: handed")).is_ok());
+    let found = user_found("handed".into(), Ok(near_on(40_000).into_bytes()));
+    assert!(
+        outside_handed_out(found, None).parsed.is_ok(),
+        "no range read, no plugin refused"
+    );
+}
+
+/// Q-8: on Linux a plugin on a port this Linux hands out reads Refused with the reason in
+/// the listing and the trust screen, never runs, and is left out of the ports a launch keeps
+/// free, so it never stops an open-network launch; the other plugins keep their ports.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_linux_a_plugin_on_a_port_linux_hands_out_is_refused_and_left_out_of_the_kept_ports() {
+    let range = crate::sandbox::linux::read_picked_ports().expect("this Linux names its range");
+    assert!(
+        *range.start() > 11_434,
+        "the test needs the bundled port below the range"
+    );
+    let port = *range.start();
+    let case = case();
+    drop_in(&case, "near.yaml", NEAR);
+    drop_in(&case, "handed.yaml", &near_on(port));
+    let listing = list(&case.db, &case.root).unwrap();
+    match &plugin(&listing, "handed").status {
+        PluginStatus::Refused { problem } => {
+            assert_eq!(problem.code, "app_plugin_port_handed_out");
+            let named = format!("ports {} to {}", range.start(), range.end());
+            assert!(problem.message.contains(&named), "{}", problem.message);
+        }
+        other => panic!("expected a refused plugin, got {other:?}"),
+    }
+    assert_eq!(plugin(&listing, "near").status, PluginStatus::NeedsReview);
+    assert_eq!(loopback_ports(&case.root).unwrap(), [9000, 11434]);
+    assert_eq!(
+        code(ready(&case.db, &case.root, "handed")),
+        "app_plugin_refused"
+    );
+    match preview(
+        &case.root,
+        &near_on(port).replace("name: handed", "name: other"),
+    )
+    .unwrap()
+    {
+        Preview::Refused { problem } => assert_eq!(problem.code, "app_plugin_port_handed_out"),
+        other => panic!("expected the trust screen to refuse, got {other:?}"),
+    }
+}
+
+/// Q-8: macOS keeps every loopback plugin port free of agents in its profile, so a plugin on
+/// a port inside the system's own range stays usable and listed for the sandbox.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn off_linux_a_plugin_on_a_port_the_system_hands_out_stays_usable() {
+    let case = case();
+    drop_in(&case, "handed.yaml", &near_on(50_000));
+    let listing = list(&case.db, &case.root).unwrap();
+    assert_eq!(plugin(&listing, "handed").status, PluginStatus::NeedsReview);
+    assert_eq!(loopback_ports(&case.root).unwrap(), [11434, 50000]);
+    assert!(matches!(
+        preview(
+            &case.root,
+            &near_on(50_000).replace("name: handed", "name: other")
+        )
+        .unwrap(),
+        Preview::Ready { .. }
+    ));
+}
