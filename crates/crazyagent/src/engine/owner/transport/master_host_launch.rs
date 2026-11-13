@@ -1066,7 +1066,7 @@ fn turn_sandbox(
 /// Reads the owner's sandbox settings from the engine database without writing to it.
 /// Input: the owner root. Output: the settings, or `master_sandbox_unavailable` when they
 /// cannot be read, so the turn fails closed rather than start under another option.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn stored_sandbox_settings(
     root: &Root,
 ) -> Result<crate::sandbox_settings::SandboxSettings, EngineError> {
@@ -1315,6 +1315,115 @@ mod tests {
         )
         .unwrap();
         assert!(base.join("engine.db").is_file());
+    }
+
+    /// Makes the real owner layout in a private temp folder: the engine root, holding the
+    /// engine database with the settings_db sockets setting, and an owner generation folder
+    /// inside it, which is what a master turn's Root opens. Input: the temp folder. Output:
+    /// the generation's path.
+    fn owner_generation(temporary: &tempfile::TempDir) -> PathBuf {
+        let engine = temporary.path().canonicalize().unwrap();
+        settings_db(&engine);
+        let generation = engine.join("o0123abcd");
+        private_directory(&generation);
+        generation
+    }
+
+    /// Builds a master turn's sandbox in an owner generation from owner_generation, with
+    /// the project folders inside the generation as the other rows keep them and a stand-in
+    /// harness. Input: the generation's path. Output: the installed sandbox, or the refusal.
+    fn master_in_generation(base: &Path) -> Result<InstalledSandbox, EngineError> {
+        let root = Root::open(base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+        master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        )
+    }
+
+    /// A master reads its sandbox settings from the engine database in the engine root, the
+    /// folder around its owner generation, as the real layout has it; the generation holds
+    /// no database and none is made there. Linux reads them before every master boundary.
+    #[test]
+    fn a_master_reads_its_sandbox_settings_from_the_engine_root_around_its_generation() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let settings = stored_sandbox_settings(&root).unwrap();
+        assert_eq!(
+            settings.linux_sockets,
+            crate::sandbox::LinuxSockets::TcpPorts
+        );
+        assert!(!base.join("engine.db").exists());
+    }
+
+    /// T8: a master's tool cache is the project's cache in the engine root, where the team
+    /// names it too, not a folder in the owner generation, which shutdown removes and the
+    /// next start replaces. Runs on macOS only, where a master gets a tool cache.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_master_tool_cache_is_the_project_cache_in_the_engine_root() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let engine = base.parent().unwrap().to_path_buf();
+        master_in_generation(&base).unwrap();
+        let project = std::fs::canonicalize(base.join("repository")).unwrap();
+        let project = project.to_str().unwrap();
+        assert!(crate::sandbox::tool_cache::project_folder(&engine, project).is_dir());
+        assert!(!crate::sandbox::tool_cache::project_folder(&base, project).exists());
+    }
+
+    /// A master's boundary denies the engine root's secrets as well as its own owner
+    /// generation's: the database, the GitHub sign-in, the saved account keys, an engine
+    /// socket and an older generation holding a socket. The generation the master's home
+    /// lives in is not itself a secret, so the launch still succeeds.
+    #[test]
+    fn a_master_boundary_denies_the_engine_root_secrets_around_its_generation() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let engine = base.parent().unwrap().to_path_buf();
+        let older = engine.join("o0badc0de");
+        private_directory(&older);
+        let _sockets = [
+            std::os::unix::net::UnixListener::bind(engine.join("e.sock")).unwrap(),
+            std::os::unix::net::UnixListener::bind(older.join("owner.sock")).unwrap(),
+            std::os::unix::net::UnixListener::bind(base.join("owner.sock")).unwrap(),
+        ];
+        let sandbox = master_in_generation(&base).unwrap();
+        let secrets = sandbox.sandbox().secret_paths();
+        for name in ["engine.db", "github.json", "account-keys", "owner.sock"] {
+            assert!(
+                secrets.contains(&base.join(name)),
+                "{name} in the generation"
+            );
+        }
+        for secret in [
+            engine.join("engine.db"),
+            engine.join("github.json"),
+            engine.join("account-keys"),
+            engine.join("e.sock"),
+            older,
+        ] {
+            assert!(secrets.contains(&secret), "{}", secret.display());
+        }
+        assert!(!secrets.contains(&base));
     }
 
     #[test]
