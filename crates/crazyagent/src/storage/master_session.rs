@@ -183,6 +183,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) time: crate::master_time_limit::TimeLimit,
     pub(crate) frames: crate::master_frame_limit::FrameSize,
     pub(crate) model: Option<String>,
+    pub(crate) model_provider: Option<String>,
 }
 
 impl PreparedMasterTurn {
@@ -3058,6 +3059,7 @@ fn bundle(
         time: crate::master_time_limit::load(tx)?.limit,
         frames: crate::master_frame_limit::load(tx)?.limit,
         model: record.model,
+        model_provider: None,
     };
     assert_eq!(
         prepared.attempt.request.task_id,

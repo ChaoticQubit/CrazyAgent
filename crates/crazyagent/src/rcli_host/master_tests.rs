@@ -46,6 +46,7 @@ impl Case {
             profile_config_sha256: String::new(),
             instructions: None,
             model: None,
+            model_provider: None,
         };
         let mut case = Self {
             _root: root,
@@ -576,6 +577,41 @@ fn a_chosen_master_model_adds_one_provider_qualified_flag_last_and_only_when_ser
         "",
     ] {
         case.launch.model = Some(refused.into());
+        rejection(case.launch.command(), "rcli_master_model_unserved");
+    }
+}
+
+/// DEC-150 addendum 9e: an owner's master model the store verified on the account's
+/// provider launches with the same one provider-qualified flag; one verified on another
+/// provider, with no provider kept, or naming a provider RCLI has no keyed account for
+/// never launches.
+#[test]
+fn an_owner_master_model_launches_only_on_the_provider_it_was_verified_on() {
+    let mut case = Case::new();
+    let mut value = config();
+    value["providers"][0]["protocol"] = json!("anthropic-messages");
+    case.config(value);
+    case.launch.binding.connection.protocol = credential("anthropic-messages");
+    case.launch.model = Some("my-model".into());
+    case.launch.model_provider = Some("anthropic".into());
+    let args: Vec<std::ffi::OsString> = case
+        .launch
+        .command()
+        .unwrap()
+        .get_args()
+        .map(|value| value.to_owned())
+        .collect();
+    assert_eq!(args.len(), 10);
+    assert_eq!(args[8], "--model");
+    assert_eq!(args[9], "local-a/my-model");
+    for other in [
+        Some("openai"),
+        Some("openrouter"),
+        Some("ollama"),
+        Some(""),
+        None,
+    ] {
+        case.launch.model_provider = other.map(str::to_owned);
         rejection(case.launch.command(), "rcli_master_model_unserved");
     }
 }

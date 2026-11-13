@@ -53,6 +53,7 @@ pub struct RcliMasterLaunch {
     pub profile_config_sha256: String,
     pub instructions: Option<PathBuf>,
     pub model: Option<String>,
+    pub model_provider: Option<String>,
 }
 
 #[derive(Deserialize)]

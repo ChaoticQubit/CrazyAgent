@@ -51,6 +51,7 @@ impl OwnerRuntimeHandle {
             profile_config_sha256,
             instructions: None,
             model: prepared.model.clone(),
+            model_provider: prepared.model_provider.clone(),
         })
     }
 }
@@ -691,6 +692,7 @@ fallback_allowed = false
             time: prepared.time,
             frames: prepared.frames,
             model: prepared.model.clone(),
+            model_provider: prepared.model_provider.clone(),
         }
     }
 
