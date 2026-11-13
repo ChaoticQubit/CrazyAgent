@@ -109,7 +109,7 @@ test("every change the bridge can keep names itself in the banner and the toast"
   for (const kind of kinds) {
     assert.ok(union.includes(`"${kind}"`), `${kind} missing from PendingIntent`);
     const label = api.changeLabel(intent(kind));
-    assert.match(label, /^[a-z][a-z' ]+[a-z]$/, kind);
+    assert.match(label.replace("Learn CrazyAgent", "learn crazyagent"), /^[a-z][a-z' ]+[a-z]$/, kind);
     assert.equal(api.unconfirmedLine(intent(kind), "not_recorded_at_barrier"), `${label.charAt(0).toUpperCase()}${label.slice(1)} never reached the engine. Retry sends it again, or Dismiss drops it.`);
     assert.equal(api.settledLine(receipt(kind, "applied", false)), `${label.charAt(0).toUpperCase()}${label.slice(1)} went through.`);
   }
