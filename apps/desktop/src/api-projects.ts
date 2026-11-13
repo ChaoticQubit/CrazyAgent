@@ -954,8 +954,8 @@ const ROADMAP_STATUSES: readonly string[] = ["pending", "in_progress", "done", "
 const ROADMAP_REFRESHES: readonly string[] = ["after_landing", "refresh_only", "off"];
 
 /** Whether a bridge reply is a roadmap status this window can show: every field of its type,
- * known status and refresh names, at most `ROADMAP_ITEMS_MAX` items. Input: the reply.
- * Output: the answer. */
+ * except a wait flag an older engine leaves out, known status and refresh names, at most
+ * `ROADMAP_ITEMS_MAX` items. Input: the reply. Output: the answer. */
 export function isRoadmapStatus(value: unknown): value is RoadmapStatus {
   if (typeof value !== "object" || value === null) return false;
   const status = value as Record<string, unknown>;
@@ -969,15 +969,20 @@ export function isRoadmapStatus(value: unknown): value is RoadmapStatus {
   return listed && (status.checked_ms === null || typeof status.checked_ms === "number")
     && typeof status.running === "boolean" && typeof status.stale === "boolean"
     && typeof status.refresh === "string" && ROADMAP_REFRESHES.includes(status.refresh)
-    && text(status.source) && text(status.problem) && typeof status.waiting_for_account === "boolean";
+    && text(status.source) && text(status.problem)
+    && (status.waiting_for_account === undefined || typeof status.waiting_for_account === "boolean");
 }
 
-/** Reads a project's roadmap status. Input: the project id. Output: the status, or
- * `invalid_response` for a reply that is not one. */
+/** Reads a project's roadmap status, an older engine's reply with no wait flag as no wait
+ * for an account. Input: the project id. Output: the status, or `invalid_response` for a
+ * reply that is not one. */
 export async function roadmapStatus(id: string): Promise<Result<RoadmapStatus>> {
   const result = await call<RoadmapStatus>("desktop_roadmap_status", { id });
-  if (result.kind !== "ok" || isRoadmapStatus(result.value)) return result;
-  return { kind: "error", code: "invalid_response", message: plainError("invalid_response") };
+  if (result.kind !== "ok") return result;
+  if (!isRoadmapStatus(result.value)) {
+    return { kind: "error", code: "invalid_response", message: plainError("invalid_response") };
+  }
+  return { kind: "ok", value: { ...result.value, waiting_for_account: result.value.waiting_for_account ?? false } };
 }
 
 /** Asks the engine to check a project's roadmap status now, without the wait after a landing.

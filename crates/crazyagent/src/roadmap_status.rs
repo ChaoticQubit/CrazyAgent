@@ -131,7 +131,8 @@ pub struct ItemState {
 
 /// A project's roadmap status as its views show it: the items of the last check, when it
 /// ran, whether one runs now or is due, the refresh setting, the roadmap file it read, why
-/// the last check failed, if it did, and whether that line is the wait for an account.
+/// the last check failed, if it did, and whether that line is the wait for an account
+/// (false in an older engine's reply).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoadmapStatus {
     pub items: Vec<ItemState>,
@@ -141,6 +142,7 @@ pub struct RoadmapStatus {
     pub refresh: Refresh,
     pub source: Option<String>,
     pub problem: Option<String>,
+    #[serde(default)]
     pub waiting_for_account: bool,
 }
 
