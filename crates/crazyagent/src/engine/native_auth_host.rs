@@ -422,7 +422,7 @@ async fn handed(
         action,
         crate::engine::owner::NativeAuthAction::SignIn { .. }
     );
-    match launch::resolved_after_probe(&harness, may_wait).await {
+    match launch::resolved_after_probe(&harness, kind, may_wait).await {
         Some(words) => Some((harness, words)),
         None => {
             eprintln!("native_auth_harness_unresolved harness={kind}");
