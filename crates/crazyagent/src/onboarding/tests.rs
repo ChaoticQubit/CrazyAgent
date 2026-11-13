@@ -701,6 +701,40 @@ fn an_answer_without_json_takes_about_from_its_first_paragraph() {
     assert!(answer.platforms.is_empty());
 }
 
+/// DEC-160: an answer cut to its last part, a JSON tail closed by a fence, or one that sent
+/// a cut json block again, leaves a code fence open; such text is no overview, so the
+/// mapping step fails into its next try and writes nothing.
+#[test]
+fn a_cut_mapping_answer_is_no_overview() {
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let base = Drafted::new("demo".into(), &pool());
+    let tail = "\", \"Later\"], \"recommended\": \"Later\"}]}\n```\n";
+    let resent = concat!(
+        "## Structure\n\nA CLI that greets people.\n\n",
+        "```json\n{\"about\": \"A CLI th\n",
+        "```json\n{\"about\": \"A CLI that greets people.\"}\n```\n",
+    );
+    assert_eq!(draft::parse_answer(tail).overview, "");
+    let answer = draft::parse_answer(resent);
+    assert_eq!(answer.overview, "");
+    assert_eq!(answer.about, "A CLI that greets people.");
+    for text in [tail, resent] {
+        let (step, _, wrote, asks) =
+            service::answered(&layout, &base, text, &MappingFacts::default(), &[]);
+        assert_eq!(wrote, None, "{text}");
+        assert_eq!(
+            step,
+            Step::Failed {
+                reason: service::MAPPING_NO_OVERVIEW.into()
+            }
+        );
+        assert!(asks.is_empty());
+        assert!(draft::overview(&layout).is_none());
+    }
+}
+
 #[test]
 fn merging_fills_only_the_gaps_and_keeps_research_off() {
     let mut base = Drafted::new("demo".into(), &pool());
