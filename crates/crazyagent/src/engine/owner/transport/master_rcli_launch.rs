@@ -780,6 +780,54 @@ fallback_allowed = false
         case.close().await;
     }
 
+    /// M-5 (DEC-150 addendum 9e): an RCLI test launch refuses a provider RCLI does not key,
+    /// waits as not installed with no RCLI host registered, and waits for a set-up account
+    /// while the pool's only keyed account lacks its key file or serves another provider.
+    /// None of these starts a runtime folder, and each leaves the RCLI test slot free.
+    #[tokio::test]
+    async fn an_rcli_test_launch_waits_without_its_host_or_a_set_up_account() {
+        use crate::model_choice::test_launch::{NotStarted, Slot, Tested, rcli_not_started};
+        let case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        let root = case.host.authority.root.path.clone();
+        let global = case.root.path().join("global.toml");
+        let project = case.root.path().join("project.toml");
+        let pool = reference("local-pool");
+        let test = |provider: &str| {
+            super::super::master_rcli::model_test::run(
+                &case.host,
+                &root,
+                (&global, &project),
+                "owner-model",
+                provider,
+                &pool,
+            )
+        };
+        let waiting =
+            |provider: &str, why| Ok((Tested::Pending, Some(rcli_not_started(provider, why))));
+        let before = case.names();
+        assert_eq!(test("local-provider"), Err("model_choice_provider_unknown"));
+        assert_eq!(test("openai"), waiting("openai", NotStarted::NotInstalled));
+        let standin = case.root.path().join("synthetic-rcli");
+        std::fs::write(&standin, b"#!/bin/sh\nexit 3\n").unwrap();
+        std::fs::set_permissions(&standin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        case.host
+            .register_rcli_master_executable(
+                crate::engine::RegisteredNativeAuthHost::capture(&standin).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(test("openai"), waiting("openai", NotStarted::NoAccount));
+        assert_eq!(
+            test("anthropic"),
+            waiting("anthropic", NotStarted::NoAccount)
+        );
+        assert!(!generated.join(".backboard/keys.json").exists());
+        assert_eq!(case.names(), before);
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert!(Slot::take(&canonical, "rcli").is_some());
+        case.close().await;
+    }
+
     fn copy_prepared(prepared: &PreparedMasterTurn) -> PreparedMasterTurn {
         PreparedMasterTurn {
             text: prepared.text.clone(),
