@@ -104,6 +104,36 @@ fn claude_turn_reads_prompt_text_tools_and_finish() {
     );
 }
 
+/// An answer Claude Code continues past the output cap stays one turn: the cut part keeps
+/// the turn going and gains no line break at the cut, and the turn ends with the last part.
+#[test]
+fn claude_answer_cut_at_its_output_cap_goes_on_in_the_same_turn() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"Count to three"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"1. one\n2. tw"}],"stop_reason":"max_tokens"}}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"content":"Output token limit hit. Resume directly"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"o\n3. three"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            text("1. one\n2. tw"),
+            text("o\n3. three\n"),
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
 #[test]
 fn claude_meta_lines_and_unknown_lines_are_ignored() {
     let case = Case::new();
