@@ -294,6 +294,10 @@ const END_COPY: Record<string, string> = {
   terminal_connection_lost: "Lost the connection to this terminal. Open it again to reconnect.",
   terminal_connection_closed: "The engine closed this terminal view. Open it again to reconnect.",
   terminal_view_replaced: "This terminal opened in a newer view, so this one closed. Open it again to bring it back here.",
+  terminal_outcome_unknown: "The engine didn't answer in time while opening this terminal.",
+  terminal_attach_timeout: "The engine took too long to open this terminal.",
+  terminal_not_answering: "The terminal server didn't answer in time.",
+  terminal_attach_failed: "The engine couldn't open this terminal.",
   exited: "The agent's app exited.",
 };
 
@@ -306,14 +310,17 @@ export function endCopy(code: string): string {
 /** The most times in a row a view that follows its agent opens the terminal again. */
 export const FOLLOW_TRIES = 30;
 
-/** Counts one more try for a following view whose terminal ended or would not open.
- * Inputs: the tries so far, when the view that just ended opened (null when it never
- * opened) and now, in milliseconds. Output: the count for the next try, or null once
- * `FOLLOW_TRIES` are spent and the view should stop and say why. */
+/** How long a view stays open before its end counts as a new run to follow afresh. */
+export const FOLLOW_STEADY_MS = 5000;
+
+/** Counts one more try for a following view whose terminal ended or would not open; only a
+ * view that stayed open `FOLLOW_STEADY_MS` starts the count afresh. Inputs: the tries so
+ * far, when the view that just ended opened (null when it never opened) and now, in ms.
+ * Output: the next try's count, or null once `FOLLOW_TRIES` are spent and it says why. */
 export function followTry(tries: number, opened: number | null, now: number): number | null {
   assert(tries >= 0 && tries <= FOLLOW_TRIES, "follow tries out of bounds");
   assert(opened === null || opened <= now, "a view cannot open after now");
-  const counted = opened === null ? tries : 0;
+  const counted = opened !== null && now - opened >= FOLLOW_STEADY_MS ? 0 : tries;
   return counted < FOLLOW_TRIES ? counted + 1 : null;
 }
 
@@ -322,7 +329,8 @@ export function followTry(tries: number, opened: number | null, now: number): nu
 export function connectingLine(reason: string | null, tries: number): string {
   assert(tries >= 0 && tries <= FOLLOW_TRIES, "follow tries out of bounds");
   assert(reason === null || reason.length > 0, "a reason is plain words");
-  return "Connecting to the terminal...";
+  if (reason === null || tries === 0) return "Connecting to the terminal...";
+  return `Connecting to the terminal again, try ${tries} of ${FOLLOW_TRIES}. Last try: ${reason}`;
 }
 
 /** Reads one message from an attached terminal channel. Input: the message, raw bytes or a
