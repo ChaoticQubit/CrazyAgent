@@ -2512,3 +2512,23 @@ fn a_graph_mark_longer_than_what_is_read_back_is_never_written() {
     let long = "m".repeat(graph::MARK_BYTES_MAX as usize + 1);
     let _ = graph::write_mark(folder.path(), &long);
 }
+
+#[test]
+fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
+    let refused = crate::tools::Missing {
+        tool: "graphify".into(),
+        reason: crate::tools::Reason::Refused,
+        needs: None,
+        looked: Vec::new(),
+        refused: Some(Box::new(crate::tools::Refused {
+            file: std::path::PathBuf::from("/h/.local/share/uv/tools/graphifyy/bin/python3"),
+            why: crate::tools::Refusal::OthersCanChange(std::path::PathBuf::from(
+                "/h/.local/share/uv/python/cpython-3.13/bin/python3.13",
+            )),
+        })),
+    };
+    assert_ne!(refused.line(), graph::GRAPHIFY_MISSING);
+    assert_eq!(service::graphify_failure(&refused), refused.line());
+    let missing = crate::setup::Dependency::Graphify.not_found();
+    assert_eq!(service::graphify_failure(&missing), graph::GRAPHIFY_MISSING);
+}

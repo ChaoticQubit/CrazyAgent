@@ -589,6 +589,8 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
         panic!("graphify should be found and refused");
     };
     assert_eq!(missing.reason, crate::tools::Reason::Refused);
+    assert_eq!(installer.lookup_program("graphify"), Err(missing.clone()));
+    assert_eq!(installer.program("graphify"), None);
     let target = installer.fix_target(&missing).unwrap();
     assert!(target.recursive);
     assert_eq!(target.path, prefix.canonicalize().unwrap());
@@ -610,6 +612,11 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
     }
     assert_eq!(mode(&elsewhere), 0o777);
     assert!(crate::tools::resolve("graphify", &installer.places).is_ok());
+    assert_eq!(
+        installer.lookup_program("graphify").ok(),
+        installer.program("graphify")
+    );
+    assert!(installer.program("graphify").is_some());
     assert_eq!(
         installer.fix_permissions(Dependency::Graphify, &confirmed),
         Err(crate::tools::permission_fix::TOOL_FIX_NOT_NEEDED)
