@@ -241,9 +241,11 @@ test("only a failed mapping of an unfinished setup offers Retry, from the projec
   assert.equal(intake.projectFolder(stored({ folder: "/Users/mira/Projects/shop" })), "/Users/mira/Projects/shop");
 });
 
-test("missing items name the form fields, once each", () => {
-  assert.deepEqual(intake.missingLabels(["about", "tech_stack", "about", "build_commands"]), ["What is it about", "Tech stack", "build commands"]);
-  assert.deepEqual(intake.missingLabels([]), []);
+test("the missing line says in plain words what the mapping couldn't work out and what to do, once each (DEC-160)", () => {
+  assert.equal(intake.missingLine(["about"]), "CrazyAgent couldn't work out what the project is about from the project's files. Fill it in below.");
+  assert.equal(intake.missingLine(["about", "platforms", "about"]), "CrazyAgent couldn't work out what the project is about and the target platforms from the project's files. Fill them in below.");
+  assert.equal(intake.missingLine(["name", "tech_stack", "build_commands"]), "CrazyAgent couldn't work out the project name, the tech stack and build commands from the project's files. Fill them in below.");
+  assert.equal(intake.missingLine([]), null);
 });
 
 test("the review form starts from the mapping agent's draft and keeps the saved pool and team", () => {
@@ -866,9 +868,12 @@ test("the setup review shows the steps, the overview, missing items and a confir
   const draft = intake.onboardingDraft(view(), stored());
   const done = html(OnboardingReviewView, { ...base, view: ok(view({ missing: ["platforms", "about"] })), draft });
   assert.match(done, /<h2[^>]*>Plant shop<\/h2>/);
-  assert.match(done, /Not found: Target platforms, What is it about\./);
+  assert.match(done, /CrazyAgent couldn&#x27;t work out the target platforms and what the project is about from the project&#x27;s files\. Fill them in below\./);
+  assert.doesNotMatch(done, /Not found:/);
+  assert.match(done, /<div class="notice info"[^>]*>(?:(?!<\/div>)[\s\S])*CrazyAgent couldn&#x27;t work out/);
   assert.match(done, /id="ob-name"[^>]*value="Plant shop"/);
-  assert.match(done, /Target platforms[\s\S]*Missing/);
+  assert.match(done, /Target platforms[\s\S]*Fill in/);
+  assert.doesNotMatch(done, /> ?Missing</);
   assert.match(done, /Research is off for existing code/);
   assert.doesNotMatch(done, /<button[^>]*disabled=""[^>]*>Confirm and finish setup<\/button>/);
   assert.match(html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind: "failed", reason: "graphify isn't installed." }, mapping: { kind: "waiting" } })), draft }), /<span class="pj-small pj-error">graphify isn&#x27;t installed\.<\/span>/);
