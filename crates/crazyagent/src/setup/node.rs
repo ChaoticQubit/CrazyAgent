@@ -77,11 +77,10 @@ impl NodeRuntime {
 
 /// A Node the tool resolver finds whole in one folder: the `node` entry and the `npm` entry
 /// beside it, whose own interpreter resolves too, as found on the places before any link is
-/// followed, and the real file `node` runs, which a link to it must name.
+/// followed, so a link to `node` keeps following the owner's own link, such as Homebrew's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Usable {
     pub node: PathBuf,
-    pub real_node: PathBuf,
     pub npm: PathBuf,
 }
 
@@ -167,16 +166,15 @@ pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
     assert!(node.entry.is_absolute() && node.program.is_absolute());
     Some(Usable {
         node: node.entry,
-        real_node: node.program,
         npm: npm.entry,
     })
 }
 
-/// Makes the engine npm prefix private and ready for `npm install -g`: the prefix with its
-/// `bin` and `lib/node_modules` folders, each this user's alone, kept as they are when
-/// already so, and `bin/node` linked to the node the install runs with, so a Node script
-/// harness installed there finds it ([`crate::harnesses::node_prefix`]). Inputs: the prefix
-/// folder and the absolute node. Output: Ok, or `setup_store_unavailable`.
+/// Makes the engine npm prefix private and ready for `npm install -g`: its `bin` and
+/// `lib/node_modules` folders this user's alone, and `bin/node` linked to the install's node
+/// entry, kept as it is when the entry is that link itself, so a harness there finds it
+/// ([`crate::harnesses::node_prefix`]). Inputs: the prefix and the node entry. Output: Ok,
+/// `setup_install_failed` when `bin/node` reaches no file, or `setup_store_unavailable`.
 pub fn make_prefix(prefix: &Path, node: &Path) -> Result<(), InstallError> {
     assert!(node.is_absolute());
     for made in [prefix.join("bin"), prefix.join("lib").join("node_modules")] {
@@ -184,7 +182,17 @@ pub fn make_prefix(prefix: &Path, node: &Path) -> Result<(), InstallError> {
     }
     private_folder(prefix)?;
     private_folder(&prefix.join("lib"))?;
-    super::pinned::link(node, &prefix.join("bin").join("node"))
+    let linked = prefix.join("bin").join("node");
+    let real_folder = |path: &Path| path.parent().and_then(|folder| folder.canonicalize().ok());
+    let itself =
+        node.file_name() == linked.file_name() && real_folder(node) == real_folder(&linked);
+    if !itself {
+        super::pinned::link(node, &linked)?;
+    }
+    std::fs::metadata(&linked)
+        .is_ok_and(|metadata| metadata.is_file())
+        .then_some(())
+        .ok_or(InstallError("setup_install_failed"))
 }
 
 /// Installs this target's pinned Node into the engine root, as `install_pin` does. Input:

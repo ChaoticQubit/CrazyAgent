@@ -167,7 +167,7 @@ pub(crate) fn engine_npm_at(
     let prefix = named.canonicalize().unwrap_or(named);
     let node_bin = found.node.parent()?.to_path_buf();
     Some(super::NpmInstall {
-        node: found.real_node,
+        node: found.node,
         program: found.npm,
         search: vec![node_bin, prefix.join("bin")],
         prefix,
