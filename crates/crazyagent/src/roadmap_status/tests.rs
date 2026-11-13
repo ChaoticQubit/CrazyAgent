@@ -216,6 +216,7 @@ fn a_project_never_checked_reads_empty_with_the_default_setting() {
             refresh: Refresh::AfterLanding,
             source: None,
             problem: None,
+            waiting_for_account: false,
         }
     );
     let mut db = db;
@@ -1152,6 +1153,48 @@ fn delete_everything_removes_the_projects_roadmap_status_runs_and_no_other_proje
     }
 }
 
+/// Only the wait for an account is told as a wait (IW-L1, DEC-147 addendum): the status says
+/// so while the stored problem is the no-account line, until the pick drops it, and never
+/// for an ended real failure, neither while a Refresh is due nor while that check runs.
+#[test]
+fn only_the_no_account_problem_is_told_as_a_wait_and_an_ended_failure_never_is() {
+    let case = status_case(Refresh::AfterLanding);
+    let mut runs = FakeRuns::default();
+    assert!(!case.read(case.now).waiting_for_account);
+    refresh(&case.db, &case.project).unwrap();
+    assert_eq!(tick(&case.db, &mut runs, case.now).unwrap(), 1);
+    let due = case.now + RETRY_MS;
+    assert!(wait_for_account(&case.db, &case.project, runs.last(), NO_ACCOUNT, due).unwrap());
+    let waiting = case.read(case.now + 1);
+    assert!(waiting.waiting_for_account && waiting.stale && !waiting.running);
+
+    assert_eq!(tick(&case.db, &mut runs, due).unwrap(), 1);
+    assert!(case.read(due).waiting_for_account);
+    assert!(account_found(&case.db, &case.project, runs.last()).unwrap());
+    assert!(!case.read(due + 1).waiting_for_account);
+    assert!(
+        finish(
+            &case.db,
+            &case.project,
+            runs.last(),
+            Err(UNFINISHED),
+            due + 2
+        )
+        .unwrap()
+    );
+    let ended = case.read(due + 3);
+    assert_eq!(ended.problem.as_deref(), Some(UNFINISHED));
+    assert!(!ended.waiting_for_account && !ended.running);
+
+    refresh(&case.db, &case.project).unwrap();
+    let queued = case.read(due + 4);
+    assert!(queued.stale && !queued.running && !queued.waiting_for_account);
+    assert_eq!(tick(&case.db, &mut runs, due + 4).unwrap(), 1);
+    let checking = case.read(due + 5);
+    assert_eq!(checking.problem.as_deref(), Some(UNFINISHED));
+    assert!(checking.running && !checking.waiting_for_account);
+}
+
 #[test]
 fn a_check_that_got_an_account_drops_the_no_account_problem_and_keeps_any_other() {
     let case = status_case(Refresh::AfterLanding);
@@ -1186,4 +1229,25 @@ fn a_check_that_got_an_account_drops_the_no_account_problem_and_keeps_any_other(
         "another problem stays until the check ends"
     );
     assert_eq!(case.read(due + 4).problem.as_deref(), Some(UNFINISHED));
+}
+
+/// A roadmap status reply from an engine before IW-L1 has no `waiting_for_account` and
+/// still reads, as no wait for an account, so a newer client keeps its roadmap status
+/// during update skew (IW-L1 r1, DEC-147 addendum).
+#[test]
+fn a_roadmap_status_from_an_engine_without_the_wait_flag_reads_as_no_wait() {
+    let case = status_case(Refresh::AfterLanding);
+    let mut status = case.read(case.now);
+    status.waiting_for_account = true;
+    let mut wire = serde_json::to_value(&status).unwrap();
+    let fields = wire.as_object_mut().unwrap();
+    assert_eq!(fields.remove("waiting_for_account"), Some(true.into()));
+    let older: RoadmapStatus = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        older,
+        RoadmapStatus {
+            waiting_for_account: false,
+            ..status
+        }
+    );
 }

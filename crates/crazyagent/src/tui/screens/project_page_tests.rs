@@ -5196,6 +5196,7 @@ mod overview_tabs {
             stale: false,
             checked_ms: None,
             failure: None,
+            waiting_for_account: false,
             refresh: Refresh::AfterLanding,
             apply: Apply::AlwaysAsk,
             needs_home: false,
@@ -5347,6 +5348,7 @@ mod overview_tabs {
         for (stale, running) in [(true, false), (false, true)] {
             let mut overview = empty();
             overview.failure = Some(reason.into());
+            overview.waiting_for_account = true;
             overview.stale = stale;
             overview.running = running;
             let shown = flat(&mut page_with_overview(overview));
@@ -5355,11 +5357,31 @@ mod overview_tabs {
         }
         let mut ended = empty();
         ended.failure = Some(reason.into());
+        ended.waiting_for_account = true;
         let shown = flat(&mut page_with_overview(ended));
         assert!(
             shown.contains(&format!("Couldn't refresh the tabs. {reason}")),
             "{shown}"
         );
+    }
+
+    /// An ended real failure stays a failed refresh while the next run waits to start and
+    /// while it writes (IW-L1, DEC-147 addendum): only the engine's wait for an account is
+    /// shown as a wait, in the same words as the desktop app.
+    #[test]
+    fn an_ended_failure_stays_a_failed_refresh_while_a_new_run_waits_or_writes() {
+        let reason = crate::project_overview::UNFINISHED;
+        for (stale, running) in [(true, false), (false, true), (true, true)] {
+            let mut overview = empty();
+            overview.failure = Some(reason.into());
+            overview.stale = stale;
+            overview.running = running;
+            let shown = flat(&mut page_with_overview(overview));
+            assert!(
+                shown.contains(&format!("Couldn't refresh the tabs. {reason}")),
+                "stale {stale} running {running}: {shown}"
+            );
+        }
     }
 
     #[test]

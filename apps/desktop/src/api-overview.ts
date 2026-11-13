@@ -27,8 +27,9 @@ export type OverviewRefresh = "after_landing" | "refresh_only" | "off";
 export type OverviewApply = "always_ask" | "when_unedited";
 
 /** Everything the Overview tabs show for one project. `needs_home` is true for a project kept
- * outside the CrazyAgent folder, whose tabs cannot be written until it is moved there. */
-export interface ProjectOverview { readme: Readme | null; tabs: TabState[]; competitors: CompetitorState; running: boolean; stale: boolean; checked_ms: number | null; failure: string | null; refresh: OverviewRefresh; apply: OverviewApply; needs_home: boolean }
+ * outside the CrazyAgent folder, whose tabs cannot be written until it is moved there, and
+ * `waiting_for_account` while `failure` is the engine's wait for an account. */
+export interface ProjectOverview { readme: Readme | null; tabs: TabState[]; competitors: CompetitorState; running: boolean; stale: boolean; checked_ms: number | null; failure: string | null; waiting_for_account: boolean; refresh: OverviewRefresh; apply: OverviewApply; needs_home: boolean }
 
 /** How often the tabs are read again while a run is going or a change set landed, in milliseconds. */
 export const OVERVIEW_POLL_MS = 5_000;
