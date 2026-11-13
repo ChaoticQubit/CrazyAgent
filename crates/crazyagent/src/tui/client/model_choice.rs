@@ -115,10 +115,12 @@ async fn run(
 ) -> Result<ModelChoiceReply, EngineError> {
     match query {
         ModelChoiceQuery::Read {
-            harness, project, ..
+            harness,
+            project,
+            fresh,
         } => {
             let models = controller
-                .model_choice_values(harness, project.clone(), true)
+                .model_choice_values(harness, project.clone(), *fresh)
                 .await?;
             let rules = match project {
                 None => Some(controller.model_choice_rules().await?),

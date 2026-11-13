@@ -427,7 +427,7 @@ impl TeamView {
         Some(ModelChoiceQuery::Read {
             harness,
             project: Some(self.project.clone()),
-            fresh: true,
+            fresh: false,
         })
     }
 
