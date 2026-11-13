@@ -280,7 +280,6 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await keys.key("P", PRIMARY);
         await ide.until("quick open", ide.rows);
         await keys.text("notes.md");
-        await pause(SETTLE_MS);
         await ide.pick("notes.md", FOLDER);
         await ide.until("notes.md open in an editor", `(() => [...document.querySelectorAll(".tabs-container .tab.active")].some((tab) => (tab.getAttribute("aria-label") ?? tab.textContent).includes("notes.md")))()`);
         await ide.until("the editor focused", `document.activeElement?.closest(".monaco-editor") !== null`);
@@ -434,7 +433,6 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await t.test("the project's terminal reads git but cannot stage or commit", async () => {
         await keys.key("Escape");
         await ide.run("Terminal: Create New Terminal");
-        await pause(SETTLE_MS);
         await ide.pick(FOLDER);
         await ide.until("the project's terminal in the panel", `document.querySelectorAll(".part.panel .xterm").length > 0`);
         await me.capture("sandboxed-terminal");

@@ -118,7 +118,9 @@ export function input({ send }) {
 }
 
 /** The workbench as the owner works it: waiting for what it shows, the F1 palette and its
- * rows, quick input rows, and the Source Control view's commit box and change groups.
+ * rows, quick input rows, and the Source Control view's commit box and change groups. A pick
+ * waits, within STEP_MS, until its row stands at the same place on two reads, as Quick open
+ * may still be searching when the owner's query is typed.
  * Inputs: the page, its input helpers and the owner helpers. Output: the helpers. */
 export function workbench(page, keys, me) {
   const until = async (what, expression, ms = STEP_MS) => {
@@ -164,12 +166,16 @@ export function workbench(page, keys, me) {
     return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   })()`);
   const pick = async (starts, has = "") => {
-    const box = await rowAt(starts, has);
-    if (!box) {
-      await me.capture(`no-row-${starts.replace(/[^a-z0-9]+/gi, "-").slice(0, 30)}`);
-      assert.fail(`no "${starts}" row; the list shows: ${JSON.stringify(await page.evaluate(rows))}`);
+    let last = null;
+    for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
+      const box = await rowAt(starts, has);
+      if (box && last && box.x === last.x && box.y === last.y) return keys.click(box);
+      last = box;
+      if (Date.now() > deadline) {
+        await me.capture(`no-row-${starts.replace(/[^a-z0-9]+/gi, "-").slice(0, 30)}`);
+        assert.fail(`no "${starts}" row; the list shows: ${JSON.stringify(await page.evaluate(rows))}`);
+      }
     }
-    await keys.click(box);
   };
   const run = async (command) => {
     await palette(command);
