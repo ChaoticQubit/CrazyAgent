@@ -95,6 +95,26 @@ function realProfile() {
   return { socket: join(root, "engine.sock"), database: join(root, "engine.db"), project, bridge: null, turnMs: REAL_TURN_MS };
 }
 
+/** Lists what the file system and git hold for an agent worktree the engine named (row M):
+ * the folder, its .git link, the repository's agent worktree records and folders, the listed
+ * worktrees under the state folder and the git version. Input: the repository and the
+ * folder. Output: the lines. */
+function worktreeFacts(repo, folder) {
+  const read = (path) => (existsSync(path) ? readFileSync(path, "utf8").trim() : "missing");
+  const names = (path) => (existsSync(path) ? readdirSync(path).filter((name) => name.startsWith("agent-")) : []);
+  const records = join(repo, ".git", "worktrees");
+  const listed = git(repo, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree "));
+  return [
+    `folder ${folder} exists ${existsSync(folder)} realpath ${existsSync(folder) ? realpathSync(folder) : "-"}`,
+    `dotgit ${read(join(folder, ".git"))}`,
+    ...names(records).map((name) => `record ${name} gitdir ${read(join(records, name, "gitdir"))} locked ${existsSync(join(records, name, "locked"))}`),
+    `state folders ${names(dirname(folder)).join(",") || "none"}`,
+    `listed ${listed.length} worktrees`,
+    ...listed.filter((line) => line.includes(".crazyagent") || line.includes("agent-")),
+    `smoke git ${git(repo, "--version").trim()}`,
+  ];
+}
+
 /** Runs git in a folder and stops the run when it fails.
  * Input: the folder and the git arguments. Output: git's standard output. */
 function git(cwd, ...args) {
@@ -801,7 +821,14 @@ async function main() {
       team.agents.push(agent.id);
       if (!agent.worktree) throw new Refused("team_agent_without_worktree", launched(agent, task));
       const folder = join(repo, agent.worktree);
-      const listed = existsSync(folder) && git(repo, "worktree", "list", "--porcelain").split("\n").some((line) => line === `worktree ${realpathSync(folder)}`);
+      const isListed = () => existsSync(folder) && git(repo, "worktree", "list", "--porcelain").split("\n").some((line) => line === `worktree ${realpathSync(folder)}`);
+      const listed = isListed();
+      const atCheck = worktreeFacts(repo, folder);
+      if (!listed) await pause(2000);
+      const later = listed || isListed();
+      const facts = [`status ${agent.status} listed at check ${listed}, 2 s later ${later}`, ...atCheck.map((line) => `at check: ${line}`), ...(listed ? [] : worktreeFacts(repo, folder).map((line) => `2 s later: ${line}`))];
+      writeFileSync(join(evidence, "6b-worktree-facts.txt"), `${facts.join("\n")}\n`, { mode: 0o600 });
+      console.log(facts.map((line) => `6b-facts ${line}`).join("\n"));
       if (!listed) throw new Refused("team_worktree_not_added", agent.worktree);
       return `worktree ${agent.worktree}; launch ${launched(agent, task)}`;
     });
