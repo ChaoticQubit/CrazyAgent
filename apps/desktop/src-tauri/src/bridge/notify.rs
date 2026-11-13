@@ -501,4 +501,63 @@ mod tests {
         assert_eq!(unlisted.code, "questions_outcome_unknown");
         assert_eq!(unlisted.cause.as_deref(), Some("questions_torn"));
     }
+
+    fn job(state: crazyagent::projects_home::job::JobState) -> JobView {
+        JobView {
+            id: crazyagent::protocol::RequestId::new("add-1").unwrap(),
+            source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
+            mode: crazyagent::projects_home::AddMode::Move,
+            overrides: Vec::new(),
+            stopping: false,
+            state,
+        }
+    }
+
+    /// An ended intake job's notice names the folder and says what happened in plain words,
+    /// never the engine code; a running job has none.
+    #[test]
+    fn an_ended_intake_job_notice_names_the_folder_and_what_happened() {
+        use crazyagent::projects_home::job::{JobState, Phase};
+        let said = |state| intake_notice(&job(state)).map(|notice| (notice.title, notice.body));
+        let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
+        assert_eq!(said(JobState::Done), pair("shop is in your projects folder", "Set it up from Home."));
+        assert_eq!(
+            said(JobState::Cancelled { phase: Phase::Copying }),
+            pair("Adding shop stopped", "Nothing was moved or copied.")
+        );
+        let failed = said(JobState::Failed { code: "home_copy_failed".into(), phase: Phase::Copying });
+        assert_eq!(failed, pair("Adding shop failed", "Open Home in CrazyAgent to see why."));
+        let landed = said(JobState::Failed {
+            code: "home_move_source_left".into(),
+            phase: Phase::Clearing,
+        });
+        assert_eq!(
+            landed,
+            pair("shop is in your projects folder", "Part of its old place could not be removed. Check it on Home.")
+        );
+        let asked = said(JobState::NeedsAnswer { code: "home_move_worktrees".into() });
+        assert_eq!(asked, pair("shop needs your answer", "Open Home in CrazyAgent to decide before it is moved."));
+        assert_eq!(said(JobState::Clearing), None);
+        assert_eq!(said(JobState::Copying { copied: 3, checked: 0 }), None);
+    }
+
+    /// A job's notification is claimed once, shares the bound with questions, and a click on
+    /// it brings the window front without naming a project to open.
+    #[test]
+    fn an_intake_job_is_notified_once_and_its_click_opens_no_project() {
+        let notices = Notices::default();
+        let first = notices.claim_job("add-1").unwrap().unwrap();
+        assert_eq!(notices.claim_job("add-1").unwrap(), None);
+        let question = notices.claim(7, "p-1").unwrap().unwrap();
+        assert_ne!(first, question);
+        assert!(notices.clicked(first));
+        assert_eq!(notices.take(), None);
+        notices.release_job("add-1", first);
+        assert!(notices.claim_job("add-1").unwrap().is_some());
+        for job in 0..SHOWN_MAX {
+            let _ = notices.claim_job(&format!("job-{job}"));
+        }
+        assert_eq!(notices.claim_job("one-more").unwrap_err().code, "notifications_full");
+        assert_eq!(notices.claim(8, "p-1").unwrap_err().code, "notifications_full");
+    }
 }
