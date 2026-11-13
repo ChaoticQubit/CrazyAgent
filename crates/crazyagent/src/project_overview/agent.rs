@@ -150,6 +150,7 @@ fn answer(
         account,
         wall_time: AGENT_TIME,
         output_tokens: Some(OUTPUT_TOKENS),
+        stream: false,
     };
     match runner.run_read_only(&run, &|| runner.is_stopping()) {
         Ok(ReadOnlyEnding::Answered(text)) => Ok((text, with_competitors)),

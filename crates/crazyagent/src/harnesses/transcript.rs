@@ -106,7 +106,7 @@ pub enum TranscriptEvent {
     Interrupted,
     TurnFinished { success: bool },
     TurnError { rate_limited: bool },
-    ModelRefused,
+    ModelRefusalSaid,
     BackgroundStarted { id: String },
     BackgroundEnded { id: String },
 }
@@ -130,6 +130,7 @@ pub struct TranscriptReader {
     dropped: bool,
     consumed: u64,
     codex_calls: CodexExecCalls,
+    codex_failed: bool,
 }
 
 impl TranscriptReader {
@@ -182,6 +183,7 @@ impl TranscriptReader {
             dropped: false,
             consumed: 0,
             codex_calls: CodexExecCalls::default(),
+            codex_failed: false,
         }
     }
 
@@ -348,7 +350,7 @@ impl TranscriptReader {
             let facts = match self.source {
                 Transcript::CodexRollouts { .. } => {
                     let exec = self.codex_calls.sees(&value);
-                    codex_facts(&value, exec)
+                    self.codex_line(&value, exec)
                 }
                 Transcript::ClaudeSession { .. } => self.claude_line(&value),
                 Transcript::Unavailable => Vec::new(),
@@ -378,6 +380,28 @@ impl TranscriptReader {
         assert!(self.scanned <= self.pending.len());
         assert!(events.len() >= EVENTS_PER_READ_MAX || self.scanned == self.pending.len());
         Ok(events)
+    }
+
+    /// Reads one Codex rollout line with what the reader knows: an `error` line that is no
+    /// rate limit ends its turn, so the `task_complete` after it finishes the turn failed,
+    /// never as an empty success (Q6-M1); a `stream_error` is a retry notice and fails
+    /// nothing. Takes the line and whether it is an exec call. Returns its facts in order.
+    fn codex_line(&mut self, value: &Value, exec: bool) -> Vec<TranscriptEvent> {
+        let payload = &value["payload"];
+        if value["type"] == "event_msg" && payload["type"] == "error" {
+            self.codex_failed |= !rate_limited(payload["message"].as_str().unwrap_or_default());
+        }
+        let mut facts = codex_facts(value, exec);
+        for fact in &mut facts {
+            match fact {
+                TranscriptEvent::TurnStarted => self.codex_failed = false,
+                TranscriptEvent::TurnFinished { success } => {
+                    *success &= !std::mem::take(&mut self.codex_failed);
+                }
+                _ => {}
+            }
+        }
+        facts
     }
 
     /// Reads one Claude Code line with what the reader knows. The model's first line after
@@ -631,6 +655,18 @@ fn line_text(text: &str) -> TranscriptEvent {
     TranscriptEvent::Text { text }
 }
 
+/// Says a Codex error refused the turn's model when its `codex_error_info` is
+/// `model_not_found`, as a rollout error line or a `task_complete` error carries it. The
+/// agent can write its rollout, so the fact is only shown, never a mark (Q-6). Takes the
+/// error object. Returns `ModelRefusalSaid` for a refusal, else nothing.
+fn codex_refusal_said(error: &Value) -> Vec<TranscriptEvent> {
+    if error["codex_error_info"] == CODEX_MODEL_REFUSED {
+        vec![TranscriptEvent::ModelRefusalSaid]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The facts of one Codex rollout line. Takes the line and whether it is the output of an
 /// exec tool call ([`CodexExecCalls::sees`]), the only output whose header can name a
 /// command left running. Returns the facts, none for a line that says nothing the session
@@ -639,6 +675,22 @@ fn codex_facts(value: &Value, exec: bool) -> Vec<TranscriptEvent> {
     let payload = &value["payload"];
     match (value["type"].as_str(), payload["type"].as_str()) {
         (Some("event_msg"), Some("task_started")) => vec![TranscriptEvent::TurnStarted],
+        (Some("event_msg"), Some("task_complete")) if payload["error"].is_object() => {
+            let error = &payload["error"];
+            let limit = matches!(
+                error["codex_error_info"].as_str(),
+                Some("usage_limit_exceeded" | "rate_limit_exceeded")
+            );
+            let mut facts = codex_refusal_said(error);
+            facts.extend([
+                TranscriptEvent::TurnError {
+                    rate_limited: limit
+                        || rate_limited(error["message"].as_str().unwrap_or_default()),
+                },
+                TranscriptEvent::TurnFinished { success: false },
+            ]);
+            facts
+        }
         (Some("event_msg"), Some("task_complete")) => {
             vec![TranscriptEvent::TurnFinished { success: true }]
         }
@@ -651,14 +703,11 @@ fn codex_facts(value: &Value, exec: bool) -> Vec<TranscriptEvent> {
             facts
         }
         (Some("event_msg"), Some("error" | "stream_error")) => {
-            let error = TranscriptEvent::TurnError {
+            let mut facts = codex_refusal_said(payload);
+            facts.push(TranscriptEvent::TurnError {
                 rate_limited: rate_limited(payload["message"].as_str().unwrap_or_default()),
-            };
-            if payload["codex_error_info"] == CODEX_MODEL_REFUSED {
-                vec![TranscriptEvent::ModelRefused, error]
-            } else {
-                vec![error]
-            }
+            });
+            facts
         }
         (Some("response_item"), Some("message")) if payload["role"] == "assistant" => {
             payload["content"]
@@ -917,7 +966,7 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
             let code = value["error"].as_str().unwrap_or_default();
             let mut facts = Vec::new();
             if code == CLAUDE_MODEL_REFUSED {
-                facts.push(TranscriptEvent::ModelRefused);
+                facts.push(TranscriptEvent::ModelRefusalSaid);
             }
             facts.extend([
                 TranscriptEvent::TurnError {

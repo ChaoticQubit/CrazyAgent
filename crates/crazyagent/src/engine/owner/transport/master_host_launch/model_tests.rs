@@ -135,28 +135,39 @@ fn a_master_turn_reads_the_owner_s_master_model_not_the_agent_default() {
 }
 
 /// A master model the master's account refused falls back by the owner's rule on that
-/// account only: Notice runs the account's own model and tells the owner once, Silent
-/// tells no one, Stop fails the turn with `master_model_refused`, and once the refusal ends
-/// and the model runs a new refusal is told again (DEC-150 M-10).
+/// account only, for Codex and Claude Code alike: Notice runs the account's own model and
+/// tells the owner once, Silent tells no one, Stop fails the turn with
+/// `master_model_refused`, and once the refusal ends a new refusal is told again (DEC-150 M-10).
 #[test]
 fn a_refused_master_model_falls_back_by_the_owner_s_rule_on_that_account_only() {
+    for harness in ["codex", "claude-code"] {
+        refused_master_model_falls_back(harness);
+    }
+}
+
+/// Runs the owner-host fallback rule row for one harness on a fresh engine database.
+/// Input: the harness. Panics with the harness named when a rule misbehaves.
+fn refused_master_model_falls_back(harness: &str) {
     use crate::model_choice::Slot;
     use crate::model_choice::rules::{FallbackRule, Rule, RuleWritten, rules, set_rule};
     use crate::team::model_pick::{MODEL_REFUSAL_MS, refuse};
     let (_tmp, base, db, project) = engine();
-    let harness = "codex";
     let model = crate::model_choice::catalog(harness)[0].clone();
     set_slot(&db, harness, Slot::Master, &model);
-    let (refusing, other) = (reference("codex-a"), reference("codex-b"));
+    let (refusing, other) = (
+        reference(&format!("{harness}-a")),
+        reference(&format!("{harness}-b")),
+    );
     let executable = base.join("no-such-executable");
+    let subject = format!("model_fallback:alpha:{harness}:%");
     let choose = |connection: &CredentialRef, now: i64| {
         master_choice(&db, harness, &executable, &project, connection, now)
             .map(|(_, chosen)| chosen)
     };
     let told = || -> i64 {
         db.query_row(
-            "SELECT COUNT(*) FROM owner_notices WHERE kind='pool_failover' AND subject LIKE 'model_fallback:alpha:codex:%'",
-            [],
+            "SELECT COUNT(*) FROM owner_notices WHERE kind='pool_failover' AND subject LIKE ?1",
+            [&subject],
             |row| row.get(0),
         )
         .unwrap()
@@ -172,54 +183,78 @@ fn a_refused_master_model_falls_back_by_the_owner_s_rule_on_that_account_only() 
     let fallback = |rule: FallbackRule| {
         let version = rules(&db).unwrap().fallback_version;
         let written = set_rule(&db, Rule::Fallback(rule), version).unwrap();
-        assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+        assert!(
+            matches!(written, RuleWritten::Saved { .. }),
+            "{harness}: {written:?}"
+        );
     };
-    assert_eq!(choose(&refusing, 1_000).unwrap(), Some(model.clone()));
+    assert_eq!(
+        rules(&db).unwrap().fallback,
+        FallbackRule::Notice,
+        "{harness}"
+    );
+    assert_eq!(
+        choose(&refusing, 1_000).unwrap(),
+        Some(model.clone()),
+        "{harness}"
+    );
     refuse(&db, &project, &refusing, &model, 1_000).unwrap();
-    assert_eq!(choose(&other, 1_001).unwrap(), Some(model.clone()));
-    assert_eq!(choose(&refusing, 1_002).unwrap(), None);
-    assert_eq!(told(), 1, "Notice tells the owner once");
+    assert_eq!(
+        choose(&other, 1_001).unwrap(),
+        Some(model.clone()),
+        "{harness}"
+    );
+    assert_eq!(choose(&refusing, 1_002).unwrap(), None, "{harness}");
+    assert_eq!(told(), 1, "{harness}: Notice tells the owner once");
     let line: String = db
         .query_row(
-            "SELECT text FROM owner_notices WHERE subject LIKE 'model_fallback:alpha:codex:%'",
-            [],
+            "SELECT text FROM owner_notices WHERE subject LIKE ?1",
+            [&subject],
             |row| row.get(0),
         )
         .unwrap();
     assert!(
         line.contains(&model) && line.contains("master runs on"),
-        "{line}"
+        "{harness}: {line}"
     );
     assert!(
         !line.contains("No account in this project's pool"),
-        "{line}"
+        "{harness}: {line}"
     );
     assert_eq!(
         team_lines(),
         0,
-        "an owner-host fallback leaves no team message that would wake a team master"
+        "{harness}: an owner-host fallback leaves no team message that would wake a team master"
     );
-    assert_eq!(choose(&refusing, 1_003).unwrap(), None);
-    assert_eq!(told(), 1, "a held fallback is told once");
+    assert_eq!(choose(&refusing, 1_003).unwrap(), None, "{harness}");
+    assert_eq!(told(), 1, "{harness}: a held fallback is told once");
     fallback(FallbackRule::Silent);
-    assert_eq!(choose(&refusing, 1_004).unwrap(), None);
-    assert_eq!(told(), 1, "Silent tells no one");
+    assert_eq!(choose(&refusing, 1_004).unwrap(), None, "{harness}");
+    assert_eq!(told(), 1, "{harness}: Silent tells no one");
     fallback(FallbackRule::Stop);
     assert_eq!(
         choose(&refusing, 1_005).unwrap_err().0,
         MASTER_MODEL_REFUSED,
-        "Stop fails the turn"
+        "{harness}: Stop fails the turn"
     );
-    assert_eq!(choose(&other, 1_006).unwrap(), Some(model.clone()));
+    assert_eq!(
+        choose(&other, 1_006).unwrap(),
+        Some(model.clone()),
+        "{harness}"
+    );
     fallback(FallbackRule::Notice);
     let ended = 1_000 + MODEL_REFUSAL_MS;
-    assert_eq!(choose(&refusing, ended).unwrap(), Some(model.clone()));
+    assert_eq!(
+        choose(&refusing, ended).unwrap(),
+        Some(model.clone()),
+        "{harness}"
+    );
     refuse(&db, &project, &refusing, &model, ended).unwrap();
-    assert_eq!(choose(&refusing, ended + 1).unwrap(), None);
+    assert_eq!(choose(&refusing, ended + 1).unwrap(), None, "{harness}");
     assert_eq!(
         told(),
         2,
-        "a refusal after the model ran again is told again"
+        "{harness}: a refusal after the model ran again is told again"
     );
-    assert_eq!(team_lines(), 0);
+    assert_eq!(team_lines(), 0, "{harness}");
 }

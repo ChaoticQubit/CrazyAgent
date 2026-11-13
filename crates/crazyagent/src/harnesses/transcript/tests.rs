@@ -1749,12 +1749,13 @@ fn injected_instructions_and_summaries_are_never_typed_and_keep_their_own_roles(
     );
 }
 
-/// A model the harness says does not exist, or the account may not use, is told apart from
-/// any other turn error (DEC-150 F8), by the code each harness writes and never by text:
-/// Claude Code's API error line with `model_not_found`, and a Codex rollout error whose
-/// `codex_error_info` is `model_not_found`. Any other code is a plain turn error.
+/// A refusal code in a transcript is a failed turn whose refusal is only said (Q-6): the
+/// agent can write its own transcript, so Claude Code's API error line with
+/// `model_not_found` and a Codex rollout error whose `codex_error_info` is `model_not_found`
+/// give `ModelRefusalSaid` for the owner's line, never a mark; text that only names the code
+/// says nothing. A refusal is marked only from the harness stream the engine reads (`launch`).
 #[test]
-fn a_model_refusal_is_told_from_its_harness_code_alone() {
+fn a_refusal_code_written_in_a_transcript_never_marks_the_model_refused() {
     let case = Case::new();
     let (file, mut reader) = case.claude();
     append(
@@ -1774,7 +1775,7 @@ fn a_model_refusal_is_told_from_its_harness_code_alone() {
         reader.read().unwrap(),
         vec![
             TranscriptEvent::TurnStarted,
-            TranscriptEvent::ModelRefused,
+            TranscriptEvent::ModelRefusalSaid,
             TranscriptEvent::TurnError {
                 rate_limited: false
             },
@@ -1790,10 +1791,10 @@ fn a_model_refusal_is_told_from_its_harness_code_alone() {
     assert_eq!(
         codex_facts(&refused, false),
         vec![
-            TranscriptEvent::ModelRefused,
+            TranscriptEvent::ModelRefusalSaid,
             TranscriptEvent::TurnError {
                 rate_limited: false
-            },
+            }
         ]
     );
     let other = serde_json::json!({"type":"event_msg","payload":{"type":"error","message":"model_not_found","codex_error_info":"bad_request"}});
@@ -1802,5 +1803,77 @@ fn a_model_refusal_is_told_from_its_harness_code_alone() {
         vec![TranscriptEvent::TurnError {
             rate_limited: false
         }]
+    );
+}
+
+/// Q6-M1: a Codex turn that ended on an error is a failed turn, never an empty success, so
+/// its task is not done with no reply. Codex 0.167.1 writes no `error` line to its rollout,
+/// only a `task_complete` carrying the turn's error; an older rollout's error line that was
+/// no rate limit fails the `task_complete` after it. A `stream_error` is a retry notice and
+/// fails nothing, a rate-limited error line keeps its own path, a `task_complete` whose
+/// error is a usage or rate limit by its `codex_error_info` ends rate limited, and the next
+/// turn starts clean.
+#[test]
+fn a_codex_turn_that_ended_on_an_error_is_failed_never_an_empty_success() {
+    let case = Case::new();
+    let sessions = case.path().join("sessions");
+    let mut reader = TranscriptReader::new(
+        Transcript::CodexRollouts {
+            sessions: sessions.clone(),
+        },
+        &case.work(),
+        SystemTime::now(),
+    );
+    rollout(
+        &sessions,
+        "2026/11/12",
+        "rollout-refused.jsonl",
+        &case.work(),
+        &[
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"1","last_agent_message":null,"error":{"message":"The model gpt-x does not exist or you do not have access to it.","codex_error_info":"model_not_found"}}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"error","message":"The model gpt-x does not exist or you do not have access to it.","codex_error_info":"model_not_found"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"2","last_agent_message":null}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"stream_error","message":"Reconnecting... 1/5"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"3","last_agent_message":"Done"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit."}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"4","last_agent_message":null}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"5","last_agent_message":null}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"6","last_agent_message":null,"error":{"message":"Try again at 9:00 PM.","codex_error_info":"usage_limit_exceeded"}}}"#,
+        ],
+    );
+    let refused = TranscriptEvent::TurnError {
+        rate_limited: false,
+    };
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::ModelRefusalSaid,
+            refused.clone(),
+            TranscriptEvent::TurnFinished { success: false },
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::ModelRefusalSaid,
+            refused.clone(),
+            TranscriptEvent::TurnFinished { success: false },
+            TranscriptEvent::TurnStarted,
+            refused,
+            text("Done\n"),
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::TurnError { rate_limited: true },
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::TurnError { rate_limited: true },
+            TranscriptEvent::TurnFinished { success: false },
+        ]
     );
 }

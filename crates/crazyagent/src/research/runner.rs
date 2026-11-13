@@ -90,14 +90,12 @@ const PANE_PREFIX: &str = "research-";
 const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
 /// The variable that caps the output tokens of each Claude Code request.
 const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
-const CLAUDE_ARGUMENTS: [&str; 6] = [
-    "--print",
-    "--output-format",
-    "text",
-    "--strict-mcp-config",
-    "--setting-sources",
-    "",
-];
+const CLAUDE_ARGUMENTS: [&str; 4] = ["--print", "--strict-mcp-config", "--setting-sources", ""];
+/// The output a Claude Code run writes by default: the answer as plain text.
+const CLAUDE_TEXT: [&str; 2] = ["--output-format", "text"];
+/// The output a streamed Claude Code run writes: stream-json, which Claude Code's print mode
+/// writes only with its verbose events, carrying the harness's own error fields (MG-M1).
+const CLAUDE_STREAM: [&str; 3] = ["--output-format", "stream-json", "--verbose"];
 /// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
 const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
 
@@ -1187,7 +1185,7 @@ impl ResearchRunner {
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account)?;
+                claude_arguments(&mut launch, &home, &tmp, job.tools, None, false, account)?;
                 launch.args(installed.arguments());
                 (agent.join("output.md"), "output.md")
             }
@@ -1589,9 +1587,10 @@ impl ResearchRunner {
 /// One agent run outside the research queue that may only read `folder`,
 /// such as onboarding's mapping agent: `name` names its agent state and
 /// sandbox profile, `agent` and `project` name whose usage its tokens count
-/// as, `prompt` goes to it on stdin, `wall_time` bounds it and
+/// as, `prompt` goes to it on stdin, `wall_time` bounds it,
 /// `output_tokens` caps each Claude Code request (`None` for Claude Code's own
-/// limit; a Codex run has no such cap).
+/// limit; a Codex run has no such cap) and `stream` has Claude Code write
+/// stream-json, its answer read from the result line (`claude_result`).
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
     #[cfg(unix)]
@@ -1606,6 +1605,8 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub wall_time: Duration,
     #[cfg(unix)]
     pub output_tokens: Option<u32>,
+    #[cfg(unix)]
+    pub stream: bool,
 }
 
 /// How a read-only agent run ended: its last message, a plain failure, out
@@ -1788,7 +1789,15 @@ impl ResearchRunner {
                 (output, read_only_stdout(harness))
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
+                claude_arguments(
+                    &mut command,
+                    &home,
+                    &tmp,
+                    false,
+                    run.output_tokens,
+                    run.stream,
+                    account,
+                )?;
                 (
                     agent.join(read_only_stdout(harness)),
                     read_only_stdout(harness),
@@ -1876,7 +1885,10 @@ impl ResearchRunner {
             return Ok(ending);
         }
         let answer = read_bounded(&agent, &output, self.limits.report_bytes_max)
-            .map(|text| text.trim().to_owned())
+            .map(|text| match (run.stream, harness) {
+                (true, ResearchHarness::ClaudeCode) => claude_result(&text).unwrap_or_default(),
+                _ => text.trim().to_owned(),
+            })
             .unwrap_or_default();
         Ok(if answer.is_empty() {
             ReadOnlyEnding::Failed("Agent returned no answer".into())
@@ -2309,14 +2321,16 @@ fn codex_arguments(
 /// either a managed config directory or a keyless Anthropic endpoint in bare
 /// mode that never reads the keychain.
 /// Takes the command, the agent home and temp dir, the tools switch, the most
-/// output tokens of each request (`None` for Claude Code's own limit) and the
-/// account. Returns an error for an account that does not fit Claude Code.
+/// output tokens of each request (`None` for Claude Code's own limit), whether it
+/// writes stream-json (`CLAUDE_STREAM`) and the account. Returns an error for an
+/// account that does not fit Claude Code.
 fn claude_arguments(
     command: &mut Command,
     home: &Path,
     tmp: &Path,
     tools: bool,
     output_tokens: Option<u32>,
+    stream: bool,
     account: &ResearchAccount,
 ) -> Result<(), RunError> {
     let key_file = match account {
@@ -2338,6 +2352,11 @@ fn claude_arguments(
     };
     command
         .args(CLAUDE_ARGUMENTS)
+        .args(if stream {
+            &CLAUDE_STREAM[..]
+        } else {
+            &CLAUDE_TEXT[..]
+        })
         .arg("--settings")
         .arg(settings)
         .env("CLAUDE_CONFIG_DIR", home)
@@ -3430,6 +3449,23 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Reads a streamed Claude Code run's answer (MG-M1): the text of its last result line when
+/// that result is a success the harness did not mark an error, trimmed. Input: the run's
+/// stream-json output. Output: the answer, or none for an error, no result line or no text.
+#[cfg(unix)]
+fn claude_result(output: &str) -> Option<String> {
+    let last = output
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["type"] == "result")?;
+    if last["subtype"] != "success" || last["is_error"] != false {
+        return None;
+    }
+    let answer = last["result"].as_str()?.trim();
+    (!answer.is_empty()).then(|| answer.to_owned())
+}
+
 /// The plain reason a read-only agent stopped with an error: Codex's own
 /// message from its last `turn.failed` event, else its last `error` event,
 /// else the generic reason; a message that is a provider's JSON error body
@@ -4404,6 +4440,7 @@ mod tests {
             account: &account,
             wall_time: Duration::from_secs(5),
             output_tokens: None,
+            stream: false,
         };
         assert!(matches!(
             runner.run_read_only(&run, &|| false),
@@ -4483,6 +4520,7 @@ mod tests {
             account: &account,
             wall_time: Duration::from_secs(5),
             output_tokens: None,
+            stream: false,
         };
         let _ = runner.run_read_only(&run, &|| false);
         let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-1.sb"))
@@ -4558,6 +4596,7 @@ mod tests {
             account: &account,
             wall_time: Duration::from_secs(5),
             output_tokens: None,
+            stream: false,
         };
         let _ = runner.run_read_only(&run, &|| false);
         let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-2.sb"))
@@ -5895,6 +5934,7 @@ mod tests {
                 Path::new("/agent/tmp"),
                 tools,
                 output_tokens,
+                false,
                 &account,
             )
             .unwrap();
@@ -5927,6 +5967,186 @@ mod tests {
                 .any(|argument| argument == "--system-prompt" || argument == "--max-turns")
         );
         assert_eq!(cap, None);
+    }
+
+    /// A read-only Claude Code run asked for its stream writes stream-json with the verbose
+    /// events Claude Code needs for it, so a caller can read the harness's own error fields;
+    /// any other run keeps plain text (DEC-150 MG-M1).
+    #[test]
+    fn a_read_only_claude_run_asked_for_its_stream_writes_stream_json() {
+        let account = ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let launch = |stream: bool| {
+            let mut command = Command::new("/usr/bin/true");
+            claude_arguments(
+                &mut command,
+                Path::new("/agent/home"),
+                Path::new("/agent/tmp"),
+                false,
+                None,
+                stream,
+                &account,
+            )
+            .unwrap();
+            command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect::<Vec<String>>()
+        };
+        let has = |arguments: &[String], pair: [&str; 2]| {
+            arguments.windows(2).any(|window| window == pair)
+        };
+        let streamed = launch(true);
+        assert!(
+            has(&streamed, ["--output-format", "stream-json"]),
+            "{streamed:?}"
+        );
+        assert!(streamed.iter().any(|argument| argument == "--verbose"));
+        assert!(!has(&streamed, ["--output-format", "text"]), "{streamed:?}");
+        let text = launch(false);
+        assert!(has(&text, ["--output-format", "text"]), "{text:?}");
+        assert!(!text.iter().any(|argument| argument == "--verbose"));
+        assert_eq!(
+            text.iter()
+                .filter(|argument| *argument == "--output-format")
+                .count(),
+            1
+        );
+    }
+
+    /// The answer of a streamed Claude Code run is the text of its last result line, and only
+    /// when that result is a success the harness did not mark an error (DEC-150 MG-M1).
+    #[test]
+    fn a_streamed_claude_answer_is_its_successful_result_line_only() {
+        let result = |subtype: &str, is_error: bool, text: &str| {
+            serde_json::json!({"type": "result", "subtype": subtype, "is_error": is_error,
+                "uuid": "result-1", "session_id": "native-session", "result": text})
+            .to_string()
+        };
+        let init = r#"{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"claude-x"}"#;
+        assert_eq!(
+            claude_result(&format!("{init}\n{}\n", result("success", false, " OK \n"))),
+            Some("OK".to_owned())
+        );
+        assert_eq!(
+            claude_result(&format!(
+                "{init}\n{}\n",
+                result("success", true, "There's an issue with the selected model.")
+            )),
+            None
+        );
+        assert_eq!(
+            claude_result(&format!(
+                "{init}\n{}\n",
+                result("error_max_turns", false, "OK")
+            )),
+            None
+        );
+        assert_eq!(
+            claude_result(&format!("{}\n", result("success", false, "   "))),
+            None
+        );
+        assert_eq!(claude_result(init), None);
+        assert_eq!(claude_result("OK"), None, "plain text is no result line");
+    }
+
+    /// A stand-in Claude Code that writes stream-json only when asked for it, so a run that
+    /// does not ask exits 3. `RESULT` is replaced by the run's last lines and `CODE` by its
+    /// exit status.
+    #[cfg(target_os = "macos")]
+    const STREAMING_CLAUDE: &str = r#"#!/bin/sh
+case " $* " in *" --output-format stream-json "*) ;; *) exit 3 ;; esac
+case " $* " in *" --verbose "*) ;; *) exit 4 ;; esac
+/bin/cat > /dev/null
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"claude-x","tools":[]}'
+RESULT
+exit CODE
+"#;
+
+    /// The refusal Claude Code 2.1.322 streams for a model the account cannot use: its own
+    /// assistant error line, then an error result.
+    #[cfg(target_os = "macos")]
+    const REFUSAL_LINES: &str = r#"printf '%s\n' '{"type":"assistant","uuid":"assistant-1","session_id":"native-session","parent_tool_use_id":null,"error":"model_not_found","message":{"id":"message-1","type":"message","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"There'"'"'s an issue with the selected model (claude-x). It may not exist or you may not have access to it."}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"uuid":"result-1","session_id":"native-session","result":"There is an issue with the selected model (claude-x)."}'"#;
+
+    /// An answer streamed as Claude Code writes one: the model's text, then a success result.
+    #[cfg(target_os = "macos")]
+    const ANSWER_LINES: &str = r#"printf '%s\n' '{"type":"assistant","uuid":"assistant-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"OK"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"uuid":"result-1","session_id":"native-session","result":"OK"}'"#;
+
+    /// Runs one streamed read-only run of a stand-in Claude Code on an endpoint account the
+    /// stand-in never calls, as the model test launch does. Takes the engine root, the run
+    /// name and the stand-in's last lines and exit status. Returns how it ended and its
+    /// captured output.
+    #[cfg(target_os = "macos")]
+    fn streamed_claude_run(
+        root: &EngineRoot,
+        name: &str,
+        lines: &str,
+        code: u8,
+    ) -> (ReadOnlyEnding, Option<String>) {
+        let claude = root.base.join("bin").join(format!("claude-{name}"));
+        fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        let script = STREAMING_CLAUDE
+            .replace("RESULT", lines)
+            .replace("CODE", &code.to_string());
+        fs::write(&claude, script).unwrap();
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = claude.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "claude-code").then(|| pinned.clone())
+                }));
+        let folder = root.base.join(format!("repo-{name}"));
+        fs::create_dir(&folder).unwrap();
+        let account = ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:9".into(),
+            model: "claude-x".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name,
+            agent: "model-test",
+            project: None,
+            folder: &folder,
+            prompt: "Reply with the single word OK.",
+            account: &account,
+            wall_time: Duration::from_secs(30),
+            output_tokens: Some(16),
+            stream: true,
+        };
+        let ended = runner.run_read_only(&run, &|| false).unwrap();
+        let output = runner.read_only_output(name, ResearchHarness::ClaudeCode);
+        (ended, output)
+    }
+
+    /// MG-M1: a model test launch of a Claude Code id the account cannot use fails the id
+    /// from the refusal Claude Code itself streams, whatever its exit status, and an id that
+    /// answers verifies with the result line's text as the answer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_streamed_claude_test_run_fails_a_refused_id_and_verifies_an_answering_one() {
+        use crate::model_choice::test_launch::{Ended, Tested, outcome};
+        let root = engine_root();
+        for (name, code) in [("model-test-refused-1", 1), ("model-test-refused-0", 0)] {
+            let (ended, output) = streamed_claude_run(&root, name, REFUSAL_LINES, code);
+            assert!(
+                matches!(ended, ReadOnlyEnding::Failed(_)),
+                "{name}: {ended:?}"
+            );
+            assert_eq!(
+                outcome("claude-code", Ended::Failed, output.as_deref()),
+                (Tested::Failed, None),
+                "{name}: {output:?}"
+            );
+        }
+        let (ended, _) = streamed_claude_run(&root, "model-test-answers", ANSWER_LINES, 0);
+        assert_eq!(ended, ReadOnlyEnding::Answered("OK".into()));
     }
 
     #[test]

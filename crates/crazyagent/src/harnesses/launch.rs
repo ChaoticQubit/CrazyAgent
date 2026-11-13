@@ -355,16 +355,20 @@ pub enum LaunchEvent {
     Usage { tokens: Tokens },
     TurnError { rate_limited: bool },
     ModelRefused,
+    ModelRefusalSaid,
     Exited { code: Option<i32> },
     LateOutput { lines: u64 },
 }
 
 /// The code Claude Code 2.1.322 gives an API error for a model that does not exist or the
-/// account may not use, on its transcript line and its stream-json line alike (DEC-150 F8).
+/// account may not use (DEC-150 F8). The engine marks a refusal only from the stream-json the
+/// harness writes to the engine's own pipe; in a transcript the agent can write, the code is
+/// only said to the owner with that turn's end (Q-6).
 pub(crate) const CLAUDE_MODEL_REFUSED: &str = "model_not_found";
 
-/// Codex 0.167.1's `codex_error_info` for that refusal on a rollout's error event
-/// (DEC-150 F8).
+/// Codex 0.167.1's error code for that refusal (DEC-150 F8). It counts only from `exec`
+/// output the engine captures itself (the owner-id test launch); in a rollout the agent can
+/// write, it is only said to the owner with that turn's end (Q-6).
 pub(crate) const CODEX_MODEL_REFUSED: &str = "model_not_found";
 
 /// Codex 0.167.1's app-server `codexErrorInfo` for that refusal on a turn error (DEC-150 F8).

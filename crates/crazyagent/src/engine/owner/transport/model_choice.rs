@@ -503,7 +503,7 @@ async fn handle(
                         claude: claude.as_deref(),
                         harness: &harness,
                         model: &model,
-                        pool,
+                        target: test_launch::Target::Pool(pool),
                     })
                 });
                 tested(

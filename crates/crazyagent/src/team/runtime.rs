@@ -2,7 +2,7 @@ use super::events::{
     INSTRUCTIONS_RESTARTED, LEAD_STOPPED_AGENT, MASTER_STOPPED_AGENT, OWNER_RESTARTED,
     OWNER_STOPPED_AGENT, OWNER_WOKE,
 };
-use super::model_pick::Fallen;
+use super::model_pick::{Claim, Fallen};
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, CancelBy, CancelPath,
     DELEGATIONS_PER_REPLY_MAX, Delegation, MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy,
@@ -29,6 +29,7 @@ use crate::harnesses::terminal_session::{
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
 use crate::master_sessions::ResumePlan;
+use crate::model_choice::test_launch::{self, Tested};
 use crate::model_gateway::relay::Relay;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
@@ -510,6 +511,7 @@ enum TurnEnd {
     Cancelled,
     Interrupted,
     Closed,
+    ModelRefusalSaid,
 }
 
 impl TurnEnd {
@@ -524,6 +526,7 @@ impl TurnEnd {
             Self::Cancelled => "cancelled",
             Self::Interrupted => "interrupted",
             Self::Closed => "closed",
+            Self::ModelRefusalSaid => "model_refusal_said",
         }
     }
 }
@@ -10133,7 +10136,14 @@ impl TeamRuntime {
                 worker.background_held = false;
                 let cut =
                     (end == TurnEnd::TimedOut).then(|| limit_note(cause.as_deref(), worker.bound));
-                let cause = cut.or(cause);
+                let said = (end == TurnEnd::ModelRefusalSaid).then(|| {
+                    refusal_said_line(
+                        &worker.harness,
+                        worker.model.as_deref(),
+                        worker.role == AgentRole::Master,
+                    )
+                });
+                let cause = cut.or(said).or(cause);
                 worker.bound = None;
                 if let Some(hosted) = &worker.hosted {
                     hosted.text(&text);
@@ -10151,6 +10161,13 @@ impl TeamRuntime {
                 if end == TurnEnd::RateLimited {
                     self.pause(&project, &connection)?;
                 }
+                if end == TurnEnd::ModelRefusalSaid {
+                    match self.said_check(id) {
+                        Ok(Some(check)) => spawn_check(check),
+                        Ok(None) => {}
+                        Err(problem) => eprintln!("model_check_not_claimed cause={}", problem.0),
+                    }
+                }
                 self.count_turn(id, &project, master)?;
                 if team_tool {
                     self.log_master_asks(&project, id)?;
@@ -10165,7 +10182,11 @@ impl TeamRuntime {
                     return Ok(false);
                 }
                 match busy {
-                    Some(busy) if held && end != TurnEnd::Success => self.release(pin, busy)?,
+                    Some(busy)
+                        if held && !matches!(end, TurnEnd::Success | TurnEnd::ModelRefusalSaid) =>
+                    {
+                        self.release(pin, busy)?
+                    }
                     Some(Busy::Task(task)) => {
                         self.finish_task(task, &text, end, cause.as_deref())?
                     }
@@ -10760,6 +10781,49 @@ impl TeamRuntime {
     /// account and model, so no start counts that account as able to run it until the
     /// refusal expires, and stops the agent so its next start picks again; a master starts
     /// again at once. Nothing is recorded for an account's own model. Takes the agent.
+    /// Claims the engine's own check of a model refusal agent `id`'s pane said (DEC-150
+    /// addendum 9g, 9h), for a profile account with an explicit model on a harness with a
+    /// test launch; a check that already refused marks the project from its own time.
+    /// Takes the agent. Returns the check to run off this thread, none when none runs.
+    fn said_check(&self, id: i64) -> Result<Option<Check>, EngineError> {
+        let worker = &self.workers[&id];
+        let (Some(model), Some((global, local))) = (worker.model.as_deref(), &self.settings) else {
+            return Ok(None);
+        };
+        if !worker.managed || !test_launch::supported(&worker.harness) {
+            return Ok(None);
+        }
+        let Some(executable) = self.harness(&worker.harness) else {
+            return Ok(None);
+        };
+        let (project, connection) = (&worker.project, &worker.connection);
+        match super::model_pick::claim_check(&self.connection, connection, model, now_ms())? {
+            Claim::Held => Ok(None),
+            Claim::Refused { checked_ms } => {
+                let now = now_ms();
+                if !super::model_pick::refused(&self.connection, project, connection, model, now)? {
+                    super::model_pick::refuse(
+                        &self.connection,
+                        project,
+                        connection,
+                        model,
+                        checked_ms,
+                    )?;
+                }
+                Ok(None)
+            }
+            Claim::Run => Ok(Some(Check {
+                root: self.root.clone(),
+                settings: (global.clone(), local.clone()),
+                harness: worker.harness.clone(),
+                executable,
+                connection: connection.clone(),
+                model: model.to_owned(),
+                project: project.clone(),
+            })),
+        }
+    }
+
     fn model_refused(&mut self, id: i64) -> Result<(), EngineError> {
         let worker = &self.workers[&id];
         let Some(model) = worker.model.clone() else {
@@ -10845,6 +10909,10 @@ impl TeamRuntime {
                 },
                 Some("The sub-agent could not finish the task"),
             ),
+            TurnEnd::ModelRefusalSaid => (
+                TaskStatus::Failed,
+                Some(cause.unwrap_or("The sub-agent could not finish the task")),
+            ),
             TurnEnd::Closed => (
                 if retry {
                     TaskStatus::Queued
@@ -10924,6 +10992,8 @@ impl TeamRuntime {
             if state == "failed" && self.stored(project)?.is_some() {
                 let why = if end == TurnEnd::Interrupted {
                     "You interrupted the master before it replied.".to_owned()
+                } else if let (TurnEnd::ModelRefusalSaid, Some(line)) = (end, cause) {
+                    line.to_owned()
                 } else if end == TurnEnd::TimedOut {
                     format!(
                         "The master stopped before it replied: {}.",
@@ -11651,9 +11721,6 @@ fn live_serve(
                 push_trimmed(&mut text, &said, LIVE_REPLY_BYTES_MAX);
             }
             Ok(Some(TranscriptEvent::TurnError { rate_limited })) => limited |= rate_limited,
-            Ok(Some(TranscriptEvent::ModelRefused)) => {
-                let _ = reports.send(Report::ModelRefused);
-            }
             Ok(Some(TranscriptEvent::Interrupted)) => interrupted = true,
             Ok(Some(TranscriptEvent::TurnFinished { success })) => {
                 let end = match (limited, interrupted, success) {
@@ -11674,6 +11741,7 @@ fn live_serve(
                 Some(
                     TranscriptEvent::ToolUse { .. }
                     | TranscriptEvent::Waiting
+                    | TranscriptEvent::ModelRefusalSaid
                     | TranscriptEvent::BackgroundStarted { .. }
                     | TranscriptEvent::BackgroundEnded { .. },
                 )
@@ -12063,9 +12131,6 @@ fn report_own(session: &mut AgentSession, reports: &Sender<Report>, own: &mut Ow
                 push_trimmed(&mut own.text, &text, LIVE_REPLY_BYTES_MAX);
             }
             TranscriptEvent::TurnError { rate_limited } => own.limited |= rate_limited,
-            TranscriptEvent::ModelRefused => {
-                let _ = reports.send(Report::ModelRefused);
-            }
             TranscriptEvent::Interrupted => own.interrupted = true,
             TranscriptEvent::TurnFinished { success } if own.running => {
                 own.running = false;
@@ -12430,6 +12495,174 @@ fn keeps_session(end: TurnEnd, background: usize, held: bool, wrapped: bool) -> 
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+
+/// What a pane turn has read of its harness's events so far that decides how it ends: a
+/// rate limit, the owner's interrupt and a model refusal its transcript said.
+#[derive(Debug, Default)]
+struct TurnRead {
+    limited: bool,
+    interrupted: bool,
+    said: bool,
+}
+
+impl TurnRead {
+    /// Folds one harness event into the turn. Takes the event. Returns the turn's end when
+    /// the event ends it: the harness finished it, by [`finished_end`], or the harness
+    /// exited, as said when a refusal was said, else closed; none for any other event.
+    fn fold(&mut self, event: &LaunchEvent) -> Option<TurnEnd> {
+        match event {
+            LaunchEvent::TurnError { rate_limited } => self.limited |= rate_limited,
+            LaunchEvent::ModelRefusalSaid => self.said = true,
+            LaunchEvent::Interrupted => self.interrupted = true,
+            LaunchEvent::TurnFinished { success } => {
+                return Some(finished_end(
+                    *success,
+                    self.interrupted,
+                    self.said,
+                    self.limited,
+                ));
+            }
+            LaunchEvent::Exited { .. } if self.said => return Some(TurnEnd::ModelRefusalSaid),
+            LaunchEvent::Exited { .. } => return Some(TurnEnd::Closed),
+            _ => {}
+        }
+        None
+    }
+}
+
+/// How a task or message turn ends once its harness finished it: a success, else the
+/// owner's interrupt, else a model refusal its transcript said (shown only, never recorded,
+/// Q-6), else a rate limit, else a failure. Takes whether the harness called the turn a
+/// success, whether it was interrupted, whether a refusal was said and whether it was
+/// rate limited. Returns the end.
+fn finished_end(success: bool, interrupted: bool, said: bool, limited: bool) -> TurnEnd {
+    if success {
+        TurnEnd::Success
+    } else if interrupted {
+        TurnEnd::Interrupted
+    } else if said {
+        TurnEnd::ModelRefusalSaid
+    } else if limited {
+        TurnEnd::RateLimited
+    } else {
+        TurnEnd::Failed
+    }
+}
+
+/// The plain line a pane turn whose transcript said the provider refused its model leaves
+/// for the owner: the harness and the model it ran, and that the work stops. The agent can
+/// write that transcript, so the line says what the harness reported and nothing is recorded
+/// (Q-6). Takes the harness id, the model, none for the account's default, and whether the
+/// turn was the master's. Returns the line, the same words in the desktop app and the TUI.
+fn refusal_said_line(harness: &str, model: Option<&str>, master: bool) -> String {
+    let name = crate::harnesses::spec(harness)
+        .filter(|spec| spec.id == harness)
+        .map_or(harness, |spec| spec.name);
+    let model = model.map_or_else(
+        || "its default model".to_owned(),
+        |model| format!("the model {model}"),
+    );
+    if master {
+        format!(
+            "{name} reported that its account cannot run {model}, so the master stopped before it replied. Pick another master model in Settings, Harnesses."
+        )
+    } else {
+        format!(
+            "{name} reported that its account cannot run {model}, so the task stopped and was not tried again. Pick another agent model in Settings, Harnesses."
+        )
+    }
+}
+
+/// One engine check of a model refusal a pane's transcript said (DEC-150 addendum 9g): the
+/// engine folder, both settings files, the harness and its executable, the account and the
+/// model the said turn ran on, and the project it ran for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Check {
+    root: PathBuf,
+    settings: (PathBuf, PathBuf),
+    harness: String,
+    executable: PathBuf,
+    connection: CredentialRef,
+    model: String,
+    project: ProjectId,
+}
+
+/// Records what the engine's check of a said refusal decided (DEC-150 addendum 9g): only a
+/// refusal the engine read itself marks the account's model, for the check's project and,
+/// through its claim, for every other project; an answer or a pending test marks nothing.
+/// Takes the database, the check, the decision and the time. Returns a SQLite failure.
+fn check_ended(
+    db: &Connection,
+    check: &Check,
+    tested: Tested,
+    now: i64,
+) -> Result<(), EngineError> {
+    if tested != Tested::Failed {
+        return Ok(());
+    }
+    super::model_pick::check_refused(db, &check.project, &check.connection, &check.model, now)
+}
+
+/// How long a check of a said refusal waits for its harness's one test slot, held by a
+/// Models page test or another check, before it gives up with no mark (DEC-150 addendum 9h).
+const CHECK_WAIT: Duration = Duration::from_secs(3 * test_launch::WALL_TIME.as_secs());
+/// How often a waiting check of a said refusal asks for the test slot again.
+const CHECK_POLL: Duration = Duration::from_secs(5);
+
+/// Starts the engine's check of a said refusal on its own named thread, so the runtime
+/// never waits on the test launch (DEC-150 addendum 9g); its claim bounds the threads.
+/// Logs one code line naming only the harness and the result. Takes the check.
+fn spawn_check(check: Check) {
+    let harness = check.harness.clone();
+    let spawned = std::thread::Builder::new()
+        .name("model-check".into())
+        .spawn(move || {
+            let result = match run_check(&check) {
+                Ok((tested, reason)) => {
+                    let tested = format!("{tested:?}").to_lowercase();
+                    reason.map_or_else(
+                        || tested.clone(),
+                        |reason| format!("{tested} reason={reason}"),
+                    )
+                }
+                Err(code) => code,
+            };
+            eprintln!("model_check harness={} result={result}", check.harness);
+        });
+    if spawned.is_err() {
+        eprintln!("model_check harness={harness} result=not_started");
+    }
+}
+
+/// Runs the engine's check of a said refusal: one test launch of the model on the said
+/// turn's account only, waiting at most `CHECK_WAIT` for the harness's test slot, and
+/// records a refusal the engine read itself. Takes the check. Returns the decision and its
+/// fixed-word pending reason, or the test launch's or the database's code.
+fn run_check(check: &Check) -> Result<(Tested, Option<String>), String> {
+    let executable = |id: &str| (check.harness == id).then_some(check.executable.as_path());
+    let request = test_launch::Request {
+        root: &check.root,
+        settings: (&check.settings.0, &check.settings.1),
+        codex: executable("codex"),
+        claude: executable("claude-code"),
+        harness: &check.harness,
+        model: &check.model,
+        target: test_launch::Target::Connection(&check.connection),
+    };
+    let asked = Instant::now();
+    let (tested, reason) = loop {
+        match test_launch::run(&request) {
+            Ok(decided) => break decided,
+            Err(test_launch::BUSY) if asked.elapsed() < CHECK_WAIT => {
+                std::thread::sleep(CHECK_POLL)
+            }
+            Err(code) => return Err(code.to_owned()),
+        }
+    };
+    let db = crate::storage::versioned::open(&check.root).map_err(|problem| problem.0)?;
+    check_ended(&db, check, tested, now_ms()).map_err(|problem| problem.0)?;
+    Ok((tested, reason))
+}
 
 /// The problem a sub-agent's turn leaves on its agent: the closed process with the turn's
 /// code for a turn that closed it, or for a turn the engine ended at one of its own bounds
@@ -13530,8 +13763,7 @@ fn turn(
     }
     let deadline = rules.limit.map(|limit| Instant::now() + limit);
     let mut text = String::new();
-    let mut limited = false;
-    let mut interrupted = false;
+    let mut read = TurnRead::default();
     let mut progress = Instant::now();
     let mut cause = None;
     let mut held_since = None;
@@ -13582,32 +13814,22 @@ fn turn(
             Ok(Some(LaunchEvent::Text { text: part })) => {
                 push_trimmed(&mut text, &part, TURN_TEXT_BYTES_MAX);
             }
-            Ok(Some(LaunchEvent::TurnError { rate_limited })) => limited |= rate_limited,
             Ok(Some(LaunchEvent::ModelRefused)) => {
                 let _ = reports.send(Report::ModelRefused);
             }
             Ok(Some(LaunchEvent::Usage { tokens })) => {
                 let _ = reports.send(Report::Usage { tokens });
             }
-            Ok(Some(LaunchEvent::Interrupted)) => interrupted = true,
-            Ok(Some(LaunchEvent::TurnFinished { success })) => {
-                break if success {
-                    TurnEnd::Success
-                } else if interrupted {
-                    TurnEnd::Interrupted
-                } else if limited {
-                    TurnEnd::RateLimited
-                } else {
-                    TurnEnd::Failed
-                };
+            Ok(Some(event)) => {
+                if let Some(end) = read.fold(&event) {
+                    break end;
+                }
             }
-            Ok(Some(LaunchEvent::Exited { .. })) => break TurnEnd::Closed,
             Err(problem) => {
                 let (end, code) = launch_end(problem);
                 cause = code;
                 break end;
             }
-            Ok(Some(_)) => {}
         }
     };
     assert!(released.is_none() || (end == TurnEnd::Success && session.held()));

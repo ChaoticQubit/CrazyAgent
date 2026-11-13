@@ -2,7 +2,7 @@ use super::tool::ModelPick;
 use crate::engine::EngineError;
 use crate::model_choice::store::{self, Pick};
 use crate::protocol::{CredentialRef, ProjectId};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_task_models (
     task INTEGER PRIMARY KEY,
@@ -198,7 +198,7 @@ CREATE TABLE IF NOT EXISTS team_model_refusals (
 /// (DEC-150 F8): a plan seldom gains a model sooner, and a refusal told wrongly passes.
 pub(crate) const MODEL_REFUSAL_MS: i64 = 6 * 60 * 60 * 1000;
 
-/// The most model refusals one project keeps, as an agent's transcript can tell any
+/// The most model refusals one project keeps, as an agent's harness stream can tell any
 /// number (DEC-150 F8); a new one past it drops the one closest to its end.
 pub(crate) const REFUSALS_MAX: usize = 64;
 
@@ -582,6 +582,101 @@ pub(crate) fn refused(
         |row| row.get(0),
     )
     .map_err(super::error)
+}
+
+const CHECK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_model_checks (
+    connection TEXT NOT NULL,
+    model TEXT NOT NULL,
+    checked_ms INTEGER NOT NULL,
+    refused INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (connection, model)
+) WITHOUT ROWID;";
+
+/// The most live engine checks of said model refusals (DEC-150 addendum 9h): a live claim
+/// is never dropped, so past this many a new account and model is held with no launch.
+pub(crate) const CHECKS_MAX: usize = 64;
+
+/// What a claim on the engine's own check of a model refusal a pane said answered
+/// (DEC-150 addendum 9g, 9h): run the check now, the check already refused at
+/// `checked_ms`, or hold, as a live check exists or the table is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Claim {
+    Run,
+    Refused { checked_ms: i64 },
+    Held,
+}
+
+/// Claims the engine's check of an account's model, at most one per `MODEL_REFUSAL_MS`
+/// (DEC-150 addendum 9g, 9h), in one immediate transaction. Takes the database, outside a
+/// transaction, the account, the model and the time. Returns the claim, or a SQLite failure.
+pub(crate) fn claim_check(
+    db: &Connection,
+    connection: &CredentialRef,
+    model: &str,
+    now: i64,
+) -> Result<Claim, EngineError> {
+    assert!(!model.is_empty() && model.len() <= crate::model_choice::MODEL_BYTES_MAX);
+    let tx =
+        Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(super::error)?;
+    tx.execute_batch(CHECK_SCHEMA).map_err(super::error)?;
+    tx.execute(
+        "DELETE FROM team_model_checks WHERE checked_ms<=?1",
+        [now - MODEL_REFUSAL_MS],
+    )
+    .map_err(super::error)?;
+    let live: Option<(i64, bool)> = tx
+        .query_row(
+            "SELECT checked_ms,refused FROM team_model_checks WHERE connection=?1 AND model=?2",
+            params![connection.as_str(), model],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(super::error)?;
+    let count = |tx: &Transaction<'_>| -> Result<i64, EngineError> {
+        tx.query_row("SELECT COUNT(*) FROM team_model_checks", [], |row| {
+            row.get(0)
+        })
+        .map_err(super::error)
+    };
+    let full = live.is_none() && count(&tx)? >= CHECKS_MAX as i64;
+    let claim = match live {
+        Some((checked_ms, true)) => Claim::Refused { checked_ms },
+        Some(_) => Claim::Held,
+        None if full => Claim::Held,
+        None => {
+            tx.execute(
+                "INSERT INTO team_model_checks(connection,model,checked_ms,refused) VALUES (?1,?2,?3,0)",
+                params![connection.as_str(), model, now],
+            )
+            .map_err(super::error)?;
+            Claim::Run
+        }
+    };
+    let kept = count(&tx)?;
+    assert!(kept <= CHECKS_MAX as i64);
+    assert!(claim != Claim::Run || kept >= 1);
+    tx.commit().map_err(super::error)?;
+    Ok(claim)
+}
+
+/// Records that the engine's check of an account's model was refused (DEC-150 addendum
+/// 9g): its claim answers refused until it ends, and the project's refusal is recorded
+/// from `now`. Takes the database, outside a transaction, the project, the account, the
+/// model and the time. Returns a SQLite failure.
+pub(crate) fn check_refused(
+    db: &Connection,
+    project: &ProjectId,
+    connection: &CredentialRef,
+    model: &str,
+    now: i64,
+) -> Result<(), EngineError> {
+    db.execute_batch(CHECK_SCHEMA).map_err(super::error)?;
+    db.execute(
+        "UPDATE team_model_checks SET refused=1 WHERE connection=?1 AND model=?2",
+        params![connection.as_str(), model],
+    )
+    .map_err(super::error)?;
+    refuse(db, project, connection, model, now)
 }
 
 /// Drops a removed project's model records (DEC-150 F6): its tasks' pinned picks, its
