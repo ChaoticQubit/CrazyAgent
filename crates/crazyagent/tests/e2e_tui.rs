@@ -2320,16 +2320,17 @@ mod models {
     }
 
     impl Tui {
-        /// Starts the engine with the stand-ins first on its PATH, saves a profile, a
-        /// projects home and one project, and opens the TUI on a settled Home. Input: a
-        /// scratch prefix. Output: the TUI.
+        /// Starts the engine with the stand-ins in the test HOME's `~/.local/bin`, a place the
+        /// engine keeps, first on its PATH so the harness pick takes them, in a scratch folder
+        /// outside the agents' `ca-` temp names; saves a profile, a projects home and one
+        /// project, and opens the TUI on a settled Home. Input: a scratch prefix. Output: the TUI.
         fn start(prefix: &str) -> Self {
-            let disk = scratch("ca-e2e-models-");
-            let bin = disk.path().join("bin");
+            let disk = scratch("e2e-models-");
             let home = disk.path().join("home");
+            let bin = home.join(".local/bin");
             let projects = disk.path().join("Projects");
-            for folder in [&bin, &home, &projects] {
-                std::fs::create_dir(folder).unwrap();
+            for folder in [&bin, &projects] {
+                std::fs::create_dir_all(folder).unwrap();
             }
             stand_in(
                 &bin.join("claude"),
