@@ -258,7 +258,7 @@ fn a_late_failure_puts_the_earlier_node_back_and_drops_the_new_tree() {
     for name in ["node", "npm", "npx"] {
         assert_eq!(
             std::fs::canonicalize(setup_bin.join(name)).unwrap(),
-            kept.canonicalize().unwrap().join("bin").join(name),
+            std::fs::canonicalize(kept.join("bin").join(name)).unwrap(),
             "{name} still runs the earlier Node"
         );
     }
