@@ -6,11 +6,12 @@ import { test } from "node:test";
 import { POLL_MS, STEP_MS, value } from "./e2e-harness.mjs";
 import { handOff, onEngine, startingWith } from "./codex-task-engine.mjs";
 
-/** The probe every run of the stand-in Codex makes before it answers: it writes the arguments
- * the engine started it with, one per line, to its own retry-argv-<pid>.txt in its home. */
-const ARGV = String.raw`case "$1" in
-  app-server) ;;
-  *) for a in "$@"; do printf '%s\n' "$a"; done > "$CODEX_HOME/retry-argv-$$.txt" ;;
+/** The probe every sub-agent run of the stand-in Codex makes from its worktree before it
+ * answers: it writes the arguments the engine started it with, one per line, to its own
+ * retry-argv-<pid>.txt in its home. Runs outside an agent worktree write nothing. */
+const ARGV = String.raw`case "$1:$(/bin/pwd -P)" in
+  app-server:*) ;;
+  */.crazyagent/worktrees/agent-*) for a in "$@"; do printf '%s\n' "$a"; done > "$CODEX_HOME/retry-argv-$$.txt" ;;
 esac
 `;
 
