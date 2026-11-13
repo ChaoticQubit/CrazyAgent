@@ -149,3 +149,26 @@ test("the view offers Install Node.js, shows it installing, and a failure's reas
   assert.match(failed, />Install Node\.js</);
   assert.doesNotMatch(shown({ kind: "none" }), />Install Node\.js</);
 });
+
+test("the step reads again while setup's Node row is checked, or settled while a harness still needs Node", () => {
+  const version = "26.13.1";
+  for (const [needed, node, waits] of [
+    [true, { state: "checking" }, true], [true, { state: "found", version }, true], [true, { state: "installed", version }, true],
+    [true, { state: "missing" }, false], [true, { state: "failed", reason: NODE_FAILED }, false], [true, { state: "installing" }, false],
+    [true, null, false], [false, { state: "checking" }, false], [false, { state: "installed", version }, false],
+  ]) {
+    assert.equal(model.nodeWaits(needed, node), waits, `needed ${needed}, ${JSON.stringify(node)}`);
+  }
+});
+
+test("a screen with the Node offer reads again while Node installs or the step waits for Node", () => {
+  const version = "26.13.1";
+  for (const [needed, node, busy, again] of [
+    [true, { state: "installing" }, false, true], [true, { state: "missing" }, true, true], [true, null, true, true],
+    [true, { state: "checking" }, false, true], [true, { state: "installed", version }, false, true],
+    [true, { state: "missing" }, false, false], [true, null, false, false], [true, { state: "failed", reason: NODE_FAILED }, true, false],
+    [false, { state: "installing" }, true, false], [false, { state: "checking" }, false, false],
+  ]) {
+    assert.equal(model.nodeReadsAgain(needed, node, busy), again, `needed ${needed}, ${JSON.stringify(node)}, busy ${busy}`);
+  }
+});

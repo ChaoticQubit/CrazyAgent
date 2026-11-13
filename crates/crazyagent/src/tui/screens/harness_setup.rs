@@ -170,6 +170,30 @@ pub(super) fn node_offer(needed: bool, node: Option<&DependencyState>, busy: boo
     }
 }
 
+/// Tells whether the step reads again for Node while a harness needs it: setup's Node row is
+/// still being checked, or it reads found or installed while the harness read still needs
+/// Node, as when it was read just before Node was linked. Inputs: the need and the Node row's
+/// state, none while unread. Output: the answer.
+fn node_waits(needed: bool, node: Option<&DependencyState>) -> bool {
+    needed
+        && matches!(
+            node,
+            Some(
+                DependencyState::Checking
+                    | DependencyState::Found { .. }
+                    | DependencyState::Installed { .. }
+            )
+        )
+}
+
+/// Tells whether a screen with the Node.js offer, this step or Settings, Harnesses, reads
+/// again for Node: while Node installs, or while `node_waits` says so. Callers bound it with
+/// their own read cap. Inputs: the need, the Node row's state, none while unread, and whether
+/// a setup run goes on. Output: the answer.
+pub(super) fn node_reads_again(needed: bool, node: Option<&DependencyState>, busy: bool) -> bool {
+    node_offer(needed, node, busy) == NodeOffer::Installing || node_waits(needed, node)
+}
+
 /// Tells whether an offered harness needs Node.js: npm can't install it without Node, or the
 /// resolver found it but it can't run without Node. Input: its versions read.
 /// Output: the answer.
@@ -349,12 +373,14 @@ impl HarnessSetup {
         }
     }
 
-    fn node_offer(&self) -> NodeOffer {
-        let needed = self
-            .versions
+    fn node_needed(&self) -> bool {
+        self.versions
             .values()
-            .any(|read| read.as_ref().is_ok_and(node_needed));
-        node_offer(needed, self.node.as_ref(), self.setup_busy)
+            .any(|read| read.as_ref().is_ok_and(node_needed))
+    }
+
+    fn node_offer(&self) -> NodeOffer {
+        node_offer(self.node_needed(), self.node.as_ref(), self.setup_busy)
     }
 
     fn pending(&self) -> bool {
@@ -363,7 +389,7 @@ impl HarnessSetup {
             .any(|(id, _)| matches!(self.row(id), Row::Waiting | Row::Installing));
         moving
             || (self.started && self.progress().running)
-            || self.node_offer() == NodeOffer::Installing
+            || node_reads_again(self.node_needed(), self.node.as_ref(), self.setup_busy)
     }
 
     fn offer(&self) -> bool {

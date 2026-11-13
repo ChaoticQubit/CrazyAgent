@@ -159,6 +159,14 @@ export function nodeNeeded(reads: readonly (HarnessVersions | null)[]): boolean 
   return reads.some((read) => read !== null && (read.refusal === NEEDS_NODE || read.needs?.program === "node"));
 }
 
+/** Tells whether the step reads again for Node while a harness needs it: setup's Node row is still
+ * being checked, or it reads found or installed while the harness read still needs Node, as when it
+ * was read just before Node was linked. Inputs: the need and the Node row's state, null while
+ * unread. Output: the answer. */
+export function nodeWaits(needed: boolean, node: DependencyState | null): boolean {
+  return needed && (node?.state === "checking" || node?.state === "found" || node?.state === "installed");
+}
+
 /** What the step offers for Node.js, from whether a harness needs it and setup's Node row. A row
  * not settled while a setup run goes on reads installing, since setup finds Node before it marks
  * the row. Inputs: the need, the Node row's state, null while unread, and whether a setup run goes
@@ -175,4 +183,12 @@ export function nodeOffer(needed: boolean, node: DependencyState | null, busy: b
       if (busy) return { kind: "installing" };
       return node === null || node.state === "missing" ? { kind: "offer" } : { kind: "none" };
   }
+}
+
+/** Tells whether a screen with the Node.js offer, this step or Settings, Harnesses, reads again
+ * for Node: while Node installs, or while `nodeWaits` says so. Callers bound it with their own
+ * poll cap. Inputs: the need, the Node row's state, null while unread, and whether a setup run
+ * goes on. Output: the answer. */
+export function nodeReadsAgain(needed: boolean, node: DependencyState | null, busy: boolean): boolean {
+  return nodeOffer(needed, node, busy).kind === "installing" || nodeWaits(needed, node);
 }
