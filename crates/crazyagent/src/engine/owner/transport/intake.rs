@@ -151,9 +151,15 @@ async fn run(
     claim: Running,
 ) {
     let ending = Ending(Arc::clone(&job));
-    let _ = (fetch, add, &engine, &authority, &packet, &a);
+    let result = match fetch(&authority, &job).await {
+        Ok(()) => {
+            job.copying();
+            add(&engine, &authority, &packet, &a, &job).await
+        }
+        Err(e) => Err(e),
+    };
     drop(claim);
-    ending.end(Err(failure("intake_not_run")));
+    ending.end(result);
     assert!(job.ended());
 }
 
