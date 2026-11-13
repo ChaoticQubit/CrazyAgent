@@ -5910,6 +5910,26 @@ mod tests {
         "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,",
         "\"result\":\"API Error\"}\n",
     );
+    const STREAM_NARRATION: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"I will read the notes first.\\n\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_TOOL: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"tool_use\",",
+        "\"id\":\"toolu_1\",\"name\":\"Read\",\"input\":{}}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_TOOL_RESULT: &str = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",",
+        "\"tool_use_id\":\"toolu_1\",\"content\":\"alpha\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_HELPER_TEXT: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"Notes from the helper.\\n\"}]},\"parent_tool_use_id\":\"toolu_2\"}\n",
+    );
+    const STREAM_HELPER_RESULT: &str = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",",
+        "\"tool_use_id\":\"toolu_3\",\"content\":\"beta\"}]},\"parent_tool_use_id\":\"toolu_2\"}\n",
+    );
 
     /// DEC-160: Claude Code continues an answer cut at the output cap in new requests, and
     /// `--print` text kept only the last one, so the mapping stored a JSON tail as the
@@ -5943,6 +5963,30 @@ mod tests {
         let noted = [STREAM_START, STREAM_SECOND, STREAM_OWN_ERROR, STREAM_DONE].concat();
         assert_eq!(claude_answer(&noted).as_deref(), Some("o\n3. three\n"));
         assert_eq!(claude_answer(""), None);
+    }
+
+    /// A Claude Code run with tools gives back only the answer it ends with: the words after
+    /// its last tool result, continued past the output cap, without the notes it wrote before
+    /// a tool call, the words of a sub-agent, or a sub-agent's tool result cutting it short.
+    #[test]
+    fn a_claude_answer_after_its_tools_comes_back_whole_without_its_working_notes() {
+        let stream = [
+            STREAM_START,
+            STREAM_NARRATION,
+            STREAM_TOOL,
+            STREAM_TOOL_RESULT,
+            STREAM_FIRST,
+            STREAM_HELPER_TEXT,
+            STREAM_HELPER_RESULT,
+            STREAM_CONTINUE,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]
+        .concat();
+        assert_eq!(
+            claude_answer(&stream).as_deref(),
+            Some("## Numbers\n\n1. one\n2. two\n3. three\n")
+        );
     }
 }
 
