@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
-import { POLL_MS } from "./e2e-harness.mjs";
+import { POLL_MS, value } from "./e2e-harness.mjs";
 import { TASK, USAGE_MS, handOff, onEngine, pricesOff, tileParts, turnsOf } from "./codex-task-engine.mjs";
 
 const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
@@ -96,8 +96,14 @@ test("the project Metrics tab shows this project's tokens with the headline from
 test("/usage in a project's console opens that project's own Metrics tab, not every project's page (DEC-132 item 1)", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-metrics-usage-command-", async ({ project, me, page, site, bridge }) => {
     await pricesOff(bridge);
+    const receipt = await value(bridge, "desktop_team_master_live_terminal", { id: project, on: false, generation: 90 });
+    assert.equal(receipt.outcome, "applied", `Live terminal turns Off: ${JSON.stringify(receipt)}`);
+    for (const deadline = Date.now() + USAGE_MS; (await value(bridge, "desktop_team_status", { id: project })).master_live_terminal !== false; await pause(POLL_MS * 4)) {
+      assert.ok(Date.now() < deadline, "the engine never kept Live terminal Off");
+    }
     const prompt = 'textarea[aria-label="Message the master"]';
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/conversation` });
+    await page.send("Page.reload");
     for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
       if (await page.evaluate(`document.querySelector(${JSON.stringify(prompt)}) !== null`).catch(() => false)) break;
       assert.ok(Date.now() < deadline, "the project's console never showed its prompt");
