@@ -3,8 +3,8 @@ use crate::engine::owner::AccountSecret;
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::icloud::{DOWNLOAD_TIME_MAX, Progress};
-use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::projects_home::job::JobView;
+use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -176,7 +176,10 @@ impl OwnerController {
     ) -> Result<JobView, EngineError> {
         let id = RequestId::new(crate::engine::owner::random_id()?)
             .map_err(|_| EngineError("intake_failed".into()))?;
-        let view = self.owner_client()?.intake_start(id, source, mode, overrides).await?;
+        let view = self
+            .owner_client()?
+            .intake_start(id, source, mode, overrides)
+            .await?;
         assert!(!view.source.is_empty());
         Ok(view)
     }

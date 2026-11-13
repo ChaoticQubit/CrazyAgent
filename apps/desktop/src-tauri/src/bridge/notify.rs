@@ -582,25 +582,53 @@ mod tests {
         use crazyagent::projects_home::job::{JobState, Phase};
         let said = |state| intake_notice(&job(state)).map(|notice| (notice.title, notice.body));
         let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
-        assert_eq!(said(JobState::Done), pair("shop is in your projects folder", "Set it up from Home."));
         assert_eq!(
-            said(JobState::Cancelled { phase: Phase::Copying }),
+            said(JobState::Done),
+            pair("shop is in your projects folder", "Set it up from Home.")
+        );
+        assert_eq!(
+            said(JobState::Cancelled {
+                phase: Phase::Copying
+            }),
             pair("Adding shop stopped", "Nothing was moved or copied.")
         );
-        let failed = said(JobState::Failed { code: "home_copy_failed".into(), phase: Phase::Copying });
-        assert_eq!(failed, pair("Adding shop failed", "Open Home in CrazyAgent to see why."));
+        let failed = said(JobState::Failed {
+            code: "home_copy_failed".into(),
+            phase: Phase::Copying,
+        });
+        assert_eq!(
+            failed,
+            pair("Adding shop failed", "Open Home in CrazyAgent to see why.")
+        );
         let landed = said(JobState::Failed {
             code: "home_move_source_left".into(),
             phase: Phase::Clearing,
         });
         assert_eq!(
             landed,
-            pair("shop is in your projects folder", "Part of its old place could not be removed. Check it on Home.")
+            pair(
+                "shop is in your projects folder",
+                "Part of its old place could not be removed. Check it on Home."
+            )
         );
-        let asked = said(JobState::NeedsAnswer { code: "home_move_worktrees".into() });
-        assert_eq!(asked, pair("shop needs your answer", "Open Home in CrazyAgent to decide before it is moved."));
+        let asked = said(JobState::NeedsAnswer {
+            code: "home_move_worktrees".into(),
+        });
+        assert_eq!(
+            asked,
+            pair(
+                "shop needs your answer",
+                "Open Home in CrazyAgent to decide before it is moved."
+            )
+        );
         assert_eq!(said(JobState::Clearing), None);
-        assert_eq!(said(JobState::Copying { copied: 3, checked: 0 }), None);
+        assert_eq!(
+            said(JobState::Copying {
+                copied: 3,
+                checked: 0
+            }),
+            None
+        );
     }
 
     /// A job's notification is claimed once, shares the bound with questions, and a click on
@@ -619,7 +647,13 @@ mod tests {
         for job in 0..SHOWN_MAX {
             let _ = notices.claim_job(&format!("job-{job}"));
         }
-        assert_eq!(notices.claim_job("one-more").unwrap_err().code, "notifications_full");
-        assert_eq!(notices.claim(8, "p-1").unwrap_err().code, "notifications_full");
+        assert_eq!(
+            notices.claim_job("one-more").unwrap_err().code,
+            "notifications_full"
+        );
+        assert_eq!(
+            notices.claim(8, "p-1").unwrap_err().code,
+            "notifications_full"
+        );
     }
 }

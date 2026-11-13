@@ -245,8 +245,14 @@ async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
     }
     let done = done.expect("the copy job ends done");
     assert_eq!(done.id, started.id);
-    assert!(home.join("site").join("index.html").exists(), "the copy landed");
-    assert!(outside.join("index.html").exists(), "a copy leaves the source");
+    assert!(
+        home.join("site").join("index.html").exists(),
+        "the copy landed"
+    );
+    assert!(
+        outside.join("index.html").exists(),
+        "a copy leaves the source"
+    );
     let dismiss = IntakeQuery::JobDismiss { id: done.id };
     let event = native.intake(IntakeJob::Query(dismiss), |_| {}).await;
     assert_eq!(event.result, Ok(IntakeView::JobDismissed(true)));

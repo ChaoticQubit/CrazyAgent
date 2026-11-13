@@ -608,7 +608,12 @@ impl NativeBridge {
         let request_id = intake_id(&id)?;
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            bounded(client.intake_stop(request_id).await.map_err(intake_failure)?)
+            bounded(
+                client
+                    .intake_stop(request_id)
+                    .await
+                    .map_err(intake_failure)?,
+            )
         }))
     }
 
@@ -618,7 +623,12 @@ impl NativeBridge {
         let request_id = intake_id(&id)?;
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            bounded(client.intake_dismiss(request_id).await.map_err(intake_failure)?)
+            bounded(
+                client
+                    .intake_dismiss(request_id)
+                    .await
+                    .map_err(intake_failure)?,
+            )
         }))
     }
 
@@ -1052,12 +1062,26 @@ mod tests {
         };
         let raw = shown(view(failed("open /Users/mira/site/a: denied")));
         assert_eq!(raw.state, failed("intake_failed"));
-        assert_eq!(shown(view(failed("home_add_cancelled"))).state, failed("home_add_cancelled"));
-        let asked = shown(view(JobState::NeedsAnswer { code: "weird".into() }));
-        assert_eq!(asked.state, JobState::NeedsAnswer { code: "intake_failed".into() });
+        assert_eq!(
+            shown(view(failed("home_add_cancelled"))).state,
+            failed("home_add_cancelled")
+        );
+        let asked = shown(view(JobState::NeedsAnswer {
+            code: "weird".into(),
+        }));
+        assert_eq!(
+            asked.state,
+            JobState::NeedsAnswer {
+                code: "intake_failed".into()
+            }
+        );
         assert_eq!(asked.overrides, vec![AddOverride::TooLarge]);
         assert_eq!(shown(view(JobState::Done)), view(JobState::Done));
-        for code in ["intake_busy", "home_add_in_progress", "home_add_interrupted"] {
+        for code in [
+            "intake_busy",
+            "home_add_in_progress",
+            "home_add_interrupted",
+        ] {
             assert_eq!(intake_code(code), Some(code));
         }
     }

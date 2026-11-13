@@ -30,7 +30,10 @@ fn an_intake_job_line_says_what_it_does_now_with_counts_as_files_land() {
     let downloading = |done, total| JobState::Downloading {
         progress: Progress { total, done },
     };
-    assert_eq!(line(&job(downloading(0, 0))), "Downloading shop from iCloud...");
+    assert_eq!(
+        line(&job(downloading(0, 0))),
+        "Downloading shop from iCloud..."
+    );
     assert_eq!(
         line(&job(downloading(12, 3000))),
         "Downloading shop from iCloud: 12 of 3000 files"
@@ -40,12 +43,18 @@ fn an_intake_job_line_says_what_it_does_now_with_counts_as_files_land() {
         mode: AddMode::Copy,
         ..job(state)
     };
-    assert_eq!(line(&copy_job(copying(18, 0))), "Copying shop: 18 files copied");
+    assert_eq!(
+        line(&copy_job(copying(18, 0))),
+        "Copying shop: 18 files copied"
+    );
     assert_eq!(
         line(&job(copying(18, 5))),
         "Checking the copy of shop: 5 files checked"
     );
-    assert_eq!(line(&job(JobState::Clearing)), "Removing shop from its old place...");
+    assert_eq!(
+        line(&job(JobState::Clearing)),
+        "Removing shop from its old place..."
+    );
     let stopping = JobView {
         stopping: true,
         ..job(copying(18, 0))
@@ -85,10 +94,7 @@ fn every_job_code_the_engine_sends_has_its_own_sentence() {
         "home_add_in_progress",
         "home_add_interrupted",
     ] {
-        assert!(
-            crate::tui::screens::intake::known(code).is_some(),
-            "{code}"
-        );
+        assert!(crate::tui::screens::intake::known(code).is_some(), "{code}");
     }
 }
 

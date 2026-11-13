@@ -100,7 +100,10 @@ pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
 
 /// The sentence for a job that just ended, said once: only when the read before showed the
 /// same job running. Takes the read before and the read now. Returns the job's line, or None.
-pub(in crate::tui) fn end_line(before: Option<&JobView>, after: Option<&JobView>) -> Option<String> {
+pub(in crate::tui) fn end_line(
+    before: Option<&JobView>,
+    after: Option<&JobView>,
+) -> Option<String> {
     let (before, after) = (before?, after?);
     let ended = before.id == after.id && running(before) && !running(after);
     let said = ended.then(|| line(after));
