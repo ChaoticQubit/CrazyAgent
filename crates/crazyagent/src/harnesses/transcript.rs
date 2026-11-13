@@ -127,6 +127,7 @@ pub struct TranscriptReader {
     dropped: bool,
     consumed: u64,
     codex_calls: CodexExecCalls,
+    codex_failed: bool,
 }
 
 impl TranscriptReader {
@@ -179,6 +180,7 @@ impl TranscriptReader {
             dropped: false,
             consumed: 0,
             codex_calls: CodexExecCalls::default(),
+            codex_failed: false,
         }
     }
 
@@ -345,7 +347,7 @@ impl TranscriptReader {
             let facts = match self.source {
                 Transcript::CodexRollouts { .. } => {
                     let exec = self.codex_calls.sees(&value);
-                    codex_facts(&value, exec)
+                    self.codex_line(&value, exec)
                 }
                 Transcript::ClaudeSession { .. } => self.claude_line(&value),
                 Transcript::Unavailable => Vec::new(),
@@ -375,6 +377,28 @@ impl TranscriptReader {
         assert!(self.scanned <= self.pending.len());
         assert!(events.len() >= EVENTS_PER_READ_MAX || self.scanned == self.pending.len());
         Ok(events)
+    }
+
+    /// Reads one Codex rollout line with what the reader knows: an `error` line that is no
+    /// rate limit ends its turn, so the `task_complete` after it finishes the turn failed,
+    /// never as an empty success (Q6-M1); a `stream_error` is a retry notice and fails
+    /// nothing. Takes the line and whether it is an exec call. Returns its facts in order.
+    fn codex_line(&mut self, value: &Value, exec: bool) -> Vec<TranscriptEvent> {
+        let payload = &value["payload"];
+        if value["type"] == "event_msg" && payload["type"] == "error" {
+            self.codex_failed |= !rate_limited(payload["message"].as_str().unwrap_or_default());
+        }
+        let mut facts = codex_facts(value, exec);
+        for fact in &mut facts {
+            match fact {
+                TranscriptEvent::TurnStarted => self.codex_failed = false,
+                TranscriptEvent::TurnFinished { success } => {
+                    *success &= !std::mem::take(&mut self.codex_failed);
+                }
+                _ => {}
+            }
+        }
+        facts
     }
 
     /// Reads one Claude Code line with what the reader knows. The model's first line after
@@ -636,6 +660,14 @@ fn codex_facts(value: &Value, exec: bool) -> Vec<TranscriptEvent> {
     let payload = &value["payload"];
     match (value["type"].as_str(), payload["type"].as_str()) {
         (Some("event_msg"), Some("task_started")) => vec![TranscriptEvent::TurnStarted],
+        (Some("event_msg"), Some("task_complete")) if payload["error"].is_object() => vec![
+            TranscriptEvent::TurnError {
+                rate_limited: rate_limited(
+                    payload["error"]["message"].as_str().unwrap_or_default(),
+                ),
+            },
+            TranscriptEvent::TurnFinished { success: false },
+        ],
         (Some("event_msg"), Some("task_complete")) => {
             vec![TranscriptEvent::TurnFinished { success: true }]
         }
