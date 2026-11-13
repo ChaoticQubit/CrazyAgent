@@ -1,6 +1,7 @@
 use super::intake::copy;
 use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobState, JobView, Phase};
+use crate::tui::glyphs::Status;
 
 #[cfg(test)]
 mod tests;
@@ -25,7 +26,7 @@ pub(in crate::tui) fn running(job: &JobView) -> bool {
 }
 
 /// The folder's own name, or the whole path when it has none.
-fn name(job: &JobView) -> String {
+pub(in crate::tui) fn name(job: &JobView) -> String {
     let path = std::path::Path::new(&job.source);
     let name = path.file_name().map_or_else(
         || job.source.clone(),
@@ -109,4 +110,25 @@ pub(in crate::tui) fn end_line(
     let said = ended.then(|| line(after));
     assert!(said.as_ref().is_none_or(|text| !text.is_empty()));
     said
+}
+
+/// The word Home's job card shows beside the folder's name, in the desktop's words, with the
+/// status kind that colors it. Takes the job. Returns the kind and the word.
+pub(in crate::tui) fn badge(job: &JobView) -> (Status, &'static str) {
+    let _ = job;
+    (Status::Unknown, "")
+}
+
+/// What Enter and d do on Home's job card, as the card's last line. Takes the job. Returns
+/// the line; a job that offers nothing yet asks the owner to wait.
+pub(in crate::tui) fn next(job: &JobView) -> &'static str {
+    let _ = job;
+    ""
+}
+
+/// The hint word for one job action, the desktop's button word. Takes the action. Returns
+/// the word.
+pub(in crate::tui) fn label(action: JobAction) -> &'static str {
+    let _ = action;
+    ""
 }
