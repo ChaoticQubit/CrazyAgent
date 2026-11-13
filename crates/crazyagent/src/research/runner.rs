@@ -4473,19 +4473,20 @@ mod tests {
         assert!(!refused(Err(Error::from(ErrorKind::PermissionDenied))));
     }
 
-    /// REACH-FLAKE: the port a reach row names for a down provider stays the row's own while
-    /// it runs. No other socket can bind it, so no other process can start listening there,
-    /// and every connect to it is refused, so the row never finds a provider it did not start.
+    /// REACH-FLAKE: the port a reach row names for a down provider stays in use while the row
+    /// runs, so the system gives it to no port-0 bind and refuses a bind that names it without
+    /// `SO_REUSEADDR`, and every connect to it is refused at once: the row never finds a
+    /// provider it did not start on that port.
     #[test]
-    fn a_port_kept_for_a_down_provider_refuses_connects_and_no_other_socket_can_take_it() {
+    fn a_port_kept_for_a_down_provider_refuses_connects_and_no_plain_bind_takes_it() {
         let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
-        let taken = crate::spawn_gate::bind_tcp_std(("127.0.0.1", port));
+        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        let taken = crate::spawn_gate::bind_tcp_std_exclusive(address);
         assert_eq!(
             taken.as_ref().map(drop).map_err(std::io::Error::kind),
             Err(std::io::ErrorKind::AddrInUse),
-            "another socket took the port the row named for a down provider"
+            "a plain bind took the port the row named for a down provider"
         );
-        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
         assert!(refused(
             crate::spawn_gate::connect_tcp_std_timeout(&address, PROVIDER_REACH_TIME).map(drop)
         ));
