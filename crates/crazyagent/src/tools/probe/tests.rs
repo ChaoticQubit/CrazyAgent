@@ -549,7 +549,7 @@ fn the_probe_mark_moves_when_the_first_run_ends_and_whenever_the_folders_change(
     );
     assert!(probes.start_now());
     probes.finish(Vec::new(), false, first);
-    assert_eq!(probes.found, [a.clone()]);
+    assert_eq!(probes.found, std::slice::from_ref(&a));
     assert_eq!(
         probes.mark(),
         found,
