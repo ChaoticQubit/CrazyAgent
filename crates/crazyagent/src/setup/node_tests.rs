@@ -353,7 +353,6 @@ fn a_usable_node_is_a_node_and_an_npm_the_resolver_finds_and_neither_alone_count
         usable(&places(vec![bin.clone()])),
         Some(Usable {
             node: bin.join("node"),
-            real_node: bin.join("node").canonicalize().unwrap(),
             npm: bin.join("npm"),
         })
     );
@@ -383,7 +382,6 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
         usable(&only_engine),
         Some(Usable {
             node: setup_bin.join("node"),
-            real_node: node.program.clone(),
             npm: setup_bin.join("npm"),
         })
     );
@@ -439,7 +437,6 @@ fn an_owner_node_or_npm_alone_never_pairs_with_the_app_install_and_the_app_pair_
     let both = places(vec![owner.clone(), setup_bin.clone()]);
     let engine_pair = Some(Usable {
         node: setup_bin.join("node"),
-        real_node: folder(root.path()).join("bin/node").canonicalize().unwrap(),
         npm: setup_bin.join("npm"),
     });
     script(&owner.join("node"), "v22.11.0");
@@ -487,6 +484,20 @@ fn the_engine_npm_prefix_links_the_node_its_install_used_so_a_node_script_harnes
         "a later install's node replaces the link"
     );
     private(&prefix.join("bin"));
+}
+
+#[test]
+fn a_node_entry_that_is_the_prefix_link_itself_is_kept_and_never_linked_to_itself() {
+    let root = root();
+    let prefix = crate::setup::harness_prefix(root.path());
+    let node = root.path().join("tools/bin/node");
+    script(&node, "node");
+    make_prefix(&prefix, &node).unwrap();
+    npm_launcher(&prefix.join("bin"));
+    let found = usable(&places(vec![prefix.join("bin")])).unwrap();
+    assert_eq!(found.node, prefix.join("bin/node"));
+    assert_eq!(make_prefix(&prefix, &found.node), Ok(()));
+    assert_eq!(std::fs::read_link(prefix.join("bin/node")).unwrap(), node);
 }
 
 #[test]
