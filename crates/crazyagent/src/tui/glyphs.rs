@@ -333,7 +333,8 @@ mod tests {
         ] {
             assert_eq!(Status::of(word), Some(kind), "{word}");
         }
-        assert_eq!(Status::of("Fill in what the project is about."), None);
+        assert_eq!(Status::of("Fill it in below."), None);
+        assert_eq!(Status::of("Fill in: About, Platforms."), None);
         assert_eq!(Status::Active.role(), Role::Running);
         assert_eq!(Status::Waiting.role(), Role::Muted);
         assert_eq!(UNICODE.status(Status::Fail), "✗");
