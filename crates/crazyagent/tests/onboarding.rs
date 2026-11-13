@@ -1376,7 +1376,6 @@ fn graphify() -> PathBuf {
 /// HOME. Input: the engine root.
 #[cfg(target_os = "macos")]
 fn require_engine_graphify(root: &Path) {
-    use crazyagent::setup::Installer;
     assert!(
         crazyagent::setup::platform_installer(root)
             .program(crazyagent::setup::Dependency::Graphify.program())
