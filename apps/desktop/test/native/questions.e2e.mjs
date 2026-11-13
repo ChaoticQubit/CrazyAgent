@@ -19,6 +19,9 @@ const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const QUESTION = "Should the menu list prices in dollars or in euros?";
 const ANSWER = "Dollars, with no cents.";
+const PERSONA = "Ada";
+const HANDLE = "menu-prices";
+const PAUSED = "The agent is paused until you answer.";
 
 /** Runs git in a folder with no system or user config. Inputs: the folder and git's
  * arguments. Output: git's trimmed stdout. */
@@ -29,8 +32,8 @@ function git(folder, ...args) {
 }
 
 /** Writes one sub-agent as the engine keeps it while it rests between turns: idle, so it
- * counts as running and has a terminal name, and run by no worker of this engine. Inputs: the
- * engine root and the project. Output: its id. */
+ * counts as running and has a terminal name, run by no worker of this engine, with the name
+ * the team keeps for it (DEC-096). Inputs: the engine root and the project. Output: its id. */
 function restingAgent(runtime, project) {
   const store = new DatabaseSync(join(runtime, "engine.db"));
   try {
@@ -39,6 +42,7 @@ function restingAgent(runtime, project) {
     const id = Number(store.prepare("INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,turns,parent) VALUES (?,'sub','codex',1,'idle',?,?,1,NULL)")
       .run(project, now, now).lastInsertRowid);
     assert.ok(Number.isSafeInteger(id) && id > 0, "the engine numbers the team agent");
+    store.prepare("INSERT INTO team_names(agent,project,persona,handle) VALUES (?,?,?,?)").run(id, project, PERSONA, HANDLE);
     return id;
   } finally {
     store.close();
@@ -127,7 +131,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     const graph = await value(bridge, "desktop_team_graph", { id: project });
     const node = graph.nodes.find((item) => item.id === `team-${agent}`) ?? assert.fail(`no card for agent ${agent}: ${JSON.stringify(graph.nodes)}`);
     const label = node.label;
-    assert.ok(label, "the asker has a name");
+    assert.equal(label, `${PERSONA} (@${HANDLE})`, "the asker has the name the team keeps");
     assert.deepEqual(await value(bridge, "desktop_coord_questions", { id: project }), { project_id: project, questions: [], more: 0, waiting: [] }, "no agent has asked anything yet");
 
     const dist = join(root, "dist");
@@ -165,11 +169,16 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("questions-toast");
         await me.click("Open", "div.toast[role=status] button");
         await me.waitFor("the question on the Questions tab Open opened", (text) => text.includes(QUESTION) && text.includes("Your answer"));
-        assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/questions`), "Open goes to the project's Questions tab, where a linked team question waits (S4-R1)");
+        for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
+          const focus = await page.evaluate(`document.activeElement?.closest("section.qs-card")?.innerText ?? null`);
+          if (focus?.includes(QUESTION)) break;
+          assert.ok(Date.now() < deadline, `Open puts the keyboard on the urgent question (V241-QUESTION-UX P2): ${focus}`);
+        }
+        assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/questions`), "Open goes to the project's Questions tab, where a linked team question waits (S4-R1), and the keyboard goes to it once");
         const cards = await page.evaluate(`[...document.querySelectorAll("section.qs-card")].map((card) => ({ name: card.getAttribute("aria-label"), text: card.innerText }))`);
         assert.equal(cards.length, 1, `one question card: ${JSON.stringify(cards)}`);
-        assert.equal(cards[0].name, `Question from Agent ${agent}`, "the card names the agent that asked");
-        for (const part of [`Agent ${agent}`, "Waiting for you", QUESTION, "Your answer", "Answer", "Dismiss"]) {
+        assert.equal(cards[0].name, `Question from ${label}`, "the card names the agent that asked by its name (V241-QUESTION-UX P1)");
+        for (const part of [label, "Urgent", "Waiting for you", PAUSED, QUESTION, "Your answer", "Answer", "Dismiss"]) {
           assert.ok(cards[0].text.includes(part), `the question card shows "${part}": ${cards[0].text}`);
         }
         await me.capture("questions-inbox");
@@ -177,6 +186,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.type("section.qs-card textarea", ANSWER);
         await me.click("Answer", "section.qs-card button");
         await me.waitFor("the answered question", (text) => text.includes(`Answer: ${ANSWER}`) && !text.includes("Your answer"));
+        const answered = await page.evaluate(`document.querySelector("section.qs-card")?.innerText ?? ""`);
+        assert.ok(!answered.includes("Urgent") && !answered.includes(PAUSED), `an answered question holds neither mark (V241-QUESTION-UX P3): ${answered}`);
         await me.capture("questions-answered");
         const sent = log.trail.filter((call) => call.cmd === "desktop_answer_question");
         assert.equal(sent.length, 1, `one answer was sent: ${JSON.stringify(sent)}`);
