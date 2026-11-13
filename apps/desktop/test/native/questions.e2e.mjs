@@ -166,10 +166,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.click("Open", "div.toast[role=status] button");
         await me.waitFor("the question on the Questions tab Open opened", (text) => text.includes(QUESTION) && text.includes("Your answer"));
         assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/questions`), "Open goes to the project's Questions tab, where a linked team question waits (S4-R1)");
-        const cards = await page.evaluate(`[...document.querySelectorAll("section.qs-card")].map((card) => card.innerText)`);
+        const cards = await page.evaluate(`[...document.querySelectorAll("section.qs-card")].map((card) => ({ name: card.getAttribute("aria-label"), text: card.innerText }))`);
         assert.equal(cards.length, 1, `one question card: ${JSON.stringify(cards)}`);
-        for (const part of ["Waiting for you", QUESTION, "Your answer", "Answer", "Dismiss"]) {
-          assert.ok(cards[0].includes(part), `the question card shows "${part}": ${cards[0]}`);
+        assert.equal(cards[0].name, `Question from Agent ${agent}`, "the card names the agent that asked");
+        for (const part of [`Agent ${agent}`, "Waiting for you", QUESTION, "Your answer", "Answer", "Dismiss"]) {
+          assert.ok(cards[0].text.includes(part), `the question card shows "${part}": ${cards[0].text}`);
         }
         await me.capture("questions-inbox");
 
