@@ -23,6 +23,27 @@ use tokio::time::Instant;
 #[path = "master_rcli_custody.rs"]
 mod custody;
 
+#[cfg(unix)]
+#[path = "master_rcli_model_test.rs"]
+pub(super) mod model_test;
+
+/// Refuses an RCLI test launch where confined model runs do not exist.
+#[cfg(not(unix))]
+pub(super) mod model_test {
+    /// Refuses the test launch. Inputs: the runtime handle, engine folder, settings files,
+    /// id, provider and pool, all unused. Output: unavailable.
+    pub(in crate::engine::owner::transport) fn run(
+        _host: &super::OwnerRuntimeHandle,
+        _root: &std::path::Path,
+        _settings: (&std::path::Path, &std::path::Path),
+        _model: &str,
+        _provider: &str,
+        _pool: &crate::protocol::CredentialRef,
+    ) -> Result<(crate::model_choice::test_launch::Tested, Option<String>), &'static str> {
+        Err("model_choice_unavailable")
+    }
+}
+
 use custody::RcliCustody;
 
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);

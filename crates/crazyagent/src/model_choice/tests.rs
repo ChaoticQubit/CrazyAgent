@@ -1158,23 +1158,24 @@ fn only_an_owner_id_waiting_for_its_test_launch_is_pending() {
 }
 
 /// An owner id is added only where a test launch can run, and the section tells both
-/// clients so (MUG2-L1): Claude Code and Codex take one, while RCLI answers
-/// `model_choice_not_supported` and keeps no id that would wait forever.
+/// clients so (MUG2-L1): Claude Code, Codex and, since DEC-150 addendum 9e, RCLI take one,
+/// while a harness without one, such as OpenCode, answers `model_choice_not_supported` and
+/// keeps no id that would wait forever.
 #[test]
 fn an_owner_id_is_added_only_where_a_test_launch_can_run_and_the_section_says_so() {
     let (_tmp, db) = engine();
-    for harness in ["codex", "claude-code"] {
+    for harness in ["codex", "claude-code", "rcli"] {
         let models = store::values(&db, harness, &[], &Scope::App, None).unwrap();
         assert!(models.testable, "{harness}");
     }
     let ids = catalog(&["local"]);
     assert_eq!(
-        store::custom_begin(&db, "rcli", &ids, "my-model", None)
+        store::custom_begin(&db, "opencode", &ids, "my-model", None)
             .unwrap_err()
             .0,
         "model_choice_not_supported"
     );
-    let models = store::values(&db, "rcli", &ids, &Scope::App, None).unwrap();
+    let models = store::values(&db, "opencode", &ids, &Scope::App, None).unwrap();
     assert!(!models.testable);
     assert!(
         models

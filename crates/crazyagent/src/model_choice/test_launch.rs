@@ -50,15 +50,23 @@ pub const POOL_NEEDED: &str = "model_choice_pool_needed";
 pub const POOL_UNKNOWN: &str = "model_choice_pool_unknown";
 
 /// Tells whether a harness has a test launch: the harnesses whose model a read-only run
-/// can set. Input: the catalog harness id. Output: true for Claude Code and Codex.
+/// can set, and RCLI, whose closed host runs one turn (DEC-150 addendum 9e). Input: the
+/// catalog harness id. Output: true for Claude Code, Codex and RCLI.
 pub fn supported(harness: &str) -> bool {
+    matches!(harness, "claude-code" | "codex" | "rcli")
+}
+
+/// Tells whether a harness's test launch is a read-only research run: Claude Code and
+/// Codex; RCLI's is decided by `rcli_outcome`. Input: the catalog harness id. Output: the
+/// answer.
+fn read_only(harness: &str) -> bool {
     matches!(harness, "claude-code" | "codex")
 }
 
 /// Names the provider whose refusal a test launch reads, for the pending reason when the
-/// provider gave none. Input: a supported harness. Output: the provider's name.
+/// provider gave none. Input: Claude Code or Codex. Output: the provider's name.
 pub fn provider(harness: &str) -> &'static str {
-    assert!(supported(harness));
+    assert!(read_only(harness));
     match harness {
         "claude-code" => "Anthropic",
         _ => "OpenAI",
@@ -66,13 +74,13 @@ pub fn provider(harness: &str) -> &'static str {
 }
 
 /// Tells whether a failed test run's standard output carries the provider's refusal code
-/// for the harness (DEC-150 F8) as a whole word. Inputs: the supported harness and the
+/// for the harness (DEC-150 F8) as a whole word. Inputs: Claude Code or Codex and the
 /// output, at most the runner's output bound. Output: true when the code is there.
 pub fn refused(harness: &str, output: &str) -> bool {
     use crate::harnesses::launch::{
         CLAUDE_MODEL_REFUSED, CODEX_MODEL_REFUSED, CODEX_SERVER_MODEL_REFUSED,
     };
-    assert!(supported(harness));
+    assert!(read_only(harness));
     let codes: &[&str] = match harness {
         "claude-code" => &[CLAUDE_MODEL_REFUSED],
         _ => &[CODEX_MODEL_REFUSED, CODEX_SERVER_MODEL_REFUSED],
@@ -94,10 +102,10 @@ fn word(text: &str, code: &str) -> bool {
 }
 
 /// Decides a test launch from how its run ended and, for a failed run, its output.
-/// Inputs: the supported harness, the ending and the output when it could be read.
+/// Inputs: Claude Code or Codex, the ending and the output when it could be read.
 /// Output: the decision and, for a pending one, its reason of at most `REASON_BYTES_MAX`.
 pub fn outcome(harness: &str, ended: Ended, output: Option<&str>) -> (Tested, Option<String>) {
-    assert!(supported(harness));
+    assert!(read_only(harness));
     let decided = match ended {
         Ended::Answered => (Tested::Verified, None),
         Ended::Failed if output.is_some_and(|output| refused(harness, output)) => {
@@ -129,10 +137,10 @@ pub fn outcome(harness: &str, ended: Ended, output: Option<&str>) -> (Tested, Op
     decided
 }
 
-/// Words the pending reason of a test launch that started no run. Inputs: the supported
-/// harness and why. Output: the reason, at most `REASON_BYTES_MAX` bytes.
+/// Words the pending reason of a test launch that started no run. Inputs: Claude Code or
+/// Codex and why. Output: the reason, at most `REASON_BYTES_MAX` bytes.
 pub fn not_started(harness: &str, why: NotStarted) -> String {
-    assert!(supported(harness));
+    assert!(read_only(harness));
     let name = crate::harnesses::spec(harness).map_or(harness, |spec| spec.name);
     let reason = match why {
         NotStarted::NotInstalled => format!("{name} is not installed, so the id was not tested."),
@@ -224,8 +232,29 @@ pub fn rcli_pick<'a>(
     set_up: impl Fn(&crate::config::ModelConnection) -> bool,
     paused: impl Fn(&crate::config::ModelConnection) -> bool,
 ) -> Result<&'a crate::config::ModelConnection, NotStarted> {
-    let _ = (members, provider, &set_up, &paused);
-    Err(NotStarted::NoAccount)
+    assert!(super::rcli_provider_name(provider).is_some());
+    assert!(members.len() <= crate::config::POOL_MEMBERS_MAX);
+    let mut paused_seen = false;
+    for &connection in members {
+        let keyed = matches!(
+            connection.auth,
+            crate::config::ModelAuthentication::ApiKey { .. }
+        );
+        if !keyed || super::rcli_provider_of(connection) != Some(provider) || !set_up(connection) {
+            continue;
+        }
+        if paused(connection) {
+            paused_seen = true;
+            continue;
+        }
+        assert_eq!(connection.harness.as_str(), "rcli");
+        return Ok(connection);
+    }
+    Err(if paused_seen {
+        NotStarted::Paused
+    } else {
+        NotStarted::NoAccount
+    })
 }
 
 /// One test launch to run: the engine's data folder, the two settings files, the
@@ -244,7 +273,7 @@ pub struct Request<'a> {
 mod run {
     use super::{
         BUSY, Ended, NotStarted, OUTPUT_TOKENS, POOL_UNKNOWN, PROMPT, Request, Tested, WALL_TIME,
-        not_started, outcome, supported,
+        not_started, outcome, read_only,
     };
     use crate::instruction_cleanup::private_folder;
     use crate::research::accounts::{AccountPick, SettingsResolver};
@@ -262,12 +291,12 @@ mod run {
     static RUNNING: Mutex<Vec<(PathBuf, &'static str)>> = Mutex::new(Vec::new());
 
     /// Holds the one test slot of a harness in an engine data folder until dropped.
-    struct Slot(PathBuf, &'static str);
+    pub(crate) struct Slot(PathBuf, &'static str);
 
     impl Slot {
         /// Takes the test slot of a harness. Inputs: the canonical engine folder and the
-        /// research harness id. Output: the slot, or none while another test holds it.
-        fn take(root: &Path, harness: &'static str) -> Option<Self> {
+        /// harness id. Output: the slot, or none while another test holds it.
+        pub(crate) fn take(root: &Path, harness: &'static str) -> Option<Self> {
             let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
             let held = |(folder, id): &(PathBuf, &str)| folder == root && *id == harness;
             if running.len() >= RUNNING_MAX || running.iter().any(held) {
@@ -294,7 +323,7 @@ mod run {
     /// The run's folder is removed once its output is read. Input: the request. Output:
     /// the decision and its pending reason, or `BUSY`, `POOL_UNKNOWN` or unavailable.
     pub(crate) fn run(request: &Request<'_>) -> Result<(Tested, Option<String>), &'static str> {
-        assert!(supported(request.harness));
+        assert!(read_only(request.harness));
         let harness = match request.harness {
             "claude-code" => ResearchHarness::ClaudeCode,
             _ => ResearchHarness::Codex,
@@ -378,7 +407,7 @@ mod run {
 }
 
 #[cfg(unix)]
-pub(crate) use run::run;
+pub(crate) use run::{Slot, run};
 
 /// Refuses a test launch where confined model runs do not exist. Input: the request,
 /// unused. Output: unavailable.

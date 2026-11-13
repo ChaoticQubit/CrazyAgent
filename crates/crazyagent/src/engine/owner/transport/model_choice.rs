@@ -454,6 +454,10 @@ async fn handle(
             .and_then(|id| super::harness_settings::registered(engine, authority, id)),
         _ => None,
     };
+    let host = OwnerRuntimeHandle {
+        engine: engine.clone(),
+        authority: authority.clone(),
+    };
     let harnesses = match &action {
         Action::Test { .. } => {
             let (codex, claude) = authority
@@ -476,8 +480,19 @@ async fn handle(
             } => {
                 let (settings, codex, claude) =
                     harnesses.ok_or_else(|| failure("model_choice_unavailable"))?;
-                let launch: Launch<'_> = Box::new(|pool, _| {
+                let launch: Launch<'_> = Box::new(|pool, provider| {
                     let (global, local) = settings.as_ref().ok_or("model_choice_unavailable")?;
+                    if harness == "rcli" {
+                        let provider = provider.ok_or("model_choice_provider_needed")?;
+                        return super::master_rcli::model_test::run(
+                            &host,
+                            &root,
+                            (global, local),
+                            &model,
+                            provider,
+                            pool,
+                        );
+                    }
                     let path = |host: &Option<Arc<RegisteredNativeAuthHost>>| match host {
                         Some(host) => host.verified_path().map(|path| Some(path.to_path_buf())),
                         None => Ok(None),
@@ -580,14 +595,14 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
         Action::Add {
             harness,
             model,
-            provider: _,
+            provider,
         } => {
             let begun = store::custom_begin(
                 &db,
                 &harness,
                 &crate::model_choice::catalog(&harness),
                 &model,
-                None,
+                provider.as_deref(),
             )?;
             Ok(Reply::Added {
                 added: begun.into(),
@@ -642,7 +657,11 @@ fn tested(
     if !store::custom_pending(&db, harness, model)? {
         return Err(failure("model_choice_custom_not_pending"));
     }
-    let (mut tested, mut reason) = launch(pool, None).map_err(failure)?;
+    let provider = store::pending_provider(&db, harness, model)?;
+    if (harness == "rcli") != provider.is_some() {
+        return Err(failure("model_choice_provider_needed"));
+    }
+    let (mut tested, mut reason) = launch(pool, provider.as_deref()).map_err(failure)?;
     if tested != Tested::Pending {
         match store::custom_checked(&db, harness, model, tested == Tested::Verified) {
             Ok(()) => {}

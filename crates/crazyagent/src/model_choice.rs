@@ -269,16 +269,28 @@ pub fn rcli_serves(
     custom: Option<&str>,
 ) -> bool {
     assert_eq!(connection.harness.as_str(), "rcli");
-    let keyed = crate::accounts::rcli_keyed_providers();
-    assert!(custom.is_none_or(|custom| keyed.iter().any(|(id, _)| *id == custom)));
+    assert!(custom.is_none_or(|custom| rcli_providers().contains(&custom)));
     if connection.model.id == model {
         return true;
     }
-    let provider = crate::accounts::provider_of(connection);
-    let Some((served, _)) = keyed.into_iter().find(|(_, keyed)| *keyed == provider) else {
+    let Some(served) = rcli_provider_of(connection) else {
         return false;
     };
     catalog_provider("rcli", model) == Some(served) || custom == Some(served)
+}
+
+/// Names the keyed RCLI provider one account runs on (DEC-150 addendum 9e): its account
+/// catalog provider when that is a keyed RCLI one. Input: the account connection. Output:
+/// the provider id, none for a URL, local or other harness's account.
+pub fn rcli_provider_of(connection: &crate::config::ModelConnection) -> Option<&'static str> {
+    if connection.harness.as_str() != "rcli" {
+        return None;
+    }
+    let provider = crate::accounts::provider_of(connection);
+    crate::accounts::rcli_keyed_providers()
+        .into_iter()
+        .find(|(_, keyed)| *keyed == provider)
+        .map(|(id, _)| id)
 }
 
 /// Lists the model ids a harness's shipped catalog offers, the candidates the store checks

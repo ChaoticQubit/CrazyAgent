@@ -313,6 +313,37 @@ pub(super) fn configured_profile_ref(
         .ok_or_else(|| error("account_profile_auth_unsupported"))
 }
 
+/// The binding an RCLI test launch (DEC-150 addendum 9e) holds one keyed pool account's
+/// configured profile under, as account setup binds it: this engine run, the settings as
+/// they are now and custody's profile of the account. Inputs: the engine database, the
+/// resolved settings and their two files, the host, the account and custody's profile id.
+/// Output: the binding, or the settings or database refusal.
+pub(crate) fn rcli_test_binding(
+    db: &Connection,
+    config: &EffectiveConfig,
+    files: (&std::path::Path, &std::path::Path),
+    host: &HostStamp,
+    connection: &ModelConnection,
+    custody_id: &str,
+) -> Result<NativeProfileBinding, EngineError> {
+    assert!(is_hex_id(custody_id));
+    assert_eq!(connection.harness.as_str(), "rcli");
+    let (global, project) = files;
+    let source_hash = settings::verified_source_hash_at(config, global, project)?;
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let revision = owner_revision(&tx)?;
+    drop(tx);
+    Ok(NativeProfileBinding {
+        database_instance: host.db_instance.clone(),
+        engine_epoch: host.engine_epoch.clone(),
+        config_id: config.id.clone(),
+        source_hash,
+        at_revision: Cursor::new(revision),
+        connection: connection.clone(),
+        custody_id: custody_id.to_owned(),
+    })
+}
+
 fn prepare(
     custody: &mut Result<NativeProfileCustody, EngineError>,
     admission: &Admission,
