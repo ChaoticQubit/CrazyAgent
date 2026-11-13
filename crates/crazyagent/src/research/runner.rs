@@ -5821,6 +5821,7 @@ mod tests {
     /// A stand-in Claude Code that writes stream-json only when asked for it, so a run that
     /// does not ask exits 3. `RESULT` is replaced by the run's last lines and `CODE` by its
     /// exit status.
+    #[cfg(target_os = "macos")]
     const STREAMING_CLAUDE: &str = r#"#!/bin/sh
 case " $* " in *" --output-format stream-json "*) ;; *) exit 3 ;; esac
 case " $* " in *" --verbose "*) ;; *) exit 4 ;; esac
@@ -5832,10 +5833,12 @@ exit CODE
 
     /// The refusal Claude Code 2.1.322 streams for a model the account cannot use: its own
     /// assistant error line, then an error result.
+    #[cfg(target_os = "macos")]
     const REFUSAL_LINES: &str = r#"printf '%s\n' '{"type":"assistant","uuid":"assistant-1","session_id":"native-session","parent_tool_use_id":null,"error":"model_not_found","message":{"id":"message-1","type":"message","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"There'"'"'s an issue with the selected model (claude-x). It may not exist or you may not have access to it."}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"uuid":"result-1","session_id":"native-session","result":"There is an issue with the selected model (claude-x)."}'"#;
 
     /// An answer streamed as Claude Code writes one: the model's text, then a success result.
+    #[cfg(target_os = "macos")]
     const ANSWER_LINES: &str = r#"printf '%s\n' '{"type":"assistant","uuid":"assistant-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"OK"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"uuid":"result-1","session_id":"native-session","result":"OK"}'"#;
 
