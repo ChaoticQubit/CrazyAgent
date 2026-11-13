@@ -150,6 +150,7 @@ impl AddPlan {
     /// caller to clear. Output: whether a source is left to clear, or the refusal code
     /// with the source as it was and no partial folder showing.
     pub(super) fn place(self, tally: &Tally) -> Result<Placed, EngineError> {
+        tally.go_on()?;
         if fs::symlink_metadata(&self.destination).is_ok() {
             return Err(refused("home_destination_exists"));
         }
