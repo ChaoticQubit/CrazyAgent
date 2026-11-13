@@ -1620,7 +1620,8 @@ impl ResearchRunner {
     /// Runs one agent with tools off that can read `run.folder`, its secret files
     /// closed but the ones the owner shared back (DEC-147.9), but write only
     /// its own engine-owned work, home and temp folders, reaching nothing but
-    /// its model endpoint. A managed account is held under the engine custody
+    /// its model endpoint and none of the engine root's secrets, which no
+    /// granted folder may hold. A managed account is held under the engine custody
     /// lease for the whole run. Takes the run and `stop`, polled while the
     /// agent runs. Returns how it ended; the agent's process group is stopped
     /// on every path, including a panic or an early error.
@@ -1726,6 +1727,7 @@ impl ResearchRunner {
             &tmp,
             SandboxNetwork::Only(vec![model_remote(account)?]),
         )?
+        .guard_engine(self.engine_folder()?)?
         .allow_read(&folder)?;
         let program =
             crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())?;
