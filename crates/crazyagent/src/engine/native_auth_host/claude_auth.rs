@@ -31,6 +31,10 @@ enum ClaudeAuthCommand {
     Renew,
 }
 
+/// Builds one Claude Code auth child that runs in the profile home with only its own
+/// environment. Inputs: the harness file, the profile home and the action. Output: the
+/// command; `native_auth_claude_launch_invalid` for a relative path, and
+/// `native_auth_claude_launch_failed` when the tool resolver refuses to start the file.
 fn auth_command(
     executable: &Path,
     home: &Path,
@@ -39,7 +43,8 @@ fn auth_command(
     if !executable.is_absolute() || !home.is_absolute() {
         return Err(EngineError("native_auth_claude_launch_invalid".into()));
     }
-    let mut command = super::sign_in_command(executable)?;
+    let mut command = super::sign_in_command(executable)
+        .map_err(|_| EngineError("native_auth_claude_launch_failed".into()))?;
     match action {
         ClaudeAuthCommand::Login => command.args(["auth", "login"]),
         ClaudeAuthCommand::Status => command.args(["auth", "status"]),
