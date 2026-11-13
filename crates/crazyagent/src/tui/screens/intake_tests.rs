@@ -24,8 +24,6 @@ use crate::tui::seam::{Arrival, PoolChange, Request, ShellRequest};
 use crate::tui::shell::Shell;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const SETTINGS: &str = r#"version = 1
@@ -473,17 +471,13 @@ async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
     shell.key(Key::Right);
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::Home));
+    let ended = job_ended(&mut shell, &mut connection).await;
+    assert_eq!(ended.state, JobState::Done);
     assert!(home.join("big").join("data.bin").exists());
     assert!(!source.exists(), "a move leaves no original");
-    assert_eq!(
-        shell.place(),
-        Some(Place::Onboarding {
-            path: home.join("big").to_str().unwrap().into(),
-            name: "big".into(),
-            project: None,
-        })
-    );
+    landed(&mut shell, &mut connection, "big").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -551,7 +545,10 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
 
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    let ended = job_ended(&mut shell, &mut connection).await;
+    assert_eq!(ended.state, JobState::Done);
+    landed(&mut shell, &mut connection, "shop").await;
     assert!(home.join("shop").join("README.md").is_file());
     assert!(!home.join("shop").join(".git").join("worktrees").exists());
     assert!(
@@ -663,17 +660,13 @@ async fn a_move_of_a_repo_with_a_linked_worktree_asks_first_and_move_anyway_move
     shell.key(Key::Right);
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    let ended = job_ended(&mut shell, &mut connection).await;
+    assert_eq!(ended.state, JobState::Done);
+    assert_eq!(ended.overrides, [AddOverride::Worktrees]);
     assert!(home.join("shop").join(".git").is_dir());
     assert!(!source.exists());
-    assert_eq!(
-        shell.place(),
-        Some(Place::Onboarding {
-            path: home.join("shop").to_str().unwrap().into(),
-            name: "shop".into(),
-            project: None,
-        })
-    );
+    landed(&mut shell, &mut connection, "shop").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -755,7 +748,10 @@ async fn a_copy_of_a_linked_worktree_asks_first_and_copy_anyway_copies_it() {
     shell.key(Key::Right);
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    let ended = job_ended(&mut shell, &mut connection).await;
+    assert_eq!(ended.state, JobState::Done);
+    landed(&mut shell, &mut connection, "shop-side").await;
     assert!(home.join("shop-side").join(".git").is_file());
     assert!(linked.join(".git").is_file());
 }
@@ -925,38 +921,47 @@ async fn a_move_reads_the_folder_size_first_and_warns_about_unreadable_files() {
     assert!(shows(&rows, "Some files can't be read."), "{rows:#?}");
 }
 
+/// DEC-159 S7: a soft refusal reaches Home as the job waiting for an answer. Answer opens
+/// Add folder on the job's folder with the question for that refusal once the projects
+/// folder is read, and yes starts the job again with its own overrides and the new ones, each
+/// once and in the engine's order. A job that no longer waits says so.
 #[test]
-fn a_soft_refusal_from_the_engine_turns_into_the_question_for_that_issue() {
+fn answering_a_job_s_soft_refusal_asks_that_question_and_starts_it_with_each_override_once() {
     let user = tempfile::tempdir().unwrap();
-    let source = user.path().canonicalize().unwrap().join("shop");
-    std::fs::create_dir_all(source.join(".git")).unwrap();
-    let mut ctx = screen_ctx(user.path());
-    let screen = open(&Place::AddFolder, &mut ctx);
-    let mut shell = Shell::with(ctx, screen);
+    let outside = user.path().canonicalize().unwrap().join("outside");
+    let source = outside.join("shop");
+    repo_with_worktree(&source, &outside.join("shop-side"));
     let typed = source.to_str().unwrap().to_owned();
-    keys(&mut shell, &format!("{typed}/"));
-    shell.key(Key::Tab);
-    shell.key(Key::Right);
+    let mut ctx = screen_ctx(user.path());
+    ctx.store.projects = Load::Ready(Vec::new());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let refused = JobState::NeedsAnswer {
+        code: "home_copy_too_large".into(),
+    };
+    let waiting = JobView {
+        overrides: vec![AddOverride::Worktrees],
+        ..job_for(&typed, AddMode::Move, refused)
+    };
+    job_read(&mut shell, Some(waiting.clone()));
+    assert!(shows(&render(&mut shell, 120, 30), "Enter Answer"));
     shell.key(Key::Enter);
+    let answer = Place::AnswerAdd {
+        job: waiting.id.clone(),
+    };
+    assert_eq!(shell.place(), Some(answer));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        !shows(&rows, "anyway?"),
+        "it waits for the projects folder: {rows:#?}"
+    );
+    let home = user.path().join("Projects").to_str().unwrap().to_owned();
     shell.arrive(intake(
-        IntakeQuery::FolderSize {
-            path: typed.clone(),
-        },
-        Ok(IntakeView::FolderSize(Measured {
-            bytes: 10,
-            placeholders: 0,
+        IntakeQuery::Home,
+        Ok(IntakeView::Home(crate::projects_home::ProjectsHome {
+            path: Some(home),
+            watching: true,
         })),
-    ));
-    shell.key(Key::Enter);
-    shell.key(Key::Enter);
-    shell.arrive(intake(
-        IntakeQuery::AddExisting {
-            source: typed.clone(),
-            mode: AddMode::Move,
-            overrides: Vec::new(),
-            generation: 1,
-        },
-        Err("home_copy_too_large".into()),
     ));
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Move shop anyway?"), "{rows:#?}");
@@ -967,25 +972,40 @@ fn a_soft_refusal_from_the_engine_turns_into_the_question_for_that_issue() {
         ),
         "{rows:#?}"
     );
-    assert!(
-        shows(&rows, "This copies every file to the other disk"),
-        "{rows:#?}"
-    );
-    assert!(shows(&rows, "Move anyway"), "{rows:#?}");
+    job_asks(&mut shell);
     shell.key(Key::Right);
     shell.key(Key::Enter);
+    let overrides = vec![AddOverride::Worktrees, AddOverride::TooLarge];
+    assert_eq!(
+        job_asks(&mut shell),
+        [start(&typed, AddMode::Move, overrides.clone())]
+    );
+    let again = job_for(&typed, AddMode::Move, JobState::Clearing);
     shell.arrive(intake(
-        IntakeQuery::AddExisting {
-            source: typed,
-            mode: AddMode::Move,
-            overrides: vec![AddOverride::TooLarge],
-            generation: 2,
-        },
-        Err("home_destination_exists".into()),
+        start(&typed, AddMode::Move, overrides),
+        Ok(IntakeView::Job(Some(again))),
     ));
+    assert_eq!(shell.place(), Some(Place::Home));
+    let said = shell.ctx.message().expect("the start is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        ("Adding shop.", "Follow it on Home; you can keep working.")
+    );
+
+    let mut ctx = screen_ctx(user.path());
+    let gone = Place::AnswerAdd {
+        job: RequestId::new("add-9").unwrap(),
+    };
+    let screen = open(&gone, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
     let rows = render(&mut shell, 80, 40);
-    assert!(!shows(&rows, "anyway?"), "{rows:#?}");
-    assert!(shows(&rows, "already has a folder"), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "This folder no longer waits for an answer. See Home."
+        ),
+        "{rows:#?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2546,13 +2566,25 @@ fn a_refused_onboarding_commit_says_why_and_keeps_the_offer() {
 /// size read with `placeholders` files only in iCloud. Takes the user folder, the way and the
 /// count. Returns the shell, after the Enter that goes on from the size, and the typed folder.
 fn measured_icloud_folder(user: &Path, mode: AddMode, placeholders: u64) -> (Shell, String) {
+    measured(user, mode, placeholders, None)
+}
+
+/// As [`measured_icloud_folder`], with the engine's intake job the store shows before the
+/// add, if any: an ended job for the same folder with the id `add-2`.
+fn measured(
+    user: &Path,
+    mode: AddMode,
+    placeholders: u64,
+    shown: Option<JobState>,
+) -> (Shell, String) {
     let user = user.canonicalize().unwrap();
     let source = user.join("Desktop").join("shop");
     std::fs::create_dir_all(source.join(".git")).unwrap();
+    let typed = source.to_str().unwrap().to_owned();
     let mut ctx = screen_ctx(&user);
+    ctx.store.intake = shown.map(|state| job_for(&typed, mode, state));
     let screen = open(&Place::AddFolder, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
-    let typed = source.to_str().unwrap().to_owned();
     keys(&mut shell, &format!("{typed}/"));
     shell.key(Key::Tab);
     shell.key(Key::Right);
@@ -2584,42 +2616,56 @@ fn intake_jobs(shell: &mut Shell) -> Vec<IntakeJob> {
     jobs
 }
 
-/// Takes the one iCloud download the screen queued. Takes the shell. Returns its folder and
-/// the flag that stops it.
-fn download_job(shell: &mut Shell) -> (String, Arc<AtomicBool>) {
-    let downloads: Vec<(String, Arc<AtomicBool>)> = intake_jobs(shell)
-        .into_iter()
-        .filter_map(|job| match job {
-            IntakeJob::IcloudDownload { path, cancel } => Some((path, cancel)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(downloads.len(), 1, "one download is queued");
-    downloads.into_iter().next().unwrap()
-}
-
-/// The ways of the adds the screen queued. Takes the shell and the folder. Returns them.
-fn added_ways(shell: &mut Shell, folder: &str) -> Vec<AddMode> {
+/// The starts of an intake job the screen queued for the folder. Takes the shell and the
+/// folder. Returns each start's way and overrides.
+fn started(shell: &mut Shell, folder: &str) -> Vec<(AddMode, Vec<AddOverride>)> {
     intake_jobs(shell)
         .into_iter()
         .filter_map(|job| match job.query() {
-            IntakeQuery::AddExisting { source, mode, .. } if source == folder => Some(mode),
+            IntakeQuery::JobStart {
+                source,
+                mode,
+                overrides,
+            } if source == folder => Some((mode, overrides)),
             _ => None,
         })
         .collect()
 }
 
-fn icloud_arrival(folder: &str, result: Result<IntakeView, String>) -> Arrival {
-    intake(
-        IntakeQuery::IcloudDownload {
-            path: folder.to_owned(),
-        },
-        result,
-    )
+fn start(folder: &str, mode: AddMode, overrides: Vec<AddOverride>) -> IntakeQuery {
+    IntakeQuery::JobStart {
+        source: folder.to_owned(),
+        mode,
+        overrides,
+    }
+}
+
+fn job_for(folder: &str, mode: AddMode, state: JobState) -> JobView {
+    JobView {
+        id: RequestId::new("add-2").unwrap(),
+        source: folder.to_owned(),
+        mode,
+        overrides: Vec::new(),
+        stopping: false,
+        state,
+    }
+}
+
+/// Checks Home after a job added `name`: its end is said and the folder, read again after
+/// the end, is listed as not set up. Takes the shell, the connection and the folder's name.
+async fn landed(shell: &mut Shell, connection: &mut Connection, name: &str) {
+    pump(shell, connection).await;
+    let lead = shell.ctx.message().map(|said| said.lead.clone());
+    let end = format!("{name} is in your projects folder. Set it up from Home.");
+    assert_eq!(lead.as_deref(), Some(end.as_str()));
+    let rows = render(shell, 120, 40);
+    let added = format!("{} Added", shell.ctx.glyphs.status(Status::Ok));
+    assert!(shows(&rows, &added), "{rows:#?}");
+    assert!(shows(&rows, "Not set up"), "{rows:#?}");
 }
 
 #[test]
-fn an_icloud_folder_asks_first_and_download_and_move_moves_once_every_file_is_here() {
+fn an_icloud_folder_asks_first_and_download_and_move_starts_the_job_after_the_move_confirm() {
     let user = tempfile::tempdir().unwrap();
     let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Move, 3);
     let rows = render(&mut shell, 80, 40);
@@ -2642,53 +2688,54 @@ fn an_icloud_folder_asks_first_and_download_and_move_moves_once_every_file_is_he
     for choice in ["Download and move", "Download and copy", "Cancel"] {
         assert!(shows(&rows, choice), "{choice} missing: {rows:#?}");
     }
-    assert!(added_ways(&mut shell, &typed).is_empty());
+    assert!(started(&mut shell, &typed).is_empty());
     shell.key(Key::Enter);
-    let (path, cancel) = download_job(&mut shell);
-    assert_eq!(path, typed);
-    assert!(!cancel.load(Ordering::Relaxed));
-    let rows = render(&mut shell, 80, 40);
-    assert!(shows(&rows, "Downloading from iCloud"), "{rows:#?}");
-    shell.arrive(icloud_arrival(
-        &typed,
-        Ok(IntakeView::IcloudProgress(Progress { total: 3, done: 1 })),
-    ));
-    let rows = render(&mut shell, 80, 40);
-    assert!(
-        shows(&rows, "Downloading from iCloud: 1 of 3 files"),
-        "{rows:#?}"
-    );
-    shell.key(Key::Enter);
-    assert!(
-        intake_jobs(&mut shell).is_empty(),
-        "keys wait while it downloads"
-    );
-    shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(3))));
     let rows = render(&mut shell, 80, 40);
     assert!(!shows(&rows, "from iCloud first?"), "{rows:#?}");
     assert!(shows(&rows, "Press Enter again to move it"), "{rows:#?}");
+    assert!(
+        started(&mut shell, &typed).is_empty(),
+        "the move is confirmed first"
+    );
     shell.key(Key::Enter);
-    assert_eq!(added_ways(&mut shell, &typed), [AddMode::Move]);
+    assert_eq!(started(&mut shell, &typed), [(AddMode::Move, Vec::new())]);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Starting"), "{rows:#?}");
+    let downloading = JobState::Downloading {
+        progress: Progress { total: 0, done: 0 },
+    };
+    shell.arrive(intake(
+        start(&typed, AddMode::Move, Vec::new()),
+        Ok(IntakeView::Job(Some(job_for(
+            &typed,
+            AddMode::Move,
+            downloading,
+        )))),
+    ));
+    let said = shell.ctx.message().expect("the start is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        ("Adding shop.", "Follow it on Home; you can keep working.")
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
 }
 
 #[test]
-fn download_and_copy_turns_a_move_into_a_copy_after_the_download() {
+fn download_and_copy_turns_a_move_into_a_copy_and_starts_it_at_once() {
     let user = tempfile::tempdir().unwrap();
     let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Move, 1);
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "1 file is only in iCloud"), "{rows:#?}");
     shell.key(Key::Right);
     shell.key(Key::Enter);
-    let (path, _) = download_job(&mut shell);
-    assert_eq!(path, typed);
-    shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(1))));
-    assert_eq!(added_ways(&mut shell, &typed), [AddMode::Copy]);
+    assert_eq!(started(&mut shell, &typed), [(AddMode::Copy, Vec::new())]);
     let rows = render(&mut shell, 80, 40);
-    assert!(shows(&rows, "Copying the folder"), "{rows:#?}");
+    assert!(shows(&rows, "(*) Copy"), "{rows:#?}");
+    assert!(shows(&rows, "Starting"), "{rows:#?}");
 }
 
 #[test]
-fn cancel_closes_the_icloud_question_and_downloads_or_adds_nothing() {
+fn cancel_closes_the_icloud_question_and_starts_nothing() {
     let user = tempfile::tempdir().unwrap();
     let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Copy, 4);
     shell.key(Key::Right);
@@ -2698,99 +2745,54 @@ fn cancel_closes_the_icloud_question_and_downloads_or_adds_nothing() {
     let rows = render(&mut shell, 80, 40);
     assert!(!shows(&rows, "from iCloud first?"), "{rows:#?}");
     assert!(
-        intake_jobs(&mut shell)
-            .iter()
-            .all(|job| !matches!(job, IntakeJob::IcloudDownload { .. })),
-        "Cancel starts no download"
+        started(&mut shell, &typed).is_empty(),
+        "Cancel starts nothing"
     );
-    assert!(added_ways(&mut shell, &typed).is_empty());
 }
 
+/// A start whose reply is lost or refused is decided from a fresh read of the job: a job for
+/// this folder that runs, or that ended done and was not the one shown before the start, is
+/// the started one and the page goes Home; anything else shows the start's refusal.
 #[test]
-fn esc_stops_a_running_download_and_the_folder_is_not_added() {
+fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_added() {
     let user = tempfile::tempdir().unwrap();
-    let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Move, 5);
-    shell.key(Key::Enter);
-    let (_, cancel) = download_job(&mut shell);
-    let rows = render(&mut shell, 80, 40);
-    assert!(shows(&rows, "Esc Stop the download"), "{rows:#?}");
-    shell.key(Key::Esc);
-    assert!(cancel.load(Ordering::Relaxed), "Esc sets the stop flag");
-    let rows = render(&mut shell, 80, 40);
-    assert!(shows(&rows, "Stopping the download"), "{rows:#?}");
-    shell.arrive(icloud_arrival(
-        &typed,
-        Err("home_icloud_not_downloaded".into()),
-    ));
-    let rows = render(&mut shell, 80, 40);
-    assert!(
-        shows(&rows, "The download stopped. Nothing was moved or copied."),
-        "{rows:#?}"
-    );
-    assert!(added_ways(&mut shell, &typed).is_empty());
-}
-
-#[test]
-fn esc_just_before_a_download_ends_still_adds_nothing() {
-    let user = tempfile::tempdir().unwrap();
-    for mode in [AddMode::Copy, AddMode::Move] {
-        let (mut shell, typed) = measured_icloud_folder(user.path(), mode, 2);
-        shell.key(Key::Enter);
-        let (_, cancel) = download_job(&mut shell);
-        shell.key(Key::Esc);
-        assert!(cancel.load(Ordering::Relaxed), "Esc sets the stop flag");
-        shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(2))));
+    let copying = JobState::Copying {
+        copied: 1,
+        checked: 0,
+    };
+    let reads = [
+        (None, Some(copying), true),
+        (None, Some(JobState::Done), true),
+        (Some("add-2"), Some(JobState::Done), false),
+        (None, None, false),
+    ];
+    for (before, read, home) in reads {
+        let shown = before.map(|_| JobState::Done);
+        let (mut shell, typed) = measured(user.path(), AddMode::Copy, 0, shown);
+        assert_eq!(started(&mut shell, &typed), [(AddMode::Copy, Vec::new())]);
+        let code = if home { "owner_timeout" } else { "intake_busy" };
+        shell.arrive(intake(
+            start(&typed, AddMode::Copy, Vec::new()),
+            Err(code.into()),
+        ));
+        assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus], "{read:?}");
+        let read_job = read
+            .clone()
+            .map(|state| job_for(&typed, AddMode::Copy, state));
+        shell.arrive(intake(
+            IntakeQuery::JobStatus,
+            Ok(IntakeView::Job(read_job)),
+        ));
+        if home {
+            assert_eq!(shell.place(), Some(Place::Home), "{read:?}");
+            continue;
+        }
+        assert_eq!(shell.place(), Some(Place::AddFolder), "{before:?} {read:?}");
         let rows = render(&mut shell, 80, 40);
-        assert!(
-            shows(&rows, "The download stopped. Nothing was moved or copied."),
-            "{rows:#?}"
-        );
-        assert!(!shows(&rows, "Copying the folder"), "{rows:#?}");
-        assert!(!shows(&rows, "Press Enter again to move it"), "{rows:#?}");
-        assert!(added_ways(&mut shell, &typed).is_empty(), "{mode:?}");
+        let refusal = "Another folder is being added. Wait for it to finish on Home.";
+        assert!(shows(&rows, refusal), "{rows:#?}");
+        assert!(job_asks(&mut shell).is_empty(), "{read:?}");
     }
-}
-
-#[test]
-fn a_download_the_engine_ends_shows_its_sentence_and_adds_nothing() {
-    let user = tempfile::tempdir().unwrap();
-    let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Copy, 2);
-    shell.key(Key::Enter);
-    let _ = download_job(&mut shell);
-    shell.arrive(icloud_arrival(
-        &typed,
-        Err("home_icloud_not_downloaded".into()),
-    ));
-    let rows = render(&mut shell, 80, 40);
-    assert!(
-        shows(&rows, "Some files are still only in iCloud"),
-        "{rows:#?}"
-    );
-    assert!(added_ways(&mut shell, &typed).is_empty());
-}
-
-#[test]
-fn an_add_the_engine_refuses_for_icloud_files_asks_to_download_them() {
-    let user = tempfile::tempdir().unwrap();
-    let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Copy, 0);
-    assert_eq!(added_ways(&mut shell, &typed), [AddMode::Copy]);
-    shell.arrive(intake(
-        IntakeQuery::AddExisting {
-            source: typed.clone(),
-            mode: AddMode::Copy,
-            overrides: Vec::new(),
-            generation: 1,
-        },
-        Err("home_icloud_not_downloaded".into()),
-    ));
-    let rows = render(&mut shell, 80, 40);
-    assert!(shows(&rows, "Some files are only in iCloud"), "{rows:#?}");
-    assert!(shows(&rows, "Enter Download and copy"), "{rows:#?}");
-    shell.key(Key::Enter);
-    let (path, _) = download_job(&mut shell);
-    assert_eq!(path, typed);
-    shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(9))));
-    assert_eq!(added_ways(&mut shell, &typed), [AddMode::Copy]);
 }
 
 fn shop_job(state: JobState) -> JobView {
