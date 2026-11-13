@@ -134,12 +134,23 @@ pub(crate) fn pinnable(metadata: &Metadata) -> Result<(), EngineError> {
     ExecutableIdentity::of(metadata).map(|_| ())
 }
 
+/// The identity a host's checks compare against: the captured one, or the one a re-hash
+/// proved after only the change time moved ([`RegisteredNativeAuthHost::retime`]), with when
+/// the checks first saw it off macOS.
+#[derive(Clone, Copy)]
+struct Pin {
+    identity: ExecutableIdentity,
+    #[cfg(not(target_os = "macos"))]
+    seen: std::time::Instant,
+}
+
 pub(crate) struct RegisteredNativeAuthHost {
     path: PathBuf,
     file: File,
     identity: ExecutableIdentity,
     digest: [u8; 32],
     entry: Option<PathBuf>,
+    retimed: std::sync::Mutex<Option<Pin>>,
     #[cfg(not(target_os = "macos"))]
     seen: std::time::Instant,
     #[cfg(not(target_os = "macos"))]
@@ -202,6 +213,7 @@ impl RegisteredNativeAuthHost {
             identity,
             digest,
             entry: None,
+            retimed: std::sync::Mutex::new(None),
             #[cfg(not(target_os = "macos"))]
             seen,
             #[cfg(not(target_os = "macos"))]
@@ -224,12 +236,11 @@ impl RegisteredNativeAuthHost {
         Ok(host)
     }
 
-    /// The host while its entry still leads to the pinned file and that file verifies;
-    /// a fresh capture when the entry leads to another path or a new inode, as after a
-    /// harness update, or when only the pinned inode's metadata changed and its bytes still
-    /// hash to the pin. A rewrite in place of the pinned inode stays refused. Input: the
-    /// shared host. Output: the host to use, `native_auth_host_executable_changed`, the
-    /// verify error for a host with no entry, or `native_auth_host_unavailable`.
+    /// The host while its entry, if any, still leads to the pinned file and that file
+    /// verifies, a change of its ctime alone included; with an entry, a fresh capture when it
+    /// leads to another path or inode, or when other metadata of the pinned inode changed and
+    /// its bytes still hash to the pin. A rewrite in place stays refused. Input: the shared
+    /// host. Output: the host to use, the verify error, or `native_auth_host_unavailable`.
     pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
         let Some(entry) = self.entry.as_deref() else {
             self.verified_path()?;
@@ -267,21 +278,18 @@ impl RegisteredNativeAuthHost {
         self.entry.as_deref()
     }
 
-    /// Returns the captured path while the retained file and the file at that path still
-    /// have the identity hashed at capture. On macOS every content write moves ctime by the
-    /// fine clock, so equal identity means the hashed bytes without re-reading a harness of
-    /// hundreds of MB. Linux moves file times by the coarse clock tick, so a same-size write
-    /// in that tick keeps the identity: there the retained file is hashed again, off the
-    /// tokio worker, until a matching hash [`settles`] it. Input: none. Output: the path, or
-    /// `native_auth_host_executable_changed`.
+    /// Returns the captured path while the retained file, the file at that path and the path
+    /// show the pinned identity; a change of the change time alone is hashed once and adopted
+    /// ([`Self::retime`]). macOS moves ctime on every write by the fine clock, so equal identity
+    /// means the hashed bytes; off macOS the coarse tick can hide a same-size write, so there
+    /// the file is hashed again until a match [`settles`] it. Output: the path, or the refusal.
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
+        let pin = self.pin();
         let named = Self::open(&self.path)?;
-        if ExecutableIdentity::of(&self.file.metadata().map_err(io_error)?)? != self.identity
-            || ExecutableIdentity::of(&named.metadata().map_err(io_error)?)? != self.identity
-            || ExecutableIdentity::of(&std::fs::symlink_metadata(&self.path).map_err(io_error)?)?
-                != self.identity
-        {
-            return Err(EngineError("native_auth_host_executable_changed".into()));
+        let seen = self.identities(&named)?;
+        if seen != [pin.identity; 3] {
+            self.retime(pin.identity, &named, seen)?;
+            return Ok(&self.path);
         }
         #[cfg(not(target_os = "macos"))]
         if !self.settled.load(std::sync::atomic::Ordering::Acquire) {
@@ -290,17 +298,92 @@ impl RegisteredNativeAuthHost {
             #[cfg(test)]
             self.rehashes
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if crate::engine::off_worker(|| Self::hash(&self.file, self.identity.length))?
+            if crate::engine::off_worker(|| Self::hash(&self.file, pin.identity.length))?
                 != self.digest
             {
                 return Err(EngineError("native_auth_host_executable_changed".into()));
             }
-            if settles(self.seen, started, wall, self.identity.changed) {
-                self.settled
-                    .store(true, std::sync::atomic::Ordering::Release);
+            if settles(pin.seen, started, wall, pin.identity.changed) {
+                let held = self
+                    .retimed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if held.map_or(self.identity, |kept| kept.identity) == pin.identity {
+                    self.settled
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
             }
         }
         Ok(&self.path)
+    }
+
+    /// The identity the checks compare against now: the latest one [`Self::retime`] proved,
+    /// else the captured one, with when the checks first saw it off macOS. Input: none.
+    /// Output: the pin.
+    fn pin(&self) -> Pin {
+        let retimed = *self
+            .retimed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        retimed.unwrap_or(Pin {
+            identity: self.identity,
+            #[cfg(not(target_os = "macos"))]
+            seen: self.seen,
+        })
+    }
+
+    /// The identities of the retained file, the file opened at the path and the path itself,
+    /// in that order. Input: the file opened at the path. Output: the three, or
+    /// `native_auth_host_executable_unsafe` or the read error for the first that fails.
+    fn identities(&self, named: &File) -> Result<[ExecutableIdentity; 3], EngineError> {
+        Ok([
+            ExecutableIdentity::of(&self.file.metadata().map_err(io_error)?)?,
+            ExecutableIdentity::of(&named.metadata().map_err(io_error)?)?,
+            ExecutableIdentity::of(&std::fs::symlink_metadata(&self.path).map_err(io_error)?)?,
+        ])
+    }
+
+    /// Adopts what the pinned inode shows now when all three looks agree and differ from the
+    /// pin in ctime alone, as a hard link, an xattr or a backup tool leaves it, and its bytes
+    /// still hash to the pin with the same three looks after the hash. Anything else, a write
+    /// during the hash included, is refused. Inputs: the pin, the file at the path and the
+    /// three looks. Output: Ok once adopted, or `native_auth_host_executable_changed`.
+    fn retime(
+        &self,
+        pin: ExecutableIdentity,
+        named: &File,
+        seen: [ExecutableIdentity; 3],
+    ) -> Result<(), EngineError> {
+        let changed = || EngineError("native_auth_host_executable_changed".into());
+        let now = seen[0];
+        let others = ExecutableIdentity {
+            changed: pin.changed,
+            ..now
+        };
+        if seen != [now; 3] || others != pin {
+            return Err(changed());
+        }
+        assert_ne!(now.changed, pin.changed);
+        assert_eq!(now.length, self.identity.length);
+        if crate::engine::off_worker(|| Self::hash(&self.file, now.length))? != self.digest
+            || self.identities(named)? != [now; 3]
+        {
+            return Err(changed());
+        }
+        let mut held = self
+            .retimed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = Some(Pin {
+            identity: now,
+            #[cfg(not(target_os = "macos"))]
+            seen: std::time::Instant::now(),
+        });
+        #[cfg(not(target_os = "macos"))]
+        self.settled
+            .store(false, std::sync::atomic::Ordering::Release);
+        drop(held);
+        Ok(())
     }
 
     pub(crate) fn verified_sha256(&self) -> Result<String, EngineError> {
