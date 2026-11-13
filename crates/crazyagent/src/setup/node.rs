@@ -14,6 +14,7 @@ const UNPACK_TIME: Duration = Duration::from_secs(300);
 const VERSION_TIME: Duration = Duration::from_secs(10);
 const TOP_BYTES_MAX: usize = 64;
 const LINKED: [&str; 3] = ["node", "npm", "npx"];
+const EARLIER: &str = "earlier";
 const LIMITS: Limits = Limits {
     entries: 20_000,
     bytes: 512 * 1024 * 1024,
@@ -52,7 +53,7 @@ pub struct NodePin {
 }
 
 /// The engine's own Node: the `node` and `npm` programs under `<engine root>/setup/node` and
-/// the engine-owned npm prefix `<engine root>/harnesses` npm harnesses install into.
+/// the engine-owned npm prefix `<engine root>/setup/harnesses` npm harnesses install into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRuntime {
     pub node: PathBuf,
@@ -74,8 +75,9 @@ impl NodeRuntime {
     }
 }
 
-/// A Node the tool resolver finds whole: the `node` entry and an `npm` entry whose own
-/// interpreter resolves too, as found on the places, before any link is followed.
+/// A Node the tool resolver finds whole in one folder: the `node` entry and the `npm` entry
+/// beside it, whose own interpreter resolves too, as found on the places before any link is
+/// followed, so a link to `node` keeps following the owner's own link, such as Homebrew's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Usable {
     pub node: PathBuf,
@@ -95,12 +97,6 @@ pub(crate) struct Limits {
 /// Input: the engine root. Output: the folder.
 pub fn folder(engine_root: &Path) -> PathBuf {
     engine_root.join("setup").join("node")
-}
-
-/// The engine-owned npm prefix npm harnesses install into, `<engine root>/harnesses`.
-/// Input: the engine root. Output: the folder.
-pub fn prefix(engine_root: &Path) -> PathBuf {
-    engine_root.join("harnesses")
 }
 
 /// The pinned Node archive for one target triple, from nodejs.org's own dist folder.
@@ -126,7 +122,7 @@ pub fn runtime(engine_root: &Path) -> Option<NodeRuntime> {
     let home = folder(engine_root);
     let node = home.join("bin").join("node");
     let npm = home.join("bin").join("npm");
-    let prefix = prefix(engine_root);
+    let prefix = super::harness_prefix(engine_root);
     let uid = rustix::process::getuid().as_raw();
     let own_file = std::fs::symlink_metadata(&node).is_ok_and(|metadata| {
         metadata.is_file()
@@ -151,30 +147,52 @@ pub fn runtime(engine_root: &Path) -> Option<NodeRuntime> {
     (own_file && inside && prefix_ready).then_some(NodeRuntime { node, npm, prefix })
 }
 
-/// The one test of whether this machine has Node, used by the setup row, the setup run and
-/// npm harness installs alike: the tool resolver finds `node`, and finds `npm` with the
-/// interpreter its first line names. The engine's own Node is found the same way, through
-/// its links in `setup/bin`. Nothing is run. Input: the places. Output: the Node, or none
-/// when node or npm is missing or unusable.
+/// The one test of whether this machine has Node, for the setup row, the setup run and npm
+/// harness installs: the first folder on the places where the tool resolver accepts both
+/// `node` and `npm` (npm with its interpreter), so npm never pairs with another install's
+/// node; the engine's own is found through its `setup/bin` links. Nothing is run.
+/// Input: the places. Output: the Node, or none when no folder holds both.
 pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
-    let node = crate::tools::resolve("node", places).ok()?;
-    let npm = crate::tools::resolve("npm", places).ok()?;
-    assert!(node.entry.is_absolute() && npm.entry.is_absolute());
+    let found = places.folders().iter().find_map(|folder| {
+        let node = crate::tools::resolve_entry(&folder.join("node"), places).ok()?;
+        let npm = crate::tools::resolve_entry(&folder.join("npm"), places).ok()?;
+        Some((node, npm))
+    });
+    let Some((node, npm)) = found else {
+        crate::tools::probe::missed();
+        return None;
+    };
+    assert_eq!(node.entry.parent(), npm.entry.parent());
+    assert!(node.entry.is_absolute() && node.program.is_absolute());
     Some(Usable {
         node: node.entry,
         npm: npm.entry,
     })
 }
 
-/// Makes the engine npm prefix private and ready for `npm install -g`: the prefix with its
-/// `bin` and `lib/node_modules` folders, each this user's alone, kept as they are when
-/// already so. Input: the prefix folder. Output: Ok, or `setup_store_unavailable`.
-pub fn make_prefix(prefix: &Path) -> Result<(), InstallError> {
+/// Makes the engine npm prefix private and ready for `npm install -g`: its `bin` and
+/// `lib/node_modules` folders this user's alone, and `bin/node` linked to the install's node
+/// entry, kept as it is when the entry is that link itself, so a harness there finds it
+/// ([`crate::harnesses::node_prefix`]). Inputs: the prefix and the node entry. Output: Ok,
+/// `setup_install_failed` when `bin/node` reaches no file, or `setup_store_unavailable`.
+pub fn make_prefix(prefix: &Path, node: &Path) -> Result<(), InstallError> {
+    assert!(node.is_absolute());
     for made in [prefix.join("bin"), prefix.join("lib").join("node_modules")] {
         private_folder(&made)?;
     }
     private_folder(prefix)?;
-    private_folder(&prefix.join("lib"))
+    private_folder(&prefix.join("lib"))?;
+    let linked = prefix.join("bin").join("node");
+    let real_folder = |path: &Path| path.parent().and_then(|folder| folder.canonicalize().ok());
+    let itself =
+        node.file_name() == linked.file_name() && real_folder(node) == real_folder(&linked);
+    if !itself {
+        super::pinned::link(node, &linked)?;
+    }
+    std::fs::metadata(&linked)
+        .is_ok_and(|metadata| metadata.is_file())
+        .then_some(())
+        .ok_or(InstallError("setup_install_failed"))
 }
 
 /// Installs this target's pinned Node into the engine root, as `install_pin` does. Input:
@@ -189,8 +207,9 @@ pub fn install(engine_root: &Path) -> Result<NodeRuntime, InstallError> {
 /// with the pinned SHA-256, unpacks it there, checks the tree (`check_tree`) and that its
 /// node reports the pinned version, then moves it to `<engine root>/setup/node`, links
 /// node, npm and npx in `setup/bin` and makes the private npm prefix. A failure removes the
-/// staging folder and leaves any earlier Node as it was. Nothing runs with sudo. Inputs:
-/// the engine root and the pin. Output: the runtime, or the setup code.
+/// staging folder and leaves any earlier Node as it was, putting it back when a step after
+/// the move fails ([`take_back`]). Nothing runs with sudo. Inputs: the engine root and the
+/// pin. Output: the runtime, or the setup code.
 pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRuntime, InstallError> {
     let valid = (pin.url.starts_with("https://") || pin.url.starts_with("file:///"))
         && pin.url.len() <= 2048
@@ -238,29 +257,28 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
             return Err(InstallError("setup_version_mismatch"));
         }
         put_in_place(&top, &folder(engine_root), &staging)?;
-        let bin = setup.join("bin");
-        private_folder(&bin)?;
-        for name in LINKED {
-            link(&folder(engine_root).join("bin").join(name), &bin.join(name))?;
+        let placed = link_in(engine_root, &setup);
+        if placed.is_err() {
+            take_back(engine_root, &setup, &staging);
         }
-        make_prefix(&prefix(engine_root))?;
-        runtime(engine_root).ok_or(InstallError("setup_install_failed"))
+        placed
     })();
     let _ = std::fs::remove_dir_all(&staging);
     result
 }
 
 /// Checks an unpacked tree before it is kept: only plain folders, files and links, no file
-/// with a set-id or sticky bit or that others can write, every link relative and resolving
-/// inside the tree, and no more entries, file bytes or depth than the bounds allow. Nothing
-/// is followed. Inputs: the tree's top folder and the bounds. Output: Ok, or
-/// `setup_archive_unsafe`.
+/// with a set-id or sticky bit or that others can write, every link relative, inside the
+/// tree by its words and by its resolved real path, and no more entries, file bytes or depth
+/// than the bounds allow. The walk never descends a link. Inputs: the tree's top folder and
+/// the bounds. Output: Ok, or `setup_archive_unsafe`.
 pub(crate) fn check_tree(top: &Path, limits: Limits) -> Result<(), InstallError> {
     let unsafe_tree = InstallError("setup_archive_unsafe");
     let top_ok = std::fs::symlink_metadata(top).is_ok_and(|metadata| metadata.is_dir());
     if !top_ok {
         return Err(unsafe_tree);
     }
+    let real_top = std::fs::canonicalize(top).map_err(|_| unsafe_tree)?;
     let mut pending: Vec<(PathBuf, usize)> = vec![(top.to_path_buf(), 0)];
     let mut entries: usize = 0;
     let mut bytes: u64 = 0;
@@ -290,7 +308,8 @@ pub(crate) fn check_tree(top: &Path, limits: Limits) -> Result<(), InstallError>
                 }
             } else if kind.is_symlink() {
                 let target = std::fs::read_link(&path).map_err(|_| unsafe_tree)?;
-                if !stays_inside(top, &dir, &target) {
+                let resolved = std::fs::canonicalize(&path).map_err(|_| unsafe_tree)?;
+                if !stays_inside(top, &dir, &target) || !resolved.starts_with(&real_top) {
                     return Err(unsafe_tree);
                 }
             } else {
@@ -346,12 +365,45 @@ fn only_top(out: &Path, top: &str) -> Result<PathBuf, InstallError> {
     plain.then_some(found).ok_or(unsafe_tree)
 }
 
+/// The steps after the new tree is moved in: links node, npm and npx in `setup/bin`, makes
+/// the engine npm prefix and reads the runtime back. Inputs: the engine root and the setup
+/// folder. Output: the runtime, or the setup code.
+fn link_in(engine_root: &Path, setup: &Path) -> Result<NodeRuntime, InstallError> {
+    let bin = setup.join("bin");
+    private_folder(&bin)?;
+    for name in LINKED {
+        link(&folder(engine_root).join("bin").join(name), &bin.join(name))?;
+    }
+    make_prefix(&super::harness_prefix(engine_root), &bin.join("node"))?;
+    runtime(engine_root).ok_or(InstallError("setup_install_failed"))
+}
+
+/// Undoes the move after a later step failed: the new tree goes into the staging folder,
+/// which is removed after, and the earlier Node comes back; with no earlier Node, the
+/// `setup/bin` links naming the new tree go too, so none points at nothing. Inputs: the
+/// engine root, the setup folder and the staging folder.
+fn take_back(engine_root: &Path, setup: &Path, staging: &Path) {
+    let kept = folder(engine_root);
+    let earlier = staging.join(EARLIER);
+    let _ = std::fs::rename(&kept, staging.join("dropped"));
+    if std::fs::symlink_metadata(&earlier).is_ok() {
+        let _ = std::fs::rename(&earlier, &kept);
+        return;
+    }
+    for name in LINKED {
+        let at = setup.join("bin").join(name);
+        if std::fs::read_link(&at).is_ok_and(|target| target == kept.join("bin").join(name)) {
+            let _ = std::fs::remove_file(&at);
+        }
+    }
+}
+
 /// Moves a checked tree to its kept folder, first moving any earlier one into the staging
 /// folder, which is removed later, and putting it back when the move fails. Inputs: the
 /// tree, the kept folder and the staging folder. Output: Ok, or `setup_store_unavailable`.
 fn put_in_place(tree: &Path, kept: &Path, staging: &Path) -> Result<(), InstallError> {
     let unavailable = InstallError("setup_store_unavailable");
-    let earlier = staging.join("earlier");
+    let earlier = staging.join(EARLIER);
     let had = std::fs::symlink_metadata(kept).is_ok();
     if had {
         std::fs::rename(kept, &earlier).map_err(|_| unavailable)?;

@@ -16,7 +16,7 @@ impl Machine {
     }
     fn roots(&self) -> Roots {
         let npm = self.root.path().join("brew/bin/npm");
-        let engine = self.root.path().join("harnesses");
+        let engine = crate::setup::harness_prefix(self.root.path());
         let home = self.root.path().join("home");
         let places = crate::tools::Places::new(
             vec![
@@ -30,6 +30,7 @@ impl Machine {
             brew_prefixes: vec![self.root.path().join("brew")],
             casks: true,
             npm: npm.exists().then(|| NpmInstall {
+                node: self.root.path().join("brew/bin/node"),
                 program: npm,
                 search: vec![self.root.path().join("brew/bin"), engine.join("bin")],
                 prefix: engine,
@@ -1157,7 +1158,11 @@ fn npm_installs_into_the_prefix_the_harness_was_found_in_whatever_the_owners_npm
     let install = install_command("codex", &machine.roots()).unwrap();
     assert_eq!(install.program, machine.root.path().join("brew/bin/npm"));
     assert!(run(&install, &home, CHECK_TIME).unwrap().success);
-    assert!(machine.root.path().join("harnesses/installed").exists());
+    assert!(
+        crate::setup::harness_prefix(machine.root.path())
+            .join("installed")
+            .exists()
+    );
     assert!(!machine.root.path().join("brew/installed").exists());
     assert!(!elsewhere.join("installed").exists());
 }
@@ -1168,7 +1173,7 @@ fn an_npm_install_goes_to_the_engine_prefix_with_the_found_npm_and_never_to_a_ho
     machine.program("brew/bin/brew", 0o755);
     let npm = machine.npm("brew");
     executable(&npm, NPM_LIKE);
-    let engine = machine.root.path().join("harnesses");
+    let engine = crate::setup::harness_prefix(machine.root.path());
     let fixed = install_command("gemini-cli", &machine.roots()).unwrap();
     assert_eq!(fixed.program, npm);
     assert_eq!(fixed.args, ["install", "-g", "@google/gemini-cli"]);
@@ -1196,10 +1201,15 @@ fn an_npm_install_goes_to_the_engine_prefix_with_the_found_npm_and_never_to_a_ho
 fn a_harness_npm_put_in_the_engine_prefix_updates_and_checks_with_the_found_npm() {
     let machine = Machine::new();
     let npm = machine.npm("brew");
-    let engine = machine.root.path().join("harnesses");
+    let engine = crate::setup::harness_prefix(machine.root.path());
     std::fs::create_dir_all(engine.join("lib/node_modules")).unwrap();
+    let relative = engine
+        .strip_prefix(machine.root.path())
+        .unwrap()
+        .to_str()
+        .unwrap();
     let real = machine.program(
-        "harnesses/lib/node_modules/@google/gemini-cli/dist/index.js",
+        &format!("{relative}/lib/node_modules/@google/gemini-cli/dist/index.js"),
         0o755,
     );
     let update = update_command("gemini-cli", &real, &real, &machine.roots()).unwrap();
@@ -1778,6 +1788,20 @@ fn an_install_runs_the_fixed_line_and_the_harness_is_found_right_after() {
 }
 
 #[test]
+fn an_npm_install_from_the_app_links_the_node_it_installs_with_into_the_engine_prefix() {
+    let machine = Machine::new();
+    executable(&machine.npm("brew"), NPM_LIKE);
+    let node = machine.program("brew/bin/node", 0o755);
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    let case = Case::new(machine, entry("gemini-cli", None), None);
+    case.install().unwrap();
+    case.finish();
+    let engine = crate::setup::harness_prefix(case.machine.root.path());
+    assert!(engine.join("installed").exists());
+    assert_eq!(std::fs::read_link(engine.join("bin/node")).unwrap(), node);
+}
+
+#[test]
 fn an_install_is_refused_when_installed_when_the_setting_is_off_and_while_another_job_runs() {
     assert_eq!(
         update_case("claude-code").install().unwrap_err(),
@@ -1885,7 +1909,7 @@ fn node_the_tool_resolver_finds_outside_homebrew_is_not_called_missing() {
         assert_eq!(fixed.program, npm, "{why}");
         assert_eq!(
             fixed.prefix.as_deref(),
-            Some(machine.root.path().join("harnesses").as_path()),
+            Some(crate::setup::harness_prefix(machine.root.path()).as_path()),
             "{why} installs into the engine prefix"
         );
     }
@@ -2069,4 +2093,85 @@ fn a_queued_list_installs_in_order_one_at_a_time_and_a_failure_does_not_stop_the
         false,
     );
     assert_eq!(goose.last.unwrap().code.as_deref(), Some(NO_INSTALLER));
+}
+
+#[test]
+fn a_second_npm_install_keeps_the_prefix_node_on_the_real_node_when_the_resolver_finds_the_link_first()
+ {
+    let machine = Machine::new();
+    let root = machine.root.path();
+    let prefix = crate::setup::harness_prefix(root);
+    let node = machine.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o755);
+    machine.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
+    let places = crate::tools::Places::new(
+        vec![prefix.join("bin"), node.parent().unwrap().to_path_buf()],
+        None,
+    );
+    for round in ["first install", "second install"] {
+        let npm = super::state::engine_npm_at(root, &places).unwrap();
+        crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
+        assert_eq!(
+            std::fs::read_link(prefix.join("bin/node")).unwrap(),
+            node,
+            "{round} links the real node"
+        );
+    }
+    let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();
+    let script = machine.program(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix));
+}
+
+#[test]
+fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
+    let machine = Machine::new();
+    let root = machine.root.path();
+    let prefix = crate::setup::harness_prefix(root);
+    let brew_bin = root.join("brew/bin");
+    let old = machine.program("brew/Cellar/node/26.0.0/bin/node", 0o755);
+    machine.program("brew/bin/npm", 0o755);
+    std::os::unix::fs::symlink(&old, brew_bin.join("node")).unwrap();
+    let places = crate::tools::Places::new(vec![brew_bin.clone()], None);
+    let npm = super::state::engine_npm_at(root, &places).unwrap();
+    crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
+    let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();
+    let script = machine.program(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    let new = machine.program("brew/Cellar/node/26.1.0/bin/node", 0o755);
+    std::fs::remove_file(brew_bin.join("node")).unwrap();
+    std::os::unix::fs::symlink(&new, brew_bin.join("node")).unwrap();
+    std::fs::remove_dir_all(root.join("brew/Cellar/node/26.0.0")).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(prefix.join("bin/node")).ok(),
+        new.canonicalize().ok(),
+        "the prefix node follows brew's own link to the new keg"
+    );
+    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix.clone()));
+    let [project, home, tmp] = ["project", "agent-home", "agent-tmp"].map(|name| {
+        let folder = root.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    });
+    let sandbox = crate::sandbox::ProjectSandbox::new(
+        &project,
+        &home,
+        &tmp,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let package = prefix.join("lib/node_modules/@openai/codex");
+    assert!(
+        sandbox
+            .tool_roots()
+            .iter()
+            .chain(sandbox.read_roots())
+            .any(|granted| *granted == package),
+        "a sandboxed agent can still read the harness package"
+    );
 }

@@ -1078,3 +1078,54 @@ fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
         assert!(!copied.stale(&bundled));
     }
 }
+
+/// A Nix-style store, a sticky folder its group can write such as /nix/store
+/// (root:nixbld 1775), is fine two or more levels above an entry whose folder below it
+/// exists, since its group cannot replace an entry another user owns; the entry's own
+/// folder, and a missing folder below the store, keep the full checks (L8c, 11-12).
+#[cfg(unix)]
+#[test]
+fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a_missing_one() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let temp = durable_folder();
+    let store = temp.path().join("store");
+    let package = store.join("hash-tool-1.0");
+    let bin = package.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("tool");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let loose = store.join("loose");
+    std::fs::write(&loose, "").unwrap();
+    let mode = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    mode(&tool, 0o555);
+    mode(&bin, 0o555);
+    mode(&package, 0o555);
+    mode(&store, 0o1775);
+    if trusted_group(std::fs::metadata(&store).unwrap().gid()) {
+        mode(&package, 0o755);
+        mode(&bin, 0o755);
+        return;
+    }
+    assert_eq!(changeable_by_others(&tool), None);
+    assert_eq!(changeable_by_others(&bin), None);
+    assert_eq!(
+        changeable_by_others(&loose),
+        Some(store.clone()),
+        "the entry's own folder keeps the full checks"
+    );
+    assert_eq!(
+        changeable_by_others(&store.join("gone/bin/tool")),
+        Some(store.clone()),
+        "the group could make a missing folder below the store"
+    );
+    mode(&store, 0o775);
+    assert_eq!(
+        changeable_by_others(&tool),
+        Some(store.clone()),
+        "without the sticky bit the group can replace the package"
+    );
+    mode(&package, 0o755);
+    mode(&bin, 0o755);
+}

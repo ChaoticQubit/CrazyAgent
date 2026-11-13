@@ -604,6 +604,7 @@ export function stateView(state: DependencyState): { word: string; tone: Tone; l
     case "installing": return { word: "Installing", tone: "info", line: null };
     case "checking": return { word: "Checking", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
+    case "unsupported": return { word: "Not supported", tone: "neutral", line: "Not supported on this system." };
     default: return { word: "Not installed", tone: "warn", line: "Setup installs it." };
   }
 }
@@ -701,6 +702,14 @@ export function rowInstall(dependency: Dependency, status: SetupStatus): boolean
   return INSTALL_ALONE.has(dependency.name) && wanted && !setupBusy(status) && !toolsChecking(status);
 }
 
+/** Tells whether Settings, Pack offers Install tools: a tool is missing or failed, never one
+ * setup can't install on this system, and nothing is running or checking. Input: the status.
+ * Output: the answer. */
+export function toolsOffer(status: SetupStatus): boolean {
+  const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed");
+  return wanted && !setupBusy(status) && !toolsChecking(status);
+}
+
 /** Tells whether setup is still working. Input: the status. Output: true while it runs or
  * anything is installing. */
 export function setupBusy(status: SetupStatus): boolean {
@@ -712,7 +721,7 @@ export function setupBusy(status: SetupStatus): boolean {
 export function setupProgress(status: SetupStatus, ticked: string[]): { done: number; total: number; failed: number } {
   const states = [...status.dependencies.map((item) => item.state.state),
     ...status.pack.filter((item) => ticked.includes(item.id)).map((item) => item.state.state)];
-  const settledStates = new Set(["found", "installed", "bundled", "on", "off", "failed"]);
+  const settledStates = new Set(["found", "installed", "bundled", "on", "off", "failed", "unsupported"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
 }
 

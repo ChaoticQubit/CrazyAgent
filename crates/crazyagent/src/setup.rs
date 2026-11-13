@@ -234,6 +234,7 @@ pub enum Pin {
 
 /// Where one dependency stands on the setup screen. `Checking` means its version check
 /// is still running in the background; the screen reads the status again to see it.
+/// `Unsupported` means setup cannot install it on this system, so no Install is offered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DependencyState {
@@ -243,6 +244,21 @@ pub enum DependencyState {
     Installing,
     Installed { version: Version },
     Failed { reason: String },
+    Unsupported,
+}
+
+impl DependencyState {
+    /// The state of a dependency setup could not find or install: unsupported for
+    /// [`PLATFORM_UNSUPPORTED`], else failed with the code's plain reason. Input: the setup
+    /// code. Output: the state.
+    pub fn refused(code: &str) -> Self {
+        if code == PLATFORM_UNSUPPORTED {
+            return Self::Unsupported;
+        }
+        Self::Failed {
+            reason: plain_reason(code).to_owned(),
+        }
+    }
 }
 
 /// One dependency as the setup screen lists it: which tool, its plain name and its state.
@@ -518,6 +534,14 @@ pub fn known_reason(code: &str) -> Option<&'static str> {
         .iter()
         .find(|(known, _)| *known == code)
         .map(|(_, sentence)| *sentence)
+}
+
+/// The engine-owned npm prefix npm harnesses install into, `<engine root>/setup/harnesses`:
+/// inside the setup folder, the one part of the engine data the tool resolver and harness
+/// finding accept as the engine's own and no agent sandbox may write. Input: the engine
+/// root. Output: the folder.
+pub fn harness_prefix(engine_root: &std::path::Path) -> std::path::PathBuf {
+    engine_root.join("setup").join("harnesses")
 }
 
 /// The installer for this Mac, installing into `<engine root>/setup`.

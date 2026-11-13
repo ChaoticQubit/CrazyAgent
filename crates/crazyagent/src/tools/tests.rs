@@ -100,7 +100,8 @@ fn an_npm_codex_with_an_env_node_line_starts_with_no_search_path() {
         Command::new(&words[0])
             .args(&words[1..])
             .env_clear()
-            .env("PATH", "/usr/bin:/bin"),
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(std::process::Stdio::piped()),
     )
     .unwrap();
     assert!(run.status.success());
@@ -145,9 +146,10 @@ fn the_newest_node_version_of_a_manager_is_found_first() {
     assert_eq!(resolve("node", &home_only(&home)).unwrap().program, newest);
 }
 
-/// The engine looks in the app's folder and its setup folder first, then Homebrew on Apple
-/// silicon and Intel, all before the PATH it inherited (R-M1), then HOME, and the system
-/// folders last.
+/// The engine looks in the app's folder, then Homebrew on Apple silicon and Intel, all
+/// before the PATH it inherited (R-M1), then HOME and the system folders, and last the app's
+/// own setup and npm harness folders, which no probed folder passes: the owner's own
+/// installs win and the app's are the fallback.
 #[test]
 fn the_engine_looks_in_homebrew_on_both_macs_and_the_system_folders_last() {
     let (_folder, home) = scratch();
@@ -164,16 +166,34 @@ fn the_engine_looks_in_homebrew_on_both_macs_and_the_system_folders_last() {
             .position(|f| f == Path::new(folder))
             .unwrap_or_else(|| panic!("{folder} is looked in"))
     };
+    let setup_bin = PathBuf::from("/engine/setup/bin");
+    let prefix_bin = crate::setup::harness_prefix(Path::new("/engine")).join("bin");
     assert_eq!(at("/app"), 0);
-    assert_eq!(at("/engine/setup/bin"), 1);
-    assert_eq!(at("/engine/harnesses/bin"), 2);
-    assert_eq!(at("/opt/homebrew/bin"), 3);
-    assert_eq!(at("/usr/local/bin"), 4);
-    assert_eq!(at("/custom/bin"), 5);
+    assert_eq!(at("/opt/homebrew/bin"), 1);
+    assert_eq!(at("/usr/local/bin"), 2);
+    assert_eq!(at("/custom/bin"), 3);
     assert!(at("/custom/bin") < folders.iter().position(|f| f.starts_with(&home)).unwrap());
+    let owners = folders.len() - 2;
     assert_eq!(
-        folders[folders.len() - 4..],
+        folders[owners - 4..owners],
         SYSTEM_FOLDERS.map(PathBuf::from)
+    );
+    assert_eq!(
+        folders[owners..],
+        [setup_bin.clone(), prefix_bin.clone()],
+        "the app's own installs are the fallback after every folder of the owner"
+    );
+    let probed = home.join("probed/bin");
+    let with_probed = places
+        .clone()
+        .with_probed(vec![probed.clone(), setup_bin.clone()]);
+    let folders = with_probed.folders();
+    let probed_at = folders.iter().position(|f| *f == probed).unwrap();
+    assert!(probed_at < folders.len() - 6, "{folders:?}");
+    assert_eq!(
+        folders[folders.len() - 2..],
+        [setup_bin, prefix_bin],
+        "a probed folder never moves the app's folders ahead"
     );
     assert!(folders.contains(&home.join(".local/bin")));
     assert!(folders.contains(&home.join(".cargo/bin")));
@@ -260,16 +280,16 @@ fn shebang_flags_and_absolute_interpreters_are_kept() {
         ],
         "macOS runs no interpreter that is itself a script, so it is split out (N3)"
     );
+    assert_eq!(
+        resolved.grants(),
+        vec![absolute, node, PathBuf::from("/bin/sh")]
+    );
     let native = program(&home.join(".local/bin/native"), "#!/bin/sh --native\n");
     let resolved = resolve("native", &home_only(&home)).unwrap();
     assert_eq!(
         resolved.argv(),
         vec![native.into_os_string()],
         "the system runs a script whose interpreter by path is a program"
-    );
-    assert_eq!(
-        resolved.grants(),
-        vec![absolute, node, PathBuf::from("/bin/sh")]
     );
 }
 
@@ -470,6 +490,60 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
             "admin's group is trusted"
         );
     }
+}
+
+/// R-M1: the engine's data folder holds the agents' HOMEs, worktrees and team state, which
+/// agents write. A PATH folder there is refused while the engine's own `setup/bin` is kept,
+/// and a file found in `setup/bin` whose real file sits in an agent's HOME is passed over.
+#[test]
+fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_kept() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let setup = root.join("setup/bin");
+    let agent = root.join("team/agents/agent-1/bin");
+    let path = std::env::join_paths([&agent, &setup]).unwrap();
+    let engine = Places::engine(Some(&root), None, Some(home.clone()), Some(&path));
+    assert!(engine.folders().contains(&setup), "{:?}", engine.folders());
+    assert!(!engine.folders().contains(&agent), "{:?}", engine.folders());
+
+    let planted = program(&agent.join("tmux"), NODE);
+    std::fs::create_dir_all(&setup).unwrap();
+    std::os::unix::fs::symlink(&planted, setup.join("tmux")).unwrap();
+    let places = Places::engine(Some(&root), None, Some(home.clone()), Some(OsStr::new("")));
+    assert!(
+        resolve("tmux", &places).map_or(true, |tmux| tmux.program != planted),
+        "a link into an agent's HOME is never used"
+    );
+    assert!(resolve_entry(&setup.join("tmux"), &places).is_err());
+    std::fs::remove_file(setup.join("tmux")).unwrap();
+    let own = program(&setup.join("tmux"), NODE);
+    assert_eq!(
+        resolve_entry(&setup.join("tmux"), &places).unwrap().program,
+        own,
+        "the setup folder is kept, though an owner tmux found first wins by name"
+    );
+}
+
+/// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
+/// that sits in a temp folder, which agents with the temp folder grant and other users
+/// write, is refused. Probed folders pass the probes' own rule instead (`probe::kept`).
+#[test]
+fn a_path_folder_in_a_temp_folder_is_refused() {
+    let (_folder, home) = scratch();
+    let owner_temp = std::env::temp_dir().join("tools-planted/bin");
+    let shared = PathBuf::from("/private/tmp/tools-planted/bin");
+    let path = std::env::join_paths([&owner_temp, &shared]).unwrap();
+    let engine = Places::engine(None, None, Some(home.clone()), Some(&path));
+    assert!(
+        !engine.folders().contains(&owner_temp),
+        "{:?}",
+        engine.folders()
+    );
+    assert!(
+        !engine.folders().contains(&shared),
+        "{:?}",
+        engine.folders()
+    );
 }
 
 /// DEC-157: a harness the app installs with npm lives in the engine's prefix inside its setup

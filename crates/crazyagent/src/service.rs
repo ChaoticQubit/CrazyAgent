@@ -745,28 +745,49 @@ WantedBy=default.target\n",
 }
 
 /// The first entry on a path that someone other than this user or root can change: an
-/// entry another user owns, or a world-writable folder such as `/tmp`, where a name that
-/// goes away can be taken by anyone. It reads the path as written and with the links of its
-/// existing part resolved. A link's own mode bits, group-writable folders and missing
-/// entries are not counted (only who can change a folder can create an entry in it), and an
-/// entry that cannot be read counts as changeable. Input: the absolute path.
-/// Output: the entry, or none when only this user and the system can change it.
+/// entry another user owns, a world-writable entry such as `/tmp`, or a folder an untrusted
+/// group can write ([`trusted_group`]), except a sticky store such as /nix/store above an
+/// entry's own folder ([`first_changeable`]). It reads the path as written and with its links
+/// resolved; an unreadable entry counts. Input: the absolute path. Output: the entry, or none.
 #[cfg(unix)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
     let me = current_uid();
     let resolved = canonical(path);
     [path, resolved.as_path()]
         .into_iter()
-        .flat_map(Path::ancestors)
-        .find(|entry| match std::fs::symlink_metadata(entry) {
+        .find_map(|path| first_changeable(path, me))
+}
+
+/// The first entry of one path, the entry itself first, that someone other than this user
+/// or root can change ([`changeable_by_others`]). A sticky folder this user or root owns
+/// counts for its group only as the entry, the entry's own folder or above a missing one,
+/// since the group cannot replace an entry another owns. Inputs: the path and this user's
+/// id. Output: the entry, or none.
+#[cfg(unix)]
+fn first_changeable(path: &Path, me: u32) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let mut below_exists = false;
+    for (depth, entry) in path.ancestors().enumerate() {
+        let read = std::fs::symlink_metadata(entry);
+        let changeable = match &read {
             Ok(metadata) => {
-                (metadata.uid() != me && metadata.uid() != 0)
+                let owned = metadata.uid() == me || metadata.uid() == 0;
+                let store = depth >= 2 && below_exists && owned && metadata.mode() & 0o1000 != 0;
+                !owned
                     || (!metadata.file_type().is_symlink() && metadata.mode() & 0o002 != 0)
+                    || (metadata.is_dir()
+                        && metadata.mode() & 0o020 != 0
+                        && !trusted_group(metadata.gid())
+                        && !store)
             }
             Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-        })
-        .map(Path::to_path_buf)
+        };
+        if changeable {
+            return Some(entry.to_path_buf());
+        }
+        below_exists = read.is_ok();
+    }
+    None
 }
 
 /// Reports no changeable entry where Unix owners and modes do not exist; the Windows task
@@ -956,6 +977,26 @@ fn windows_quoted(text: &str) -> String {
 #[cfg(unix)]
 fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
+}
+
+/// The macOS admin group, whose members can already act as root.
+#[cfg(target_os = "macos")]
+const ADMIN_GROUP: u32 = 80;
+
+/// Whether a group that can write a folder holds only users who may already act as root:
+/// wheel and admin. Every macOS user is in staff, so a staff folder is not trusted.
+/// Input: the group id. Output: the answer.
+#[cfg(target_os = "macos")]
+fn trusted_group(group: u32) -> bool {
+    group == 0 || group == ADMIN_GROUP
+}
+
+/// Whether a group that can write a folder holds only root or this user: root's group, or
+/// this user's own group, as user private groups give it. Input: the group id. Output:
+/// the answer.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn trusted_group(group: u32) -> bool {
+    group == 0 || group == rustix::process::getegid().as_raw()
 }
 
 /// Names no user id where launchd domains do not exist. Output: zero, unused off macOS.

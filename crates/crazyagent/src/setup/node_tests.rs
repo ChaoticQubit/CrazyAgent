@@ -67,7 +67,7 @@ fn nothing_left(root: &Path) {
     for name in ["node", "npm", "npx"] {
         assert!(std::fs::symlink_metadata(setup.join("bin").join(name)).is_err());
     }
-    assert!(std::fs::symlink_metadata(root.join("harnesses")).is_err());
+    assert!(std::fs::symlink_metadata(crate::setup::harness_prefix(root)).is_err());
     let hidden: Vec<String> = std::fs::read_dir(&setup)
         .map(|entries| {
             entries
@@ -114,7 +114,7 @@ fn the_pinned_node_unpacks_under_setup_with_its_links_and_an_engine_npm_prefix()
     let (archive, sha256) = pack(work.path(), &source);
     let installed = install_pin(root.path(), &pin_for(&archive, &sha256)).unwrap();
     let setup = root.path().join("setup");
-    let prefix = root.path().join("harnesses");
+    let prefix = crate::setup::harness_prefix(root.path());
     assert_eq!(installed.node, setup.join("node/bin/node"));
     assert_eq!(installed.npm, setup.join("node/bin/npm"));
     assert_eq!(installed.prefix, prefix);
@@ -236,6 +236,90 @@ fn an_unpacked_tree_is_kept_only_with_plain_files_folders_and_links_that_stay_in
     assert_eq!(check_tree(&deep, limits), unsafe_tree);
 }
 
+#[test]
+fn a_late_failure_puts_the_earlier_node_back_and_drops_the_new_tree() {
+    let root = root();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("source");
+    tree(&source, TOP, "v26.13.1");
+    let (archive, sha256) = pack(work.path(), &source);
+    install_pin(root.path(), &pin_for(&archive, &sha256)).unwrap();
+    let kept = folder(root.path());
+    std::fs::write(kept.join("earlier"), "the earlier Node").unwrap();
+    let prefix = crate::setup::harness_prefix(root.path());
+    std::fs::remove_dir_all(&prefix).unwrap();
+    std::fs::write(&prefix, "not a folder").unwrap();
+    assert_eq!(
+        install_pin(root.path(), &pin_for(&archive, &sha256)),
+        Err(InstallError("setup_store_unavailable"))
+    );
+    assert!(kept.join("earlier").is_file(), "the earlier Node is back");
+    let setup_bin = root.path().join("setup/bin");
+    for name in ["node", "npm", "npx"] {
+        assert_eq!(
+            std::fs::canonicalize(setup_bin.join(name)).unwrap(),
+            kept.canonicalize().unwrap().join("bin").join(name),
+            "{name} still runs the earlier Node"
+        );
+    }
+    let hidden: Vec<String> = std::fs::read_dir(root.path().join("setup"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with('.'))
+        .collect();
+    assert!(
+        hidden.is_empty(),
+        "the new tree goes with the staging folder: {hidden:?}"
+    );
+
+    let fresh = crate::setup::harness_prefix(&work.path().join("fresh"));
+    std::fs::create_dir_all(fresh.parent().unwrap()).unwrap();
+    std::fs::set_permissions(
+        fresh.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(&fresh, "not a folder").unwrap();
+    let fresh_root = work.path().join("fresh");
+    assert_eq!(
+        install_pin(&fresh_root, &pin_for(&archive, &sha256)),
+        Err(InstallError("setup_store_unavailable"))
+    );
+    assert!(
+        std::fs::symlink_metadata(folder(&fresh_root)).is_err(),
+        "no new tree is kept"
+    );
+    for name in ["node", "npm", "npx"] {
+        assert!(
+            std::fs::symlink_metadata(fresh_root.join("setup/bin").join(name)).is_err(),
+            "no {name} link is left pointing at nothing"
+        );
+    }
+}
+
+#[test]
+fn a_link_that_climbs_out_through_another_link_is_refused_though_its_words_stay_inside() {
+    let work = tempfile::tempdir().unwrap();
+    let limits = Limits {
+        entries: 64,
+        bytes: 1024 * 1024,
+        depth: 8,
+    };
+    let top = tree(&work.path().join("chain"), TOP, "v26.13.1");
+    std::fs::create_dir_all(top.join("a/b")).unwrap();
+    std::os::unix::fs::symlink("../..", top.join("a/b/s")).unwrap();
+    assert_eq!(
+        check_tree(&top, limits),
+        Ok(()),
+        "a link to the top itself stays inside"
+    );
+    std::os::unix::fs::symlink("s/../..", top.join("a/b/t")).unwrap();
+    assert_eq!(
+        check_tree(&top, limits),
+        Err(InstallError("setup_archive_unsafe"))
+    );
+}
+
 fn places(folders: Vec<PathBuf>) -> crate::tools::Places {
     crate::tools::Places::new(folders, None)
 }
@@ -302,16 +386,127 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
         })
     );
     let engine = crate::tools::Places::engine(Some(root.path()), None, None, None);
-    let at = |wanted: &Path| engine.folders().iter().position(|found| found == wanted);
-    assert_eq!(at(&setup_bin), Some(0));
-    assert_eq!(at(&prefix(root.path()).join("bin")), Some(1));
+    let folders = engine.folders();
+    assert_eq!(
+        folders[folders.len() - 2..],
+        [
+            setup_bin,
+            crate::setup::harness_prefix(root.path()).join("bin")
+        ]
+    );
+}
+
+#[test]
+fn an_owner_node_and_the_app_node_both_present_picks_the_owners() {
+    let root = root();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("source");
+    tree(&source, TOP, "v26.13.1");
+    let (archive, sha256) = pack(work.path(), &source);
+    install_pin(root.path(), &pin_for(&archive, &sha256)).unwrap();
+    let home = work.path().join("home");
+    let owner = home.join(".local/bin");
+    script(&owner.join("node"), "v22.11.0");
+    npm_launcher(&owner);
+    let engine = crate::tools::Places::engine(Some(root.path()), None, Some(home), None);
+    let setup_bin = root.path().join("setup/bin");
+    let prefix_bin = crate::setup::harness_prefix(root.path()).join("bin");
+    let both: Vec<PathBuf> = engine
+        .folders()
+        .iter()
+        .filter(|folder| [&owner, &setup_bin, &prefix_bin].contains(folder))
+        .cloned()
+        .collect();
+    assert_eq!(both, [owner.clone(), setup_bin, prefix_bin]);
+    let found = usable(&places(both)).unwrap();
+    assert_eq!(found.node, owner.join("node"));
+    assert_eq!(found.npm, owner.join("npm"));
+}
+
+#[test]
+fn an_owner_node_or_npm_alone_never_pairs_with_the_app_install_and_the_app_pair_is_used_whole() {
+    use crate::setup::{Dependency, Installer, Version};
+    let root = root();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("source");
+    tree(&source, TOP, "v26.13.1");
+    let (archive, sha256) = pack(work.path(), &source);
+    install_pin(root.path(), &pin_for(&archive, &sha256)).unwrap();
+    let owner = work.path().join("owner");
+    let setup_bin = root.path().join("setup/bin");
+    let both = places(vec![owner.clone(), setup_bin.clone()]);
+    let engine_pair = Some(Usable {
+        node: setup_bin.join("node"),
+        npm: setup_bin.join("npm"),
+    });
+    script(&owner.join("node"), "v22.11.0");
+    assert_eq!(usable(&both), engine_pair, "an owner node without npm");
+    let installer = PinnedInstaller::with_paths(root.path(), Vec::new()).with_places(both.clone());
+    assert_eq!(
+        installer.find(Dependency::Node),
+        Ok(Some(Version::parse(NODE_VERSION).unwrap()))
+    );
+    std::fs::remove_file(owner.join("node")).unwrap();
+    npm_launcher(&owner);
+    assert_eq!(usable(&both), engine_pair, "an owner npm without node");
+}
+
+#[test]
+fn the_engine_npm_prefix_sits_in_the_setup_folder_the_resolver_and_harness_finding_accept() {
+    let root = Path::new("/engine");
+    assert_eq!(
+        crate::setup::harness_prefix(root),
+        root.join("setup").join("harnesses")
+    );
+    assert!(crate::setup::harness_prefix(root).starts_with(root.join("setup")));
+}
+
+#[test]
+fn the_engine_npm_prefix_links_the_node_its_install_used_so_a_node_script_harness_finds_it() {
+    let root = root();
+    let prefix = crate::setup::harness_prefix(root.path());
+    let first = root.path().join("tools/one/bin/node");
+    script(&first, "one");
+    make_prefix(&prefix, &first).unwrap();
+    assert_eq!(std::fs::read_link(prefix.join("bin/node")).unwrap(), first);
+    let harness = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+    script(&harness, "codex");
+    assert_eq!(
+        crate::harnesses::node_prefix(&harness),
+        Some(prefix.clone())
+    );
+    let second = root.path().join("tools/two/bin/node");
+    script(&second, "two");
+    make_prefix(&prefix, &second).unwrap();
+    assert_eq!(
+        std::fs::read_link(prefix.join("bin/node")).unwrap(),
+        second,
+        "a later install's node replaces the link"
+    );
+    private(&prefix.join("bin"));
+}
+
+#[test]
+fn a_node_entry_that_is_the_prefix_link_itself_is_kept_and_never_linked_to_itself() {
+    let root = root();
+    let prefix = crate::setup::harness_prefix(root.path());
+    let node = root.path().join("tools/bin/node");
+    script(&node, "node");
+    make_prefix(&prefix, &node).unwrap();
+    npm_launcher(&prefix.join("bin"));
+    let found = usable(&places(vec![prefix.join("bin")])).unwrap();
+    assert_eq!(found.node, prefix.join("bin/node"));
+    assert_eq!(make_prefix(&prefix, &found.node), Ok(()));
+    assert_eq!(std::fs::read_link(prefix.join("bin/node")).unwrap(), node);
 }
 
 #[test]
 fn the_engine_npm_prefix_is_made_private_even_with_no_engine_node() {
     let root = root();
-    let made = prefix(root.path());
-    make_prefix(&made).unwrap();
+    let made = crate::setup::harness_prefix(root.path());
+    let node = root.path().join("tools/bin/node");
+    script(&node, "node");
+    make_prefix(&made, &node).unwrap();
     for folder in [
         made.clone(),
         made.join("bin"),
@@ -321,7 +516,11 @@ fn the_engine_npm_prefix_is_made_private_even_with_no_engine_node() {
         private(&folder);
     }
     assert_eq!(runtime(root.path()), None);
-    assert_eq!(make_prefix(&made), Ok(()), "making it again keeps it");
+    assert_eq!(
+        make_prefix(&made, &node),
+        Ok(()),
+        "making it again keeps it"
+    );
 }
 
 #[test]

@@ -1186,6 +1186,13 @@ test("the Node row says what Node is for and offers its own Install only while i
   const uv = { name: "uv", label: "uv", state: { state: "missing" } };
   assert.equal(intake.rowInstall(uv, status(uv)), false, "only Node installs alone");
   const found = (name) => ({ name, label: name, state: { state: "found", version: "1.0" } });
+  const unsupported = node({ state: "unsupported" });
+  assert.deepEqual(intake.dependencyView(unsupported), { title: "Node.js", about: "Runs the harnesses CrazyAgent installs with npm.", word: "Not supported", tone: "neutral", line: "Not supported on this system." });
+  assert.equal(intake.rowInstall(unsupported, status(unsupported)), false, "no Install where setup can't install it");
+  const windows = { dependencies: [found("tmux"), found("uv"), found("graphify"), unsupported], pack: [], running: false, version: 1 };
+  assert.equal(intake.toolsOffer(windows), false, "Settings, Pack offers no Install tools for an unsupported tool alone");
+  assert.equal(intake.toolsOffer({ ...windows, dependencies: [...windows.dependencies, missing] }), true);
+  assert.deepEqual(intake.setupProgress(windows, []), { done: 4, total: 4, failed: 0 });
   const tools = { kind: "ok", value: { dependencies: [found("tmux"), found("uv"), found("graphify"), missing], pack: [], running: false, version: 1 } };
   assert.equal(intake.toolsStep(tools).done, true, "Node is not one of the tools the first run needs");
   for (const file of ["../src/screens/intake/setup-step.tsx", "../src/screens/settings/pack.tsx"]) {
@@ -1193,4 +1200,6 @@ test("the Node row says what Node is for and offers its own Install only while i
     assert.match(screen, /rowInstall\(dependency, /, file);
     assert.match(screen, /installDependency\(dependency\.name\)/, file);
   }
+  const pack = readFileSync(new URL("../src/screens/settings/pack.tsx", import.meta.url), "utf8");
+  assert.match(pack, /toolsOffer\(status\)/, "Settings, Pack offers Install tools through the one test");
 });

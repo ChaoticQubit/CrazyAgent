@@ -171,7 +171,7 @@ const LOCK_FOLDER: &str = r#"\.lock$"#;
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
-const TOOL_FILES_MAX: usize = 4;
+const TOOL_FILES_MAX: usize = 5;
 const EXECS_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
@@ -1389,10 +1389,10 @@ impl ProjectSandbox {
     }
 
     /// Lets a Node script harness find the `node` beside it, as its sign-in does: under an npm
-    /// prefix ([`crate::harnesses::node_prefix`]) only `bin` and the harness's package folder
-    /// become readable, Seatbelt denying credential names such as `etc/npmrc` below each, and
-    /// `bin` goes first on PATH; a prefix in the project or agent-writable is skipped. Input:
-    /// the canonical program. Output: the sandbox, or a refusal of either folder.
+    /// prefix ([`crate::harnesses::node_prefix`]) only `bin`, the harness's package folder and
+    /// the real file `bin/node` links to become readable, Seatbelt denying credential names
+    /// below each folder, and `bin` goes first on PATH; a prefix or node in the project or
+    /// agent-writable is skipped. Input: the canonical program. Output: the sandbox, or a refusal.
     pub fn allow_node_for(mut self, program: &Path) -> Result<Self, SandboxError> {
         let Some(prefix) = crate::harnesses::node_prefix(program) else {
             return Ok(self);
@@ -1401,26 +1401,24 @@ impl ProjectSandbox {
             return Ok(self);
         };
         let folders = [canonical(&prefix.join("bin"))?, canonical(&package)?];
-        let agents = folders.iter().any(|folder| {
-            crate::harnesses::in_crazyagent_folder(folder)
-                || folder.starts_with(&self.project_root)
+        let node = canonical(&prefix.join("bin").join("node"))?;
+        let agents = folders.iter().chain([&node]).any(|path| {
+            crate::harnesses::in_crazyagent_folder(path)
+                || path.starts_with(&self.project_root)
                 || self
                     .writable_roots()
-                    .any(|root| folder.starts_with(root) || root.starts_with(folder))
+                    .any(|root| path.starts_with(root) || root.starts_with(path))
         });
         if agents {
             return Ok(self);
         }
         for folder in folders {
-            let covered = SYSTEM_READ_ROOTS
-                .iter()
-                .map(Path::new)
-                .chain(self.read_roots.iter().map(PathBuf::as_path))
-                .chain(self.tool_roots.iter().map(PathBuf::as_path))
-                .any(|root| folder.starts_with(root));
-            if !covered {
+            if !self.reads(&folder) {
                 self = self.allow_node_folder(&folder)?;
             }
+        }
+        if !self.reads(&node) {
+            self = self.allow_node_file(&node)?;
         }
         self.node_bin = Some(prefix.join("bin"));
         assert!(self.node_bin.as_deref().is_some_and(Path::is_absolute));
@@ -1460,6 +1458,43 @@ impl ProjectSandbox {
                 self = self.allow_node_folder(&folder)?;
             }
         }
+        Ok(self)
+    }
+
+    /// Whether a system, granted or toolchain folder already makes a path readable. Input: an
+    /// absolute path. Output: the answer.
+    fn reads(&self, path: &Path) -> bool {
+        SYSTEM_READ_ROOTS
+            .iter()
+            .map(Path::new)
+            .chain(self.read_roots.iter().map(PathBuf::as_path))
+            .chain(self.tool_roots.iter().map(PathBuf::as_path))
+            .any(|root| path.starts_with(root))
+    }
+
+    /// Grants the real `node` an npm prefix links to, such as the engine's own Node in its
+    /// setup folder, read-only and runnable: under Seatbelt as one toolchain file, elsewhere
+    /// its folder as a read root. Input: the canonical existing file. Output: the widened
+    /// sandbox, or a refusal when it fails the toolchain file or read root checks.
+    fn allow_node_file(mut self, node: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            let folder = node
+                .parent()
+                .ok_or_else(|| invalid("node must sit in a folder"))?;
+            return self.allow_read(folder);
+        }
+        if self.tool_files.iter().any(|file| file == node) {
+            return Ok(self);
+        }
+        if self.tool_files.len() >= TOOL_FILES_MAX {
+            return Err(invalid("too many toolchain files"));
+        }
+        clear_of_secrets(node, &self.secret_paths())?;
+        if !clean_absolute(node) || !node.is_file() || canonical(node)? != *node {
+            return Err(invalid("toolchain files must be existing canonical files"));
+        }
+        self.tool_files.push(node.to_path_buf());
+        assert!(self.tool_files.len() <= TOOL_FILES_MAX);
         Ok(self)
     }
 

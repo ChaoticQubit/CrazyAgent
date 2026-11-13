@@ -141,7 +141,7 @@ impl Roots {
 
     /// The roots of this machine for one engine: [`Roots::system`] with the npm that npm
     /// harnesses install with, found by setup's one Node test on the engine's resolver
-    /// places, and the engine's own prefix `<engine root>/harnesses`. Nothing is run.
+    /// places, and the engine's own prefix `<engine root>/setup/harnesses`. Nothing is run.
     /// Input: the engine root. Output: the roots; no npm when no usable Node is found.
     pub fn engine(engine_root: &Path) -> Self {
         let mut roots = Self::on(crate::tools::Places::from_environment(Some(engine_root)));
@@ -168,10 +168,11 @@ pub(crate) fn engine_npm_at(
     places: &crate::tools::Places,
 ) -> Option<super::NpmInstall> {
     let found = crate::setup::node::usable(places)?;
-    let named = crate::setup::node::prefix(engine_root);
+    let named = crate::setup::harness_prefix(engine_root);
     let prefix = named.canonicalize().unwrap_or(named);
     let node_bin = found.node.parent()?.to_path_buf();
     Some(super::NpmInstall {
+        node: found.node,
         program: found.npm,
         search: vec![node_bin, prefix.join("bin")],
         prefix,
@@ -192,7 +193,7 @@ fn engine_npm(_engine_root: &Path, _places: &crate::tools::Places) -> Option<sup
 fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
     match (&fixed.prefix, &roots.npm) {
         (Some(prefix), Some(engine)) if *prefix == engine.prefix => {
-            crate::setup::node::make_prefix(prefix).map_err(|_| INSTALL_FAILED)
+            crate::setup::node::make_prefix(prefix, &engine.node).map_err(|_| INSTALL_FAILED)
         }
         _ => Ok(()),
     }

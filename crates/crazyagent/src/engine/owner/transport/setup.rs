@@ -286,6 +286,14 @@ async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dep
     if matches!(found, Ok(Ok(Some(_)))) {
         return;
     }
+    if let Ok(Err(code)) = &found
+        && code.0 == crate::setup::PLATFORM_UNSUPPORTED
+    {
+        progress::with(root, |state| {
+            state.dependencies.insert(dep, DependencyState::Unsupported);
+        });
+        return;
+    }
     progress::with(root, |state| {
         state.dependencies.insert(dep, DependencyState::Installing);
     });
@@ -296,9 +304,7 @@ async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dep
     .await;
     let next = match outcome {
         Ok(Ok(version)) => DependencyState::Installed { version },
-        Ok(Err(code)) => DependencyState::Failed {
-            reason: plain_reason(code.0).to_owned(),
-        },
+        Ok(Err(code)) => DependencyState::refused(code.0),
         Err(_) => DependencyState::Failed {
             reason: plain_reason("setup_install_failed").to_owned(),
         },

@@ -125,3 +125,42 @@ fn a_live_master_starts_once_tmux_is_installed_with_no_engine_restart() {
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
+
+static TOOL_LOOKS: AtomicUsize = AtomicUsize::new(0);
+
+fn count_tool_look() {
+    TOOL_LOOKS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The owner installs a tool and presses Try again: each time the owner switches the live
+/// master on, the runtime asks the tool probes to look again at once
+/// (`tools::probe::refresh_now`), whatever their backoff, so a tool found only on the login
+/// shell's PATH or npm's prefix is seen; ticks while the switch stays off never look.
+#[test]
+fn each_live_master_start_the_owner_asks_for_looks_for_tools_again() {
+    let fixture = Fixture::new(1);
+    let mut team = without_tmux(&fixture, RESUMING_CODEX, None).with_tools_refresh(count_tool_look);
+    let project = fixture.setup.project_id.clone();
+    super::super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the first start says tmux is missing",
+        says_tmux_is_missing,
+    );
+    idle_ticks(&mut team);
+    assert_eq!(
+        TOOL_LOOKS.load(Ordering::SeqCst),
+        1,
+        "the start looked once"
+    );
+
+    super::super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "Try again says it again", says_tmux_is_missing);
+    idle_ticks(&mut team);
+    assert_eq!(
+        TOOL_LOOKS.load(Ordering::SeqCst),
+        2,
+        "Try again looked again, once"
+    );
+    team.shutdown().unwrap();
+}
