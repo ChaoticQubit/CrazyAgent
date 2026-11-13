@@ -590,10 +590,29 @@ fallback_allowed = false
         }
     }
 
+    /// The config the engine generates for a keyed RCLI connection's SDK home, byte for byte
+    /// as the account setup writes it: the hashed provider id, the "Configured provider"
+    /// name and API key auth. Input: the connection. Output: the bytes.
+    fn engine_config(connection: &crate::config::ModelConnection) -> Vec<u8> {
+        let selection = crate::rcli_host::configured_sdk_connection(connection).unwrap();
+        let crate::config::ModelEndpoint::Http { url } = &connection.endpoint else {
+            panic!("a keyed RCLI connection has an HTTP endpoint");
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "model": { "provider": selection.provider.as_str(), "model": connection.model.id },
+            "providers": [{
+                "id": selection.provider.as_str(), "name": "Configured provider",
+                "protocol": selection.protocol.as_str(), "baseUrl": url,
+                "auth": { "type": "apiKey" }
+            }]
+        }))
+        .unwrap()
+    }
+
     /// Writes the generated SDK home of a keyed account in the engine root, the fixture's
-    /// state folder, with the fixture's config and no key file, as a keyed account saved
-    /// before DEC-150 addendum 9a has it. Inputs: the fixture and the account's connection.
-    /// Output: the home.
+    /// state folder, holding the engine's own config and no key file, as a keyed account
+    /// saved before DEC-150 addendum 9a has it. Inputs: the fixture and the account's
+    /// connection. Output: the home.
     fn generated_home(case: &Fixture, connection: &crate::config::ModelConnection) -> PathBuf {
         use sha2::{Digest, Sha256};
         let profile = crate::config::configured_profile_ref(connection).unwrap();
@@ -606,7 +625,7 @@ fallback_allowed = false
         private_directory(&home.join(".backboard"));
         private_file(
             &home.join(".backboard/config.json"),
-            &std::fs::read(case.home.join(".backboard/config.json")).unwrap(),
+            &engine_config(connection),
         );
         home
     }
