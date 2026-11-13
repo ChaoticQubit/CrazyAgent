@@ -857,7 +857,7 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             part.display()
         ),
         Refusal::AgentsCanWrite => format!(
-            "{tool} can't start: {file} is not used because agents can change it there (inside a project, a .crazyagent folder or the app's data). Use a copy outside your projects, then try again."
+            "{tool} can't start: {file} is not used because agents can change it there (inside a project, a .crazyagent folder, an agent's temp folder or the app's data). Use a copy outside those places, then try again."
         ),
         Refusal::Shim => format!(
             "{tool} can't start: {file} is a version manager shim with no install found behind it. Add a version with that version manager, then try again."
