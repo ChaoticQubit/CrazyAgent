@@ -42,7 +42,7 @@ const KEEPER_POLL: Duration = Duration::from_millis(50);
 /// A lead's own server this engine started runs under a keeper, the engine's own child,
 /// kept here until the lead's stop ends it (KEEPER (b)), and so does its teammates' server.
 /// Each keeper also ends its server at the lead's deadline record, which every renewal pass
-/// moves ahead, so the quit limit holds whatever runs inside (FBTMUX-P1-R1-L1).
+/// moves ahead, whatever runs inside the server (FBTMUX-P1-R1-L1).
 pub struct Servers {
     engine: Tmux,
     root: PathBuf,
@@ -190,11 +190,13 @@ impl Servers {
     /// the foreground inside the lead's or the teammates' profile, after the
     /// [`crate::sandbox::PANE_SHIM`] forked the run's warden, so the keeper's stop has the
     /// warden kill every process in that sandbox. The keeper runs outside the sandbox with a
-    /// fixed argv, `PATH` and the reads of the lead's deadline record, so it also stops at the
-    /// quit limit whatever runs inside (FBTMUX-P1-R1-L1). A server already listening, as one
+    /// fixed argv, `PATH` and the reads of the lead's deadline record, so it also ends the
+    /// server at the quit limit whatever runs inside it (FBTMUX-P1-R1-L1). A server already listening, as one
     /// an earlier engine left, gets no keeper and stays unkept; a teammates' socket an ended
     /// server left is never served again. A later start of the same lead ends that lead's
-    /// earlier keeper first. Takes the lead, its socket and which server. Returns whether a
+    /// earlier keeper first; an earlier teammates' keeper that does not confirm, as after a
+    /// teammate killed its warden, is killed rather than refusing the start, since its server
+    /// listens at another socket. Takes the lead, its socket and which server. Returns whether a
     /// keeper started now, `terminal_folder_unsafe` for a socket path that is not this user's
     /// socket, or `terminal_unavailable`.
     #[cfg(target_os = "macos")]
@@ -246,8 +248,12 @@ impl Servers {
             && !end_keeper(&mut earlier)
             && keeper_runs(&mut earlier)
         {
-            keepers.insert(lead.clone(), earlier);
-            return Err(failure("terminal_unavailable"));
+            if !mates {
+                keepers.insert(lead.clone(), earlier);
+                return Err(failure("terminal_unavailable"));
+            }
+            let _ = earlier.kill();
+            let _ = earlier.wait();
         }
         keepers.retain(|_, keeper| keeper_runs(keeper));
         if keepers.len() >= LEADS_KEPT_MAX {
