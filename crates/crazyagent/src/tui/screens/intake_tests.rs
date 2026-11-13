@@ -9,12 +9,14 @@ use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{FoundResearch, MappingFacts, MappingTry, OnboardingView, Step};
 use crate::project_setup::{KeptFile, ProjectSetup, ResearchKind, SetupAction, SetupQuery};
 use crate::projects_home::icloud::Progress;
+use crate::projects_home::job::{JobState, JobView, Phase};
 use crate::projects_home::{AddMode, AddOverride, Measured};
-use crate::protocol::ProjectId;
+use crate::protocol::{ProjectId, RequestId};
 use crate::tui::client::Connection;
 use crate::tui::client::intake::{IntakeEvent, IntakeJob, IntakeQuery, IntakeView};
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::ctx::{Ctx, Link, Load};
+use crate::tui::frame::Tone;
 use crate::tui::glyphs::Status;
 use crate::tui::keys::Key;
 use crate::tui::run::owner_arrival;
@@ -2765,4 +2767,107 @@ fn an_add_the_engine_refuses_for_icloud_files_asks_to_download_them() {
     assert_eq!(path, typed);
     shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(9))));
     assert_eq!(added_ways(&mut shell, &typed), [AddMode::Copy]);
+}
+
+fn shop_job(state: JobState) -> JobView {
+    JobView {
+        id: RequestId::new("add-1").unwrap(),
+        source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
+        mode: AddMode::Move,
+        overrides: vec![AddOverride::TooLarge],
+        stopping: false,
+        state,
+    }
+}
+
+fn job_asks(shell: &mut Shell) -> Vec<IntakeQuery> {
+    std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Intake(job) => Some(job.query()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn job_read(shell: &mut Shell, job: Option<JobView>) {
+    shell.arrive(intake(IntakeQuery::JobStatus, Ok(IntakeView::Job(job))));
+    job_asks(shell);
+}
+
+/// DEC-159 S7: Home lists the engine's intake job first as its own card, even before any
+/// project exists; Enter does the job's first action, d dismisses only an ended job, and a
+/// refused request is said with the engine's sentence.
+#[test]
+fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
+    let mut ctx = ctx(120, 30);
+    ctx.store.projects = Load::Ready(Vec::new());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let running = shop_job(JobState::Downloading {
+        progress: Progress {
+            total: 3000,
+            done: 12,
+        },
+    });
+    job_read(&mut shell, Some(running.clone()));
+    let rows = render(&mut shell, 120, 30);
+    assert!(!shows(&rows, "No projects yet."), "{rows:#?}");
+    let badge = format!("{} Downloading", shell.ctx.glyphs.status(Status::Active));
+    assert!(shows(&rows, &badge), "{rows:#?}");
+    let line = "Downloading shop from iCloud: 12 of 3000 files";
+    assert!(shows(&rows, line), "{rows:#?}");
+    assert!(shows(&rows, "Enter stops it."), "{rows:#?}");
+    assert!(shows(&rows, "Enter Stop"), "{rows:#?}");
+    shell.key(Key::Enter);
+    let stop = IntakeQuery::JobStop {
+        id: running.id.clone(),
+    };
+    assert_eq!(job_asks(&mut shell), [stop]);
+    shell.key(Key::Char('d'));
+    assert!(
+        job_asks(&mut shell).is_empty(),
+        "a running job is never dismissed"
+    );
+
+    let failed = shop_job(JobState::Failed {
+        code: "home_copy_failed".into(),
+        phase: Phase::Copying,
+    });
+    job_read(&mut shell, Some(failed.clone()));
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        shows(&rows, "Enter tries again. d dismisses it."),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Enter Try again"), "{rows:#?}");
+    assert!(shows(&rows, "d Dismiss"), "{rows:#?}");
+    shell.key(Key::Enter);
+    let start = IntakeQuery::JobStart {
+        source: failed.source.clone(),
+        mode: AddMode::Move,
+        overrides: vec![AddOverride::TooLarge],
+    };
+    assert_eq!(job_asks(&mut shell), [start.clone()]);
+    shell.arrive(intake(start, Err("intake_busy".into())));
+    let said = shell.ctx.message().expect("a refused start is said");
+    assert_eq!(
+        (said.tone, said.lead.as_str(), said.rest.as_str()),
+        (
+            Tone::Error,
+            "Adding the folder did not start again.",
+            "Another folder is being added. Wait for it to finish on Home."
+        )
+    );
+
+    shell.key(Key::Char('d'));
+    let dismiss = IntakeQuery::JobDismiss {
+        id: failed.id.clone(),
+    };
+    assert_eq!(job_asks(&mut shell), [dismiss.clone()]);
+    shell.arrive(intake(dismiss, Ok(IntakeView::JobDismissed(true))));
+    assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus]);
+    job_read(&mut shell, None);
+    let rows = render(&mut shell, 120, 30);
+    assert!(shows(&rows, "No projects yet."), "{rows:#?}");
+    assert!(!shows(&rows, "shop"), "{rows:#?}");
 }

@@ -149,3 +149,73 @@ fn a_jobs_end_is_said_once_when_the_read_after_a_running_one_shows_it_ended() {
     };
     assert_eq!(end_line(Some(&running_job), Some(&other)), None);
 }
+
+#[test]
+fn home_s_job_card_names_the_state_in_the_desktop_s_words_and_says_what_its_keys_do() {
+    let downloading = JobState::Downloading {
+        progress: Progress { total: 3, done: 1 },
+    };
+    let rows = [
+        (
+            downloading.clone(),
+            Status::Active,
+            "Downloading",
+            "Enter stops it.",
+        ),
+        (copying(2, 0), Status::Active, "Adding", "Enter stops it."),
+        (
+            JobState::Clearing,
+            Status::Active,
+            "Finishing",
+            "Wait for it to finish.",
+        ),
+        (JobState::Done, Status::Ok, "Added", "Enter dismisses it."),
+        (
+            failed("home_copy_failed", Phase::Copying),
+            Status::Fail,
+            "Failed",
+            "Enter tries again. d dismisses it.",
+        ),
+        (
+            failed("home_move_source_left", Phase::Clearing),
+            Status::Fail,
+            "Failed",
+            "Enter dismisses it.",
+        ),
+        (
+            JobState::Cancelled {
+                phase: Phase::Copying,
+            },
+            Status::Off,
+            "Stopped",
+            "Enter tries again. d dismisses it.",
+        ),
+        (
+            JobState::NeedsAnswer {
+                code: "home_move_worktrees".into(),
+            },
+            Status::Needs,
+            "Needs answer",
+            "Enter answers. d dismisses it.",
+        ),
+    ];
+    for (state, kind, word, keys) in rows {
+        let shown = job(state.clone());
+        assert_eq!(badge(&shown), (kind, word), "{state:?}");
+        assert_eq!(next(&shown), keys, "{state:?}");
+    }
+    let stopping = JobView {
+        stopping: true,
+        ..job(downloading)
+    };
+    assert_eq!(next(&stopping), "Wait for it to finish.");
+    assert_eq!(name(&stopping), "shop");
+    let labels = [
+        JobAction::Stop,
+        JobAction::Retry,
+        JobAction::Answer,
+        JobAction::Dismiss,
+    ]
+    .map(label);
+    assert_eq!(labels, ["Stop", "Try again", "Answer", "Dismiss"]);
+}
