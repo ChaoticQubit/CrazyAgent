@@ -21,8 +21,8 @@ const TREE_FILES = 16;
 const LARGE_BYTES = 50 * 1024 * 1024;
 const LFS_POINTER = "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
 const REPO = "owner-shaped";
-const ROOT_PREFIX = "ca-of-";
-const ROOT_NAME = /^ca-of-[A-Za-z0-9]{6}$/;
+const ROOT_PREFIX = "cad-of-";
+const ROOT_NAME = /^cad-of-[A-Za-z0-9]{6}$/;
 const ROOT_MARK = "owner-flow-root";
 const ROOT_QUIET_MS = 15 * 60 * 1000;
 const ROOT_ACTIVITY = [".", "h/engine.db", "h/engine.db-wal", `repos/${REPO}/.git`, `repos/${REPO}/.git/index`];
@@ -334,13 +334,20 @@ function claimRoot(root, keep) {
   }
 }
 
+/** The folder of a temp root that holds the stand-in claude: ~/.local/bin of the run's HOME, a
+ * HOME place the engine looks in, since it drops PATH folders in a temp folder. Input: the root.
+ * Output: the folder. */
+function standInBin(root) {
+  return join(root, "u", ".local", "bin");
+}
+
 /** Reads a regular file inside a temp root. Input: the path.
  * Output: its text, or "" when it is missing or not a regular file. */
 function rootText(path) {
   return lstatSync(path, { throwIfNoEntry: false })?.isFile() ? readFileSync(path, "utf8") : "";
 }
 
-/** Says why --clean keeps a ca-of-* folder: gone, not this user's folder, held open by a live
+/** Says why --clean keeps a cad-of-* folder: gone, not this user's folder, held open by a live
  * process, without this smoke's stand-in claude, kept for SMOKE_EVIDENCE, or changed within 15
  * minutes. Input: the folder, the pid holding a file in it (if any) and the time now.
  * Output: the reason, or null when the folder may be removed. */
@@ -349,7 +356,7 @@ function keepReason(root, holder, now) {
   if (!folder) return "already gone";
   if (!folder.isDirectory() || folder.uid !== process.getuid()) return "not this smoke's";
   if (holder) return `in use by pid ${holder}`;
-  if (!rootText(join(root, "bin", "claude")).includes(STAND_IN_SIGN)) return "not this smoke's";
+  if (!rootText(join(standInBin(root), "claude")).includes(STAND_IN_SIGN)) return "not this smoke's";
   if (rootText(join(root, ROOT_MARK)) === "kept\n") return "kept for SMOKE_EVIDENCE";
   const changed = Math.max(...ROOT_ACTIVITY.map((path) => lstatSync(join(root, path), { throwIfNoEntry: false })?.mtimeMs ?? 0));
   if (now - changed < ROOT_QUIET_MS) return `changed ${Math.round((now - changed) / 60000)} min ago`;
@@ -358,7 +365,7 @@ function keepReason(root, holder, now) {
 
 /** Removes the temp roots that earlier smoke runs left in /tmp, keeping every folder keepReason
  * names. lsof lists the open files of this user's processes once, so a running smoke's root is
- * never touched. Input: whether to list only. Output: one line per ca-of-* folder and the counts;
+ * never touched. Input: whether to list only. Output: one line per cad-of-* folder and the counts;
  * exit 2 when lsof cannot list, 1 when a root could not be removed. */
 function clean(dryRun) {
   const base = realpathSync("/tmp");
@@ -417,7 +424,7 @@ async function main() {
   console.log(`temp root ${root} (${keep ? "kept for SMOKE_EVIDENCE" : "removed on exit; SMOKE_EVIDENCE=1 keeps it"})`);
   const crazyHome = join(root, "h");
   const userHome = join(root, "u");
-  const bin = join(root, "bin");
+  const bin = standInBin(root);
   const repo = join(root, "repos", REPO);
   const linked = join(root, "repos", `${REPO}-worktrees`);
   const projects = join(root, "projects");
