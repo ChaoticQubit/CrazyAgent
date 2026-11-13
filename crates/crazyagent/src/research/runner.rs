@@ -2108,15 +2108,21 @@ pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
         !addresses.is_empty() && addresses.iter().all(|address| address.ip().is_loopback()),
         "a loopback endpoint is checked on loopback addresses only"
     );
-    let reached = addresses.iter().any(|address| {
-        crate::spawn_gate::connect_tcp_std_timeout(address, PROVIDER_REACH_TIME).is_ok()
+    let unreached = addresses.iter().all(|address| {
+        refused(crate::spawn_gate::connect_tcp_std_timeout(address, PROVIDER_REACH_TIME).map(drop))
     });
     let host = url.host_str()?;
-    (!reached).then(|| {
+    unreached.then(|| {
         format!(
             "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then retry setup."
         )
     })
+}
+
+/// Tells whether one connect to a loopback model provider proves nothing listens there.
+/// Input: the connect's outcome. Output: true when it failed.
+fn refused(outcome: std::io::Result<()>) -> bool {
+    outcome.is_err()
 }
 
 /// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
@@ -4336,6 +4342,20 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_millis(500));
         drop(open);
+    }
+
+    /// MR-L1: only a refused connect proves nothing listens on a loopback provider. A
+    /// success, a connect that ran out of time, too many open files or any other error never
+    /// does, so such a mapping step still runs its try as before.
+    #[test]
+    fn only_a_refused_connect_counts_as_an_unreached_provider() {
+        use std::io::{Error, ErrorKind};
+        assert!(refused(Err(Error::from(ErrorKind::ConnectionRefused))));
+        assert!(!refused(Ok(())));
+        assert!(!refused(Err(Error::from(ErrorKind::TimedOut))));
+        assert!(!refused(Err(Error::from_raw_os_error(libc::EMFILE))));
+        assert!(!refused(Err(Error::from(ErrorKind::AddrNotAvailable))));
+        assert!(!refused(Err(Error::from(ErrorKind::PermissionDenied))));
     }
 
     #[test]
