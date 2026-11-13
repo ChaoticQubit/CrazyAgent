@@ -802,6 +802,11 @@ mod tests {
         )
     }
 
+    /// The RCLI host is found beside the app, in the engine's setup folder, in a PATH folder,
+    /// in ~/.local/bin and ~/.cargo/bin, never in a `.crazyagent` folder, with its link kept.
+    /// The engine drops PATH folders in a temp folder, so the PATH leg is shown in two
+    /// halves: the engine keeps a PATH folder outside temp, as a real install is, and drops
+    /// one in `.crazyagent`; a host in a scratch PATH folder among the places is found.
     #[test]
     fn the_rcli_host_is_found_in_every_layout_the_engine_looks_in() {
         let temp = tempfile::tempdir().unwrap();
@@ -809,18 +814,24 @@ mod tests {
         let home = root.join("home");
         let engine = root.join("engine");
         let app = root.join("CrazyAgent.app/Contents/MacOS");
+        let installed = PathBuf::from("/opt/crazyagent-rcli-row/bin");
+        let planted = PathBuf::from("/opt/crazyagent-rcli-row/project/.crazyagent/bin");
         let elsewhere = root.join("elsewhere/bin");
         let hidden = root.join("project/.crazyagent/bin");
         std::fs::create_dir_all(&home).unwrap();
-        let path = std::env::join_paths([hidden.clone(), elsewhere.clone()]).unwrap();
-        let places = scratch_only(
-            crate::tools::Places::engine(
-                Some(&engine),
-                None,
-                Some(home.clone()),
-                Some(path.as_os_str()),
-            ),
-            &root,
+        let path = std::env::join_paths([planted.clone(), installed.clone()]).unwrap();
+        let looked = crate::tools::Places::engine(
+            Some(&engine),
+            None,
+            Some(home.clone()),
+            Some(path.as_os_str()),
+        );
+        assert!(looked.folders().contains(&installed));
+        assert!(!looked.folders().contains(&planted));
+        let scratch = scratch_only(looked, &root);
+        let places = crate::tools::Places::new(
+            [scratch.folders(), &[hidden.clone(), elsewhere.clone()]].concat(),
+            Some(home.clone()),
         );
         let layouts = [
             home.join(".cargo/bin"),
