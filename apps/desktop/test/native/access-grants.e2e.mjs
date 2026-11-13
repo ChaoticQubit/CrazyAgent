@@ -74,7 +74,7 @@ async function profileAfterHandOff(me, page, site, project, runtime, rule) {
   await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
   await me.unfold("Agents and tasks");
   await me.waitFor("the Hand off form on the Agents tab", (text) => text.includes("Hand off"));
-  await handOff(me, page, project, runtime);
+  assert.equal(await handOff(me, page, project, runtime), "done", "the sub-agent ran with the saved extra");
   const folder = join(runtime, "team", "profiles");
   for (const deadline = Date.now() + PROFILE_MS; ; await pause(POLL_MS)) {
     const profiles = existsSync(folder) ? readdirSync(folder).filter((name) => /^agent-\d+\.sb$/.test(name)).map((name) => readFileSync(join(folder, name), "utf8")) : [];
@@ -147,7 +147,7 @@ test("the temp folder extra saves from Agent access and the next sub-agent uses 
     await saved(bridge, project, "the temp folder extra", (view) => view.grants?.some((held) => held.grant.kind === "temp_folder"));
     await me.capture("grant-temp-folder");
     await profileAfterHandOff(me, page, site, project, runtime, `(subpath "${before.temp_folder.path}")\n    (vnode-type SOCKET)`);
-  }));
+  }, 1, undefined, { ownTemp: true }));
 
 for (const allow of [true, false]) {
   test(`an agent's access request the owner ${allow ? "allows" : "does not allow"} ${allow ? "joins Agent access" : "adds nothing"} and is logged`, { timeout: 600000 }, (t) =>
