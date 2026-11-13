@@ -2114,9 +2114,19 @@ pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
     let host = url.host_str()?;
     unreached.then(|| {
         format!(
-            "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then retry setup."
+            "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then try again."
         )
     })
+}
+
+/// [`unreached_provider`] where this OS runs confined model runs, else none, so a run's own
+/// line that confined runs are unavailable here keeps its place. Every read-only run's caller
+/// asks it before the run. Input: the account. Output: the owner's line, or none.
+pub(crate) fn unreached_provider_here(account: &ResearchAccount) -> Option<String> {
+    if confined_unavailable(std::env::consts::OS).is_some() {
+        return None;
+    }
+    unreached_provider(account)
 }
 
 /// Tells whether one connect to a loopback model provider proves nothing listens there:
@@ -4312,7 +4322,7 @@ mod tests {
             key: None,
         };
         let line = format!(
-            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then retry setup."
+            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
         );
         let started = Instant::now();
         assert_eq!(
@@ -4343,6 +4353,30 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_millis(500));
         drop(open);
+    }
+
+    /// The reach check every read-only run's caller asks names a refusing loopback provider
+    /// only where this OS runs confined model runs; elsewhere the run's own unavailable line
+    /// keeps its place.
+    #[test]
+    fn the_reach_check_here_names_a_refusing_provider_only_where_confined_runs_exist() {
+        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let account = ResearchAccount::Endpoint {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "local-model".into(),
+            key: None,
+        };
+        let line = format!(
+            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
+        );
+        assert_eq!(
+            unreached_provider_here(&account),
+            confined_unavailable(std::env::consts::OS)
+                .is_none()
+                .then_some(line)
+        );
     }
 
     /// MR-L1: only a refused connect proves nothing listens on a loopback provider. A
