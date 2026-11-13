@@ -2521,6 +2521,51 @@ async fn desktop_icloud_cancel(
 }
 
 #[tauri::command]
+async fn desktop_intake_start(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    path: String,
+    mode: AddMode,
+    overrides: Vec<AddOverride>,
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_start(path, mode, overrides)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_intake_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Option<crazyagent::projects_home::job::JobView>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_status()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_intake_stop(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_stop(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_intake_dismiss(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_dismiss(id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_setup_status(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4939,6 +4984,10 @@ native_commands! {
     desktop_icloud_download,
     desktop_icloud_progress,
     desktop_icloud_cancel,
+    desktop_intake_start,
+    desktop_intake_status,
+    desktop_intake_stop,
+    desktop_intake_dismiss,
     desktop_setup_status,
     desktop_run_setup,
     desktop_set_pack_entry,
