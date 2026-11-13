@@ -2320,16 +2320,33 @@ mod models {
             .collect()
     }
 
+    /// Makes the Models rows' scratch folder in this user's own temp folder and reads it
+    /// through its links, then checks no part of it is changeable by another user, the rule
+    /// the harness pin applies, so stand-ins inside it can be pinned. A world-writable /tmp,
+    /// as on most Linux machines, fails here: set TMPDIR to a private folder. Input: a name
+    /// prefix. Output: the folder, removed when dropped, and its real path.
+    fn private_scratch(prefix: &str) -> (tempfile::TempDir, PathBuf) {
+        let disk = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        let root = std::fs::canonicalize(disk.path()).unwrap();
+        assert_eq!(
+            crazyagent::service::changeable_by_others(&root),
+            None,
+            "the Models rows need a private temp folder (set TMPDIR to one), not {root:?}"
+        );
+        (disk, root)
+    }
+
     impl Tui {
-        /// Starts the engine with the stand-ins in the test HOME's `~/.local/bin`, a place the
-        /// engine keeps, first on its PATH so the harness pick takes them, in a scratch folder
-        /// outside the agents' `ca-` temp names; saves a profile, a projects home and one
-        /// project, and opens the TUI on a settled Home. Input: a scratch prefix. Output: the TUI.
+        /// Starts the engine with the stand-ins in the test HOME's `~/.local/bin` inside a
+        /// private scratch folder the harness pin accepts, on a PATH of that folder and the
+        /// system folders alone, so the pick takes the stand-ins and never an install of this
+        /// machine; saves a profile, a projects home and one project, and opens the TUI on a
+        /// settled Home. Input: a scratch prefix. Output: the TUI.
         fn start(prefix: &str) -> Self {
-            let disk = scratch("e2e-models-");
-            let home = disk.path().join("home");
+            let (disk, root) = private_scratch("e2e-models-");
+            let home = root.join("home");
             let bin = home.join(".local/bin");
-            let projects = disk.path().join("Projects");
+            let projects = root.join("Projects");
             for folder in [&bin, &projects] {
                 std::fs::create_dir_all(folder).unwrap();
             }
@@ -2338,14 +2355,13 @@ mod models {
                 &format!("{} (Claude Code)", qualified_versions()[0]),
             );
             stand_in(&bin.join("opencode"), "1.0.0");
-            let lists = disk.path().join("codex-lists");
+            let lists = root.join("codex-lists");
             codex_stand_in(&bin.join("codex"), &lists);
             stand_in(&bin.join("crazyagent-rcli"), "3.0.4");
-            let inherited = std::env::var_os("PATH").unwrap_or_default();
             let mut engine = Engine::new(prefix);
             engine.home = Some(home);
             engine.env_path = Some(
-                std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+                std::env::join_paths([bin, PathBuf::from("/usr/bin"), PathBuf::from("/bin")])
                     .unwrap(),
             );
             engine.launch();
