@@ -14,6 +14,78 @@ const SETTLE_TRIES: usize = 3;
 const SETTLE_GAP: Duration = Duration::from_millis(50);
 static EXCHANGES: AtomicU64 = AtomicU64::new(1);
 
+/// The owner changes this engine is running, each by its owner and request id, so a resend
+/// or a check of one still running answers `InProgress` instead of planning it again.
+pub(super) type RunningSet = Mutex<std::collections::HashSet<(String, RequestId)>>;
+
+/// One owner change's claim on its request id while this exchange runs it. Dropping it,
+/// after the record and the reply, lets a later resend reach the recorded result.
+struct Running<'a> {
+    set: &'a RunningSet,
+    key: (String, RequestId),
+}
+
+impl<'a> Running<'a> {
+    /// Claims a request id for this run. Inputs: the set, the owner and the request id.
+    /// Output: the claim, or None while another exchange runs the same id.
+    fn claim(set: &'a RunningSet, owner_id: &str, id: &RequestId) -> Option<Self> {
+        assert!(!owner_id.is_empty());
+        let key = (owner_id.to_owned(), id.clone());
+        let mut held = set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            held.len() < DEFERRED_MAX,
+            "each run holds one deferred place"
+        );
+        if !held.insert(key.clone()) {
+            return None;
+        }
+        assert!(held.contains(&key));
+        Some(Self { set, key })
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let mut held = self
+            .set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let removed = held.remove(&self.key);
+        assert!(removed, "a claim frees only its own request id");
+    }
+}
+
+/// Whether this engine is running an owner change. Inputs: the authority, the admission
+/// and the change's request id. Output: true from the change's first plan until its reply.
+pub(super) fn running(authority: &Authority, a: &Admission, id: &RequestId) -> bool {
+    let held = authority
+        .running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(held.len() <= DEFERRED_MAX);
+    held.contains(&(a.owner_id.clone(), id.clone()))
+}
+
+/// The answer for a resend or a check of a change still running, after the grant check
+/// every owner answer passes. Inputs: the authority, the client packet, the admission and
+/// the change's request id. Output: `InProgress` for the change, or the grant's refusal.
+pub(super) fn still_running(
+    authority: &Authority,
+    packet: &[u8; 37],
+    a: &Admission,
+    id: &RequestId,
+) -> Result<OwnerResponse, EngineError> {
+    match authority.authenticate(packet) {
+        Ok(current) if &current == a => Ok(OwnerResponse::InProgress {
+            operation_id: id.clone(),
+        }),
+        Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
+        Err(e) => Err(e),
+    }
+}
+
 enum Step {
     Reply(Box<OwnerResponse>),
     Record(HomeEffect),
@@ -131,8 +203,10 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 }
 
 /// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
-/// and FolderSize for one owner. Input: the stream, engine, authority, owner packet and
-/// admission, the validated request and the exchange deadline. Output: the
+/// and FolderSize for one owner. A change claims its request id first: a resend of one this
+/// engine still runs answers `InProgress` and plans nothing (DEC-159). Input: the stream,
+/// engine, authority, owner packet and admission, the validated request and the exchange
+/// deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
 /// the replay check, the plan, a grant check under the owner barrier and, for a
 /// home move, a recheck of agent work under the move's hold just before the disk
@@ -169,6 +243,19 @@ pub(super) async fn serve(
     let mutation = matches!(request.operation, OwnerOperation::Apply { .. });
     let exchange = EXCHANGES.fetch_add(1, Ordering::Relaxed);
     assert!(exchange > 0);
+    let _running = match mutation {
+        true => match Running::claim(&authority.running, &a.owner_id, &id) {
+            Some(running) => Some(running),
+            None => {
+                let reply = still_running(authority, packet, a, &id).map(|response| OwnerReply {
+                    request_id: id.clone(),
+                    response,
+                });
+                return write_owner_reply(stream, reply, id, mutation).await;
+            }
+        },
+        false => None,
+    };
     let planned = tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
         .await
         .unwrap_or_else(|_| Err(failure(UNKNOWN)));

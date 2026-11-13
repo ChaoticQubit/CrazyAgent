@@ -494,6 +494,7 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     deferred: std::sync::atomic::AtomicUsize,
+    running: projects_home::RunningSet,
     controls: std::sync::atomic::AtomicU64,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
@@ -1341,6 +1342,7 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 deferred: std::sync::atomic::AtomicUsize::new(0),
+                running: Mutex::new(std::collections::HashSet::new()),
                 controls: std::sync::atomic::AtomicU64::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
@@ -2423,6 +2425,20 @@ async fn serve_admitted(
                 operation.current_revision = current.revision;
             }
             return write_owner_reply(stream, result, id, mutation)
+                .await
+                .map(|()| None);
+        }
+        if let OwnerOperation::Reconcile { operation_id, .. } = &request.operation
+            && projects_home::running(authority, &a, operation_id)
+        {
+            let reply =
+                projects_home::still_running(authority, auth, &a, operation_id).map(|response| {
+                    OwnerReply {
+                        request_id: id.clone(),
+                        response,
+                    }
+                });
+            return write_owner_reply(stream, reply, id, mutation)
                 .await
                 .map(|()| None);
         }
