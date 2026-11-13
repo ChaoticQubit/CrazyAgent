@@ -590,13 +590,14 @@ fallback_allowed = false
         }
     }
 
-    /// Writes the generated SDK home of a keyed account with the fixture's config and no key
-    /// file, as a keyed account saved before DEC-150 addendum 9a has it once the master start
-    /// repaired it. Inputs: the fixture and the account's connection. Output: the home.
+    /// Writes the generated SDK home of a keyed account in the engine root, the fixture's
+    /// state folder, with the fixture's config and no key file, as a keyed account saved
+    /// before DEC-150 addendum 9a has it. Inputs: the fixture and the account's connection.
+    /// Output: the home.
     fn generated_home(case: &Fixture, connection: &crate::config::ModelConnection) -> PathBuf {
         use sha2::{Digest, Sha256};
         let profile = crate::config::configured_profile_ref(connection).unwrap();
-        let homes = case.host.authority.root.path.join("configured-sdk-homes");
+        let homes = case.root.path().join("state/configured-sdk-homes");
         if !homes.exists() {
             private_directory(&homes);
         }
@@ -610,11 +611,13 @@ fallback_allowed = false
         home
     }
 
-    /// Counts the account setups the engine reserved or started and never settled. Input:
-    /// the fixture. Output: the count, zero before any setup made the table.
+    /// Counts the account setups the engine reserved or started and never settled, read
+    /// from the engine's own database in the fixture's state folder. Input: the fixture.
+    /// Output: the count, zero before any setup made the table.
     fn unsettled_setups(case: &Fixture) -> i64 {
-        let db =
-            rusqlite::Connection::open(case.host.authority.root.path.join("engine.db")).unwrap();
+        let database = case.root.path().join("state/engine.db");
+        assert!(database.is_file());
+        let db = rusqlite::Connection::open(&database).unwrap();
         let table: i64 = db
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='account_profile_operations'",
