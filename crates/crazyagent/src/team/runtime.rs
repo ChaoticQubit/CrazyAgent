@@ -2944,7 +2944,8 @@ impl TeamRuntime {
 
     /// The accounts `project`'s picks skip now: those paused for every project and those the
     /// project holds itself after a limit its own agents reported (SECAUDIT-RATELIMIT-FORGE).
-    /// Takes the project. Returns the connections.
+    /// Takes the project. Returns the connections, or the read's failure, so a hold row it
+    /// cannot read never leaves an account free (V3-HOLD-FAILOPEN, DEC-150 addendum 9j).
     fn paused(&self, project: &ProjectId) -> Result<BTreeSet<CredentialRef>, EngineError> {
         let mut statement = self
             .connection
@@ -2954,13 +2955,17 @@ impl TeamRuntime {
                  WHERE project = ?2 AND until_ms > ?1",
             )
             .map_err(error)?;
-        let paused = statement
+        let rows = statement
             .query_map(params![now_ms(), project.as_str()], |row| {
                 row.get::<_, String>(0)
             })
-            .map_err(error)?
-            .filter_map(|row| row.ok().and_then(|c| CredentialRef::new(c).ok()))
-            .collect();
+            .map_err(error)?;
+        let mut paused = BTreeSet::new();
+        for row in rows {
+            if let Ok(connection) = CredentialRef::new(row.map_err(error)?) {
+                paused.insert(connection);
+            }
+        }
         Ok(paused)
     }
 
@@ -10782,9 +10787,10 @@ impl TeamRuntime {
     /// refusal expires, and stops the agent so its next start picks again; a master starts
     /// again at once. Nothing is recorded for an account's own model. Takes the agent.
     /// Claims the engine's own check of a model refusal agent `id`'s pane said (DEC-150
-    /// addendum 9g, 9h, 9i), for a profile account with an explicit model on a harness with
-    /// a read-only test launch and an account the project does not hold; a check that
-    /// already refused marks the project from its own time.
+    /// addendum 9g, 9h, 9i, 9j), for a profile account with an explicit model on a harness
+    /// with a read-only test launch and an account the project does not hold, a failed hold
+    /// read counting as held; a check that already refused marks the project from its own
+    /// time.
     /// Takes the agent. Returns the check to run off this thread, none when none runs.
     fn said_check(&self, id: i64) -> Result<Option<Check>, EngineError> {
         let worker = &self.workers[&id];
@@ -10798,9 +10804,13 @@ impl TeamRuntime {
             return Ok(None);
         };
         let (project, connection) = (&worker.project, &worker.connection);
-        let held = super::held_until(&self.connection, project.as_str(), connection)
-            .map_err(error)?
-            .is_some();
+        let held = match super::held_until(&self.connection, project.as_str(), connection) {
+            Ok(until) => until.is_some(),
+            Err(problem) => {
+                eprintln!("model_check_hold_unread cause={problem}");
+                true
+            }
+        };
         match super::model_pick::claim_check(&self.connection, connection, model, now_ms(), held)? {
             Claim::Held => Ok(None),
             Claim::Refused { checked_ms } => {
