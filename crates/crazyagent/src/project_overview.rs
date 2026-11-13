@@ -1012,10 +1012,11 @@ pub fn competitors(
     })
 }
 
-/// Reads the project's Overview. The first read of a project makes its row stale and due
-/// at once, which asks for the first writing run; a project with no `.crazyagent` folder
-/// gets no row and `needs_home` instead, so no run is asked for it. The README and the
-/// competitor state are read as well. A run counts as running for as long as its claim is
+/// Reads the project's Overview. A read makes a project's row stale and due at once while
+/// no writing run has ever started for it under After each landed change set, even when a
+/// setting saved earlier made the row, which asks for the first writing run; a project with
+/// no `.crazyagent` folder gets no row and `needs_home` instead, so no run is asked for it.
+/// The README and the competitor state are read as well. A run counts as running for as long as its claim is
 /// open: the engine closes it when it ends or its time is over, and at engine start.
 /// Inputs: the connection, the project, its folder and the time. Output: the Overview
 /// with the four tabs in order, or `overview_unavailable`.
@@ -1030,7 +1031,10 @@ pub fn read(
     let needs_home = matches!(place, Place::NoLayout);
     if !needs_home {
         db.execute(
-            "INSERT OR IGNORE INTO project_overview(project,stale,due_ms) VALUES(?1,1,0)",
+            "INSERT INTO project_overview(project,stale,due_ms) VALUES(?1,1,0)
+             ON CONFLICT(project) DO UPDATE SET stale=1, due_ms=0
+             WHERE refresh='after_landing' AND stale=0 AND checked_ms IS NULL
+               AND running_ms IS NULL AND failure IS NULL",
             [project.as_str()],
         )
         .map_err(unavailable)?;
