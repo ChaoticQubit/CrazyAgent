@@ -382,6 +382,14 @@ pub trait Host: Send + Sync {
         None
     }
 
+    /// The keepers of a native lead's own and teammates' servers this host started, each as
+    /// its process id and whether it keeps the teammates' server, so a quitting engine can
+    /// freeze both (DEC-158). Takes the name. Returns them, own first; none for a host that
+    /// started no server for the agent.
+    fn server_keepers(&self, _agent: &AgentId) -> Vec<(u32, bool)> {
+        Vec::new()
+    }
+
     /// Lists the agent terminals still running, reconnecting to the host first when needed.
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
     /// Returns the names in order.
@@ -481,6 +489,10 @@ impl Host for OwnServer {
 
     fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
         self.0.end_kept_server(agent)
+    }
+
+    fn server_keepers(&self, agent: &AgentId) -> Vec<(u32, bool)> {
+        self.0.server_keepers(agent)
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
