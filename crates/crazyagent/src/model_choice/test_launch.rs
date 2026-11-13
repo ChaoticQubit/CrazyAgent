@@ -160,11 +160,15 @@ pub fn not_started(harness: &str, why: NotStarted) -> String {
 
 /// The accounts a test launch may run on: the first fitting member of the owner's pool, as
 /// the Models page tests an id, or only one account, as the engine checks a model refusal
-/// a pane said on that account (DEC-150 addendum 9g).
+/// a pane of `project` said on that account, read with that project's holds after a limit
+/// (DEC-150 addendum 9g, 9i).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target<'a> {
     Pool(&'a CredentialRef),
-    Connection(&'a CredentialRef),
+    Connection {
+        connection: &'a CredentialRef,
+        project: &'a str,
+    },
 }
 
 /// One test launch to run: the engine's data folder, the two settings files, the
@@ -264,7 +268,9 @@ mod run {
             .map_err(|_| UNAVAILABLE)?;
         let picked = match request.target {
             Target::Pool(pool) => resolver.pool_pick("", pool, &[harness]),
-            Target::Connection(connection) => resolver.connection_pick("", connection, &[harness]),
+            Target::Connection { connection, .. } => {
+                resolver.connection_pick("", connection, &[harness])
+            }
         };
         let account = match picked {
             AccountPick::NeedsPool => return Err(POOL_UNKNOWN),

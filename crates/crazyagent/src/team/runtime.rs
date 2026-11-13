@@ -12553,7 +12553,10 @@ fn run_check(check: &Check) -> Result<(Tested, Option<String>), String> {
         claude: executable("claude-code"),
         harness: &check.harness,
         model: &check.model,
-        target: test_launch::Target::Connection(&check.connection),
+        target: test_launch::Target::Connection {
+            connection: &check.connection,
+            project: check.project.as_str(),
+        },
     };
     let asked = Instant::now();
     let (tested, reason) = loop {
