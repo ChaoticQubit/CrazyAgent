@@ -686,13 +686,13 @@ fn install_hint(tool: &str) -> &'static str {
 
 /// Whether a found file can be used: an executable file that is not a version-manager shim,
 /// that agents cannot write, as found or through its links ([`Places::agent_writable`]),
-/// and that no other user can change. Inputs: the places and the file. Output: the answer.
+/// and that no other user can change ([`crate::service::changeable_past_sticky`]). Inputs: the places and the file. Output: the answer.
 fn usable_candidate(places: &Places, candidate: &Path) -> bool {
     executable_file(candidate)
         && candidate.canonicalize().is_ok()
         && !crate::harnesses::is_shim(places.home(), candidate)
         && !places.agent_writable(candidate)
-        && crate::service::changeable_by_others(candidate).is_none()
+        && crate::service::changeable_past_sticky(candidate).is_none()
 }
 
 fn valid_name(name: &str) -> bool {

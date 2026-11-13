@@ -1245,7 +1245,7 @@ impl TeamRuntime {
 
     /// Replaces what the runtime runs to look for tools again when the owner switches a live
     /// master on, for a row that counts those looks. Takes the function. Returns the runtime.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn with_tools_refresh(mut self, refresh: fn()) -> Self {
         self.tools_refresh = refresh;
         self
@@ -1549,7 +1549,8 @@ impl TeamRuntime {
     /// reuses sub-agents within the plan's limits, stops idle or cancelled agents, ends team
     /// panes no agent owns, rewrites each followed IDE workspace whose sections changed, logs
     /// the questions masters' harnesses ask the owner in their own terminals, then alerts the
-    /// owner to new questions and terminal waits by severity.
+    /// owner to new questions and terminal waits by severity. A project no longer active has
+    /// its live switch off, so its next switch-on counts as a new start.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.settle()?;
         self.collect()?;
@@ -1558,7 +1559,10 @@ impl TeamRuntime {
         let access = (self.access)().unwrap_or_default();
         self.owner_restarts(&access)?;
         self.owner_wakes(&access)?;
-        for project in self.active_projects()? {
+        let active = self.active_projects()?;
+        self.live_switched_on
+            .retain(|project| active.contains(project));
+        for project in active {
             self.step(&project, &access)?;
         }
         self.collect()?;

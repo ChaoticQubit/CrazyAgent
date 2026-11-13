@@ -747,45 +747,99 @@ WantedBy=default.target\n",
 /// The first entry on a path that someone other than this user or root can change: an
 /// entry another user owns, a world-writable entry such as `/tmp`, or a folder an untrusted
 /// group can write ([`trusted_group`]), except a sticky store such as /nix/store above an
-/// entry's own folder ([`first_changeable`]). It reads the path as written and with its links
-/// resolved; an unreadable entry counts. Input: the absolute path. Output: the entry, or none.
+/// entry's own folder ([`first_changeable_part`]). It reads the path as written and with its
+/// links resolved; an unreadable entry counts. Input: the absolute path. Output: the entry.
 #[cfg(unix)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
-    let me = current_uid();
-    let resolved = canonical(path);
-    [path, resolved.as_path()]
-        .into_iter()
-        .find_map(|path| first_changeable(path, me))
+    changeable(path, false)
 }
 
-/// The first entry of one path, the entry itself first, that someone other than this user
-/// or root can change ([`changeable_by_others`]). A sticky folder this user or root owns
-/// counts for its group only as the entry, the entry's own folder or above a missing one,
-/// since the group cannot replace an entry another owns. Inputs: the path and this user's
-/// id. Output: the entry, or none.
+/// Like [`changeable_by_others`] for the tools the resolver runs, where a sticky folder
+/// others can write, such as `/tmp`, also passes as a store above an entry's own folder,
+/// since no one can replace a part this user or root owns there. Input: the absolute path.
+/// Output: the entry, or none.
 #[cfg(unix)]
-fn first_changeable(path: &Path, me: u32) -> Option<PathBuf> {
+pub(crate) fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
+    changeable(path, true)
+}
+
+/// Reads a path as written and with its links resolved and names its first changeable part
+/// ([`first_changeable_part`]). Inputs: the path and whether world-writable stores pass.
+/// Output: the entry, or none.
+#[cfg(unix)]
+fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
+    let me = current_uid();
+    let resolved = canonical(path);
+    [path, resolved.as_path()].into_iter().find_map(|path| {
+        let parts: Vec<Part> = path.ancestors().map(read_part).collect();
+        first_changeable_part(&parts, me, open_stores)
+            .and_then(|depth| path.ancestors().nth(depth))
+            .map(Path::to_path_buf)
+    })
+}
+
+/// One part of a path as the ownership rule reads it: missing, unreadable, or its owner,
+/// group, mode and whether it is a folder or a link.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Part {
+    Missing,
+    Unreadable,
+    Found {
+        owner: u32,
+        group: u32,
+        mode: u32,
+        folder: bool,
+        link: bool,
+    },
+}
+
+/// Reads one part of a path without following a link. Input: the part. Output: the read.
+#[cfg(unix)]
+fn read_part(entry: &Path) -> Part {
     use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(entry) {
+        Ok(metadata) => Part::Found {
+            owner: metadata.uid(),
+            group: metadata.gid(),
+            mode: metadata.mode(),
+            folder: metadata.is_dir(),
+            link: metadata.file_type().is_symlink(),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Part::Missing,
+        Err(_) => Part::Unreadable,
+    }
+}
+
+/// The first part, the entry first, that someone other than `me` or root can change. A
+/// sticky folder `me` or root owns, two or more parts above the entry with the part below
+/// it present, is a store: its group's write passes, and with `open_stores` everyone's
+/// does too. Inputs: the parts, `me` and `open_stores`. Output: the part's index, or none.
+#[cfg(unix)]
+pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) -> Option<usize> {
     let mut below_exists = false;
-    for (depth, entry) in path.ancestors().enumerate() {
-        let read = std::fs::symlink_metadata(entry);
-        let changeable = match &read {
-            Ok(metadata) => {
-                let owned = metadata.uid() == me || metadata.uid() == 0;
-                let store = depth >= 2 && below_exists && owned && metadata.mode() & 0o1000 != 0;
-                !owned
-                    || (!metadata.file_type().is_symlink() && metadata.mode() & 0o002 != 0)
-                    || (metadata.is_dir()
-                        && metadata.mode() & 0o020 != 0
-                        && !trusted_group(metadata.gid())
-                        && !store)
+    for (depth, part) in parts.iter().enumerate() {
+        let changeable = match *part {
+            Part::Missing => false,
+            Part::Unreadable => true,
+            Part::Found {
+                owner,
+                group,
+                mode,
+                folder,
+                link,
+            } => {
+                let owned = owner == me || owner == 0;
+                let store = depth >= 2 && below_exists && owned && folder && mode & 0o1000 != 0;
+                let world = !link && mode & 0o002 != 0;
+                let grouped = folder && mode & 0o020 != 0 && !trusted_group(group);
+                !owned || (world && !(store && open_stores)) || (grouped && !store)
             }
-            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
         };
         if changeable {
-            return Some(entry.to_path_buf());
+            return Some(depth);
         }
-        below_exists = read.is_ok();
+        below_exists = *part != Part::Missing;
     }
     None
 }
@@ -794,6 +848,13 @@ fn first_changeable(path: &Path, me: u32) -> Option<PathBuf> {
 /// runs from the folder the installer chose. Input unused. Output: none.
 #[cfg(not(unix))]
 pub fn changeable_by_others(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// Reports no changeable entry where Unix owners and modes do not exist. Input unused.
+/// Output: none.
+#[cfg(not(unix))]
+pub(crate) fn changeable_past_sticky(_path: &Path) -> Option<PathBuf> {
     None
 }
 
