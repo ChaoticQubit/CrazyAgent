@@ -53,14 +53,21 @@ export function providerVerdict({ tiles, methods }) {
   return `${tiles.length} providers, each once: ${ways.join(", ")}; tiles ${tiles.join(", ")}`;
 }
 
-/** Judges Home's Needs you rows for one signed-out account (N-D19; OP-46): exactly one row
- * names it. Input: { name, rows }, the account name and every row's text. Output: the detail. */
-export function signInRowsVerdict({ name, rows }) {
-  assert(typeof name === "string" && name.length > 0 && Array.isArray(rows));
-  const naming = rows.filter((row) => row.includes(name));
-  if (naming.length === 0) throw new Error(`Home shows no sign-in row for ${name}`);
-  if (naming.length > 1) throw new Error(`OP-46: Home shows ${naming.length} rows for ${name}`);
-  return `one Needs you row for ${name}: "${naming[0]}"`;
+/** Judges the sign-ins the bell holds for one signed-out account (N-D19; OP-46): the engine's
+ * unfolded pending sign-ins carry exactly one item for its id, under its name, and the bell's
+ * Account sign-in row folds no more items than there are signed-out accounts. Input: { name,
+ * account, items, row }, the account's name and id, the unfolded items and the row's text.
+ * Output: the detail. */
+export function signInRowsVerdict({ name, account, items, row }) {
+  assert(typeof name === "string" && name.length > 0 && typeof account === "string" && Array.isArray(items) && typeof row === "string");
+  const mine = items.filter((item) => item.target?.page === "account_sign_in" && item.target.account === account);
+  if (mine.length === 0) throw new Error(`the bell holds no sign-in for ${name}`);
+  if (mine.length > 1) throw new Error(`OP-46: the bell holds ${mine.length} sign-ins for ${name}`);
+  if (!mine[0].text.includes(name)) throw new Error(`the sign-in for ${name} reads "${mine[0].text}"`);
+  const accounts = new Set(items.map((item) => item.target?.account)).size;
+  const folded = Number(/(\d+) like this/u.exec(row)?.[1] ?? 1);
+  if (folded > accounts) throw new Error(`OP-46: the bell's Account sign-in row folds ${folded} sign-ins for ${accounts} signed-out accounts`);
+  return `one sign-in for ${name} ("${mine[0].text}"); the bell's Account sign-in row folds ${folded} for ${accounts} signed-out accounts: "${row}"`;
 }
 
 /** Judges Home's Get set up Add an account step (N-D20; OP-47) against the accounts read:
