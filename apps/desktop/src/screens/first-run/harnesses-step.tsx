@@ -4,7 +4,7 @@ import { harnessVersions, installHarnesses, queuedHarnesses, updateCopy, UPDATE_
 import { installDependency, loadSetupStatus } from "../../api-intake";
 import { openLink } from "../../api-projects";
 import { Button, StatusBadge } from "../../ui";
-import { HARNESS_WORDS, OFFERED, harnessRow, installable, nodeNeeded, nodeOffer, nodeWaits, progress, progressLine, retry, rowBadge, rowLine, tickable, type HarnessRow, type NodeOffer } from "./harnesses";
+import { HARNESS_WORDS, OFFERED, harnessRow, installable, nodeNeeded, nodeOffer, nodeReadsAgain, progress, progressLine, retry, rowBadge, rowLine, tickable, type HarnessRow, type NodeOffer } from "./harnesses";
 import "../intake/intake.css";
 
 type Rows = Readonly<Record<string, HarnessRow>>;
@@ -69,8 +69,8 @@ export function HarnessesStepView({ rows, picks, started, busy, problem, node = 
 
 /** Reads every offered harness: the catalog row, the versions read and the install queue, so a
  * failed read becomes a refused row with Try again instead of a row that never loads, and setup's
- * Node row for the Node.js offer. Output: the rows by id, the Node offer and the problem line,
- * empty when every read worked. */
+ * Node row for the Node.js offer. Output: the rows by id, the Node offer, whether to read again
+ * for Node and the problem line, empty when every read worked. */
 async function readRows(): Promise<{ rows: Record<string, HarnessRow>; node: NodeOffer; waits: boolean; problem: string }> {
   const ids = OFFERED.map(({ id }) => id).filter((id) => id !== "rcli");
   const [catalog, queued, setup, ...reads] = await Promise.all([harnessCatalog(false), queuedHarnesses(), loadSetupStatus(), ...ids.map((id) => harnessVersions(id, false))]);
@@ -86,8 +86,9 @@ async function readRows(): Promise<{ rows: Record<string, HarnessRow>; node: Nod
   const problem = catalog.kind !== "ok" ? failure(catalog) : queued.kind !== "ok" ? failure(queued) : "";
   const found = setup.kind === "ok" ? setup.value.dependencies.find((item) => item.name === "node") : undefined;
   const needed = nodeNeeded(reads.map((read) => read.kind === "ok" ? read.value : null));
-  return { rows, node: nodeOffer(needed, found?.state ?? null, setup.kind === "ok" && setup.value.running),
-    waits: nodeWaits(needed, found?.state ?? null), problem };
+  const state = found?.state ?? null;
+  const running = setup.kind === "ok" && setup.value.running;
+  return { rows, node: nodeOffer(needed, state, running), waits: nodeReadsAgain(needed, state, running), problem };
 }
 
 function failure(result: Exclude<Result<unknown>, { kind: "ok" }>): string {

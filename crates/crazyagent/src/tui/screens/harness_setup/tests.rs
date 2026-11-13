@@ -992,3 +992,34 @@ fn node_read_installed_before_the_harness_saw_it_reads_again_until_the_row_leave
     shell.refresh();
     assert!(sent(&mut shell).is_empty(), "nothing needs Node any more");
 }
+
+#[test]
+fn a_screen_with_the_node_offer_reads_again_while_node_installs_or_the_step_waits_for_node() {
+    let version = || Version::parse("26.13.1").unwrap();
+    let failed = || DependencyState::Failed {
+        reason: NODE_FAILED.into(),
+    };
+    for (needed, node, busy, again) in [
+        (true, Some(DependencyState::Installing), false, true),
+        (true, Some(DependencyState::Missing), true, true),
+        (true, None, true, true),
+        (true, Some(DependencyState::Checking), false, true),
+        (
+            true,
+            Some(DependencyState::Installed { version: version() }),
+            false,
+            true,
+        ),
+        (true, Some(DependencyState::Missing), false, false),
+        (true, None, false, false),
+        (true, Some(failed()), true, false),
+        (false, Some(DependencyState::Installing), true, false),
+        (false, Some(DependencyState::Checking), false, false),
+    ] {
+        assert_eq!(
+            node_reads_again(needed, node.as_ref(), busy),
+            again,
+            "needed {needed}, {node:?}, busy {busy}"
+        );
+    }
+}

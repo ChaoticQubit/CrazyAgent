@@ -160,3 +160,15 @@ test("the step reads again while setup's Node row is checked, or settled while a
     assert.equal(model.nodeWaits(needed, node), waits, `needed ${needed}, ${JSON.stringify(node)}`);
   }
 });
+
+test("a screen with the Node offer reads again while Node installs or the step waits for Node", () => {
+  const version = "26.13.1";
+  for (const [needed, node, busy, again] of [
+    [true, { state: "installing" }, false, true], [true, { state: "missing" }, true, true], [true, null, true, true],
+    [true, { state: "checking" }, false, true], [true, { state: "installed", version }, false, true],
+    [true, { state: "missing" }, false, false], [true, null, false, false], [true, { state: "failed", reason: NODE_FAILED }, true, false],
+    [false, { state: "installing" }, true, false], [false, { state: "checking" }, false, false],
+  ]) {
+    assert.equal(model.nodeReadsAgain(needed, node, busy), again, `needed ${needed}, ${JSON.stringify(node)}, busy ${busy}`);
+  }
+});
