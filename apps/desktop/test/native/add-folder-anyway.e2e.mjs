@@ -176,7 +176,7 @@ async function landedOnHome(page, me, landed, hasGit, ms) {
   assert.equal(await page.evaluate("location.hash"), "#/home", "Move anyway goes to Home");
   let row = "";
   for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
-    row = await page.evaluate(`[...document.querySelectorAll(".in-found .in-row")].map((item) => item.innerText).find((text) => text.includes(${JSON.stringify(landed)}) || text.includes(${JSON.stringify(name)})) ?? ""`);
+    row = await page.evaluate(`[...document.querySelectorAll(".in-found .in-list .in-row")].map((item) => item.innerText).find((text) => text.includes(${JSON.stringify(landed)}) || text.includes(${JSON.stringify(name)})) ?? ""`);
     if (row) break;
     if (Date.now() > deadline) {
       await me.capture(`no-row-${name}`);
