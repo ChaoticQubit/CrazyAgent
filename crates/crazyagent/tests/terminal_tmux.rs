@@ -2,7 +2,7 @@
 
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::harnesses::terminal_session::end_left_pane;
-use crazyagent::terminal::buffer::skipped_marker;
+use crazyagent::terminal::buffer::Chunk;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{
     AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
@@ -87,11 +87,31 @@ fn read_until(stream: &mut TerminalStream, seen: &mut Vec<u8>, wanted: &[u8]) ->
         tokio::time::timeout(Duration::from_secs(10), async {
             while !contains(seen, wanted) {
                 match stream.next().await {
-                    Some(chunk) => seen.extend_from_slice(&chunk),
-                    None => return false,
+                    Some(Chunk::Output(chunk)) => seen.extend_from_slice(&chunk),
+                    Some(Chunk::Behind) | None => return false,
                 }
             }
             true
+        })
+        .await
+        .unwrap_or(false)
+    })
+}
+
+fn read_behind(stream: &mut TerminalStream, seen: &mut Vec<u8>) -> bool {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match stream.next().await {
+                    Some(Chunk::Output(chunk)) => seen.extend_from_slice(&chunk),
+                    Some(Chunk::Behind) => return true,
+                    None => return false,
+                }
+            }
         })
         .await
         .unwrap_or(false)
@@ -395,7 +415,7 @@ fn panes_have_a_scrollback_cap_and_close_when_their_process_ends() {
 }
 
 #[test]
-fn a_viewer_that_falls_behind_is_told_how_much_output_it_missed() {
+fn a_viewer_that_falls_behind_reads_behind_and_a_fresh_view_draws_the_screen_now() {
     let root = root();
     let tmux = tmux(root.path());
     let folder = root.path().join(FOLDER);
@@ -411,18 +431,27 @@ fn a_viewer_that_falls_behind_is_told_how_much_output_it_missed() {
     let flood = VIEWER_BUFFER_BYTES_MAX * 3;
     host.input(
         &agent,
-        format!("head -c {flood} /dev/zero | tr '\\0' a; echo; echo flood-done\r").as_bytes(),
+        format!("head -c {flood} /dev/zero | tr '\\0' a; echo; echo flood-$((6*7))-done\r")
+            .as_bytes(),
     )
     .unwrap();
     std::thread::sleep(Duration::from_secs(5));
     let mut seen = Vec::new();
-    assert!(read_until(&mut stream, &mut seen, b"\r\nflood-done\r\n"));
     assert!(
-        contains(&seen, b" bytes of output skipped]"),
-        "the viewer reads a skipped marker instead of being dropped"
+        read_behind(&mut stream, &mut seen),
+        "a viewer more than its buffer behind reads Behind instead of being dropped"
     );
-    assert!(seen.len() < flood, "the oldest output was dropped");
-    assert!(skipped_marker(1).starts_with(b"\r\n"));
+    assert!(
+        !contains(&seen, b"bytes of output skipped"),
+        "no viewer ever reads a skipped-output line"
+    );
+    assert!(seen.len() < flood, "the output the viewer could not keep was not read");
+    assert!(ended(&mut stream), "a viewer that read Behind reads its end next");
+    let fresh = host.attach(&agent).unwrap();
+    assert!(
+        contains(&fresh.redraw(), b"flood-42-done"),
+        "a fresh view draws the screen as it is now"
+    );
     host.kill(&agent).unwrap();
 }
 
@@ -1054,8 +1083,8 @@ fn quiet(stream: &mut TerminalStream, unwanted: &[u8], wait: Duration) -> Vec<u8
         let _ = tokio::time::timeout(wait, async {
             while !contains(&seen, unwanted) {
                 match stream.next().await {
-                    Some(chunk) => seen.extend_from_slice(&chunk),
-                    None => return,
+                    Some(Chunk::Output(chunk)) => seen.extend_from_slice(&chunk),
+                    Some(Chunk::Behind) | None => return,
                 }
             }
         })

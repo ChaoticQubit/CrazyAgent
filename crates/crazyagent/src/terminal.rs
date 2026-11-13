@@ -186,13 +186,14 @@ pub fn pane_id_valid(id: &str) -> bool {
     })
 }
 
+const VIEW_RESET: &[u8] =
+    b"\x1b[?1049l\x1b[?2004l\x1b[?1l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l";
+
 /// One viewer's live view of an agent's terminal: its size, the screen at attach, then output.
-/// `history`, written first, puts the terminal's earlier rows into a fresh view's scrollback
-/// and is empty when the host keeps none; `screen` then redraws the whole current screen in a
-/// fresh terminal of `cols` by `rows`.
-/// `next` gives each later output chunk in order and none once the terminal ends.
-/// A viewer that falls more than `VIEWER_BUFFER_BYTES_MAX` behind loses the oldest output and
-/// reads one `buffer::skipped_marker` chunk in its place.
+/// `history`, written first, fills a fresh view's scrollback (empty when the host keeps none);
+/// `screen` then redraws the whole screen in a fresh `cols` by `rows` terminal. `next` gives
+/// later output in order, `Chunk::Behind` once the viewer lost output (the viewer then attaches
+/// again and writes that stream's `redraw`), and none once the terminal ends.
 #[derive(Debug)]
 pub struct TerminalStream {
     pub agent: AgentId,
@@ -204,17 +205,36 @@ pub struct TerminalStream {
 }
 
 impl TerminalStream {
-    /// Waits for the next output chunk. Takes the stream.
-    /// Returns at most `CHUNK_BYTES_MAX` bytes, or none once the terminal ended.
-    pub async fn next(&mut self) -> Option<Vec<u8>> {
+    /// Waits for the next read. Takes the stream. Returns output of at most
+    /// `CHUNK_BYTES_MAX` bytes, `Chunk::Behind` once output was lost, or none once the
+    /// terminal ended.
+    pub async fn next(&mut self) -> Option<buffer::Chunk> {
         self.chunks.recv().await
     }
 
-    /// Waits for the next output chunk outside an async runtime. Takes the stream.
-    /// Returns at most `CHUNK_BYTES_MAX` bytes, or none once the terminal ended.
-    pub fn next_blocking(&mut self) -> Option<Vec<u8>> {
+    /// Waits for the next read outside an async runtime. Takes the stream. Returns as `next`.
+    pub fn next_blocking(&mut self) -> Option<buffer::Chunk> {
         self.chunks.blocking_recv()
     }
+
+    /// The bytes that bring a view that was already drawing this terminal back to its screen
+    /// now, after it fell behind: every mode a screen can turn on is turned off, then `screen`
+    /// redraws the whole screen with the modes the agent uses. Takes the stream. Returns them.
+    pub fn redraw(&self) -> Vec<u8> {
+        let mut bytes = VIEW_RESET.to_vec();
+        bytes.extend_from_slice(&self.screen);
+        bytes
+    }
+}
+
+/// Opens a fresh viewer in place of one that read `Chunk::Behind`, on a blocking thread, so
+/// the view goes on from the screen as it is now with nothing lost or repeated after it.
+/// Takes the host the old viewer came from and the terminal name. Returns the new stream,
+/// whose `redraw` the view writes first, or the host's code, such as `terminal_agent_unknown`.
+pub async fn attach_again(host: Arc<dyn Host>, agent: AgentId) -> Result<TerminalStream, HostError> {
+    tokio::task::spawn_blocking(move || host.attach(&agent))
+        .await
+        .map_err(|_| failure("terminal_unavailable"))?
 }
 
 /// Runs every agent's interactive app in a real terminal that outlives the engine and its viewers.
