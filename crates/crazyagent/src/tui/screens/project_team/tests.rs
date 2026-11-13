@@ -1509,6 +1509,7 @@ fn composer_models(
         qualified: true,
         reason: None,
         testable: true,
+        providers: Vec::new(),
     }
 }
 

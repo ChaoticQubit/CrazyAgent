@@ -1833,7 +1833,7 @@ fn store_rcli_master_model(case: &Fixture, model: &str) {
         .unwrap();
     let catalog = crate::model_choice::catalog("rcli");
     if !catalog.iter().any(|id| id == model) {
-        store::custom_begin(&writer, "rcli", &catalog, model).unwrap();
+        store::custom_begin(&writer, "rcli", &catalog, model, None).unwrap();
         store::custom_checked(&writer, "rcli", model, true).unwrap();
     }
     let scope = crate::harness_settings::Scope::App;

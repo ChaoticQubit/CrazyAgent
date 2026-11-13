@@ -45,6 +45,15 @@ pub const MODEL_CHOICE_CODES: &[&str] = &[
     "model_choice_unavailable",
 ];
 
+/// One keyed provider the owner names for an RCLI model id they add (DEC-150 addendum 9e):
+/// the RCLI provider id the store saves and its name as the account screens show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderChoice {
+    pub id: String,
+    pub name: String,
+}
+
 /// The model catalogs the engine ships, by harness id, each a version-qualified JSON
 /// document built from the harness's published model reference (DEC-150 Q1).
 const SHIPPED: &[(&str, &str)] = &[
@@ -152,6 +161,8 @@ pub struct Models {
     pub qualified: bool,
     pub reason: Option<String>,
     pub testable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderChoice>,
 }
 
 /// What a set or reset did: saved as the next version, refused as stale with the current
@@ -203,6 +214,28 @@ pub struct ModelCatalog {
 /// id. URL and Ollama accounts serve only their own model, so none is listed for them.
 pub const RCLI_PROVIDERS: &[&str] = &["anthropic", "openai", "openrouter"];
 
+/// The providers an RCLI catalog id or an owner's RCLI id may name: every keyed provider
+/// RCLI runs a chosen model on, as the account catalog defines them (DEC-150 addendum 9e).
+/// Output: the RCLI provider ids, distinct, in account catalog order.
+pub fn rcli_providers() -> Vec<&'static str> {
+    Vec::new()
+}
+
+/// Lists the providers the owner picks one of when adding a model id to a harness: every
+/// keyed RCLI provider with its account screen name for RCLI, none for a harness whose
+/// account decides its provider. Input: the catalog harness id. Output: the choices.
+pub fn provider_choices(harness: &str) -> Vec<ProviderChoice> {
+    let _ = harness;
+    Vec::new()
+}
+
+/// Names one RCLI provider as the account screens show it. Input: the RCLI provider id.
+/// Output: the name, none for an id that is not a keyed RCLI provider.
+pub fn rcli_provider_name(id: &str) -> Option<&'static str> {
+    let _ = id;
+    None
+}
+
 /// Names the provider RCLI's shipped catalog lists for one model id (DEC-150 M-5). Inputs:
 /// the harness name and the model id. Output: the provider, none for an id the catalog
 /// does not list or a harness whose catalog names no providers.
@@ -217,10 +250,16 @@ pub fn catalog_provider(harness: &str, model: &str) -> Option<&'static str> {
 
 /// Tells whether one RCLI account can run a master model (DEC-150 M-5, leader 17:09): its
 /// own model always, and a keyed Anthropic, OpenAI or OpenRouter account any id the catalog
-/// lists for its provider. Inputs: the model id and the account connection. Output: the
-/// answer.
-pub fn rcli_serves(model: &str, connection: &crate::config::ModelConnection) -> bool {
+/// lists for its provider or the owner's id verified on its provider (addendum 9e). Inputs:
+/// the model id, the account connection and the provider an owner's verified id was tested
+/// on, none for a catalog id. Output: the answer.
+pub fn rcli_serves(
+    model: &str,
+    connection: &crate::config::ModelConnection,
+    custom: Option<&str>,
+) -> bool {
     use crate::accounts::Provider;
+    let _ = custom;
     assert_eq!(connection.harness.as_str(), "rcli");
     if connection.model.id == model {
         return true;

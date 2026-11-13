@@ -29462,7 +29462,7 @@ fn a_master_model_no_pool_account_runs_falls_back_with_one_notice() {
             .unwrap()
             .version;
         assert_eq!(
-            store::custom_begin(&fixture.connection, "codex", &catalog, model).unwrap(),
+            store::custom_begin(&fixture.connection, "codex", &catalog, model, None).unwrap(),
             Begun::Pending
         );
         store::custom_checked(&fixture.connection, "codex", model, true).unwrap();
@@ -29521,7 +29521,8 @@ fn codex_model(fixture: &Fixture, model: &str, slot: crate::model_choice::Slot) 
     use crate::model_choice::store::{self, Begun};
     let catalog = crate::model_choice::catalog("codex");
     let scope = crate::harness_settings::Scope::App;
-    if store::custom_begin(&fixture.connection, "codex", &catalog, model).unwrap() == Begun::Pending
+    if store::custom_begin(&fixture.connection, "codex", &catalog, model, None).unwrap()
+        == Begun::Pending
     {
         store::custom_checked(&fixture.connection, "codex", model, true).unwrap();
     }

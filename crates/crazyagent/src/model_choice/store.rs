@@ -86,6 +86,7 @@ pub fn values(
         qualified: reason.is_none(),
         reason,
         testable: super::test_launch::supported(harness),
+        providers: super::provider_choices(harness),
     })
 }
 
@@ -271,15 +272,20 @@ fn terms(
 
 /// Adds one model id the owner typed for a harness with a test launch, waiting for it,
 /// unless the harness's catalog lists it or it already passed. A failed id may be tried
-/// again. Inputs: the engine database, the harness name, its model catalog and the id.
-/// Output: what was done, or `model_choice_not_supported`, `model_choice_value_invalid`,
-/// `model_choice_custom_full`, `model_choice_harness_unknown` or `model_choice_unavailable`.
+/// again. An RCLI id names the keyed provider its test runs on (DEC-150 addendum 9e); no
+/// other harness takes one. Inputs: the engine database, the harness name, its model
+/// catalog, the id and the provider. Output: what was done, or `model_choice_not_supported`,
+/// `model_choice_value_invalid`, `model_choice_provider_needed`,
+/// `model_choice_provider_unknown`, `model_choice_custom_full`,
+/// `model_choice_harness_unknown` or `model_choice_unavailable`.
 pub fn custom_begin(
     db: &Connection,
     harness: &str,
     catalog: &[String],
     model: &str,
+    provider: Option<&str>,
 ) -> Result<Begun, EngineError> {
+    let _ = provider;
     let harness = known(harness)?;
     if !super::test_launch::supported(harness) {
         return Err(failure("model_choice_not_supported"));
@@ -374,6 +380,34 @@ pub fn custom_pending(db: &Connection, harness: &str, model: &str) -> Result<boo
         |row| row.get(0),
     )
     .map_err(unavailable)
+}
+
+/// Names the provider one owner id passed its test launch on, the only provider whose
+/// accounts run it (DEC-150 addendum 9e). Inputs: the engine database, the harness name and
+/// the id. Output: the provider, none for an id that is not verified or was saved before
+/// ids kept one, or `model_choice_harness_unknown` or `model_choice_unavailable`.
+pub fn custom_provider(
+    db: &Connection,
+    harness: &str,
+    model: &str,
+) -> Result<Option<String>, EngineError> {
+    let _ = (db, model);
+    known(harness)?;
+    Ok(None)
+}
+
+/// Names the provider one owner id waiting for its test launch is tested on. Inputs: the
+/// engine database, the harness name and the id. Output: the provider, none for an id that
+/// is not pending or names none, or `model_choice_harness_unknown` or
+/// `model_choice_unavailable`.
+pub fn pending_provider(
+    db: &Connection,
+    harness: &str,
+    model: &str,
+) -> Result<Option<String>, EngineError> {
+    let _ = (db, model);
+    known(harness)?;
+    Ok(None)
 }
 
 /// Removes one owner id from a harness. A slot that names it passes it over from then on

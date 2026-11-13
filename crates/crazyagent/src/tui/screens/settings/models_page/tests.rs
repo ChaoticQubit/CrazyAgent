@@ -60,6 +60,7 @@ fn models(rows: [Row; 3], owned: &[(&str, Origin)]) -> Models {
         qualified: true,
         reason: None,
         testable: true,
+        providers: Vec::new(),
     }
 }
 
@@ -581,6 +582,7 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
         qualified: true,
         reason: None,
         testable: false,
+        providers: Vec::new(),
     };
     let page = ModelsPage::new("opencode".into(), "OpenCode".into(), Scope::App);
     let mut shell = Shell::with(ctx(80, 24), Box::new(page));
@@ -855,6 +857,7 @@ fn only_a_pending_id_offers_a_test_launch() {
 fn a_harness_without_a_test_launch_says_not_supported_on_add_and_on_a_pending_id() {
     let mut shell = app_page(Models {
         testable: false,
+        providers: Vec::new(),
         ..with_own(Origin::Pending)
     });
     shell.ctx.store.pools = crate::tui::ctx::Load::Ready(vec![pool("main")]);

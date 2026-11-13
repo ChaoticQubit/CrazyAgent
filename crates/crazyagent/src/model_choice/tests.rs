@@ -436,17 +436,17 @@ fn an_rcli_master_model_runs_only_on_an_account_whose_provider_serves_it() {
         ("qwen3-coder", &url),
         ("llama3.2", &local),
     ] {
-        assert!(rcli_serves(model, served_by), "{model}");
+        assert!(rcli_serves(model, served_by, None), "{model}");
         for other in all.iter().filter(|other| other.id != served_by.id) {
             assert!(
-                !rcli_serves(model, other),
+                !rcli_serves(model, other, None),
                 "{model} on {}",
                 other.id.as_str()
             );
         }
     }
-    assert!(rcli_serves("openai/gpt-6-luna", &openrouter));
-    assert!(!rcli_serves("gpt-6-luna", &openrouter));
+    assert!(rcli_serves("openai/gpt-6-luna", &openrouter, None));
+    assert!(!rcli_serves("gpt-6-luna", &openrouter, None));
     assert_eq!(
         catalog_provider("rcli", "claude-opus-5-5"),
         Some("anthropic")
@@ -484,17 +484,17 @@ fn an_added_model_is_usable_only_after_its_test_launch_passes() {
     let (_tmp, db) = engine();
     let ids = catalog(&["gpt-a"]);
     assert_eq!(
-        store::custom_begin(&db, "codex", &ids, "gpt-a").unwrap(),
+        store::custom_begin(&db, "codex", &ids, "gpt-a", None).unwrap(),
         Begun::Listed
     );
     assert_eq!(
-        store::custom_begin(&db, "codex", &ids, "bad id")
+        store::custom_begin(&db, "codex", &ids, "bad id", None)
             .unwrap_err()
             .0,
         "model_choice_value_invalid"
     );
     assert_eq!(
-        store::custom_begin(&db, "codex", &ids, "my-model").unwrap(),
+        store::custom_begin(&db, "codex", &ids, "my-model", None).unwrap(),
         Begun::Pending
     );
     let models = store::values(&db, "codex", &ids, &Scope::App, None).unwrap();
@@ -532,7 +532,7 @@ fn an_added_model_is_usable_only_after_its_test_launch_passes() {
     );
 
     assert_eq!(
-        store::custom_begin(&db, "codex", &ids, "my-model").unwrap(),
+        store::custom_begin(&db, "codex", &ids, "my-model", None).unwrap(),
         Begun::Pending
     );
     store::custom_checked(&db, "codex", "my-model", true).unwrap();
@@ -577,18 +577,18 @@ fn added_models_stop_at_their_bound() {
     let ids = catalog(&["gpt-a"]);
     for n in 0..CUSTOM_MAX {
         assert_eq!(
-            store::custom_begin(&db, "codex", &ids, &format!("own-{n}")).unwrap(),
+            store::custom_begin(&db, "codex", &ids, &format!("own-{n}"), None).unwrap(),
             Begun::Pending
         );
     }
     assert_eq!(
-        store::custom_begin(&db, "codex", &ids, "one-more")
+        store::custom_begin(&db, "codex", &ids, "one-more", None)
             .unwrap_err()
             .0,
         "model_choice_custom_full"
     );
     assert_eq!(
-        store::custom_begin(&db, "codex", &ids, "own-0").unwrap(),
+        store::custom_begin(&db, "codex", &ids, "own-0", None).unwrap(),
         Begun::Pending
     );
 }
@@ -748,7 +748,7 @@ fn every_refusal_code_is_listed() {
         )
         .unwrap_err()
         .0,
-        store::custom_begin(&db, "codex", &catalog(&["a"]), "bad id")
+        store::custom_begin(&db, "codex", &catalog(&["a"]), "bad id", None)
             .unwrap_err()
             .0,
         store::custom_checked(&db, "codex", "never", true)
@@ -1141,7 +1141,7 @@ fn only_an_owner_id_waiting_for_its_test_launch_is_pending() {
     let ids = crate::model_choice::catalog("codex");
     assert!(!store::custom_pending(&db, "codex", "my-model").unwrap());
     assert_eq!(
-        store::custom_begin(&db, "codex", &ids, "my-model").unwrap(),
+        store::custom_begin(&db, "codex", &ids, "my-model", None).unwrap(),
         Begun::Pending
     );
     assert!(store::custom_pending(&db, "codex", "my-model").unwrap());
@@ -1169,7 +1169,7 @@ fn an_owner_id_is_added_only_where_a_test_launch_can_run_and_the_section_says_so
     }
     let ids = catalog(&["local"]);
     assert_eq!(
-        store::custom_begin(&db, "rcli", &ids, "my-model")
+        store::custom_begin(&db, "rcli", &ids, "my-model", None)
             .unwrap_err()
             .0,
         "model_choice_not_supported"
@@ -1183,5 +1183,206 @@ fn an_owner_id_is_added_only_where_a_test_launch_can_run_and_the_section_says_so
             .all(|candidate| candidate.id != "my-model"),
         "{:?}",
         models.candidates
+    );
+}
+
+/// DEC-150 addendum 9e: the providers the store and the Add choice name for RCLI are the
+/// account catalog's keyed RCLI providers, not a list of their own; only RCLI's Models
+/// section offers them, and both new refusal codes are listed.
+#[test]
+fn the_rcli_providers_are_the_account_catalog_s_keyed_rcli_providers() {
+    let keyed: Vec<&str> = crate::accounts::rcli_keyed_providers()
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(!keyed.is_empty());
+    assert_eq!(rcli_providers(), keyed);
+    let choices = provider_choices("rcli");
+    let ids: Vec<&str> = choices.iter().map(|choice| choice.id.as_str()).collect();
+    assert_eq!(ids, keyed);
+    for choice in &choices {
+        assert_eq!(rcli_provider_name(&choice.id), Some(choice.name.as_str()));
+    }
+    let names: Vec<&str> = choices.iter().map(|choice| choice.name.as_str()).collect();
+    assert_eq!(names, ["OpenRouter", "OpenAI API", "Anthropic API"]);
+    assert_eq!(rcli_provider_name("openai-compatible"), None);
+    for harness in ["codex", "claude-code"] {
+        assert!(provider_choices(harness).is_empty(), "{harness}");
+    }
+    let (_tmp, db) = engine();
+    let rcli = store::values(&db, "rcli", &super::catalog("rcli"), &Scope::App, None).unwrap();
+    assert_eq!(rcli.providers, choices);
+    let codex = store::values(&db, "codex", &catalog(&["gpt-a"]), &Scope::App, None).unwrap();
+    assert!(codex.providers.is_empty());
+    for code in [
+        "model_choice_provider_needed",
+        "model_choice_provider_unknown",
+    ] {
+        assert!(MODEL_CHOICE_CODES.contains(&code), "{code}");
+    }
+}
+
+/// DEC-150 addendum 9e: an owner's RCLI id runs only on a keyed account of the provider
+/// its test launch passed on; with no provider kept it runs on none but an account whose
+/// own model it is, and a URL account never runs it.
+#[test]
+fn an_owner_rcli_id_runs_only_on_an_account_of_the_provider_it_was_verified_on() {
+    let openai = rcli_account(
+        "openai",
+        "openai-chat",
+        "https://api.openai.com/v1",
+        "gpt-6-luna",
+        true,
+    );
+    let openrouter = rcli_account(
+        "openrouter",
+        "openai-chat",
+        "https://openrouter.ai/api/v1",
+        "openai/gpt-6-luna",
+        true,
+    );
+    let anthropic = rcli_account(
+        "anthropic",
+        "anthropic-messages",
+        "https://api.anthropic.com/v1",
+        "claude-opus-5-5",
+        true,
+    );
+    let url = rcli_account(
+        "openai-compatible",
+        "openai-chat",
+        "https://llm.example.com/v1",
+        "qwen3-coder",
+        true,
+    );
+    assert!(rcli_serves("my-model", &openrouter, Some("openrouter")));
+    assert!(rcli_serves("my-model", &anthropic, Some("anthropic")));
+    assert!(!rcli_serves("my-model", &openai, Some("openrouter")));
+    assert!(!rcli_serves("my-model", &anthropic, Some("openai")));
+    assert!(!rcli_serves("my-model", &url, Some("openai")));
+    assert!(!rcli_serves("my-model", &openrouter, None));
+    assert!(rcli_serves("gpt-6.1-sol", &openai, None));
+    assert!(rcli_serves("gpt-6.1-sol", &openai, Some("openrouter")));
+    assert!(rcli_serves("qwen3-coder", &url, Some("openai")));
+}
+
+/// DEC-150 addendum 9e: an RCLI id the owner adds names one keyed provider, kept while it
+/// waits and once it passes; another harness takes none. A re-add before the test moves
+/// it to the new provider; a verified id keeps the one it passed on.
+#[test]
+fn an_added_rcli_id_names_one_keyed_provider_and_keeps_the_one_it_passed_on() {
+    let (_tmp, db) = engine();
+    let ids = super::catalog("rcli");
+    let codex = catalog(&["gpt-a"]);
+    assert_eq!(
+        store::custom_begin(&db, "codex", &codex, "my-model", Some("openai"))
+            .unwrap_err()
+            .0,
+        "model_choice_provider_unknown"
+    );
+    assert_eq!(
+        store::custom_begin(&db, "rcli", &ids, "my-model", None)
+            .unwrap_err()
+            .0,
+        "model_choice_provider_needed"
+    );
+    for unknown in ["openai-compatible", "local", "OpenRouter", ""] {
+        assert_eq!(
+            store::custom_begin(&db, "rcli", &ids, "my-model", Some(unknown))
+                .unwrap_err()
+                .0,
+            "model_choice_provider_unknown",
+            "{unknown}"
+        );
+    }
+    assert_eq!(
+        store::custom_begin(&db, "rcli", &ids, "my-model", Some("openrouter")).unwrap(),
+        Begun::Pending
+    );
+    assert_eq!(
+        store::pending_provider(&db, "rcli", "my-model").unwrap(),
+        Some("openrouter".to_owned())
+    );
+    assert_eq!(
+        store::custom_provider(&db, "rcli", "my-model").unwrap(),
+        None
+    );
+    assert_eq!(
+        store::custom_begin(&db, "rcli", &ids, "my-model", Some("openai")).unwrap(),
+        Begun::Pending
+    );
+    assert_eq!(
+        store::pending_provider(&db, "rcli", "my-model").unwrap(),
+        Some("openai".to_owned())
+    );
+    store::custom_checked(&db, "rcli", "my-model", true).unwrap();
+    assert_eq!(
+        store::pending_provider(&db, "rcli", "my-model").unwrap(),
+        None
+    );
+    assert_eq!(
+        store::custom_provider(&db, "rcli", "my-model").unwrap(),
+        Some("openai".to_owned())
+    );
+    assert_eq!(
+        store::custom_begin(&db, "rcli", &ids, "my-model", Some("openrouter")).unwrap(),
+        Begun::Verified
+    );
+    assert_eq!(
+        store::custom_provider(&db, "rcli", "my-model").unwrap(),
+        Some("openai".to_owned())
+    );
+    assert_eq!(
+        store::custom_provider(&db, "codex", "my-model").unwrap(),
+        None
+    );
+}
+
+/// DEC-150 addendum 9e: an engine database whose owner ids were saved before ids kept a
+/// provider still reads, its RCLI ids serve no provider, and the first write keeps every
+/// row while making room for a provider.
+#[test]
+fn an_owner_id_saved_before_providers_were_kept_names_none_and_keeps_its_row() {
+    let (_tmp, db) = engine();
+    db.execute_batch(
+        "CREATE TABLE model_custom (
+            harness TEXT NOT NULL,
+            model TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('pending', 'verified', 'failed')),
+            checked_ms INTEGER NOT NULL,
+            PRIMARY KEY (harness, model)
+        ) WITHOUT ROWID;
+        INSERT INTO model_custom VALUES ('rcli', 'old-model', 'verified', 1);
+        INSERT INTO model_custom VALUES ('codex', 'old-codex', 'verified', 1);",
+    )
+    .unwrap();
+    assert_eq!(
+        store::custom_provider(&db, "rcli", "old-model").unwrap(),
+        None
+    );
+    let codex = catalog(&["gpt-a"]);
+    assert_eq!(
+        store::custom_begin(&db, "codex", &codex, "new-codex", None).unwrap(),
+        Begun::Pending
+    );
+    assert_eq!(
+        store::custom_provider(&db, "rcli", "old-model").unwrap(),
+        None
+    );
+    let models = store::values(&db, "codex", &codex, &Scope::App, None).unwrap();
+    assert!(
+        models
+            .candidates
+            .iter()
+            .any(|c| c.id == "old-codex" && c.origin == Origin::Verified)
+    );
+    db.execute(
+        "UPDATE model_custom SET provider = 'openrouter' WHERE harness = 'rcli' AND model = 'old-model'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        store::custom_provider(&db, "rcli", "old-model").unwrap(),
+        Some("openrouter".to_owned())
     );
 }

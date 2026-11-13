@@ -89,3 +89,85 @@ fn only_claude_code_and_codex_have_a_test_launch() {
         assert!(!supported(harness), "{harness}");
     }
 }
+
+/// DEC-150 addendum 9e (leader 19:01, 19:08): an RCLI test launch reads only the provider
+/// failure the host named and the account's provider. An answer verifies the id; a 404
+/// fails it only from OpenAI or Anthropic; OpenRouter, every other failure, a timeout and a
+/// stop leave it pending with the provider's account screen name.
+#[test]
+fn an_rcli_test_fails_an_id_only_on_a_404_from_openai_or_anthropic() {
+    use crate::rcli_host::RcliProviderFailure as Failure;
+    for provider in ["openai", "anthropic", "openrouter"] {
+        assert_eq!(
+            rcli_outcome(provider, RcliEnded::Answered),
+            (Tested::Verified, None),
+            "{provider}"
+        );
+    }
+    for provider in ["openai", "anthropic"] {
+        assert_eq!(
+            rcli_outcome(provider, RcliEnded::Failed(Some(Failure::NotFound))),
+            (Tested::Failed, None),
+            "{provider}"
+        );
+    }
+    let (tested, reason) = rcli_outcome("openrouter", RcliEnded::Failed(Some(Failure::NotFound)));
+    assert_eq!(tested, Tested::Pending);
+    assert!(reason.unwrap().starts_with("Not reported by OpenRouter: "));
+    for failure in [
+        None,
+        Some(Failure::RateLimited),
+        Some(Failure::QuotaExhausted),
+        Some(Failure::InvalidAuthentication),
+    ] {
+        let (tested, reason) = rcli_outcome("openai", RcliEnded::Failed(failure));
+        assert_eq!(tested, Tested::Pending, "{failure:?}");
+        assert!(
+            reason.unwrap().starts_with("Not reported by OpenAI API: "),
+            "{failure:?}"
+        );
+    }
+    for ended in [RcliEnded::TimedOut, RcliEnded::Stopped] {
+        let (tested, reason) = rcli_outcome("anthropic", ended);
+        assert_eq!(tested, Tested::Pending, "{ended:?}");
+        let reason = reason.unwrap();
+        assert!(!reason.is_empty() && reason.len() <= REASON_BYTES_MAX);
+    }
+}
+
+/// DEC-150 addendum 9e (leader 19:01): an RCLI test that started no run says why, naming
+/// the provider the id is tested on as the account screens do; with no set-up account of
+/// that provider in the pool it says so and the id stays pending.
+#[test]
+fn an_rcli_test_that_never_started_says_why_by_the_provider_name() {
+    for (provider, name) in [
+        ("openai", "OpenAI API"),
+        ("anthropic", "Anthropic API"),
+        ("openrouter", "OpenRouter"),
+    ] {
+        assert_eq!(
+            rcli_not_started(provider, NotStarted::NoAccount),
+            format!("No set-up {name} account in this pool.")
+        );
+        let reasons: Vec<String> = [
+            NotStarted::NotInstalled,
+            NotStarted::NoAccount,
+            NotStarted::Paused,
+            NotStarted::CouldNotStart,
+        ]
+        .into_iter()
+        .map(|why| rcli_not_started(provider, why))
+        .collect();
+        for reason in &reasons {
+            assert!(
+                !reason.is_empty() && reason.len() <= REASON_BYTES_MAX,
+                "{reason}"
+            );
+        }
+        assert!(reasons[2].contains(name) && reasons[3].contains(name));
+        let mut distinct = reasons.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), reasons.len());
+    }
+}

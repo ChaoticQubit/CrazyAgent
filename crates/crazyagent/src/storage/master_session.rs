@@ -2200,7 +2200,7 @@ fn candidates<'a>(
         .into_iter()
         .map(|(connection, gap, chosen)| {
             let gap = gap.or_else(|| {
-                (!crate::model_choice::rcli_serves(model, connection)).then(|| {
+                (!crate::model_choice::rcli_serves(model, connection, None)).then(|| {
                     (
                         MasterReason::ModelUnserved,
                         "master_model_unserved".to_owned(),

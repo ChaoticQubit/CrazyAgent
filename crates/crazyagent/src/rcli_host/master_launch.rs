@@ -161,7 +161,7 @@ impl RcliMasterLaunch {
         };
         let connection = &self.binding.connection;
         if !crate::model_choice::model_valid("rcli", model)
-            || !crate::model_choice::rcli_serves(model, connection)
+            || !crate::model_choice::rcli_serves(model, connection, None)
         {
             return Err(error("rcli_master_model_unserved"));
         }

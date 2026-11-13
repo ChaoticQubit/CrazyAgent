@@ -320,6 +320,7 @@ fn the_largest_models_section_fits_one_owner_frame() {
         qualified: false,
         reason: Some("r".repeat(crate::model_choice::UNQUALIFIED_REASON_BYTES_MAX)),
         testable: true,
+        providers: Vec::new(),
     };
     for reply in [
         Reply::Values {

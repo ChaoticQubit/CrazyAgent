@@ -579,6 +579,7 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
                 &harness,
                 &crate::model_choice::catalog(&harness),
                 &model,
+                None,
             )?;
             Ok(Reply::Added {
                 added: begun.into(),

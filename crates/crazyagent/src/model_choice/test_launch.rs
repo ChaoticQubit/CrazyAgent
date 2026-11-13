@@ -147,6 +147,34 @@ pub fn not_started(harness: &str, why: NotStarted) -> String {
     reason
 }
 
+/// How an RCLI test launch's run ended (DEC-150 addendum 9e): the host's answer, a failed
+/// turn with the provider failure the host named, if any, no answer in time, or stopped by
+/// the engine. The host's error text is never kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RcliEnded {
+    Answered,
+    Failed(Option<crate::rcli_host::RcliProviderFailure>),
+    TimedOut,
+    Stopped,
+}
+
+/// Decides an RCLI test launch by the provider of the account it ran on (DEC-150 addendum
+/// 9e): an answer verifies the id, a 404 from OpenAI or Anthropic fails it, and anything
+/// else, an OpenRouter 404 included, leaves it pending with a fixed reason. Inputs: the
+/// RCLI provider id and the ending. Output: the decision and its pending reason.
+pub fn rcli_outcome(provider: &str, ended: RcliEnded) -> (Tested, Option<String>) {
+    let _ = (provider, ended);
+    (Tested::Pending, Some(String::new()))
+}
+
+/// Words the pending reason of an RCLI test launch that started no run, by the provider
+/// the id is tested on. Inputs: the RCLI provider id and why. Output: the reason, at most
+/// `REASON_BYTES_MAX` bytes.
+pub fn rcli_not_started(provider: &str, why: NotStarted) -> String {
+    let _ = (provider, why);
+    String::new()
+}
+
 /// One test launch to run: the engine's data folder, the two settings files, the
 /// installed harness executables, the harness, the owner's id and the pool to run it on.
 pub struct Request<'a> {

@@ -245,6 +245,14 @@ pub fn catalog() -> Vec<ProviderEntry> {
     entries
 }
 
+/// The keyed providers RCLI runs a chosen model on (DEC-150 addendum 9e): each catalog
+/// provider whose only sign-in is an API key on an RCLI account with a preset URL, with the
+/// RCLI provider id its account saves. A subscription provider's API key saves one of these
+/// ids. Output: (id, provider) pairs in catalog order, every keyed RCLI id exactly once.
+pub fn rcli_keyed_providers() -> Vec<(&'static str, Provider)> {
+    Vec::new()
+}
+
 /// Checks one owner-entered account name: trimmed, bounded and free of control or
 /// bidirectional override characters. Input: raw text. Output: the trimmed name or an error.
 pub fn account_name(raw: &str) -> Result<String, EngineError> {
