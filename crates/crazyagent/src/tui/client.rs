@@ -2327,10 +2327,11 @@ impl NativeOwner {
 }
 
 /// The problem a creation job hands the loss check: the job's failure, except a late answer
-/// on a creation the worker keeps, which the page checks by the same identity first; only
-/// that check's failed connection lets go of the engine (DEC-159).
-/// Input: the creation event. Output: the problem the loss check reads, or none.
-fn creation_loss(event: &CreationEvent, _delivery: MutationDelivery) -> Option<&str> {
+/// to the first send of a creation the worker keeps, which the page checks by the same
+/// identity next. A late answer to that check or to a retry counts: a live engine answers
+/// the check at once (DEC-159 D1), and a revoked client's stream closes unanswered.
+/// Input: the creation event and its delivery. Output: the problem the loss check reads.
+fn creation_loss(event: &CreationEvent, delivery: MutationDelivery) -> Option<&str> {
     let problem = event.result.as_ref().err().map(String::as_str);
     assert!(
         problem.is_none_or(|code| !code.is_empty()),
@@ -2340,7 +2341,8 @@ fn creation_loss(event: &CreationEvent, _delivery: MutationDelivery) -> Option<&
         !event.retained || event.operation.is_some(),
         "a kept creation names its change"
     );
-    problem.filter(|code| !(event.retained && answer_late(code)))
+    let checked_next = matches!(delivery, MutationDelivery::Submit) && event.retained;
+    problem.filter(|code| !(checked_next && answer_late(code)))
 }
 
 /// True for an owner change whose answer did not come in time or could not be read: the
