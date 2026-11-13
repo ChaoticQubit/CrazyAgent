@@ -69,14 +69,17 @@ pub(super) fn running(authority: &Authority, a: &Admission, id: &RequestId) -> b
 }
 
 /// The answer for a resend or a check of a change still running, after the grant check
-/// every owner answer passes. Inputs: the authority, the client packet, the admission and
-/// the change's request id. Output: `InProgress` for the change, or the grant's refusal.
-pub(super) fn still_running(
+/// every owner answer passes under the owner barrier. Inputs: the engine, the authority, the
+/// client packet, the admission and the change's request id. Output: `InProgress` for the
+/// change, or the grant's refusal.
+pub(super) async fn still_running(
+    engine: &Engine,
     authority: &Authority,
     packet: &[u8; 37],
     a: &Admission,
     id: &RequestId,
 ) -> Result<OwnerResponse, EngineError> {
+    let _barrier = engine.owner_egress.write().await;
     match authority.authenticate(packet) {
         Ok(current) if &current == a => Ok(OwnerResponse::InProgress {
             operation_id: id.clone(),
@@ -247,10 +250,13 @@ pub(super) async fn serve(
         true => match Running::claim(&authority.running, &a.owner_id, &id) {
             Some(running) => Some(running),
             None => {
-                let reply = still_running(authority, packet, a, &id).map(|response| OwnerReply {
-                    request_id: id.clone(),
-                    response,
-                });
+                let reply =
+                    still_running(engine, authority, packet, a, &id)
+                        .await
+                        .map(|response| OwnerReply {
+                            request_id: id.clone(),
+                            response,
+                        });
                 return write_owner_reply(stream, reply, id, mutation).await;
             }
         },

@@ -2431,12 +2431,11 @@ async fn serve_admitted(
         if let OwnerOperation::Reconcile { operation_id, .. } = &request.operation
             && projects_home::running(authority, &a, operation_id)
         {
-            let reply =
-                projects_home::still_running(authority, auth, &a, operation_id).map(|response| {
-                    OwnerReply {
-                        request_id: id.clone(),
-                        response,
-                    }
+            let reply = projects_home::still_running(engine, authority, auth, &a, operation_id)
+                .await
+                .map(|response| OwnerReply {
+                    request_id: id.clone(),
+                    response,
                 });
             return write_owner_reply(stream, reply, id, mutation)
                 .await
