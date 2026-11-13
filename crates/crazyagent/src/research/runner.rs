@@ -98,6 +98,8 @@ const CLAUDE_ARGUMENTS: [&str; 6] = [
     "--setting-sources",
     "",
 ];
+/// The model name Claude Code gives the messages it writes itself, such as its API errors.
+const CLAUDE_OWN_MODEL: &str = "<synthetic>";
 /// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
 const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
 
@@ -3343,6 +3345,48 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
+/// The answer of a tools-off Claude Code run, read from its stream of JSON events: the
+/// text of its assistant messages, their thinking and Claude Code's own error messages left
+/// out. Input: the event lines. Output: the answer, or `None` while the stream ends in no
+/// successful result, such as a log cut at its bound or a run Claude Code ended on an error.
+#[cfg(unix)]
+fn claude_answer(events: &str) -> Option<String> {
+    let mut answer = String::new();
+    let mut finished = false;
+    for line in events.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("assistant") if !claude_error(&event) => {
+                answer.clear();
+                for block in event["message"]["content"].as_array().into_iter().flatten() {
+                    if block["type"] == "text"
+                        && let Some(text) = block["text"].as_str()
+                    {
+                        answer.push_str(text);
+                    }
+                }
+            }
+            Some("result") => {
+                finished = event["subtype"] == "success" && event["is_error"] == false;
+            }
+            _ => {}
+        }
+    }
+    assert!(answer.len() <= events.len());
+    finished.then_some(answer)
+}
+
+/// Whether one assistant event of a Claude Code stream is Claude Code's own error message,
+/// such as the one it ends a run with when an answer is cut once more after its last
+/// continue request, rather than the model's words. Input: the event. Output: the answer.
+#[cfg(unix)]
+fn claude_error(event: &serde_json::Value) -> bool {
+    assert!(event["type"] == "assistant");
+    event["is_api_error_message"] == true || event["message"]["model"] == CLAUDE_OWN_MODEL
+}
+
 /// The plain reason a read-only agent stopped with an error: Codex's own
 /// message from its last `turn.failed` event, else its last `error` event,
 /// else the generic reason; a message that is a provider's JSON error body
@@ -5781,6 +5825,49 @@ mod tests {
             "a folder the engine made gets its repository"
         );
         ensure_repository(&created, &home).unwrap();
+    }
+
+    const STREAM_START: &str = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n";
+    const STREAM_THINKING: &str = "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\"}]},\"parent_tool_use_id\":null}\n";
+    const STREAM_FIRST: &str = "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"## Numbers\\n\\n1. one\\n2. tw\"}]},\"parent_tool_use_id\":null}\n";
+    const STREAM_CONTINUE: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Output token limit hit. Resume directly\"}]}}\n";
+    const STREAM_SECOND: &str = "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"o\\n3. three\\n\"}]},\"parent_tool_use_id\":null}\n";
+    const STREAM_OWN_ERROR: &str = "{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"content\":[{\"type\":\"text\",\"text\":\"API Error: the response exceeded the output token maximum\"}]},\"is_api_error_message\":true,\"error\":\"max_output_tokens\"}\n";
+    const STREAM_DONE: &str = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"o\\n3. three\\n\"}\n";
+    const STREAM_FAILED: &str = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"result\":\"API Error\"}\n";
+
+    /// DEC-160: Claude Code continues an answer cut at the output cap in new requests, and
+    /// `--print` text kept only the last one, so the mapping stored a JSON tail as the
+    /// overview. The answer is every assistant message's text, joined in order.
+    #[test]
+    fn a_tools_off_claude_answer_continued_past_its_output_cap_comes_back_whole() {
+        let stream = [
+            STREAM_START,
+            STREAM_THINKING,
+            STREAM_FIRST,
+            STREAM_CONTINUE,
+            STREAM_THINKING,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]
+        .concat();
+        assert_eq!(
+            claude_answer(&stream).as_deref(),
+            Some("## Numbers\n\n1. one\n2. two\n3. three\n")
+        );
+    }
+
+    /// An answer is taken only from a stream that ends in a successful result, and never
+    /// holds Claude Code's own error message.
+    #[test]
+    fn a_claude_stream_without_a_successful_result_gives_no_answer() {
+        let cut = [STREAM_START, STREAM_FIRST, STREAM_CONTINUE, STREAM_SECOND].concat();
+        assert_eq!(claude_answer(&cut), None);
+        let failed = [STREAM_START, STREAM_FIRST, STREAM_OWN_ERROR, STREAM_FAILED].concat();
+        assert_eq!(claude_answer(&failed), None);
+        let noted = [STREAM_START, STREAM_SECOND, STREAM_OWN_ERROR, STREAM_DONE].concat();
+        assert_eq!(claude_answer(&noted).as_deref(), Some("o\n3. three\n"));
+        assert_eq!(claude_answer(""), None);
     }
 }
 
