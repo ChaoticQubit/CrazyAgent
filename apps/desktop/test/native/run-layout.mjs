@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { setTimeout as pause } from "node:timers/promises";
 
 export function createRunDirectories(evidence) {
   for (const name of ["home", "tmp", "webdriver"]) mkdirSync(join(evidence, name), { mode: 0o700 });
@@ -60,9 +62,113 @@ export function clearWebStore(home) {
   assert.throws(() => lstatSync(store), { code: "ENOENT" }, "no web store is left for the run");
 }
 
+const LOCK_NAME = ".crazyagent-native-run.lock";
+const LOCK_WAIT_MS = 60000;
+const LOCK_POLL_MS = 250;
+const LOCK_RETRIES_MAX = 16;
+
 /** Takes the one native run lock of a home for this process, so two native suites never run
- * side by side on one home. Inputs: the home and { label, waitMs, pollMs }. Output: the lock,
- * whose release() frees it. */
-export async function lockHome(_home, _options = {}) {
-  return { release() {} };
+ * side by side on one home: a held home is waited on for waitMs, then refused naming the
+ * holder; a lock whose pid is dead is taken over; this process frees it on exit. Inputs: the
+ * home and { label, waitMs, pollMs }. Output: the lock, whose release() frees it. */
+export async function lockHome(home, { label, waitMs = LOCK_WAIT_MS, pollMs = LOCK_POLL_MS } = {}) {
+  assert(isAbsolute(home), "the home is an absolute path");
+  assert(typeof label === "string" && label !== "", "the lock names its suite");
+  assert(Number.isInteger(waitMs) && waitMs >= 0 && Number.isInteger(pollMs) && pollMs > 0, "the wait is bounded");
+  const lock = join(home, LOCK_NAME);
+  const mine = { pid: process.pid, started: new Date().toISOString(), label, token: randomBytes(16).toString("hex") };
+  const draft = `${lock}.${mine.token}`;
+  writeFileSync(draft, JSON.stringify(mine), { flag: "wx", mode: 0o600 });
+  const deadline = Date.now() + waitMs;
+  const attempts = Math.ceil(waitMs / pollMs) + LOCK_RETRIES_MAX;
+  let held = null;
+  try {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        linkSync(draft, lock);
+        held = mine;
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+      const holder = readLock(lock);
+      if (holder === undefined) continue;
+      if (holder !== null && !alive(holder.pid)) {
+        takeOver(lock, holder, mine.token);
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error(heldMessage(home, lock, holder, waitMs));
+      await pause(pollMs);
+    }
+  } finally {
+    rmSync(draft, { force: true });
+  }
+  if (held === null) throw new Error(heldMessage(home, lock, readLock(lock) ?? null, waitMs));
+  const release = () => {
+    if (readLock(lock)?.token === mine.token) rmSync(lock, { force: true });
+    process.removeListener("exit", release);
+  };
+  process.on("exit", release);
+  return { release };
+}
+
+/** Reads a home's lock. Input: the lock file. Output: its holder { pid, started, label, token },
+ * undefined when there is no lock, or null when the file is not a lock this code wrote. */
+function readLock(lock) {
+  let text;
+  try {
+    text = readFileSync(lock, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  }
+  let holder;
+  try {
+    holder = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const valid = holder !== null && typeof holder === "object" && Number.isInteger(holder.pid) && holder.pid > 0
+    && typeof holder.started === "string" && typeof holder.label === "string" && /^[0-9a-f]{32}$/.test(holder.token ?? "");
+  return valid ? holder : null;
+}
+
+/** Tells whether a process lives: signal 0 reaches it, or it belongs to another user.
+ * Input: the pid. Output: the answer. */
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== "ESRCH";
+  }
+}
+
+/** Removes a lock whose holder is dead: moves it to a private name, then removes it when it is
+ * still that holder's, or puts back a newer lock another suite made in the meantime. Inputs:
+ * the lock file, the dead holder and this taker's token. Output: nothing. */
+function takeOver(lock, holder, token) {
+  const moved = `${lock}.stale.${token}`;
+  try {
+    renameSync(lock, moved);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  if (readLock(moved)?.token !== holder.token) {
+    try {
+      linkSync(moved, lock);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+  }
+  rmSync(moved, { force: true });
+}
+
+/** The plain refusal for a held home: who holds it, since when, how long this suite waited,
+ * and when the lock may be removed by hand. Inputs: the home, the lock file, its holder (null
+ * when unreadable) and the wait. Output: the message. */
+function heldMessage(home, lock, holder, waitMs) {
+  const who = holder ? `pid ${holder.pid} (${holder.label}), started ${holder.started}` : "a lock that cannot be read";
+  return `The native test home ${home} is in use by ${who}. Waited ${Math.round(waitMs / 1000)} s; native suites never run side by side on one home. Run this suite once that one ends, or remove ${lock} if no native run holds it.`;
 }

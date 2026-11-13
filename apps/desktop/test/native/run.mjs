@@ -9,7 +9,7 @@ import { createConnection, createServer } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
-import { chooseHome, clearWebStore, createRunDirectories, runProjects } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, lockHome, runProjects } from "./run-layout.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workRoot = resolve(appRoot, "../../.local-state/desktop-execution");
@@ -51,9 +51,10 @@ function binary(path) {
     sha256: createHash("sha256").update(readFileSync(path)).digest("hex") };
 }
 
-function environment() {
+async function environment() {
   createRunDirectories(evidence);
   const { home, prepared } = chooseHome(join(evidence, "home"));
+  await lockHome(home, { label: `run.mjs ${suite} ${evidence}` });
   clearWebStore(home);
   return { projects: runProjects(home), env: {
     PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
@@ -206,7 +207,7 @@ function captured(entry) {
 
 async function execute() {
   const binaries = [binary(app), binary(fixture)];
-  const { env, projects } = environment();
+  const { env, projects } = await environment();
   const port = await unusedPort();
   const engine = launch("engine", fixture,
     [suite === "model-access-read-only" ? "serve" : "serve-model-access",
@@ -255,6 +256,7 @@ catch (error) {
   writeFileSync(join(evidence, "setup-failure.json"), JSON.stringify({
     started, ended: new Date().toISOString(), failure: String(error.message),
   }), { flag: "wx", mode: 0o600 });
+  console.error(String(error.message));
   console.error(join(evidence, "setup-failure.json"));
   process.exitCode = 1;
 }
