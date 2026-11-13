@@ -268,6 +268,22 @@ fn the_folder_probes_run_again_only_after_a_failure_or_a_miss_backing_off_to_ten
     assert!(probes.start(at + 2 * RETRY_AFTER, true));
 }
 
+/// Only the first folder run counts as the first run going, from its start until it ends,
+/// so a sign-in that missed waits for that first answer only, at most the run's own bound.
+#[test]
+fn only_the_first_folder_run_counts_as_the_first_run_going() {
+    let now = Instant::now();
+    let mut probes = Probes::new();
+    assert!(!probes.first_run_going());
+    assert!(probes.start(now, false));
+    assert!(probes.first_run_going());
+    probes.finish(Vec::new(), false, now);
+    assert!(!probes.first_run_going());
+    assert!(probes.start_now());
+    assert!(!probes.first_run_going());
+    assert!(first_run_bound() > SHELL_LIMIT + NPM_LIMIT);
+}
+
 #[test]
 fn an_explicit_retry_starts_a_folder_run_at_once_whatever_the_backoff_but_never_a_second_one() {
     let first = Instant::now();

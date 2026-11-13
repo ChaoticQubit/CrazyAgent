@@ -3,12 +3,15 @@ use crate::engine::EngineError;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// The most words one handed launch holds: the interpreters, their first-line words and the
 /// harness file.
 pub(crate) const LAUNCH_WORDS_MAX: usize = 12;
 /// The longest first-line word a handed launch carries.
 const ARGUMENT_BYTES_MAX: usize = 256;
+/// How often a sign-in waiting for the engine's first probe run checks whether it ended.
+const PROBE_POLL: Duration = Duration::from_millis(50);
 
 /// One word of the launch the engine resolved for a sign-in custodian: a file the launch runs
 /// or reads, pinned by its real path, identity and hash, or a word the harness's first line
@@ -57,6 +60,26 @@ pub(super) fn resolved(harness: &RegisteredNativeAuthHost) -> Option<Vec<LaunchW
         });
     }
     well_formed(&launch).then_some(launch)
+}
+
+/// Resolves a harness launch as [`resolved`] does and, when that misses while the engine's
+/// first probe run is still going, as on the first sign-in right after the app starts, waits
+/// for that run, at most as long as its own probes may take, and resolves once more. Input:
+/// the pinned harness. Output: the pinned words, or none.
+pub(super) async fn resolved_after_probe(
+    harness: &RegisteredNativeAuthHost,
+) -> Option<Vec<LaunchWord>> {
+    if let Some(launch) = resolved(harness) {
+        return Some(launch);
+    }
+    if !crate::tools::probe::first_run_going() {
+        return None;
+    }
+    let deadline = Instant::now() + crate::tools::probe::first_run_bound();
+    while crate::tools::probe::first_run_going() && Instant::now() < deadline {
+        tokio::time::sleep(PROBE_POLL).await;
+    }
+    resolved(harness)
 }
 
 /// Names one pinned harness and the launch the engine resolved for it on a custodian's

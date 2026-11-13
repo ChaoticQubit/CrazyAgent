@@ -408,15 +408,15 @@ impl CustodianCause {
     }
 }
 
-/// The harness a custodian gets with the launch the engine resolved for it
-/// ([`launch::resolved`]), or none when it cannot start, so the custodian ends the sign-in
-/// without effect and it settles unavailable. Inputs: the pinned harness and its kind.
-/// Output: both, or none.
+/// The harness a custodian gets with the launch the engine resolved for it, waiting for the
+/// first probe run when that is still going ([`launch::resolved_after_probe`]), or none when
+/// it cannot start, so the custodian ends the sign-in without effect and it settles
+/// unavailable. Inputs: the pinned harness and its kind. Output: both, or none.
 async fn handed(
     harness: Arc<RegisteredNativeAuthHost>,
     kind: &str,
 ) -> Option<(Arc<RegisteredNativeAuthHost>, Vec<LaunchWord>)> {
-    match launch::resolved(&harness) {
+    match launch::resolved_after_probe(&harness).await {
         Some(words) => Some((harness, words)),
         None => {
             eprintln!("native_auth_harness_unresolved harness={kind}");
