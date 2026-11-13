@@ -98,14 +98,14 @@ impl ProviderRetry {
         match (self, harness) {
             (Self::StopAtOnce, HarnessKind::ClaudeCode) => "Claude Code: no retries.",
             (Self::StopAtOnce, HarnessKind::Codex) => {
-                "Codex: no retries on an API key or address account. With a ChatGPT sign-in Codex takes no retry count, so it only stops waiting for the network without end."
+                "Codex: no retries on an API key or address account. With a ChatGPT sign-in Codex takes no retry count, so it only stops waiting for the network without end. The Codex master keeps its own retries for now."
             }
             (_, HarnessKind::Rcli) => "RCLI: one try. The engine never repeats an RCLI request.",
             (Self::RetryBriefly | Self::HarnessDefault, HarnessKind::ClaudeCode) => {
                 "Claude Code: its own retries, up to 10 with longer waits each time."
             }
             (Self::RetryBriefly, HarnessKind::Codex) => {
-                "Codex: its own retries, without waiting for the network without end."
+                "Codex: its own retries, without waiting for the network without end. The Codex master keeps its own retries and that wait for now."
             }
             (Self::HarnessDefault, HarnessKind::Codex) => {
                 "Codex: its own retries. A provider that refuses connections keeps it waiting for the network without end."
