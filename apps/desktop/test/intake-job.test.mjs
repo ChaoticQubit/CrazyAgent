@@ -74,3 +74,48 @@ test("answering a soft refusal on Home asks about that issue and keeps the job's
   assert.throws(() => intake.jobQuestion(job({ state: "done" })));
   assert.throws(() => intake.jobQuestion(job({ state: "needs_answer", code: "intake_failed" })));
 });
+
+const { createElement } = await import("react");
+const { renderToStaticMarkup } = await import("react-dom/server");
+const { IntakeJobView } = await import("../src/screens/intake/found.tsx");
+const { Sidebar } = await import("../src/ui/shell.tsx");
+const router = await import("../src/ui/router.ts");
+const html = (type, props) => renderToStaticMarkup(createElement(type, props));
+const noop = () => {};
+const jobRow = (state, extra = {}) => html(IntakeJobView, { job: job(state, extra), busy: false, onStop: noop, onRetry: noop, onAnswer: noop, onDismiss: noop });
+const buttons = (markup) => [...markup.matchAll(/<button[^>]*>(?:<[^>]+>)*([^<]*)/g)].map((match) => match[1]);
+
+test("Home's job row shows the job's line and only the actions its state allows", () => {
+  const running = jobRow(downloading(12, 3000));
+  assert.match(running, /Downloading shop from iCloud: 12 of 3000 files/);
+  assert.match(running, /role="status"/);
+  assert.deepEqual(buttons(running), ["Stop"]);
+  assert.deepEqual(buttons(jobRow({ state: "clearing" })), []);
+  assert.deepEqual(buttons(jobRow({ state: "done" })), ["Dismiss"]);
+  assert.deepEqual(buttons(jobRow(failed("home_copy_failed", "copying"))), ["Try again", "Dismiss"]);
+  assert.deepEqual(buttons(jobRow(failed("home_move_source_left", "clearing"))), ["Dismiss"]);
+  assert.deepEqual(buttons(jobRow({ state: "needs_answer", code: "home_move_worktrees" })), ["Answer", "Dismiss"]);
+  assert.match(jobRow({ state: "cancelled", phase: "copying" }), /Adding shop stopped\. Nothing was moved or copied\./);
+});
+
+const found = (name, state, extra = {}) => ({ name, path: `/Users/mira/Projects/${name}`, git: true, known: false, state, ...extra });
+const HOME = router.formatRoute({ name: "home" });
+
+test("the sidebar lists folders not set up at once, and the folder being added, each pointing Home", () => {
+  const folders = [found("zeta", "found"), found("alpha", "found"), found("beta", "onboarding", { project_id: "p2" }),
+    found("gamma", "ready", { project_id: "p3" }), found("delta", "found", { project_id: "p1" }), found("shop", "found")];
+  assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: folders }, null, new Set(["p1"])).map((entry) => [entry.name, entry.note, entry.href]),
+    [["alpha", "Not set up", HOME], ["shop", "Not set up", HOME], ["zeta", "Not set up", HOME]]);
+  const adding = intake.sidebarFolders({ kind: "ok", value: folders }, job(copying(4)), new Set());
+  assert.deepEqual(adding.map((entry) => [entry.id, entry.name, entry.note]),
+    [["intake:add-1", "shop", "Adding..."], [`found:${folders[1].path}`, "alpha", "Not set up"], [`found:${folders[0].path}`, "zeta", "Not set up"]]);
+  assert.deepEqual(intake.sidebarFolders({ kind: "loading" }, job({ state: "done" }), new Set()), []);
+  const many = Array.from({ length: 40 }, (_, index) => found(`f${String(index).padStart(2, "0")}`, "found"));
+  assert.equal(intake.sidebarFolders({ kind: "ok", value: many }, null, new Set()).length, intake.SIDEBAR_FOLDERS_MAX);
+});
+
+test("a sidebar folder row shows its note and opens its own page", () => {
+  const markup = html(Sidebar, { route: { name: "home" }, profileName: "Mira", engine: "running", onRetry: noop,
+    projects: [{ id: "found:/Users/mira/Projects/alpha", name: "alpha", note: "Not set up", href: HOME }] });
+  assert.match(markup, new RegExp(`href="${HOME}"[^>]*>(?:(?!</a>).)*alpha(?:(?!</a>).)*<span class="nav-note">Not set up</span>`));
+});
