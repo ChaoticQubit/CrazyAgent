@@ -2327,7 +2327,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.set_provider_retry(choice, generation).await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_provider_retry(choice, generation) .await }.await;
             routed(result)
         }
         "desktop_learning_progress" => {
