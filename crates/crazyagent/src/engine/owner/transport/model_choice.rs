@@ -564,8 +564,12 @@ fn retried(action: &Action) -> bool {
 /// Says how long a failed `--version` ask for a Models read is kept before the harness is
 /// asked again: no time when the owner asked again, else the list backoff. Input: the
 /// action. Output: the wait.
-fn version_backoff(_action: &Action) -> std::time::Duration {
-    crate::model_choice::live::BACKOFF
+fn version_backoff(action: &Action) -> std::time::Duration {
+    if retried(action) {
+        std::time::Duration::ZERO
+    } else {
+        crate::model_choice::live::BACKOFF
+    }
 }
 
 /// Says on a Models reply whether the owner can ask its harness for the list again now: a

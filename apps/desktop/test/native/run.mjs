@@ -3,9 +3,10 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   accessSync, closeSync, constants, mkdirSync, mkdtempSync, openSync,
-  readFileSync, statSync, writeFileSync, writeSync,
+  readFileSync, realpathSync, statSync, writeFileSync, writeSync,
 } from "node:fs";
 import { createConnection, createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
@@ -60,18 +61,24 @@ function catalogVersion() {
   return version;
 }
 
-/** Puts stand-in harnesses on PATH for the Models suites: for the project suite, whose page
- * lists installed harnesses only, a Claude Code answering the catalog's first version; for the
- * app suite, a Codex whose model list command fails, adding a line to bin/codex.lists each run.
- * Output: the folder to put first on PATH, or none for every other suite. */
+/** Puts stand-in harnesses on PATH for the Models suites, in a new folder in this process's
+ * private temp folder: the engine refuses a harness inside a project (the repository) or under
+ * a folder others can write (/tmp). For the project suite, whose page lists installed
+ * harnesses only, a Claude Code answering the catalog's first version; for the app suite, a
+ * Codex whose model list command fails, adding a line to the evidence folder's codex.lists
+ * each run. Output: the folder to put first on PATH, or none for every other suite. */
 function standIns() {
+  const lists = join(evidence, "codex.lists");
+  assert(!lists.includes("'"), "the codex.lists path fits in a quoted shell word");
   const scripts = {
     "models-project": () => ({ claude: `#!/bin/sh\nprintf '${catalogVersion()} (Claude Code)\\n'\n` }),
-    "models-app": () => ({ codex: "#!/bin/sh\nif [ \"$1 $2 $3\" = 'debug models --bundled' ]; then\n  echo run >> \"$0.lists\"\n  exit 1\nfi\nprintf 'codex-cli 0.167.1\\n'\n" }),
+    "models-app": () => ({ codex: `#!/bin/sh\nif [ "$1 $2 $3" = 'debug models --bundled' ]; then\n  echo run >> '${lists}'\n  exit 1\nfi\nprintf 'codex-cli 0.167.1\\n'\n` }),
   }[suite];
   if (scripts === undefined) return null;
-  const folder = join(evidence, "bin");
-  mkdirSync(folder, { mode: 0o700 });
+  const folder = realpathSync(mkdtempSync(join(tmpdir(), "cad-bin-")));
+  for (let at = folder; at !== dirname(at); at = dirname(at)) {
+    assert((statSync(at).mode & 0o002) === 0, `${at} is writable by every user, so the engine refuses a harness under it: set TMPDIR to a private folder`);
+  }
   for (const [name, script] of Object.entries(scripts())) writeFileSync(join(folder, name), script, { mode: 0o700 });
   return folder;
 }
