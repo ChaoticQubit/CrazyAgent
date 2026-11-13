@@ -317,8 +317,9 @@ impl Connection {
                                 .as_mut()
                                 .expect("creation requires paired configuration");
                             let was_ready = native.ready;
+                            let delivery = job.delivery;
                             let event = runtime.block_on(native.creation(*job));
-                            let problem = creation_loss(&event);
+                            let problem = creation_loss(&event, delivery);
                             if !report_loss(was_ready, native, problem, &mut client, &owner_replies)
                             {
                                 break;
@@ -2329,7 +2330,7 @@ impl NativeOwner {
 /// on a creation the worker keeps, which the page checks by the same identity first; only
 /// that check's failed connection lets go of the engine (DEC-159).
 /// Input: the creation event. Output: the problem the loss check reads, or none.
-fn creation_loss(event: &CreationEvent) -> Option<&str> {
+fn creation_loss(event: &CreationEvent, _delivery: MutationDelivery) -> Option<&str> {
     let problem = event.result.as_ref().err().map(String::as_str);
     assert!(
         problem.is_none_or(|code| !code.is_empty()),
@@ -3190,12 +3191,12 @@ mod creation_recovery_tests {
             "owner_actor_stopped_outcome_unknown",
         ] {
             assert_eq!(
-                creation_loss(&event(Err(late.into()), true)),
+                creation_loss(&event(Err(late.into()), true), MutationDelivery::Submit),
                 None,
                 "a late answer on a kept creation is reconciled, never read as a lost engine: {late}"
             );
             assert_eq!(
-                creation_loss(&event(Err(late.into()), false)),
+                creation_loss(&event(Err(late.into()), false), MutationDelivery::Submit),
                 Some(late),
                 "with nothing kept to check, a late answer still counts: {late}"
             );
@@ -3206,7 +3207,7 @@ mod creation_recovery_tests {
             "owner_socket_replaced",
         ] {
             assert_eq!(
-                creation_loss(&event(Err(gone.into()), true)),
+                creation_loss(&event(Err(gone.into()), true), MutationDelivery::Submit),
                 Some(gone),
                 "a failed connection is lost even with a kept creation: {gone}"
             );
@@ -3214,7 +3215,13 @@ mod creation_recovery_tests {
         let running = OwnerResponse::InProgress {
             operation_id: id.clone(),
         };
-        assert_eq!(creation_loss(&event(Ok(Box::new(running)), true)), None);
+        assert_eq!(
+            creation_loss(
+                &event(Ok(Box::new(running)), true),
+                MutationDelivery::Reconcile
+            ),
+            None
+        );
         h.close().await;
     }
 }
