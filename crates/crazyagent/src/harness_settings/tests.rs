@@ -385,6 +385,7 @@ pub(crate) fn codex_settings<'a>(lines: impl IntoIterator<Item = &'a str>) -> Ve
 
 /// Lists the top-level settings of one `config.toml` the engine wrote. Input: the file
 /// text. Output: the settings, in key order.
+#[cfg(target_os = "macos")]
 pub(crate) fn codex_file_settings(text: &str) -> Vec<(String, Value)> {
     let table = toml::from_str::<toml::Table>(text).unwrap();
     table
