@@ -845,212 +845,76 @@ fn a_shared_folder_is_refused_and_outside_worktrees_need_the_owners_choice() {
     }
 }
 
-/// A move that goes by copy records the project at the checked copy before anything is
-/// deleted. An entry the check never saw (a `.DS_Store` Finder wrote meanwhile) then stays
-/// in the old folder, which is reported, and the project and its agent copy are whole in
-/// the home.
+/// RV-DS241-44: a set-up project whose folder is gone still owns its name in the home. A
+/// Move or Copy of another project onto that name, and an add of a folder with that name,
+/// are refused before anything is written, and the missing project's onboarding and saved
+/// rows stay whole.
 #[test]
-fn a_move_by_copy_records_the_project_at_the_copy_before_the_old_folder_is_cleared() {
+fn a_move_onto_the_folder_of_a_project_whose_folder_is_gone_is_refused_and_its_rows_stay() {
     let case = Case::new();
-    let origin = case.repo.clone();
-    let clone = case.own_clone(7);
-    std::fs::write(clone.join("work.txt"), b"not landed\n").unwrap();
-    git(&clone, &["add", "work.txt"]);
-    git(&clone, &["commit", "-m", "agent work"]);
-    let old = case.copied();
-    std::fs::write(origin.join(".DS_Store"), b"finder").unwrap();
-    assert_eq!(case.finish(true), Some(Finished::Moved { repointed: 1 }));
-    assert_eq!(case.stored_folder(), case.target());
-    assert_eq!(pending(&case.db).unwrap(), None);
-    assert!(origin.join("README").is_file());
-    assert_eq!(old.clear().unwrap_err().0, "home_move_source_left");
-    assert_eq!(std::fs::read(origin.join(".DS_Store")).unwrap(), b"finder");
-    assert!(std::fs::symlink_metadata(origin.join("README")).is_err());
-    assert!(std::fs::symlink_metadata(origin.join(".git")).is_err());
-    assert_eq!(
-        std::fs::read(case.target().join("README")).unwrap(),
-        b"one\n"
-    );
-    assert!(std::fs::symlink_metadata(case.target().join(".DS_Store")).is_err());
-    let moved = case.target().join(".crazyagent/worktrees/agent-7");
-    assert_eq!(git(&moved, &["log", "-1", "--format=%s"]), "agent work");
-    assert_eq!(
-        git(&moved, &["log", "-1", "--format=%s", "HEAD~1"]),
-        "first"
-    );
-    assert_eq!(case.leftovers(&origin), Vec::<String>::new());
-}
-
-/// A crash never leaves the project on a folder with files missing: before the record
-/// the old folder is whole and the project stays there; after the record the project is
-/// on the whole copy and the old folder, never cleared, is whole too.
-#[test]
-fn a_crash_around_the_record_of_a_move_by_copy_leaves_the_project_on_a_whole_folder() {
-    let before = Case::new();
-    drop(before.copied());
-    assert_eq!(before.finish(false), Some(Finished::Left));
-    assert_eq!(before.stored_folder(), before.repo);
-    assert_eq!(pending(&before.db).unwrap(), None);
-    assert_eq!(git(&before.repo, &["log", "-1", "--format=%s"]), "first");
-
-    let after = Case::new();
-    drop(after.copied());
-    assert_eq!(after.finish(true), Some(Finished::Moved { repointed: 0 }));
-    assert_eq!(after.finish(false), None);
-    assert_eq!(after.stored_folder(), after.target());
-    assert_eq!(git(&after.target(), &["log", "-1", "--format=%s"]), "first");
-    assert_eq!(git(&after.repo, &["log", "-1", "--format=%s"]), "first");
-}
-
-/// A file iCloud changes in the old folder after the copy was checked is kept there as it
-/// is now; the project is on the copy, which holds the checked text.
-#[test]
-fn an_entry_icloud_changed_after_the_check_stays_in_the_old_folder_and_the_project_is_on_the_copy()
-{
-    let case = Case::new();
-    let origin = case.repo.clone();
-    std::fs::write(origin.join("notes.md"), b"draft\n").unwrap();
-    let old = case.copied();
-    std::fs::write(
-        origin.join("notes.md"),
-        b"draft\nsynced in from another Mac\n",
-    )
-    .unwrap();
-    assert_eq!(case.finish(true), Some(Finished::Moved { repointed: 0 }));
-    assert_eq!(old.clear().unwrap_err().0, "home_move_source_left");
-    assert_eq!(
-        std::fs::read(origin.join("notes.md")).unwrap(),
-        b"draft\nsynced in from another Mac\n"
-    );
-    assert!(std::fs::symlink_metadata(origin.join("README")).is_err());
-    assert_eq!(
-        std::fs::read(case.target().join("notes.md")).unwrap(),
-        b"draft\n"
-    );
-    assert_eq!(case.stored_folder(), case.target());
-}
-
-/// Work that starts after the plan and before the folder moves refuses the move with
-/// nothing moved: a master session that took its own working copy, a change set step and
-/// an onboarding step.
-#[test]
-fn work_that_starts_between_the_plan_and_the_disk_work_refuses_the_move() {
-    let case = Case::new();
-    let origin = case.repo.clone();
-    let planned = case.plan(AddMode::Move, &[]).unwrap();
-    case.db
-        .execute(
-            "INSERT INTO worktree_leases(task,repository,path,body) VALUES ('task-1',?1,?2,?3)",
-            params![
-                text(&origin),
-                text(&case.engine.join("lease-1")),
-                r#"{"lease":{"state":"Reserved"}}"#
-            ],
-        )
-        .unwrap();
-    assert_eq!(
-        planned.run_with(Duration::ZERO).unwrap_err().0,
-        "move_project_master_session"
-    );
-    assert_eq!(case.finish(false), Some(Finished::Left));
-    case.db.execute("DELETE FROM worktree_leases", []).unwrap();
-
-    let planned = case.plan(AddMode::Move, &[]).unwrap();
-    case.change_set("updating");
-    assert_eq!(
-        planned.run_with(Duration::ZERO).unwrap_err().0,
-        "move_project_busy"
-    );
-    assert_eq!(case.finish(false), Some(Finished::Left));
-    case.db
-        .execute("DELETE FROM landing_change_sets", [])
-        .unwrap();
-
-    let planned = case.plan(AddMode::Move, &[]).unwrap();
+    let gone = case.target();
+    assert!(std::fs::symlink_metadata(&gone).is_err());
     case.db
         .execute(
             "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
-             VALUES (?1,?2,'pool','running','waiting','{}',1,1)",
-            params![PROJECT, text(&origin)],
+             VALUES ('missing',?1,'pool','done','done','{}',1,1)",
+            [text(&gone)],
         )
         .unwrap();
-    assert_eq!(
-        planned.run_with(Duration::ZERO).unwrap_err().0,
-        "move_project_busy"
-    );
-    assert_eq!(case.finish(false), Some(Finished::Left));
-    case.db.execute("DELETE FROM onboarding", []).unwrap();
-
-    assert!(origin.join("README").is_file());
-    assert!(std::fs::symlink_metadata(case.target()).is_err());
-    assert_eq!(case.stored_folder(), origin);
-    assert!(matches!(
-        case.move_project(AddMode::Move, &[]).unwrap(),
-        Finished::Moved { .. }
-    ));
-    assert_eq!(case.stored_folder(), case.target());
-}
-
-/// While a project move is pending, a master session cannot take a working copy of the
-/// repository in the folder being moved; it can once the move is finished or forgotten.
-#[test]
-fn a_pending_project_move_refuses_a_master_working_copy_of_its_repository() {
-    use crate::protocol::{Outcome, SessionId, TaskId};
-    let case = Case::new();
+    for table in ["onboarding_saved_drafts", "onboarding_saved_overviews"] {
+        case.db
+            .execute(
+                &format!("INSERT INTO {table}(repo,seal) VALUES (?1,?2)"),
+                params![text(&gone), SEAL],
+            )
+            .unwrap();
+    }
+    let missing = Registered {
+        project_id: ProjectId::new("missing").unwrap(),
+        name: PROJECT.into(),
+        folder: gone.clone(),
+        repositories: vec![gone.clone()],
+        onboarding: false,
+    };
+    let mut registered = case.registered();
+    registered.push(missing.clone());
     let project = ProjectId::new(PROJECT).unwrap();
-    let reserve = |case: &Case| {
+    for mode in [AddMode::Move, AddMode::Copy] {
         let tx = case.db.unchecked_transaction().unwrap();
-        crate::worktrees::reserve_master_bootstrap(
+        let refused = plan(
             &tx,
+            &case.database,
             &case.engine,
-            &project,
-            &TaskId::new("task-1").unwrap(),
-            &SessionId::new("session-1").unwrap(),
-            text(&case.repo),
+            &registered,
+            &Asked {
+                project: &project,
+                mode,
+                overrides: &[],
+                request: "request-7",
+                exchange: EXCHANGE,
+            },
         )
-        .unwrap()
-    };
-    case.plan(AddMode::Move, &[]).unwrap();
-    assert_eq!(
-        reserve(&case),
-        Outcome::Rejected {
-            code: "move_project_in_progress".into()
-        }
-    );
-    assert_eq!(case.finish(false), Some(Finished::Left));
-    assert_eq!(
-        reserve(&case),
-        Outcome::Rejected {
-            code: "repository_not_admitted".into()
-        }
-    );
-}
-
-#[test]
-fn landing_work_in_flight_holds_the_folder_and_the_move_holds_it_until_its_record() {
-    let case = Case::new();
-    let planned = case.plan(AddMode::Move, &[]).unwrap();
-    let repositories = std::collections::BTreeSet::from([planned.source().to_path_buf()]);
-    let wait = Duration::from_millis(50);
-    let landing = crate::landing::hold_repositories(&repositories, Duration::ZERO).unwrap();
-    assert_eq!(
-        planned.clone().run_by_copy(wait).unwrap_err().0,
-        "move_project_busy"
-    );
+        .unwrap_err();
+        tx.commit().unwrap();
+        assert_eq!(refused.0, "home_destination_exists");
+        assert_eq!(pending(&case.db).unwrap(), None);
+        let added = super::plan_add(
+            &case.home,
+            &case.engine,
+            text(&case.repo),
+            mode,
+            &[],
+            std::slice::from_ref(&missing),
+        )
+        .unwrap_err();
+        assert_eq!(added.0, "home_destination_exists");
+    }
     assert!(case.repo.join("README").is_file());
-    assert!(std::fs::symlink_metadata(case.target()).is_err());
-    assert_eq!(case.stored_folder(), case.repo);
-    drop(landing);
-
-    let (placed, held) = planned.run_by_copy(wait).unwrap().into_parts();
-    assert!(crate::landing::hold_repositories(&repositories, Duration::ZERO).is_none());
-    assert!(matches!(case.finish(true), Some(Finished::Moved { .. })));
-    assert!(crate::landing::hold_repositories(&repositories, Duration::ZERO).is_none());
-    drop(held);
-    assert!(crate::landing::hold_repositories(&repositories, Duration::ZERO).is_some());
-    let Placed::Copied(old) = placed else {
-        panic!("a move by copy leaves its source to clear");
-    };
-    old.clear().unwrap();
-    assert_eq!(case.stored_folder(), case.target());
+    for table in [
+        "onboarding",
+        "onboarding_saved_drafts",
+        "onboarding_saved_overviews",
+    ] {
+        assert_eq!(case.rows_under(table, "repo", &gone), 1, "{table}");
+    }
 }
