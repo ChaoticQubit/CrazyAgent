@@ -1418,3 +1418,27 @@ fn an_mcp_secret_shorter_than_eight_bytes_is_refused_with_a_plain_reason() {
     store_secret(root, &reference, b"12345678".to_vec()).unwrap();
     assert_eq!(read_secret(root, &reference).unwrap(), b"12345678");
 }
+
+/// Where the engine has no shared context-mode install, the default pack's pinned
+/// context-mode launch is left out with its reason, never run through npx, and every other
+/// spec runs as approved.
+#[test]
+fn a_launch_without_a_shared_install_leaves_the_pinned_context_mode_server_out_never_npx() {
+    use crate::plugins::ContextModeOff;
+    let stdio = |command: &str, package: &str| ServerSpec::Stdio {
+        command: command.into(),
+        args: vec!["-y".into(), package.into()],
+    };
+    assert_eq!(
+        without_shared_install(stdio("/opt/homebrew/bin/npx", "context-mode@1.0.169")),
+        Err(ContextModeOff::Unsupported)
+    );
+    for kept in [
+        stdio("/opt/homebrew/bin/npx", "context-mode@latest"),
+        stdio("/opt/homebrew/bin/npx", "other-server@1.0.0"),
+        stdio("npx", "context-mode@1.0.169"),
+        stdio("/opt/homebrew/bin/node", "context-mode@1.0.169"),
+    ] {
+        assert_eq!(without_shared_install(kept.clone()), Ok(kept));
+    }
+}

@@ -4619,6 +4619,10 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
             ContextModeOff::NodeTooOld,
             "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n",
         ),
+        (
+            ContextModeOff::Unsupported,
+            "- context-mode is off for this launch: CrazyAgent cannot run it on this platform yet. Use the shell instead.\n",
+        ),
     ] {
         let plugins = LaunchPlugins {
             skills: Vec::new(),
