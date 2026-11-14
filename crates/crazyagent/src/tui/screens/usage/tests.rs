@@ -1526,3 +1526,23 @@ fn a_key_or_local_card_also_ends_with_its_line_and_no_extras_read_adds_nothing()
         "{shown}"
     );
 }
+
+#[test]
+fn money_one_each_key_sends_only_its_own_choice() {
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let mut answer = report();
+    answer.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(answer)), &mut ctx);
+    for key in ['m', 'p'] {
+        assert!(
+            matches!(page.key(&Key::Char(key), &mut ctx), Flow::Handled),
+            "{key}"
+        );
+        let Some(Request::Settings(job)) = ctx.next_request() else {
+            panic!("the {key} key asks the engine");
+        };
+        assert_eq!(format!("{job:?}"), "SetMoneyOne", "{key}");
+    }
+}

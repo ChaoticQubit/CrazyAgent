@@ -735,3 +735,107 @@ mod spend_one_tests {
         usage.stop().await;
     }
 }
+
+#[cfg(all(test, unix))]
+mod money_one_tests {
+    use super::super::usage_tests::Usage;
+    use super::*;
+    use crate::usage::money::{MainNumber, PriceSource, ProjectLimits};
+    use serde_json::{Value, json};
+
+    fn decoded(usage: Value) -> Result<Action, serde_json::Error> {
+        serde_json::from_value::<Envelope>(json!({ "usage": usage })).map(|envelope| envelope.usage)
+    }
+
+    #[test]
+    fn money_one_requests_name_one_known_field_and_its_value_and_nothing_else() {
+        for (field, value) in [
+            ("main_number", "tokens"),
+            ("prices", "off"),
+            ("project_limits", "shown"),
+        ] {
+            let sent =
+                json!({ "kind": "set_money_one", "choice": { "field": field, "value": value } });
+            assert!(decoded(sent).is_ok(), "{field}");
+        }
+        for refused in [
+            json!({ "kind": "set_money_one", "choice": { "field": "currency", "value": "off" } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "main_number", "value": "euros" } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "prices" } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "prices", "value": "off", "extra": 1 } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "prices", "value": "off" }, "settings": {} }),
+        ] {
+            assert!(decoded(refused.clone()).is_err(), "{refused}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn money_one_changes_its_own_choice_and_keeps_the_other_two() {
+        let usage = Usage::start().await;
+        let send = |field: &str, value: &str| {
+            decoded(
+                json!({ "kind": "set_money_one", "choice": { "field": field, "value": value } }),
+            )
+            .expect("the engine reads a one-choice request")
+        };
+        let fresh = usage
+            .client
+            .usage_exchange(send("prices", "off"))
+            .await
+            .unwrap();
+        assert!(matches!(fresh, Reply::Done));
+        let report = usage.client.usage_report(None, None, 0).await.unwrap();
+        assert_eq!(
+            report.money.settings,
+            MoneySettings {
+                prices: PriceSource::Off,
+                ..MoneySettings::default()
+            },
+            "a first one-choice save keeps the defaults of the other two"
+        );
+        let all = MoneySettings {
+            main_number: MainNumber::Tokens,
+            prices: PriceSource::Off,
+            project_limits: ProjectLimits::Shown,
+        };
+        usage.client.usage_set_money(all).await.unwrap();
+        for (field, value, expected) in [
+            (
+                "project_limits",
+                "hidden",
+                MoneySettings {
+                    project_limits: ProjectLimits::Hidden,
+                    ..all
+                },
+            ),
+            (
+                "main_number",
+                "dollars",
+                MoneySettings {
+                    main_number: MainNumber::Dollars,
+                    project_limits: ProjectLimits::Hidden,
+                    ..all
+                },
+            ),
+            (
+                "prices",
+                "bundled",
+                MoneySettings {
+                    main_number: MainNumber::Dollars,
+                    prices: PriceSource::Bundled,
+                    project_limits: ProjectLimits::Hidden,
+                },
+            ),
+        ] {
+            let reply = usage
+                .client
+                .usage_exchange(send(field, value))
+                .await
+                .unwrap();
+            assert!(matches!(reply, Reply::Done), "{field}");
+            let report = usage.client.usage_report(None, None, 0).await.unwrap();
+            assert_eq!(report.money.settings, expected, "{field}");
+        }
+        usage.stop().await;
+    }
+}
