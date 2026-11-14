@@ -19,11 +19,21 @@ export const ALL_LIMITED_OPTIONS: { value: AllLimited; label: string }[] = [
 ];
 
 /** The Claude free resets sources, the default first. */
-export const RESETS_SOURCE_OPTIONS: { value: ResetsSource; label: string }[] = [];
+export const RESETS_SOURCE_OPTIONS: { value: ResetsSource; label: string }[] = [
+  { value: "through_claude_code", label: "Through Claude Code" },
+  { value: "as_claude_code", label: "As Claude Code" },
+  { value: "off", label: "Don't read" },
+];
+
+const RESETS_SOURCE_HELP: Record<ResetsSource, string> = {
+  through_claude_code: "CrazyAgent asks Claude Code first. Claude Code can't report free resets yet, so CrazyAgent asks Anthropic as Claude Code.",
+  as_claude_code: "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks.",
+  off: "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings.",
+};
 
 /** The help line under Claude free resets. Input: the source. Output: the sentence. */
-export function resetsSourceHelp(_value: ResetsSource): string {
-  return "";
+export function resetsSourceHelp(value: ResetsSource): string {
+  return RESETS_SOURCE_HELP[value];
 }
 
 const CONFIRM_HELP: Record<SpendConfirm, string> = {
@@ -50,14 +60,16 @@ export function allLimitedHelp(settings: SpendSettings): string {
   return ALL_LIMITED_HELP[settings.all_limited];
 }
 
-/** The two spend settings as drawn, each option a radio with its help line and a changed mark
- * off the default. Inputs: the settings, the refusal to show and the change handler. Output:
+/** The three free resets settings as drawn, each option a radio with its help line and a
+ * changed mark off the default. Inputs: the settings, the refusal to show and the change handler. Output:
  * the section. */
 export function SpendSettingsView({ settings, refused, onChange }: {
   settings: SpendSettings; refused: string; onChange: (settings: SpendSettings) => void;
 }) {
   const confirmChanged = settings.confirm !== SPEND_DEFAULTS.confirm;
   const limitedChanged = settings.all_limited !== SPEND_DEFAULTS.all_limited;
+  const source = settings.resets_source ?? "through_claude_code";
+  const sourceChanged = source !== SPEND_DEFAULTS.resets_source;
   return <SettingSection title="Free resets" about="Some accounts hold free resets that start their limits over. These choose how CrazyAgent uses them.">
     <SettingLine label="Spend confirmation" help={confirmHelp(settings.confirm)} changed={confirmChanged}>
       <Segmented label="Spend confirmation" value={settings.confirm} options={CONFIRM_OPTIONS} onValue={(confirm) => onChange({ ...settings, confirm })} />
@@ -65,11 +77,14 @@ export function SpendSettingsView({ settings, refused, onChange }: {
     <SettingLine label="When every pool account is limited" help={allLimitedHelp(settings)} changed={limitedChanged}>
       <Segmented label="When every pool account is limited" value={settings.all_limited} options={ALL_LIMITED_OPTIONS} onValue={(all_limited) => onChange({ ...settings, all_limited })} />
     </SettingLine>
+    <SettingLine label="Claude free resets" help={resetsSourceHelp(source)} changed={sourceChanged}>
+      <Segmented label="Claude free resets" value={source} options={RESETS_SOURCE_OPTIONS} onValue={(resets_source) => onChange({ ...settings, resets_source })} />
+    </SettingLine>
     {refused && <div className="set-body"><Notice tone="danger" alert>{refused}</Notice></div>}
   </SettingSection>;
 }
 
-/** The two spend settings on Pools: shows the choice at once, stores it, and rereads the usage
+/** The three free resets settings on Pools: shows the choice at once, stores it, and rereads the usage
  * once the engine kept it. Inputs: the spend view read with the usage and the reread. Output:
  * the section. */
 export function SpendSettingsSection({ spend, onDone }: { spend: SpendView | undefined; onDone: () => void }) {
@@ -77,7 +92,8 @@ export function SpendSettingsSection({ spend, onDone }: { spend: SpendView | und
   const [refused, setRefused] = useState("");
   const stored = spend?.settings;
   useEffect(() => {
-    if (shown && stored && shown.confirm === stored.confirm && shown.all_limited === stored.all_limited) setShown(undefined);
+    if (shown && stored && shown.confirm === stored.confirm && shown.all_limited === stored.all_limited
+      && (shown.resets_source ?? "through_claude_code") === (stored.resets_source ?? "through_claude_code")) setShown(undefined);
   }, [shown, stored]);
   const change = (next: SpendSettings) => {
     setShown(next);

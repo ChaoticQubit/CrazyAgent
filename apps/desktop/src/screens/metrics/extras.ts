@@ -21,9 +21,19 @@ export const UNREAD = "Free resets: couldn't read";
 /** The words for a free resets count the engine could not read, by why, the same as the TUI's:
  * the plain words with a short reason, or off when the owner turned the read off. Input: the
  * class. Output: the words. */
-export function unreadText(_kind: UnreadClass | string): string {
-  return UNREAD;
+export function unreadText(kind: UnreadClass | string): string {
+  return UNREAD_WORDS[kind as UnreadClass] ?? UNREAD;
 }
+
+const UNREAD_WORDS: Record<UnreadClass, string> = {
+  unspecified: UNREAD,
+  asker: "Free resets: couldn't read (Anthropic answers only Claude Code)",
+  withheld: "Free resets: couldn't read (Anthropic withheld them)",
+  no_reason: "Free resets: couldn't read (Anthropic gave no reason)",
+  no_answer: "Free resets: couldn't read (no answer)",
+  not_understood: "Free resets: couldn't read (answer not understood)",
+  off: "Free resets: off in Settings",
+};
 
 /** How long before the first look a gain still counts as new, in milliseconds: one usage
  * poll and some slack, so a reset that arrived while the app was closed for long is not

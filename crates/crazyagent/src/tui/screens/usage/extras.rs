@@ -11,8 +11,16 @@ pub const UNREAD: &str = "Free resets: couldn't read";
 /// The words for a free resets count the engine could not read, by why, the same as the
 /// desktop's: the plain words with a short reason, or off when the owner turned the read
 /// off. Input: the class. Output: the words.
-pub fn unread_text(_class: UnreadClass) -> &'static str {
-    UNREAD
+pub fn unread_text(class: UnreadClass) -> &'static str {
+    match class {
+        UnreadClass::Unspecified => UNREAD,
+        UnreadClass::Asker => "Free resets: couldn't read (Anthropic answers only Claude Code)",
+        UnreadClass::Withheld => "Free resets: couldn't read (Anthropic withheld them)",
+        UnreadClass::NoReason => "Free resets: couldn't read (Anthropic gave no reason)",
+        UnreadClass::NoAnswer => "Free resets: couldn't read (no answer)",
+        UnreadClass::NotUnderstood => "Free resets: couldn't read (answer not understood)",
+        UnreadClass::Off => "Free resets: off in Settings",
+    }
 }
 
 /// The count an account holds now: its stored count, or none when not reported or when the

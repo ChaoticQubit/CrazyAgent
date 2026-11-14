@@ -219,7 +219,7 @@ fn failed(code: &str) -> Latest {
 /// Asks a harness for its version with `--version`, bounded like every other run.
 /// Inputs: the harness executable and the home folder. Output: the version, None when the
 /// harness cannot be asked or prints no plain version.
-fn version_of(executable: &Path, home: &Path) -> Option<String> {
+pub(super) fn version_of(executable: &Path, home: &Path) -> Option<String> {
     if !executable.is_absolute() {
         return None;
     }

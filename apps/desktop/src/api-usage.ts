@@ -210,7 +210,7 @@ export interface SpendView {
 }
 
 /** The settings an engine that never stored any reads as. */
-export const SPEND_DEFAULTS: SpendSettings = { confirm: "confirm_each", all_limited: "notice" };
+export const SPEND_DEFAULTS: SpendSettings = { confirm: "confirm_each", all_limited: "notice", resets_source: "through_claude_code" };
 
 export interface MetricsBucket {
   start_ms: number;

@@ -223,8 +223,8 @@ impl OwnerClient {
         }
     }
 
-    /// Stores the owner's spend settings: Spend confirmation and When every pool account is
-    /// limited. Input: the settings. Output: done.
+    /// Stores the owner's spend settings: Spend confirmation, When every pool account is
+    /// limited and Claude free resets. Input: the settings. Output: done.
     pub async fn usage_set_spend(&self, settings: SpendSettings) -> Result<(), EngineError> {
         match self.usage_exchange(Action::SetSpend { settings }).await? {
             Reply::Done => Ok(()),
