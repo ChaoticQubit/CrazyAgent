@@ -154,6 +154,54 @@ fn a_committed_tab_file_is_foreign_until_the_owner_saves_it() {
     assert!(!written.foreign && !written.edited, "the engine's own text");
 }
 
+/// RV-DS241-2 r1: the check the engine makes before it runs a command answers exactly as the
+/// Overview's read does for the tab: foreign for a committed file, not once the owner saves
+/// it, foreign again after an outside change, and not for the engine's own text.
+#[test]
+fn the_run_check_reads_a_tab_as_foreign_exactly_as_the_overview_does() {
+    let (db, project, folder) = case();
+    let install = folder
+        .path()
+        .join(".crazyagent/overview/install-and-use.md");
+    let foreign = |db: &Connection| {
+        let answer = tab_foreign(db, &project, folder.path(), Tab::InstallAndUse).unwrap();
+        assert_eq!(answer, install_and_use(db, &project, folder.path()).foreign);
+        answer
+    };
+    assert!(!foreign(&db), "no file is nothing to run");
+    std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+    std::fs::write(&install, "```sh\ncargo install alpha\n```\n").unwrap();
+    assert!(foreign(&db), "a committed file is foreign");
+    let committed = install_and_use(&db, &project, folder.path());
+    let text = committed.text.unwrap();
+    save(
+        &db,
+        &project,
+        folder.path(),
+        Tab::InstallAndUse,
+        &text,
+        &committed.version,
+    )
+    .unwrap();
+    assert!(!foreign(&db), "the owner's save");
+    std::fs::write(&install, "```sh\ncargo install beta\n```\n").unwrap();
+    assert!(foreign(&db), "an outside change after the save");
+    std::fs::remove_file(&install).unwrap();
+    offer(
+        &db,
+        &project,
+        folder.path(),
+        Tab::InstallAndUse,
+        "```sh\nmake\n```\n",
+    )
+    .unwrap();
+    assert!(
+        install_and_use(&db, &project, folder.path()).text.is_some(),
+        "the engine wrote the tab"
+    );
+    assert!(!foreign(&db), "the engine's own text");
+}
+
 /// A tabs table made before the owner's seal was kept gets that column when the engine
 /// starts, more than once without harm, and an owner's save in it reads as the owner's
 /// edit, never as a foreign file.

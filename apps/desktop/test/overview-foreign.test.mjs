@@ -7,6 +7,8 @@ import "./load-source.mjs";
 
 const view = await import("../src/screens/project/overview-tabs.tsx");
 const screen = await import("../src/screens/project/overview.tsx");
+const ide = await import("../src/api-ide.ts");
+const run = await import("../src/screens/project/run-command.tsx");
 
 const TAB_IDS = ["quick_info", "features", "competitors", "install_and_use"];
 const FOREIGN = "This tab's file came with the project's files: CrazyAgent didn't write it and you didn't save it. Check it before you use its commands.";
@@ -81,4 +83,14 @@ test("the TUI says the same words for a tab from the project's files (DEC-141)",
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_view.rs", import.meta.url), "utf8");
   assert.equal(view.FOREIGN_TAB, FOREIGN);
   assert.ok(tui.includes(`"${FOREIGN}"`), "the TUI's line differs");
+});
+
+test("RV-DS241-2 r1: the engine's refusal of a Run from a tab of the project's files reads in plain words, Copy only, and reaches the window by its own code", async () => {
+  const words = ide.runCopy("ide_run_foreign_tab");
+  assert.equal(words, "This tab's file came with the project's files, so CrazyAgent won't run its commands. Copy the command and check it before you run it yourself.");
+  assert.notEqual(words, ide.runCopy("something_else"));
+  const outcome = await run.runOutcome("alpha", "cargo install alpha", () => Promise.resolve({ kind: "error", code: "ide_run_foreign_tab", message: "ide_run_foreign_tab" }));
+  assert.deepEqual(outcome, { note: words, openIde: false });
+  const codes = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/ide.rs", import.meta.url), "utf8");
+  assert.ok(codes.includes(`    "ide_run_foreign_tab",\n`), "the native bridge passes the code on, not ide_outcome_unknown");
 });
