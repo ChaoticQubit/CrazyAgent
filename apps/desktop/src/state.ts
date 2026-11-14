@@ -140,9 +140,10 @@ export interface Session {
 }
 
 /** The app session: connects to the engine on launch, reads the profile and projects, keeps
- * the unconfirmed-change banner, the toast and a revision counter screens reload on. A reply
- * that leaves a change unconfirmed starts a few spaced automatic checks of that change.
- * Output: the session. */
+ * the unconfirmed-change banner, the toast and a revision counter screens reload on. A start
+ * moves the revision once the engine runs, before the profile lands, so a screen shown on the
+ * profile reads once and one kept on screen through the start reads again. A reply that leaves
+ * a change unconfirmed starts a few spaced automatic checks of that change. Output: the session. */
 export function useSession(): Session {
   const [engine, setEngine] = useState<EngineState>("connecting");
   const [unconfirmed, setUnconfirmed] = useState<Unconfirmed | null>(null);
@@ -268,8 +269,8 @@ export function useSession(): Session {
     setEngine(state);
     setStuckSignIn(result.kind === "ok" && result.value.stuck_sign_in !== null ? { busy: false } : null);
     if (state !== "running") return;
-    await Promise.all([refreshProfile(), refreshProjects()]);
     setRevision((value) => value + 1);
+    await Promise.all([refreshProfile(), refreshProjects()]);
   }
 
   useEffect(() => {
