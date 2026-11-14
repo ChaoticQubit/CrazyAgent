@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 const { validateProfile, emptyProfileDraft, draftFromProfile, Welcome, skipGuideNote, ProfileFields } = await import("../src/screens/first-run/index.tsx");
 const { plainError } = await import("../src/api.ts");
 const { errorMessage } = await import("../src/engine-client.ts");
+const { addChip, ChipInput } = await import("../src/ui/field.tsx");
 
 const NAME_WORDS = "Enter your name on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters.";
 const ROLE_WORDS = "Keep your role on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters.";
@@ -55,6 +56,24 @@ test("hidden, direction and tag characters are refused in every profile field, a
   assert.deepEqual(validateProfile(draft({ bio: "Builds\u2066 tools." })), { errors: { bio: BIO_WORDS } });
   assert.deepEqual(validateProfile(draft({ stack: ["Ru\ufeffst"] })), { errors: { stack: STACK_WORDS } });
   assert.ok("profile" in validateProfile(draft({ bio: "\u{1f469}\u200d\u{1f4bb} builds tools." })));
+});
+
+test("a stack chip the profile save would refuse is refused as it is added, naming it, and a plain one is added (RV-DS241-136)", () => {
+  for (const typed of ["Re\u00adact", "Ru\u200bst"]) {
+    const added = addChip(["Go"], typed, 12, 40);
+    assert.ok("error" in added, `${JSON.stringify(typed)} became a chip`);
+    assert.ok(added.error.includes(typed.replace(/[\u00ad\u200b]/u, (hidden) => `\\u${hidden.codePointAt(0).toString(16).padStart(4, "0")}`)), added.error);
+  }
+  const long = "数据库管理系统数据库管理系统";
+  assert.equal([...long].length, 14);
+  const refused = addChip([], long, 12, 40);
+  assert.ok("error" in refused, "42 UTF-8 bytes became a chip");
+  assert.match(refused.error, /40 bytes/);
+  assert.deepEqual(addChip(["Go"], " Rust ", 12, 40), { values: ["Go", "Rust"] });
+  assert.deepEqual(addChip(["Go"], "数据库", 12, 40), { values: ["Go", "数据库"] });
+  const markup = renderToStaticMarkup(createElement(ChipInput, { id: "stack", label: "Preferred stack", values: ["Ru\u200bst"], onValues: () => {} }));
+  assert.ok(markup.includes("Ru\\u200bst"), markup);
+  assert.ok(!markup.includes("Ru\u200bst"), "a chip shows its hidden character as an escape");
 });
 
 test("the engine refusals read in the same words on the profile form, the app copy and the engine client", () => {
