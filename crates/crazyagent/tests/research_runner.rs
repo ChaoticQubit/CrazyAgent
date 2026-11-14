@@ -233,10 +233,12 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
         fs::read_to_string(case.state.join("profiles").join(format!("job-{id}-1.sb"))).unwrap();
     assert!(profile.starts_with("(version 1)\n(deny default)\n"));
     assert!(profile.contains(&format!("(subpath \"{}\")", case.project.display())));
-    assert!(profile.contains(&format!("(subpath \"{}/context\")", case.project.display())));
+    assert_eq!(case.crazyagent, case.project.join(".crazyagent"));
+    let pattern = case.project.display().to_string().replace('.', "\\.");
+    let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?$";
+    assert!(profile.contains(&format!("(regex #\"^{pattern}/{context}\")")));
     assert!(profile.contains(&format!(
-        "(subpath \"{}/context\")",
-        case.crazyagent.display()
+        "(regex #\"^{pattern}/\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/{context}\")"
     )));
     assert!(
         files_containing(&case.state.join("agents"), &marker) > 0,

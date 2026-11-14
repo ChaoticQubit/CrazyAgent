@@ -2615,10 +2615,7 @@ impl ProjectSandbox {
                 file.display()
             ));
         }
-        let project = self.project_root.display();
-        text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (subpath \"{project}/.git/sequencer\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
-        ));
+        text.push_str(&self.project_denies());
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(
                 "(deny {FIXED_WRITES}\n  (literal \"{}\"))\n",
@@ -2638,8 +2635,9 @@ impl ProjectSandbox {
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
             text.push_str(&format!(
-                "(deny file-write*\n  (literal \"{}/HEAD\"))\n",
-                checkout.admin.display()
+                "(deny file-write*\n  (regex #\"^{}/{}$\"))\n",
+                seatbelt_pattern(&checkout.admin),
+                any_case("HEAD")
             ));
         }
         if let Some(clone) = &self.clone {
@@ -2806,6 +2804,64 @@ impl ProjectSandbox {
         text
     }
 
+    /// The Seatbelt rule that keeps the files the engine and the owner's git read in the
+    /// project folder out of agent hands: both `context/` folders, the git hooks and the
+    /// rebase, sequencer, remotes and branches state, each with everything below it, and the
+    /// entries `.git`, `.crazyagent`, the git config and its lock, the index and its lock,
+    /// `commondir`, `config.worktree`, `objects` and `objects/info`. Each name below the
+    /// project folder matches in any letter case, so the rule does not depend on how Seatbelt
+    /// folds case on the case-insensitive volume, where git finds a name however it is typed
+    /// (RV-DS241-15). `.git/info`, `.git/shallow`, the alternates files and `.git/modules`
+    /// are kept the same way by [`Self::ancestry_denies`] and [`Self::submodule_denies`].
+    /// Input: the policy. Output: the rule text.
+    fn project_denies(&self) -> String {
+        let project = seatbelt_pattern(&self.project_root);
+        let git = any_case(".git");
+        let state = any_case(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let context = any_case("context");
+        let objects = format!("{git}/{}", any_case("objects"));
+        let mut below = vec![context.clone(), format!("{state}/{context}")];
+        below.extend(
+            [
+                "hooks",
+                "rebase-merge",
+                "rebase-apply",
+                "remotes",
+                "branches",
+                "sequencer",
+            ]
+            .map(|name| format!("{git}/{}", any_case(name))),
+        );
+        let mut entries = vec![
+            git.clone(),
+            state,
+            format!("{objects}/{}", any_case("info")),
+            objects,
+        ];
+        entries.extend(
+            [
+                "config",
+                "config.lock",
+                "index",
+                "index.lock",
+                "commondir",
+                "config.worktree",
+            ]
+            .map(|name| format!("{git}/{}", any_case(name))),
+        );
+        let mut text = String::from("(deny file-write*");
+        for path in &below {
+            text.push_str(&format!("\n  (regex #\"^{project}/{path}(/.*)?$\")"));
+        }
+        for path in &entries {
+            text.push_str(&format!("\n  (regex #\"^{project}/{path}$\")"));
+        }
+        text.push_str(")\n");
+        assert_eq!(below.len() + entries.len(), 18);
+        assert_eq!(text.matches("(regex #\"^/").count(), 18);
+        text
+    }
+
     /// The Seatbelt rules that keep the owner's git reading the metadata the engine made.
     /// No agent may move the project folder, the git worktrees folders or a worktree, which
     /// would carry protected files out of their denied paths and back. A worktree's `.git`
@@ -2817,8 +2873,9 @@ impl ProjectSandbox {
     /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
     /// which the owner's next commit runs as maintenance, empties whatever folder a link at
     /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
-    /// name below the project root matches in any letter case, as in `clone_store_denies`,
-    /// since the case-insensitive disk finds it however it is typed (DEC-123 rv-secreview L2).
+    /// name below the project root, and each extra worktree's `.git` link, matches in any
+    /// letter case, as in `clone_store_denies`, since the case-insensitive disk finds it
+    /// however it is typed (DEC-123 rv-secreview L2, RV-DS241-15).
     /// Input: the policy. Output: the rule text.
     fn git_link_denies(&self) -> String {
         let project = self.project_root.display();
@@ -2844,15 +2901,18 @@ impl ProjectSandbox {
         for worktree in &self.worktrees {
             moves.push_str(&format!("\n  (literal \"{}\")", worktree.display()));
             links.push_str(&format!(
-                "\n  (literal \"{}\")",
-                worktree.join(".git").display()
+                "\n  (regex #\"^{}/{git}$\")",
+                seatbelt_pattern(worktree)
             ));
         }
         let text = format!(
             "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/{}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{git}/\") (vnode-type SYMLINK)))\n",
             any_case("config.worktree")
         );
-        assert_eq!(text.matches("(regex #\"^/").count(), 8);
+        assert_eq!(
+            text.matches("(regex #\"^/").count(),
+            8 + self.worktrees.len()
+        );
         assert!(text.contains("(vnode-type SYMLINK)"));
         assert!(!text.contains("/.crazyagent/worktrees\""));
         text
@@ -2864,12 +2924,12 @@ impl ProjectSandbox {
     /// admin folder, so none can plant a submodule whose metadata the engine or the owner
     /// then enters. The `.gitmodules` file and gitlinks stay writable tracked content: the
     /// engine's own git ignores them with `--ignore-submodules` and never recurses. The
-    /// name matches in any letter case, since the project disk may be case insensitive.
-    /// Input: the policy. Output: the rule text.
+    /// name matches in any letter case ([`any_case`], the long s included), since the
+    /// project disk may be case insensitive. Input: the policy. Output: the rule text.
     fn submodule_denies(&self) -> String {
         let pattern = seatbelt_pattern(&self.project_root);
-        let dot_git = "\\.[gG][iI][tT]";
-        let modules = "[mM][oO][dD][uU][lL][eE][sS]";
+        let dot_git = any_case(".git");
+        let modules = any_case("modules");
         let text = format!(
             "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/worktrees/[^/]+)?/{modules}(/.*)?$\"))\n"
         );
@@ -2957,11 +3017,11 @@ impl ProjectSandbox {
     /// `alternates` or `http-alternates` file in the project's object store or the one its
     /// checkout shares (land-19 r1 M1, r2 L1), and the project's `.git/info` (which holds
     /// `grafts`) and `.git/shallow` (land-19 r2 M1). A forged graph or graft could claim an
-    /// agent commit is on the landing tip. The case-exact denies on `.git/info`,
-    /// `.git/shallow` and the alternates files miss a case variant made where the name does
-    /// not exist yet, as after a clone or `init --template=`, which git then reads through
-    /// the case-insensitive volume. Engine git reads no graph or graft; this also keeps the
-    /// owner's own git from being handed one. Input: the policy. Output: the rule text.
+    /// agent commit is on the landing tip. This is the only rule on those names, and it holds
+    /// a case variant made where the name does not exist yet, as after a clone or
+    /// `init --template=`, which git then reads through the case-insensitive volume. Engine
+    /// git reads no graph or graft; this also keeps the owner's own git from being handed one.
+    /// Input: the policy. Output: the rule text.
     fn ancestry_denies(&self) -> String {
         let git = format!(
             "{}/{}",
@@ -3377,21 +3437,23 @@ impl Sandbox for InstalledSandbox {
 
 impl Checkout {
     /// The Seatbelt rules that keep a confined agent from adding to or changing the git
-    /// objects the owner and the other agents share: no write in `info/` or `pack/`, no
-    /// new, moved or removed fan-out folder, no new object file by any route (create,
-    /// rename or link) and no rewrite, removal or replacement of one, and no symlink
-    /// anywhere in the store. Git reads a loose object before a packed one without checking
-    /// its bytes, so any object an agent could add would stand in for the owner's own;
-    /// object writes are the engine's, at turn end. Seatbelt regexes take no `{n}` counts,
-    /// so the hex digits repeat. Input: the checkout. Output: the rule text.
+    /// objects the owner and the other agents share: no write in `info/` or `pack/`, nor of
+    /// either folder entry, in any letter case, no new, moved or removed fan-out folder, no
+    /// new object file by any route (create, rename or link) and no rewrite, removal or
+    /// replacement of one, and no symlink anywhere in the store. Git reads a loose object
+    /// before a packed one without checking its bytes, so any object an agent could add
+    /// would stand in for the owner's own; object writes are the engine's, at turn end.
+    /// Seatbelt regexes take no `{n}` counts, so the hex digits repeat. Input: the checkout.
+    /// Output: the rule text.
     fn object_denies(&self) -> String {
         const HEX: &str = "[0-9a-fA-F]";
         let objects = self.objects.display();
         let pattern = seatbelt_pattern(&self.objects);
+        let held = format!("({}|{})", any_case("info"), any_case("pack"));
         let text = format!(
-            "(deny file-write*\n  (subpath \"{objects}/info\")\n  (subpath \"{objects}/pack\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n"
+            "(deny file-write*\n  (regex #\"^{pattern}/{held}(/.*)?$\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n"
         );
-        assert!(text.matches("(regex #\"^/").count() == 4);
+        assert!(text.matches("(regex #\"^/").count() == 5);
         assert!(text.contains("(vnode-type SYMLINK)"));
         text
     }
