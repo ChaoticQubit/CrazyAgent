@@ -297,10 +297,17 @@ struct StatusUpkeep {
 
 #[cfg(unix)]
 impl StatusUpkeep {
-    /// Opens the upkeep on the engine database and closes the runs an engine that stopped
-    /// left open. Input: the database path. Output: the upkeep, idle for good when the
-    /// database cannot be opened.
+    /// Opens the upkeep on the engine database, closes the runs an engine that stopped
+    /// left open and removes the status run folders an engine before 2.4.1 left in the
+    /// research state beside the database. Input: the database path. Output: the upkeep,
+    /// idle for good when the database cannot be opened.
     fn open(database: &Path) -> Self {
+        if let Some(runtime) = database.parent() {
+            let swept = crate::roadmap_status::run::sweep_unhashed(&runtime.join("research"));
+            if swept > 0 {
+                eprintln!("roadmap_status_old_runs_removed count={swept}");
+            }
+        }
         let db = database
             .parent()
             .and_then(|root| crate::questions::open(root).ok());
