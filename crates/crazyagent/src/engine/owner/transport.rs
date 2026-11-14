@@ -3602,6 +3602,76 @@ mod tests {
         engine.close().await.unwrap();
     }
 
+    /// RV-DS241-67: the tmux look runs with the host's lock free, so a read or a second look
+    /// never waits on a slow `tmux -V`, and a look that started first but ends last keeps the
+    /// host a newer look opened on another program. The newer look runs inside the older
+    /// one's finder only once the lock is seen free, so the row ends under either code.
+    #[tokio::test]
+    async fn a_slow_tmux_look_holds_no_lock_and_an_older_look_keeps_the_newer_host() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
+        let (old, new) = (root.path().join("old/tmux"), root.path().join("new/tmux"));
+        let mut newer = None;
+        let older = engine
+            .terminal_on(root.path(), || {
+                if engine.terminal.try_lock().is_ok() {
+                    newer = Some(engine.terminal_on(root.path(), || Some(new.clone())));
+                }
+                Some(old.clone())
+            })
+            .unwrap();
+        let newer = newer
+            .expect("the host's lock is free while tmux is looked up")
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&older, &newer),
+            "the older look keeps the newer host"
+        );
+        let again = engine
+            .terminal_on(root.path(), || Some(new.clone()))
+            .unwrap();
+        assert!(Arc::ptr_eq(&newer, &again));
+        engine.close().await.unwrap();
+    }
+
+    /// RV-DS241-67: a look that finds the kept host's program again counts as the newest
+    /// look, so an older look still running that found another program never replaces the
+    /// host that newer look confirmed.
+    #[tokio::test]
+    async fn an_older_look_never_replaces_a_host_a_newer_look_found_again() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
+        let (program, other) = (
+            root.path().join("kept/tmux"),
+            root.path().join("other/tmux"),
+        );
+        let kept = engine
+            .terminal_on(root.path(), || Some(program.clone()))
+            .unwrap();
+        let mut again = None;
+        let older = engine
+            .terminal_on(root.path(), || {
+                if engine.terminal.try_lock().is_ok() {
+                    again = Some(engine.terminal_on(root.path(), || Some(program.clone())));
+                }
+                Some(other.clone())
+            })
+            .unwrap();
+        let again = again
+            .expect("the host's lock is free while tmux is looked up")
+            .unwrap();
+        assert!(Arc::ptr_eq(&kept, &again));
+        assert!(
+            Arc::ptr_eq(&kept, &older),
+            "the older look keeps the host found again"
+        );
+        engine.close().await.unwrap();
+    }
+
     const GATEWAY_ACTOR_CATALOG: &str = r#"
 allowed_destinations = ["sandbox-profile"]
 [routing]

@@ -102,7 +102,7 @@ async fn open(
 ) -> Result<(Arc<dyn Host>, Arc<Mutex<Terminals>>, TerminalStream), EngineError> {
     let root = runtime.ide()?.root;
     let settings = runtime.ide_servers().settings_files();
-    let host = runtime.terminal()?;
+    let host = runtime.terminal_off_worker().await?;
     let registry = runtime.ide_grants().terminals.clone();
     let name = pane_name()?;
     let project = project.clone();
