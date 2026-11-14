@@ -2330,7 +2330,7 @@ impl Screen for AppSetup {
             _ => {}
         }
         if self.fixable().is_some() && self.refused_tool() == Some(RefusedTool::FixButton) {
-            hints.push(hint("p", "Fix permissions"));
+            hints.push(hint("p", "Fix"));
         }
         if !self.first_run {
             hints.push(hint("h", "Change home"));
@@ -2343,7 +2343,7 @@ impl Screen for AppSetup {
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
             hints.push(hint("z", "Master frame"));
-            hints.push(hint("u", "Unused tools"));
+            hints.push(hint("u", "Unused"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
