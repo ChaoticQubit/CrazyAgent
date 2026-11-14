@@ -335,7 +335,7 @@ impl Usage {
         if source == spend::ResetsSource::Off {
             return None;
         }
-        let entry = self.harness("claude");
+        let entry = self.harness("claude-code");
         let stamp = entry.as_deref().and_then(ExecutableStamp::of);
         let known = self
             .claude_version

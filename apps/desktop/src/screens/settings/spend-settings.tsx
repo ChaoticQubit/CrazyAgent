@@ -26,7 +26,7 @@ export const RESETS_SOURCE_OPTIONS: { value: ResetsSource; label: string }[] = [
 ];
 
 const RESETS_SOURCE_HELP: Record<ResetsSource, string> = {
-  through_claude_code: "CrazyAgent asks Claude Code first. Claude Code can't report free resets yet, so CrazyAgent asks Anthropic as Claude Code.",
+  through_claude_code: "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code.",
   as_claude_code: "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks.",
   off: "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings.",
 };

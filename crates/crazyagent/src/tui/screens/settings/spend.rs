@@ -123,7 +123,7 @@ pub(in crate::tui) fn resets_source_words(value: ResetsSource) -> &'static str {
 pub(in crate::tui) fn resets_source_help(value: ResetsSource) -> &'static str {
     match value {
         ResetsSource::ThroughClaudeCode => {
-            "CrazyAgent asks Claude Code first. Claude Code can't report free resets yet, so CrazyAgent asks Anthropic as Claude Code."
+            "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code."
         }
         ResetsSource::AsClaudeCode => {
             "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks."
