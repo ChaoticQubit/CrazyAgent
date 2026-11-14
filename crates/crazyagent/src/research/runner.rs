@@ -2694,7 +2694,8 @@ fn repository_setup(root: &Path) -> RepositorySetup {
 }
 
 /// Runs one git command the engine makes in a project folder it created: the safe git
-/// options, a cleared environment with a private HOME and TMPDIR, no system config, no input
+/// options, a cleared environment with a private HOME and TMPDIR, no system or global
+/// config, so no hook a config in that home names runs (RV-DS241-39 r2 F1), no input
 /// or output, in a process group of its own so SETUP_TIMEOUT stops git and what it started.
 /// Inputs: the folder, the private home and the arguments. Output: whether git succeeded,
 /// or the spawn or wait failure.
@@ -2714,6 +2715,7 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         .env("TMPDIR", tmp)
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -2803,9 +2805,11 @@ pub(crate) fn add_worktree_at(
 
 /// Adds a detached git worktree at `worktree` in the project folder, running git under the
 /// sandbox's profile, which it installs at `profile` as the only one that may make a
-/// checkout's `.git` link; the caller confines and reinstalls it before any agent runs. The
-/// worktree is added without a checkout and made local-only, and the checkout blanks every
-/// filter driver its own effective config names. Takes the sandbox, profile path, worktree.
+/// checkout's `.git` link; the caller confines and reinstalls it before any agent runs. A
+/// project whose effective config names a hook gets no worktree, refused before the first
+/// git write. The worktree is added without a checkout and made local-only, and the
+/// checkout blanks every filter driver its own effective config names. Takes the sandbox,
+/// profile path, worktree.
 #[cfg(unix)]
 pub(crate) fn add_worktree(
     sandbox: &ProjectSandbox,
@@ -2836,6 +2840,7 @@ pub(crate) fn add_worktree_at(
     }
     fs::create_dir_all(&worktrees)?;
     sandbox.clone().adding_worktrees().install(profile)?;
+    hook_refusal(&filter_keys(sandbox, profile, sandbox.project_root())?)?;
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
@@ -2843,7 +2848,9 @@ pub(crate) fn add_worktree_at(
     setup_step(&mut add, "worktree_add_failed")?;
     crate::worktrees::lock_remotes(sandbox.project_root(), worktree)
         .map_err(|_| RunError::Setup("worktree_remote_lock_failed"))?;
-    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
+    let keys = filter_keys(sandbox, profile, worktree)?;
+    hook_refusal(&keys)?;
+    let overrides = filter_overrides(&keys)?;
     let mut checkout = worktree_git(sandbox, profile);
     checkout
         .args(&overrides)
@@ -2887,6 +2894,7 @@ pub(crate) fn add_teammate_worktree_at(
         ));
     }
     let _setup = repository_setup(sandbox.project_root());
+    hook_refusal(&filter_keys(sandbox, profile, sandbox.project_root())?)?;
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout"]);
     match base {
@@ -2894,7 +2902,9 @@ pub(crate) fn add_teammate_worktree_at(
         None => add.arg(worktree).arg(branch),
     };
     setup_step(&mut add, "worktree_add_failed")?;
-    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
+    let keys = filter_keys(sandbox, profile, worktree)?;
+    hook_refusal(&keys)?;
+    let overrides = filter_overrides(&keys)?;
     let mut checkout = worktree_git(sandbox, profile);
     checkout
         .args(&overrides)
@@ -3148,11 +3158,12 @@ fn setup_debug_stderr() -> Stdio {
     Stdio::null()
 }
 
-/// The git arguments that list, NUL-separated, the filter keys of every config file git
-/// reads, the only keys [`filter_overrides`] uses, so the listing grows with a repository's
-/// filter drivers and never with its branches or remotes. The `-c` adds one key of the
-/// engine's own, which git reads last: a listing that ends with it ([`FILTER_KEYS_END`])
-/// is whole, and git always has a key to print, so no exit status stands for "no filter".
+/// The git arguments that list, NUL-separated, the filter and hook keys of every config
+/// file git reads: the filter keys [`filter_overrides`] uses and the hook keys
+/// [`listed_hook`] refuses, so the listing grows with a repository's filter drivers and
+/// hooks and never with its branches or remotes. The `-c` adds one key of the engine's own,
+/// which git reads last: a listing that ends with it ([`FILTER_KEYS_END`]) is whole, and
+/// git always has a key to print, so no exit status stands for "no filter".
 #[cfg(unix)]
 pub(crate) const FILTER_KEYS: [&str; 7] = [
     "-c",
@@ -3161,8 +3172,52 @@ pub(crate) const FILTER_KEYS: [&str; 7] = [
     "--name-only",
     "-z",
     "--get-regexp",
-    "^filter\\.",
+    "^(filter|hook)\\.",
 ];
+
+/// The most bytes of a hook key an owner line shows.
+#[cfg(unix)]
+const HOOK_KEY_SHOWN_MAX: usize = 128;
+
+/// The first config hook key a [`FILTER_KEYS`] listing names: `hook.<name>.<key>`, which
+/// git 2.54 runs whatever `core.hooksPath` says, so no engine git may run in a repository
+/// whose config holds one (RV-DS241-39 r2 F1). Takes the NUL-separated keys
+/// [`listed_filter_keys`] gives. Returns the key as an owner line shows it, at most
+/// [`HOOK_KEY_SHOWN_MAX`] bytes with every byte outside letters, digits, `.`, `-` and `_`
+/// shown as `?`, or None when the listing names no hook.
+#[cfg(unix)]
+pub(crate) fn listed_hook(keys: &[u8]) -> Option<String> {
+    let key = keys
+        .split(|byte| *byte == 0)
+        .find(|key| key.starts_with(b"hook."))?;
+    let shown: String = key
+        .iter()
+        .copied()
+        .take(HOOK_KEY_SHOWN_MAX)
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_') {
+                char::from(byte)
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    assert!(shown.starts_with("hook.") && shown.len() <= HOOK_KEY_SHOWN_MAX);
+    Some(shown)
+}
+
+/// Refuses a worktree setup in a repository whose effective config names a hook, before
+/// any git that could run it. Takes the NUL-separated keys a [`FILTER_KEYS`] listing gave.
+/// Returns unit, or `Invalid` with the owner's line naming the first hook key.
+#[cfg(unix)]
+fn hook_refusal(keys: &[u8]) -> Result<(), RunError> {
+    match listed_hook(keys) {
+        None => Ok(()),
+        Some(key) => Err(RunError::Invalid(format!(
+            "the project's Git config sets {key}, a hook the engine never runs; remove it from the repository's config, then start again"
+        ))),
+    }
+}
 
 /// The key the `-c` of [`FILTER_KEYS`] sets with its NUL, as git prints it at the end of a
 /// whole listing.
