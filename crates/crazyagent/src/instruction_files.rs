@@ -1009,8 +1009,9 @@ pub const CARRIED_NOTICE: &str = "The repository came with its own .crazyagent/i
 /// The project text to keep: project instructions the folder's repository tracks go under
 /// [`CARRIED_HEADING`] unless they already start with it, and a tracking check that fails
 /// counts as tracked; an untracked file, the engine's or the owner's, and an empty one stay
-/// as they are. Inputs: the canonical project folder and its project text. Output: the text.
-fn carried(root: &Path, existing: &str) -> String {
+/// as they are. Text the heading leaves no room for is cut at the limit. Inputs: the
+/// canonical project folder and its project text. Output: the text and whether it was cut.
+fn carried(root: &Path, existing: &str) -> (String, bool) {
     assert_eq!(
         CARRIED_PATH,
         format!(
@@ -1021,7 +1022,7 @@ fn carried(root: &Path, existing: &str) -> String {
     );
     let part = existing.trim();
     if part.is_empty() || existing.starts_with(CARRIED_HEADING) {
-        return existing.to_owned();
+        return (existing.to_owned(), false);
     }
     let tracked = match fs::symlink_metadata(root.join(".git")) {
         Ok(metadata) if metadata.is_dir() || metadata.is_file() => !matches!(
@@ -1031,9 +1032,16 @@ fn carried(root: &Path, existing: &str) -> String {
         _ => false,
     };
     if !tracked {
-        return existing.to_owned();
+        return (existing.to_owned(), false);
     }
-    format!("{CARRIED_HEADING}\n\n{part}\n")
+    let room = crate::agent_home::TEXT_BYTES_MAX - CARRIED_HEADING.len() - 3;
+    let mut end = part.len().min(room);
+    while !part.is_char_boundary(end) {
+        end -= 1;
+    }
+    let text = format!("{CARRIED_HEADING}\n\n{}\n", part[..end].trim_end());
+    assert!(text.len() <= crate::agent_home::TEXT_BYTES_MAX);
+    (text, end < part.len())
 }
 
 /// Whether a project's instructions came with its folder's repository: they start with
@@ -1047,7 +1055,9 @@ pub fn carried_in(folder: &Path) -> bool {
 /// once under a heading naming every file that held it, after the text already there and
 /// never twice, then moves each copied file into `.crazyagent/imported/` at its same path.
 /// A file that cannot be imported stays where it is. Project instructions the folder's
-/// repository committed are first kept under their own Imported heading ([`carried`]).
+/// repository committed are first saved under their own Imported heading ([`carried`]),
+/// even when the files imported after them do not fit, the whole file kept aside when the
+/// heading leaves it no room.
 /// A project without `.crazyagent/` gets it first. Input: the project folder. Output: the
 /// moved files, or a plain code with nothing moved, such as `process_text_too_large` when
 /// the result would not fit.
@@ -1064,9 +1074,16 @@ pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
         .collect();
     let code = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
     let existing = crate::agent_home::read_project(&root).map_err(code)?;
-    let kept = carried(&root, &existing);
+    let (kept, cut) = carried(&root, &existing);
     if found.is_empty() && kept == existing {
         return Ok(Vec::new());
+    }
+    if kept != existing {
+        let whole = !cut || move_aside(&root, &state, CARRIED_PATH).is_ok();
+        crate::agent_home::save_project(&root, &kept).map_err(code)?;
+        if !whole {
+            return Err(failure("process_import_unmovable"));
+        }
     }
     let mut sections: Vec<(Vec<&str>, &Path, &str)> = Vec::new();
     for found in &found {
@@ -1085,7 +1102,7 @@ pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
             None => sections.push((vec![found.file.path.as_str()], target, text)),
         }
     }
-    let mut text = kept;
+    let mut text = kept.clone();
     for (names, _, part) in &sections {
         if existing.contains(part) {
             continue;
@@ -1102,7 +1119,7 @@ pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
     if text.len() > crate::agent_home::TEXT_BYTES_MAX {
         return Err(failure("process_text_too_large"));
     }
-    if text != existing {
+    if text != kept {
         crate::agent_home::save_project(&root, &text).map_err(code)?;
     }
     let mut moved = Vec::new();
@@ -1412,12 +1429,13 @@ fn owned(_metadata: &fs::Metadata) -> bool {
     true
 }
 
-/// Moves one project instruction file, or the link at its path, to the same path under
+/// Moves one project instruction file, or the link at its path, or carried project
+/// instructions about to be cut to fit their heading, to the same path under
 /// `.crazyagent/imported/`, beside an earlier move as `<path>.2` and so on rather than over
 /// it. Inputs: the canonical project folder, its `.crazyagent/` folder and the file's path
 /// inside the project. Output: unit, or `process_import_unmovable`.
 fn move_aside(root: &Path, state: &Path, path: &str) -> Result<(), EngineError> {
-    assert!(PROJECT_FILES.contains(&path));
+    assert!(PROJECT_FILES.contains(&path) || path == CARRIED_PATH);
     let unmovable = || failure("process_import_unmovable");
     let mut folder = state.join(IMPORTED_DIRECTORY);
     real_folder(&folder).map_err(|_| unmovable())?;
