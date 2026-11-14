@@ -810,3 +810,27 @@ test("the master area shows the time left under Master run time and the rounds o
   assert.equal(live.timeLeftWords(12 * 60_000), "12 min left");
   assert.equal(live.timeLeftWords(0), "Time is up; it stops if it works on without you");
 });
+
+test("a master harness saved while a failed start left the live master off starts it on the new harness at once, with no tab change, and an alias of the same harness starts nothing (DEC-161 bug 2)", async () => {
+  const codex = "The live master was turned off: it could not start: No account in this project's pool can run codex. Start it again from the master view.";
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountArea("codex", false)');
+    await evaluate("Fixture.settle()");
+    const opened = await evaluate("Fixture.teamReloads()");
+    await evaluate(`Fixture.readSwitch("codex", false, ${JSON.stringify({ live_problem: codex })})`);
+    await evaluate("Fixture.settle()");
+    const refused = await evaluate("Fixture.teamReloads()");
+    await evaluate(`Fixture.readSwitch("claude-code", false, ${JSON.stringify({ live_problem: codex })})`);
+    const switched = await evaluate("Fixture.settle()");
+    const started = await evaluate("Fixture.teamReloads()");
+    await evaluate(`Fixture.readSwitch("claude", false, ${JSON.stringify({ live_problem: codex })})`);
+    await evaluate("Fixture.settle()");
+    return { opened, refused, switched, started, alias: await evaluate("Fixture.teamReloads()") };
+  });
+  assert.equal(seen.opened, 1, "the open starts it once");
+  assert.equal(seen.refused, 1, "a refused start is not sent again on its own");
+  assert.equal(seen.started, 2, "the saved switch starts it on the new harness at once");
+  assert.match(seen.switched.text, /Claude Code/, seen.switched.text);
+  assert.doesNotMatch(seen.switched.text, /can run codex/, seen.switched.text);
+  assert.equal(seen.alias, 2, "the alias claude is the same Claude Code master, so nothing starts again");
+});

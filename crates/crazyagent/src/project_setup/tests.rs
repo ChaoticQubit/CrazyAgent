@@ -1629,3 +1629,81 @@ fn a_found_file_is_linked_only_under_the_group_the_owner_kept_it_in() {
         ]
     );
 }
+
+const KEYED_ONLY: &str = r#"
+timeout_ms = 1000
+[model_access]
+accounts = ["account-anthropic", "account-openai", "account-rcli"]
+[[model_access.connections]]
+id = "k-anthropic"
+provider = "provider-anthropic"
+harness = "rcli"
+protocol = "anthropic-messages"
+account_ref = "account-anthropic"
+endpoint = { kind = "http", url = "https://api.anthropic.com/v1" }
+model = { id = "model-anthropic", author = "author-anthropic" }
+auth = { method = "api_key", credential_ref = "key-anthropic" }
+[[model_access.connections]]
+id = "k-openai"
+provider = "provider-openai"
+harness = "rcli"
+protocol = "openai-chat"
+account_ref = "account-openai"
+endpoint = { kind = "http", url = "https://api.openai.com/v1" }
+model = { id = "model-openai", author = "author-openai" }
+auth = { method = "api_key", credential_ref = "key-openai" }
+[[model_access.connections]]
+id = "m-rcli"
+provider = "provider-rcli"
+harness = "rcli"
+protocol = "native"
+account_ref = "account-rcli"
+endpoint = { kind = "native" }
+model = { id = "native-default", author = "author-rcli" }
+auth = { method = "native_managed", profile_ref = "profile-rcli" }
+[[model_access.pools]]
+id = "pool-anthropic"
+members = ["k-anthropic"]
+projects = []
+roles = []
+fallback_allowed = false
+[[model_access.pools]]
+id = "pool-both"
+members = ["k-anthropic", "k-openai"]
+projects = []
+roles = []
+fallback_allowed = false
+[[model_access.pools]]
+id = "pool-rcli"
+members = ["m-rcli"]
+projects = []
+roles = []
+fallback_allowed = false
+"#;
+
+/// DEC-161 bug 1: a pool whose only account is an Anthropic API key leads with Claude Code,
+/// never Codex, which no account of it can run; Codex leads where a key account can run it,
+/// and a pool where nothing can run keeps Codex with the status that says so.
+#[test]
+fn a_pool_with_only_an_anthropic_api_key_leads_with_claude_code_not_codex() {
+    let config = resolve_config_bytes(KEYED_ONLY, "").unwrap();
+    let none = BTreeSet::new();
+    let anthropic = CredentialRef::new("pool-anthropic").unwrap();
+    let both = CredentialRef::new("pool-both").unwrap();
+    let rcli = CredentialRef::new("pool-rcli").unwrap();
+    let team = default_team(&config, Some(&anthropic), &none);
+    assert!(
+        crate::harnesses::same(&team.master, "claude-code"),
+        "an Anthropic API key runs Claude Code, so it leads: {}",
+        team.master
+    );
+    assert_eq!(default_team_status(&config, Some(&anthropic), &none), None);
+    assert_eq!(default_team(&config, Some(&both), &none).master, "codex");
+    assert_eq!(default_team_status(&config, Some(&both), &none), None);
+    let signed = BTreeSet::from([CredentialRef::new("m-rcli").unwrap()]);
+    assert_eq!(default_team(&config, Some(&rcli), &signed).master, "codex");
+    assert_eq!(
+        default_team_status(&config, Some(&rcli), &signed),
+        Some("Needs a signed-in account")
+    );
+}

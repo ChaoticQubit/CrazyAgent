@@ -7556,3 +7556,18 @@ fn the_master_reads_the_owner_s_agent_limits_and_each_waiting_task() {
     assert!(text.contains(read.limits.as_deref().unwrap()), "{text}");
     assert!(text.contains(&read.queued[1].line), "{text}");
 }
+
+/// DEC-161 bug 1: when no account of the pool can run a team harness, the start line says
+/// which account kind to add, in the words of the Add account tiles, after the line clients
+/// already match.
+#[test]
+fn the_no_account_line_names_the_account_kind_the_harness_needs() {
+    assert_eq!(
+        no_account_line("codex", "codex"),
+        "No account in this project's pool can run codex. Add a ChatGPT sign-in or an OpenAI API key to the pool"
+    );
+    assert_eq!(
+        no_account_line("claude", "claude-code"),
+        "No account in this project's pool can run claude. Add a Claude sign-in or an Anthropic API key to the pool"
+    );
+}

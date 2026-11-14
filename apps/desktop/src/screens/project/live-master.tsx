@@ -259,6 +259,7 @@ export function liveStaleNote(name: string): string {
  * of the area starts it, and it stops only on the master idle stop or when the app quits.
  * The plan's master is read through the harness catalog, so an alias such as "claude" is the
  * same Claude Code master (OP-28), and nothing is shown before the plan and catalog are read.
+ * A saved switch to another harness opens the area afresh, as a tab change does (DEC-161).
  * Input: the project data. Output: the area;
  * any other master, a project with Live terminal off, a project without a team plan and a plan
  * that couldn't be read keep the engine-driven conversation. */
@@ -268,7 +269,7 @@ export function MasterArea({ data }: { data: ProjectData }) {
   const harness = stored === undefined ? undefined : entry(valueOf(data.harnesses), stored)?.id ?? stored;
   const area = harness === undefined || !runsLive(harness) || liveTerminalOff(data.team.result, data.id)
     ? <ConversationTab data={data} />
-    : <LiveMaster key={data.id} data={data} harness={harness} />;
+    : <LiveMaster key={`${data.id}:${harness}`} data={data} harness={harness} />;
   return <MasterSettingsDrawer data={data} liveHarness={harness === undefined || runsLive(harness)}>{area}</MasterSettingsDrawer>;
 }
 
