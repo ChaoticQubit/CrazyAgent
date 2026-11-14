@@ -261,7 +261,7 @@ fn a_folder_with_no_placeholders_downloads_nothing_and_never_runs_brctl() {
     );
     let download = Download::default();
     let path = folder.path().to_str().unwrap();
-    assert_eq!(super::download(path, &download).unwrap(), 0);
+    assert_eq!(super::download(path, &download, COPY_BOUNDS).unwrap(), 0);
     assert_eq!(download.progress(), Progress { total: 0, done: 0 });
     for (path, code) in [
         ("relative", "icloud_path_invalid"),
@@ -269,7 +269,7 @@ fn a_folder_with_no_placeholders_downloads_nothing_and_never_runs_brctl() {
         ("/", "icloud_folder_unsafe"),
     ] {
         assert_eq!(
-            super::download(path, &download).unwrap_err().0,
+            super::download(path, &download, COPY_BOUNDS).unwrap_err().0,
             code,
             "{path}"
         );
@@ -358,14 +358,14 @@ fn placeholders_in_icloud_drive_are_counted_downloaded_and_a_cancel_stops_the_wa
     let cancelled = Download::default();
     cancelled.cancel();
     assert_eq!(
-        super::download(folder.to_str().unwrap(), &cancelled)
+        super::download(folder.to_str().unwrap(), &cancelled, COPY_BOUNDS)
             .unwrap_err()
             .0,
         "home_icloud_not_downloaded"
     );
     let download = Download::default();
     assert_eq!(
-        super::download(folder.to_str().unwrap(), &download).unwrap(),
+        super::download(folder.to_str().unwrap(), &download, COPY_BOUNDS).unwrap(),
         files.len() as u64
     );
     assert_eq!(
