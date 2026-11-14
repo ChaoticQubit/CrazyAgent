@@ -200,9 +200,10 @@ pub(super) async fn serve(
         ("rcli", runtime.registered_rcli_master_executable()),
     ] {
         if let Ok(executable) = executable
-            && let Ok(path) = executable.verified_path()
+            && let Ok(pinned) = executable.verified_path()
         {
-            search = search.with_registered(id, path.to_path_buf());
+            let listed = executable.entry().unwrap_or(pinned);
+            search = search.with_registered(id, listed.to_path_buf());
         }
     }
     if !matches!(action, Action::List | Action::Check) {
