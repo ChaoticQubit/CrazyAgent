@@ -6,6 +6,12 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Passes every entry a re-pin uses, so these rows test the pin alone; the engine-start
+/// checks a re-pin runs are proven in the registry rows. Input: the entry. Output: Ok.
+fn trusted(_: &Path) -> Result<(), crate::engine::EngineError> {
+    Ok(())
+}
+
 fn executable(root: &Path, name: &str) -> PathBuf {
     let path = root.join(name);
     std::fs::write(&path, b"registered-host-bytes").unwrap();
@@ -431,7 +437,7 @@ fn native_auth_registered_entry_refuses_a_rewrite_of_its_pinned_file_in_place() 
     file.write_all(b"tampered-host-bytes").unwrap();
     drop(file);
     assert_eq!(
-        registered.current().map(|_| ()).unwrap_err().0,
+        registered.current(trusted).map(|_| ()).unwrap_err().0,
         "native_auth_host_executable_changed"
     );
 }
@@ -445,13 +451,13 @@ fn native_auth_registered_entry_keeps_a_pinned_file_whose_metadata_alone_changed
     let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
     std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o500)).unwrap();
     assert!(registered.verified_path().is_err());
-    let current = registered.current().unwrap();
+    let current = registered.current(trusted).unwrap();
     assert_eq!(
         current.verified_path().unwrap(),
         std::fs::canonicalize(&real).unwrap()
     );
     assert_eq!(current.digest, registered.digest);
-    assert!(Arc::ptr_eq(&current, &current.current().unwrap()));
+    assert!(Arc::ptr_eq(&current, &current.current(trusted).unwrap()));
 }
 
 #[test]
@@ -487,7 +493,7 @@ fn native_auth_registered_entry_refuses_a_pinned_file_whose_metadata_turned_unsa
     let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
     std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o720)).unwrap();
     assert_eq!(
-        registered.current().map(|_| ()).unwrap_err().0,
+        registered.current(trusted).map(|_| ()).unwrap_err().0,
         "native_auth_host_executable_unsafe"
     );
 }
@@ -500,10 +506,10 @@ fn native_auth_registered_entry_moves_to_a_new_install_while_the_old_one_is_kept
     let link = root.path().join("claude");
     symlink(&old, &link).unwrap();
     let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
-    assert!(Arc::ptr_eq(&registered, &registered.current().unwrap()));
+    assert!(Arc::ptr_eq(&registered, &registered.current(trusted).unwrap()));
     std::fs::remove_file(&link).unwrap();
     symlink(&new, &link).unwrap();
-    let current = registered.current().unwrap();
+    let current = registered.current(trusted).unwrap();
     assert_eq!(
         current.verified_path().unwrap(),
         std::fs::canonicalize(&new).unwrap()
@@ -739,7 +745,7 @@ fn a_host_whose_change_time_alone_moved_keeps_verifying_and_a_later_write_is_sti
             path,
             "linked: {linked}"
         );
-        assert!(Arc::ptr_eq(&registered, &registered.current().unwrap()));
+        assert!(Arc::ptr_eq(&registered, &registered.current(trusted).unwrap()));
     }
     assert_eq!(
         registered.verified_sha256().unwrap(),
@@ -752,7 +758,7 @@ fn a_host_whose_change_time_alone_moved_keeps_verifying_and_a_later_write_is_sti
         "native_auth_host_executable_changed"
     );
     assert_eq!(
-        registered.current().map(|_| ()).unwrap_err().0,
+        registered.current(trusted).map(|_| ()).unwrap_err().0,
         "native_auth_host_executable_changed"
     );
 }

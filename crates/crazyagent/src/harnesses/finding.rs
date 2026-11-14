@@ -358,6 +358,17 @@ pub fn check(
     if !CHOOSABLE.contains(&id) {
         return Err(failure(UNKNOWN_HARNESS));
     }
+    check_file(path, space, home)
+}
+
+/// Checks a harness file by the rules of [`check`] whatever its id, so a pinned rcli or a
+/// harness a PATH entry leads to again later passes the same rules as at engine start.
+/// Inputs: the path, the agent space and HOME. Output: the path, links kept, or the refusal.
+pub fn check_file(
+    path: &Path,
+    space: &AgentSpace,
+    home: Option<&Path>,
+) -> Result<PathBuf, EngineError> {
     let text = path.to_str().ok_or_else(|| failure(PATH_INVALID))?;
     if !path.is_absolute()
         || text.len() > PATH_BYTES_MAX
