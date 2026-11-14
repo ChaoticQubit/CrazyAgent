@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -141,8 +141,12 @@ impl Drop for Process {
         if std::thread::panicking() {
             eprintln!(
                 "engine stdout: {}\nengine stderr: {}",
-                String::from_utf8_lossy(&self.stdout.lock().unwrap()),
-                String::from_utf8_lossy(&self.stderr.lock().unwrap()),
+                String::from_utf8_lossy(
+                    &self.stdout.lock().unwrap_or_else(PoisonError::into_inner)
+                ),
+                String::from_utf8_lossy(
+                    &self.stderr.lock().unwrap_or_else(PoisonError::into_inner)
+                ),
             );
         }
     }
