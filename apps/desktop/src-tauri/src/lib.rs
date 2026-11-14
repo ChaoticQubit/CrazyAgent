@@ -1842,7 +1842,7 @@ async fn desktop_terminal_attach(
                 return Err(engine_failure("window_denied"));
             }
         }
-        Ok(())
+        Ok::<(), BridgeError>(())
     };
     let room = terminals
         .0
