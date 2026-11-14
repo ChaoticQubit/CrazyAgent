@@ -201,7 +201,7 @@ test("a verdict is incomplete while a required metric is missing or unmeasured; 
   assert.deepEqual(incomplete([...whole, row("launch_ms", "unmeasured")]), []);
   assert.deepEqual(incomplete(whole.filter((item) => item.metric !== "reload_home_ms")), ["reload_home_ms"]);
   assert.deepEqual(incomplete([...whole.slice(1), row(REQUIRED[0], "unmeasured")]), [REQUIRED[0]]);
-  assert.deepEqual(incomplete([...whole, row("switch_cold_home_ms", "unmeasured")]), ["switch_cold_home_ms"]);
+  assert.deepEqual(incomplete([...whole, row("switch_cold_settings_ms", "unmeasured")]), ["switch_cold_settings_ms"]);
   assert.ok(REQUIRED.includes("launch_webview_ms") && REQUIRED.includes("tui_launch_ms") && !REQUIRED.includes("launch_ms"));
 });
 
