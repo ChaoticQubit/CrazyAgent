@@ -495,3 +495,46 @@ fn a_confined_agent_makes_no_repository_in_a_shared_folder_or_the_owner_temp_fol
         allowed(&sandbox, &profile, &script);
     }
 }
+
+/// SA vid 11 r2 (rv-sec3 F1): the file an owner's project instructions save writes before
+/// its rename publishes it sits under a path every platform boundary protects, so a project
+/// agent can neither make it, plant it in advance nor rewrite it in the window before the
+/// rename, while the agent still writes a new file beside the instructions in `.crazyagent`.
+#[test]
+fn a_project_agent_cannot_reach_the_file_an_instructions_save_stages() {
+    let case = case();
+    let state = case.project.join(".crazyagent");
+    fs::create_dir_all(state.join("context")).unwrap();
+    let sandbox = sandbox(&case);
+    let profile = case.profiles.join("staged.sb");
+    let staging = crate::agent_home::project_staging(&state);
+    assert!(
+        sandbox
+            .protected_paths()
+            .iter()
+            .any(|path| staging.starts_with(path)),
+        "{}",
+        staging.display()
+    );
+    let staged = crate::agent_home::staged(&staging, crate::agent_home::PROJECT_FILE, 0);
+    refused(
+        &sandbox,
+        &profile,
+        &format!("printf x > {}", quoted(&staged)),
+        &staged,
+    );
+    refused(
+        &sandbox,
+        &profile,
+        &format!(
+            "printf x > .crazyagent/planted && /bin/mv .crazyagent/planted {}",
+            quoted(&staged)
+        ),
+        &staged,
+    );
+    fs::write(&staged, "Owner rule.\n").unwrap();
+    let rewrite = run(&sandbox, &profile, &format!("printf x > {}", quoted(&staged)));
+    assert!(!rewrite.status.success());
+    assert_eq!(fs::read_to_string(&staged).unwrap(), "Owner rule.\n");
+    allowed(&sandbox, &profile, "printf x > .crazyagent/note.txt");
+}

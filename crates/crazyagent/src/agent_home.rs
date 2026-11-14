@@ -232,7 +232,13 @@ pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
     validate(text)?;
     let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
     real_folder(&state).map_err(|_| failure("process_project_folder_missing"))?;
-    write_whole(&state, PROJECT_FILE, text.as_bytes())
+    write_staged(&project_staging(&state), &state, PROJECT_FILE, text.as_bytes())
+}
+
+/// The folder a project instructions save writes its temporary file in before renaming it
+/// into the state folder `state`. Input: the state folder. Output: the staging folder.
+pub(crate) fn project_staging(state: &Path) -> PathBuf {
+    state.to_path_buf()
 }
 
 /// Builds what every agent of the project receives from the owner's two instruction texts
@@ -1046,12 +1052,21 @@ fn read_text(file: File) -> Result<String, AgentHomeError> {
 }
 
 pub(crate) fn write_whole(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), AgentHomeError> {
+    write_staged(folder, folder, name, bytes)
+}
+
+/// Writes `bytes` as `folder/name` whole: into a new temporary file in `staging`, a folder on
+/// the same volume, synced, then renamed over the name, so a reader finds the old text or the
+/// new one, never a part. Inputs: the staging folder, the folder, the name and the bytes.
+/// Output: unit, or `process_text_unwritable` with the temporary file removed.
+fn write_staged(
+    staging: &Path,
+    folder: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), AgentHomeError> {
     assert!(!name.contains('/') && !name.starts_with('.'));
-    let temporary = folder.join(format!(
-        ".{name}.{}.{}",
-        std::process::id(),
-        TEMPORARY.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = staged(staging, name, TEMPORARY.fetch_add(1, Ordering::Relaxed));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1066,6 +1081,13 @@ pub(crate) fn write_whole(folder: &Path, name: &str, bytes: &[u8]) -> Result<(),
         return Err(failure("process_text_unwritable"));
     }
     Ok(())
+}
+
+/// The `count`-th temporary file a save of `name` writes in `staging`, named after the
+/// engine's process so two engines never share one. Inputs: the staging folder, the name and
+/// the count. Output: the path.
+pub(crate) fn staged(staging: &Path, name: &str, count: u64) -> PathBuf {
+    staging.join(format!(".{name}.{}.{count}", std::process::id()))
 }
 
 mod transcript;

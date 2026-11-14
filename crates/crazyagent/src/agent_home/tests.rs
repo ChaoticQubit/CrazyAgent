@@ -64,6 +64,43 @@ fn both_texts_are_saved_and_read_back_and_a_missing_file_is_empty() {
     );
 }
 
+/// SA vid 11 r2 (rv-sec3 F1): a project instructions save writes its temporary file in the
+/// state folder's `context/`, made when missing, and leaves only that folder, empty, and the
+/// instructions file in the state folder; a `context` that is a link is refused with
+/// nothing written through it and the saved text kept.
+#[cfg(unix)]
+#[test]
+fn a_project_save_stages_in_the_context_folder_and_refuses_a_linked_one() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let folder = project.folder.clone().unwrap();
+    let state = folder.join(".crazyagent");
+    save_project(&folder, "Owner rule.\n").unwrap();
+    let mut left: Vec<_> = fs::read_dir(&state)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["context", "instructions.md"]);
+    assert_eq!(
+        fs::read_dir(state.join("context")).unwrap().count(),
+        0,
+        "no temporary file is left behind"
+    );
+    assert_eq!(read_project(&folder).unwrap(), "Owner rule.\n");
+
+    fs::remove_dir(state.join("context")).unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, state.join("context")).unwrap();
+    assert_eq!(
+        save_project(&folder, "Planted.\n").unwrap_err().0,
+        "process_text_unsafe"
+    );
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    assert_eq!(read_project(&folder).unwrap(), "Owner rule.\n");
+}
+
 #[test]
 fn a_project_without_its_state_folder_is_refused_and_reads_empty() {
     let (_directory, root) = folder();
