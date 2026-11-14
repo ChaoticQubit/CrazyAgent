@@ -25497,10 +25497,10 @@ fn an_endpoint_agent_under_no_network_gets_a_proxy_only_for_its_named_https_endp
 }
 
 /// A kept pane an earlier engine left running gets its model proxy back on the port its
-/// record and profile name, with its account's hosts, and closes with the engine; a pane
-/// whose saved port another process took, or whose saved port is not one of the model proxy
-/// ports, ends with the reason and no listener on that port, since its profile reaches no
-/// other port (S4b, LPF1-L2).
+/// record and profile name, with its account's hosts, and closes with the engine, ending
+/// there as its record never asked to be frozen (DEC-158); a pane whose saved port another
+/// process took, or whose saved port is not one of the model proxy ports, ends with the
+/// reason and no listener on that port, since its profile reaches no other port (S4b, LPF1-L2).
 /// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
 /// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
 #[cfg(target_os = "macos")]
@@ -25551,7 +25551,16 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         proxy_status(port, "example.com:443"),
         "HTTP/1.1 403 Forbidden"
     );
-    assert_eq!(team.shutdown().unwrap(), names(&[kept]));
+    assert!(
+        team.shutdown().unwrap().is_empty(),
+        "a kept proxied pane whose record never asked to be frozen ends with the engine"
+    );
+    assert!(
+        !host
+            .alive()
+            .unwrap()
+            .contains(&AgentId::team(kept).unwrap())
+    );
     let deadline = Instant::now() + WAIT;
     while crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_ok() {
         assert!(
@@ -25560,7 +25569,6 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    host.kill(&AgentId::team(kept).unwrap()).unwrap();
 
     let taken = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
     let held = free();
@@ -30138,7 +30146,8 @@ fn ended_native_lead_on<T>(
 /// [`LEAVING_CLAUDE`] does only once the first move took, so a refused move fails the row.
 #[cfg(target_os = "macos")]
 const SOCKET_TIME_CLAUDE: &str = r#"#!/bin/sh
-s="${TMPDIR%/}/tmux.sock"
+t="${TMPDIR%/}"
+s="${t%/*}/tmux.sock"
 [ -S "$s" ] && /usr/bin/touch -t 209901010000 "$s" || exit 1
 /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid" &
 while /usr/bin/touch -t 209901010000 "$s"; do /bin/sleep 0.5; done
@@ -30151,7 +30160,8 @@ exec /bin/sleep 300
 /// only once the holder ended, so a refused end fails the row.
 #[cfg(target_os = "macos")]
 const HOLDER_ENDING_CLAUDE: &str = r#"#!/bin/sh
-s="${TMPDIR%/}/tmux.sock"
+t="${TMPDIR%/}"
+s="${t%/*}/tmux.sock"
 tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
 /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid" &
 exec /bin/sleep 300
@@ -30164,7 +30174,8 @@ exec /bin/sleep 300
 /// end fails the row.
 #[cfg(target_os = "macos")]
 const WARDEN_ENDING_CLAUDE: &str = r#"#!/bin/sh
-s="${TMPDIR%/}/tmux.sock"
+t="${TMPDIR%/}"
+s="${t%/*}/tmux.sock"
 p=$(tmux -S "$s" display-message -p '#{pid}') && [ -n "$p" ] || exit 1
 /usr/bin/pkill -9 -P "$p" perl || exit 1
 tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
