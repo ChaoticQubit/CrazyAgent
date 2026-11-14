@@ -1635,3 +1635,100 @@ fn a_new_pin_keeps_the_hooks_the_owner_switched_off() {
         ["UserPromptSubmit"]
     );
 }
+
+/// RV-DS241-31: an entry left off across two new pins still keeps the hooks the owner switched
+/// off. No hooks are seeded while the entry is off, so the second pin carries what the first
+/// one kept, and the hooks come back off once the entry is on and its hooks are seeded.
+#[test]
+fn hooks_kept_while_an_entry_is_off_survive_a_second_new_pin() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    connection
+        .execute(
+            "INSERT INTO projects(id, body) VALUES('project-1', '{}')",
+            [],
+        )
+        .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let pins: Vec<tempfile::TempDir> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let pin = |connection: &mut Connection, number: usize| {
+        install(
+            connection,
+            root,
+            "caveman",
+            &format!("https://example.invalid/caveman@{}", number + 1),
+            vec![skill(pins[number].path(), "caveman")],
+            None,
+        )
+        .unwrap();
+    };
+    let switch = |connection: &mut Connection, on: bool| {
+        let version = status_of(connection, root).version;
+        let action = SetupAction::Set {
+            id: "caveman".into(),
+            on,
+            version,
+        };
+        assert_eq!(owner(connection, root, action), Outcome::Applied);
+    };
+    pin(&mut connection, 0);
+    let plugin = hook_plugin(work.path(), "caveman");
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    let id_of = |event: &str| {
+        views
+            .iter()
+            .find(|view| view.event == event)
+            .unwrap()
+            .id
+            .clone()
+    };
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: id_of("SessionStart"),
+            enabled: false,
+        },
+    )
+    .unwrap();
+    let prompt = id_of("UserPromptSubmit");
+    let version = plugins::plugin_version(&connection, &prompt).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::Switch {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            id: prompt,
+            on: false,
+            version,
+        },
+    )
+    .unwrap();
+    switch(&mut connection, false);
+
+    pin(&mut connection, 1);
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    assert!(
+        hook_views(&mut connection, root, None).is_empty(),
+        "no hooks are seeded for an entry that is off"
+    );
+    pin(&mut connection, 2);
+    switch(&mut connection, true);
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    let start = views
+        .iter()
+        .find(|view| view.event == "SessionStart")
+        .unwrap();
+    assert!(
+        !start.enabled,
+        "a hook switched off stays off across two pins"
+    );
+    assert!(
+        effective_events(&mut connection, root, "project-1").is_empty(),
+        "a hook switched off in one project stays off there across two pins"
+    );
+}
