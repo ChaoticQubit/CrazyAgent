@@ -75,6 +75,7 @@ pub(in crate::tui) enum AppSetupJob {
     FixPermissions {
         name: crate::setup::Dependency,
         tree: String,
+        recursive: bool,
         generation: u64,
     },
     SetRefusedTool {
@@ -349,10 +350,11 @@ impl NativeOwner {
             AppSetupJob::FixPermissions {
                 name,
                 tree,
+                recursive,
                 generation,
             } => AppSetupEvent::FixSet(applied(
                 controller
-                    .fix_tool_permissions(name, tree, generation)
+                    .fix_tool_permissions(name, tree, recursive, generation)
                     .await,
                 "setup_outcome_unknown",
                 lost,

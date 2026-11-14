@@ -695,16 +695,17 @@ impl NativeBridge {
     }
 
     /// Removes group and other write from the tree the owner confirmed for one tool found and
-    /// passed over (DEC-162), as one owner intent. Inputs: the tool, the tree the confirm
-    /// named and a fresh draft generation. Output: the status as the fix starts; a refusal
-    /// comes back as its plain code.
+    /// passed over (DEC-162), as one owner intent. Inputs: the tool, the tree and the scope
+    /// the confirm named and a fresh draft generation. Output: the status as the fix starts;
+    /// a refusal comes back as its plain code.
     pub async fn fix_tool_permissions(
         &mut self,
         name: Dependency,
         tree: String,
+        recursive: bool,
         generation: u64,
     ) -> Result<SetupStatus, BridgeError> {
-        self.setup_change(OwnerMutation::FixToolPermissions { name, tree }, generation)
+        self.setup_change(OwnerMutation::FixToolPermissions { name, tree, recursive }, generation)
             .await
     }
 

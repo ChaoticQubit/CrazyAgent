@@ -2579,12 +2579,13 @@ async fn desktop_fix_tool_permissions(
     state: State<'_, NativeState>,
     name: crazyagent::setup::Dependency,
     tree: String,
+    recursive: bool,
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .fix_tool_permissions(name, tree, generation)
+        .fix_tool_permissions(name, tree, recursive, generation)
         .await
 }
 

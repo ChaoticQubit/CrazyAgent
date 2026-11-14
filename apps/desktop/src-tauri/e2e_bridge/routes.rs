@@ -1933,13 +1933,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 name: crazyagent::setup::Dependency,
                 tree: String,
+                recursive: bool,
                 generation: u64,
             }
-            let Args { name, tree, generation } = match parse(args) {
+            let Args { name, tree, recursive, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .fix_tool_permissions(name, tree, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .fix_tool_permissions(name, tree, recursive, generation) .await }.await;
             routed(result)
         }
         "desktop_set_refused_tool" => {

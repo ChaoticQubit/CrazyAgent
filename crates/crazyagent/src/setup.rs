@@ -522,15 +522,16 @@ pub trait Installer: Send + Sync {
     }
 
     /// Removes group and other write from the target this installer resolves for a refused
-    /// dependency, only when it is the one the owner confirmed (DEC-162). Inputs: the
-    /// dependency and the confirmed target as the row showed it. Output: what changed, or the
-    /// `tool_fix_*` code.
+    /// dependency, only when both its path and its scope are the ones the owner confirmed
+    /// (DEC-162). Inputs: the dependency, the confirmed path as the row showed it and whether
+    /// the confirm named the whole tree. Output: what changed, or the `tool_fix_*` code.
     fn fix_permissions(
         &self,
         dep: Dependency,
         confirmed: &str,
+        recursive: bool,
     ) -> Result<crate::tools::permission_fix::Report, &'static str> {
-        let _ = (dep, confirmed);
+        let _ = (dep, confirmed, recursive);
         Err(crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE)
     }
 }
@@ -846,7 +847,11 @@ pub enum SetupAction {
     Set { id: String, on: bool, version: u64 },
     Remove { id: String, version: u64 },
     Install { name: Dependency },
-    FixPermissions { name: Dependency, tree: String },
+    FixPermissions {
+        name: Dependency,
+        tree: String,
+        recursive: bool,
+    },
     SetRefusedTool { choice: RefusedTool },
 }
 

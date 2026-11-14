@@ -120,11 +120,16 @@ pub(super) async fn after_owner(
         }
         (
             OwnerOperation::Apply {
-                mutation: OwnerMutation::FixToolPermissions { name, tree },
+                mutation:
+                    OwnerMutation::FixToolPermissions {
+                        name,
+                        tree,
+                        recursive,
+                    },
             },
             OwnerResponse::Applied { operation },
         ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
-            start_fix(engine_root(authority)?, *name, tree.clone())?;
+            start_fix(engine_root(authority)?, *name, tree.clone(), *recursive)?;
         }
         (
             OwnerOperation::Apply {
@@ -323,13 +328,18 @@ fn begin_one(root: PathBuf, dep: Dependency) -> Result<RunGuard, EngineError> {
 
 /// Runs the owner's confirmed permission fix for one refused dependency alone in the
 /// background, as the setup row's Fix asks (DEC-162), one at a time with any other setup
-/// run. Inputs: the engine root, the dependency and the tree the owner confirmed. Output:
-/// Ok once it runs, or `setup_busy`.
-fn start_fix(root: PathBuf, dep: Dependency, tree: String) -> Result<(), EngineError> {
+/// run. Inputs: the engine root, the dependency, the tree the owner confirmed and whether
+/// the confirm named all of it. Output: Ok once it runs, or `setup_busy`.
+fn start_fix(
+    root: PathBuf,
+    dep: Dependency,
+    tree: String,
+    recursive: bool,
+) -> Result<(), EngineError> {
     let guard = begin_one(root, dep)?;
     tokio::spawn(async move {
         let root = guard.0.clone();
-        fix_dependency(platform_installer(&root), &root, dep, tree).await;
+        fix_dependency(platform_installer(&root), &root, dep, tree, recursive).await;
         drop(guard);
     });
     Ok(())
@@ -338,12 +348,19 @@ fn start_fix(root: PathBuf, dep: Dependency, tree: String) -> Result<(), EngineE
 /// Removes group and other write from the confirmed tree through the installer, logs one
 /// line naming the tree and the counts or the code, keeps the failure's sentence on the
 /// dependency's row, and has the next status read check every tool again. Inputs: the
-/// installer, the engine root, the dependency and the confirmed tree.
-async fn fix_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency, tree: String) {
+/// installer, the engine root, the dependency, the confirmed tree and its confirmed scope.
+async fn fix_dependency(
+    installer: Arc<dyn Installer>,
+    root: &Path,
+    dep: Dependency,
+    tree: String,
+    recursive: bool,
+) {
     let shown = tree.clone();
-    let outcome = tokio::task::spawn_blocking(move || installer.fix_permissions(dep, &tree))
-        .await
-        .unwrap_or(Err(crate::tools::permission_fix::TOOL_FIX_FAILED));
+    let outcome =
+        tokio::task::spawn_blocking(move || installer.fix_permissions(dep, &tree, recursive))
+            .await
+            .unwrap_or(Err(crate::tools::permission_fix::TOOL_FIX_FAILED));
     match outcome {
         Ok(report) => eprintln!(
             "tool_fix_done tool={} tree={shown:?} changed={} shared={} skipped_foreign={} skipped_links={} skipped_other={}",

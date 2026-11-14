@@ -216,6 +216,7 @@ pub enum OwnerMutation {
     FixToolPermissions {
         name: crate::setup::Dependency,
         tree: String,
+        recursive: bool,
     },
     SetRefusedTool {
         choice: crate::setup::RefusedTool,
@@ -485,10 +486,15 @@ impl OwnerMutation {
             Self::InstallDependency { name } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Install { name: *name },
             },
-            Self::FixToolPermissions { name, tree } => Command::OwnerSetup {
+            Self::FixToolPermissions {
+                name,
+                tree,
+                recursive,
+            } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::FixPermissions {
                     name: *name,
                     tree: tree.clone(),
+                    recursive: *recursive,
                 },
             },
             Self::SetRefusedTool { choice } => Command::OwnerSetup {

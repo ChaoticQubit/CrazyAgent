@@ -352,9 +352,10 @@ export function installDependency(name: DependencyName): Promise<Result<SetupSta
 }
 
 /** Fixes the permissions of the tree the owner confirmed for one refused tool (DEC-162).
- * Inputs: its name and the tree the confirm named. Output: the status as the fix starts. */
-export function fixToolPermissions(name: DependencyName, tree: string): Promise<Result<SetupStatus>> {
-  return wrap(() => startFix(name, tree, nextGeneration()));
+ * Inputs: its name, the tree the confirm named and whether it named all of it. Output: the
+ * status as the fix starts. */
+export function fixToolPermissions(name: DependencyName, tree: string, recursive: boolean): Promise<Result<SetupStatus>> {
+  return wrap(() => startFix(name, tree, recursive, nextGeneration()));
 }
 
 /** Saves what setup offers for a tool found and passed over. Input: the choice. Output: the

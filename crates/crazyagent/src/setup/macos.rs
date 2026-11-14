@@ -144,8 +144,9 @@ impl Installer for MacInstaller {
         &self,
         dep: Dependency,
         confirmed: &str,
+        recursive: bool,
     ) -> Result<crate::tools::permission_fix::Report, &'static str> {
-        self.pinned.fix_permissions(dep, confirmed)
+        self.pinned.fix_permissions(dep, confirmed, recursive)
     }
 
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {

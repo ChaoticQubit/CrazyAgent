@@ -180,7 +180,7 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
     if (busy) return;
     setBusy(true);
     setProblem("");
-    const result = await fixToolPermissions(ask.dependency.name, ask.fix.tree);
+    const result = await fixToolPermissions(ask.dependency.name, ask.fix.tree, ask.fix.recursive);
     setBusy(false);
     setFixAsk(null);
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Fixing permissions isn't in this build." : intakeCopy(result)); reload(); return; }

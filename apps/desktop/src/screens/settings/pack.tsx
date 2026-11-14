@@ -233,7 +233,7 @@ export function PackSettings() {
       onRefusedTool={(choice) => void apply(TOOLS_BUSY, () => setRefusedTool(choice), `Unused tools: ${REFUSED_TOOL_CHOICES.find((option) => option.value === choice)?.title ?? choice}.`)}
       onSwitch={(entry, on) => void apply(entry.id, () => setPackEntry(entry.id, on, version), `${entryName(entry)} is ${on ? "on" : "off"}.`)} />
     <ToolFixDialog ask={fixAsk} pending={busy !== null} onCancel={() => { if (busy === null) setFixAsk(null); }}
-      onConfirm={(pending) => void apply(TOOLS_BUSY + pending.dependency.name, () => fixToolPermissions(pending.dependency.name, pending.fix.tree), `Fixing permissions on ${displayText(pending.fix.tree)}.`)} />
+      onConfirm={(pending) => void apply(TOOLS_BUSY + pending.dependency.name, () => fixToolPermissions(pending.dependency.name, pending.fix.tree, pending.fix.recursive), `Fixing permissions on ${displayText(pending.fix.tree)}.`)} />
     <PackConfirmDialogs ask={ask} pending={busy !== null} onCancel={() => { if (busy === null) setAsk(null); }} onConfirm={confirm} />
   </>;
 }

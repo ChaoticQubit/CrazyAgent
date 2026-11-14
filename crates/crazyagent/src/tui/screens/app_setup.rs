@@ -1520,6 +1520,7 @@ impl AppSetup {
                     let job = AppSetupJob::FixPermissions {
                         name,
                         tree: fix.tree,
+                        recursive: fix.recursive,
                         generation: ctx.next_generation(),
                     };
                     self.change(job, Sent::Fix { done, name }, ctx);

@@ -78,17 +78,25 @@ impl OwnerController {
     }
 
     /// Removes group and other write from the tree the owner confirmed for one tool found
-    /// and passed over (DEC-162). Takes the tool, the tree the confirm named and the client
-    /// generation. Returns the actual owner response; a rejection carries a plain code,
-    /// `tool_fix_off` while the setting asks for the command only.
+    /// and passed over (DEC-162). Takes the tool, the tree and the scope the confirm named and
+    /// the client generation. Returns the actual owner response; a rejection carries a plain
+    /// code, `tool_fix_off` while the setting asks for the command only.
     pub async fn fix_tool_permissions(
         &mut self,
         name: crate::setup::Dependency,
         tree: String,
+        recursive: bool,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.setup_status().await?;
-        self.begin_mutation(OwnerMutation::FixToolPermissions { name, tree }, generation)?;
+        self.begin_mutation(
+            OwnerMutation::FixToolPermissions {
+                name,
+                tree,
+                recursive,
+            },
+            generation,
+        )?;
         self.send_pending().await
     }
 

@@ -1682,8 +1682,8 @@ export function installDependency(name: DependencyName, generation: number): Pro
 /** Removes group and other write from the tree the owner confirmed for one refused tool.
  * Inputs: its name, the tree the confirm named and a generation. Output: the status as the
  * fix starts. */
-export function fixToolPermissions(name: DependencyName, tree: string, generation: number): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_fix_tool_permissions", { name, tree, generation });
+export function fixToolPermissions(name: DependencyName, tree: string, recursive: boolean, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_fix_tool_permissions", { name, tree, recursive, generation });
 }
 
 /** Saves what setup offers for a tool found and passed over. Inputs: the choice and a

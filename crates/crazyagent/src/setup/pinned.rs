@@ -529,6 +529,7 @@ impl Installer for PinnedInstaller {
         &self,
         dep: Dependency,
         confirmed: &str,
+        recursive: bool,
     ) -> Result<permission_fix::Report, &'static str> {
         let missing = match crate::tools::resolve(dep.program(), &self.places) {
             Ok(_) => return Err(permission_fix::TOOL_FIX_NOT_NEEDED),
@@ -537,7 +538,7 @@ impl Installer for PinnedInstaller {
         let target = self
             .fix_target(&missing)
             .ok_or(permission_fix::TOOL_FIX_UNAVAILABLE)?;
-        if target.path.to_string_lossy() != confirmed {
+        if target.path.to_string_lossy() != confirmed || target.recursive != recursive {
             return Err(permission_fix::TOOL_FIX_CHANGED);
         }
         permission_fix::fix(&target, &self.places)
