@@ -1,5 +1,5 @@
 use crate::file_lock::HeldLock;
-use crate::plugins::{ContextModeOff, ServerSpec};
+use crate::plugins::{ContextModeOff, ServerSpec, exact_version, pinned_context_mode as pinned};
 use crate::setup::InstallError;
 use crate::setup::process::{private_folder, run_command, staging_folder};
 use base64::Engine;
@@ -13,10 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const PACKAGE: &str = "context-mode";
+const PACKAGE: &str = crate::plugins::CONTEXT_MODE_PACKAGE;
 const PROGRAM: &str = "cli.bundle.mjs";
 const MODULES: &str = "node_modules";
-const VERSION_BYTES_MAX: usize = 32;
 const MANIFEST_BYTES_MAX: u64 = 64 * 1024;
 const LOCK_BYTES_MAX: u64 = 1024 * 1024;
 const MARKER_BYTES_MAX: u64 = 32;
@@ -225,41 +224,6 @@ fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), 
         let _ = std::fs::remove_dir_all(&staged);
     }
     result
-}
-
-fn pinned(spec: &ServerSpec) -> Option<(&Path, &str)> {
-    let ServerSpec::Stdio { command, args } = spec else {
-        return None;
-    };
-    let command = Path::new(command);
-    let [flag, package] = args.as_slice() else {
-        return None;
-    };
-    let version = package
-        .strip_prefix(PACKAGE)
-        .and_then(|rest| rest.strip_prefix('@'))
-        .filter(|version| flag == "-y" && exact_version(version))?;
-    let npx = command.is_absolute() && command.file_name() == Some("npx".as_ref());
-    command.parent().filter(|_| npx).map(|bin| (bin, version))
-}
-
-fn exact_version(version: &str) -> bool {
-    let (core, pre) = match version.split_once('-') {
-        Some((core, pre)) => (core, Some(pre)),
-        None => (version, None),
-    };
-    let numbers: Vec<&str> = core.split('.').collect();
-    version.len() <= VERSION_BYTES_MAX
-        && numbers.len() == 3
-        && numbers
-            .iter()
-            .all(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
-        && pre.is_none_or(|pre| {
-            !pre.is_empty()
-                && pre
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
-        })
 }
 
 fn pack_entry(version: &str) -> Option<crate::setup::pack::PackManifestEntry> {

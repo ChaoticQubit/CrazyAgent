@@ -2,7 +2,7 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod check;
 pub mod hook_folder;
@@ -390,14 +390,72 @@ pub struct LaunchServer {
 
 /// Why a launch left the default pack's context-mode server out rather than run its npx
 /// spec: the engine's shared install is still being set up, setting it up failed or cannot
-/// run, the installed files did not match the pinned hashes, or the Node.js beside npx is
-/// older than context-mode needs.
+/// run, the installed files did not match the pinned hashes, the Node.js beside npx is older
+/// than context-mode needs, or this platform has no shared install at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextModeOff {
     SettingUp,
     Failed,
     Mismatch,
     NodeTooOld,
+    Unsupported,
+}
+
+/// The npm package of the default pack's context-mode server.
+pub(crate) const CONTEXT_MODE_PACKAGE: &str = "context-mode";
+const PACKAGE_VERSION_BYTES_MAX: usize = 32;
+
+/// Reads the default pack's pinned context-mode launch from an approved spec: an absolute
+/// `npx` given exactly `-y context-mode@<version>` with an exact version. Input: the spec.
+/// Output: npx's folder and the version, or none for any other spec.
+pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
+    let ServerSpec::Stdio { command, args } = spec else {
+        return None;
+    };
+    let command = Path::new(command);
+    let [flag, package] = args.as_slice() else {
+        return None;
+    };
+    let version = package
+        .strip_prefix(CONTEXT_MODE_PACKAGE)
+        .and_then(|rest| rest.strip_prefix('@'))
+        .filter(|version| flag == "-y" && exact_version(version))?;
+    let npx = command.is_absolute() && npx_program(command);
+    command.parent().filter(|_| npx).map(|bin| (bin, version))
+}
+
+#[cfg(unix)]
+fn npx_program(command: &Path) -> bool {
+    command.file_name() == Some("npx".as_ref())
+}
+
+#[cfg(not(unix))]
+fn npx_program(command: &Path) -> bool {
+    command
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("npx"))
+}
+
+/// Whether a package version is exact: three numbers and an optional pre-release of letters,
+/// digits, dots and dashes, at most 32 bytes. Input: the version. Output: the answer.
+pub(crate) fn exact_version(version: &str) -> bool {
+    let (core, pre) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
+    };
+    let numbers: Vec<&str> = core.split('.').collect();
+    version.len() <= PACKAGE_VERSION_BYTES_MAX
+        && numbers.len() == 3
+        && numbers
+            .iter()
+            .all(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+        && pre.is_none_or(|pre| {
+            !pre.is_empty()
+                && pre
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        })
 }
 
 /// The effective set with each server's secret values already read, ready for a harness

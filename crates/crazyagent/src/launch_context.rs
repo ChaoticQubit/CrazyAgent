@@ -1667,6 +1667,9 @@ fn context_mode_off_line(off: crate::plugins::ContextModeOff) -> &'static str {
         ContextModeOff::NodeTooOld => {
             "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n"
         }
+        ContextModeOff::Unsupported => {
+            "- context-mode is off for this launch: CrazyAgent cannot run it on this platform yet. Use the shell instead.\n"
+        }
     }
 }
 
