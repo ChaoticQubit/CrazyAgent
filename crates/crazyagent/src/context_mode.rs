@@ -1,5 +1,5 @@
 use crate::file_lock::HeldLock;
-use crate::plugins::ServerSpec;
+use crate::plugins::{ContextModeOff, ServerSpec};
 use crate::setup::InstallError;
 use crate::setup::process::{private_folder, run_command, staging_folder};
 use base64::Engine;
@@ -65,24 +65,34 @@ pub fn install_folder(root: &Path, version: &str) -> PathBuf {
 }
 
 /// The spec an agent launch runs for one approved server. The default pack's pinned
-/// context-mode launch, `<folder>/npx -y context-mode@<version>`, runs the engine's shared
-/// install of that same version with the `node` beside npx once the install is complete, so
-/// a fresh agent home never fetches the package into its own cold npm cache. Until then it
-/// stays the approved npx launch and the engine installs the shared copy in the background,
-/// except on a `node` older than context-mode needs, where the launch leaves the server out
-/// rather than let npx run dependency install scripts. Every other server is unchanged.
-/// Inputs: the engine root and the spec. Output: the spec, or none to leave the server out.
-pub fn for_launch(root: &Path, spec: ServerSpec) -> Option<ServerSpec> {
+/// context-mode launch, `<folder>/npx -y context-mode@<version>`, runs only the engine's
+/// shared install of that same version, checked against the pinned hashes, with the `node`
+/// beside npx. It never runs the npx spec, which would let npm run dependency install
+/// scripts: until the install is complete the launch leaves the server out, says why, and
+/// the engine installs the shared copy in the background when it can. Every other server is
+/// unchanged. Inputs: the engine root and the spec. Output: the spec, or why it is left out.
+pub fn for_launch(root: &Path, spec: ServerSpec) -> Result<ServerSpec, ContextModeOff> {
     let Some((bin, version)) = pinned(&spec) else {
-        return Some(spec);
+        return Ok(spec);
     };
-    if let Some(shared) = shared(&install_folder(root, version), &bin.join("node"), version) {
-        return Some(shared);
+    let folder = install_folder(root, version);
+    let node = bin.join("node");
+    let found = checked(&folder, version);
+    if let Some(shared) = found.ok().and_then(|()| run_spec(&folder, &node)) {
+        return Ok(shared);
     }
-    match begin_install(root, bin, version) {
-        Begin::Refused(code) if code == NODE_TOO_OLD => None,
-        _ => Some(spec),
-    }
+    let mismatch = found.is_err_and(|code| code.ends_with("_mismatch"));
+    Err(
+        match after_begin(begin_install(root, bin, version), &folder, &node, version) {
+            ForCheck::Run(shared) => return Ok(shared),
+            ForCheck::Refused(NODE_TOO_OLD) => ContextModeOff::NodeTooOld,
+            _ if mismatch => ContextModeOff::Mismatch,
+            ForCheck::SettingUp | ForCheck::Refused("context_mode_installs_busy") => {
+                ContextModeOff::SettingUp
+            }
+            ForCheck::Failed(_) | ForCheck::Refused(_) => ContextModeOff::Failed,
+        },
+    )
 }
 
 /// What a Settings check of one approved server runs ([`ForCheck`]). Like [`for_launch`] it
@@ -272,7 +282,15 @@ fn program_pin(version: &str) -> Option<String> {
 }
 
 fn shared(folder: &Path, node: &Path, version: &str) -> Option<ServerSpec> {
-    if !folder.is_absolute() || !complete(folder, version) || !runnable(node) {
+    checked(folder, version).ok()?;
+    run_spec(folder, node)
+}
+
+/// The spec that runs a shared install's program with a `node`, without checking the install.
+/// Inputs: the install folder and the `node`. Output: the spec, or none for a relative folder
+/// or a `node` that cannot run.
+fn run_spec(folder: &Path, node: &Path) -> Option<ServerSpec> {
+    if !folder.is_absolute() || !runnable(node) {
         return None;
     }
     let program = folder.join(MODULES).join(PACKAGE).join(PROGRAM);

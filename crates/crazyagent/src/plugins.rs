@@ -388,15 +388,26 @@ pub struct LaunchServer {
     pub secrets: Vec<LaunchSecret>,
 }
 
+/// Why a launch left the default pack's context-mode server out rather than run its npx
+/// spec: the engine's shared install is still being set up, setting it up failed or cannot
+/// run, the installed files did not match the pinned hashes, or the Node.js beside npx is
+/// older than context-mode needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextModeOff {
+    SettingUp,
+    Failed,
+    Mismatch,
+    NodeTooOld,
+}
+
 /// The effective set with each server's secret values already read, ready for a harness
-/// launch. Skills are the same folders as in `EffectivePlugins`. `context_mode_needs_node`
-/// says the default pack's context-mode server was left out because the Node.js beside npx
-/// is older than context-mode needs.
+/// launch. Skills are the same folders as in `EffectivePlugins`. `context_mode_off` says why
+/// the default pack's context-mode server was left out, none when it was not.
 #[derive(Debug, Default)]
 pub struct LaunchPlugins {
     pub skills: Vec<EffectiveSkill>,
     pub servers: Vec<LaunchServer>,
-    pub context_mode_needs_node: bool,
+    pub context_mode_off: Option<ContextModeOff>,
 }
 
 const PROBLEMS: &[(&str, &str)] = &[
