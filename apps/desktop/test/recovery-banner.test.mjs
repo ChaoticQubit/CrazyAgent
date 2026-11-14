@@ -110,8 +110,36 @@ test("a delete an engine stop cut short says so and offers Keep the project and 
   const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
   assert.match(index, /<SettingsTab key=\{`\$\{settingsSection \?\? ""\}-\$\{deleteAsks\}`\} data=\{data\} section=\{settingsSection\} \/>/);
   const settings = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.match(settings, /const asked = hashParam\("ask"\);/);
-  assert.match(settings, /useRef<RemoveChoice>\(asked === "delete" \? "everything" : "dashboard"\)/);
+  assert.match(settings, /const asked = takeRemoveAsk\(data\.id\);/);
+});
+
+test("a route asking to remove or delete opens the Remove dialog once and leaves the address without its ask", async () => {
+  const { takeRemoveAsk } = await import("../src/screens/project/settings.tsx");
+  const before = { window: globalThis.window, event: globalThis.HashChangeEvent };
+  const replaced = [];
+  const fired = [];
+  globalThis.HashChangeEvent = class { constructor(type) { this.type = type; } };
+  const at = (hash) => {
+    const location = { hash };
+    globalThis.window = { location, history: { replaceState: (_state, _title, next) => { replaced.push(next); location.hash = next; } }, dispatchEvent: (event) => fired.push(event.type) };
+  };
+  try {
+    at("#/projects/p%201/settings?section=remove&ask=delete");
+    assert.equal(takeRemoveAsk("p 1"), "everything");
+    assert.deepEqual(replaced, ["#/projects/p%201/settings?section=remove"]);
+    assert.deepEqual(fired, ["hashchange"]);
+    assert.equal(takeRemoveAsk("p 1"), null, "a second mount of the section opens nothing");
+    at("#/projects/p-2/settings?section=remove&ask=remove");
+    assert.equal(takeRemoveAsk("p-2"), "dashboard");
+    at("#/projects/p-2/settings?section=remove&ask=other");
+    assert.equal(takeRemoveAsk("p-2"), null);
+    at("#/projects/p-2/settings?section=remove");
+    assert.equal(takeRemoveAsk("p-2"), null);
+    assert.deepEqual(replaced, ["#/projects/p%201/settings?section=remove", "#/projects/p-2/settings?section=remove", "#/projects/p-2/settings?section=remove"]);
+  } finally {
+    globalThis.window = before.window;
+    globalThis.HashChangeEvent = before.event;
+  }
 });
 
 test("one agent's several runs each get their own row key in every group", () => {
