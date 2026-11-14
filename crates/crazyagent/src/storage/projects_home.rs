@@ -294,6 +294,37 @@ pub(super) fn add_plan(
     Ok(plan)
 }
 
+/// Checks an AddExistingFolder before an intake job downloads its folder: the refusals of
+/// [`add_plan`] that read nothing inside the folder ([`home::check_add`], the pending home
+/// move, an unset home, a destination a running add holds), with no revision check and no
+/// `projects_home_add` row written. Inputs: the connection, database path, owner admission,
+/// the job's request, source, mode and overrides. Output: Ok, or the refusal code.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn add_check(
+    db: &mut Connection,
+    path: &Path,
+    a: &Admission,
+    request: &RequestId,
+    source: &str,
+    mode: AddMode,
+    overrides: &[AddOverride],
+) -> Result<(), EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    if pending_move(&tx)?.is_some() {
+        return Err(error("home_move_in_progress"));
+    }
+    let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
+    let root = engine_root(path)?;
+    let plan = home::check_add(&saved, &root, source, mode, overrides, &guarded(&tx)?)?;
+    if destination_held(&tx, plan.destination(), request)? {
+        return Err(error("home_add_in_progress"));
+    }
+    assert!(plan.destination().starts_with(&saved));
+    assert!(!plan.source().starts_with(&saved));
+    tx.rollback().map_err(error)
+}
+
 /// Whether a running add other than `request` planned `destination`. Two adds of folders
 /// with the same name both find it free on disk until one lands, and an engine start reads
 /// each cut add's end from that one folder, so only one may plan it. Inputs: the connection,

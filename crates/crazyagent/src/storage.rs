@@ -169,6 +169,14 @@ pub(crate) enum Job {
         Vec<crate::projects_home::AddOverride>,
         oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
     ),
+    HomeAddCheck(
+        Admission,
+        RequestId,
+        String,
+        crate::projects_home::AddMode,
+        Vec<crate::projects_home::AddOverride>,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
     HomeAddSettle(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
     HomeAddForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
@@ -629,6 +637,14 @@ impl Storage {
                                 Err(error("projects_home_readonly"))
                             } else {
                                 projects_home::add_plan(&mut connection, &path, &admission, &expected, &request, &source, mode, &overrides)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddCheck(admission, request, source, mode, overrides, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_check(&mut connection, &path, &admission, &request, &source, mode, &overrides)
                             };
                             let _ = reply.send(result);
                         }

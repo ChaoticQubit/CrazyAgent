@@ -477,8 +477,32 @@ pub fn same_volume(folder: &Path, home: &Path) -> Option<bool> {
 /// a project uses, and a Copy of a folder that is itself a linked worktree or
 /// submodule checkout. Each override lifts exactly one soft refusal for this add:
 /// `worktrees` the git worktree links, `linked_checkout` the linked checkout, and
-/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`].
+/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`]. The git worktree links
+/// are checked last, after every refusal of [`check_add`].
 pub fn plan_add(
+    home: &Path,
+    engine_root: &Path,
+    source: &str,
+    mode: AddMode,
+    overrides: &[AddOverride],
+    registered: &[Registered],
+) -> Result<AddPlan, EngineError> {
+    let plan = check_add(home, engine_root, source, mode, overrides, registered)?;
+    let asked_past = overrides.contains(&AddOverride::Worktrees);
+    if mode == AddMode::Move && !asked_past && git_links(plan.source()) {
+        return Err(refused("home_move_worktrees"));
+    }
+    assert!(plan.source().is_absolute());
+    assert_eq!(plan.destination().parent(), Some(home));
+    Ok(plan)
+}
+
+/// Checks bringing an existing folder into the projects home without reading inside it, so
+/// it can run before the folder's iCloud files are on this Mac: every refusal of
+/// [`plan_add`] but a Move's git worktree links, which reads the folder's git data. It reads
+/// only the source's own path, its `.git` entry's type and the home. Inputs: as
+/// [`plan_add`]. Output: the plan, or the refusal.
+pub fn check_add(
     home: &Path,
     engine_root: &Path,
     source: &str,
@@ -508,13 +532,8 @@ pub fn plan_add(
         return Err(refused("home_source_hidden"));
     }
     folder_name(name).map_err(|_| refused("home_source_name"))?;
-    if mode == AddMode::Move {
-        if !overrides.contains(&AddOverride::Worktrees) && git_links(&real) {
-            return Err(refused("home_move_worktrees"));
-        }
-        if registered.iter().any(|project| in_use(&real, project)) {
-            return Err(refused("home_move_project"));
-        }
+    if mode == AddMode::Move && registered.iter().any(|project| in_use(&real, project)) {
+        return Err(refused("home_move_project"));
     }
     if mode == AddMode::Copy
         && !overrides.contains(&AddOverride::LinkedCheckout)
@@ -528,6 +547,8 @@ pub fn plan_add(
         COPY_BOUNDS
     };
     let destination = destination(home, name)?;
+    assert!(real.is_absolute());
+    assert!(!destination.starts_with(&real));
     Ok(AddPlan::new(real, destination, mode, bounds))
 }
 

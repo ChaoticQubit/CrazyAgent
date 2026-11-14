@@ -181,12 +181,12 @@ impl Intake {
     }
 }
 
-/// Runs one intake job: forgets the ended add it replaced, downloads what of the folder is
-/// only in iCloud, then serves the add with the job as its sink and records how the job
-/// ended. The claim on the job's id is dropped before the end is recorded, so a new job
-/// that may start then never finds two job claims held. Inputs: the engine, the authority,
-/// the packet and admission of the client that started it, the job, its claim and the
-/// ended job it replaced.
+/// Runs one intake job: forgets the ended add it replaced, checks the add before any
+/// download, downloads what of the folder is only in iCloud, then serves the add with the
+/// job as its sink and records how the job ended. The claim on the job's id is dropped
+/// before the end is recorded, so a new job that may start then never finds two job claims
+/// held. Inputs: the engine, the authority, the packet and admission of the client that
+/// started it, the job, its claim and the ended job it replaced.
 async fn run(
     engine: Arc<Engine>,
     authority: Arc<Authority>,
@@ -204,16 +204,44 @@ async fn run(
     {
         eprintln!("home_add_not_forgotten cause={}", e.0);
     }
-    let result = match fetch(&authority, &job).await {
-        Ok(()) => {
-            job.copying();
-            add(&engine, &authority, &packet, &a, &job).await
-        }
-        Err(e) => Err(e),
-    };
+    let result = added(&engine, &authority, &packet, &a, &job).await;
     drop(claim);
     ending.end(result);
     assert!(job.ended());
+}
+
+/// The job's work in order: the check, the download, then the add planned in full again
+/// right before its copy. Inputs: as [`run`]. Output: Ok once the add is recorded as
+/// applied, else the first step's code.
+async fn added(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    packet: &[u8; 37],
+    a: &Admission,
+    job: &Arc<IntakeJob>,
+) -> Result<(), EngineError> {
+    check(engine, a, job).await?;
+    fetch(authority, job).await?;
+    job.copying();
+    add(engine, authority, packet, a, job).await
+}
+
+/// Checks the job's add before its download, so a folder the add refuses is not downloaded
+/// first: every refusal that reads nothing inside the folder, with no add row written. A
+/// soft refusal the folder's files decide still comes after the download. Inputs: the
+/// engine, the job's admission and the job. Output: Ok, the refusal code, or the
+/// unknown-outcome code when storage does not answer in time.
+async fn check(engine: &Engine, a: &Admission, job: &IntakeJob) -> Result<(), EngineError> {
+    let (id, source) = (job.id().clone(), job.source().to_owned());
+    let (mode, overrides) = (job.mode(), job.overrides().to_vec());
+    assert!(!source.is_empty());
+    let ask = engine
+        .owner_job(|reply| Job::HomeAddCheck(a.clone(), id, source, mode, overrides, reply));
+    let checked = tokio::time::timeout(engine.timeout, ask)
+        .await
+        .map_err(|_| failure(UNKNOWN))?;
+    assert!(!matches!(&checked, Err(e) if e.0.is_empty()));
+    checked
 }
 
 /// A job's end, recorded once: by its task, or when the task stops early, an abort at
