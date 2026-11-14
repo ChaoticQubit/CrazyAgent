@@ -1013,10 +1013,9 @@ pub const CARRIED_HEADING: &str = "### Imported from .crazyagent/instructions.md
 pub const CARRIED_NOTICE: &str = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
 
 /// The project text a folder arrived with as one [`imported`] section under
-/// [`CARRIED_HEADING`], a label it already starts with taken off first; empty text stays as
-/// it is. Text the heading leaves no room for is cut at the limit, back to a whole line when
-/// the cut line would read as a heading. Input: the project text. Output: the text to keep
-/// and whether it was cut.
+/// [`CARRIED_HEADING`], a label it starts with taken off first; empty text stays. Past the
+/// limit it is cut, back a line or to nothing when the cut end would read as a heading, the
+/// whole file kept aside. Input: the project text. Output: the text and whether it was cut.
 fn carried(existing: &str) -> (String, bool) {
     assert_eq!(CARRIED_HEADING, format!("{IMPORTED_LABEL}{CARRIED_PATH}"));
     let body = existing.strip_prefix(CARRIED_HEADING).unwrap_or(existing);
@@ -1032,10 +1031,12 @@ fn carried(existing: &str) -> (String, bool) {
     let mut kept = part[..end].trim_end();
     if demoted(kept) != kept {
         assert!(end < part.len());
-        let line = kept
+        kept = kept
             .rfind(['\n', '\r'])
-            .expect("only the line a cut ends in can read as a heading");
-        kept = kept[..line].trim_end();
+            .map_or("", |line| kept[..line].trim_end());
+        if demoted(kept) != kept {
+            kept = "";
+        }
     }
     assert_eq!(demoted(kept), kept);
     let text = imported(CARRIED_PATH, kept);
@@ -1053,13 +1054,11 @@ fn imported(names: &str, text: &str) -> String {
     format!("{IMPORTED_LABEL}{names}\n\n{body}\n")
 }
 
-/// Imported text with no line an agent reads as a heading at the [`IMPORTED_LABEL`] level or
-/// above but the labels themselves: a line whose first visible characters are one to three
-/// `#` then a space or its end gets three more unless it starts with the label, and a line
-/// of only `=` or only `-` under a non-blank line gets a blank line of the same ending above
-/// it, so it heads nothing (SA vid 7 r2, r2b). A second pass changes nothing, so labelling
-/// again after an import keeps the text. Input: the text. Output: the text, the same when it
-/// has no such line.
+/// Imported text where only labels (`### Imported from` then whitespace or the line end)
+/// read as a heading at their level or above: other ATX headings of level one to three get
+/// three more `#`, and an `=` or `-` underline under a non-blank line gets a blank line of
+/// the same ending above it (SA vid 7 r2, r2b). A second pass, or trimming the end, changes
+/// nothing. Input: the text. Output: the text, the same when it has no such line.
 fn demoted(text: &str) -> String {
     let lead = |c: char| {
         c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}')
@@ -1083,7 +1082,10 @@ fn demoted(text: &str) -> String {
             out.push_str(above_ending);
         }
         out.push_str(&line[..line.len() - body.len()]);
-        if !line.starts_with(IMPORTED_LABEL)
+        let label = line
+            .strip_prefix(IMPORTED_LABEL.trim_end())
+            .is_some_and(|after| after.chars().next().is_none_or(char::is_whitespace));
+        if !label
             && (1..=3).contains(&hashes)
             && body[hashes..]
                 .chars()
