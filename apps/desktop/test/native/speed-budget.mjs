@@ -141,3 +141,27 @@ export function readQuiet() {
   assert.ok(Number.isFinite(load1) && Number.isFinite(memoryLevel), "sysctl gave numbers");
   return { load1, compilers, memoryLevel, onAC, screenLocked, busy };
 }
+
+/** WebKit helper processes run under launchd, not under the app, and their command lines name
+ * no client; the speed rows find the ones the app started as the pids new since its launch.
+ * Input: none. Output: the pids of every WebKit WebContent, Networking and GPU process. */
+export function webkitHelpers() {
+  const listed = output("/bin/ps", ["-axo", "pid=,comm="]).split("\n");
+  const pids = listed.flatMap((line) => {
+    const found = line.trim().match(/^(\d+)\s+(?:.*\/)?com\.apple\.WebKit\.(WebContent|Networking|GPU)$/);
+    return found ? [Number(found[1])] : [];
+  });
+  assert.ok(pids.every((pid) => Number.isInteger(pid) && pid > 1));
+  return pids;
+}
+
+/** Reads one process's memory footprint, the number Activity Monitor shows as Memory.
+ * Input: the pid. Output: megabytes. */
+export function footprintMb(pid) {
+  assert.ok(Number.isInteger(pid) && pid > 1, `a pid: ${pid}`);
+  const found = output("/usr/bin/footprint", ["-p", String(pid)]).match(/Footprint: ([\d.]+) (KB|MB|GB)/);
+  assert.ok(found, `footprint read pid ${pid}`);
+  const megabytes = Number(found[1]) * { KB: 1 / 1024, MB: 1, GB: 1024 }[found[2]];
+  assert.ok(Number.isFinite(megabytes) && megabytes > 0);
+  return round(megabytes);
+}

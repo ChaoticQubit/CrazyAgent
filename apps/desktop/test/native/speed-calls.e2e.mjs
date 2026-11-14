@@ -6,9 +6,11 @@ import { isAbsolute, join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as pause } from "node:timers/promises";
 import { withPage } from "../browser.mjs";
-import { INTERNALS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop } from "./e2e-harness.mjs";
 import { countFindings } from "./speed-budget.mjs";
+import { seedSide, speedSettings } from "./speed-seed.mjs";
 
+const SESSIONS_C1 = 3;
 const SETTLE_MS = 2000;
 const IDLE_MS = 60000;
 const LOOK_MS = 50;
@@ -42,18 +44,7 @@ async function boot(label, side, evidence) {
   const runtime = join(root, "engine");
   const home = join(root, "home");
   for (const folder of [runtime, home, join(home, ".codex"), join(root, "projects")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
-  const provider = await closedPort();
-  writeFileSync(join(runtime, "global.toml"), `version = 1
-timeout_ms = 2000
-allowed_destinations = []
-
-[model_access]
-accounts = ["local-account"]
-connections = [
-  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/v1" }, model = { id = "e2e-model", author = "openai-compatible" }, auth = { method = "none" } },
-]
-pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
-`, { mode: 0o600 });
+  writeFileSync(join(runtime, "global.toml"), speedSettings(await closedPort()), { mode: 0o600 });
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
   const run = { label, root, runtime, log: { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false } };
   ({ child: run.engine } = await launch(side.engine,
@@ -62,15 +53,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   const started = await launch(side.bridge, [join(runtime, "engine.sock")], { ...env }, evidence, `${label}-bridge`, /^ready (\d+) ([0-9a-f]{64})$/m);
   run.bridgeProcess = started.child;
   run.bridge = { port: Number(started.match[1]), token: started.match[2] };
-  assert.equal((await value(run.bridge, "desktop_connect")).connected, true, `${label}: the bridge connects`);
-  assert.equal((await value(run.bridge, "desktop_save_owner_profile", { profile: { name: "Speed Owner" }, generation: 1 })).outcome, "applied");
-  assert.equal((await value(run.bridge, "desktop_set_projects_home", { path: join(root, "projects"), generation: 2 })).outcome, "applied");
-  const receipt = await value(run.bridge, "desktop_setup_project", {
-    spec: { name: "Speed Calls", repositories: [] },
-    setup: { about: "A project the call-count row walks", tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [] },
-    generation: 3,
-  });
-  assert.equal(receipt.outcome, "applied", `${label}: the project is made: ${JSON.stringify(receipt)}`);
+  run.seeded = await seedSide(run.bridge, join(root, "projects"), SESSIONS_C1);
+  assert.equal(run.seeded.sessions, SESSIONS_C1, `${label}: the project has its master sessions`);
   run.site = await serveApp(side.dist, run.bridge, [], run.log);
   return run;
 }
