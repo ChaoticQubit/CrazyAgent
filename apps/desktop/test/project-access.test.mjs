@@ -435,3 +435,12 @@ test("only on Linux do the network and access choices say ports hold no host and
     assert.ok(!page.includes(escaped(access.LINUX_NESTED_GIT)), page);
   }
 });
+
+test("only on Linux below Full access do the allowed extras say a port is open on every host (RV-DS241-83)", () => {
+  const shown = (platform, chosen) => renderToStaticMarkup(createElement(access.GrantsEditor, { prefix: "g", view, grants: [], access: chosen, onChange: () => {}, platform }));
+  const line = access.LINUX_PORTS_ANY_HOST.replaceAll("'", "&#x27;");
+  assert.ok(shown("linux", "sandboxed").includes(line), shown("linux", "sandboxed"));
+  for (const page of [shown("macos", "sandboxed"), shown("windows", "own_branch"), shown("linux", "full")]) {
+    assert.ok(!page.includes(line), page);
+  }
+});

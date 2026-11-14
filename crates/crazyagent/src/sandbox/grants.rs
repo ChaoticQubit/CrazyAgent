@@ -628,7 +628,7 @@ pub fn request(
         recommended: Some(DONT_ALLOW.to_owned()),
         context: Some(format!(
             "{} Its reason, in its own words: {}. Allow only if you trust it. Allowing adds it to this project's Agent access, where you can remove it; running agents restart at their next pause to use it.",
-            meaning(&grant),
+            asked_meaning(&grant, cfg!(target_os = "linux")),
             serde_json::to_string(&reason).map_err(|_| "grant_requests_unavailable")?
         )),
     };
@@ -749,6 +749,13 @@ pub fn meaning(grant: &AccessGrant) -> &'static str {
             "Agents use your own temp folder as theirs: they can read and change other apps' temp files there, but no socket in it."
         }
     }
+}
+
+/// What one grant lets agents do as its access question says it, from [`meaning`]. Inputs:
+/// the grant and whether the engine runs on Linux. Output: the sentences.
+pub fn asked_meaning(grant: &AccessGrant, linux: bool) -> String {
+    let _ = linux;
+    meaning(grant).to_owned()
 }
 
 fn capital(text: &str) -> String {

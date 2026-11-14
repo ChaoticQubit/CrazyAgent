@@ -815,3 +815,35 @@ fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
         "a database port stays the owner's informed choice"
     );
 }
+
+/// RV-DS241-83: on Linux, where Landlock limits ports and not hosts, a port's access question
+/// says the port is open to agents on every host; a socket's and the temp folder's do not,
+/// and no other system's question says it.
+#[test]
+fn only_on_linux_does_a_port_question_say_the_port_is_open_on_every_host() {
+    let port = AccessGrant::Port { port: 5_432 };
+    let line = crate::sandbox::LINUX_PORTS_ANY_HOST_LINE;
+    assert_eq!(asked_meaning(&port, false), meaning(&port));
+    assert_eq!(
+        asked_meaning(&port, true),
+        format!("{} {line}", meaning(&port))
+    );
+    for grant in [
+        AccessGrant::Socket {
+            path: PathBuf::from("/private/tmp/app/app.sock"),
+        },
+        AccessGrant::TempFolder,
+    ] {
+        assert_eq!(asked_meaning(&grant, true), meaning(&grant), "{grant:?}");
+    }
+    let case = Case::new();
+    let question = case.ask_port(5_432);
+    let pending = crate::questions::pending(&case.db, &case.project).unwrap();
+    let asked = pending.iter().find(|q| q.id == question).unwrap();
+    let context = asked.context.as_deref().unwrap_or_default();
+    assert_eq!(
+        context.contains(line),
+        cfg!(target_os = "linux"),
+        "{context}"
+    );
+}
