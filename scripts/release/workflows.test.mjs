@@ -29,27 +29,58 @@ function block(text, indent, name) {
 }
 
 /**
- * Lists the jobs under `jobs:` of a workflow. Input: the workflow text. Output: each job's name
- * with its lines.
+ * Lists the jobs under `jobs:` of a workflow, failing closed: every line of the block that is
+ * not blank or a comment belongs to a job whose key sits alone at 2-space indent, so a job the
+ * guards cannot read throws instead of being skipped. Input: the workflow text. Output: each
+ * job's name with its lines, at least one.
  */
 function jobsOf(text) {
-  const jobs = block(text, 0, "jobs");
-  const names = jobs.map((line) => line.match(/^ {2}([A-Za-z0-9_-]+):\s*$/)?.[1]).filter(Boolean);
-  return names.map((name) => ({ name, lines: block(jobs.join("\n"), 2, name) }));
+  const lines = text.split("\n");
+  const start = lines.indexOf("jobs:");
+  assert(start >= 0, "no jobs: block at indent 0, so no job can be read");
+  const jobs = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    if (/^\S/.test(line)) break;
+    const name = line.match(/^ {2}([A-Za-z0-9_-]+):\s*$/)?.[1];
+    if (name) {
+      jobs.push({ name, lines: [line] });
+      continue;
+    }
+    assert(jobs.length > 0 && line.length - line.trimStart().length > 2, `every job key sits alone at 2-space indent under jobs:, not ${JSON.stringify(line)}`);
+    jobs.at(-1).lines.push(line);
+  }
+  assert(jobs.length > 0, "no job key at 2-space indent under jobs:");
+  return jobs;
 }
 
 /**
- * Names the jobs of a workflow that read a secret or bind an environment, whatever the file
- * or job. Input: the workflow text. Output: the job names in file order.
+ * The lines of a workflow outside its `jobs:` block, such as a workflow-level `env:` every job
+ * inherits; the block ends where jobsOf stops reading. Input: the workflow text. Output: the lines.
+ */
+function sharedLines(text) {
+  const lines = text.split("\n");
+  const start = lines.indexOf("jobs:");
+  const end = lines.findIndex((line, index) => index > start && /^[^\s#]/.test(line));
+  return [...lines.slice(0, start), ...(end < 0 ? [] : lines.slice(end))];
+}
+
+/**
+ * Names the jobs of a workflow that read a secret, hand secrets to a called workflow or bind an
+ * environment, whatever the file or job; a secret outside `jobs:` reaches every job. Input: the
+ * workflow text. Output: the job names in file order.
  */
 function exposedJobs(text) {
-  return jobsOf(text).filter(({ lines }) => lines.some((line) => line.includes("secrets.") || /^ {4}environment:/.test(line))).map(({ name }) => name);
+  const jobs = jobsOf(text);
+  const shared = sharedLines(text).some((line) => line.includes("secrets."));
+  return jobs.filter(({ lines }) => shared || lines.some((line) => line.includes("secrets.") || /^ {4}(environment|secrets):/.test(line))).map(({ name }) => name);
 }
 
 /**
  * Lists every runner of a workflow outside the allowed GitHub-hosted images, reading each
- * matrix runner value when a job takes `${{ matrix.runner }}`. A job that calls a reusable
- * workflow has no runner of its own. Input: the workflow text. Output: "job: runner" entries.
+ * matrix runner value when a job takes `${{ matrix.runner }}`; a `runner:` key, in block or
+ * flow form, whose value is not one plain name is a problem. A job that calls a reusable workflow has no runner of its own.
+ * Input: the workflow text. Output: "job: runner" entries.
  */
 function runnerProblems(text) {
   const allowed = new Set(Object.values(RUNNERS));
@@ -60,9 +91,17 @@ function runnerProblems(text) {
       if (!lines.some((line) => /^ {4}uses: \.\/\.github\/workflows\//.test(line))) problems.push(`${name}: no runner`);
       continue;
     }
-    const runners = runsOn === "${{ matrix.runner }}" ? lines.map((line) => line.match(/^\s+(?:- )?runner: (\S+)$/)?.[1]).filter(Boolean) : [runsOn];
-    if (runners.length === 0) problems.push(`${name}: no matrix runner`);
-    for (const runner of runners) if (!allowed.has(runner)) problems.push(`${name}: ${runner}`);
+    if (runsOn !== "${{ matrix.runner }}") {
+      if (!allowed.has(runsOn)) problems.push(`${name}: ${runsOn}`);
+      continue;
+    }
+    const named = lines.filter((line) => /(?:^\s+(?:- )?|[{,]\s*)runner:/.test(line));
+    if (named.length === 0) problems.push(`${name}: no matrix runner`);
+    for (const line of named) {
+      const runner = line.match(/^\s+(?:- )?runner: ([A-Za-z0-9._-]+)$/)?.[1];
+      if (runner === undefined) problems.push(`${name}: runner line ${line.trim()}`);
+      else if (!allowed.has(runner)) problems.push(`${name}: ${runner}`);
+    }
   }
   return problems;
 }
