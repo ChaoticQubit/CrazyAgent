@@ -1322,6 +1322,7 @@ fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
 
 /// An app engine `<root>/<folder>/CrazyAgent.app/Contents/MacOS/crazyagent` written on disk.
 /// Inputs: the row's folder and the folder the app sits in. Output: the engine's path.
+#[cfg(unix)]
 fn app_engine(root: &Path, folder: &str) -> PathBuf {
     let engine = root
         .join(folder)
@@ -1336,6 +1337,7 @@ fn app_engine(root: &Path, folder: &str) -> PathBuf {
 
 /// A dev build's app engine inside a cargo target folder, which [`Service::may_replace`]
 /// refuses. Input: the row's folder. Output: the engine's path.
+#[cfg(unix)]
 fn dev_engine(root: &Path) -> PathBuf {
     let target = root.join("worktree").join("target");
     let built = app_engine(&target.join("release").join("bundle"), "macos");
@@ -1433,6 +1435,31 @@ fn a_definition_naming_a_volumes_or_translocated_program_is_never_started_as_is(
         assert_eq!(there.broken_program(), None);
         assert_eq!(there.repair(mounted, true, false), Repair::Start);
         assert_eq!(there.repair(mounted, true, true), Repair::Refuse);
+    }
+}
+
+/// RV-DS241-118: a program path written escaped (XML in a plist; quoted, with `$$` and `%%`,
+/// for systemd) reads back as itself, so an engine kept in such a folder is never taken for
+/// a gone one and starts as it is.
+#[cfg(unix)]
+#[test]
+fn an_escaped_program_path_reads_back_as_itself_and_starts_as_it_is() {
+    let temp = tempfile::tempdir().unwrap();
+    let folder = temp.path().join("Tools & $Apps %1 \"q\" \\b 'x' <y>");
+    let bundled = app_engine(&folder, "Applications");
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert_eq!(
+            own.installed_program(),
+            Some(bundled.clone()),
+            "{platform:?}"
+        );
+        assert_eq!(own.broken_program(), None);
+        assert_eq!(own.repair(&bundled, true, false), Repair::Start);
     }
 }
 

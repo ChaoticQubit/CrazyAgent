@@ -1573,9 +1573,17 @@ pub async fn ensure_running(
     layout.prepare()?;
     let since = log_length(layout);
     if service.status()?.installed {
-        match service.repair(executable, true, false) {
+        let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+        let kept = Service {
+            executable: persistable(&service.executable, layout, appdir.as_deref())?,
+            ..service.clone()
+        };
+        match kept.repair(executable, true, false) {
             Repair::Start => service.start()?,
-            Repair::Install => service.install()?,
+            Repair::Install => {
+                kept.install()?;
+                retire_old_copies(layout, &kept.executable);
+            }
             Repair::Refuse => return Err(transient_refused(&service.executable)),
         }
         wait_started(layout, service, bound, since).await?;
