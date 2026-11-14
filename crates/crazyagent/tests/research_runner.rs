@@ -4,6 +4,7 @@ mod research_support;
 
 use crazyagent::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
 use crazyagent::protocol::CredentialRef;
+use crazyagent::provider_reach::ProviderReach;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{
     ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner, RunError,
@@ -99,6 +100,15 @@ fn wait_for_file(path: &Path, deadline: Duration) {
 
 fn runner(case: &Case, limits: ResearchLimits) -> ResearchRunner {
     ResearchRunner::new(&case.database, &case.state, &codex(), limits).unwrap()
+}
+
+/// A reach that finds every name at one documentation address and connects there, so a
+/// row's remote or managed account reads as reached with no real DNS (DEC-163 addendum 8).
+fn found_everywhere() -> ProviderReach {
+    ProviderReach::new(
+        |_, port| Ok(vec![std::net::SocketAddr::from(([192, 0, 2, 1], port))]),
+        |_| Ok(()),
+    )
 }
 
 fn limits(wall_time: Duration) -> ResearchLimits {
@@ -956,6 +966,7 @@ fn a_managed_account_not_signed_in_for_this_engine_run_waits_for_a_pool() {
         },
     };
     let run = runner(&case, limits(Duration::from_secs(5)))
+        .with_reach(found_everywhere())
         .run_once(&project(
             &case,
             Some(ResearchAccount::ManagedCodex {
@@ -1311,6 +1322,7 @@ fn a_tools_on_research_job_under_no_network_runs_with_its_model_proxy_bound() {
         limits(Duration::from_secs(60)),
     )
     .unwrap()
+    .with_reach(found_everywhere())
     .run_once(&project(&case, Some(account)))
     .unwrap()
     .unwrap();

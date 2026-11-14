@@ -56,6 +56,7 @@ pub mod project_overview;
 pub mod project_setup;
 pub mod projects_home;
 pub mod protocol;
+pub mod provider_reach;
 pub mod provider_retry;
 pub mod qualification;
 pub mod questions;

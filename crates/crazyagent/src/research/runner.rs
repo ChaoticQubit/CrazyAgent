@@ -17,6 +17,7 @@ use crate::launch_context::AgentContext;
 use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::provider_reach::ProviderReach;
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
@@ -76,8 +77,6 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
-/// How long [`unreached_provider`] waits for a loopback model provider to take a connection.
-const PROVIDER_REACH_TIME: Duration = Duration::from_secs(2);
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 /// The `RunError::Invalid` text of a run whose agent state folder already exists,
@@ -310,6 +309,7 @@ pub struct ResearchRunner {
     agents: Option<Arc<Agents>>,
     settings: Option<(PathBuf, PathBuf)>,
     reproving: Option<Arc<AtomicBool>>,
+    reach: ProviderReach,
 }
 
 /// The words that start a research harness with no search path
@@ -511,7 +511,23 @@ impl ResearchRunner {
             agents: None,
             settings: None,
             reproving: None,
+            reach: ProviderReach::system(),
         })
+    }
+
+    /// Checks whether each run's model provider can be reached through `reach` in place of
+    /// this machine's resolver and network, so a row's remote or managed account never needs
+    /// real DNS (DEC-163). Takes the reach. Returns the runner.
+    pub fn with_reach(mut self, reach: ProviderReach) -> Self {
+        self.reach = reach;
+        self
+    }
+
+    /// Why a run's model provider can't be reached, asked through this runner's reach
+    /// ([`unreached_provider_here`]) before every research job and read-only run starts.
+    /// Input: the account. Output: why, with the owner's line, or none.
+    pub(crate) fn unreached(&self, account: &ResearchAccount) -> Option<Unreached> {
+        unreached_provider_here(&self.reach, account)
     }
 
     /// Reads the owner's model settings from these two files at each tools-on launch, so
@@ -766,8 +782,8 @@ impl ResearchRunner {
             let status = jobs.fail(&job, line, 1)?;
             return Ok(run(status, None, None));
         }
-        if let Some(line) = unreached_provider_here(account) {
-            let status = jobs.fail_unspent(&job, &line)?;
+        if let Some(unreached) = self.unreached(account) {
+            let status = jobs.fail_unspent(&job, unreached.line())?;
             return Ok(run(status, None, None));
         }
         match self.launch(jobs, &job, project, account) {
@@ -2107,58 +2123,101 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
     }
 }
 
-/// Tells whether a loopback endpoint account's model provider refuses every connect, so a
-/// caller can fail at once with a plain line in place of a harness retrying it for minutes.
-/// Managed accounts, remote endpoints and any other connect error are not named. Input: the
-/// account. Output: the owner's line naming the provider's host and port, else none.
-pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
-    let (ResearchAccount::Endpoint { base_url, .. }
-    | ResearchAccount::AnthropicEndpoint { base_url, .. }) = account
-    else {
-        return None;
-    };
-    let Ok(SandboxRemote::Loopback(port)) = model_remote(account) else {
-        return None;
+/// Why a run's model provider can't be reached, each with the owner's line (DEC-163): a
+/// loopback provider refused every connect, a remote one has no address or refused on every
+/// address the engine may dial, or this machine finds none of a managed account's hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Unreached {
+    Loopback(String),
+    Remote(String),
+    Offline(String),
+}
+
+impl Unreached {
+    /// The owner's line naming the provider and what to do. Output: the line.
+    pub(crate) fn line(&self) -> &str {
+        match self {
+            Self::Loopback(line) | Self::Remote(line) | Self::Offline(line) => line,
+        }
+    }
+}
+
+/// Tells why an account's model provider can't be reached, through `reach`, so a caller
+/// can fail at once with a plain line in place of a harness retrying it for minutes. A
+/// loopback endpoint is named when every loopback address refuses, a remote endpoint when
+/// its name has no address or every address it may dial refuses, and a managed account only
+/// when no host of its sign-in is found, by lookup alone. A timeout or any other error names
+/// nothing. Inputs: the reach and the account. Output: why, with the owner's line, or none.
+pub(crate) fn unreached_provider(
+    reach: &ProviderReach,
+    account: &ResearchAccount,
+) -> Option<Unreached> {
+    let base_url = match account {
+        ResearchAccount::ManagedCodex { .. } => return offline(reach, CODEX_MODEL_HOSTS),
+        ResearchAccount::ManagedClaude { .. } => return offline(reach, CLAUDE_MODEL_HOSTS),
+        ResearchAccount::Endpoint { base_url, .. }
+        | ResearchAccount::AnthropicEndpoint { base_url, .. } => base_url,
     };
     let url = endpoint_url(base_url).ok()?;
-    let addresses: Vec<std::net::SocketAddr> = match url.host()? {
-        url::Host::Ipv4(address) => vec![(address, port).into()],
-        url::Host::Ipv6(address) => vec![(address, port).into()],
-        url::Host::Domain(_) => vec![
-            (std::net::Ipv4Addr::LOCALHOST, port).into(),
-            (std::net::Ipv6Addr::LOCALHOST, port).into(),
-        ],
-    };
-    assert!(
-        !addresses.is_empty() && addresses.iter().all(|address| address.ip().is_loopback()),
-        "a loopback endpoint is checked on loopback addresses only"
-    );
-    let unreached = addresses.iter().all(|address| {
-        refused(crate::spawn_gate::connect_tcp_std_timeout(address, PROVIDER_REACH_TIME).map(drop))
-    });
     let host = url.host_str()?;
-    unreached.then(|| {
-        format!(
-            "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then try again."
-        )
+    match model_remote(account).ok()? {
+        SandboxRemote::Loopback(port) => {
+            let addresses: Vec<std::net::SocketAddr> = match url.host()? {
+                url::Host::Ipv4(address) => vec![(address, port).into()],
+                url::Host::Ipv6(address) => vec![(address, port).into()],
+                url::Host::Domain(_) => vec![
+                    (std::net::Ipv4Addr::LOCALHOST, port).into(),
+                    (std::net::Ipv6Addr::LOCALHOST, port).into(),
+                ],
+            };
+            assert!(
+                addresses.iter().all(|address| address.ip().is_loopback()),
+                "a loopback endpoint is checked on loopback addresses only"
+            );
+            reach.refused_everywhere(&addresses).then(|| {
+                Unreached::Loopback(format!(
+                    "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then try again."
+                ))
+            })
+        }
+        SandboxRemote::AnyHost(port) => {
+            let unreached = match url.host()? {
+                url::Host::Ipv4(address) => reach.unreached_at(&[(address, port).into()]),
+                url::Host::Ipv6(address) => reach.unreached_at(&[(address, port).into()]),
+                url::Host::Domain(name) => reach.unreached_name(name, port),
+            };
+            unreached.then(|| {
+                Unreached::Remote(format!(
+                    "Can't reach the model provider at {host}:{port}. Check the address or the network, or pick another account in this pool, then try again."
+                ))
+            })
+        }
+    }
+}
+
+/// The line for a managed account when this machine finds none of its sign-in's hosts,
+/// naming the first. Inputs: the reach and the hosts. Output: why, or none.
+fn offline(reach: &ProviderReach, hosts: &[(&str, u16)]) -> Option<Unreached> {
+    let (first, _) = hosts.first()?;
+    reach.offline(hosts).then(|| {
+        Unreached::Offline(format!(
+            "No network: can't find {first}. Check this computer's network connection, then try again."
+        ))
     })
 }
 
 /// [`unreached_provider`] where this OS runs confined model runs, else none, so a run's own
 /// line that confined runs are unavailable here keeps its place. Every read-only run's caller
-/// asks it before the run. Input: the account. Output: the owner's line, or none.
-pub(crate) fn unreached_provider_here(account: &ResearchAccount) -> Option<String> {
+/// asks it, through its runner ([`ResearchRunner::unreached`]), before the run. Inputs: the
+/// reach and the account. Output: why, with the owner's line, or none.
+pub(crate) fn unreached_provider_here(
+    reach: &ProviderReach,
+    account: &ResearchAccount,
+) -> Option<Unreached> {
     if confined_unavailable(std::env::consts::OS).is_some() {
         return None;
     }
-    unreached_provider(account)
-}
-
-/// Tells whether one connect to a loopback model provider proves nothing listens there:
-/// only a refused connect does, never a success, a timeout or another error such as too
-/// many open files. Input: the connect's outcome. Output: true only for a refusal.
-fn refused(outcome: std::io::Result<()>) -> bool {
-    matches!(outcome, Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused)
+    unreached_provider(reach, account)
 }
 
 /// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
@@ -4349,10 +4408,16 @@ mod tests {
     }
 
     /// A loopback provider that refuses connections is named at once with its host and port
-    /// and the way out, for either endpoint kind; one that listens and a remote endpoint are
-    /// never named, and no check waits on a remote host.
+    /// and the way out, for either endpoint kind; one that listens is never named. Remote
+    /// endpoints have their own rows on stand-in reaches.
     #[test]
     fn a_loopback_provider_that_refuses_connections_is_named_at_once_and_a_listening_one_is_not() {
+        let named = |account: &ResearchAccount| {
+            unreached_provider(&ProviderReach::system(), account).map(|unreached| {
+                assert!(matches!(unreached, Unreached::Loopback(_)), "{unreached:?}");
+                unreached.line().to_owned()
+            })
+        };
         let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let port = closed.local_addr().unwrap().port();
         drop(closed);
@@ -4373,11 +4438,11 @@ mod tests {
         );
         let started = Instant::now();
         assert_eq!(
-            unreached_provider(&codex(format!("http://127.0.0.1:{port}/v1"))),
+            named(&codex(format!("http://127.0.0.1:{port}/v1"))),
             Some(line.clone())
         );
         assert_eq!(
-            unreached_provider(&claude(format!("http://127.0.0.1:{port}"))),
+            named(&claude(format!("http://127.0.0.1:{port}"))),
             Some(line)
         );
         assert!(
@@ -4386,20 +4451,109 @@ mod tests {
             started.elapsed()
         );
         assert_eq!(
-            unreached_provider(&codex(format!("http://127.0.0.1:{listening}/v1"))),
+            named(&codex(format!("http://127.0.0.1:{listening}/v1"))),
             None
         );
         assert_eq!(
-            unreached_provider(&claude(format!("http://localhost:{listening}"))),
+            named(&claude(format!("http://localhost:{listening}"))),
             None
         );
-        let started = Instant::now();
-        assert_eq!(
-            unreached_provider(&codex("https://models.example.test/v1".into())),
-            None
-        );
-        assert!(started.elapsed() < Duration::from_millis(500));
         drop(open);
+    }
+
+    /// A remote endpoint whose name has no address, or whose every address refuses, is
+    /// named with its host and port and the way out; an IP literal is dialed with no lookup.
+    /// A managed account is named only when no host of its sign-in is found, by lookup alone,
+    /// with no connect. Every lookup and dial goes to stand-ins, so no row does real DNS
+    /// (DEC-163 addendum 8).
+    #[test]
+    fn a_remote_or_managed_provider_is_named_through_the_reach_with_its_own_line() {
+        use std::sync::{Arc, Mutex};
+        let looked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = Arc::clone(&looked);
+        let nowhere = ProviderReach::new(
+            move |name, _| {
+                seen.lock().unwrap().push(name.to_owned());
+                Err(io::Error::other("no address"))
+            },
+            |address| panic!("a name with no address is never dialed: {address}"),
+        );
+        let refusing = ProviderReach::new(
+            |name, _| panic!("an address is never looked up: {name}"),
+            |_| Err(io::ErrorKind::ConnectionRefused.into()),
+        );
+        let found = ProviderReach::new(
+            |_, port| Ok(vec![std::net::SocketAddr::from(([192, 0, 2, 1], port))]),
+            |_| Ok(()),
+        );
+        let codex = |base_url: &str| ResearchAccount::Endpoint {
+            base_url: base_url.into(),
+            model: "remote-model".into(),
+            key: None,
+        };
+        let claude = |base_url: &str| ResearchAccount::AnthropicEndpoint {
+            base_url: base_url.into(),
+            model: "remote-model".into(),
+            key: None,
+        };
+        let managed_codex = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let managed_claude = ResearchAccount::ManagedClaude {
+            connection: codex_connection(),
+            model: None,
+        };
+        let remote = |at: &str| {
+            Some(Unreached::Remote(format!(
+                "Can't reach the model provider at {at}. Check the address or the network, or pick another account in this pool, then try again."
+            )))
+        };
+        let offline = |host: &str| {
+            Some(Unreached::Offline(format!(
+                "No network: can't find {host}. Check this computer's network connection, then try again."
+            )))
+        };
+
+        assert_eq!(
+            unreached_provider(&nowhere, &codex("https://models.example.test/v1")),
+            remote("models.example.test:443")
+        );
+        assert_eq!(
+            unreached_provider(&nowhere, &claude("https://claude.example.test:8443")),
+            remote("claude.example.test:8443")
+        );
+        assert_eq!(
+            unreached_provider(&refusing, &codex("http://192.0.2.7:8080/v1")),
+            remote("192.0.2.7:8080")
+        );
+        assert_eq!(
+            unreached_provider(&nowhere, &managed_codex),
+            offline("chatgpt.com")
+        );
+        assert_eq!(
+            unreached_provider(&nowhere, &managed_claude),
+            offline("api.anthropic.com")
+        );
+        assert_eq!(
+            *looked.lock().unwrap(),
+            [
+                "models.example.test",
+                "claude.example.test",
+                "chatgpt.com",
+                "api.openai.com",
+                "api.anthropic.com"
+            ]
+        );
+        for account in [
+            codex("https://models.example.test/v1"),
+            claude("https://claude.example.test"),
+            codex("http://192.0.2.7:8080/v1"),
+            managed_codex,
+            managed_claude,
+        ] {
+            assert_eq!(unreached_provider(&found, &account), None, "{account:?}");
+        }
     }
 
     /// The reach check every read-only run's caller asks names a refusing loopback provider
@@ -4419,7 +4573,8 @@ mod tests {
             "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
         );
         assert_eq!(
-            unreached_provider_here(&account),
+            unreached_provider_here(&ProviderReach::system(), &account)
+                .map(|unreached| unreached.line().to_owned()),
             confined_unavailable(std::env::consts::OS)
                 .is_none()
                 .then_some(line)
@@ -4487,11 +4642,73 @@ mod tests {
         assert_eq!((job.attempts, job.claimer), (0, None));
     }
 
+    /// A research job whose remote endpoint's name has no address ends failed at once with
+    /// the remote reach line, starts no harness process and spends no attempt; the runner
+    /// asks its own reach, a stand-in here, so the row does no real DNS (DEC-163 addendum 8).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_job_on_a_remote_provider_with_no_address_fails_at_once_without_an_attempt_or_a_harness()
+     {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        repository_git(&folder, &["init", "-q"]);
+        repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+        register_project(&root.database, "alpha", &folder);
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits {
+                wall_time: Duration::from_secs(10),
+                ..ResearchLimits::default()
+            },
+        )
+        .unwrap()
+        .with_reach(ProviderReach::new(
+            |_, _| Err(io::Error::other("no address")),
+            |address| panic!("a name with no address is never dialed: {address}"),
+        ));
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: "https://models.example.test/v1".into(),
+                model: "remote-model".into(),
+                key: None,
+            }),
+        };
+        let started = Instant::now();
+        let run = runner.run_once(&project).unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            (run.job, run.status, run.process_group),
+            (id, ResearchStatus::Failed, None)
+        );
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!(
+            job.error.as_deref(),
+            Some(
+                "Can't reach the model provider at models.example.test:443. Check the address or the network, or pick another account in this pool, then try again."
+            )
+        );
+        assert_eq!((job.attempts, job.claimer), (0, None));
+    }
+
     /// MR-L1: only a refused connect proves nothing listens on a loopback provider. A
     /// success, a connect that ran out of time, too many open files or any other error never
     /// does, so such a mapping step still runs its try as before.
     #[test]
     fn only_a_refused_connect_counts_as_an_unreached_provider() {
+        use crate::provider_reach::refused;
         use std::io::{Error, ErrorKind};
         assert!(refused(Err(Error::from(ErrorKind::ConnectionRefused))));
         assert!(!refused(Ok(())));

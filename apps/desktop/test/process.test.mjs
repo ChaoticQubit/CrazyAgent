@@ -854,7 +854,7 @@ test("every Edit with AI refusal reads as a plain sentence that says nothing cha
   const codes = ["instructions_cleanup_pool_needed", "instructions_cleanup_pool_not_asked", "instructions_cleanup_pool_unknown", "instructions_cleanup_project_pool_missing",
     "instructions_cleanup_no_account", "instructions_cleanup_paused", "instructions_cleanup_busy", "instructions_cleanup_empty", "instructions_cleanup_failed",
     "instructions_cleanup_timed_out", "instructions_cleanup_no_proposal", "instructions_cleanup_too_large", "instructions_cleanup_off", "instructions_cleanup_unavailable",
-    "instructions_cleanup_provider_unreachable"];
+    "instructions_cleanup_provider_unreachable", "instructions_cleanup_remote_provider_unreachable", "instructions_cleanup_no_network"];
   for (const code of codes) {
     assert.ok(client.PROCESS_REFUSALS.includes(code), `${code} has its own words`);
     const words = client.processMessage({ kind: "error", code, message: "raw engine words" });
@@ -873,6 +873,17 @@ test("an Edit with AI run whose provider refuses connections says nothing was se
   assert.equal(client.processMessage({ kind: "error", code, message: "" }), words);
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/process.rs", import.meta.url), "utf8");
   assert.ok(tui.includes(`"${code}" => "${words}"`), `${code} reads the same in the TUI`);
+});
+
+test("an Edit with AI run whose remote provider can't be reached or that finds no network says what to check, as the TUI does", () => {
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/process.rs", import.meta.url), "utf8");
+  for (const [code, words] of [
+    ["instructions_cleanup_remote_provider_unreachable", "Can't reach this pool's model provider, so nothing was sent. Check its address or the network, or pick another account, then try again."],
+    ["instructions_cleanup_no_network", "No network: can't find this pool's model provider, so nothing was sent. Check this computer's network connection, then try again."],
+  ]) {
+    assert.equal(client.processMessage({ kind: "error", code, message: "" }), words);
+    assert.ok(tui.includes(`"${code}" => "${words}"`), `${code} reads the same in the TUI`);
+  }
 });
 
 test("Edit with AI is a project setting, On unless the owner turned it off, and its row says what Off does", () => {

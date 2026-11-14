@@ -289,3 +289,21 @@ fn old_run_folders_are_pruned_and_run_names_never_repeat() {
         "the runner's name bound"
     );
 }
+
+/// Each reason the pool's model provider can't be reached ends the run with its own code,
+/// so each client says what to do: start a local provider, check a remote one's address, or
+/// check this computer's network (DEC-163 addendum 8).
+#[test]
+fn each_unreached_provider_ends_the_run_with_its_own_code() {
+    use crate::research::runner::Unreached;
+    let line = || "the engine's line".to_owned();
+    assert_eq!(
+        unreached_code(&Unreached::Loopback(line())),
+        PROVIDER_UNREACHABLE
+    );
+    assert_eq!(
+        unreached_code(&Unreached::Remote(line())),
+        REMOTE_PROVIDER_UNREACHABLE
+    );
+    assert_eq!(unreached_code(&Unreached::Offline(line())), NO_NETWORK);
+}

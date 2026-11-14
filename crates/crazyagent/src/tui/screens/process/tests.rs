@@ -1813,6 +1813,8 @@ fn every_edit_with_ai_refusal_has_its_own_plain_sentence() {
         cleanup::OFF,
         cleanup::UNAVAILABLE,
         cleanup::PROVIDER_UNREACHABLE,
+        cleanup::REMOTE_PROVIDER_UNREACHABLE,
+        cleanup::NO_NETWORK,
     ];
     let mut sentences = std::collections::BTreeSet::new();
     for code in codes {
@@ -1827,6 +1829,22 @@ fn every_edit_with_ai_refusal_has_its_own_plain_sentence() {
         sentences.len(),
         codes.len(),
         "no two refusals share a sentence"
+    );
+}
+
+/// An Edit with AI run whose remote provider can't be reached says to check its address
+/// or the network, and one on a computer that finds no sign-in host says there is no
+/// network, each that nothing was sent, as the desktop does (DEC-163 addendum 8).
+#[test]
+fn an_edit_with_ai_run_on_a_remote_or_offline_provider_says_what_to_check() {
+    use crate::instruction_cleanup as cleanup;
+    assert_eq!(
+        message(cleanup::REMOTE_PROVIDER_UNREACHABLE),
+        "Can't reach this pool's model provider, so nothing was sent. Check its address or the network, or pick another account, then try again."
+    );
+    assert_eq!(
+        message(cleanup::NO_NETWORK),
+        "No network: can't find this pool's model provider, so nothing was sent. Check this computer's network connection, then try again."
     );
 }
 
