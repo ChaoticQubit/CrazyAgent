@@ -27,7 +27,7 @@ function plugin(folder, name) {
   }));
 }
 
-test("Settings, Plugins, Hooks lists the engine's hooks, refuses a folder without plugin.json, adds a plugin folder's hooks and turns one off and on", { timeout: 300000 }, async () => {
+test("Settings, Plugins says where each skill came from, and Hooks lists the engine's hooks, refuses a folder without plugin.json, adds a plugin folder's hooks and turns one off and on", { timeout: 300000 }, async () => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -42,6 +42,12 @@ test("Settings, Plugins, Hooks lists the engine's hooks, refuses a folder withou
   for (const folder of [runtime, evidence, home, join(home, ".codex"), projects]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   plugin(guard, "guard");
   plugin(bare, null);
+  const picked = join(root, "skills", "notes");
+  const imported = join(home, ".claude", "skills", "review");
+  for (const [folder, name] of [[picked, "notes"], [imported, "review"]]) {
+    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    writeFileSync(join(folder, "SKILL.md"), `---\nname: ${name}\ndescription: Checks where ${name} came from.\n---\n\nSteps.\n`);
+  }
   const provider = await closedPort();
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
@@ -71,6 +77,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     assert.equal((await value(bridge, "desktop_set_projects_home", { path: projects, generation: 2 })).outcome, "applied");
     const hooks = () => value(bridge, "desktop_plugin_hooks", { projectId: null });
     assert.deepEqual(await hooks(), [], "a new engine has no hooks");
+    const chosen = await value(bridge, "desktop_add_skill", { scope: { kind: "global" }, folder: picked });
+    assert.equal(chosen.origin, "Added by you", `a skill from a folder the owner picks: ${JSON.stringify(chosen)}`);
+    const brought = await value(bridge, "desktop_import_skill", { folder: imported, replace: null });
+    assert.equal(brought.skill.origin, "Imported from Claude Code", `a skill imported from ~/.claude/skills: ${JSON.stringify(brought)}`);
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
@@ -85,6 +95,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/settings/plugins` });
         await me.waitFor("the Plugins segments", (text) => text.includes("Skills") && text.includes("MCP servers") && text.includes("Hooks"), STEP_MS);
+        const skills = await me.waitFor("the skill rows with where each came from", (text) => text.includes("Added by you") && text.includes("Imported from Claude Code"), STEP_MS);
+        assert.ok(skills.includes("notes") && skills.includes("review") && skills.includes(".claude/skills/review"),
+          `each skill row names where the skill came from next to its folder:\n${skills.slice(0, 2000)}`);
+        await me.capture("skills-origin");
         await me.click("Hooks", "[role=radio]");
         const empty = await me.waitFor("the Hooks segment settled", (text) => ["No hooks yet", "Couldn't load hooks.", "Hooks isn't ready yet"].some((words) => text.includes(words)), STEP_MS);
         assert.ok(empty.includes("No hooks yet") && !empty.includes("Couldn't load hooks.") && !empty.includes("Hooks isn't ready yet"),

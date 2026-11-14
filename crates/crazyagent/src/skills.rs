@@ -238,6 +238,7 @@ mod tests {
             enabled: true,
             on_here: None,
             source: "/picked/notes".into(),
+            origin: "Added by you".into(),
             folder: folder.display().to_string(),
             version: 0,
             refused: None,

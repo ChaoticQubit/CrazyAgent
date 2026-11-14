@@ -296,6 +296,7 @@ mod tests {
             enabled: true,
             on_here: None,
             source: source.display().to_string(),
+            origin: "Imported from Claude Code".into(),
             folder: folder.display().to_string(),
             version: 0,
             refused: None,

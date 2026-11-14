@@ -7,7 +7,7 @@ export * from "./settings-tab.mjs";
 
 const FAILURE = { code: "engine_failed" };
 const skill = (patch) => ({ id: "skill-1", name: "frontend-design", description: "Builds polished front ends.", line: "Builds polished front ends.", scope: { kind: "global" }, scope_label: "For every project",
-  enabled: true, on_here: null, version: 0, source: "/Users/owner/skills/frontend-design", folder: "/Users/owner/plugins/skill-1", refused: null, ...patch });
+  enabled: true, on_here: null, version: 0, source: "/Users/owner/skills/frontend-design", origin: "Added by you", folder: "/Users/owner/plugins/skill-1", refused: null, ...patch });
 const server = (patch) => ({ id: "server-1", name: "github", scope: { kind: "global" }, scope_label: "For every project", spec: { kind: "stdio", command: "/bin/npx", args: ["-y", "github"] }, runs: "/bin/npx -y github",
   enabled: true, status: "approved", status_label: "Approved", problem: null, tools: ["echo", "anonymous"], checks: 1, secrets: [{ name: "GITHUB_TOKEN", saved: true }], on_here: null, version: 0, ...patch });
 const hook = (patch) => ({ id: "hook-1", name: "caveman", plugin: "caveman", event: "SessionStart", matcher: "startup", command: "node hook.js", scope: { kind: "global" }, scope_label: "For every project",
