@@ -5,6 +5,9 @@ use std::collections::HashMap;
 /// The separator between the parts of an account's limits line, the same as the desktop's.
 pub const PART_GAP: &str = " \u{b7} ";
 
+/// The words for free resets the last read found no count of, the same as the desktop's.
+pub const UNREAD: &str = "Free resets: couldn't read";
+
 /// The count an account holds now: its stored count, or none when not reported or when the
 /// next expiry has passed, which the engine also reads as not reported until read again.
 /// Inputs: the contract and now. Output: the resets, or none.
@@ -35,11 +38,14 @@ fn counted(count: u32) -> String {
 }
 
 /// An account's free resets in words, the same as the desktop's: "No free resets", "2 free
-/// resets (5-hour, weekly), next expires Nov 20", with "(may break)" for a private read, or
-/// "Free resets: not reported by <harness>". Inputs: the contract, now and the local offset in
-/// seconds. Output: the words, never a bare 0.
+/// resets (5-hour, weekly), next expires Nov 20", with "(may break)" for a private read, "Free
+/// resets: couldn't read" or "Free resets: not reported by <harness>". Inputs: the contract,
+/// now and the local offset in seconds. Output: the words, never a bare 0.
 pub fn resets_text(extras: &LimitExtras, now_ms: i64, offset: i64) -> String {
     let Some(resets) = live(extras, now_ms) else {
+        if extras.resets_unread {
+            return UNREAD.to_owned();
+        }
         return format!("Free resets: {}", extras.not_reported);
     };
     let label = if extras.may_break { " (may break)" } else { "" };
@@ -74,11 +80,12 @@ pub fn credits_text(extras: &LimitExtras) -> String {
 /// resets, credits and where to spend, with two not reported fields said once. Inputs: the
 /// contract, now and the local offset in seconds. Output: the line.
 pub fn extras_line(extras: &LimitExtras, now_ms: i64, offset: i64) -> String {
-    let mut parts = if live(extras, now_ms).is_none() && extras.credits.is_none() {
-        vec![format!("Free resets and credits: {}", extras.not_reported)]
-    } else {
-        vec![resets_text(extras, now_ms, offset), credits_text(extras)]
-    };
+    let mut parts =
+        if live(extras, now_ms).is_none() && !extras.resets_unread && extras.credits.is_none() {
+            vec![format!("Free resets and credits: {}", extras.not_reported)]
+        } else {
+            vec![resets_text(extras, now_ms, offset), credits_text(extras)]
+        };
     if let Spend::Elsewhere { place } = &extras.spend {
         parts.push(format!("Spend at {place}"));
     }

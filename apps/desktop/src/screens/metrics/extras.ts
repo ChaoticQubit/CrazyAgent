@@ -15,6 +15,9 @@ const KIND_WORDS: Record<ResetKind, string> = {
 /** The separator between the parts of an account's limits line, as the plan line uses. */
 export const PART_GAP = " · ";
 
+/** The words for free resets the last read found no count of, the same as the TUI's. */
+export const UNREAD = "Free resets: couldn't read";
+
 /** How long before the first look a gain still counts as new, in milliseconds: one usage
  * poll and some slack, so a reset that arrived while the app was closed for long is not
  * told as new. */
@@ -54,11 +57,12 @@ function kindWords(kind: string): string {
 }
 
 /** An account's free resets in words: "No free resets", "2 free resets (5-hour, weekly), next
- * expires Nov 20", with "(may break)" for a private read, or "Free resets: not reported by
- * <harness>". Inputs: the contract and now. Output: the words, never a bare 0. */
+ * expires Nov 20", with "(may break)" for a private read, "Free resets: couldn't read" or "Free
+ * resets: not reported by <harness>". Inputs: the contract and now. Output: the words, never a
+ * bare 0. */
 export function resetsText(extras: LimitExtras, nowMs: number): string {
   const resets = liveResets(extras, nowMs);
-  if (resets === null) return `Free resets: ${extras.not_reported}`;
+  if (resets === null) return extras.resets_unread === true ? UNREAD : `Free resets: ${extras.not_reported}`;
   const label = extras.may_break ? " (may break)" : "";
   if (resets.count === 0) return `No free resets${label}`;
   const counted = resets.count === 1 ? "1 free reset" : `${resets.count} free resets`;
@@ -78,7 +82,7 @@ export function creditsText(extras: LimitExtras): string {
  * contract and now. Output: the line. */
 export function extrasLine(extras: LimitExtras, nowMs: number): string {
   const resets = liveResets(extras, nowMs);
-  const parts = resets === null && extras.credits === null
+  const parts = resets === null && extras.resets_unread !== true && extras.credits === null
     ? [`Free resets and credits: ${extras.not_reported}`]
     : [resetsText(extras, nowMs), creditsText(extras)];
   if (extras.spend.kind === "elsewhere") parts.push(`Spend at ${extras.spend.place}`);

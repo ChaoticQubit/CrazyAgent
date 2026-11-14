@@ -439,10 +439,15 @@ pub fn codex_reset_credits(result: &Value, now_ms: i64) -> Field<Resets> {
     }
 }
 
+/// The reasons Claude's detail reply gives for an ineligible account that mean the account
+/// itself has no free resets, as Claude Code 2.1.322 names them; any other reason is about who
+/// asks or unknown, so it never reads as none.
+const NONE_FOR_ACCOUNT: [&str; 4] = ["no_grant", "seat", "tenure", "tier"];
+
 /// Reads free resets from Claude's private detail reply: the resets left summed over grants
 /// that are not paused and have not ended, and the earliest end of those after `now_ms`; an
-/// account that is not eligible holds none. Grant ids are never read. Inputs: the parsed body
-/// and the time. Output: the resets, or absent.
+/// ineligible account holds none only for a `NONE_FOR_ACCOUNT` reason. Grant ids are never
+/// read. Inputs: the parsed body and the time. Output: the resets, or absent.
 pub fn claude_resets(body: &Value, now_ms: i64) -> Field<Resets> {
     let detail = &body["cedar_ember"];
     if !detail.is_object() {
@@ -452,6 +457,10 @@ pub fn claude_resets(body: &Value, now_ms: i64) -> Field<Resets> {
         return Field::Absent;
     };
     if !eligible {
+        let reason = detail["ineligible_reason"].as_str();
+        if !reason.is_some_and(|reason| NONE_FOR_ACCOUNT.contains(&reason)) {
+            return Field::Absent;
+        }
         return Field::Known(Resets {
             count: 0,
             kinds: Vec::new(),
@@ -727,8 +736,9 @@ pub fn record_extras(
 }
 
 /// An account's stored extras at `now_ms`, a count whose next expiry has passed read as not
-/// reported. Inputs: the store, the account and the time. Output: the extras, empty for an
-/// account never read, or `usage_unavailable`.
+/// reported, and unread when the last resets read cleared the count. Inputs: the store, the
+/// account and the time. Output: the extras, empty for an account never read, or
+/// `usage_unavailable`.
 pub fn extras_of(
     db: &Connection,
     account: &CredentialRef,
@@ -742,13 +752,15 @@ pub fn extras_of(
         kinds: kinds_of(row.kinds.as_deref()),
         next_expiry_ms: row.expire_ms,
     });
+    let resets_unread = row.count.is_none() && row.resets_checked_ms.is_some();
+    assert!(!resets_unread || resets.is_none());
     Ok(StoredExtras {
         resets,
         credits: row.credits,
         resets_checked_ms: row.resets_checked_ms,
         credits_checked_ms: row.credits_checked_ms,
         resets_gained_ms: row.resets_gained_ms,
-        resets_unread: false,
+        resets_unread,
     })
 }
 
@@ -783,7 +795,7 @@ pub fn limit_extras(connection: &ModelConnection, stored: &StoredExtras) -> Limi
         resets_checked_ms: stored.resets_checked_ms.filter(|_| resets),
         credits_checked_ms: stored.credits_checked_ms.filter(|_| credits),
         resets_gained_ms: stored.resets_gained_ms.filter(|_| resets),
-        resets_unread: false,
+        resets_unread: stored.resets_unread && resets,
     }
 }
 
