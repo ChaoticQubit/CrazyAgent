@@ -341,7 +341,7 @@ struct NativeLead {
 /// A stand-in Claude Code that, run as a native lead, starts one process in a session of
 /// its own, as [`LEAVING_CLAUDE`] does, which opens `beats` in the lead's folder before it
 /// names itself and then adds a line to that open file every 50 ms, so a row sees whether
-/// it ran at all, even once the lead's folder is gone.
+/// it ran at all, whatever happens to the lead's folder.
 const BEATING_CLAUDE: &str = r#"#!/bin/sh
 /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $beat, ">>", $ARGV[1]) or die; select((select($beat), $| = 1)[0]); open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; while (1) { print $beat "x\n"; select(undef, undef, undef, 0.05) }' "$PWD/left.pid" "$PWD/beats" &
 exec /bin/sleep 300
@@ -353,8 +353,10 @@ impl NativeLead {
         Self::start_with(LEAVING_CLAUDE)
     }
 
-    /// Starts the lead with the stand-in `script` and waits for its process in a session of
-    /// its own. Input: the stand-in. Output: the lead.
+    /// Starts the lead with the stand-in `script`, its worktree recorded and its add settled
+    /// as the engine's launch does before the harness starts, so a later engine keeps that
+    /// worktree, and waits for its process in a session of its own. Input: the stand-in.
+    /// Output: the lead.
     fn start_with(script: &str) -> Self {
         use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
         let fixture = Fixture::new(1);
@@ -396,7 +398,7 @@ impl NativeLead {
             },
         };
         let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
-        let (_, plan, _) = runtime
+        let (root, plan, _) = runtime
             .prepare(
                 &fixture.setup,
                 id,
@@ -409,6 +411,15 @@ impl NativeLead {
             )
             .unwrap();
         assert!(plan.native, "the lead starts with native teammates");
+        let landing = agent_git_dir(&root, &plan.working_dir, Layout::Linked).unwrap();
+        runtime
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![id, PROJECT, landing[0], landing[1], landing[2]],
+            )
+            .unwrap();
+        spawn_ledger::settle(&runtime.connection, &runtime.root, id, true);
         let lead = AgentId::team(id).unwrap();
         let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
         let down = LeadServersDown {
@@ -474,7 +485,7 @@ impl NativeLead {
 
     /// How many beats a [`BEATING_CLAUDE`] lead's process wrote so far, read through the
     /// row's own link to its beats file in the fixture base, outside the lead's folders, so
-    /// the count stays once the engine removes the lead's folder.
+    /// the count does not depend on the lead's folder.
     fn beats(&self) -> usize {
         std::fs::read_to_string(&self.beats).map_or(0, |text| text.lines().count())
     }
