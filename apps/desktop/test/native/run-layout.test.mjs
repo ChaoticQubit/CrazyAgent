@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -230,4 +231,37 @@ test("owner_fixture prints why it failed, so a refused root names its reason in 
   const fixture = source("../../src-tauri/src/bin/owner_fixture.rs");
   assert.match(fixture, /Err\(error\) => \{\n\s+eprintln!\("native fixture failed: \{error\}"\);/);
   assert.doesNotMatch(fixture, /eprintln!\("native fixture failed"\)/);
+});
+
+/** Plants the refused-tool home in the system temp folder the gate uses, runs one check on it,
+ * then removes it. Input: the check, given the home and the installation prefix. */
+function inSystemTemp(check) {
+  const mask = process.umask(0o022);
+  const parent = mkdtempSync(join("/private/tmp", "ca-refused-"));
+  try {
+    const { home } = refusedToolHome({}, parent);
+    check(home, refusedGraphifyPaths(home).prefix);
+  } finally {
+    process.umask(mask);
+    rmSync(parent, { recursive: true });
+  }
+}
+
+test("the refused-tool plant in the system temp folder is changeable by the owner's group, never wheel or admin, whose members already act as root", { skip: process.platform !== "darwin" }, () => {
+  inSystemTemp((home, prefix) => {
+    for (const folder of [prefix, join(prefix, "bin")]) {
+      const { gid, mode } = statSync(folder);
+      assert.equal(mode & 0o777, 0o775, folder);
+      assert.equal(gid, process.getgid(), `${folder} carries the owner's group, not the temp folder's`);
+      assert.ok(![0, 80].includes(gid), `${folder} is not wheel or admin`);
+    }
+  });
+});
+
+test("the refused-tool plant's graphify reports its version through the planted Python, as setup's version check runs it", { skip: process.platform !== "darwin" }, () => {
+  inSystemTemp((home, prefix) => {
+    const tool = join(home, ".local/share/uv/tools/graphifyy/bin");
+    const words = execFileSync(join(prefix, "bin/python3.9"), [join(tool, "graphify"), "--version"], { env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 10000 });
+    assert.equal(words, "graphify 0.9.9\n");
+  });
 });
