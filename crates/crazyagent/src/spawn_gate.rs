@@ -332,10 +332,9 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
 
 /// Holds a free loopback TCP port that refuses every connect, as a model provider that is
 /// down: a listener takes one connection from this process and is closed, so the port stays
-/// in use by that connection with nothing listening on it. The system then gives the port to
-/// no port-0 bind and refuses a bind that names it without `SO_REUSEADDR`. Input: none.
-/// Output: the connection's two ends, which free the port when dropped, and the port.
-#[cfg(unix)]
+/// in use by that connection with nothing listening on it. On unix the system then gives the
+/// port to no port-0 bind and refuses a bind that names it without `SO_REUSEADDR`. Input:
+/// none. Output: the connection's two ends, which free the port when dropped, and the port.
 pub fn refusing_tcp_port() -> io::Result<([std::net::TcpStream; 2], u16)> {
     let listener = bind_tcp_std("127.0.0.1:0")?;
     let address = listener.local_addr()?;
@@ -344,6 +343,50 @@ pub fn refusing_tcp_port() -> io::Result<([std::net::TcpStream; 2], u16)> {
     drop(listener);
     assert_eq!(far.local_addr()?, address, "the kept end holds the port");
     Ok(([near, far], address.port()))
+}
+
+/// The loopback block [`free_low_tcp_port`] picks from: below the ports every system hands
+/// out by itself, below the 30000 up that Linux node services use, and below both systems'
+/// model proxy blocks.
+const LOW_PORTS: std::ops::RangeInclusive<u16> = 20_000..=28_999;
+const _: () = {
+    use crate::sandbox::OWNER_PORTS;
+    use crate::sandbox::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
+    assert!(*LOW_PORTS.start() > 1024 && *LOW_PORTS.end() < 30_000);
+    assert!(*LOW_PORTS.end() < PICKED_PORTS_START);
+    assert!(*LOW_PORTS.end() < *PROXY_PORTS.start() || *LOW_PORTS.start() > *PROXY_PORTS.end());
+    let mut index = 0;
+    while index < OWNER_PORTS.len() {
+        assert!(OWNER_PORTS[index] < *LOW_PORTS.start() || OWNER_PORTS[index] > *LOW_PORTS.end());
+        index += 1;
+    }
+};
+
+/// Picks a loopback TCP port nothing holds now from [`LOW_PORTS`], so no port-0 bind or
+/// outbound connect takes it before the caller's own listener, such as a sandboxed child's,
+/// binds it. Each call in this process starts past the port the last call gave. Input: none.
+/// Output: the port, which nothing holds when this returns.
+pub fn free_low_tcp_port() -> io::Result<u16> {
+    static NEXT: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
+    let span = u32::from(LOW_PORTS.end() - LOW_PORTS.start()) + 1;
+    let mut next = NEXT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let first = next.unwrap_or_else(|| std::process::id().wrapping_mul(2_654_435_761) % span);
+    for step in 0..span {
+        let offset = (first + step) % span;
+        let port = LOW_PORTS.start() + u16::try_from(offset).map_err(io::Error::other)?;
+        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        if bind_tcp_std_exclusive(address).is_ok() {
+            assert!(LOW_PORTS.contains(&port));
+            *next = Some((offset + 1) % span);
+            return Ok(port);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AddrInUse,
+        "every low loopback port is taken",
+    ))
 }
 
 /// Binds a blocking UDP socket inside the gate.
