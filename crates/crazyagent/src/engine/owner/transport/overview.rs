@@ -689,6 +689,7 @@ mod tests {
         assert!(fits(&text));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_overview_is_read_and_changed_over_the_owner_socket_one_text_a_frame() {
         use super::super::usage_tests::Usage;
