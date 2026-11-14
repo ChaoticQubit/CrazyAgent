@@ -76,15 +76,17 @@ pub fn validate_git(repo: &str, commit: &str, path: Option<&str>) -> Result<(), 
 }
 
 fn git_env(setup: &Path) -> Vec<(&'static str, OsString)> {
-    vec![
+    let mut env = vec![
         ("PATH", OsString::from("/usr/bin:/bin")),
         ("HOME", setup.as_os_str().to_owned()),
-        ("GIT_CONFIG_NOSYSTEM", "1".into()),
         ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
-        ("GIT_TERMINAL_PROMPT", "0".into()),
         ("GIT_ASKPASS", "/usr/bin/false".into()),
         ("LANG", "C".into()),
-    ]
+    ];
+    env.extend(
+        crate::research::runner::GIT_SAFE_ENV.map(|(name, value)| (name, OsString::from(value))),
+    );
+    env
 }
 
 fn git(

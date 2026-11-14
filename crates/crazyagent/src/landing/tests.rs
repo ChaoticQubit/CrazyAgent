@@ -3595,6 +3595,25 @@ fn the_owners_ignore_file_is_the_global_setting_else_the_default_and_only_a_real
 }
 
 #[test]
+fn the_onboarding_listing_keeps_out_what_the_owners_global_ignore_file_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, repo) = (root.join("home"), root.join("repo"));
+    for folder in [&home, &repo] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+    git_in(&home, &repo, &["init", "-q", "--template="]);
+    write(&home.join(".config/git/ignore"), "scratch.txt\n");
+    write(&repo.join("scratch.txt"), "the owner's own notes\n");
+    write(&repo.join("notes.md"), "# Notes\n");
+
+    let kept = crate::onboarding::draft::kept_out(&repo);
+
+    assert_eq!(kept, Some(vec!["scratch.txt".to_owned()]));
+}
+
+#[test]
 fn files_the_owners_global_ignore_file_excludes_stay_out_of_change_sets() {
     let configured: [(&str, Option<&str>); 2] = [
         (".config/git/ignore", None),

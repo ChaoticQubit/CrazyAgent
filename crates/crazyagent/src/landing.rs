@@ -16,6 +16,8 @@ pub(crate) mod evidence;
 mod flow;
 #[cfg(unix)]
 mod git;
+#[cfg(unix)]
+pub(crate) use git::owner_excludes_setting;
 mod hold;
 #[cfg(unix)]
 pub(crate) mod ide;
@@ -65,6 +67,13 @@ const LOCAL_ROOTS: [&str; 10] = [
     "/mnt/",
     "/opt/",
 ];
+
+/// The owner's global ignore file setting for an engine git. Other systems: none, as before,
+/// since landing's git reads are Unix only. Takes nothing. Returns none. Written, not tested.
+#[cfg(not(unix))]
+pub(crate) fn owner_excludes_setting() -> Option<String> {
+    None
+}
 
 /// Replaces every control character but newline and tab, and every bidirectional
 /// override or isolate, with U+FFFD, then shows every other character a reviewer cannot

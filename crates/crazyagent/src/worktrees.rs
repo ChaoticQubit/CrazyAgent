@@ -295,11 +295,8 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_ATTR_NOSYSTEM", "1")
+        .envs(crate::research::runner::GIT_SAFE_ENV)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
