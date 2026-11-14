@@ -15,6 +15,7 @@ const ADDED = "- Sells juice";
 const RIVAL = "- Berry Barn: cheaper, no delivery.";
 const INSTALL = "cargo install fruit-stand";
 const OWNER_LINE = "- Written by the owner";
+const OUTSIDE = "Ships pears by post";
 const TABS = ["quick_info", "features", "competitors", "install_and_use"];
 
 /** The reply of one writing run: the four tabs in the fenced form the engine reads, with one
@@ -303,5 +304,19 @@ test("A tab file CrazyAgent can't show says why, names the file and has no Edit"
     assert.equal(await button(page, "Edit"), null, "a blocked tab has no Edit");
     assert.equal(await refusal(bridge, "desktop_overview_save", { projectId: project, tab: "features", text: "- x\n", version: "" }), "overview_tab_blocked");
     await me.capture("blocked");
+  }, 1, CODEX);
+});
+
+test("A tab file changed outside CrazyAgent shows its new text when its tab is picked again, with no new visit", { timeout: 900000 }, async (t) => {
+  await onEngine(t, "ca-overview-outside-", async ({ project, me, page, site, bridge }) => {
+    await openTab(page, site, me, project, "Features");
+    await written(bridge, project);
+    await me.waitFor("the written Features tab from a read after the run, so the page polls no more", (seen) => seen.includes("Sells fruit") && /Checked /.test(seen));
+    writeFileSync(join(await repoOf(bridge, project), ".crazyagent", "overview", "features.md"), `- ${OUTSIDE}\n`);
+    await until(bridge, project, "the engine never read the outside edit", (read) => (tabOf(read, "features").text ?? "").includes(OUTSIDE), STEP_MS);
+    await me.click("Quick info", "[role=tab]");
+    await me.click("Features", "[role=tab]");
+    await me.waitFor("the outside edit on the Features tab", (text) => text.includes(OUTSIDE));
+    await me.capture("outside-edit");
   }, 1, CODEX);
 });
