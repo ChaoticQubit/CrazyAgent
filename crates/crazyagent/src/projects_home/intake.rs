@@ -1,4 +1,7 @@
-use super::platform::{Stamp, copy_link, permission_bits, private_folder, stamp, writable_folder};
+use super::platform::{
+    SourceFolder, Stamp, copy_link, open_seen, permission_bits, private_folder, set_mode, stamp,
+    writable_folder,
+};
 use super::{AddMode, holds_owner_home, owner_home, path_text, real_folder, refused};
 use crate::engine::EngineError;
 use std::collections::HashMap;
@@ -393,8 +396,9 @@ impl Verified {
             return fs::read_link(path)
                 .is_ok_and(|target| fs::read_link(&copy).is_ok_and(|kept| kept == target));
         }
-        fs::symlink_metadata(&copy).is_ok_and(|kept| kept.is_file())
-            && same_bytes(path, &copy).unwrap_or(false)
+        fs::symlink_metadata(&copy).is_ok_and(|kept| {
+            kept.is_file() && same_bytes((path, metadata), (copy.as_path(), &kept)).unwrap_or(false)
+        })
     }
 }
 
@@ -478,7 +482,9 @@ fn restore(copy: &Path, source: &Path) -> Result<(), EngineError> {
 }
 
 /// Copies back every entry of `copy` missing from `target` without following
-/// links, then gives each folder of `target` its counterpart's permissions.
+/// links, each read through the folder of `copy` it was listed in and written only where
+/// nothing holds its path, then gives each folder of `target` its counterpart's
+/// permissions, never through a link put at its path (RV-DS241-40, RV-DS241-41).
 /// Input: a complete copy and a partly deleted folder it was copied from.
 /// Output: Ok, or the refusal codes of `copy_tree`; entries still in `target`
 /// are kept for `verify_tree` to compare.
@@ -488,38 +494,39 @@ fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
         return copy_tree(copy, target);
     }
     let root = fs::symlink_metadata(copy).map_err(failed)?;
-    let mut folders = vec![(target.to_path_buf(), root)];
-    let mut stack = vec![(copy.to_path_buf(), target.to_path_buf(), 0usize)];
+    let mut folders = vec![(target.to_path_buf(), root.clone())];
+    let mut stack = vec![(copy.to_path_buf(), target.to_path_buf(), 0usize, root)];
     let mut entries = 0u64;
-    while let Some((from, to, depth)) = stack.pop() {
-        for entry in fs::read_dir(&from).map_err(failed)? {
+    while let Some((from, to, depth, seen)) = stack.pop() {
+        let below = from
+            .strip_prefix(copy)
+            .map_err(|_| refused("home_copy_failed"))?;
+        let folder = SourceFolder::open(copy, below, &seen).map_err(failed)?;
+        for name in folder.names().map_err(failed)? {
             entries += 1;
             if entries > ENTRIES_MAX {
                 return Err(refused("home_copy_too_large"));
             }
-            let entry = entry.map_err(failed)?;
-            let path = entry.path();
-            let kept = to.join(entry.file_name());
+            let name = name.map_err(failed)?;
+            let path = from.join(&name);
+            let kept = to.join(&name);
             let metadata = fs::symlink_metadata(&path).map_err(failed)?;
             let kind = metadata.file_type();
             match fs::symlink_metadata(&kept) {
                 Err(_) if kind.is_symlink() => {
-                    let link = fs::read_link(&path).map_err(failed)?;
+                    let link = folder.read_link(&name).map_err(failed)?;
                     copy_link(&path, link, &kept).map_err(failed)?;
                 }
                 Err(_) if kind.is_dir() => copy_tree(&path, &kept)?,
-                Err(_) => {
-                    fs::copy(&path, &kept).map_err(failed)?;
-                    fs::set_permissions(&kept, metadata.permissions()).map_err(failed)?;
-                }
+                Err(_) => folder.copy_file(&name, &metadata, &kept).map_err(failed)?,
                 Ok(existing)
                     if kind.is_dir() && existing.is_dir() && !existing.file_type().is_symlink() =>
                 {
                     if depth + 1 > DEPTH_MAX {
                         return Err(refused("home_copy_too_large"));
                     }
-                    folders.push((kept.clone(), metadata));
-                    stack.push((path, kept, depth + 1));
+                    folders.push((kept.clone(), metadata.clone()));
+                    stack.push((path, kept, depth + 1, metadata));
                 }
                 Ok(_) => {}
             }
@@ -528,7 +535,7 @@ fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
     for (folder, wanted) in folders.into_iter().rev() {
         let now = fs::symlink_metadata(&folder).map_err(failed)?;
         if permission_bits(&now) != permission_bits(&wanted) {
-            fs::set_permissions(&folder, wanted.permissions()).map_err(failed)?;
+            set_mode(&folder, wanted.permissions()).map_err(failed)?;
         }
     }
     assert!(entries <= ENTRIES_MAX);
@@ -782,6 +789,10 @@ fn gitdir_inside(root: &Path, folder: &Path, file: &Path) -> bool {
 }
 
 /// Copies a folder tree without following links, leaving out each entry `skip` names.
+/// Each source folder is opened from the root with no link followed and each entry is read
+/// through it, so an entry swapped for a link meanwhile is refused, never read through
+/// (RV-DS241-41), and each file is written only where nothing holds its path, so a link
+/// copied under a name that differs only in case is never written through (RV-DS241-40).
 /// Inputs: a real source folder, a target path that does not exist yet, the skip rule
 /// and the bounds. Output: as `copy_tree`.
 fn copy_entries(
@@ -804,18 +815,22 @@ fn copy_entries(
     fs::create_dir(target).map_err(failed)?;
     private_folder(target).map_err(failed)?;
     let mut folders = vec![(target.to_path_buf(), root.permissions())];
-    let mut stack = vec![(source.to_path_buf(), target.to_path_buf(), 0usize)];
+    let mut stack = vec![(source.to_path_buf(), target.to_path_buf(), 0usize, root)];
     let mut entries = 0u64;
-    while let Some((from, to, depth)) = stack.pop() {
-        for entry in fs::read_dir(&from).map_err(failed)? {
+    while let Some((from, to, depth, seen)) = stack.pop() {
+        let below = from
+            .strip_prefix(source)
+            .map_err(|_| refused("home_copy_failed"))?;
+        let folder = SourceFolder::open(source, below, &seen).map_err(failed)?;
+        for name in folder.names().map_err(failed)? {
             entries += 1;
             if entries > bounds.entries {
                 return Err(refused("home_copy_too_large"));
             }
             tally.go_on()?;
-            let entry = entry.map_err(failed)?;
-            let path = entry.path();
-            let copy = to.join(entry.file_name());
+            let name = name.map_err(failed)?;
+            let path = from.join(&name);
+            let copy = to.join(&name);
             let metadata = fs::symlink_metadata(&path).map_err(failed)?;
             let kind = metadata.file_type();
             if skip(&path, kind) {
@@ -825,7 +840,7 @@ fn copy_entries(
                 return Err(still_in_icloud("copy"));
             }
             if kind.is_symlink() {
-                let link = fs::read_link(&path).map_err(failed)?;
+                let link = folder.read_link(&name).map_err(failed)?;
                 copy_link(&path, link, &copy).map_err(failed)?;
             } else if kind.is_dir() {
                 if depth + 1 > bounds.depth {
@@ -834,10 +849,9 @@ fn copy_entries(
                 fs::create_dir(&copy).map_err(failed)?;
                 private_folder(&copy).map_err(failed)?;
                 folders.push((copy.clone(), metadata.permissions()));
-                stack.push((path, copy, depth + 1));
+                stack.push((path, copy, depth + 1, metadata));
             } else if kind.is_file() {
-                fs::copy(&path, &copy).map_err(failed)?;
-                fs::set_permissions(&copy, metadata.permissions()).map_err(failed)?;
+                folder.copy_file(&name, &metadata, &copy).map_err(failed)?;
             } else {
                 return Err(refused("home_copy_special_file"));
             }
@@ -901,7 +915,7 @@ fn verify_within(
             return Err(differs());
         }
         if a.is_file() {
-            if a.len() != b.len() || !same_bytes(&left, &right)? {
+            if a.len() != b.len() || !same_bytes((left.as_path(), &a), (right.as_path(), &b))? {
                 return Err(differs());
             }
             verified.record(&left, &a);
@@ -935,8 +949,16 @@ fn verify_within(
     Ok(verified)
 }
 
-fn same_bytes(left: &Path, right: &Path) -> Result<bool, EngineError> {
-    let open = |path: &Path| fs::File::open(path).map_err(|_| refused("home_copy_unverified"));
+/// Compares the bytes of a source file and its copy, each opened only as the file its
+/// listing showed and never through a link at its path (RV-DS241-41). Inputs: each path
+/// with its listed metadata. Output: whether the bytes match, or `home_copy_unverified`.
+fn same_bytes(
+    left: (&Path, &fs::Metadata),
+    right: (&Path, &fs::Metadata),
+) -> Result<bool, EngineError> {
+    let open = |(path, seen): (&Path, &fs::Metadata)| {
+        open_seen(path, seen).map_err(|_| refused("home_copy_unverified"))
+    };
     let (mut a, mut b) = (open(left)?, open(right)?);
     let mut first = vec![0u8; CHUNK_BYTES];
     let mut second = vec![0u8; CHUNK_BYTES];

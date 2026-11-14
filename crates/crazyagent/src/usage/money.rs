@@ -55,6 +55,26 @@ pub struct MoneySettings {
     pub project_limits: ProjectLimits,
 }
 
+/// One of the owner's dollars and Metrics page choices with its new value. A save names only
+/// the choice the owner changed, so the other two stay as stored and a change another window
+/// made to them is kept. An unknown choice, value or extra key does not decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "field",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum MoneyChoice {
+    MainNumber(MainNumber),
+    Prices(PriceSource),
+    ProjectLimits(ProjectLimits),
+}
+
+const PROJECT_LIMITS_UPSERT: &str =
+    "INSERT INTO usage_project_limits (singleton,choice) VALUES (1,?1)
+         ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice";
+
 /// What the charts and tables show for dollars over a range.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,9 +141,9 @@ pub fn write(db: &Connection, settings: MoneySettings) -> Result<(), EngineError
     stored
 }
 
-/// Writes the two rows the owner's choices live in, inside the caller's savepoint. Inputs:
-/// the store and the settings. Output: done, or `usage_unavailable`.
-fn store(db: &Connection, settings: MoneySettings) -> Result<(), EngineError> {
+/// The stored words of the three choices. Input: the settings. Output: main_number, prices
+/// and the project limits choice as the store keeps them.
+fn stored_words(settings: MoneySettings) -> [&'static str; 3] {
     let main = match settings.main_number {
         MainNumber::Dollars => "dollars",
         MainNumber::Tokens => "tokens",
@@ -132,22 +152,59 @@ fn store(db: &Connection, settings: MoneySettings) -> Result<(), EngineError> {
         PriceSource::Bundled => "bundled",
         PriceSource::Off => "off",
     };
+    let limits = match settings.project_limits {
+        ProjectLimits::Hidden => "hidden",
+        ProjectLimits::Shown => "shown",
+    };
+    [main, source, limits]
+}
+
+/// Stores one of the owner's choices in one statement and leaves the other two as stored, the
+/// defaults when none was stored yet. Inputs: the store and the choice. Output: done, or
+/// `usage_unavailable`.
+pub fn write_one(db: &Connection, choice: MoneyChoice) -> Result<(), EngineError> {
+    let mut fresh = MoneySettings::default();
+    let column = match choice {
+        MoneyChoice::MainNumber(value) => {
+            fresh.main_number = value;
+            "main_number"
+        }
+        MoneyChoice::Prices(value) => {
+            fresh.prices = value;
+            "prices"
+        }
+        MoneyChoice::ProjectLimits(value) => {
+            fresh.project_limits = value;
+            let [_, _, limits] = stored_words(fresh);
+            db.execute(PROJECT_LIMITS_UPSERT, params![limits])
+                .map_err(storage)?;
+            return Ok(());
+        }
+    };
+    let [main, source, _] = stored_words(fresh);
+    db.execute(
+        &format!(
+            "INSERT INTO usage_money (singleton,main_number,prices) VALUES (1,?1,?2)
+             ON CONFLICT(singleton) DO UPDATE SET {column}=excluded.{column}"
+        ),
+        params![main, source],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Writes the two rows the owner's choices live in, inside the caller's savepoint. Inputs:
+/// the store and the settings. Output: done, or `usage_unavailable`.
+fn store(db: &Connection, settings: MoneySettings) -> Result<(), EngineError> {
+    let [main, source, limits] = stored_words(settings);
     db.execute(
         "INSERT INTO usage_money (singleton,main_number,prices) VALUES (1,?1,?2)
          ON CONFLICT(singleton) DO UPDATE SET main_number=excluded.main_number,prices=excluded.prices",
         params![main, source],
     )
     .map_err(storage)?;
-    let limits = match settings.project_limits {
-        ProjectLimits::Hidden => "hidden",
-        ProjectLimits::Shown => "shown",
-    };
-    db.execute(
-        "INSERT INTO usage_project_limits (singleton,choice) VALUES (1,?1)
-         ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice",
-        params![limits],
-    )
-    .map_err(storage)?;
+    db.execute(PROJECT_LIMITS_UPSERT, params![limits])
+        .map_err(storage)?;
     Ok(())
 }
 

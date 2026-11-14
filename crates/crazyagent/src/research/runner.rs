@@ -42,7 +42,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
 pub(crate) const GIT: &str = "/usr/bin/git";
-pub(crate) const GIT_SAFE: [&str; 10] = [
+/// The settings every engine git runs with, whatever the repository configures: no hooks,
+/// fsmonitor or pager, no submodule recursion, no transport and no signature program, so a
+/// log or show that meets a signed commit in any armor runs `/usr/bin/false`, never a
+/// program the repository names (RV-DS241-39), and no signature check on a log or show at
+/// all, so a repository that turns `log.showSignature` on gets no check output mixed into
+/// what the engine reads (RV-DS241-39 r2 F2).
+pub(crate) const GIT_SAFE: [&str; 18] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
@@ -53,6 +59,14 @@ pub(crate) const GIT_SAFE: [&str; 10] = [
     "submodule.recurse=false",
     "-c",
     "protocol.allow=never",
+    "-c",
+    "gpg.program=/usr/bin/false",
+    "-c",
+    "gpg.x509.program=/usr/bin/false",
+    "-c",
+    "gpg.ssh.program=/usr/bin/false",
+    "-c",
+    "log.showSignature=false",
 ];
 #[cfg(unix)]
 const GIT_CONFIG_LISTING_BYTES_MAX: usize = 64 * 1024;
@@ -1728,10 +1742,13 @@ impl ResearchRunner {
             ));
         }
         let agent = self.state.join("agents").join(run.name);
-        if fs::symlink_metadata(&agent).is_ok() {
-            return Err(RunError::Invalid(RUN_NAME_USED.into()));
+        match fs::DirBuilder::new().mode(0o700).create(&agent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(RunError::Invalid(RUN_NAME_USED.into()));
+            }
+            Err(error) => return Err(error.into()),
         }
-        private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
         self.register_usage(
@@ -2677,11 +2694,18 @@ fn repository_setup(root: &Path) -> RepositorySetup {
 }
 
 /// Runs one git command the engine makes in a project folder it created: the safe git
-/// options, a cleared environment with a private HOME and TMPDIR, no system config, no input
-/// or output, bounded by SETUP_TIMEOUT. Inputs: the folder, the private home and the
-/// arguments. Output: whether git succeeded, or the spawn or wait failure.
+/// options, a cleared environment with a private HOME and TMPDIR, no system or global
+/// config, so no hook a config in that home names runs (RV-DS241-39 r2 F1), no input
+/// or output, in a process group of its own so SETUP_TIMEOUT stops git and what it started.
+/// Inputs: the folder, the private home and the arguments. Output: whether git succeeded,
+/// or the spawn or wait failure.
 pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<bool, RunError> {
     let mut command = Command::new(GIT);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command
         .args(GIT_SAFE)
         .args(arguments)
@@ -2691,6 +2715,7 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         .env("TMPDIR", tmp)
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -2780,9 +2805,11 @@ pub(crate) fn add_worktree_at(
 
 /// Adds a detached git worktree at `worktree` in the project folder, running git under the
 /// sandbox's profile, which it installs at `profile` as the only one that may make a
-/// checkout's `.git` link; the caller confines and reinstalls it before any agent runs. The
-/// worktree is added without a checkout and made local-only, and the checkout blanks every
-/// filter driver its own effective config names. Takes the sandbox, profile path, worktree.
+/// checkout's `.git` link; the caller confines and reinstalls it before any agent runs. A
+/// project whose effective config names a hook gets no worktree, refused before the first
+/// git write. The worktree is added without a checkout and made local-only, and the
+/// checkout blanks every filter driver its own effective config names. Takes the sandbox,
+/// profile path, worktree.
 #[cfg(unix)]
 pub(crate) fn add_worktree(
     sandbox: &ProjectSandbox,
@@ -2813,6 +2840,7 @@ pub(crate) fn add_worktree_at(
     }
     fs::create_dir_all(&worktrees)?;
     sandbox.clone().adding_worktrees().install(profile)?;
+    hook_refusal(&filter_keys(sandbox, profile, sandbox.project_root())?)?;
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
@@ -2820,7 +2848,9 @@ pub(crate) fn add_worktree_at(
     setup_step(&mut add, "worktree_add_failed")?;
     crate::worktrees::lock_remotes(sandbox.project_root(), worktree)
         .map_err(|_| RunError::Setup("worktree_remote_lock_failed"))?;
-    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
+    let keys = filter_keys(sandbox, profile, worktree)?;
+    hook_refusal(&keys)?;
+    let overrides = filter_overrides(&keys)?;
     let mut checkout = worktree_git(sandbox, profile);
     checkout
         .args(&overrides)
@@ -2864,6 +2894,7 @@ pub(crate) fn add_teammate_worktree_at(
         ));
     }
     let _setup = repository_setup(sandbox.project_root());
+    hook_refusal(&filter_keys(sandbox, profile, sandbox.project_root())?)?;
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout"]);
     match base {
@@ -2871,7 +2902,9 @@ pub(crate) fn add_teammate_worktree_at(
         None => add.arg(worktree).arg(branch),
     };
     setup_step(&mut add, "worktree_add_failed")?;
-    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
+    let keys = filter_keys(sandbox, profile, worktree)?;
+    hook_refusal(&keys)?;
+    let overrides = filter_overrides(&keys)?;
     let mut checkout = worktree_git(sandbox, profile);
     checkout
         .args(&overrides)
@@ -3125,11 +3158,12 @@ fn setup_debug_stderr() -> Stdio {
     Stdio::null()
 }
 
-/// The git arguments that list, NUL-separated, the filter keys of every config file git
-/// reads, the only keys [`filter_overrides`] uses, so the listing grows with a repository's
-/// filter drivers and never with its branches or remotes. The `-c` adds one key of the
-/// engine's own, which git reads last: a listing that ends with it ([`FILTER_KEYS_END`])
-/// is whole, and git always has a key to print, so no exit status stands for "no filter".
+/// The git arguments that list, NUL-separated, the filter and hook keys of every config
+/// file git reads: the filter keys [`filter_overrides`] uses and the hook keys
+/// [`listed_hook`] refuses, so the listing grows with a repository's filter drivers and
+/// hooks and never with its branches or remotes. The `-c` adds one key of the engine's own,
+/// which git reads last: a listing that ends with it ([`FILTER_KEYS_END`]) is whole, and
+/// git always has a key to print, so no exit status stands for "no filter".
 #[cfg(unix)]
 pub(crate) const FILTER_KEYS: [&str; 7] = [
     "-c",
@@ -3138,8 +3172,52 @@ pub(crate) const FILTER_KEYS: [&str; 7] = [
     "--name-only",
     "-z",
     "--get-regexp",
-    "^filter\\.",
+    "^(filter|hook)\\.",
 ];
+
+/// The most bytes of a hook key an owner line shows.
+#[cfg(unix)]
+const HOOK_KEY_SHOWN_MAX: usize = 128;
+
+/// The first config hook key a [`FILTER_KEYS`] listing names: `hook.<name>.<key>`, which
+/// git 2.54 runs whatever `core.hooksPath` says, so no engine git may run in a repository
+/// whose config holds one (RV-DS241-39 r2 F1). Takes the NUL-separated keys
+/// [`listed_filter_keys`] gives. Returns the key as an owner line shows it, at most
+/// [`HOOK_KEY_SHOWN_MAX`] bytes with every byte outside letters, digits, `.`, `-` and `_`
+/// shown as `?`, or None when the listing names no hook.
+#[cfg(unix)]
+pub(crate) fn listed_hook(keys: &[u8]) -> Option<String> {
+    let key = keys
+        .split(|byte| *byte == 0)
+        .find(|key| key.starts_with(b"hook."))?;
+    let shown: String = key
+        .iter()
+        .copied()
+        .take(HOOK_KEY_SHOWN_MAX)
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_') {
+                char::from(byte)
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    assert!(shown.starts_with("hook.") && shown.len() <= HOOK_KEY_SHOWN_MAX);
+    Some(shown)
+}
+
+/// Refuses a worktree setup in a repository whose effective config names a hook, before
+/// any git that could run it. Takes the NUL-separated keys a [`FILTER_KEYS`] listing gave.
+/// Returns unit, or `Invalid` with the owner's line naming the first hook key.
+#[cfg(unix)]
+fn hook_refusal(keys: &[u8]) -> Result<(), RunError> {
+    match listed_hook(keys) {
+        None => Ok(()),
+        Some(key) => Err(RunError::Invalid(format!(
+            "the project's Git config sets {key}, a hook the engine never runs; remove it from the repository's config, then start again"
+        ))),
+    }
+}
 
 /// The key the `-c` of [`FILTER_KEYS`] sets with its NUL, as git prints it at the end of a
 /// whole listing.
@@ -3273,12 +3351,14 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<Ended, RunError> {
     }
 }
 
-/// Stops a setup command that ran past its limit: kills the process group it leads,
-/// reaps it and waits for the group to empty. Takes the command's process.
+/// Stops a setup command that ran past its limit: kills the process group it leads and
+/// the command itself, so one that leads no group still ends, reaps it and waits for the
+/// group to empty. Takes the command's process.
 #[cfg(unix)]
 fn stop_timed_out(child: &mut Child) {
     let group = child.id();
     kill_group(group);
+    let _ = child.kill();
     let _ = child.wait();
     await_group_exit(group);
 }
@@ -6459,6 +6539,90 @@ mod tests {
         );
     }
 
+    /// The engine's setup git runs unconfined with the agent's own tmp folder as its home,
+    /// so a global config an agent planted there names hooks that git 2.54 runs whatever
+    /// `core.hooksPath` says. The project repository the setup makes runs none of them
+    /// (RV-DS241-39 r2 F1).
+    #[test]
+    fn engine_setup_git_runs_no_hook_a_config_in_its_home_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (project, tmp, markers) = (
+            base.join("project"),
+            base.join("tmp"),
+            base.join("markers"),
+        );
+        for folder in [&project, &tmp, &markers] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let mut config = String::new();
+        for event in [
+            "pre-commit",
+            "commit-msg",
+            "post-commit",
+            "reference-transaction",
+            "post-index-change",
+        ] {
+            config.push_str(&format!(
+                "[hook \"{event}\"]\n\tcommand = touch '{}'\n\tevent = {event}\n",
+                markers.join(event).display()
+            ));
+        }
+        fs::write(tmp.join(".gitconfig"), config).unwrap();
+        ensure_repository(&project, &tmp).unwrap();
+        assert!(project.join(".git").is_dir());
+        let ran: Vec<String> = fs::read_dir(&markers)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(ran, Vec::<String>::new());
+    }
+
+    /// A project whose own git config names hooks, which git 2.54 runs whatever
+    /// `core.hooksPath` says, gets no agent worktree: the setup refuses before its first git
+    /// write with a line naming the key, and no hook runs (RV-DS241-39 r2 F1).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_project_whose_config_names_a_hook_gets_no_agent_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (project, home, tmp, profiles) = (
+            base.join("project"),
+            base.join("home"),
+            base.join("tmp"),
+            base.join("profiles"),
+        );
+        for folder in [&project, &home, &tmp, &profiles] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let worktrees = project.join("worktrees");
+        fs::create_dir_all(&worktrees).unwrap();
+        for (name, event) in [("x", "post-index-change"), ("y", "post-checkout")] {
+            let marker = worktrees.join(format!("hook-{name}"));
+            for (key, value) in [
+                ("command", format!("touch '{}'", marker.display())),
+                ("event", event.to_owned()),
+            ] {
+                let key = format!("hook.{name}.{key}");
+                assert!(engine_git(&project, &tmp, &["config", &key, &value]).unwrap());
+            }
+        }
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = profiles.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let refused = add_worktree(&sandbox, &profile, &worktrees.join("agent-1")).unwrap_err();
+        let RunError::Invalid(line) = &refused else {
+            panic!("{refused:?}");
+        };
+        assert!(line.contains("hook.x.command"), "{line}");
+        for name in ["x", "y"] {
+            let marker = worktrees.join(format!("hook-{name}"));
+            assert!(fs::symlink_metadata(&marker).is_err(), "{name}");
+        }
+    }
+
     /// Many agent worktrees add at once, each project in its own sandbox under one profile,
     /// the way a run of the team tests drives the setup path. Every add must succeed; a
     /// refusal here is the load flake the real-git setup fixes.
@@ -6577,6 +6741,57 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(20));
         let pid = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
         assert!(rustix::process::test_kill_process_group(pid).is_err());
+    }
+
+    /// A setup command that leads no process group of its own is still stopped at its
+    /// limit: the stop ends the command itself, not only a group it does not lead
+    /// (RV-DS241-28).
+    #[test]
+    fn a_bounded_setup_command_that_leads_no_group_is_stopped_at_its_limit() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = crate::spawn_gate::spawn(&mut command).unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            wait_bounded(child, Duration::from_millis(200)).unwrap(),
+            Ended::TimedOut
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The engine's own git leads a process group of its own, so the setup time limit
+    /// stops git and every program git started (RV-DS241-28).
+    #[test]
+    fn engine_git_leads_its_own_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let folder = base.join("folder");
+        let tmp = base.join("tmp");
+        for made in [&folder, &tmp] {
+            fs::create_dir_all(made).unwrap();
+        }
+        let ran = engine_git(
+            &folder,
+            &tmp,
+            &["-c", "alias.group=!ps -o pgid= -p $$ > group.txt", "group"],
+        )
+        .unwrap();
+        assert!(ran);
+        let group: i32 = fs::read_to_string(folder.join("group.txt"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(group > 1);
+        assert_ne!(group, rustix::process::getpgrp().as_raw_nonzero().get());
     }
 
     /// A worktree add that git refuses names its own step, not the generic setup refusal:

@@ -12,10 +12,13 @@ function Messages({ id, helper, error }: { id: string; helper?: ReactNode; error
   </>;
 }
 
-function Counter({ value, maxLength, counterAt }: { value: string; maxLength?: number; counterAt?: number }) {
-  const length = [...value].length;
+/** The near-limit counter under a field, in characters, or in UTF-8 bytes for a limit the
+ * engine counts in bytes. Inputs: the value, the limit, the threshold and whether it counts
+ * bytes. Output: the counter, or nothing below the threshold. */
+function Counter({ value, maxLength, counterAt, countBytes = false }: { value: string; maxLength?: number; counterAt?: number; countBytes?: boolean }) {
+  const length = countBytes ? new TextEncoder().encode(value).length : [...value].length;
   if (!maxLength || counterAt === undefined || length < counterAt) return null;
-  return <span className="counter-text" aria-live="polite">{length.toLocaleString("en-US")} of {maxLength.toLocaleString("en-US")} characters</span>;
+  return <span className="counter-text" aria-live="polite">{length.toLocaleString("en-US")} of {maxLength.toLocaleString("en-US")} {countBytes ? "bytes" : "characters"}</span>;
 }
 
 /** A labelled one-line text input with helper text, an error linked by aria-describedby and
@@ -43,9 +46,10 @@ export function TextField({ id, label, value, onValue, helper, error, maxLength,
 }
 
 /** A labelled multi-line text area with helper, error and an optional near-limit counter.
- * Inputs: id, label, value, change handler, rows, helper, error, max length, counter threshold
- * and whether a label elsewhere on the page already names it. */
-export function TextArea({ id, label, value, onValue, rows = 3, helper, error, maxLength, counterAt, readOnly = false, labelOutside = false }: {
+ * Inputs: id, label, value, change handler, rows, helper, error, max length, counter threshold,
+ * whether the counter counts UTF-8 bytes and whether a label elsewhere on the page already
+ * names it. */
+export function TextArea({ id, label, value, onValue, rows = 3, helper, error, maxLength, counterAt, countBytes = false, readOnly = false, labelOutside = false }: {
   id: string;
   label: string;
   value: string;
@@ -55,6 +59,7 @@ export function TextArea({ id, label, value, onValue, rows = 3, helper, error, m
   error?: string;
   maxLength?: number;
   counterAt?: number;
+  countBytes?: boolean;
   readOnly?: boolean;
   labelOutside?: boolean;
 }) {
@@ -62,7 +67,7 @@ export function TextArea({ id, label, value, onValue, rows = 3, helper, error, m
     {!labelOutside && <label htmlFor={id}>{label}</label>}
     <textarea id={id} className="textarea" rows={rows} value={value} maxLength={maxLength} readOnly={readOnly} aria-invalid={error ? true : undefined}
       aria-describedby={describedBy(id, helper, error)} onChange={(event) => onValue(event.target.value)} />
-    <Counter value={value} maxLength={maxLength} counterAt={counterAt} />
+    <Counter value={value} maxLength={maxLength} counterAt={counterAt} countBytes={countBytes} />
     <Messages id={id} helper={helper} error={error} />
   </div>;
 }

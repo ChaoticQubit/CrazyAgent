@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { chmodSync, constants, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -41,6 +41,24 @@ export function refusedToolHome(env = process.env, parent = existsSync("/private
   return { home, prepared: false };
 }
 
+/** The HOME the first-run-harnesses-node suite gives its app and engine: a new real folder in
+ * the system temp folder, since the resolver never looks under the checkout, holding an owner's
+ * npm Codex in `.npm-global/bin`, a HOME folder the engine's harness search reads, that asks
+ * for node, with no Node anywhere. A prepared home is refused, so the stand-in never lands in
+ * one. Inputs: the environment and the parent folder. Output: { home, prepared: false }. */
+export function nodeSuiteHome(env = process.env, parent = existsSync("/private/tmp") ? "/private/tmp" : "/tmp") {
+  if (env.CRAZYAGENT_E2E_HOME) throw new Error("the first-run-harnesses-node suite plants a Codex in its home and needs a fresh one: unset CRAZYAGENT_E2E_HOME");
+  const home = realpathSync(mkdtempSync(join(parent, "can-")));
+  const bin = join(home, ".npm-global/bin");
+  mkdirSync(bin, { recursive: true, mode: 0o755 });
+  for (const folder of [join(home, ".npm-global"), bin]) chmodSync(folder, 0o755);
+  const codex = join(bin, "codex");
+  writeFileSync(codex, "#!/usr/bin/env node\n", { flag: "wx", mode: 0o755 });
+  chmodSync(codex, 0o755);
+  assert.equal(statSync(codex).mode & 0o7777, 0o755, "the stand-in Codex is an executable only this user can change");
+  return { home, prepared: false };
+}
+
 /** Where the refused-tool suite's graphify lives in its home: the Python installation whose
  * folders the group can change, and the 0777 file a link in it points out to.
  * Input: the home. Output: { prefix, outside }. */
@@ -49,16 +67,19 @@ export function refusedGraphifyPaths(home) {
 }
 
 /** Lays out a graphify the resolver finds and passes over, as uv lays out a tool: `.local/bin`
- * links to the tool's script, whose Python links to a real `python3.9` (a copy of `/bin/bash`) in
- * an installation the group can change (0775); a link in it points out to a 0777 file. Any path
- * already there fails. Input: the new home. Output: the fixture's paths. */
+ * links to the tool's script, whose Python links to a real `python3.9` in an installation the
+ * owner's group can change (0775); a link in it points out to a 0777 file. The installation takes
+ * the owner's primary group, since a folder made in `/private/tmp` inherits wheel, which the
+ * resolver trusts, and `python3.9` is a small `/bin/sh` script, since a copied Apple program is
+ * stopped outside its system folder. Any path already there fails. Input: the new home. Output:
+ * the fixture's paths. */
 function plantRefusedGraphify(home) {
   const paths = refusedGraphifyPaths(home);
   const real = join(paths.prefix, "bin");
   const tool = join(home, ".local/share/uv/tools/graphifyy/bin");
   const bin = join(home, ".local/bin");
   for (const folder of [real, tool, bin, dirname(paths.outside)]) mkdirSync(folder, { recursive: true, mode: 0o755 });
-  copyFileSync("/bin/bash", join(real, "python3.9"), constants.COPYFILE_EXCL);
+  writeFileSync(join(real, "python3.9"), `#!/bin/sh\nexec /bin/sh "$@"\n`, { flag: "wx", mode: 0o755 });
   chmodSync(join(real, "python3.9"), 0o755);
   symlinkSync(join(real, "python3.9"), join(tool, "python"));
   const script = join(tool, "graphify");
@@ -68,7 +89,11 @@ function plantRefusedGraphify(home) {
   writeFileSync(paths.outside, "kept", { flag: "wx" });
   chmodSync(paths.outside, 0o777);
   symlinkSync(paths.outside, join(paths.prefix, "outside"));
-  for (const folder of [real, paths.prefix]) chmodSync(folder, 0o775);
+  for (const folder of [real, paths.prefix]) {
+    chownSync(folder, process.getuid(), process.getgid());
+    chmodSync(folder, 0o775);
+    assert.ok(![0, 80].includes(statSync(folder).gid), `${folder} must carry a group others share, never wheel or admin`);
+  }
   return paths;
 }
 

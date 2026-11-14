@@ -646,14 +646,20 @@ pub(super) fn sweep_home(db: &Connection) -> Result<usize, EngineError> {
 /// starts, it first turns each mark of a project still there into "A delete was cut short" on
 /// its banner, continuing nothing, then forgets every plan an earlier engine process left.
 /// The marks settle in their own write and the plans after, so a settle that fails is tried
-/// again whole: a mark already ended is not ended twice. Inputs: the connection and the
-/// exchange. Output: Ok, or any SQLite or ledger failure.
-pub(super) fn delete_settle(db: &Connection, exchange: Option<u64>) -> Result<(), EngineError> {
+/// again whole: a mark already ended is not ended twice. Inputs: the connection, the
+/// exchange and whether its folders reached the Trash ([`delete_mark::settle`]). Output: Ok,
+/// or any SQLite or ledger failure.
+pub(super) fn delete_settle(
+    db: &Connection,
+    exchange: Option<u64>,
+    trashed: bool,
+) -> Result<(), EngineError> {
+    assert!(exchange.is_some() || !trashed);
     let exchange = exchange.map(i64::try_from).transpose().map_err(error)?;
     let tx = db.unchecked_transaction().map_err(error)?;
     match exchange {
         Some(exchange) => {
-            delete_mark::settle(&tx, exchange)?;
+            delete_mark::settle(&tx, exchange, trashed)?;
         }
         None => {
             let shown = delete_mark::start(&tx)?;

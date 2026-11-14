@@ -792,6 +792,42 @@ async fn a_delete_cut_short_by_an_engine_stop_waits_for_keep_or_delete_again() {
     engine.stop().await;
 }
 
+/// A trigger that refuses removing any project's records, as a Delete everything's record
+/// refused after its folders reached the Trash.
+#[cfg(target_os = "macos")]
+const RECORD_REFUSED: &str = "CREATE TRIGGER project_record_refused BEFORE DELETE ON projects
+     BEGIN SELECT RAISE(ABORT, 'project_record_refused'); END;";
+
+/// RV-DS241-65: a Delete everything whose record is refused after its folders reached the
+/// Trash keeps the project's records and shows "A delete was cut short" on its banner, so the
+/// owner can keep the project or delete it again, and its plan is gone. Runs on macOS only,
+/// the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_delete_whose_record_is_refused_after_the_trash_move_shows_it_was_cut_short() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    std::fs::remove_dir_all(&folder).unwrap();
+    write_db(&engine, RECORD_REFUSED);
+    let response = owner.delete_project(project.clone(), NAME.into(), 2).await;
+    assert!(
+        !matches!(&response, Ok(OwnerResponse::Applied { operation })
+            if operation.result == OwnerResult::Applied),
+        "{response:?}"
+    );
+    assert_eq!(kept(&engine), 2, "the refused record keeps the project");
+    let shown = delete_notices(&owner, &project).await;
+    assert_eq!(shown.len(), 1, "the project shows its delete cut short");
+    assert_eq!(serde_json::to_value(shown[0].shown).unwrap(), "unknown");
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_delete_pending"),
+        0
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// Remove from dashboard of a project whose delete was cut short ends its mark with its
 /// records, so a project added again under the same id starts with no "A delete was cut
 /// short". Runs on macOS only, the one platform that offers Delete everything (DEC-118).

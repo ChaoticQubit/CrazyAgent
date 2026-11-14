@@ -1333,9 +1333,10 @@ impl Wizard {
         }
     }
 
-    /// Reads the file or the folder's files at a typed path and checks them against the limits.
-    /// Takes the typed path; `~` means the home folder.
-    /// Returns the documents to add, or a plain sentence saying what to fix.
+    /// Reads the file or the folder's own files at a typed path and checks them against the
+    /// limits: a folder's links are skipped, never followed, and each file goes by its path
+    /// as listed, so the engine's no-follow open sees it (RV-DS241-106). Takes the typed path;
+    /// `~` means the home folder. Returns the documents to add, or a plain sentence to fix.
     pub fn documents_at(&self, typed: &str) -> Result<Vec<Document>, String> {
         let typed = typed.trim();
         if typed.is_empty() {
@@ -1346,15 +1347,18 @@ impl Wizard {
         let metadata =
             std::fs::metadata(&path).map_err(|_| format!("No file or folder at {typed}."))?;
         let files = if metadata.is_dir() {
-            let mut entries: Vec<PathBuf> = std::fs::read_dir(&path)
-                .map_err(|_| format!("Could not read the folder {typed}."))?
-                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            let unread = |_| format!("Could not read the folder {typed}.");
+            let folder = std::fs::canonicalize(&path).map_err(unread)?;
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(&folder)
+                .map_err(unread)?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                .map(|entry| entry.path())
                 .filter(|entry| {
-                    entry.is_file()
-                        && !entry
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .is_some_and(|name| name.starts_with('.'))
+                    !entry
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with('.'))
                         && allowed(entry)
                 })
                 .collect();
@@ -1366,13 +1370,13 @@ impl Wizard {
             }
             entries
         } else {
-            vec![path]
+            vec![std::fs::canonicalize(&path).map_err(|_| format!("No file at {typed}."))?]
         };
         let (count, per_file, total) = self.document_limits();
         let mut used: u64 = self.documents.iter().map(|d| d.bytes).sum();
         let mut added: Vec<Document> = Vec::new();
-        for file in files {
-            let real = std::fs::canonicalize(&file).map_err(|_| format!("No file at {typed}."))?;
+        for real in files {
+            assert!(real.is_absolute());
             let name = real
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1387,7 +1391,7 @@ impl Wizard {
                     "{name} is not a supported type. Add PDF, Markdown, text, CSV, Word or image files."
                 ));
             }
-            let bytes = std::fs::metadata(&real)
+            let bytes = std::fs::symlink_metadata(&real)
                 .map_err(|_| format!("Could not read {name}."))?
                 .len();
             if bytes > per_file {

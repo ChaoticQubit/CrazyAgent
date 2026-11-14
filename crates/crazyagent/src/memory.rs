@@ -627,6 +627,22 @@ pub(crate) fn hidden_text(text: &str) -> bool {
     (0..chars.len()).any(|at| hidden_at(&chars, at))
 }
 
+/// Takes out every character [`hidden_text`] finds; line breaks, tabs and an emoji
+/// selector or joiner inside an emoji stay. Input: the text. Output: the text without them.
+pub(crate) fn without_hidden(text: &str) -> String {
+    if !hidden_text(text) {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let out: String = (0..chars.len())
+        .filter(|at| !hidden_at(&chars, *at))
+        .map(|at| chars[at])
+        .collect();
+    assert!(out.len() < text.len());
+    assert!(!hidden_text(&out));
+    out
+}
+
 /// Shows every character hidden_text finds as a visible escape, `\uXXXX` or `\u{XXXXX}`,
 /// the same form the desktop shows. Input: the text. Output: the text with those characters
 /// escaped; line breaks, tabs and an emoji selector or joiner inside an emoji stay as they are.

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { chooseHome, clearWebStore, createRunDirectories, refusedGraphifyPaths, refusedToolHome, runProjects } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, nodeSuiteHome, refusedGraphifyPaths, refusedToolHome, runProjects } from "./run-layout.mjs";
 import { createNavigationReader } from "./refresh-barrier.mjs";
 
 const source = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
@@ -182,10 +183,85 @@ test("the refused-tool suite's home lies outside the checkout, holds a uv graphi
     assert.equal(statSync(join(tool, "graphify")).mode & 0o777, 0o755);
     assert.equal(readFileSync(join(tool, "graphify"), "utf8"), `#!${join(tool, "python")}\necho 'graphify 0.9.9'\n`);
     const runner = source("./run.mjs");
-    assert.match(runner, /suite === "refused-tool" \? refusedToolHome\(\) : chooseHome\(join\(evidence, "home"\)\)/);
+    assert.match(runner, /suite === "refused-tool" \? refusedToolHome\(\)\n\s+: suite === "first-run-harnesses-node" \? nodeSuiteHome\(\) : chooseHome\(join\(evidence, "home"\)\)/);
     assert.match(source("./model-access.wdio.conf.mjs"), /"refused-tool": "refused-tool\.e2e\.mjs"/);
   } finally {
     process.umask(mask);
     rmSync(parent, { recursive: true });
   }
+});
+
+test("run.mjs never writes under the fixture engine's root, which owner_fixture serve needs empty, and the Node suite's Codex lives in its home", () => {
+  const runner = source("./run.mjs");
+  const start = runner.indexOf("function engineEnvironment(");
+  assert.ok(start > 0, "run.mjs builds the engine's environment in engineEnvironment");
+  const environment = runner.slice(start, runner.indexOf("\n}\n", start));
+  assert.doesNotMatch(environment, /engineRoot|mkdirSync|writeFileSync/, "owner_fixture serve refuses a root that is not empty");
+  assert.doesNotMatch(runner, /join\(engineRoot, "setup"|plantNodeCodex/, "the fixture's catalog never searches the engine prefix under /tmp");
+  assert.match(runner, /: suite === "first-run-harnesses-node" \? nodeSuiteHome\(\) :/);
+});
+
+test("the Node suite's home lies outside the checkout, holds an owner's npm Codex that asks for node and nothing else, and is never a prepared home", () => {
+  const mask = process.umask(0o022);
+  const parent = mkdtempSync(join(tmpdir(), "ca-node-"));
+  try {
+    assert.throws(() => nodeSuiteHome({ CRAZYAGENT_E2E_HOME: parent }, parent), /needs a fresh one: unset CRAZYAGENT_E2E_HOME/);
+    assert.deepEqual(readdirSync(parent), [], "a refused prepared home plants nothing");
+    const { home, prepared } = nodeSuiteHome({}, parent);
+    assert.equal(prepared, false);
+    assert.equal(home, realpathSync(home), "the home is real, so the Codex lies strictly below it as the engine sees it");
+    assert.equal(dirname(home), realpathSync(parent));
+    assert.equal(statSync(home).mode & 0o777, 0o700);
+    assert.deepEqual(readdirSync(home), [".npm-global"], "no Node and no other harness folder in the home");
+    assert.deepEqual(readdirSync(join(home, ".npm-global")), ["bin"]);
+    assert.deepEqual(readdirSync(join(home, ".npm-global/bin")), ["codex"]);
+    const codex = join(home, ".npm-global/bin/codex");
+    assert.equal(lstatSync(codex).isFile(), true);
+    assert.equal(statSync(codex).mode & 0o777, 0o755);
+    for (const folder of [join(home, ".npm-global"), join(home, ".npm-global/bin")]) assert.equal(statSync(folder).mode & 0o777, 0o755, folder);
+    assert.equal(readFileSync(codex, "utf8"), "#!/usr/bin/env node\n");
+    assert.match(source("./model-access.wdio.conf.mjs"), /"first-run-harnesses-node": "first-run-harnesses-node\.e2e\.mjs"/);
+  } finally {
+    process.umask(mask);
+    rmSync(parent, { recursive: true });
+  }
+});
+
+test("owner_fixture prints why it failed, so a refused root names its reason in the engine log", () => {
+  const fixture = source("../../src-tauri/src/bin/owner_fixture.rs");
+  assert.match(fixture, /Err\(error\) => \{\n\s+eprintln!\("native fixture failed: \{error\}"\);/);
+  assert.doesNotMatch(fixture, /eprintln!\("native fixture failed"\)/);
+});
+
+/** Plants the refused-tool home in the system temp folder the gate uses, runs one check on it,
+ * then removes it. Input: the check, given the home and the installation prefix. */
+function inSystemTemp(check) {
+  const mask = process.umask(0o022);
+  const parent = mkdtempSync(join("/private/tmp", "ca-refused-"));
+  try {
+    const { home } = refusedToolHome({}, parent);
+    check(home, refusedGraphifyPaths(home).prefix);
+  } finally {
+    process.umask(mask);
+    rmSync(parent, { recursive: true });
+  }
+}
+
+test("the refused-tool plant in the system temp folder is changeable by the owner's group, never wheel or admin, whose members already act as root", { skip: process.platform !== "darwin" }, () => {
+  inSystemTemp((home, prefix) => {
+    for (const folder of [prefix, join(prefix, "bin")]) {
+      const { gid, mode } = statSync(folder);
+      assert.equal(mode & 0o777, 0o775, folder);
+      assert.equal(gid, process.getgid(), `${folder} carries the owner's group, not the temp folder's`);
+      assert.ok(![0, 80].includes(gid), `${folder} is not wheel or admin`);
+    }
+  });
+});
+
+test("the refused-tool plant's graphify reports its version through the planted Python, as setup's version check runs it", { skip: process.platform !== "darwin" }, () => {
+  inSystemTemp((home, prefix) => {
+    const tool = join(home, ".local/share/uv/tools/graphifyy/bin");
+    const words = execFileSync(join(prefix, "bin/python3.9"), [join(tool, "graphify"), "--version"], { env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 10000 });
+    assert.equal(words, "graphify 0.9.9\n");
+  });
 });

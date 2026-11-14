@@ -1010,7 +1010,16 @@ fn a_run_closed_after_its_time_or_whose_project_was_removed_no_longer_holds_its_
 fn the_name_of_a_status_run_is_read_back_as_its_own_projects_only() {
     let demo = ProjectId::new("demo").unwrap();
     let name = run::run_name(&demo, NOW);
-    assert_eq!(name, format!("roadmap-status-demo-{NOW}"));
+    let hash = run_stem(&demo)
+        .strip_prefix("roadmap-status-demo-")
+        .unwrap()
+        .to_owned();
+    assert_eq!(hash.len(), 16);
+    assert!(
+        hash.bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    );
+    assert_eq!(name, format!("roadmap-status-demo-{hash}-{NOW}"));
     assert!(names_run(&demo, &name));
     for other in ["demo-2", "dem", "demonstration"] {
         let other = ProjectId::new(other).unwrap();
@@ -1047,6 +1056,30 @@ fn the_name_of_a_status_run_is_read_back_as_its_own_projects_only() {
         "job-1-1",
     ] {
         assert!(!names_run(&demo, odd), "{odd}");
+    }
+}
+
+/// Two projects whose ids differ only in bytes a state name cannot hold, or only after the
+/// bytes a state name has room for, never read each other's status runs as their own, so a
+/// delete of one leaves the other's running check alone (RV-DS241-45).
+#[test]
+fn projects_whose_ids_a_state_name_cannot_tell_apart_keep_their_status_runs_apart() {
+    let long = "a".repeat(100);
+    let pairs = [
+        ("v1.2".to_owned(), "v1_2".to_owned()),
+        ("team:one".to_owned(), "team_one".to_owned()),
+        (format!("{long}-first"), format!("{long}-other")),
+    ];
+    for (one, two) in pairs {
+        let one = ProjectId::new(one).unwrap();
+        let two = ProjectId::new(two).unwrap();
+        assert_ne!(run_stem(&one), run_stem(&two), "{one:?} {two:?}");
+        for (project, other) in [(&one, &two), (&two, &one)] {
+            let name = run::run_name(project, NOW);
+            assert!(name.len() <= RUN_NAME_BYTES_MAX, "{name}");
+            assert!(names_run(project, &name), "{name}");
+            assert!(!names_run(other, &name), "{other:?} {name}");
+        }
     }
 }
 
@@ -1134,7 +1167,8 @@ fn a_status_run_names_only_its_own_folder_and_profile_for_removal() {
 
 /// S4-2 r1 M1: Delete everything records the project's roadmap status runs as engine files
 /// and removes each run's folder and Seatbelt profile; the runs of a project whose id only
-/// starts the same, a name in no run's shape and a research job's run all stay.
+/// starts the same, a name in no run's shape, a name in the 2.4.0 shape that carries no
+/// hash of the id and a research job's run all stay.
 #[test]
 fn delete_everything_removes_the_projects_roadmap_status_runs_and_no_other_projects() {
     let root = tempfile::tempdir().unwrap();
@@ -1142,12 +1176,14 @@ fn delete_everything_removes_the_projects_roadmap_status_runs_and_no_other_proje
     let agents = base.join("research").join("agents");
     let profiles = base.join("research").join("profiles");
     std::fs::create_dir_all(&profiles).unwrap();
-    let own = "roadmap-status-demo-1794000000000";
+    let started = 1_794_000_000_000;
+    let own = run::run_name(&ProjectId::new("demo").unwrap(), started);
     let others = [
-        "roadmap-status-demo-2-1794000000000",
-        "roadmap-status-demonstration-1794000000000",
-        "roadmap-status-demo-later",
-        "job-7-1",
+        run::run_name(&ProjectId::new("demo-2").unwrap(), started),
+        run::run_name(&ProjectId::new("demonstration").unwrap(), started),
+        "roadmap-status-demo-later".to_owned(),
+        format!("roadmap-status-demo-{started}"),
+        "job-7-1".to_owned(),
     ];
     for name in others.iter().chain([&own]) {
         std::fs::create_dir_all(agents.join(name).join("home")).unwrap();
@@ -1163,14 +1199,14 @@ fn delete_everything_removes_the_projects_roadmap_status_runs_and_no_other_proje
     };
     let files = plan.engine_files(&[]);
     let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, [own]);
+    assert_eq!(names, [own.as_str()]);
     assert_eq!(
         crate::projects_home::remove_engine_files(&plan.database, &files),
-        [own.to_owned()]
+        [own.clone()]
     );
-    assert!(std::fs::symlink_metadata(agents.join(own)).is_err());
+    assert!(std::fs::symlink_metadata(agents.join(&own)).is_err());
     assert!(std::fs::symlink_metadata(profiles.join(format!("{own}.sb"))).is_err());
-    for name in others {
+    for name in &others {
         assert!(agents.join(name).join("prompt.md").is_file(), "{name}");
         assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
     }

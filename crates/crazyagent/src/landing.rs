@@ -28,6 +28,8 @@ mod owner;
 pub mod owner_edit;
 #[cfg(unix)]
 mod retire;
+#[cfg(all(test, unix))]
+pub(crate) mod signature_tests;
 #[cfg(unix)]
 mod store;
 #[cfg(unix)]

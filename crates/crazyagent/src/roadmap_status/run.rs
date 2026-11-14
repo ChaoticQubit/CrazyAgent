@@ -1,6 +1,6 @@
 use super::*;
 use crate::research::runner::{
-    ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError,
+    RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError,
 };
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -81,6 +81,58 @@ impl RunLeft {
 /// removes: a status run's or an Overview writing run's. Input: the name. Output: the answer.
 fn run_head(name: &str) -> bool {
     name.starts_with(RUN_NAME_HEAD) || name.starts_with(crate::project_overview::RUN_NAME_HEAD)
+}
+
+/// The most entries of the research agents folder one start sweep reads.
+#[cfg(unix)]
+const SWEPT_MAX: usize = 4096;
+
+/// Removes every status run folder, with its profile, that an engine before 2.4.1 left in
+/// the research state: named [`RUN_NAME_HEAD`], the project id and the start time, with no
+/// run-id hash, a shape no run of this engine makes and Delete everything no longer
+/// matches (RV-DS241-45 r2). It runs at engine start, before any status run, and reads at
+/// most [`SWEPT_MAX`] entries. Input: the absolute research state folder. Output: how many
+/// runs it removed.
+#[cfg(unix)]
+pub(crate) fn sweep_unhashed(state: &Path) -> usize {
+    assert!(state.is_absolute());
+    let Ok(listing) = std::fs::read_dir(state.join("agents")) else {
+        return 0;
+    };
+    let mut swept = 0;
+    for entry in listing.take(SWEPT_MAX).flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(RUN_NAME_HEAD) || hashed(name) {
+            continue;
+        }
+        let profile = state.join("profiles").join(format!("{name}.sb"));
+        RunLeft::at(entry.path(), profile, Instant::now()).remove();
+        swept += 1;
+    }
+    assert!(swept <= SWEPT_MAX);
+    swept
+}
+
+/// Whether a status run name ends as this engine writes it: `-`, the run-id hash in
+/// lowercase hex, `-` and the start time in plain digits. Input: the name. Output: the
+/// answer.
+#[cfg(unix)]
+fn hashed(name: &str) -> bool {
+    let Some((stem, time)) = name.rsplit_once('-') else {
+        return false;
+    };
+    let Some((_, hash)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    (1..=RUN_TIME_DIGITS_MAX).contains(&time.len())
+        && time.bytes().all(|byte| byte.is_ascii_digit())
+        && hash.len() == 2 * RUN_ID_HASH_BYTES
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// How a check ended without a status: with words for the owner, or too early to say, so it
@@ -196,7 +248,8 @@ pub(crate) fn asked(
         .join(format!("{}.sb", run.name));
     let fresh = std::fs::symlink_metadata(&folder).is_err();
     let ending = runner.run_read_only(run, stop);
-    let left = (fresh && !matches!(ending, Err(RunError::Uncertain(_))))
+    let taken = matches!(&ending, Err(RunError::Invalid(reason)) if reason == RUN_NAME_USED);
+    let left = (fresh && !taken && !matches!(ending, Err(RunError::Uncertain(_))))
         .then(|| RunLeft::at(folder, profile, Instant::now()));
     (ending, left)
 }
