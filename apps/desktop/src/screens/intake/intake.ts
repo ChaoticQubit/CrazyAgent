@@ -1,12 +1,12 @@
-import { ADD_WARNINGS, measuredLine } from "../../api-intake";
+import { ADD_WARNINGS, intakeCopy, measuredLine } from "../../api-intake";
 import type { Result } from "../../api";
 import { receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
-  AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntentReceipt,
+  AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt,
   MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
-import type { IconName, Tone } from "../../ui";
+import { formatRoute, type IconName, type SidebarProject, type Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { draftOf, formatBytes, researchChoices, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
@@ -210,6 +210,124 @@ export function icloudProgressLine(progress: IcloudProgress | null): string {
   if (progress === null || progress.total === 0) return "Downloading from iCloud...";
   if (progress.done > progress.total) throw new Error(`iCloud progress done ${progress.done} is past total ${progress.total}`);
   return `Downloading from iCloud: ${progress.done} of ${progress.total} files`;
+}
+
+/** How often the app reads the engine's intake job while one runs. */
+export const INTAKE_POLL_MS = 1000;
+
+/** Whether the intake job is still at work: downloading, copying or clearing. Input: the job,
+ * if any. Output: true while it runs. */
+export function jobRunning(job: IntakeJob | null): boolean {
+  const state = job?.state.state;
+  return state === "downloading" || state === "copying" || state === "clearing";
+}
+
+/** How long until the app reads the intake job again: every second while one runs, else at
+ * the found-folder pace, so a job another client started shows up too. Input: the last read
+ * job. Output: the wait in ms. */
+export function intakePollMs(job: IntakeJob | null): number {
+  return jobRunning(job) ? INTAKE_POLL_MS : FOUND_POLL_MS;
+}
+
+/** What the intake job does now or how it ended, with the folder's name and the counts as files
+ * land. Input: the job. Output: one sentence. */
+export function jobLine(job: IntakeJob): string {
+  const name = folderName(job.source);
+  const now = job.state;
+  if (jobRunning(job) && job.stopping) return `Stopping ${name}...`;
+  switch (now.state) {
+    case "downloading": {
+      const { done, total } = now.progress;
+      if (done > total) throw new Error(`intake download done ${done} is past total ${total}`);
+      return total === 0 ? `Downloading ${name} from iCloud...` : `Downloading ${name} from iCloud: ${done} of ${total} files`;
+    }
+    case "copying": {
+      const verb = job.mode === "move" ? "Moving" : "Copying";
+      if (now.checked > 0) return `Checking the copy of ${name}: ${now.checked} files checked`;
+      return now.copied > 0 ? `${verb} ${name}: ${now.copied} files copied` : `${verb} ${name}...`;
+    }
+    case "clearing":
+      return `Removing ${name} from its old place...`;
+    case "done":
+      return `${name} is in your projects folder. Set it up from Home.`;
+    case "cancelled":
+      return `Adding ${name} stopped. Nothing was moved or copied.`;
+    case "failed":
+      return `${name}: ${intakeCopy(now.code)}`;
+    case "needs_answer":
+      return `${name} needs your answer before it is ${job.mode === "move" ? "moved" : "copied"}.`;
+  }
+}
+
+/** What Home offers for the intake job. Stop while it downloads or copies; nothing while it
+ * clears, since that never stops; Retry only when the folder did not land, since a failure while
+ * clearing means it is already in the projects folder; an answer for a soft refusal; Dismiss
+ * once it ended. Input: the job. Output: the actions in button order. */
+export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dismiss")[] {
+  const now = job.state;
+  switch (now.state) {
+    case "downloading":
+    case "copying":
+      return job.stopping ? [] : ["stop"];
+    case "clearing":
+      return [];
+    case "done":
+      return ["dismiss"];
+    case "failed":
+      return now.phase === "clearing" ? ["dismiss"] : ["retry", "dismiss"];
+    case "cancelled":
+      return ["retry", "dismiss"];
+    case "needs_answer":
+      return ["answer", "dismiss"];
+  }
+}
+
+/** The sentence for a job that just ended, said once as a toast and a notification: only when
+ * the read before showed the same job running. Inputs: the read before and the read now.
+ * Output: the job's line, or null. */
+export function jobEndLine(before: IntakeJob | null, after: IntakeJob | null): string | null {
+  if (before === null || after === null || before.id !== after.id) return null;
+  return jobRunning(before) && !jobRunning(after) ? jobLine(after) : null;
+}
+
+/** The most folders not set up the sidebar lists; the rest stay on Home. */
+export const SIDEBAR_FOLDERS_MAX = 16;
+
+/** The sidebar rows for folders that are not projects yet, each opening Home: the folder the
+ * intake job is adding while it runs, then the folders found in the projects folder and not set
+ * up, by name, at most `SIDEBAR_FOLDERS_MAX`, none that is already a listed project. Inputs: the
+ * found read, the intake job and the listed project ids. Output: the rows. */
+export function sidebarFolders(found: Loaded<FoundProject[]>, job: IntakeJob | null, projects: ReadonlySet<string>): SidebarProject[] {
+  const href = formatRoute({ name: "home" });
+  const adding = job !== null && jobRunning(job) ? folderName(job.source) : null;
+  const rows: SidebarProject[] = adding === null || job === null ? [] : [{ id: `intake:${job.id}`, name: adding, note: "Adding...", href }];
+  const folders = found.kind === "ok" ? found.value : [];
+  const fresh = folders.filter((folder) => folder.state === "found" && folder.name !== adding && !(folder.project_id && projects.has(folder.project_id)))
+    .sort((left, right) => left.name.localeCompare(right.name)).slice(0, SIDEBAR_FOLDERS_MAX);
+  rows.push(...fresh.map((folder) => ({ id: `found:${folder.path}`, name: folder.name, note: "Not set up", href })));
+  if (rows.length > SIDEBAR_FOLDERS_MAX + 1) throw new Error(`sidebar folders ${rows.length} past ${SIDEBAR_FOLDERS_MAX + 1}`);
+  return rows;
+}
+
+const ANSWER_ISSUES: Record<string, AnywayIssue> = {
+  home_move_worktrees: "worktrees",
+  home_copy_linked_checkout: "linked_checkout",
+  home_copy_too_large: "too_many",
+};
+
+const OVERRIDE_ORDER: AddOverride[] = ["worktrees", "linked_checkout", "too_large"];
+
+/** The question Home asks for a job waiting on a soft refusal: the one issue the engine refused,
+ * and the overrides an answer of yes starts again with, the job's own plus the one for that
+ * issue, in the engine's order. Input: a job waiting for an answer. Output: issues and overrides. */
+export function jobQuestion(job: IntakeJob): { issues: AnywayIssue[]; overrides: AddOverride[] } {
+  if (job.state.state !== "needs_answer") throw new Error(`job ${job.id} asks nothing in state ${job.state.state}`);
+  const code = job.state.code;
+  if (!Object.hasOwn(ANSWER_ISSUES, code)) throw new Error(`job ${job.id} asks about unknown code ${code}`);
+  const asked = new Set([...job.overrides, REFUSAL_OVERRIDES[code]]);
+  const overrides = OVERRIDE_ORDER.filter((override) => asked.has(override));
+  if (overrides.length < job.overrides.length) throw new Error(`job ${job.id} lost an override`);
+  return { issues: [ANSWER_ISSUES[code]], overrides };
 }
 
 /** Why Add folder offers no Move or Copy yet while the folder read is still checking its git links. */

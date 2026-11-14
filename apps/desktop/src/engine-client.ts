@@ -144,7 +144,7 @@ export interface BaselineDetail extends BaselineRow {
 
 export interface ActionReceipt {
   baseline_id: string;
-  outcome: "applied" | "rejected" | "unavailable" | "unknown" | "not_recorded_at_barrier" | "uncertain";
+  outcome: "applied" | "rejected" | "unavailable" | "unknown" | "in_progress" | "not_recorded_at_barrier" | "uncertain";
   pending: boolean;
 }
 
@@ -1618,6 +1618,53 @@ export function icloudProgress(): Promise<IcloudProgress | null> {
 /** Stops the running iCloud download. Output: whether one was running. */
 export function icloudCancel(): Promise<boolean> {
   return invoke<boolean>("desktop_icloud_cancel");
+}
+
+/** The part of an intake job that was running when it ended. */
+export type IntakePhase = "downloading" | "copying" | "clearing";
+
+/** What the engine's intake job is doing, or how it ended. Copying counts the files copied,
+ * then the files checked; clearing removes a moved folder's old place and never stops. */
+export type IntakeJobState =
+  | { state: "downloading"; progress: IcloudProgress }
+  | { state: "copying"; copied: number; checked: number }
+  | { state: "clearing" }
+  | { state: "done" }
+  | { state: "failed"; code: string; phase: IntakePhase }
+  | { state: "cancelled"; phase: IntakePhase }
+  | { state: "needs_answer"; code: string };
+
+/** The engine's intake job, which adds one folder to the projects folder apart from the window:
+ * its id, the folder, move or copy, the soft refusals it goes past, whether a stop was asked and
+ * its state. */
+export interface IntakeJob {
+  id: string;
+  source: string;
+  mode: AddFolderMode;
+  overrides: AddOverride[];
+  stopping: boolean;
+  state: IntakeJobState;
+}
+
+/** Starts the engine's intake job for a folder, or attaches to the one adding it already.
+ * Inputs: the absolute folder, move or copy and the overrides. Output: the job. */
+export function intakeStart(path: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<IntakeJob> {
+  return invoke<IntakeJob>("desktop_intake_start", { path, mode, overrides });
+}
+
+/** Reads the engine's intake job, running or last ended. Output: the job, or null. */
+export function intakeStatus(): Promise<IntakeJob | null> {
+  return invoke<IntakeJob | null>("desktop_intake_status");
+}
+
+/** Asks the running intake job to stop between files. Input: its id. Output: whether it ran. */
+export function intakeStop(id: string): Promise<boolean> {
+  return invoke<boolean>("desktop_intake_stop", { id });
+}
+
+/** Forgets an ended intake job. Input: its id. Output: whether it was forgotten. */
+export function intakeDismiss(id: string): Promise<boolean> {
+  return invoke<boolean>("desktop_intake_dismiss", { id });
 }
 
 /** Measures a folder before Copy and names its GitHub repository, if any.

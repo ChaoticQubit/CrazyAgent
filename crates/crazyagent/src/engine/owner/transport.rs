@@ -51,6 +51,7 @@ mod icloud;
 pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
+mod intake;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod overview;
@@ -504,6 +505,7 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     deferred: std::sync::atomic::AtomicUsize,
+    running: projects_home::RunningSet,
     controls: std::sync::atomic::AtomicU64,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
@@ -512,6 +514,7 @@ struct Authority {
     ide: Arc<crate::ide::bridge::Grants>,
     reproving: Arc<std::sync::atomic::AtomicBool>,
     icloud: crate::projects_home::icloud::Downloads,
+    intake: intake::Intake,
 }
 
 impl Authority {
@@ -1351,6 +1354,7 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 deferred: std::sync::atomic::AtomicUsize::new(0),
+                running: Mutex::new(std::collections::HashSet::new()),
                 controls: std::sync::atomic::AtomicU64::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
@@ -1359,6 +1363,7 @@ impl OwnerServer {
                 ide,
                 reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 icloud: crate::projects_home::icloud::Downloads::default(),
+                intake: intake::Intake::default(),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1571,6 +1576,10 @@ impl OwnerServer {
             Arc::downgrade(&self.authority),
             upkeep_stopped,
         ));
+        self.authority
+            .intake
+            .restore(&self.engine, self.timeout)
+            .await;
         let backfill = setup::engine_root(&self.authority).ok().map(|root| {
             tokio::spawn(setup::backfill_hooks(
                 self.engine.storage.sender.clone(),
@@ -1664,6 +1673,7 @@ impl OwnerServer {
         while tasks.custody.join_next().await.is_some() {}
         while tasks.clients.join_next().await.is_some() {}
         while tasks.refusals.join_next().await.is_some() {}
+        self.authority.intake.stop_all(self.timeout).await;
         log_panic(&upkeep.await, "landing_upkeep_panicked");
         log_panic(&sweep.await, "finished_agents_sweep_panicked");
         let drained = self
@@ -2436,6 +2446,19 @@ async fn serve_admitted(
                 .await
                 .map(|()| None);
         }
+        if let OwnerOperation::Reconcile { operation_id, .. } = &request.operation
+            && projects_home::running(authority, &a, operation_id)
+        {
+            let reply = projects_home::still_running(engine, authority, auth, &a, operation_id)
+                .await
+                .map(|response| OwnerReply {
+                    request_id: id.clone(),
+                    response,
+                });
+            return write_owner_reply(stream, reply, id, mutation)
+                .await
+                .map(|()| None);
+        }
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
         if let Err(error) = authority.master_dispatch.lock().await.room(&submitted) {
@@ -2474,8 +2497,9 @@ async fn serve_admitted(
     };
     match deferred {
         Deferred::ProjectsHome(a, request) => {
+            let sink = projects_home::Sink::Client(stream);
             let _ =
-                projects_home::serve(stream, engine, authority, auth, &a, *request, deadline).await;
+                projects_home::serve(sink, engine, authority, auth, &a, *request, deadline).await;
         }
         Deferred::GitHub(a) => {
             let _ = github::serve(stream, engine, authority, auth, &a, body).await;

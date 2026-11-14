@@ -4,7 +4,10 @@ import type { OwnerProfile, Result } from "./api";
 import type { EngineState } from "./ui/shell";
 import type { Route } from "./ui/router";
 import { watchUnconfirmed, leavesProfileUnconfirmed } from "./engine-client";
-import type { ActionReceipt, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
+import type { ActionReceipt, FoundProject, IntakeJob, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
+import { loadFoundProjects, loadIntakeJob } from "./api-intake";
+import { notifyIntake } from "./notify";
+import { FOUND_POLL_MS, intakePollMs, jobEndLine } from "./screens/intake/intake";
 import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
 import type { InputChoice } from "./screens/team/terminal-io";
 import { QUESTIONS_SHOWN_DEFAULT, questionsShown } from "./api-questions";
@@ -113,7 +116,11 @@ export interface Session {
   toast: string;
   toastOpen: Route | null;
   revision: number;
+  intake: IntakeJob | null;
+  found: Loaded<FoundProject[]>;
   retry: () => void;
+  refreshIntake: (started?: IntakeJob) => void;
+  refreshFound: () => void;
   checkUnconfirmed: () => Promise<void>;
   checkProfile: () => Promise<void>;
   clearStuckSignIn: () => Promise<void>;
@@ -143,6 +150,11 @@ export function useSession(): Session {
   const [toastOpen, setToastOpen] = useState<Route | null>(null);
   const [revision, setRevision] = useState(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [intake, setIntake] = useState<IntakeJob | null>(null);
+  const intakeSeen = useRef<IntakeJob | null>(null);
+  const [intakeTick, setIntakeTick] = useState(0);
+  const [found, setFound] = useState<Loaded<FoundProject[]>>({ kind: "loading" });
+  const [foundTick, setFoundTick] = useState(0);
 
   function noteResult<T>(result: Result<T>): Result<T> {
     if (result.kind === "error" && result.code === "engine_unreachable") setEngine("down");
@@ -259,9 +271,57 @@ export function useSession(): Session {
     return stop;
   }, []);
 
+  useEffect(() => {
+    if (engine !== "running") return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = async () => {
+      const result = await loadIntakeJob();
+      if (!live) return;
+      if (result.kind === "ok") {
+        const line = jobEndLine(intakeSeen.current, result.value);
+        intakeSeen.current = result.value;
+        setIntake(result.value);
+        if (line && result.value) {
+          showToast(line, { name: "home" });
+          setFoundTick((value) => value + 1);
+          void notifyIntake(result.value.id);
+        }
+      }
+      if (result.kind !== "not_ready") timer = setTimeout(() => void read(), intakePollMs(intakeSeen.current));
+    };
+    void read();
+    return () => { live = false; clearTimeout(timer); };
+  }, [engine, intakeTick]);
+
+  useEffect(() => {
+    if (engine !== "running") return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = async () => {
+      const result = await loadFoundProjects();
+      if (!live) return;
+      setFound(result);
+      if (result.kind !== "not_ready") timer = setTimeout(() => void read(), FOUND_POLL_MS);
+    };
+    void read();
+    return () => { live = false; clearTimeout(timer); };
+  }, [engine, foundTick]);
+
+  const ready = found.kind === "ok" ? found.value.filter((folder) => folder.state === "ready").map((folder) => folder.project_id ?? folder.path).sort().join("\n") : "";
+  useEffect(() => { if (ready) void refreshProjects(); }, [ready]);
+
   return {
-    engine, unconfirmed, profileCheck, stuckSignIn, profile, projects, projectsMore, toast, toastOpen, revision,
+    engine, unconfirmed, profileCheck, stuckSignIn, profile, projects, projectsMore, toast, toastOpen, revision, intake, found,
     retry: () => { void start(); },
+    refreshIntake: (started?: IntakeJob) => {
+      if (started) {
+        intakeSeen.current = started;
+        setIntake(started);
+      }
+      setIntakeTick((value) => value + 1);
+    },
+    refreshFound: () => setFoundTick((value) => value + 1),
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
     checkProfile: async () => { await checkProfile(); },
     clearStuckSignIn: async () => {

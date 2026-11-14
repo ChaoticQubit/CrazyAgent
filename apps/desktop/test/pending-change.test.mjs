@@ -122,3 +122,34 @@ test("a change kind the window does not know still gets a plain banner and toast
   assert.equal(api.settledLine(receipt("a_future_change", "applied", false)), "Your change went through.");
   assert.equal(api.changeLabel(intent("model_access", { model_access: { kind: "add_connected_account", connection: {} } })), "changing accounts and pools");
 });
+
+test("a change the engine is still running says so, keeps Retry away and stays unconfirmed (DEC-159)", () => {
+  assert.equal(api.unconfirmedLine(intent("add_existing_folder"), "in_progress"), "Adding a folder is still running in the engine. It finishes on its own; we keep checking.");
+  assert.deepEqual(projects.receiptState(receipt("add_existing_folder", "in_progress", true)), { kind: "unconfirmed" });
+  const app = readFileSync(new URL("../src/app.tsx", import.meta.url), "utf8");
+  assert.match(app, /session\.unconfirmed\.outcome !== "in_progress" &&\s*<Button[\s\S]{0,160}?retryUnconfirmed\(\)\}>Retry<\/Button>\}/);
+});
+
+test("Retry on a change whose reply was lost reconnects first, as Check again does (DEC-159)", async () => {
+  const sent = [];
+  const before = globalThis.window;
+  let connected = false;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command) {
+    sent.push(command);
+    if (command === "desktop_status") return { connected, pending: true };
+    if (command === "desktop_connect") { connected = true; return { connected, pending: true }; }
+    if (command === "desktop_retry_intent") return { ...intent("add_existing_folder"), outcome: connected ? "in_progress" : "uncertain", pending: true, rejection: null };
+    throw new Error(`unexpected ${command}`);
+  } } };
+  try {
+    const result = await api.retryUnconfirmed();
+    assert.deepEqual(sent, ["desktop_status", "desktop_connect", "desktop_retry_intent"]);
+    assert.equal(result.kind, "ok");
+    assert.equal(result.value.outcome, "in_progress");
+    sent.length = 0;
+    await api.retryUnconfirmed();
+    assert.deepEqual(sent, ["desktop_status", "desktop_retry_intent"]);
+  } finally {
+    globalThis.window = before;
+  }
+});

@@ -1,13 +1,15 @@
 use super::{
     ActionOutcome, BridgeError, IntentReceipt, NativeBridge, Unlocked, bounded, caused, failure,
+    native_random_id,
 };
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::projects_home::icloud::Progress;
+use crazyagent::projects_home::job::{JobState, JobView};
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
-use crazyagent::protocol::{CredentialRef, ProjectId};
+use crazyagent::protocol::{CredentialRef, ProjectId, RequestId};
 use crazyagent::setup::{Dependency, SetupStatus};
 use serde::Serialize;
 use std::path::Path;
@@ -20,7 +22,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 71] = [
+pub const INTAKE_CODES: [&str; 75] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -60,6 +62,10 @@ pub const INTAKE_CODES: [&str; 71] = [
     "home_new_project_failed",
     "home_add_unverified",
     "home_add_interrupted",
+    "home_add_cancelled",
+    "home_add_in_progress",
+    "intake_busy",
+    "intake_failed",
     "home_record_invalid",
     "home_icloud_not_downloaded",
     "home_permission_denied",
@@ -223,6 +229,26 @@ pub fn intake_code(code: &str) -> Option<&'static str> {
 
 fn intake_failure(error: EngineError) -> BridgeError {
     known(&error.0, &INTAKE_CODES, "owner_read_failed")
+}
+
+/// An intake job's view as the window may show it: a failure or question code the window has
+/// no sentence for becomes `intake_failed`, so no raw engine text reaches the window.
+/// Input: the engine's view. Output: the same view with only listed codes.
+pub fn shown(mut view: JobView) -> JobView {
+    if let JobState::Failed { code, .. } | JobState::NeedsAnswer { code } = &mut view.state {
+        *code = intake_code(code).unwrap_or("intake_failed").to_owned();
+    }
+    assert!(match &view.state {
+        JobState::Failed { code, .. } | JobState::NeedsAnswer { code } => {
+            intake_code(code).is_some()
+        }
+        _ => true,
+    });
+    view
+}
+
+fn intake_id(id: &str) -> Result<RequestId, BridgeError> {
+    RequestId::new(id).map_err(|_| failure("intake_failed"))
 }
 
 /// Names a GitHub failure from its allowlist only, never with the engine code behind it:
@@ -542,6 +568,67 @@ impl NativeBridge {
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
             bounded(client.icloud_cancel().await.map_err(intake_failure)?)
+        }))
+    }
+
+    /// Starts the engine's intake job for a folder: it downloads what is only in iCloud, then
+    /// moves or copies the folder into the projects home apart from this window, so leaving
+    /// Add folder or quitting the app never stops it. Each start has a fresh id; a start for
+    /// the folder already being added attaches to that job. Inputs: the absolute folder, move
+    /// or copy and the soft refusals the owner chose to go past. Output: the job's view, or
+    /// `intake_busy` while another folder is being added.
+    pub fn intake_start(
+        &mut self,
+        path: String,
+        mode: AddMode,
+        overrides: Vec<AddOverride>,
+    ) -> Result<Unlocked<JobView>, BridgeError> {
+        crazyagent::projects_home::path_text(&path, "home_source_invalid")
+            .map_err(intake_failure)?;
+        let request_id = intake_id(&native_random_id()?)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            let view = client.intake_start(request_id, path, mode, overrides).await;
+            bounded(shown(view.map_err(intake_failure)?))
+        }))
+    }
+
+    /// Reads the engine's intake job, running or last ended. Output: its view, or None.
+    pub fn intake_status(&mut self) -> Result<Unlocked<Option<JobView>>, BridgeError> {
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            let view = client.intake_status().await.map_err(intake_failure)?;
+            bounded(view.map(shown))
+        }))
+    }
+
+    /// Asks the running intake job to stop between files. Input: its id. Output: whether it
+    /// was running.
+    pub fn intake_stop(&mut self, id: String) -> Result<Unlocked<bool>, BridgeError> {
+        let request_id = intake_id(&id)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .intake_stop(request_id)
+                    .await
+                    .map_err(intake_failure)?,
+            )
+        }))
+    }
+
+    /// Forgets an ended intake job, so Home no longer shows it. Input: its id. Output:
+    /// whether it was forgotten; a running job never is.
+    pub fn intake_dismiss(&mut self, id: String) -> Result<Unlocked<bool>, BridgeError> {
+        let request_id = intake_id(&id)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .intake_dismiss(request_id)
+                    .await
+                    .map_err(intake_failure)?,
+            )
         }))
     }
 
@@ -969,6 +1056,46 @@ mod tests {
             github_failure(EngineError("clone_destination_exists".into())).code,
             "clone_destination_exists"
         );
+    }
+
+    #[test]
+    fn an_intake_job_reaches_the_window_with_listed_codes_only() {
+        let view = |state| JobView {
+            id: RequestId::new("add-1").unwrap(),
+            source: "/Users/mira/site".into(),
+            mode: AddMode::Copy,
+            overrides: vec![AddOverride::TooLarge],
+            stopping: false,
+            state,
+        };
+        let failed = |code: &str| JobState::Failed {
+            code: code.into(),
+            phase: crazyagent::projects_home::job::Phase::Copying,
+        };
+        let raw = shown(view(failed("open /Users/mira/site/a: denied")));
+        assert_eq!(raw.state, failed("intake_failed"));
+        assert_eq!(
+            shown(view(failed("home_add_cancelled"))).state,
+            failed("home_add_cancelled")
+        );
+        let asked = shown(view(JobState::NeedsAnswer {
+            code: "weird".into(),
+        }));
+        assert_eq!(
+            asked.state,
+            JobState::NeedsAnswer {
+                code: "intake_failed".into()
+            }
+        );
+        assert_eq!(asked.overrides, vec![AddOverride::TooLarge]);
+        assert_eq!(shown(view(JobState::Done)), view(JobState::Done));
+        for code in [
+            "intake_busy",
+            "home_add_in_progress",
+            "home_add_interrupted",
+        ] {
+            assert_eq!(intake_code(code), Some(code));
+        }
     }
 
     #[test]
