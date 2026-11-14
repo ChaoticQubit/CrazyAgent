@@ -476,3 +476,15 @@ fn the_spend_view_is_read_once_a_minute_or_every_5_s_while_a_spend_is_out() {
         "a clock that went back reads again"
     );
 }
+
+/// c, l and f each send only the setting they step, so a change made meanwhile in another
+/// window to the other two is never written back over.
+#[test]
+fn spend_one_each_key_sends_only_its_own_setting() {
+    for key in ['c', 'l', 'f'] {
+        let (mut spend, mut ctx) = ready(view(settings(SpendConfirm::OneClick, AllLimited::NoHint), Vec::new()));
+        spend.key(&Key::Char(key), &mut ctx);
+        let sent = job(&mut ctx).expect("the key asks the engine");
+        assert_eq!(format!("{sent:?}"), "SetSpendOne", "{key}");
+    }
+}

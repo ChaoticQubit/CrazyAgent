@@ -613,3 +613,98 @@ mod spend_request_tests {
         assert!(USAGE_CODES.contains(&"usage_spend_unconfirmed"));
     }
 }
+
+#[cfg(all(test, unix))]
+mod spend_one_tests {
+    use super::super::usage_tests::Usage;
+    use super::*;
+    use crate::usage::spend::{AllLimited, ResetsSource, SpendConfirm};
+    use serde_json::{Value, json};
+
+    fn decoded(usage: Value) -> Result<Action, serde_json::Error> {
+        serde_json::from_value::<Envelope>(json!({ "usage": usage })).map(|envelope| envelope.usage)
+    }
+
+    #[test]
+    fn spend_one_requests_name_one_known_field_and_its_value_and_nothing_else() {
+        for field in ["confirm", "all_limited", "resets_source"] {
+            let value = if field == "all_limited" { "no_hint" } else { "off" };
+            let sent = json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } });
+            assert!(decoded(sent).is_ok(), "{field}");
+        }
+        for refused in [
+            json!({ "kind": "set_spend_one", "choice": { "field": "colour", "value": "off" } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm", "value": "sometimes" } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm" } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm", "value": "off", "extra": 1 } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm", "value": "off" }, "settings": {} }),
+        ] {
+            assert!(decoded(refused.clone()).is_err(), "{refused}");
+        }
+        assert!(USAGE_CODES.contains(&"usage_request_invalid"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spend_one_changes_its_own_setting_and_keeps_the_other_two() {
+        let usage = Usage::start().await;
+        let send = |field: &str, value: &str| {
+            decoded(json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } }))
+                .expect("the engine reads a one-setting request")
+        };
+        let fresh = usage
+            .client
+            .usage_exchange(send("confirm", "off"))
+            .await
+            .unwrap();
+        assert!(matches!(fresh, Reply::Done));
+        let report = usage.client.usage_report(None, None, 0).await.unwrap();
+        assert_eq!(
+            report.spend.settings,
+            SpendSettings {
+                confirm: SpendConfirm::Off,
+                ..SpendSettings::default()
+            },
+            "a first one-setting save keeps the defaults of the other two"
+        );
+        let all = SpendSettings {
+            confirm: SpendConfirm::OneClick,
+            all_limited: AllLimited::NoHint,
+            resets_source: ResetsSource::AsClaudeCode,
+        };
+        usage.client.usage_set_spend(all).await.unwrap();
+        for (field, value, expected) in [
+            (
+                "resets_source",
+                "off",
+                SpendSettings {
+                    resets_source: ResetsSource::Off,
+                    ..all
+                },
+            ),
+            (
+                "all_limited",
+                "auto_spend",
+                SpendSettings {
+                    all_limited: AllLimited::AutoSpend,
+                    resets_source: ResetsSource::Off,
+                    ..all
+                },
+            ),
+            (
+                "confirm",
+                "confirm_each",
+                SpendSettings {
+                    confirm: SpendConfirm::ConfirmEach,
+                    all_limited: AllLimited::AutoSpend,
+                    resets_source: ResetsSource::Off,
+                },
+            ),
+        ] {
+            let reply = usage.client.usage_exchange(send(field, value)).await.unwrap();
+            assert!(matches!(reply, Reply::Done), "{field}");
+            let report = usage.client.usage_report(None, None, 0).await.unwrap();
+            assert_eq!(report.spend.settings, expected, "{field}");
+        }
+        usage.stop().await;
+    }
+}
