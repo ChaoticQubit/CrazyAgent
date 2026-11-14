@@ -1031,30 +1031,14 @@ pub fn carried_in(folder: &Path) -> bool {
     crate::agent_home::read_project(folder).is_ok_and(|text| text.starts_with(CARRIED_HEADING))
 }
 
-/// Copies the project's own instruction files into its project instructions, each text
-/// once under a heading naming every file that held it, after the text already there and
-/// never twice, then moves each copied file into `.crazyagent/imported/` at its same path.
-/// A file that cannot be imported stays where it is. The project instructions are taken as
-/// they are; only [`import_arrived`] labels them. A project without `.crazyagent/` gets it
-/// first. Input: the project folder. Output: the moved files, or a plain code with nothing
-/// moved, such as `process_text_too_large` when the result would not fit.
-pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
-    import_as(folder, false)
-}
-
-/// The import a new project's onboarding start runs, before the app has written its project
-/// instructions: what `.crazyagent/instructions.md` the folder arrived with is first saved
-/// under [`CARRIED_HEADING`] ([`carried`]), git or not, even when the files imported after
-/// it do not fit, the whole file kept aside when the heading leaves it no room; later
-/// imports never label again. Input: the project folder. Output: as [`import`].
-pub fn import_arrived(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
-    import_as(folder, true)
-}
-
-/// Runs [`import`], labelling arrived project instructions first when `arrived` is set.
-/// Inputs: the project folder and whether this is the onboarding start's import. Output: as
-/// [`import`].
-fn import_as(folder: &Path, arrived: bool) -> Result<Vec<ImportFile>, EngineError> {
+/// Labels the project instructions a new project's folder arrived with, before the app has
+/// written any: a non-empty `.crazyagent/instructions.md`, git or not, is saved under
+/// [`CARRIED_HEADING`] ([`carried`]), the whole file moved aside into
+/// `.crazyagent/imported/` first when the heading leaves it no room. Text that cannot be
+/// read is left as it is, since no agent launch reads it either. Input: the project folder.
+/// Output: unit, or a plain code when the label cannot be saved, so the start is refused
+/// rather than giving agents the text unlabelled.
+pub fn label_arrived(folder: &Path) -> Result<(), EngineError> {
     assert_eq!(
         CARRIED_PATH,
         format!(
@@ -1069,29 +1053,45 @@ fn import_as(folder: &Path, arrived: bool) -> Result<Vec<ImportFile>, EngineErro
     let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
     let state = crate::projects_home::prepare_layout(&root)
         .map_err(|_| failure("process_folder_unsafe"))?;
+    let Ok(existing) = crate::agent_home::read_project(&root) else {
+        return Ok(());
+    };
+    let (kept, cut) = carried(&existing);
+    if kept == existing {
+        return Ok(());
+    }
+    assert!(kept.starts_with(CARRIED_HEADING) && kept.len() <= crate::agent_home::TEXT_BYTES_MAX);
+    if cut {
+        move_aside(&root, &state, CARRIED_PATH)?;
+    }
+    crate::agent_home::save_project(&root, &kept)
+        .map_err(|problem: crate::agent_home::AgentHomeError| EngineError(problem.0))?;
+    Ok(())
+}
+
+/// Copies the project's own instruction files into its project instructions, each text
+/// once under a heading naming every file that held it, after the text already there and
+/// never twice, then moves each copied file into `.crazyagent/imported/` at its same path.
+/// A file that cannot be imported stays where it is. The project instructions are taken as
+/// they are; only [`label_arrived`] labels them. A project without `.crazyagent/` gets it
+/// first. Input: the project folder. Output: the moved files, or a plain code with nothing
+/// moved, such as `process_text_too_large` when the result would not fit.
+pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
+    let _importing = IMPORTING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
+    let state = crate::projects_home::prepare_layout(&root)
+        .map_err(|_| failure("process_folder_unsafe"))?;
     let found: Vec<Found> = find(&root)
         .into_iter()
         .filter(|found| found.read.is_some())
         .collect();
-    if found.is_empty() && !arrived {
+    if found.is_empty() {
         return Ok(Vec::new());
     }
     let code = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
     let existing = crate::agent_home::read_project(&root).map_err(code)?;
-    let (kept, cut) = match arrived {
-        true => carried(&existing),
-        false => (existing.clone(), false),
-    };
-    if found.is_empty() && kept == existing {
-        return Ok(Vec::new());
-    }
-    if kept != existing {
-        let whole = !cut || move_aside(&root, &state, CARRIED_PATH).is_ok();
-        crate::agent_home::save_project(&root, &kept).map_err(code)?;
-        if !whole {
-            return Err(failure("process_import_unmovable"));
-        }
-    }
     let mut sections: Vec<(Vec<&str>, &Path, &str)> = Vec::new();
     for found in &found {
         let Some((target, text)) = &found.read else {
@@ -1109,7 +1109,7 @@ fn import_as(folder: &Path, arrived: bool) -> Result<Vec<ImportFile>, EngineErro
             None => sections.push((vec![found.file.path.as_str()], target, text)),
         }
     }
-    let mut text = kept.clone();
+    let mut text = existing.clone();
     for (names, _, part) in &sections {
         if existing.contains(part) {
             continue;
@@ -1126,7 +1126,7 @@ fn import_as(folder: &Path, arrived: bool) -> Result<Vec<ImportFile>, EngineErro
     if text.len() > crate::agent_home::TEXT_BYTES_MAX {
         return Err(failure("process_text_too_large"));
     }
-    if text != kept {
+    if text != existing {
         crate::agent_home::save_project(&root, &text).map_err(code)?;
     }
     let mut moved = Vec::new();
@@ -1436,7 +1436,7 @@ fn owned(_metadata: &fs::Metadata) -> bool {
     true
 }
 
-/// Moves one project instruction file, or the link at its path, or carried project
+/// Moves one project instruction file, or the link at its path, or arrived project
 /// instructions about to be cut to fit their heading, to the same path under
 /// `.crazyagent/imported/`, beside an earlier move as `<path>.2` and so on rather than over
 /// it. Inputs: the canonical project folder, its `.crazyagent/` folder and the file's path

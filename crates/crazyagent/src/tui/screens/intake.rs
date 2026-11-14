@@ -187,6 +187,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "onboarding_folder_unsafe" => {
             "This folder holds your home folder, app data or agent settings, so it can't be set up."
         }
+        "onboarding_instructions_unwritable" => {
+            "This folder came with a .crazyagent/instructions.md that CrazyAgent can't label as Imported. Make that file and its .crazyagent folder writable, then start again."
+        }
         "onboarding_layout_incomplete" => {
             "The project's .crazyagent folder is incomplete. Check it and start again."
         }
