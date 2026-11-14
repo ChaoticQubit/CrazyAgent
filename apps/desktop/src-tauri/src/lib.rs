@@ -1827,15 +1827,27 @@ async fn desktop_terminal_attach(
     terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
     let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
-    if webview.label() != "main" {
-        let id = id.ok_or_else(|| engine_failure("window_denied"))?;
-        terminal_window_for(&webview, &id)?;
-        let graph = read(&state).await?.team_graph(&id).await?;
-        if !bridge::terminal::graph_shows(&graph, &agent) {
-            return Err(engine_failure("window_denied"));
+    let id = match webview.label() {
+        "main" => None,
+        _ => {
+            let id = id.ok_or_else(|| engine_failure("window_denied"))?;
+            terminal_window_for(&webview, &id)?;
+            Some(id)
         }
-    }
-    let room = terminals.0.room(webview.label(), &agent)?;
+    };
+    let shows = async {
+        if let Some(id) = id {
+            let graph = read(&state).await?.team_graph(&id).await?;
+            if !bridge::terminal::graph_shows(&graph, &agent) {
+                return Err(engine_failure("window_denied"));
+            }
+        }
+        Ok(())
+    };
+    let room = terminals
+        .0
+        .checked_room(webview.label(), &agent, shows)
+        .await?;
     let session = lock(&state).await?.open_terminal(agent, pane).await?;
     room.attach(session, output)
 }

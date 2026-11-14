@@ -538,6 +538,19 @@ impl Terminals {
         })
     }
 
+    /// Runs a window's own check, the team graph read of a wall window, then takes a place
+    /// for one more view as [`Terminals::room`] does. Inputs: the window label, the terminal
+    /// name and the check. Output: the held place, the check's error or the room errors.
+    pub async fn checked_room(
+        self: &Arc<Self>,
+        window: &str,
+        agent: &AgentId,
+        check: impl std::future::Future<Output = Result<(), BridgeError>>,
+    ) -> Result<Reservation, BridgeError> {
+        check.await?;
+        self.room(window, agent)
+    }
+
     /// Queues one input, prompt or resize request for an agent terminal a window shows.
     /// Takes the window label, the terminal name and the request.
     /// Returns once queued in order, or a plain code for a bad request or no view.
@@ -730,6 +743,41 @@ mod tests {
         terminals.detach("main", &agent, new.serial).unwrap();
         assert_eq!(shown(&terminals, "main", &agent), None);
         terminals.detach("main", &agent, new.serial).unwrap();
+    }
+
+    /// A wall window's page reloads while an attach waits on its team graph read: the place
+    /// that attach took is refused when it lands, so the old page's view never holds a slot,
+    /// and an attach whose read refuses the window gives its place back (RV-DS241-46).
+    #[test]
+    fn a_page_load_during_a_wall_attachs_graph_read_refuses_its_place() {
+        let terminals = Arc::new(Terminals::default());
+        terminals.page_started(WALL);
+        let agent = team(1);
+        let place = tauri::async_runtime::block_on(terminals.checked_room(WALL, &agent, async {
+            terminals.page_started(WALL);
+            Ok(())
+        }))
+        .unwrap();
+        let (requests, _queue) = mpsc::channel(1);
+        let landed = terminals
+            .views()
+            .unwrap()
+            .install(WALL, &agent, place.serial, requests);
+        assert_eq!(
+            code(landed),
+            Some("terminal_view_replaced"),
+            "the place taken before the reload is refused when it lands"
+        );
+        assert_eq!(shown(&terminals, WALL, &agent), None);
+        let denied =
+            tauri::async_runtime::block_on(
+                terminals.checked_room(WALL, &team(2), async { Err(failure("window_denied")) }),
+            );
+        assert_eq!(code(denied), Some("window_denied"));
+        assert!(
+            terminals.views().unwrap().windows[WALL].opening.is_empty(),
+            "a refused read gives its place back"
+        );
     }
 
     /// The main webview reloads while all but one of its views are open and the last is
