@@ -164,8 +164,10 @@ pub(in crate::tui) enum SettingsJob {
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
-/// settings. Switch turns an every-project item on or off for one project.
-/// Input: built by the plugins pages. Output: one plugins call on the engine.
+/// settings. Switch turns an every-project item on or off for one project;
+/// Switches does that for each of a plugin's hooks in turn, stopping at the
+/// first refusal. Input: built by the plugins pages. Output: one plugins call on
+/// the engine per item.
 pub(in crate::tui) enum PluginChange {
     AddSkill {
         scope: Scope,
@@ -233,6 +235,11 @@ pub(in crate::tui) enum PluginChange {
         id: String,
         on: bool,
         version: u64,
+    },
+    Switches {
+        project: ProjectId,
+        items: Vec<(String, u64)>,
+        on: bool,
     },
 }
 
@@ -1098,6 +1105,20 @@ impl NativeOwner {
                 .switch_plugin(project, id, on, version)
                 .await
                 .map(|()| None),
+            PluginChange::Switches { project, items, on } => {
+                assert!(!items.is_empty());
+                let mut done = Ok(None);
+                for (id, version) in items {
+                    done = controller
+                        .switch_plugin(project.clone(), id, on, version)
+                        .await
+                        .map(|()| None);
+                    if done.is_err() {
+                        break;
+                    }
+                }
+                done
+            }
         };
         done.map_err(|error| problem(&error, lost))
     }
