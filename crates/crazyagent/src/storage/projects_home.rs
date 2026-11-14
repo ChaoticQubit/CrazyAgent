@@ -635,7 +635,9 @@ pub(super) fn sweep_home(db: &Connection) -> Result<usize, EngineError> {
     };
     assert!(saved.is_absolute());
     let removed = home::sweep_staging(&saved);
-    eprintln!("home_staging_swept count={removed}");
+    if removed > 0 {
+        eprintln!("home_staging_swept count={removed}");
+    }
     Ok(removed)
 }
 
@@ -655,7 +657,9 @@ pub(super) fn delete_settle(db: &Connection, exchange: Option<u64>) -> Result<()
         }
         None => {
             let shown = delete_mark::start(&tx)?;
-            eprintln!("project_delete_cut_short count={shown}");
+            if shown > 0 {
+                eprintln!("project_delete_cut_short count={shown}");
+            }
         }
     }
     tx.commit().map_err(error)?;
