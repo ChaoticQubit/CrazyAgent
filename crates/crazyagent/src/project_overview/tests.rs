@@ -1475,6 +1475,8 @@ fn a_writing_run_is_shown_nothing_in_a_hidden_folder_and_no_secret_looking_path(
         ".env.production",
         "deploy/id_rsa",
         "k8s/kubeconfig",
+        "credentials",
+        "id_ed25519",
         "notes/acquisition-plan.md",
     ]
     .map(str::to_owned);
@@ -1494,6 +1496,8 @@ fn a_writing_run_is_shown_nothing_in_a_hidden_folder_and_no_secret_looking_path(
         ".env.production",
         "id_rsa",
         "kubeconfig",
+        "credentials",
+        "id_ed25519",
     ] {
         assert!(!asked.contains(gone), "{gone} reached the provider");
     }
