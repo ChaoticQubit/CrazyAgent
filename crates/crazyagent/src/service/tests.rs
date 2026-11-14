@@ -1503,8 +1503,10 @@ fn a_forced_reinstall_never_replaces_another_program_this_engine_may_not() {
 /// `<root>/setup/bin`, so whether this app may replace another program is judged on the
 /// app's own engine in its `.mount_` folder, not on the copy, which is in no app bundle.
 /// Restart engine and a plain start then replace an older program, and a newer one known
-/// at the data root is kept on Restart engine and started as it is on a plain start. A
-/// definition naming the copy with another PATH is still refreshed.
+/// at the data root is kept on Restart engine and started as it is on a plain start. The
+/// copy is one path every AppImage runs, so a definition naming it, with this PATH or
+/// another, is also kept and started as it is while a newer engine is known there, and is
+/// refreshed only once none is (DS-118 r3 F1).
 #[cfg(unix)]
 #[test]
 fn an_appimage_copy_is_judged_by_the_app_engine_it_was_copied_from() {
@@ -1555,8 +1557,74 @@ fn an_appimage_copy_is_judged_by_the_app_engine_it_was_copied_from() {
     )
     .unwrap();
     assert!(!copy.runs_another_program());
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Keep);
+    write_definition(
+        &copy.definition,
+        &copy.definition_text().unwrap(),
+        Platform::Linux,
+    )
+    .unwrap();
+    assert!(copy.current());
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Keep);
+    std::fs::remove_file(copy.root.join("owner-current")).unwrap();
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Install);
+    write_definition(
+        &copy.definition,
+        &elsewhere.definition_text().unwrap(),
+        Platform::Linux,
+    )
+    .unwrap();
     assert_eq!(copy.repair(&bundled, true, false), Repair::Install);
     assert_eq!(copy.repair(&bundled, true, true), Repair::Install);
+}
+
+/// DS-118 r3 F1 (rv-code): an older AppImage never writes its bytes over the private copy
+/// in `<root>/setup/bin` while the data root reports a newer engine, since every AppImage
+/// runs that one path: the copy and the files beside it keep the newer bytes. A copy that is
+/// not this user's private file, or one with no newer engine reported, gets the app's bytes.
+#[cfg(unix)]
+#[test]
+fn persistable_keeps_the_copy_of_a_newer_engine_the_data_root_reports() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    let copies = layout.root().join("setup").join("bin");
+    let runner = copies.join("crazyagent-runner");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap();
+    write_mode(&installed, "crazyagent newer bytes", 0o700);
+    write_mode(&runner, "crazyagent-runner newer bytes", 0o700);
+    std::fs::write(
+        layout.root().join("owner-current"),
+        br#"{"engine_version":"99.0.0"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        persistable(&bundled, &layout, Some(&mount)).unwrap(),
+        installed
+    );
+    assert_eq!(read(&installed), "crazyagent newer bytes");
+    assert_eq!(read(&runner), "crazyagent-runner newer bytes");
+    write_mode(&installed, "crazyagent newer bytes", 0o755);
+    assert_eq!(
+        persistable(&bundled, &layout, Some(&mount)).unwrap(),
+        installed
+    );
+    assert_eq!(read(&installed), "crazyagent bytes");
+    assert_eq!(mode_of(&installed), 0o700);
+    write_mode(&installed, "crazyagent newer bytes", 0o700);
+    write_mode(&runner, "crazyagent-runner newer bytes", 0o700);
+    std::fs::remove_file(layout.root().join("owner-current")).unwrap();
+    assert_eq!(
+        persistable(&bundled, &layout, Some(&mount)).unwrap(),
+        installed
+    );
+    assert_eq!(read(&installed), "crazyagent bytes");
+    assert_eq!(read(&runner), "crazyagent-runner bytes");
 }
 
 /// DS-118 r1 F1 (rv-code): a refused start removes an installed definition naming a broken
