@@ -405,35 +405,114 @@ fn no_package_script_runs_before_npm_s_record_of_the_tarball_hash_is_checked_aga
     );
 }
 
-#[test]
-fn only_a_pinned_spec_whose_install_runs_now_reads_as_installing() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join("engine");
-    let pinned_spec = npx(&format!("context-mode@{VERSION}"));
-    assert!(
-        !installing(&root, &pinned_spec),
-        "no install runs for a new engine root"
-    );
-    let folder = install_folder(&root, VERSION);
+fn npx_in(case: &Case, version: &str) -> ServerSpec {
+    ServerSpec::Stdio {
+        command: case.bin.join("npx").to_str().unwrap().to_owned(),
+        args: vec!["-y".into(), format!("context-mode@{version}")],
+    }
+}
+
+fn registered(folder: &Path) -> bool {
     INSTALLING
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .push(folder.clone());
-    let during = installing(&root, &pinned_spec);
-    let loose = installing(&root, &npx("context-mode@latest"));
-    let other = installing(&directory.path().join("other"), &pinned_spec);
-    finish(&folder);
+        .contains(&folder.to_path_buf())
+}
+
+#[test]
+fn a_check_inside_the_backoff_after_a_failed_install_gets_the_time_left_and_never_npx() {
+    let case = case("/usr/bin/false");
+    fs::write(case.npm().join(FAILED), (now() - 60).to_string()).unwrap();
+    match for_check(&case.root, npx_in(&case, VERSION)) {
+        ForCheck::Failed(left) => assert!(
+            left <= INSTALL_BACKOFF - Duration::from_secs(59)
+                && left >= INSTALL_BACKOFF - Duration::from_secs(70),
+            "{left:?}"
+        ),
+        other => panic!("a recent failure holds the install back: {other:?}"),
+    }
     assert!(
-        during,
-        "the pinned spec reads as installing while its install runs"
+        !registered(&case.folder()),
+        "an install that cannot run is never registered"
     );
-    assert!(
-        !loose,
-        "a tag never installs, so it never reads as installing"
+    assert!(!case.npm().join(PROFILE).exists(), "npm never started");
+    assert_eq!(
+        for_launch(&case.root, npx_in(&case, VERSION)),
+        npx_in(&case, VERSION),
+        "an agent launch still runs the approved spec"
     );
-    assert!(!other, "another engine root's install is not this one's");
-    assert!(
-        !installing(&root, &pinned_spec),
-        "the install is over once it finished"
+}
+
+#[test]
+fn a_check_without_npm_beside_npx_is_refused_and_never_registered() {
+    let case = case("/usr/bin/false");
+    fs::remove_file(case.bin.join("npm")).unwrap();
+    assert_eq!(
+        for_check(&case.root, npx_in(&case, VERSION)),
+        ForCheck::Refused("context_mode_npm_missing")
     );
+    assert!(!registered(&case.folder()));
+}
+
+#[test]
+fn a_check_of_a_version_the_pack_does_not_pin_is_refused_and_never_registered() {
+    let case = case("/usr/bin/false");
+    assert_eq!(
+        for_check(&case.root, npx_in(&case, "9.9.9")),
+        ForCheck::Refused("context_mode_integrity_unpinned")
+    );
+    assert!(!registered(&install_folder(&case.root, "9.9.9")));
+}
+
+#[test]
+fn a_check_runs_the_shared_install_once_complete_even_while_an_install_is_registered() {
+    let case = case("/usr/bin/false");
+    finished(&case.folder(), PINNED);
+    INSTALLING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(case.folder());
+    let checked = for_check(&case.root, npx_in(&case, VERSION));
+    finish(&case.folder());
+    let program = case
+        .folder()
+        .join("node_modules/context-mode/cli.bundle.mjs");
+    assert_eq!(
+        checked,
+        ForCheck::Run(ServerSpec::Stdio {
+            command: case.bin.join("node").to_str().unwrap().to_owned(),
+            args: vec![program.to_str().unwrap().to_owned()],
+        }),
+        "a finished install wins over the registration it has not cleared yet"
+    );
+}
+
+#[test]
+fn a_check_while_the_install_runs_says_it_is_being_set_up() {
+    let case = case("/usr/bin/false");
+    INSTALLING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(case.folder());
+    let during = for_check(&case.root, npx_in(&case, VERSION));
+    finish(&case.folder());
+    assert_eq!(during, ForCheck::SettingUp);
+    assert!(!case.npm().join(PROFILE).exists(), "npm never started");
+    assert!(!registered(&case.folder()));
+}
+
+#[test]
+fn a_check_of_any_other_server_runs_it_as_approved() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("engine");
+    for spec in [
+        npx("context-mode@latest"),
+        npx("other-server@1.0.0"),
+        ServerSpec::Stdio {
+            command: "/opt/homebrew/bin/uvx".into(),
+            args: vec!["mcp-github".into()],
+        },
+    ] {
+        assert_eq!(for_check(&root, spec.clone()), ForCheck::Run(spec));
+    }
 }

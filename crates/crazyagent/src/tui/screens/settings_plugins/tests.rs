@@ -1441,6 +1441,18 @@ fn a_check_while_context_mode_is_set_up_reads_the_setting_up_words() {
         plugin_plain("server_setting_up"),
         "context-mode is still being set up. Check again in a minute."
     );
+    for code in [
+        "server_install_failed",
+        "server_npm_missing",
+        "server_version_unpinned",
+        "server_installs_busy",
+    ] {
+        assert_eq!(
+            Some(plugin_plain(code)),
+            crate::plugins::plain_problem(code),
+            "the TUI shows the engine's words for {code}"
+        );
+    }
 }
 
 fn hook(plugin: &str, event: &str, matcher: Option<&str>, enabled: bool) -> HookView {

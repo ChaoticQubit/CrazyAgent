@@ -794,4 +794,53 @@ mod tests {
             assert_eq!(check_problem(other), "The server can't start.", "{other:?}");
         }
     }
+
+    #[test]
+    fn a_check_that_found_no_shared_install_says_why_in_its_own_words() {
+        assert_eq!(
+            check_problem(&install_failed(7)),
+            "Setting up context-mode failed. The engine tries again 7 minutes after this check."
+        );
+        assert_eq!(
+            check_problem(&install_failed(1)),
+            "Setting up context-mode failed. The engine tries again 1 minute after this check."
+        );
+        for unreadable in [
+            "server_install_failed:",
+            "server_install_failed:0",
+            "server_install_failed:99",
+            "server_install_failed:x",
+        ] {
+            assert_eq!(
+                check_problem(unreadable),
+                "Setting up context-mode failed. The engine tries again within 10 minutes.",
+                "{unreadable:?}"
+            );
+        }
+        for (code, words) in [
+            (
+                "server_install_failed",
+                "Setting up context-mode failed. The engine tries again within 10 minutes.",
+            ),
+            (
+                "server_npm_missing",
+                "context-mode needs npm and node in the same folder as npx. Install Node.js, then check again.",
+            ),
+            (
+                "server_version_unpinned",
+                "This context-mode version is not the one the default pack pins, so CrazyAgent does not install it. Use the default pack's version.",
+            ),
+            (
+                "server_installs_busy",
+                "Too many installs are running. Check again in a minute.",
+            ),
+            (
+                "server_setting_up",
+                "context-mode is still being set up. Check again in a minute.",
+            ),
+        ] {
+            assert_eq!(check_problem(code), words, "{code}");
+            assert_eq!(plain_problem(code), Some(words), "{code}");
+        }
+    }
 }
