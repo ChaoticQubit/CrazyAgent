@@ -28,6 +28,45 @@ function block(text, indent, name) {
   return lines.slice(start, end < 0 ? lines.length : end);
 }
 
+/**
+ * Lists the jobs under `jobs:` of a workflow. Input: the workflow text. Output: each job's name
+ * with its lines.
+ */
+function jobsOf(text) {
+  const jobs = block(text, 0, "jobs");
+  const names = jobs.map((line) => line.match(/^ {2}([A-Za-z0-9_-]+):\s*$/)?.[1]).filter(Boolean);
+  return names.map((name) => ({ name, lines: block(jobs.join("\n"), 2, name) }));
+}
+
+/**
+ * Names the jobs of a workflow that read a secret or bind an environment, whatever the file
+ * or job. Input: the workflow text. Output: the job names in file order.
+ */
+function exposedJobs(text) {
+  return jobsOf(text).filter(({ lines }) => lines.some((line) => line.includes("secrets.") || /^ {4}environment:/.test(line))).map(({ name }) => name);
+}
+
+/**
+ * Lists every runner of a workflow outside the allowed GitHub-hosted images, reading each
+ * matrix runner value when a job takes `${{ matrix.runner }}`. A job that calls a reusable
+ * workflow has no runner of its own. Input: the workflow text. Output: "job: runner" entries.
+ */
+function runnerProblems(text) {
+  const allowed = new Set(Object.values(RUNNERS));
+  const problems = [];
+  for (const { name, lines } of jobsOf(text)) {
+    const runsOn = lines.find((line) => /^ {4}runs-on:/.test(line))?.replace(/^ {4}runs-on:\s*/, "");
+    if (runsOn === undefined) {
+      if (!lines.some((line) => /^ {4}uses: \.\/\.github\/workflows\//.test(line))) problems.push(`${name}: no runner`);
+      continue;
+    }
+    const runners = runsOn === "${{ matrix.runner }}" ? lines.map((line) => line.match(/^\s+(?:- )?runner: (\S+)$/)?.[1]).filter(Boolean) : [runsOn];
+    if (runners.length === 0) problems.push(`${name}: no matrix runner`);
+    for (const runner of runners) if (!allowed.has(runner)) problems.push(`${name}: ${runner}`);
+  }
+  return problems;
+}
+
 test("CI runs for pull requests and as a reusable workflow; a pull request cancels its own older run, and a release's CI never shares a group with another ref or gets cancelled", async () => {
   const ci = await workflow("ci.yml");
   const on = block(ci, 0, "on");
@@ -58,11 +97,7 @@ test("signing secrets reach only the build job, which is bound to the release en
   const jobs = block(release, 0, "jobs").join("\n");
   const build = block(jobs, 2, "build");
   assert(build.includes("    environment: release"), "build runs in the release environment");
-  for (const job of ["prepare", "ci", "publish"]) {
-    const lines = block(jobs, 2, job);
-    assert(!lines.some((line) => line.includes("secrets.")), `${job} reads no secret`);
-    assert(!lines.some((line) => /^ {4}environment:/.test(line)), `${job} needs no environment`);
-  }
+  assert.deepEqual(exposedJobs(release), ["build"], "every other job reads no secret and needs no environment");
   assert(release.split("\n").filter((line) => line.includes("secrets.")).length > 0);
 });
 
@@ -100,12 +135,10 @@ test("every CI job runs on a GitHub-hosted runner, macOS on macos-15, and no wor
   const ci = await workflow("ci.yml");
   const jobs = block(ci, 0, "jobs").join("\n");
   for (const [job, runner] of Object.entries(RUNNERS)) assert(block(jobs, 2, job).includes(`    runs-on: ${runner}`), job);
-  for (const name of ["ci.yml", "release.yml"]) {
+  for (const name of (await readdir(WORKFLOWS)).filter((name) => /\.ya?ml$/.test(name))) {
     const text = await workflow(name);
     assert.doesNotMatch(text, /pull_request_target|head\.repo/, name);
-    for (const line of text.split("\n").filter((line) => /^\s+runs-on:/.test(line))) {
-      assert.match(line.trim(), /^runs-on: (?:ubuntu-22\.04|macos-15|windows-2022|\$\{\{ matrix\.runner \}\})$/, `${name}: ${line.trim()}`);
-    }
+    assert.deepEqual(runnerProblems(text), [], name);
   }
 });
 
