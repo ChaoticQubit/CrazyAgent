@@ -387,8 +387,9 @@ impl PinnedInstaller {
                 && env.and_then(Path::parent) == Some(home)
                 && runnable(&target)
                 && env.is_some_and(|env| {
-                    std::fs::read(env.join(LOCK_FILE))
-                        .is_ok_and(|text| text == lock.requirements.as_bytes())
+                    runnable(&env.join("venv/bin/python"))
+                        && std::fs::read(env.join(LOCK_FILE))
+                            .is_ok_and(|text| text == lock.requirements.as_bytes())
                 })
         })
     }
@@ -455,10 +456,18 @@ pub(super) fn link(target: &Path, at: &Path) -> Result<(), InstallError> {
 
 /// Tells whether a path is a regular file someone may run. Input: the path.
 /// Output: true for a file with any execute bit, following links.
-/// The words that make tar unpack one archive into a folder, before any member names.
-/// Inputs: the archive and the folder. Output: tar's arguments.
+/// The words that make tar unpack one archive into a folder, before any member names, as
+/// this user's files under this user's mode mask, never the archive's owners or modes, which
+/// tar keeps by default for root. Inputs: the archive and the folder. Output: tar's arguments.
 pub(super) fn unpack_args(archive: &Path, into: &Path) -> Vec<OsString> {
-    vec!["-xzf".into(), archive.into(), "-C".into(), into.into()]
+    vec![
+        "--no-same-owner".into(),
+        "--no-same-permissions".into(),
+        "-xzf".into(),
+        archive.into(),
+        "-C".into(),
+        into.into(),
+    ]
 }
 
 pub(super) fn runnable(path: &Path) -> bool {

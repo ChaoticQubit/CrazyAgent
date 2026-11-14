@@ -555,7 +555,7 @@ pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 /// profile reads: the Setup note, and a refused agent git step.
 pub const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
 
-const REASONS: [(&str, &str); 34] = [
+const REASONS: [(&str, &str); 35] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -571,6 +571,10 @@ const REASONS: [(&str, &str); 34] = [
     (
         "setup_homebrew_missing",
         "Homebrew is not installed. Install tmux yourself, then run setup again.",
+    ),
+    (
+        "setup_homebrew_unsafe",
+        "Another account can change Homebrew's files, so setup did not run it. Install tmux yourself, then run setup again.",
     ),
     ("setup_install_failed", "The installer did not finish."),
     (
