@@ -76,9 +76,7 @@ test("each skill says where it came from, in the list and in its detail", () => 
 
 test("a skill's detail renders its SKILL.md without the frontmatter, its files and its switch", () => {
   const markup = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: detail() })));
-  assert.match(markup, /<h2>Steps<\/h2>/);
-  assert.match(markup, /<li>Read the brief<\/li>/);
-  assert.match(markup, /<code>npm run build<\/code>/);
+  assert.match(markup, /<pre[^>]*>\n*# Steps\n\n- Read the brief\n- Ship `npm run build`\n<\/pre>/);
   assert.doesNotMatch(markup, /name: frontend-design/);
   assert.match(markup, /Builds polished front ends\./);
   assert.match(markup, /For every project/);

@@ -914,7 +914,7 @@ fn the_skill_page_renders_skill_md_and_files_and_switches_the_skill() {
         .position(|line| line == "From ~/Skills/frontend-design")
         .unwrap();
     assert_eq!(lines[from - 1], "Added by you", "{lines:?}");
-    assert!(lines.iter().any(|line| line == "Steps"), "{lines:?}");
+    assert!(lines.iter().any(|line| line == "# Steps"), "{lines:?}");
     assert!(lines.iter().any(|line| line.contains("Read the brief")));
     assert!(lines.iter().any(|line| line.contains("npm run build")));
     assert!(
@@ -1022,7 +1022,7 @@ fn the_skill_page_shows_every_header_line_agents_read_beyond_its_name_and_descri
         !lines.iter().any(|line| line == "name: frontend-design"),
         "the name line is the page title: {lines:?}"
     );
-    assert!(lines.iter().any(|line| line == "Steps"), "{lines:?}");
+    assert!(lines.iter().any(|line| line == "# Steps"), "{lines:?}");
 
     let plain = texts(&SkillDetailPage::with(detail(true)).lines(70, &ctx));
     assert!(
