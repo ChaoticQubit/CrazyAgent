@@ -189,3 +189,19 @@ test("the refused-tool suite's home lies outside the checkout, holds a uv graphi
     rmSync(parent, { recursive: true });
   }
 });
+
+test("run.mjs leaves the fixture engine's root empty until the engine is ready, then plants the Node suite's Codex before the app starts", () => {
+  const runner = source("./run.mjs");
+  const start = runner.indexOf("function engineEnvironment(");
+  assert.ok(start > 0, "run.mjs builds the engine's environment in engineEnvironment");
+  const environment = runner.slice(start, runner.indexOf("\n}\n", start));
+  assert.doesNotMatch(environment, /engineRoot|mkdirSync|writeFileSync/, "owner_fixture serve refuses a root that is not empty");
+  assert.match(runner, /await ready\(engine\);\n\s+plantNodeCodex\(\);\n/, "Codex is planted once the fixture engine is ready");
+  assert.ok(runner.indexOf("plantNodeCodex();") < runner.indexOf('launch("webdriver"'), "Codex is planted before the app starts");
+});
+
+test("owner_fixture prints why it failed, so a refused root names its reason in the engine log", () => {
+  const fixture = source("../../src-tauri/src/bin/owner_fixture.rs");
+  assert.match(fixture, /Err\(error\) => \{\n\s+eprintln!\("native fixture failed: \{error\}"\);/);
+  assert.doesNotMatch(fixture, /eprintln!\("native fixture failed"\)/);
+});
