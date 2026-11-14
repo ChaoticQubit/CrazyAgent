@@ -14716,7 +14716,7 @@ fn an_owner_accept_through_accept_into_as_is_refused_by_assertion() {
 
 /// How long a landing race row runs: `CRAZYAGENT_LANDING_RACE_SECONDS` for a longer run at a
 /// red, else a few seconds. Output: the seconds.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn race_seconds() -> u64 {
     std::env::var("CRAZYAGENT_LANDING_RACE_SECONDS")
         .ok()
@@ -14726,7 +14726,7 @@ fn race_seconds() -> u64 {
 
 /// The engine's git on the case's agent worktree, confined for one step. Inputs: the case and
 /// what the step may write. Output: the repository.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn confined_agent(case: &Case, writes: git::Writes) -> git::Repo {
     git::Repo::open(
         &case.repo,
@@ -14740,7 +14740,7 @@ fn confined_agent(case: &Case, writes: git::Writes) -> git::Repo {
 
 /// SECAUDIT unconfined-git-add-reads-through-raced-symlink, with no timing: a step on the work
 /// tree cannot read a file behind a link, while a plain file in the work tree still reads.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_confined_git_step_cannot_read_a_file_behind_a_link() {
     let case = Case::new();
@@ -14763,7 +14763,7 @@ fn a_confined_git_step_cannot_read_a_file_behind_a_link() {
 /// only what it names. Neither step reaches the owner's hooks or anywhere outside, a step
 /// filling the work tree writes no git metadata, and a step adding the work tree writes
 /// nothing in it. What each may write still works.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_confined_git_step_writes_only_what_it_names_and_never_the_git_folder() {
     use super::git::Writes::{Objects, WorkTree};
@@ -14802,7 +14802,7 @@ fn a_confined_git_step_writes_only_what_it_names_and_never_the_git_folder() {
 
 /// SECAUDIT unconfined-git-add-reads-through-raced-symlink: a file an agent keeps swapping for
 /// a link while its turn ends leaves no blob of what the link points at.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_file_swapped_for_a_link_during_the_turn_end_leaves_no_blob_of_what_it_points_at() {
     use std::sync::Arc;
@@ -14861,7 +14861,7 @@ fn a_file_swapped_for_a_link_during_the_turn_end_leaves_no_blob_of_what_it_point
 /// One attempt of the read-tree race: a lead's worktree on its branch holding `x/keep.txt`
 /// from one landed set, and a waiting second set adding `x/planted.bin` with `known`.
 /// Input: the file's text. Output: the case, the lead and the waiting set.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
     let case = Case::new();
     let agents = case
@@ -14910,7 +14910,7 @@ fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
 /// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: the step an
 /// Accept fills an agent's worktree through writes nothing outside that worktree, where the
 /// same step on the owner's checkout still can.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn an_accept_fills_an_agents_worktree_through_a_step_confined_to_it() {
     let (case, lead, _) = read_tree_attempt("known\n");
@@ -14953,7 +14953,7 @@ fn an_accept_fills_an_agents_worktree_through_a_step_confined_to_it() {
 /// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree: a folder of a lead's worktree
 /// swapped for a link while its worker's set lands writes nothing outside the worktree, and
 /// the same landing with no swap still fills the worktree under the confined step.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_folder_swapped_for_a_link_during_a_landing_writes_nothing_outside_the_worktree() {
     use std::sync::Arc;
@@ -15021,6 +15021,184 @@ fn a_folder_swapped_for_a_link_during_a_landing_writes_nothing_outside_the_workt
                 false
             },
         );
+        done.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        tried += 1;
+        if std::fs::read(outside.path().join("planted.bin"))
+            .is_ok_and(|bytes| bytes == known.as_bytes())
+        {
+            hits += 1;
+        }
+    }
+    assert!(tried > 0);
+    assert_eq!(hits, 0, "planted.bin was written outside the worktree");
+}
+
+/// The text a Linux reset race row writes, long enough that git's write of it spans many
+/// swaps of the folder above it. Output: the text.
+#[cfg(target_os = "linux")]
+fn reset_race_text() -> String {
+    (0..)
+        .map(|n: u32| format!("{n:08}\n"))
+        .take(466_034)
+        .collect()
+}
+
+/// One attempt of a Linux reset race: the case's master worktree on its lease holding
+/// `x/keep.txt` and, with `held`, `x/planted.bin` with `known`, and the owner commit a reset
+/// moves it onto, which adds `x/planted.bin` when `held` is false and drops it when true.
+/// Inputs: the file's text and whether the lease holds it. Output: the case, the master's
+/// workspace, the opened agent, the commit it holds and the reset's target.
+#[cfg(target_os = "linux")]
+fn reset_attempt(known: &str, held: bool) -> (Case, Workspace, flow::Agent, String, String) {
+    let case = Case::new();
+    case.owner_commit("x/keep.txt", "keep\n", "Keep");
+    if held {
+        case.owner_commit("x/planted.bin", known, "Plant");
+    }
+    let master = master_agent(&case);
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Master,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let from = agent.head().unwrap();
+    let target = if held {
+        case.owner(&["rm", "-q", "x/planted.bin"]);
+        case.owner(&["commit", "-q", "-m", "Drop"]);
+        case.tip()
+    } else {
+        case.owner_commit("x/planted.bin", known, "Plant")
+    };
+    (case, master, agent, from, target)
+}
+
+/// Swaps `x` in a worktree for a link to `outside` and back, over and over on a thread from
+/// when `go` is set until `done` is, as an agent racing an engine git step would. Inputs:
+/// the worktree and the link's target. Output: the go and done flags and the thread.
+#[cfg(target_os = "linux")]
+fn swap_x(
+    worktree: &Path,
+    outside: &Path,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let go = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let x = worktree.join("x");
+    let aside = worktree.join("x.aside");
+    let target = outside.to_path_buf();
+    let swapper = std::thread::spawn({
+        let (go, done) = (go.clone(), done.clone());
+        move || {
+            while !go.load(Ordering::Relaxed) {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::yield_now();
+            }
+            while !done.load(Ordering::Relaxed) {
+                let _ = std::fs::rename(&x, &aside);
+                let _ = std::os::unix::fs::symlink(&target, &x);
+                let _ = std::fs::remove_file(&x);
+                let _ = std::fs::rename(&aside, &x);
+            }
+        }
+    });
+    (go, done, swapper)
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree on Linux, the reset an owner
+/// Accept, Update or Restore and the startup reconcile run (`flow::reset_agent`): a folder of
+/// the master's worktree swapped for a link while the reset fills it writes nothing outside
+/// the worktree, and the same reset with no swap still fills the worktree under the
+/// confined step.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_folder_swapped_for_a_link_during_a_reset_writes_nothing_outside_the_worktree() {
+    use std::sync::atomic::Ordering;
+    let known = reset_race_text();
+    let (_case, master, agent, from, target) = reset_attempt(&known, false);
+    assert!(flow::reset_agent(&agent, &from, &target).unwrap());
+    assert!(
+        master.worktree.join("x/planted.bin").is_file(),
+        "the reset with no swap did not fill the worktree"
+    );
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let (mut tried, mut hits) = (0u32, 0u32);
+    while tried < 100 && Instant::now() < deadline {
+        let (_case, master, agent, from, target) = reset_attempt(&known, false);
+        let outside = tempfile::tempdir().unwrap();
+        let (go, done, swapper) = swap_x(&master.worktree, outside.path());
+        plant(&flow::BEFORE_READ_TREE, &master.git_dir, move || {
+            go.store(true, Ordering::Relaxed);
+        });
+        let _ = flow::reset_agent(&agent, &from, &target);
+        flow::BEFORE_READ_TREE
+            .lock()
+            .unwrap()
+            .retain(|(planted, _)| planted != &master.git_dir);
+        done.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        tried += 1;
+        if std::fs::read(outside.path().join("planted.bin"))
+            .is_ok_and(|bytes| bytes == known.as_bytes())
+        {
+            hits += 1;
+        }
+    }
+    assert!(tried > 0);
+    assert_eq!(hits, 0, "planted.bin was written outside the worktree");
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree on Linux, the read-tree a
+/// reset that did not hold puts the files back with (`flow::files_back`): the agent switches
+/// its branch inside the reset, so the engine writes `x/planted.bin` back, and a folder
+/// swapped for a link meanwhile writes nothing outside the worktree. With no swap the file
+/// comes back and the worktree is clean.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_folder_swapped_for_a_link_while_a_reset_puts_files_back_writes_nothing_outside() {
+    use std::sync::atomic::Ordering;
+    let known = reset_race_text();
+    let switched = |case: &Case, master: &Workspace| {
+        let (home, worktree) = (case.home.clone(), master.worktree.clone());
+        plant(&flow::AFTER_READ_TREE, &master.git_dir, move || {
+            git_in(&home, &worktree, &["switch", "-q", "-c", "side"]);
+        })
+    };
+    let (case, master, agent, from, target) = reset_attempt(&known, true);
+    let runs = switched(&case, &master);
+    assert!(!flow::reset_agent(&agent, &from, &target).unwrap());
+    assert_eq!(unplant_from(&master.git_dir, &runs), 1);
+    assert!(
+        std::fs::read(master.worktree.join("x/planted.bin"))
+            .is_ok_and(|bytes| bytes == known.as_bytes()),
+        "the files did not come back with no swap"
+    );
+    assert_eq!(
+        git_in(&case.home, &master.worktree, &["status", "--porcelain"]),
+        ""
+    );
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let (mut tried, mut hits) = (0u32, 0u32);
+    while tried < 100 && Instant::now() < deadline {
+        let (case, master, agent, from, target) = reset_attempt(&known, true);
+        let outside = tempfile::tempdir().unwrap();
+        let (go, done, swapper) = swap_x(&master.worktree, outside.path());
+        let runs = switched(&case, &master);
+        plant(&flow::AFTER_READ_TREE, &master.git_dir, move || {
+            go.store(true, Ordering::Relaxed);
+        });
+        let _ = flow::reset_agent(&agent, &from, &target);
+        unplant_from(&master.git_dir, &runs);
         done.store(true, Ordering::Relaxed);
         swapper.join().unwrap();
         tried += 1;
