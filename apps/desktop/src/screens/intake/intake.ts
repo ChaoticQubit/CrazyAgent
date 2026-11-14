@@ -328,17 +328,23 @@ const ANSWER_ISSUES: Record<string, AnywayIssue> = {
 
 const OVERRIDE_ORDER: AddOverride[] = ["worktrees", "linked_checkout", "too_large"];
 
-/** The question Home asks for a job waiting on a soft refusal: the one issue the engine refused,
- * and the overrides an answer of yes starts again with, the job's own plus the one for that
- * issue, in the engine's order. Input: a job waiting for an answer. Output: issues and overrides. */
-export function jobQuestion(job: IntakeJob): { issues: AnywayIssue[]; overrides: AddOverride[] } {
+/** The question Home asks for a job waiting on a soft refusal: what a fresh read of its folder
+ * finds for its way plus the issue the engine refused, naming the git link a refused move has,
+ * or that its git data went unread when the read could not tell; and the overrides an answer of
+ * yes starts again with, the job's own plus the one for that issue, in the engine's order.
+ * Inputs: a job waiting for an answer and its folder read, finished. Output: issues and overrides. */
+export function jobQuestion(job: IntakeJob, size: Loaded<FolderSize>): { issues: AnywayIssue[]; overrides: AddOverride[] } {
   if (job.state.state !== "needs_answer") throw new Error(`job ${job.id} asks nothing in state ${job.state.state}`);
+  if (size.kind === "loading") throw new Error(`job ${job.id} is asked about before its folder read finished`);
   const code = job.state.code;
   if (!Object.hasOwn(ANSWER_ISSUES, code)) throw new Error(`job ${job.id} asks about unknown code ${code}`);
   const asked = new Set([...job.overrides, REFUSAL_OVERRIDES[code]]);
   const overrides = OVERRIDE_ORDER.filter((override) => asked.has(override));
   if (overrides.length < job.overrides.length) throw new Error(`job ${job.id} lost an override`);
-  return { issues: [ANSWER_ISSUES[code]], overrides };
+  const unread = size.kind !== "ok" || typeof size.value.movable !== "boolean";
+  const found = anywayIssues(job.mode, size, code)
+    .map((issue) => unread && code === "home_move_worktrees" && issue === "worktrees" ? "git_data_unread" : issue);
+  return { issues: ISSUE_ORDER.filter((issue) => found.includes(issue)), overrides };
 }
 
 /** Why Add folder offers no Move or Copy yet while the folder read is still checking its git links. */
