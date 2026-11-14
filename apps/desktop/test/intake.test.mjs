@@ -261,6 +261,31 @@ test("the review form starts from the mapping agent's draft and keeps the saved 
   assert.equal(intake.onboardingDraft(view({ name: undefined }), stored()).name, "shop");
 });
 
+test("after Retry mapping the form fills only from a view read after the retry, then from the retried mapping, failed again or not", async () => {
+  const state = await import("../src/state.ts");
+  const typed = (about, stack) => ({ ...intake.onboardingDraft(view(), stored()), about, stack });
+  const prefilled = setup({ about: "", tech_stack: ["Rust"] });
+  const before = view({ mapping: { kind: "failed", reason: "The mapping agent stopped." }, draft: prefilled });
+  state.stampRead({ kind: "ok", value: before }, state.startRead());
+  const retried = state.readsSoFar();
+  assert.equal(state.readAfter(before, retried), false);
+  assert.equal(intake.fillsForm(before, state.readAfter(before, retried), null, false), false, "the failed view shown while the reload runs never fills the emptied form");
+  const running = view({ mapping: { kind: "running" }, draft: prefilled });
+  state.stampRead({ kind: "ok", value: running }, state.startRead());
+  assert.equal(state.readAfter(running, retried), true);
+  assert.equal(intake.fillsForm(running, true, null, false), false, "a running mapping fills nothing yet");
+  const mapped = view();
+  state.stampRead({ kind: "ok", value: mapped }, state.startRead());
+  assert.equal(intake.fillsForm(mapped, state.readAfter(mapped, retried), null, false), true, "the retried mapping's answers fill the form");
+  const again = view({ mapping: { kind: "failed", reason: "The mapping agent stopped again." }, draft: prefilled });
+  state.stampRead({ kind: "ok", value: again }, state.startRead());
+  assert.equal(intake.fillsForm(again, state.readAfter(again, retried), null, false), true, "a retry that failed again still fills the form");
+  assert.equal(state.readAfter(undefined, retried), false);
+  assert.equal(intake.fillsForm(mapped, true, typed("", []), false), true, "answers that arrive after an empty draft fill it");
+  assert.equal(intake.fillsForm(mapped, true, typed("", []), true), false, "never over what the owner typed");
+  assert.equal(intake.fillsForm(mapped, true, typed("Mine.", []), false), false);
+});
+
 test("a failed graph alone does not make the form ready while the mapping waits", () => {
   const waiting = view({ graph: { kind: "failed", reason: "Graph build failed" }, mapping: { kind: "waiting" } });
   assert.equal(intake.confirmReady(waiting).ready, false);
