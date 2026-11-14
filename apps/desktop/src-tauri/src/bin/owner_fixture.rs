@@ -18,6 +18,33 @@ use std::time::Duration;
 
 type FixtureResult<T> = Result<T, Box<dyn Error>>;
 
+/// How long a served fixture engine waits for its stop request when the runner names no life.
+const LIFE_DEFAULT_SECONDS: u64 = 360;
+/// The shortest life the runner may name, in seconds.
+const LIFE_MIN_SECONDS: u64 = 60;
+/// The longest life the runner may name, in seconds, so a lost runner never leaves an engine
+/// running for more than an hour.
+const LIFE_MAX_SECONDS: u64 = 3600;
+const _: () = assert!(LIFE_MIN_SECONDS <= LIFE_DEFAULT_SECONDS);
+const _: () = assert!(LIFE_DEFAULT_SECONDS <= LIFE_MAX_SECONDS);
+
+/// The life of a served fixture engine: the native runner's own bound for it, from
+/// `CRAZYAGENT_DESKTOP_TEST_FIXTURE_SECONDS`, so a long suite never loses its engine before the
+/// runner's bound, else `LIFE_DEFAULT_SECONDS`. Output: the life, or why the value is refused.
+fn fixture_life() -> FixtureResult<Duration> {
+    let Some(value) = std::env::var_os("CRAZYAGENT_DESKTOP_TEST_FIXTURE_SECONDS") else {
+        return Ok(Duration::from_secs(LIFE_DEFAULT_SECONDS));
+    };
+    let seconds: u64 = value
+        .to_str()
+        .and_then(|text| text.parse().ok())
+        .ok_or("the fixture life is not a whole number of seconds")?;
+    if !(LIFE_MIN_SECONDS..=LIFE_MAX_SECONDS).contains(&seconds) {
+        return Err("the fixture life is out of bounds".into());
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
 async fn attach(root: &Path, projects: &Path) -> FixtureResult<()> {
     let client = Client::new(root.join("e.sock"), Duration::from_secs(3))?;
     let (_, mut owner) = OwnerController::attach_configured(client, OwnerClientKind::Tui).await?;
@@ -46,7 +73,7 @@ fn emit(value: serde_json::Value) -> FixtureResult<()> {
     Ok(())
 }
 
-async fn await_stop() -> FixtureResult<()> {
+async fn await_stop(life: Duration) -> FixtureResult<()> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let mut bytes = [0; 5];
@@ -54,7 +81,7 @@ async fn await_stop() -> FixtureResult<()> {
         let _ = sender.send(result.is_ok() && bytes == *b"stop\n");
     });
     emit(json!({ "ready": true }))?;
-    match tokio::time::timeout(Duration::from_secs(360), receiver).await {
+    match tokio::time::timeout(life, receiver).await {
         Ok(Ok(true)) => Ok(()),
         _ => Err("fixture shutdown request missing or invalid".into()),
     }
@@ -85,6 +112,7 @@ async fn serve(root: &Path, projects: &Path, metadata: bool) -> FixtureResult<()
     if !root.is_absolute() || std::fs::read_dir(root)?.next().is_some() {
         return Err("fixture requires a new empty absolute directory".into());
     }
+    let life = fixture_life()?;
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let mut service = if metadata {
         EngineService::start_with_settings_sources(
@@ -107,7 +135,7 @@ async fn serve(root: &Path, projects: &Path, metadata: bool) -> FixtureResult<()
         }
     };
     let result = match attach(root, projects).await {
-        Ok(()) => await_stop().await,
+        Ok(()) => await_stop(life).await,
         Err(error) => Err(error),
     };
     if let Some(upkeep) = upkeep {
