@@ -11778,14 +11778,20 @@ fn native_session(
     }
 }
 
+/// The owner's line for a native lead whose launch's run time passed before this engine took
+/// it over, as after an app quit or a long freeze.
+const LEAD_RUN_TIME_PASSED: &str = "The native lead's run time ended before it was taken over";
+
 /// Takes over a native-mode lead on a signed-in account that an earlier engine left running
 /// in its own server: waits for the runtime's first order, a turn or a start, which carries
 /// a fresh custody use of the account, hands the credential to the lead's home again, then
 /// serves turns on the running session, so the lead and its teammates never run on without
-/// the account. A first order without the account ends the lead. A lead's end not proven
-/// gone reports the uncertain cleanup before the cause it ended for, and keeps a credential
-/// already handed over held (S4B-B1). Takes the adoption and the worker's channels and
-/// flags. Returns the problem that ended it, if any.
+/// the account. A first order without the account ends the lead, and so does any first
+/// order once the launch's run time has passed, with the launch deadline and before any
+/// handoff (RV-DS241-130). A lead's end not proven gone reports the uncertain cleanup before
+/// the cause it ended for, and keeps a credential already handed over held (S4B-B1). Takes
+/// the adoption and the worker's channels and flags. Returns the problem that ended it, if
+/// any.
 #[allow(clippy::too_many_arguments)]
 fn native_adopted(
     adoption: Adoption,
@@ -11828,6 +11834,22 @@ fn native_adopted(
         }
     };
     let taken = first.is_some();
+    let left = record.run_time_left(limits.run_time);
+    if left.is_zero() {
+        let cause = Some(with_code(LEAD_RUN_TIME_PASSED, Some("launch_deadline")));
+        let ended = end(false, None);
+        if taken {
+            let _ = reports.send(Report::Finished {
+                text: String::new(),
+                end: TurnEnd::TimedOut,
+                cause: Some("launch_deadline".to_owned()),
+            });
+        }
+        if !ended {
+            return ended_with(settle_stop(Err(Unstopped::Uncertain), None, by), cause);
+        }
+        return cause;
+    }
     let Some(grant) = grant else {
         let cause = Some("The native lead was taken over without its signed-in account".into());
         if !end(taken, None) {
@@ -11836,11 +11858,7 @@ fn native_adopted(
         return cause;
     };
     let Grant { profile, .. } = *grant;
-    let credential = match profile.hand_to_agent(
-        &managed.home,
-        record.run_time_left(limits.run_time),
-        &managed.executable,
-    ) {
+    let credential = match profile.hand_to_agent(&managed.home, left, &managed.executable) {
         Ok(credential) => credential,
         Err(problem) => {
             let cause = Some(with_code(
@@ -12149,6 +12167,8 @@ fn serve(
 /// continues it; a refused resume is reported and ends the agent as a kept one does. A
 /// master's turn starts a fresh conversation, since its feed briefs it again each turn; only
 /// the first turn of a run the engine resumes after an interruption continues its session.
+/// A turn given no time, as a used-up session limit gives one, ends timed out by the turn
+/// limit before any handoff, as a turn that ran out of time ends its worker (RV-DS241-130).
 #[allow(clippy::too_many_arguments)]
 fn per_turn(
     plan: &Plan,
@@ -12162,6 +12182,14 @@ fn per_turn(
 ) -> Option<String> {
     let mut resume = plan.resume.clone();
     while let Next::Turn(prompt, grant, rules) = next_turn(orders, cancel, None) {
+        if rules.limit.is_some_and(|limit| limit.is_zero()) {
+            let _ = reports.send(Report::Finished {
+                text: String::new(),
+                end: TurnEnd::TimedOut,
+                cause: Some(TURN_LIMIT.to_owned()),
+            });
+            return None;
+        }
         let Some(grant) = grant else {
             let _ = reports.send(Report::Finished {
                 text: String::new(),
