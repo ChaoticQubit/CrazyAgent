@@ -287,9 +287,9 @@ fn git_until(
 }
 
 /// Builds the engine's Git process: the host Git with a cleared environment, no system
-/// or global config, hooks, fsmonitor, replace objects, grafts, commit-graph files,
-/// protocols or automatic maintenance. Inputs: the repository and the arguments. Output:
-/// the unspawned process.
+/// or global config, the engine's safe settings (no hooks, fsmonitor, pager, protocols or
+/// signature programs), no replace objects, grafts, commit-graph files or automatic
+/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process.
 fn git_command(repository: &Path, args: &[&str]) -> Process {
     let mut command = Process::new("/usr/bin/git");
     command
@@ -304,19 +304,10 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
         .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
+        .args(crate::research::runner::GIT_SAFE)
         .args([
             "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.pager=cat",
-            "-c",
             "core.attributesFile=/dev/null",
-            "-c",
-            "submodule.recurse=false",
-            "-c",
-            "protocol.allow=never",
             "-c",
             "gc.auto=0",
             "-c",

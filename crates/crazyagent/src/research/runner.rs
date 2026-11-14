@@ -42,7 +42,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
 pub(crate) const GIT: &str = "/usr/bin/git";
-pub(crate) const GIT_SAFE: [&str; 10] = [
+/// The settings every engine git runs with, whatever the repository configures: no hooks,
+/// fsmonitor or pager, no submodule recursion, no transport and no signature program, so a
+/// log or show that meets a signed commit in any armor runs `/usr/bin/false`, never a
+/// program the repository names (RV-DS241-39).
+pub(crate) const GIT_SAFE: [&str; 16] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
@@ -53,6 +57,12 @@ pub(crate) const GIT_SAFE: [&str; 10] = [
     "submodule.recurse=false",
     "-c",
     "protocol.allow=never",
+    "-c",
+    "gpg.program=/usr/bin/false",
+    "-c",
+    "gpg.x509.program=/usr/bin/false",
+    "-c",
+    "gpg.ssh.program=/usr/bin/false",
 ];
 #[cfg(unix)]
 const GIT_CONFIG_LISTING_BYTES_MAX: usize = 64 * 1024;

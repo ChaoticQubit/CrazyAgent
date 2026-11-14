@@ -857,8 +857,8 @@ fn tilde_run(parts: &[(Vec<String>, usize)]) -> usize {
 
 /// Gathers what a status run reads beside the roadmap: the numbered items, the project's
 /// landed change sets, the newest commit subjects on the owner's checked-out branch and the
-/// tracked paths that look like tests, read through the engine's confined git and fenced as
-/// data. A folder that is no git checkout gives the items and the landed sets only. Inputs:
+/// tracked paths that look like tests, read by the engine's own git outside any sandbox,
+/// which runs nothing the repository configures, and fenced as data. A folder that is no git checkout gives the items and the landed sets only. Inputs:
 /// the project folder, the items and the landed sets, newest first, each as its name and
 /// title. Output: the evidence within `EVIDENCE_PACK_BYTES_MAX`, or a plain git code.
 pub fn evidence(
