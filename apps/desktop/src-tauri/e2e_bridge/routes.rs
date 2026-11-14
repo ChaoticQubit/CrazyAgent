@@ -705,14 +705,15 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[serde(rename_all = "camelCase")]
             struct Args {
                 id: String,
+                version: u64,
                 paths: Vec<String>,
                 generation: u64,
             }
-            let Args { id, paths, generation } = match parse(args) {
+            let Args { id, version, paths, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .set_project_hidden_paths(&id, paths, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_project_hidden_paths(&id, version, paths, generation) .await }.await;
             routed(result)
         }
         "desktop_delete_project_context" => {

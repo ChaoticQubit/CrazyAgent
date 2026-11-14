@@ -2778,6 +2778,7 @@ fn owner_read(
                 .into_iter()
                 .map(|path| path.display().to_string())
                 .collect(),
+            version: versioned::current(&tx, &versioned::hidden_paths_item(project_id))?.version,
         },
         OwnerRead::ProjectAgentPolicy { project_id } => {
             let Some(setup) = crate::project_setup::load_setup(&tx, project_id)? else {

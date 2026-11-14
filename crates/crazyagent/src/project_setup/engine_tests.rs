@@ -3562,3 +3562,129 @@ async fn a_new_project_records_the_toolchains_the_owner_has_installed_in_its_fir
     );
     engine.stop().await;
 }
+
+#[tokio::test]
+async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_folder() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let folder = stored.project_folder();
+    let (secret, vendor) = (folder.join("secret"), folder.join("vendor"));
+    std::fs::create_dir_all(&secret).unwrap();
+    std::fs::create_dir_all(&vendor).unwrap();
+    let text = |path: &Path| {
+        std::fs::canonicalize(path)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let opened = owner.project_hidden_paths(project.clone()).await.unwrap();
+    assert_eq!(opened.version, 0, "folders nobody hid are at version 0");
+    let landed = owner
+        .set_project_hidden_paths(project.clone(), opened.version, vec![text(&secret)], 2)
+        .await
+        .unwrap();
+    assert_eq!(result(landed), OwnerResult::Applied);
+
+    for (version, generation) in [(opened.version, 3), (7, 4)] {
+        let refused = owner
+            .set_project_hidden_paths(project.clone(), version, vec![], generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save from version {version} never un-hides the folder saved at version 1"
+        );
+    }
+    let invalid_and_stale = owner
+        .set_project_hidden_paths(project.clone(), 0, vec!["relative".into()], 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(invalid_and_stale),
+        rejected("hidden_path_not_absolute"),
+        "a refused folder is named before the version is checked"
+    );
+    assert_eq!(
+        owner.project_hidden_paths(project.clone()).await.unwrap(),
+        HiddenPaths {
+            paths: vec![text(&secret)],
+            version: 1
+        },
+        "the stale window changed nothing"
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT version FROM versioned_items WHERE item='hidden-paths:setup-pooled'
+             AND writer='owner'"
+        ),
+        1
+    );
+
+    let redone = owner
+        .set_project_hidden_paths(project.clone(), 1, vec![text(&secret), text(&vendor)], 6)
+        .await
+        .unwrap();
+    assert_eq!(result(redone), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_hidden_paths(project.clone()).await.unwrap(),
+        HiddenPaths {
+            paths: vec![text(&secret), text(&vendor)],
+            version: 2
+        },
+        "after a re-read the redo lands"
+    );
+
+    let removed = owner.remove_project(project.clone(), 7).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT version FROM versioned_items WHERE item='hidden-paths:setup-pooled'"),
+        3,
+        "a removed project's hidden folders move their version on once more"
+    );
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_hidden_paths(project.clone()).await.unwrap(),
+        HiddenPaths {
+            paths: vec![],
+            version: 3
+        },
+        "the project added again under the same id starts with no hidden folders"
+    );
+    for (version, generation) in [(0, 9), (2, 10)] {
+        let refused = owner
+            .set_project_hidden_paths(project.clone(), version, vec![], generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save read before the removal at version {version} is refused"
+        );
+    }
+    drop(owner);
+    engine.stop().await;
+}

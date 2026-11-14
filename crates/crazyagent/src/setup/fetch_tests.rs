@@ -64,6 +64,7 @@ fn entry(id: &str, kind: PackKind, source: PackSource, install: &str) -> PackMan
         on_by_default: true,
         install: install.into(),
         integrity: None,
+        program_integrity: None,
     }
 }
 

@@ -436,6 +436,15 @@ pub struct ReadPaths {
     pub version: u64,
 }
 
+/// The folders a project's agents are kept out of in saved order, with the version the
+/// owner's screen sends back when it changes them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HiddenPaths {
+    pub paths: Vec<String>,
+    pub version: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredSetup {
@@ -793,7 +802,7 @@ pub enum SetupView {
     Removal(Box<crate::team::cleanup::RemovalPreview>),
     Context(ProjectContext),
     ReadPaths(ReadPaths),
-    HiddenPaths(Vec<String>),
+    HiddenPaths(HiddenPaths),
     AgentPolicy(crate::sandbox::policy::PolicyView),
     Item(ContextChunk),
     Log(Vec<String>),
@@ -875,6 +884,7 @@ pub enum SetupAction {
     },
     SetHiddenPaths {
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
     },
     SetAgentPolicy {
@@ -1994,9 +2004,11 @@ pub(crate) fn execute(
             version,
             paths,
         } => set_read_paths(tx, project_id, *version, paths),
-        SetupAction::SetHiddenPaths { project_id, paths } => {
-            set_hidden_paths(tx, project_id, paths)
-        }
+        SetupAction::SetHiddenPaths {
+            project_id,
+            version,
+            paths,
+        } => set_hidden_paths(tx, project_id, *version, paths),
         SetupAction::SetAgentPolicy {
             project_id,
             version,
@@ -2612,11 +2624,14 @@ fn set_read_paths(
 
 /// Saves a project's hidden folders once each passes
 /// [`crate::sandbox::hidden_paths::checked`] against the project's own folder, so agents are
-/// kept out of them. Takes the transaction, project and typed paths. Returns Applied, or a
-/// plain rejection for an unknown project or a refused path.
+/// kept out of them, and the owner's screen showed the current ones. Takes the transaction,
+/// project, the version the screen showed and the typed paths. Returns Applied, or a plain
+/// rejection for an unknown project, a refused path or `stale_revision` when the folders
+/// changed since, so a stale screen never un-hides a folder.
 fn set_hidden_paths(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
+    version: u64,
     paths: &[String],
 ) -> Result<Outcome, EngineError> {
     let Some(setup) = load_setup(tx, project_id)? else {
@@ -2629,6 +2644,10 @@ fn set_hidden_paths(
     };
     if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &checked) {
         return Ok(rejected(code));
+    }
+    let item = crate::storage::versioned::hidden_paths_item(project_id);
+    if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
@@ -2746,6 +2765,7 @@ fn remove(
     crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
+        crate::storage::versioned::hidden_paths_item(project_id),
         crate::storage::versioned::agent_policy_item(project_id),
         crate::storage::versioned::instruction_settings_item(project_id),
         crate::storage::versioned::process_text_item(Some(project_id)),

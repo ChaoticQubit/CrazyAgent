@@ -1,6 +1,7 @@
 use super::*;
+use crate::plugins::ContextModeOff;
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const VERSION: &str = "1.0.169";
@@ -17,9 +18,9 @@ struct Case {
     bin: PathBuf,
 }
 
-/// Makes a private engine root with its `setup/npm` folder and a folder holding `npm` and
-/// `node` links to real system programs, so npm never reaches a registry. Input: the program
-/// `npm` runs. Output: the case, removed when dropped.
+/// Makes a private engine root with its `setup/npm` folder and a folder holding an `npm`
+/// link to a real system program, so npm never reaches a registry, and a `node` that reports
+/// a supported version. Input: the program `npm` runs. Output: the case, removed when dropped.
 fn case(npm: &str) -> Case {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
@@ -33,7 +34,7 @@ fn case(npm: &str) -> Case {
             .unwrap();
     }
     std::os::unix::fs::symlink(npm, bin.join("npm")).unwrap();
-    std::os::unix::fs::symlink("/usr/bin/true", bin.join("node")).unwrap();
+    node_reports(&bin, "v24.0.0");
     Case {
         _directory: directory,
         #[cfg(target_os = "macos")]
@@ -41,6 +42,15 @@ fn case(npm: &str) -> Case {
         root,
         bin,
     }
+}
+
+/// Writes a `node` into a folder that prints one version for `node --version`. Inputs: the
+/// folder and the version line. Output: none.
+fn node_reports(bin: &Path, version: &str) {
+    let node = bin.join("node");
+    let _ = fs::remove_file(&node);
+    fs::write(&node, format!("#!/bin/sh\necho {version}\n")).unwrap();
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 impl Case {
@@ -438,8 +448,8 @@ fn a_check_inside_the_backoff_after_a_failed_install_gets_the_time_left_and_neve
     assert!(!case.npm().join(PROFILE).exists(), "npm never started");
     assert_eq!(
         for_launch(&case.root, npx_in(&case, VERSION)),
-        npx_in(&case, VERSION),
-        "an agent launch still runs the approved spec"
+        Err(ContextModeOff::Failed),
+        "an agent launch never falls back to npx, which runs dependency install scripts"
     );
 }
 
@@ -535,5 +545,194 @@ fn a_check_of_any_other_server_runs_it_as_approved() {
         },
     ] {
         assert_eq!(for_check(&root, spec.clone()), ForCheck::Run(spec));
+    }
+}
+
+const PROGRAM_PINNED: &str = "sha512-JtyjW26+UfYxCH3Dvw55p7ZQCVoFaM/p6yt8fw4crItrGS6OTnJOmw3vP5r1OEup9SR5cbJtJI262EHdMm5HUA==";
+
+#[test]
+fn the_pack_pins_the_hash_of_the_program_the_shared_install_runs() {
+    assert_eq!(program_pin(VERSION).as_deref(), Some(PROGRAM_PINNED));
+    assert_eq!(program_pin("9.9.9"), None);
+}
+
+#[test]
+fn an_install_whose_program_differs_from_the_pinned_hash_is_never_run() {
+    let case = case("/usr/bin/false");
+    finished(&case.folder(), PINNED);
+    let program = case
+        .folder()
+        .join("node_modules/context-mode/cli.bundle.mjs");
+    fs::write(&program, "import('node:child_process');\n").unwrap();
+    assert_eq!(
+        checked(&case.folder(), VERSION),
+        Err("context_mode_program_mismatch"),
+        "npm's tarball record alone never vouches for the program on disk"
+    );
+    assert!(!complete(&case.folder(), VERSION));
+    assert_eq!(
+        shared(&case.folder(), &case.bin.join("node"), VERSION),
+        None,
+        "neither a launch nor a check runs a changed program"
+    );
+    fs::write(&program, "").unwrap();
+    assert!(complete(&case.folder(), VERSION));
+}
+
+#[test]
+fn only_node_22_5_or_newer_runs_the_shared_install() {
+    for supported in [
+        "v22.5.0\n",
+        "v22.5.1",
+        "v22.12.0\n",
+        "v23.0.0\n",
+        "v24.11.1\n",
+    ] {
+        assert!(supported_node(supported.as_bytes()), "{supported:?}");
+    }
+    for older in [
+        "v22.4.1\n",
+        "v20.18.0\n",
+        "v18.20.4\n",
+        "",
+        "22.5.0\n",
+        "v22\n",
+        "v22.x.0\n",
+        "v99999999999.0.0\n",
+        "node: command not found\n",
+    ] {
+        assert!(!supported_node(older.as_bytes()), "{older:?}");
+    }
+}
+
+#[test]
+fn on_a_node_older_than_22_5_no_install_starts_and_an_agent_launch_drops_the_server() {
+    let case = case("/usr/bin/false");
+    node_reports(&case.bin, "v22.4.1");
+    assert_eq!(case.install().unwrap_err().0, "context_mode_node_too_old");
+    assert_eq!(
+        for_check(&case.root, npx_in(&case, VERSION)),
+        ForCheck::Refused("context_mode_node_too_old")
+    );
+    assert_eq!(
+        for_launch(&case.root, npx_in(&case, VERSION)),
+        Err(ContextModeOff::NodeTooOld),
+        "no npx fallback, which would run dependency install scripts"
+    );
+    assert!(!registered(&case.folder()));
+    assert!(!case.npm().join(FAILED).exists(), "no failure is recorded");
+    assert!(!case.npm().join(PROFILE).exists(), "npm never started");
+    assert!(case.staged().is_empty());
+    fs::remove_file(case.bin.join("node")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/true", case.bin.join("node")).unwrap();
+    assert_eq!(
+        for_launch(&case.root, npx_in(&case, VERSION)),
+        Err(ContextModeOff::NodeTooOld),
+        "a node that names no version counts as too old"
+    );
+}
+
+#[cfg(target_os = "macos")]
+const RECORDING_NPM: &str = r#"#!/bin/sh
+prefix=
+take=
+for word in "$@"; do
+  if [ -n "$take" ]; then prefix=$word; take=; fi
+  if [ "$word" = --prefix ]; then take=1; fi
+done
+printf '%s\n' "$1" >> "$prefix/tasks"
+if [ "$1" != install ]; then exit 0; fi
+package="$prefix/node_modules/context-mode"
+/bin/mkdir -p "$package"
+printf '{"name":"context-mode","version":"VERSION"}' > "$package/package.json"
+: > "$package/cli.bundle.mjs"
+printf '{"packages":{"node_modules/context-mode":{"version":"VERSION","integrity":"PINNED_HASH"}}}' > "$prefix/node_modules/.package-lock.json"
+"#;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_shared_install_runs_npm_install_with_scripts_off_and_never_npm_rebuild() {
+    let case = case("/usr/bin/false");
+    let npm = case.bin.join("npm");
+    fs::remove_file(&npm).unwrap();
+    fs::write(
+        &npm,
+        RECORDING_NPM
+            .replace("VERSION", VERSION)
+            .replace("PINNED_HASH", PINNED),
+    )
+    .unwrap();
+    fs::set_permissions(&npm, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(case.install().unwrap(), case.folder());
+    assert_eq!(
+        fs::read_to_string(case.folder().join("tasks")).unwrap(),
+        "install\n",
+        "no dependency install script ever runs"
+    );
+}
+
+/// Runs `for_launch` while this case's install is registered as running, so no install
+/// starts. Inputs: the case and the spec. Output: what the launch runs.
+fn launched_while_installing(case: &Case, spec: ServerSpec) -> Result<ServerSpec, ContextModeOff> {
+    INSTALLING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(case.folder());
+    let launched = for_launch(&case.root, spec);
+    finish(&case.folder());
+    launched
+}
+
+#[test]
+fn an_agent_launch_runs_the_checked_shared_install_or_no_context_mode_never_npx() {
+    let case = case("/usr/bin/false");
+    assert_eq!(
+        launched_while_installing(&case, npx_in(&case, VERSION)),
+        Err(ContextModeOff::SettingUp),
+        "a launch while the shared install is set up runs no npx"
+    );
+
+    finished(&case.folder(), PINNED);
+    let program = case
+        .folder()
+        .join("node_modules/context-mode/cli.bundle.mjs");
+    let shared = ServerSpec::Stdio {
+        command: case.bin.join("node").to_str().unwrap().to_owned(),
+        args: vec![program.to_str().unwrap().to_owned()],
+    };
+    assert_eq!(
+        for_launch(&case.root, npx_in(&case, VERSION)),
+        Ok(shared),
+        "a checked install runs with the node beside npx"
+    );
+
+    fs::write(&program, "import('node:child_process');\n").unwrap();
+    assert_eq!(
+        launched_while_installing(&case, npx_in(&case, VERSION)),
+        Err(ContextModeOff::Mismatch),
+        "a program that differs from the pin is never run, nor npx in its place"
+    );
+    finished(&case.folder(), OTHER);
+    assert_eq!(
+        launched_while_installing(&case, npx_in(&case, VERSION)),
+        Err(ContextModeOff::Mismatch),
+        "a tarball other than the pinned one is never run"
+    );
+
+    fs::remove_dir_all(case.folder()).unwrap();
+    assert_eq!(
+        for_launch(&case.root, npx_in(&case, "9.9.9")),
+        Err(ContextModeOff::Failed),
+        "a version the pack does not pin is never fetched by npx"
+    );
+    fs::remove_file(case.bin.join("npm")).unwrap();
+    assert_eq!(
+        for_launch(&case.root, npx_in(&case, VERSION)),
+        Err(ContextModeOff::Failed)
+    );
+    assert!(!registered(&case.folder()));
+    assert!(!case.npm().join(PROFILE).exists(), "npm never started");
+    for other in [npx("context-mode@latest"), npx("other-server@1.0.0")] {
+        assert_eq!(for_launch(&case.root, other.clone()), Ok(other));
     }
 }

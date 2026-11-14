@@ -1450,9 +1450,33 @@ pub(crate) fn launch_set(
     launch(root, effective(tx, root, project)?)
 }
 
+/// The spec an agent launch runs where the engine has no shared context-mode install: the
+/// default pack's pinned context-mode launch is left out, never run through npx, which would
+/// let npm run dependency install scripts, and every other spec runs as approved. Input: the
+/// approved spec. Output: the spec, or why it is left out.
+#[cfg(any(test, not(unix)))]
+fn without_shared_install(spec: ServerSpec) -> Result<ServerSpec, crate::plugins::ContextModeOff> {
+    match crate::plugins::pinned_context_mode(&spec) {
+        Some(_) => Err(crate::plugins::ContextModeOff::Unsupported),
+        None => Ok(spec),
+    }
+}
+
 fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, EngineError> {
     let mut servers = Vec::with_capacity(plugins.servers.len());
+    let mut context_mode_off = None;
     for server in plugins.servers {
+        #[cfg(unix)]
+        let spec = crate::context_mode::for_launch(root, server.spec);
+        #[cfg(not(unix))]
+        let spec = without_shared_install(server.spec);
+        let spec = match spec {
+            Ok(spec) => spec,
+            Err(off) => {
+                context_mode_off = Some(off);
+                continue;
+            }
+        };
         let mut secrets = Vec::with_capacity(server.secrets.len());
         for secret in server.secrets {
             secrets.push(LaunchSecret {
@@ -1460,10 +1484,6 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
                 value: SecretValue::new(read_secret(root, &secret.reference)?),
             });
         }
-        #[cfg(unix)]
-        let spec = crate::context_mode::for_launch(root, server.spec);
-        #[cfg(not(unix))]
-        let spec = server.spec;
         servers.push(LaunchServer {
             name: server.name,
             spec,
@@ -1474,6 +1494,7 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
     Ok(LaunchPlugins {
         skills: plugins.skills,
         servers,
+        context_mode_off,
     })
 }
 

@@ -105,7 +105,8 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
     )
     .unwrap();
     std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::os::unix::fs::symlink("/usr/bin/true", bin.join("node")).unwrap();
+    std::fs::write(bin.join("node"), "#!/bin/sh\necho v24.0.0\n").unwrap();
+    std::fs::set_permissions(bin.join("node"), std::fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink("/usr/bin/false", bin.join("npm")).unwrap();
     let check = |version: &str| {
         boundary_check(
@@ -140,6 +141,60 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
         !root.join(CHECK_FOLDER).exists(),
         "no check home was made for a check that did not run"
     );
+}
+
+/// The Settings check of the default pack's pinned context-mode server on a Node.js older
+/// than 22.5 records its own code, so the row says why, and neither npx nor npm starts and no
+/// failure is recorded.
+#[cfg(unix)]
+#[test]
+fn the_context_mode_check_on_a_node_older_than_22_5_says_so_and_never_starts_npx() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = base.join("engine");
+    let bin = base.join("bin");
+    let npm = root.join("setup").join("npm");
+    for folder in [&npm, &bin] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)
+            .unwrap();
+    }
+    let ran = base.join("npx-ran");
+    let npx = bin.join("npx");
+    std::fs::write(
+        &npx,
+        format!("#!/bin/sh\n: > '{}'\nexit 3\n", ran.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("node"), "#!/bin/sh\necho v22.4.1\n").unwrap();
+    std::fs::set_permissions(bin.join("node"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/false", bin.join("npm")).unwrap();
+    let refused = boundary_check(
+        &root,
+        "mcp-0123456789abcdef01234567",
+        npx.to_str().unwrap(),
+        &["-y".to_owned(), "context-mode@1.0.169".to_owned()],
+        &[],
+        &[],
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap_err();
+    assert_eq!(refused, "server_node_too_old");
+    assert_eq!(
+        crate::plugins::check_problem(&refused),
+        "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again."
+    );
+    assert!(!ran.exists(), "npx never started");
+    assert!(!npm.join("context-mode@1.0.169.failed").exists());
+    assert!(
+        !npm.join("context-mode@1.0.169.sb").exists(),
+        "npm never started"
+    );
+    assert!(!root.join(CHECK_FOLDER).exists());
 }
 
 /// The Settings check of the default pack's pinned context-mode server runs what an agent
@@ -196,7 +251,10 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
         args: args.clone(),
     };
     assert!(
-        crate::context_mode::shared_install(&crate::context_mode::for_launch(&root, approved))
+        crate::context_mode::for_launch(&root, approved)
+            .ok()
+            .as_ref()
+            .and_then(crate::context_mode::shared_install)
             .is_some(),
         "the fixture's shared install is complete, so an agent launch runs it"
     );

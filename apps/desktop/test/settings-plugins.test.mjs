@@ -42,6 +42,10 @@ test("plugin refusals from the engine read as the plugin sentences, not the gene
   assert.equal(api.plainError("skillful <b>"), "Something went wrong. Try again. (unknown)");
 });
 
+test("a context-mode check on a Node.js older than 22.5 reads the version it needs", () => {
+  assert.equal(api.plainError("server_node_too_old"), "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.");
+});
+
 test("the skills list shows each skill from the engine with its folder, switch and remove action", () => {
   const markup = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [skill(), skill({ id: "skill-2", name: "pdf", enabled: false })] })));
   assert.match(markup, /frontend-design/);

@@ -898,7 +898,7 @@ async fn desktop_project_hidden_paths(
     webview: Webview,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<Vec<String>, BridgeError> {
+) -> Result<crazyagent::project_setup::HiddenPaths, BridgeError> {
     main_window(&webview)?;
     read(&state).await?.project_hidden_paths(&id).await
 }
@@ -961,13 +961,14 @@ async fn desktop_set_project_hidden_paths(
     webview: Webview,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
     paths: Vec<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .set_project_hidden_paths(&id, paths, generation)
+        .set_project_hidden_paths(&id, version, paths, generation)
         .await
 }
 

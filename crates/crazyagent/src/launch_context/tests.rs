@@ -2029,6 +2029,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
                     ),
                 }],
             }],
+            context_mode_off: None,
         },
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
@@ -2154,6 +2155,7 @@ impl LeftPane {
                         value: crate::plugins::SecretValue::new(secret.as_bytes().to_vec()),
                     }],
                 }],
+                context_mode_off: None,
             },
             instructions: "# Project context from CrazyAgent\n".into(),
             process: None,
@@ -2545,6 +2547,7 @@ fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_code
     let plugins = || LaunchPlugins {
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
+        context_mode_off: None,
     };
 
     let claude = private_home(&root, "claude");
@@ -2578,6 +2581,7 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
     let plugins = || LaunchPlugins {
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
+        context_mode_off: None,
     };
     let off = || {
         vec![
@@ -2934,6 +2938,7 @@ fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
                     folder: folder.clone(),
                 }],
                 servers: vec![command_server("context-mode")],
+                context_mode_off: None,
             },
             Vec::new(),
         )
@@ -3012,6 +3017,7 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
             true => vec![command_server("context-mode"), command_server("graph")],
             false => vec![command_server("graph")],
         },
+        context_mode_off: None,
     };
     let off = |tools: &[&str]| {
         vec![(
@@ -3135,6 +3141,7 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
             false => Vec::new(),
         },
         servers: vec![command_server("context-mode"), command_server("graph")],
+        context_mode_off: None,
     };
     let off = || {
         vec![(
@@ -3252,6 +3259,7 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
         LaunchPlugins {
             skills: Vec::new(),
             servers: vec![command_server("graph")],
+            context_mode_off: None,
         },
         Vec::new(),
     )
@@ -3645,12 +3653,15 @@ fn a_fresh_agent_home_starts_context_mode_from_the_engine_install_not_npx() {
         fs::set_permissions(bin.join(program), fs::Permissions::from_mode(0o755)).unwrap();
     }
     let mut connection = store_context_mode(&root, &bin);
-    let waiting = context_mode_context(launch_app(&mut connection, &root));
-    let (command, _) = claude_context_mode(&waiting, &private_folder(&base.join("first")));
+    let waiting = launch_app(&mut connection, &root);
+    assert!(
+        waiting.servers.is_empty(),
+        "until the engine install is complete an agent gets no context-mode, never npx"
+    );
     assert_eq!(
-        command,
-        bin.join("npx").to_str().unwrap(),
-        "until the engine install is complete an agent keeps the approved npx launch"
+        waiting.context_mode_off,
+        Some(crate::plugins::ContextModeOff::Failed),
+        "no npm beside npx, so no shared install can run"
     );
 
     let install = root
@@ -4540,4 +4551,92 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
         ),
         "the resumed turn is not told the new text replaces the old"
     );
+}
+
+#[test]
+fn a_launch_whose_context_mode_was_dropped_on_an_old_node_says_why_in_its_tools_section() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let line = "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n";
+    let plugins = |dropped: bool| LaunchPlugins {
+        skills: Vec::new(),
+        servers: vec![command_server("graph")],
+        context_mode_off: dropped.then_some(crate::plugins::ContextModeOff::NodeTooOld),
+    };
+    let claude = private_home(&root, "claude");
+    let installed = context_with(&root, plugins(true), Vec::new())
+        .install("claude-code", &claude, true)
+        .unwrap();
+    let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    let section = tools_section(&prompt);
+    assert!(section.contains(line), "{section}");
+    assert!(!section.contains("ctx_execute"), "{section}");
+
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, plugins(true), Vec::new())
+        .install("codex", &codex, true)
+        .unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(installed);
+    assert!(tools_section(&developer).contains(line), "{developer}");
+
+    let kept = private_home(&root, "kept");
+    let installed = context_with(&root, plugins(false), Vec::new())
+        .install("claude-code", &kept, true)
+        .unwrap();
+    let prompt = fs::read_to_string(kept.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    assert!(!prompt.contains("context-mode is off"), "{prompt}");
+}
+
+#[test]
+fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
+    use crate::plugins::ContextModeOff;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    for (off, line) in [
+        (
+            ContextModeOff::SettingUp,
+            "- context-mode is off for this launch: CrazyAgent is still setting it up on this computer. Use the shell instead; agents started once it is set up get it.\n",
+        ),
+        (
+            ContextModeOff::Failed,
+            "- context-mode is off for this launch: setting it up failed on this computer. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
+        ),
+        (
+            ContextModeOff::Mismatch,
+            "- context-mode is off for this launch: its installed files did not match the copy the default pack pins, so CrazyAgent did not run them. Use the shell instead, and tell the owner in your report.\n",
+        ),
+        (
+            ContextModeOff::NodeTooOld,
+            "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n",
+        ),
+        (
+            ContextModeOff::Unsupported,
+            "- context-mode is off for this launch: CrazyAgent cannot run it on this platform yet. Use the shell instead.\n",
+        ),
+    ] {
+        let plugins = LaunchPlugins {
+            skills: Vec::new(),
+            servers: vec![command_server("graph")],
+            context_mode_off: Some(off),
+        };
+        let home = private_home(&root, &format!("{off:?}").to_lowercase());
+        let installed = context_with(&root, plugins, Vec::new())
+            .install("claude-code", &home, true)
+            .unwrap();
+        let prompt = fs::read_to_string(home.join(STATE).join("instructions.md")).unwrap();
+        drop(installed);
+        let section = tools_section(&prompt);
+        assert!(section.contains(line), "{off:?}: {section}");
+        assert!(!section.contains("ctx_execute"), "{off:?}: {section}");
+    }
 }

@@ -2,7 +2,7 @@ import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api"
 import type { Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
@@ -370,6 +370,10 @@ export function addReadPath(paths: string[], typed: string): { paths: string[] }
  * them, once it shows the saved folders again. */
 export const READ_PATHS_STALE = "These folders changed since you opened them. The list now shows the saved folders; make your change again.";
 
+/** What the hidden folders list says after a save refused because the folders changed since
+ * it read them, once it shows the saved folders again. */
+export const HIDDEN_PATHS_STALE = "These hidden folders changed since you opened them. The list now shows the saved folders; make your change again.";
+
 /** What Agent access says after a save refused because the policy changed since the page read
  * it, once it shows the saved access again. */
 export const ACCESS_STALE = "Agent access changed since you opened it. The page now shows the saved access; make your change again.";
@@ -474,7 +478,7 @@ function SandboxSection({ data }: { data: ProjectData }) {
 }
 
 function HiddenSection({ data }: { data: ProjectData }) {
-  const [saved, setSaved] = useState<string[] | null>(null);
+  const [saved, setSaved] = useState<HiddenPaths | null>(null);
   const [paths, setPaths] = useState<string[]>([]);
   const [typed, setTyped] = useState("");
   const [note, setNote] = useState("");
@@ -485,7 +489,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
     let live = true;
     void loadHiddenPaths(data.id).then((result) => {
       if (!live) return;
-      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value); }
+      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value.paths); }
       else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
     });
     void loadAgentPolicy(data.id).then((result) => {
@@ -503,19 +507,34 @@ function HiddenSection({ data }: { data: ProjectData }) {
     setNote("");
   }
 
+  async function reread(): Promise<boolean> {
+    const fresh = await loadHiddenPaths(data.id);
+    if (fresh.kind !== "ok") return false;
+    setSaved(fresh.value);
+    setPaths(fresh.value.paths);
+    return true;
+  }
+
   async function save() {
+    if (saved === null) return;
     setBusy(true);
-    const result = await saveHiddenPaths(data.id, paths, nextGeneration());
-    setBusy(false);
-    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    const result = await saveHiddenPaths(data.id, paths, saved.version, nextGeneration());
+    if (savedStale(result)) {
+      const shown = await reread();
+      setBusy(false);
+      return setNote(shown ? HIDDEN_PATHS_STALE : "These hidden folders changed since you opened them. Reopen this page to see them.");
+    }
+    if (result.kind !== "ok") { setBusy(false); return setNote(result.kind === "not_ready" ? notReady : failureCopy(result)); }
     const state = receiptState(result.value);
-    if (state.kind !== "applied") return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
-    setSaved(paths);
+    if (state.kind !== "applied") { setBusy(false); return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again."); }
+    const shown = await reread();
+    setBusy(false);
+    if (!shown) return setNote("Hidden folders saved. Reopen this page to change them again.");
     setNote("");
     data.notify("Hidden folders saved. Agents started from now on can't open them.");
   }
 
-  const changed = saved !== null && JSON.stringify(saved) !== JSON.stringify(paths);
+  const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>
     <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run while access is Sandboxed. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project that git does not track.</p>

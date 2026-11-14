@@ -708,11 +708,12 @@ pub fn withdraw(
 /// is taken only when the owner typed into that terminal after the question was asked, and
 /// one owner key time answers at most one question. The text is the master's report of the
 /// answer, kept as answered in the master's terminal and never shown as the owner's words.
-/// Inputs: the engine connection, the project, the master's team agent id, the question id,
-/// the version it read, the answer and when the owner last typed into its terminal. Output:
-/// Settled, Stale, or `questions_not_found`, `questions_in_terminal`,
-/// `questions_owner_not_typed`, `questions_owner_turn_used`, `questions_answer_invalid` or
-/// `questions_text_invalid`.
+/// An access request's question is the owner's alone to decide, so a master never closes it
+/// (RV-DS241-13). Inputs: the engine connection, the project, the master's team agent id,
+/// the question id, the version it read, the answer and when the owner last typed into its
+/// terminal. Output: Settled, Stale, or `questions_not_found` (also for an access request's
+/// question), `questions_in_terminal`, `questions_owner_not_typed`,
+/// `questions_owner_turn_used`, `questions_answer_invalid` or `questions_text_invalid`.
 pub fn relay(
     db: &Connection,
     project: &ProjectId,
@@ -725,7 +726,10 @@ pub fn relay(
     let agent = AgentId::team(master).map_err(|_| failure("questions_not_found"))?;
     let tx = immediate(db)?;
     let question = found(&tx, id)?;
-    if &question.project != project {
+    let access = question
+        .asker
+        .starts_with(crate::sandbox::grants::ASKER_PREFIX);
+    if &question.project != project || access {
         return Err(failure("questions_not_found"));
     }
     if question.status != QuestionStatus::Pending {
