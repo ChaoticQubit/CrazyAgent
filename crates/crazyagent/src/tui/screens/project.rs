@@ -2500,7 +2500,8 @@ impl ProjectScreen {
         self.remove_typed.clear();
     }
 
-    /// Opens the remove ask for a delete an engine stop cut short, as x does, with Delete
+    /// Opens the remove ask for a delete an engine stop cut short, as x does, on the Settings
+    /// tab where that ask lives, as the desktop's Delete again opens Settings, with Delete
     /// everything picked once the engine's preview offers it; the exact name is still typed.
     /// Does nothing while another box is open, which keeps its keys. Takes the screen.
     /// Returns nothing.
@@ -2508,10 +2509,11 @@ impl ProjectScreen {
         if self.boxed() {
             return;
         }
-        self.close_remove();
+        self.open(Tab::Settings);
         self.confirm_remove = true;
         self.removal_read_ms = None;
         self.remove_everything = true;
+        assert_eq!(self.tab, Tab::Settings);
         assert!(self.removal.is_none());
         assert_eq!(self.remove_choice, RemoveChoice::Dashboard);
     }
