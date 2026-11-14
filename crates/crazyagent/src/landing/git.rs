@@ -206,6 +206,24 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
         .then_some(real)
 }
 
+/// The `core.excludesFile=<path>` setting naming the owner's global ignore file
+/// ([`owner_excludes`]), for an engine git that clears its environment yet must keep out what
+/// the owner's own git ignores (RV-DS241-73). Takes nothing. Returns the setting, none when
+/// the owner has no usable ignore file or its path is not UTF-8.
+#[cfg(unix)]
+pub(crate) fn owner_excludes_setting() -> Option<String> {
+    let (home, xdg) = owner_folders();
+    let path = owner_excludes(&home?, xdg.as_deref())?;
+    Some(format!("core.excludesFile={}", path.to_str()?))
+}
+
+/// The owner's global ignore file setting. Other systems: none, as before. Written, not
+/// tested.
+#[cfg(not(unix))]
+pub(crate) fn owner_excludes_setting() -> Option<String> {
+    None
+}
+
 /// A repository the engine runs git on through a git folder and work tree it computed
 /// itself, never a `.git` file in the work tree. Every call runs the real git, not the
 /// `/usr/bin/git` xcrun shim where xcrun resolves it, with a cleared environment, no
@@ -262,15 +280,7 @@ impl Repo {
             git_dir == metadata || git_dir.parent() == Some(metadata.join("worktrees").as_path()),
             "engine git opens only the owner checkout's git folder or a linked worktree's"
         );
-        let excludes = work_tree
-            .and_then(|_| {
-                let (home, xdg) = owner_folders();
-                owner_excludes(&home?, xdg.as_deref())
-            })
-            .and_then(|path| {
-                path.to_str()
-                    .map(|path| format!("core.excludesFile={path}"))
-            });
+        let excludes = work_tree.and_then(|_| owner_excludes_setting());
         let mut repo = Self {
             git_dir: git_dir.to_path_buf(),
             work_tree: work_tree.map(Path::to_path_buf),

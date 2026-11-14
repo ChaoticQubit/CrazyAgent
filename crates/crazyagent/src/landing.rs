@@ -16,6 +16,7 @@ pub(crate) mod evidence;
 mod flow;
 #[cfg(unix)]
 mod git;
+pub(crate) use git::owner_excludes_setting;
 mod hold;
 #[cfg(unix)]
 pub(crate) mod ide;

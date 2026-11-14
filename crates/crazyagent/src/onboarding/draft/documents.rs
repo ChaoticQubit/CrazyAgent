@@ -508,9 +508,9 @@ fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
 
 /// The project's own git run in `repo` with `args`: the real git with no system or global
 /// config, hooks, fsmonitor or pager, no lazy fetch and no transport at all whatever the
-/// repository's own config allows (RV-DS241-71), no prompt and the C locale, its input and
-/// output piped and its errors dropped. Takes the folder and the arguments. Returns the
-/// command.
+/// repository's own config allows (RV-DS241-71), no prompt and the C locale, honouring the
+/// owner's global ignore file as the owner's git does (RV-DS241-73), its input and output
+/// piped and its errors dropped. Takes the folder and the arguments. Returns the command.
 fn git(repo: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(crate::research::runner::setup_git());
     command
@@ -521,7 +521,11 @@ fn git(repo: &Path, args: &[&str]) -> Command {
         .env("GIT_ALLOW_PROTOCOL", "")
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
+        .args(crate::research::runner::GIT_SAFE);
+    if let Some(excludes) = crate::landing::owner_excludes_setting() {
+        command.arg("-c").arg(excludes);
+    }
+    command
         .args(args)
         .current_dir(repo)
         .stdin(Stdio::piped())
