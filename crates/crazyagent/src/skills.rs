@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub use crate::plugins::SkillView as SkillInfo;
 
 pub mod import;
+pub mod origin;
 
 pub const LINE_BYTES_MAX: usize = 160;
 pub const TEXT_BYTES_MAX: usize = 1024 * 1024;

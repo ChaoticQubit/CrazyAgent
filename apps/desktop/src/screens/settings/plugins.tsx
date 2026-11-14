@@ -178,7 +178,7 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
       const on = pluginSwitch(skill, projectId);
       return <SettingLine key={skill.id} label={skill.name} changed={pluginChanged(skill, projectId)}
         shown={<SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]} onOpen={() => onOpen(skill)} />}
-        help={<><span>{skill.description}</span><span className="mono small">{homePath(skill.source)}</span>
+        help={<><span>{skill.description}</span><span className="small">{skill.origin}</span><span className="mono small">{homePath(skill.source)}</span>
           {skill.refused && <span className="row"><StatusBadge word="Not given to agents" tone="danger" /><span>{skillUnused(skill.refused)}</span></span>}</>}>
         <Switch id={`skill-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
           disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
@@ -243,7 +243,7 @@ export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLi
     {extra.length > 0 && <Notice tone="warn"><span>Agents also read these lines of its SKILL.md header:</span>
       <pre className="mono small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{extra.map(displayText).join("\n")}</pre></Notice>}
     <div className="row between">
-      <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
+      <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="muted small">{skill.origin}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
       <Switch id="skill-detail-on" label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
         disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
     </div>

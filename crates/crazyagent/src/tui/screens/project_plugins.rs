@@ -624,7 +624,10 @@ impl ProjectPlugins {
                 Row::of(place(&skill.scope), look.fg),
             ];
             if wide {
-                cells.push(Row::of(skill.description.clone(), look.muted));
+                cells.push(Row::of(
+                    format!("{}  {}", skill.origin, skill.description),
+                    look.muted,
+                ));
             }
             lines.push(list_row(
                 columns(&widths, cells),

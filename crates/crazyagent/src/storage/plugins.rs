@@ -917,6 +917,7 @@ fn skill_view(
         enabled: record.enabled,
         on_here,
         source: crate::memory::visible_text(&record.source),
+        origin: crate::skills::origin::of(root, &record.source),
         folder: folder.display().to_string(),
         version: plugin_version(connection, &record.id)?,
         refused,

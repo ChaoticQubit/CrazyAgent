@@ -287,6 +287,11 @@ impl SkillDetailPage {
             );
         }
         lines.push(styled(
+            cut(&printable(skill.origin.clone()), limit, ctx.glyphs.ellipsis),
+            Role::Muted,
+            theme,
+        ));
+        lines.push(styled(
             cut(
                 &printable(format!("From {}", tilde(&skill.source, ctx))),
                 limit,
