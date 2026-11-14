@@ -648,13 +648,16 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     ExitCode::from(126)
 }
 
-/// Starts a harness bubblewrap launched, behind the socket filter alone: no Unix-domain
-/// socket and no io_uring ring ([`refuse_sockets`]), so a closed agent reaches no socket in
-/// the folders bound for it. Bubblewrap already holds the files, the network and the
+/// Starts a harness bubblewrap launched, behind the socket filter alone, the one a Landlock
+/// agent with a network limit gets ([`refuse_sockets`] with `tcp_only`): no Unix-domain
+/// socket, so a closed agent reaches no socket in the folders bound for it, no io_uring
+/// ring, and no socket but TCP over IPv4 or IPv6 and routing netlink, so no AF_VSOCK or
+/// other family that `--unshare-net` does not isolate reaches outside the closed network
+/// (RV-DS241-84 r2). Bubblewrap already holds the files, the network namespace and the
 /// session. Input: the harness. Output: 3 when the filter cannot be installed, 126 when the
 /// harness cannot start.
 fn filtered(program: &Path, args: Vec<OsString>) -> ExitCode {
-    if let Err(reason) = refuse_sockets(false, false) {
+    if let Err(reason) = refuse_sockets(true, false) {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
@@ -1067,7 +1070,8 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
 
 /// The bubblewrap command for a closed agent up to its harness: its own namespaces, the
 /// system folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, then
-/// the helper bound read-only and started to install the socket filter ([`FILTER_SOCKETS`]).
+/// the helper bound read-only and started to install the TCP-only socket filter
+/// ([`FILTER_SOCKETS`]).
 /// Inputs: bwrap, the helper, the grants, the working folder and the network. Output: the
 /// command, which the harness follows after `--`.
 fn bwrap_command(
