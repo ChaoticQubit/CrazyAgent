@@ -555,7 +555,7 @@ pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 /// profile reads: the Setup note, and a refused agent git step.
 pub const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
 
-const REASONS: [(&str, &str); 34] = [
+const REASONS: [(&str, &str); 35] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -588,6 +588,10 @@ const REASONS: [(&str, &str); 34] = [
     (
         "setup_uv_missing",
         "uv is needed to install Graphify and it is not installed.",
+    ),
+    (
+        "setup_winget_missing",
+        "winget is needed to install uv and it is not installed. Install App Installer from the Microsoft Store, then run setup again.",
     ),
     (
         "setup_store_unavailable",
@@ -746,7 +750,11 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
 #[cfg(target_os = "windows")]
 pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
-    match windows::WindowsInstaller::new(&engine_root.join("setup"), local_app_data.as_deref()) {
+    match windows::WindowsInstaller::new(
+        &engine_root.join("setup"),
+        local_app_data.as_deref(),
+        crate::tools::Places::from_environment(Some(engine_root)),
+    ) {
         Ok(installer) => Box::new(installer),
         Err(code) => Box::new(RefusingInstaller(code)),
     }

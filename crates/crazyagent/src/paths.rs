@@ -440,7 +440,34 @@ fn launch_executable_in(
     path: Option<&OsStr>,
     temps: &[PathBuf],
 ) -> std::io::Result<PathBuf> {
+    let used = launch_entry_in(entry, path, temps)?;
+    let real = executable_file(&used).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "harness is not installed")
+    })?;
+    assert!(real.is_absolute());
+    Ok(real)
+}
+
+/// The entry a launch of a harness entry kept at engine start goes through now, links kept,
+/// so a re-pin checks what engine start would check: the entry itself while it leads to a
+/// runnable file; when an entry in a PATH folder is gone, the first PATH match for its name
+/// under the rules of [`launch_executable`]; else NotFound. Inputs: the absolute entry and
+/// the PATH value. Output: the entry used.
+pub fn launch_entry(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
+    launch_entry_in(entry, path, &crate::tools::temp_roots())
+}
+
+/// Finds the entry a launch goes through as [`launch_entry`] does with the temp folders
+/// given. Inputs: the entry, the PATH value and the temp folders. Output: the entry used.
+fn launch_entry_in(
+    entry: &Path,
+    path: Option<&OsStr>,
+    temps: &[PathBuf],
+) -> std::io::Result<PathBuf> {
     assert!(entry.is_absolute(), "harness entry {}", entry.display());
+    if executable_file(entry).is_some() {
+        return Ok(entry.to_path_buf());
+    }
     let on_path = || {
         let folder = entry.parent()?;
         let name = entry.file_name()?.to_str()?;
@@ -451,14 +478,14 @@ fn launch_executable_in(
         };
         std::env::split_paths(path?)
             .any(|listed| listed == folder)
-            .then(|| path_entry(name, path, refused).and_then(|entry| executable_file(&entry)))
+            .then(|| path_entry(name, path, refused))
             .flatten()
     };
-    let real = executable_file(entry).or_else(on_path).ok_or_else(|| {
+    let used = on_path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "harness is not installed")
     })?;
-    assert!(real.is_absolute());
-    Ok(real)
+    assert!(used.is_absolute());
+    Ok(used)
 }
 
 #[cfg(all(test, unix))]
