@@ -1439,3 +1439,105 @@ fn command_only_refuses_the_permission_fix_in_the_engine() {
         "tool_fix_off"
     );
 }
+
+/// RV-DS241-30: removing a pack item on the plugin screen takes it out of the entry's row,
+/// so an entry left with nothing reads not installed and a setup run installs it again, and
+/// an entry that keeps other items still reads installed without the removed one.
+#[test]
+fn a_plugin_screen_removal_updates_the_pack_row_so_setup_can_install_it_again() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    let graph = skill(work.path(), "graphify");
+    install(
+        &mut connection,
+        root,
+        GRAPH_ENTRY,
+        "https://example.invalid/graphify@1",
+        vec![graph.clone()],
+        None,
+    )
+    .unwrap();
+    assert!(graph_on(&mut connection));
+    let id = skills(&mut connection, root)[0].id.clone();
+    let version = plugins::plugin_version(&connection, &id).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::RemoveSkill { id, version },
+    )
+    .unwrap();
+    assert!(!graph_on(&mut connection));
+    let status = status_of(&mut connection, root);
+    assert_eq!(pack_state(&status, GRAPH_ENTRY), PackState::Available);
+    install(
+        &mut connection,
+        root,
+        GRAPH_ENTRY,
+        "https://example.invalid/graphify@1",
+        vec![graph],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        skills(&mut connection, root).len(),
+        1,
+        "setup installs it again"
+    );
+    assert!(graph_on(&mut connection));
+
+    let server_entry = "context-mode";
+    install(
+        &mut connection,
+        root,
+        server_entry,
+        "https://example.invalid/context-mode@1",
+        Vec::new(),
+        Some(("context-mode".into(), spec())),
+    )
+    .unwrap();
+    let server = servers(&mut connection, root)[0].id.clone();
+    let version = plugins::plugin_version(&connection, &server).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::RemoveServer {
+            id: server,
+            version,
+        },
+    )
+    .unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(entry_switch(&tx, server_entry).unwrap(), None);
+    drop(tx);
+
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/superpowers@1",
+        vec![skill(work.path(), "alpha"), skill(work.path(), "beta")],
+        None,
+    )
+    .unwrap();
+    let alpha = skills(&mut connection, root)
+        .into_iter()
+        .find(|view| view.name == "alpha")
+        .unwrap()
+        .id;
+    let version = plugins::plugin_version(&connection, &alpha).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::RemoveSkill {
+            id: alpha.clone(),
+            version,
+        },
+    )
+    .unwrap();
+    let tx = connection.transaction().unwrap();
+    let row = load_pack(&tx, "superpowers").unwrap().unwrap();
+    assert_eq!(entry_switch(&tx, "superpowers").unwrap(), Some(true));
+    assert!(!row.skills.contains(&alpha));
+    assert_eq!(row.skills.len(), 1);
+}
