@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -49,16 +49,17 @@ export function refusedGraphifyPaths(home) {
 }
 
 /** Lays out a graphify the resolver finds and passes over, as uv lays out a tool: `.local/bin`
- * links to the tool's script, whose Python links into an installation the group can change (0775)
- * and leads to `/bin/bash`; a link in it points out to a 0777 file. Any path already there fails.
- * Input: the new home. Output: the fixture's paths. */
+ * links to the tool's script, whose Python links to a real `python3.9` (a copy of `/bin/bash`) in
+ * an installation the group can change (0775); a link in it points out to a 0777 file. Any path
+ * already there fails. Input: the new home. Output: the fixture's paths. */
 function plantRefusedGraphify(home) {
   const paths = refusedGraphifyPaths(home);
   const real = join(paths.prefix, "bin");
   const tool = join(home, ".local/share/uv/tools/graphifyy/bin");
   const bin = join(home, ".local/bin");
   for (const folder of [real, tool, bin, dirname(paths.outside)]) mkdirSync(folder, { recursive: true, mode: 0o755 });
-  symlinkSync("/bin/bash", join(real, "python3.9"));
+  copyFileSync("/bin/bash", join(real, "python3.9"), constants.COPYFILE_EXCL);
+  chmodSync(join(real, "python3.9"), 0o755);
   symlinkSync(join(real, "python3.9"), join(tool, "python"));
   const script = join(tool, "graphify");
   writeFileSync(script, `#!${join(tool, "python")}\necho 'graphify 0.9.9'\n`, { flag: "wx", mode: 0o755 });

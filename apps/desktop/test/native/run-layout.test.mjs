@@ -176,7 +176,9 @@ test("the refused-tool suite's home lies outside the checkout, holds a uv graphi
     assert.equal(lstatSync(join(prefix, "outside")).isSymbolicLink(), true);
     assert.equal(realpathSync(join(prefix, "outside")), outside);
     assert.equal(realpathSync(join(home, ".local/bin/graphify")), join(tool, "graphify"));
-    assert.equal(realpathSync(join(tool, "python")), realpathSync("/bin/bash"));
+    assert.equal(realpathSync(join(tool, "python")), join(prefix, "bin/python3.9"), "the Python is a real file inside the installation");
+    assert.equal(lstatSync(join(prefix, "bin/python3.9")).isFile(), true);
+    assert.equal(statSync(join(prefix, "bin/python3.9")).mode & 0o777, 0o755);
     assert.equal(statSync(join(tool, "graphify")).mode & 0o777, 0o755);
     assert.equal(readFileSync(join(tool, "graphify"), "utf8"), `#!${join(tool, "python")}\necho 'graphify 0.9.9'\n`);
     const runner = source("./run.mjs");

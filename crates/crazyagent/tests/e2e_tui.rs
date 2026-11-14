@@ -1962,8 +1962,8 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
 
 /// Makes a graphify in `home` that the resolver finds and passes over (DEC-162), laid out as
 /// uv lays out a tool: `.local/bin/graphify` links to the tool's script, whose Python links
-/// into an installation whose folders the group can change (0775) and whose `python3.9`
-/// leads to `/bin/bash`; a link in the installation points out to a 0777 file elsewhere in
+/// to a real `python3.9` (a copy of `/bin/bash`) in an installation whose folders the group
+/// can change (0775); a link in the installation points out to a 0777 file elsewhere in
 /// the home. Input: the home. Output: the installation folder and the file outside it.
 fn refused_graphify(home: &Path) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -1975,7 +1975,8 @@ fn refused_graphify(home: &Path) -> (PathBuf, PathBuf) {
     for folder in [&real, &tool, &bin] {
         std::fs::create_dir_all(folder).unwrap();
     }
-    symlink("/bin/bash", real.join("python3.9")).unwrap();
+    std::fs::copy("/bin/bash", real.join("python3.9")).unwrap();
+    std::fs::set_permissions(real.join("python3.9"), mode(0o755)).unwrap();
     symlink(real.join("python3.9"), tool.join("python")).unwrap();
     let script = tool.join("graphify");
     let text = format!(
