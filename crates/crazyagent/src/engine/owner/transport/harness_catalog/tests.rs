@@ -22,7 +22,8 @@ fn codex(entries: Vec<HarnessEntry>) -> HarnessEntry {
 /// v241 HR-L1: a found harness the tool resolver can't start is listed Can't run with the
 /// resolver's line, never Ready, so the settings groups, both Home counts and the New Project
 /// default follow a launch; the next list reads Ready once the program its first line names
-/// is there, so the status is read on each list, never kept from an old probe.
+/// is there, so the status is read on each list, never kept from an old probe. The Codex and
+/// its program sit outside the engine's data folder, whose files agents can write.
 #[tokio::test]
 async fn a_found_harness_the_resolver_cant_start_is_listed_cant_run_until_its_program_is_there() {
     let root = tempfile::Builder::new()
@@ -43,9 +44,14 @@ async fn a_found_harness_the_resolver_cant_start_is_listed_cant_run_until_its_pr
     )
     .await
     .unwrap();
+    let outside = tempfile::Builder::new()
+        .prefix("hc-codex-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(outside.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let host = root.path().join("crazyagent-pin-only");
-    let executable = root.path().join("bin/codex");
-    let runtime = root.path().join("runtime/ca-owner-runtime");
+    let executable = outside.path().join("bin/codex");
+    let runtime = outside.path().join("runtime/ca-owner-runtime");
     program(&host, "host", 0o700);
     program(&executable, &format!("#!{}\n", runtime.display()), 0o700);
     service.register_native_auth_host(&host).unwrap();
