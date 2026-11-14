@@ -971,24 +971,40 @@ fn a_native_lead_whose_frozen_record_cannot_be_stored_is_ended() {
 }
 
 /// DEC-158: a proxied agent's pane starts under a keeper given the engine's freeze record,
-/// and its pane record says so, so a quitting engine may freeze it and a later one thaw it.
+/// and its pane record says so: the engine freezes the launched pane through that keeper
+/// and thaws it again, which a keeper started without the record never confirms.
 #[test]
 fn a_proxied_agent_s_pane_record_says_its_keeper_can_freeze_it() {
     let fixture = Fixture::new(1);
     let (runtime, id, plan, _) = proxied_agent(&fixture);
-    let (request, context) = proxied_launch(&fixture, &runtime, id, &plan);
-    let host = fixture.host();
-    let session = crate::harnesses::terminal_session::TerminalSession::start(
-        host.clone(),
-        AgentId::team(id).unwrap(),
-        request,
-        Some(context),
+    std::fs::write(
+        fixture.base.join("bin").join("codex"),
+        "#!/bin/sh\n[ \"$1\" = app-server ] && exit 0\nexec /bin/sleep 300\n",
     )
     .unwrap();
-    assert_eq!(
-        session.record().and_then(|record| record.freeze),
-        Some(true)
+    let (request, context) = proxied_launch(&fixture, &runtime, id, &plan);
+    let host = fixture.host();
+    let agent = AgentId::team(id).unwrap();
+    let session =
+        TerminalSession::start(host.clone(), agent.clone(), request, Some(context)).unwrap();
+    let record = session
+        .record()
+        .cloned()
+        .expect("the launched pane has a record");
+    assert_eq!(record.freeze, Some(true));
+    let frozen = runtime
+        .freeze_kept(&host, id, &record)
+        .expect("the launched pane's keeper confirmed no freeze through the engine's record");
+    assert!(frozen.frozen_ms.is_some());
+    assert!(
+        hold_keeper(
+            record.pid,
+            &agent_pane_state(&runtime.state, id),
+            Hold::Thaw
+        ),
+        "the launched pane's keeper confirmed no thaw through the engine's record"
     );
     drop(session);
+    let _ = end_left_pane(host.as_ref(), &agent, "team");
     host.close(&[]).unwrap();
 }
