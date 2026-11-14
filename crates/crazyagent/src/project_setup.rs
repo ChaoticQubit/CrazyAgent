@@ -1011,7 +1011,21 @@ fn now_ms() -> i64 {
 const DEFAULT_TEAM_HARNESS: &str = "codex";
 const LEAD_HARNESSES: [&str; 3] = ["codex", "claude", "claude-code"];
 const TEAM_NEEDS_POOL: &str = "Needs a pool";
-const TEAM_NEEDS_SIGN_IN: &str = "Needs a signed-in account";
+
+/// The default team status when no account of the pool can lead the team: the account kinds
+/// both lead harnesses take, Codex and Claude Code, built from the words the team start line
+/// names them in (`team::account_providers`), so the two never drift (V241-MASTER-WORDS).
+/// Takes none. Returns the words.
+fn team_needs_account() -> &'static str {
+    static WORDS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let (codex_in, codex_key) = crate::team::account_providers("codex");
+        let (claude_in, claude_key) = crate::team::account_providers("claude-code");
+        format!(
+            "Needs a {codex_in} or {claude_in} sign-in, or an {codex_key} or {claude_key} API key"
+        )
+    });
+    WORDS.as_str()
+}
 
 const TECH_CATALOG: [(&str, &str, TechGroup); 30] = [
     ("typescript", "TypeScript", TechGroup::Language),
@@ -1233,7 +1247,7 @@ fn lead_harness<'a>(
 
 /// Says in plain words why the default team cannot start yet.
 /// Takes the configuration, the chosen pool and the signed-in connections.
-/// Returns "Needs a pool" without a pool that has members, "Needs a signed-in account" when no
+/// Returns "Needs a pool" without a pool that has members, the account kinds to add when no
 /// member can run the default harness, or none when the default team can start.
 pub fn default_team_status(
     config: &EffectiveConfig,
@@ -1253,7 +1267,7 @@ pub fn default_team_status(
     let ready = |connection: &crate::config::ModelConnection| signed_in.contains(&connection.id);
     match crate::research::accounts::pool_account(access, chosen, harness, &ready) {
         Some(_) => None,
-        None => Some(TEAM_NEEDS_SIGN_IN),
+        None => Some(team_needs_account()),
     }
 }
 

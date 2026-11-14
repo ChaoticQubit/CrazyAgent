@@ -367,18 +367,28 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
         .filter(|id| matches!(*id, "codex" | "claude-code"))
 }
 
+/// Names the accounts that run a launch adapter, in the words of the Add account tiles
+/// (DEC-161): the sign-in's and the API key's provider, the one source of the account kind
+/// words the team start line and the default team status say.
+/// Takes the launch adapter `launch_harness` gives. Returns the two provider names.
+pub(crate) fn account_providers(launch: &str) -> (&'static str, &'static str) {
+    assert!(launch_harness(launch) == Some(launch));
+    match launch {
+        "codex" => ("ChatGPT", "OpenAI"),
+        "claude-code" => ("Claude", "Anthropic"),
+        other => unreachable!("{other} is not a launch adapter"),
+    }
+}
+
 /// The line a team start shows when no account of the project's pool can run its harness,
 /// naming the account kind to add in the words of the Add account tiles (DEC-161).
 /// Takes the harness as the plan names it and the launch adapter `launch_harness` gave it.
 /// Returns the plain line.
 pub(crate) fn no_account_line(harness: &str, launch: &str) -> String {
-    assert!(launch_harness(launch) == Some(launch));
-    let kind = match launch {
-        "codex" => "a ChatGPT sign-in or an OpenAI API key",
-        "claude-code" => "a Claude sign-in or an Anthropic API key",
-        other => unreachable!("{other} is not a launch adapter"),
-    };
-    format!("No account in this project's pool can run {harness}. Add {kind} to the pool")
+    let (sign_in, key) = account_providers(launch);
+    format!(
+        "No account in this project's pool can run {harness}. Add a {sign_in} sign-in or an {key} API key to the pool"
+    )
 }
 
 /// What the Coordination rows of a harness kind no sub-agent runs on say instead of a live
