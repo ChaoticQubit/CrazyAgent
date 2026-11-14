@@ -2782,6 +2782,7 @@ fn remove(
     crate::activity::forget_project(tx, project_id)?;
     crate::usage::forget_project(tx, project_id.as_str())?;
     crate::ide::bridge::run_command::forget_project(tx, project_id)?;
+    finish_removed_agent_notices(tx, project_id)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
@@ -2806,6 +2807,40 @@ fn remove(
     crate::memory::library::forget_orphan_agent_memories(tx)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
+}
+
+/// Finishes, as unknown, the pending start and worktree actions of the agents a removal
+/// deletes, its stopped and failed ones, so no notice is left naming an agent that is gone
+/// (RV-DS241-64). Takes the transaction and the project. Returns done, or the ledger's or
+/// the database's refusal.
+fn finish_removed_agent_notices(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+) -> Result<(), EngineError> {
+    use crate::ledger::{ActionKind, Outcome};
+    crate::ledger::initialize(tx)?;
+    for kind in [ActionKind::AgentSpawn, ActionKind::WorktreeCreate] {
+        for action in crate::ledger::pending(tx, kind)? {
+            let Some(agent) = serde_json::from_str::<serde_json::Value>(&action.payload)
+                .ok()
+                .and_then(|payload| payload.get("team_agent")?.as_i64())
+            else {
+                continue;
+            };
+            let removed: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM team_agents
+                     WHERE id=?1 AND project=?2 AND status IN ('stopped','failed'))",
+                    params![agent, project_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            if removed {
+                crate::ledger::finish(tx, action.id, Outcome::Unknown)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Records a Delete everything once the owner transport finished its disk work: the
