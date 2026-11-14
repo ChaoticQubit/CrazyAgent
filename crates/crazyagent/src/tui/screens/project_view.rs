@@ -867,8 +867,7 @@ fn overview_blocked(tab: OverviewTab, code: &str) -> String {
 
 /// What a tab whose file came with the project's files says above its text, the desktop's
 /// words (RV-DS241-2, DEC-141): CrazyAgent didn't write it and the owner didn't save it here.
-const FOREIGN_TAB: &str =
-    "This tab's file came with the project's files: CrazyAgent didn't write it and you didn't save it. Check it before you use its commands.";
+const FOREIGN_TAB: &str = "This tab's file came with the project's files: CrazyAgent didn't write it and you didn't save it. Check it before you use its commands.";
 
 /// The lines above the picked Overview tab's text and the text itself, as Markdown.
 /// A project outside the CrazyAgent folder and a blocked tab get their one line and no text;

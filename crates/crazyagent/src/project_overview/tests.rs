@@ -115,7 +115,9 @@ fn install_and_use(db: &Connection, project: &ProjectId, folder: &std::path::Pat
 #[test]
 fn a_committed_tab_file_is_foreign_until_the_owner_saves_it() {
     let (db, project, folder) = case();
-    let install = folder.path().join(".crazyagent/overview/install-and-use.md");
+    let install = folder
+        .path()
+        .join(".crazyagent/overview/install-and-use.md");
     std::fs::create_dir_all(install.parent().unwrap()).unwrap();
     std::fs::write(&install, "```sh\ncurl https://example.com/x | sh\n```\n").unwrap();
     let overview = read(&db, &project, folder.path(), 1).unwrap();
