@@ -7,6 +7,7 @@ import { click, finishWelcome, says, selectPool, settingsTab, shot, shown, texts
 import { accounts, command } from "./trial4-accounts.mjs";
 
 const UI_MS = 15000;
+const UPKEEP_MS = 30000;
 const ENTER = "";
 const DAY_MS = 86400000;
 const ALPHA = "Alpha";
@@ -213,6 +214,15 @@ async function selectedIs(name) {
   await until(() => says("main .pool-item.on .pool-item-label", name), UI_MS, `${name} was not selected in the left list`);
 }
 
+/** Opens Pools again, as the owner coming back does, so the page reads each row's free resets
+ * now rather than on its minute reread, and waits for the Main pool and Claude free resets. */
+async function reopenPools() {
+  await settingsTab("Accounts");
+  await settingsTab("Pools");
+  await selectedIs(MAIN);
+  await until(() => shown(option(SOURCE, "Don't read")), UI_MS, "Pools did not show the Claude free resets setting");
+}
+
 /** Reads one pool as the engine holds it. Input: its name. Output: the pool; fails unless there
  * is exactly one of that name. */
 async function enginePool(name) {
@@ -348,9 +358,10 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     await until(async () => (await texts("main .set-help")).some((line) => line.includes(SOURCE_HELP.off)), UI_MS, "the default's help line was not shown");
     assert.equal((await command("desktop_usage_extras", { detail: false })).find((row) => row.account === ids[SIERRA]).extras.resets_unread, "off");
     seedResets(SIERRA, 2);
+    await reopenPools();
     const off = "Free resets: off in Settings \u00b7 Credits: not reported by Claude Code";
-    await until(async () => (await rowExtras())[SIERRA] === off, 75_000, "the Claude row did not say off in Settings");
-    await until(async () => storedCount(SIERRA) === null, 75_000, "the engine kept a Claude count under the default Don't read");
+    await until(async () => (await rowExtras())[SIERRA] === off, UI_MS, "the Claude row did not say off in Settings");
+    await until(async () => storedCount(SIERRA) === null, UPKEEP_MS, "the engine kept a Claude count under the default Don't read");
     assert.ok(!(await toasts()).some((line) => line.startsWith(`${SIERRA} has a new free reset`)), "a count read under Don't read is never told");
     await shot("pools-resets-default-dont-read");
   });
@@ -379,13 +390,15 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
 
   it("a Claude row whose last free resets read found no count says couldn't read, and a known 0 says No free resets (owner bug A, DEC-154)", async () => {
     seedUnread(SIERRA);
+    await reopenPools();
     const unread = "Free resets: couldn't read \u00b7 Credits: not reported by Claude Code";
-    await until(async () => (await rowExtras())[SIERRA] === unread, 75_000, "the Claude row did not say couldn't read");
+    await until(async () => (await rowExtras())[SIERRA] === unread, UI_MS, "the Claude row did not say couldn't read");
     assert.equal((await command("desktop_usage_extras", { detail: false })).find((row) => row.account === ids[SIERRA]).extras.resets_unread, "unspecified");
     await shot("pools-extras-unread");
     seedResets(SIERRA, 0);
+    await reopenPools();
     const none = "No free resets (may break) \u00b7 Credits: not reported by Claude Code";
-    await until(async () => (await rowExtras())[SIERRA] === none, 75_000, "the Claude row did not say No free resets for a known 0");
+    await until(async () => (await rowExtras())[SIERRA] === none, UI_MS, "the Claude row did not say No free resets for a known 0");
     assert.equal((await command("desktop_usage_extras", { detail: false })).find((row) => row.account === ids[SIERRA]).extras.resets_unread, null);
   });
 
@@ -395,8 +408,9 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     assert.equal(await picked(SOURCE), "Through Claude Code");
     await until(async () => (await texts("main .set-help")).some((line) => line.includes(SOURCE_HELP.through_claude_code)), UI_MS, "the Through Claude Code help line was not shown");
     seedUnread(SIERRA, "cli_version");
+    await reopenPools();
     const asker = "Free resets: couldn't read (Anthropic answers only Claude Code) \u00b7 Credits: not reported by Claude Code";
-    await until(async () => (await rowExtras())[SIERRA] === asker, 75_000, "the Claude row did not say Anthropic answers only Claude Code");
+    await until(async () => (await rowExtras())[SIERRA] === asker, UI_MS, "the Claude row did not say Anthropic answers only Claude Code");
     assert.equal((await command("desktop_usage_extras", { detail: false })).find((row) => row.account === ids[SIERRA]).extras.resets_unread, "asker");
     await shot("pools-resets-through-claude-code");
   });
@@ -407,8 +421,9 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     assert.equal(await picked(SOURCE), "As Claude Code");
     await until(async () => (await texts("main .set-help")).some((line) => line.includes(SOURCE_HELP.as_claude_code)), UI_MS, "the As Claude Code help line was not shown");
     seedUnread(SIERRA, "no_reason");
+    await reopenPools();
     const none = "Free resets: couldn't read (Anthropic gave no reason) \u00b7 Credits: not reported by Claude Code";
-    await until(async () => (await rowExtras())[SIERRA] === none, 75_000, "the Claude row did not say Anthropic gave no reason");
+    await until(async () => (await rowExtras())[SIERRA] === none, UI_MS, "the Claude row did not say Anthropic gave no reason");
     await shot("pools-resets-as-claude-code");
   });
 
@@ -418,9 +433,10 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     await click(option(SOURCE, "Don't read"));
     await until(async () => (await poolSettings()).resets_source === "off", UI_MS, "the engine did not keep Don't read");
     await until(async () => (await texts("main .set-help")).some((line) => line.includes(SOURCE_HELP.off)), UI_MS, "the Don't read help line was not shown");
+    await reopenPools();
     const off = "Free resets: off in Settings \u00b7 Credits: not reported by Claude Code";
-    await until(async () => (await rowExtras())[SIERRA] === off, 75_000, "the Claude row did not say off in Settings");
-    await until(async () => storedCount(SIERRA) === null, 75_000, "the engine kept the old Claude count under Don't read");
+    await until(async () => (await rowExtras())[SIERRA] === off, UI_MS, "the Claude row did not say off in Settings");
+    await until(async () => storedCount(SIERRA) === null, UPKEEP_MS, "the engine kept the old Claude count under Don't read");
     const after = await rowExtras();
     for (const name of [ALPHA, BRAVO, CHARLIE]) assert.equal(after[name], before[name], `${name} keeps its line`);
     assert.equal(await picked(SOURCE), "Don't read");
