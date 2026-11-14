@@ -1683,6 +1683,64 @@ mod import {
             "{text}"
         );
     }
+
+    /// SA vid 7: the Imported heading lands on its own, when the repository carries only its
+    /// project instructions, when the instruction files imported beside them do not fit, and
+    /// when the heading leaves no room for the last bytes, which are cut only after the whole
+    /// file is kept in `.crazyagent/imported/`.
+    #[test]
+    fn a_committed_project_instructions_file_gets_its_heading_alone_crowded_and_at_the_limit() {
+        let heading = "## Imported from .crazyagent/instructions.md\n\n";
+        let max = crate::agent_home::TEXT_BYTES_MAX;
+        let carry = |checkout: &Checkout, text: &str| {
+            write(&checkout.folder.join(".crazyagent/instructions.md"), text);
+            checkout.git(&["add", "-f", ".crazyagent/instructions.md"]);
+            checkout.git(&["commit", "-q", "-m", "carried"]);
+        };
+        let bare = || {
+            let checkout = Checkout::new();
+            checkout.git(&["rm", "-q", "CLAUDE.md", ".claude/CLAUDE.md"]);
+            checkout
+        };
+
+        let alone = bare();
+        carry(&alone, "DUMMY-ALONE-7\n");
+        assert_eq!(marks(&import(&alone.folder).unwrap()), []);
+        assert_eq!(
+            crate::agent_home::read_project(&alone.folder).unwrap(),
+            format!("{heading}DUMMY-ALONE-7\n")
+        );
+
+        let crowded = Checkout::new();
+        write(&crowded.folder.join("CLAUDE.md"), &"x".repeat(max - 10));
+        crowded.git(&["add", "CLAUDE.md"]);
+        carry(&crowded, "DUMMY-CROWDED-7\n");
+        assert!(import(&crowded.folder).is_err());
+        assert_eq!(
+            crate::agent_home::read_project(&crowded.folder).unwrap(),
+            format!("{heading}DUMMY-CROWDED-7\n")
+        );
+
+        let full = bare();
+        let body = format!("DUMMY-FULL-7\n{}\n", "y".repeat(max - 30));
+        assert!(body.len() <= max && heading.len() + body.len() > max);
+        carry(&full, &body);
+        assert_eq!(marks(&import(&full.folder).unwrap()), []);
+        let text = crate::agent_home::read_project(&full.folder).unwrap();
+        assert!(
+            text.starts_with(&format!("{heading}DUMMY-FULL-7\nyyy")) && text.len() <= max,
+            "{}",
+            &text[..80.min(text.len())]
+        );
+        assert_eq!(
+            fs::read_to_string(
+                full.folder
+                    .join(".crazyagent/imported/.crazyagent/instructions.md")
+            )
+            .unwrap(),
+            body
+        );
+    }
 }
 
 #[test]
