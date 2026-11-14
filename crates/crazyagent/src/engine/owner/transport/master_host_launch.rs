@@ -164,6 +164,7 @@ impl OwnerRuntimeHandle {
                 delegate,
                 &prepared.tools_off,
                 prepared.steps,
+                prepared.provider_retry,
             )?
         } else {
             codex_master_turn(
@@ -309,8 +310,9 @@ pub(super) struct MasterTurnLaunch {
 /// stays denied and the managed home is never given to the master. Inputs: where the turn runs, the
 /// account lease, the registered executable, the attempt's connection, the instruction text, the
 /// turn's time limit (none for no limit), the engine executable for tools on, the team tools
-/// switched off and the owner's master step limit, which only a tools-on command carries
-/// (OB-5b). Output: the launch parts with the copy, or the refusal of the part that failed,
+/// switched off, the owner's master step limit, which only a tools-on command carries
+/// (OB-5b), and the connection-retry choice, set as the agents' Claude Code variable
+/// (DEC-163 Q7). Output: the launch parts with the copy, or the refusal of the part that failed,
 /// `native_profile_renewal_failed`, a transient refusal, when the token still lapses within a
 /// minute after a renewal.
 #[allow(clippy::too_many_arguments)]
@@ -324,11 +326,12 @@ pub(super) fn claude_master_turn(
     engine: Option<&Path>,
     tools_off: &[String],
     steps: StepLimit,
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
     let credential = profile.hand_to_turn(&home, wall_time, executable)?;
-    let (command, sandbox, tool_record) = match engine {
+    let (mut command, sandbox, tool_record) = match engine {
         None => (
             crate::engine::claude_host::launch_command(
                 executable,
@@ -384,6 +387,7 @@ pub(super) fn claude_master_turn(
             (command, sandbox, Some(drop))
         }
     };
+    crate::engine::claude_host::limit_retries(&mut command, retry);
     Ok(MasterTurnLaunch {
         command,
         sandbox,
