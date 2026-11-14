@@ -175,6 +175,7 @@ fn every_protected_git_path_is_denied_by_an_any_case_regex() {
         (format!("{state}/{context}"), true),
         (git.clone(), false),
         (state.clone(), false),
+        (format!("{state}/{}", any_case("instructions.md")), false),
         (objects.clone(), false),
         (format!("{objects}/{}", any_case("info")), false),
     ];
@@ -312,6 +313,17 @@ fn a_project_agent_writes_no_protected_path_in_any_letter_case() {
             &profile,
             &format!("mkdir {}", quoted(&folder)),
             &folder,
+        );
+    }
+    for file in [
+        case.project.join(".crazyagent").join("instructions.md"),
+        case.project.join(".crazyagent").join("INSTRUCTIONS.md"),
+    ] {
+        refused(
+            &sandbox,
+            &profile,
+            &format!("printf x > {}", quoted(&file)),
+            &file,
         );
     }
     assert_eq!(fs::read_dir(&git).unwrap().count(), 1);
