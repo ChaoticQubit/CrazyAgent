@@ -26,6 +26,9 @@ pub const DONT_ALLOW: &str = "Don't allow";
 /// The asker name prefix of the questions access requests raise.
 pub const ASKER_PREFIX: &str = "engine:access:";
 
+/// The one refusal code an agent's access request gets for every failed check of a socket
+/// path it wrote plainly (RV-DS241-87).
+const SOCKET_REFUSED: &str = "grant_socket_refused";
 const LOG_TABLE: &str = "CREATE TABLE IF NOT EXISTS access_grant_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
@@ -188,6 +191,9 @@ pub fn refusal_text(code: &str) -> &'static str {
         }
         "grant_socket_owner" => {
             "That socket belongs to the system or another user, has a second name, or sits in a folder other users can change, so it is never allowed."
+        }
+        "grant_socket_refused" => {
+            "That socket cannot be allowed. A socket can be allowed only when it is there now, belongs to the owner with one name, sits in a folder only the owner can change, and is no socket of CrazyAgent itself, of keys or credentials, of containers or virtual machines, or of a terminal, editor, SSH connection or key agent. Check the path and that the program making it runs, then ask again."
         }
         "grant_socket_missing" => {
             "There is no socket at that path now. Start the program that makes it, then allow it again."
@@ -587,9 +593,9 @@ pub fn request(
 ) -> Result<Requested, String> {
     let reason = plain_reason(reason)?;
     let data = data_root(db).ok_or("grant_requests_unavailable")?;
-    let grant = checked(grant, &data)?;
+    let grant = checked(grant, &data).map_err(|code| asked_refusal(grant, code))?;
     let identity = match &grant {
-        AccessGrant::Socket { path } => Some(socket_identity(path).ok_or("grant_socket_missing")?),
+        AccessGrant::Socket { path } => Some(socket_identity(path).ok_or(SOCKET_REFUSED)?),
         AccessGrant::Port { .. } | AccessGrant::TempFolder => None,
     };
     let policy =
@@ -651,6 +657,23 @@ pub fn request(
             let _ = db.execute("DELETE FROM access_requests WHERE id=?1", [id]);
             Err(problem.0)
         }
+    }
+}
+
+/// The refusal an agent's access request gets for a grant [`checked`] refused. A socket
+/// path the agent wrote plainly gets [`SOCKET_REFUSED`] whatever about it failed, since
+/// each detailed code tells whether a folder or file outside the agent's sandbox exists
+/// and what it is (RV-DS241-87); the detailed code goes to the engine log for the owner. A
+/// path that is not plain as written, a socket asked off macOS and every port or temp
+/// folder refusal keep their own code, which no file decides. Inputs: the grant as asked
+/// and the check's code. Output: the code to answer with.
+fn asked_refusal(grant: &AccessGrant, code: &'static str) -> &'static str {
+    match grant {
+        AccessGrant::Socket { .. } if grant.plain() && code != "grant_socket_needs_macos" => {
+            eprintln!("access_request_refused code={code}");
+            SOCKET_REFUSED
+        }
+        AccessGrant::Socket { .. } | AccessGrant::Port { .. } | AccessGrant::TempFolder => code,
     }
 }
 
