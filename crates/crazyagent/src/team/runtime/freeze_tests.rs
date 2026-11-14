@@ -39,28 +39,75 @@ fn free_proxy_port() -> u16 {
     port
 }
 
+/// When a stand-in harness kills the warden its pane shim forked beside it, as an agent
+/// that ends its own warden would: never, as soon as it starts, or on its first dial after
+/// the row writes `kill.warden`. A stand-in that killed it writes `warden.killed`.
+#[derive(Clone, Copy)]
+enum WardenKill {
+    Never,
+    AtStart,
+    OnAsk,
+}
+
 /// One proxied pane under the keeper, its warden armed, whose stand-in harness started a
 /// process in a session of its own and dials both loopback addresses of its proxy port
-/// every 100 ms, counting each dial that connected.
+/// every 100 ms, counting each dial that connected. The process in its own session runs
+/// until the row writes `stop` in the pane's folder.
 struct Proxied {
     agent: AgentId,
     folder: PathBuf,
     port: u16,
 }
 
+/// Writes `stop` in a stand-in's folder when the row ends, passed or failed, so a process
+/// the stand-in started in a session of its own, which can outlive its pane, exits then.
+struct StopChild(PathBuf);
+
+impl Drop for StopChild {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.0.join("stop"), "");
+    }
+}
+
 impl Proxied {
     /// Starts the pane for team agent `id` as an earlier engine would have and keeps its
     /// record. Inputs: the fixture, the host, the agent and its proxy port. Output: the pane.
     fn keep(fixture: &Fixture, host: &Arc<dyn Host>, id: i64, port: u16) -> Self {
+        Self::keep_killing(fixture, host, id, port, WardenKill::Never)
+    }
+
+    /// Starts and keeps the pane as [`Proxied::keep`] does, its stand-in killing its warden
+    /// when `kill` says. Inputs: the fixture, the host, the agent, its proxy port and when
+    /// the warden is killed. Output: the pane.
+    fn keep_killing(
+        fixture: &Fixture,
+        host: &Arc<dyn Host>,
+        id: i64,
+        port: u16,
+        kill: WardenKill,
+    ) -> Self {
         let folder = fixture.base.join(format!("frozen-{id}"));
         std::fs::create_dir(&folder).unwrap();
         let profile = folder.join("agent.sb");
         std::fs::write(&profile, CONFINED_SIGNALS).unwrap();
+        let dir = folder.display();
+        let warden = format!(
+            "for p in $(/bin/ps -ax -o pid= -o ppid= -o comm= | /usr/bin/awk -v sh=$$ '$2==sh && $3 ~ /perl/ {{print $1}}'); do kill -9 $p && echo $p > '{dir}/warden.killed'; done"
+        );
+        let (started, dialing) = match kill {
+            WardenKill::Never => (String::new(), String::new()),
+            WardenKill::AtStart => (format!("{warden}\n"), String::new()),
+            WardenKill::OnAsk => (
+                String::new(),
+                format!(
+                    "[ -e '{dir}/kill.warden' ] && [ ! -e '{dir}/warden.killed' ] && {{ {warden}; }}; "
+                ),
+            ),
+        };
         let script = format!(
-            "/usr/bin/perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); open(my $out, \">\", \"$ARGV[0]/child.pid.new\") or die; print $out \"$$\\n\"; close($out); rename(\"$ARGV[0]/child.pid.new\", \"$ARGV[0]/child.pid\"); sleep 1 while 1' '{dir}'\n\
+            "/usr/bin/perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); open(my $out, \">\", \"$ARGV[0]/child.pid.new\") or die; print $out \"$$\\n\"; close($out); rename(\"$ARGV[0]/child.pid.new\", \"$ARGV[0]/child.pid\"); sleep 1 until -e \"$ARGV[0]/stop\"' '{dir}'\n\
              echo $$ > '{dir}/harness.pid.new' && mv '{dir}/harness.pid.new' '{dir}/harness.pid'\n\
-             while :; do for address in 127.0.0.1 ::1; do /usr/bin/nc -z -G 1 $address {port} 2>/dev/null && echo x >> '{dir}/dialed'; done; sleep 0.1; done\n",
-            dir = folder.display(),
+             {started}while :; do {dialing}for address in 127.0.0.1 ::1; do /usr/bin/nc -z -G 1 $address {port} 2>/dev/null && echo x >> '{dir}/dialed'; done; sleep 0.1; done\n"
         );
         let state = agent_pane_state(&fixture.base.join("team"), id);
         std::fs::DirBuilder::new()
@@ -209,6 +256,74 @@ fn a_kept_proxied_pane_is_stopped_after_shutdown_with_its_setsid_child() {
     );
     assert!(fixture.recorded(id));
     pane.end(&host);
+    host.close(&[]).unwrap();
+}
+
+/// SA freeze_or_end: a kept proxied pane whose agent killed its warden cannot be frozen at
+/// quit, and its keeper does not confirm the end, so while the agent's setsid child runs on
+/// the agent is stopped with a note that its sandbox could not be confirmed empty.
+#[test]
+fn a_kept_proxied_pane_whose_agent_killed_its_warden_is_not_recorded_plainly_stopped_at_quit() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let open = endpoint_runtimes(&fixture);
+    let id = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let pane = Proxied::keep_killing(&fixture, &host, id, free_proxy_port(), WardenKill::OnAsk);
+    let _stop = StopChild(pane.folder.clone());
+    let mut team = open().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the proxied pane is taken over", |f| {
+        f.agent_status(id) == (AgentStatus::Idle, None)
+    });
+    std::fs::write(pane.folder.join("kill.warden"), "").unwrap();
+    pane.pid("warden.killed");
+
+    assert!(team.shutdown().unwrap().is_empty());
+    let child = state_of(pane.pid("child.pid"));
+    assert!(
+        child.is_some_and(|state| state != 'T'),
+        "the agent's setsid child runs on: {child:?}"
+    );
+    assert_eq!(
+        fixture.agent_status(id),
+        (
+            AgentStatus::Stopped,
+            Some(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(crate::harnesses::leftovers::UNCERTAIN)
+            ))
+        )
+    );
+    host.close(&[]).unwrap();
+}
+
+/// SA freeze_or_end: a kept proxied pane an earlier engine left unfrozen, whose agent killed
+/// its warden, fails its thaw at the next engine start, and its note says its sandbox could
+/// not be confirmed empty while the agent's setsid child runs on.
+#[test]
+fn a_kept_pane_whose_agent_killed_its_warden_fails_its_thaw_with_its_cleanup_named_uncertain() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let open = endpoint_runtimes(&fixture);
+    let id = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let pane = Proxied::keep_killing(&fixture, &host, id, free_proxy_port(), WardenKill::AtStart);
+    let _stop = StopChild(pane.folder.clone());
+    pane.pid("warden.killed");
+
+    let mut team = open().with_terminal(host.clone()).unwrap();
+    assert!(!host.alive().unwrap().contains(&pane.agent));
+    let child = state_of(pane.pid("child.pid"));
+    assert!(
+        child.is_some_and(|state| state != 'T'),
+        "the agent's setsid child runs on: {child:?}"
+    );
+    assert!(
+        fixture.note(&format!(
+            "The terminal of team agent {id} was closed: it could not be continued after its freeze. {}.",
+            crate::sandbox::warden::CLEANUP_UNCERTAIN
+        )),
+        "the note names the cleanup uncertain"
+    );
+    assert!(team.shutdown().unwrap().is_empty());
     host.close(&[]).unwrap();
 }
 
