@@ -630,3 +630,84 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
         Err(crate::tools::permission_fix::TOOL_FIX_NOT_NEEDED)
     );
 }
+
+/// Every archive setup unpacks becomes this user's files under this user's mode mask, never
+/// the archive's owners and modes, which tar keeps by default when the engine runs as root;
+/// uv's and Node's unpacks share these words, and this Mac's or Linux's own tar takes them.
+#[test]
+fn an_archive_unpacks_with_neither_its_owners_nor_its_modes() {
+    let root = private_root();
+    let source = root.path().join("source");
+    std::fs::create_dir_all(source.join("top")).unwrap();
+    std::fs::write(source.join("top/tool"), "#!/bin/sh\nexit 0\n").unwrap();
+    let archive = root.path().join("tool.tar.gz");
+    let status = crate::spawn_gate::status(
+        Command::new(TAR)
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&source)
+            .arg("top"),
+    )
+    .unwrap();
+    assert!(status.success());
+    let out = root.path().join("out");
+    private_folder(&out).unwrap();
+    let words = unpack_args(&archive, &out);
+    for flag in ["--no-same-owner", "--no-same-permissions"] {
+        assert!(
+            words.iter().any(|word| word == flag),
+            "tar unpacks without {flag}"
+        );
+    }
+    let (unpacked, _) = run(
+        Path::new(TAR),
+        &words,
+        &[("PATH", OsString::from("/usr/bin:/bin"))],
+        root.path(),
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(unpacked);
+    assert_eq!(
+        std::fs::read_to_string(out.join("top/tool")).unwrap(),
+        "#!/bin/sh\nexit 0\n"
+    );
+}
+
+/// A locked tool whose environment Python is gone, as when the base Python uv built it from
+/// was removed, is installed again instead of reported in place: setup goes on to uv, here
+/// missing, and does not answer Ok. A tool whose environment Python runs is kept as it is.
+#[test]
+fn a_locked_tool_whose_environment_python_is_gone_is_installed_again() {
+    let root = private_root();
+    let installer = PinnedInstaller::with_paths(root.path(), vec![]);
+    let requirements = "demo-tool==1.0 \\\n    --hash=sha256:00\n";
+    let lock = ToolLock {
+        package: "demo-tool",
+        version: "1.0",
+        programs: &["demo-tool"],
+        requirements,
+    };
+    let env = root.path().join("setup/uv/tools/demo-tool/env-1");
+    let venv_bin = env.join("venv/bin");
+    std::fs::create_dir_all(&venv_bin).unwrap();
+    std::fs::write(env.join(LOCK_FILE), requirements).unwrap();
+    let program = venv_bin.join("demo-tool");
+    let base = root.path().join("base/python3");
+    for file in [&program, &base] {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::os::unix::fs::symlink(&base, venv_bin.join("python")).unwrap();
+    let bin = root.path().join("setup/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&program, bin.join("demo-tool")).unwrap();
+    assert_eq!(installer.install_locked(&lock, "3"), Ok(()));
+    std::fs::remove_file(&base).unwrap();
+    assert_eq!(
+        installer.install_locked(&lock, "3"),
+        Err(InstallError("setup_uv_missing"))
+    );
+}

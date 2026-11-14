@@ -241,6 +241,70 @@ mod tests {
         }
     }
 
+    fn fake_brew(root: &Path, folder: &str, text: &str) -> PathBuf {
+        let brew = root.join(folder).join("brew");
+        std::fs::create_dir_all(brew.parent().unwrap()).unwrap();
+        std::fs::write(&brew, text).unwrap();
+        std::fs::set_permissions(&brew, std::fs::Permissions::from_mode(0o700)).unwrap();
+        brew
+    }
+
+    /// A root engine installs tmux with apt or dnf and never runs Homebrew, which would run
+    /// whatever the account owning Linuxbrew put there; as any other user a `brew` in a
+    /// folder another account can change is refused with its own code and never started.
+    #[test]
+    fn tmux_never_runs_homebrew_as_root_or_from_a_folder_others_can_change() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let own = fake_brew(root.path(), "own", "#!/bin/sh\nexit 0\n");
+        let shared = fake_brew(root.path(), "shared", "#!/bin/sh\nexit 0\n");
+        std::fs::set_permissions(
+            shared.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        let apt = tmux_command("tmux", Some(&own), true, Some(PackageManager::Apt)).unwrap();
+        assert_eq!(apt.get_program(), APT_GET);
+        assert_eq!(
+            tmux_command("tmux", Some(&own), true, None).err(),
+            Some(InstallError("setup_homebrew_missing"))
+        );
+        let homebrew = tmux_command("tmux", Some(&own), false, None).unwrap();
+        assert_eq!(homebrew.get_program(), own.as_os_str());
+        assert_eq!(
+            tmux_command("tmux", Some(&shared), false, Some(PackageManager::Apt)).err(),
+            Some(InstallError("setup_homebrew_unsafe"))
+        );
+        assert!(crate::setup::known_reason("setup_homebrew_unsafe").is_some());
+    }
+
+    /// Homebrew starts with only what it needs, a fixed PATH and this user's home, name,
+    /// language and temp folder, so no API key or token in the engine's environment reaches
+    /// a tmux install; the shell that runs the fixture adds only its own working names.
+    #[test]
+    fn homebrew_starts_with_only_the_kept_environment() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let brew = fake_brew(root.path(), "own", "#!/bin/sh\nexec /usr/bin/env\n");
+        let mut command = tmux_command("tmux", Some(&brew), false, None).unwrap();
+        let output = run_bounded(&mut command, Duration::from_secs(30), true).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let names: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .collect();
+        assert!(names.contains(&"PATH"), "{text}");
+        let kept = [
+            "PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "PWD", "OLDPWD", "SHLVL", "_",
+        ];
+        for name in names {
+            assert!(
+                kept.contains(&name) || name.starts_with("HOMEBREW_"),
+                "{name} reached Homebrew"
+            );
+        }
+    }
+
     /// On Linux, setup answers tmux wherever the tool resolver looks, as the live master's
     /// start does ([`crate::terminal::tmux::installed`]): a tmux only in `~/.local/bin`
     /// shows Found with its version, and none anywhere gives the resolver's tmux line.

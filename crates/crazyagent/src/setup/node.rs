@@ -230,12 +230,7 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
         private_folder(&out)?;
         let (unpacked, _) = run(
             Path::new(TAR),
-            &[
-                "-xzf".into(),
-                archive.into_os_string(),
-                "-C".into(),
-                out.clone().into_os_string(),
-            ],
+            &super::pinned::unpack_args(&archive, &out),
             &installer.env(),
             &staging,
             UNPACK_TIME,

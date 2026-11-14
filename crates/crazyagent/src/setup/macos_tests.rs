@@ -189,6 +189,47 @@ fn tmux_without_homebrew_and_graphify_without_uv_fail_with_plain_reasons() {
     );
 }
 
+/// Setup never runs a Homebrew `brew` another account can change, here one in a folder
+/// anyone can write: it moves on to the next `brew`, refuses with its own code when none is
+/// left, and asks Homebrew for the formula only, never a cask of the same name.
+#[test]
+fn a_homebrew_others_can_change_is_never_run_and_brew_installs_only_a_formula() {
+    let root = root();
+    let ran = |brew: &Path| brew.with_file_name("ran");
+    let fake = |folder: &str, mode: u32| {
+        let brew = root.path().join(folder).join("brew");
+        std::fs::create_dir_all(brew.parent().unwrap()).unwrap();
+        let text = format!("#!/bin/sh\necho \"$@\" > '{}'\n", ran(&brew).display());
+        std::fs::write(&brew, text).unwrap();
+        std::fs::set_permissions(&brew, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            brew.parent().unwrap(),
+            std::fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+        brew
+    };
+    let shared = fake("shared", 0o777);
+    let own = fake("own", 0o700);
+    let tmux = pin(Dependency::Tmux);
+    let Pin::Homebrew { formula } = &tmux else {
+        panic!("tmux is pinned to a Homebrew formula on macOS");
+    };
+    let alone = MacInstaller::with_paths(root.path(), vec![], vec![shared.clone()]);
+    assert_eq!(
+        alone.install(Dependency::Tmux, &tmux).unwrap_err(),
+        InstallError("setup_homebrew_unsafe")
+    );
+    assert!(!ran(&shared).exists());
+    let both = MacInstaller::with_paths(root.path(), vec![], vec![shared.clone(), own.clone()]);
+    let _ = both.install(Dependency::Tmux, &tmux);
+    assert!(!ran(&shared).exists());
+    assert_eq!(
+        std::fs::read_to_string(ran(&own)).unwrap(),
+        format!("install --formula {formula}\n")
+    );
+}
+
 #[test]
 fn a_python_tool_without_a_bundled_lock_is_refused_before_uv_runs() {
     let root = root();
