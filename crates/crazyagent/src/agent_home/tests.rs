@@ -95,7 +95,7 @@ fn a_project_save_stages_in_the_context_folder_and_refuses_a_linked_one() {
     std::os::unix::fs::symlink(&elsewhere, state.join("context")).unwrap();
     assert_eq!(
         save_project(&folder, "Planted.\n").unwrap_err().0,
-        "process_text_unsafe"
+        "process_text_unwritable"
     );
     assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
     assert_eq!(read_project(&folder).unwrap(), "Owner rule.\n");

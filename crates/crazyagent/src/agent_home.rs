@@ -244,9 +244,9 @@ pub fn read_project(folder: &Path) -> Result<String, AgentHomeError> {
 
 /// Saves the project instructions into `<folder>/.crazyagent/instructions.md`, a folder git
 /// ignores, through a temporary file in [`project_staging`], made when missing. A project
-/// made before `.crazyagent/` existed keeps its state in the project folder itself, so it
-/// is refused rather than given a new state folder. Input: the project folder and the text.
-/// Output: unit, `process_project_folder_missing`, `process_text_unsafe`, or another code.
+/// made before `.crazyagent/` existed keeps its state in the project folder and is refused.
+/// Input: the project folder and the text. Output: unit, `process_project_folder_missing`,
+/// `process_text_unwritable` when the staging folder is a link, or another plain code.
 pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
     validate(text)?;
     let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
@@ -258,7 +258,7 @@ pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
         }
         _ => {}
     }
-    real_folder(&staging).map_err(|_| failure("process_text_unsafe"))?;
+    real_folder(&staging).map_err(|_| failure("process_text_unwritable"))?;
     write_staged(&staging, &state, PROJECT_FILE, text.as_bytes())
 }
 
