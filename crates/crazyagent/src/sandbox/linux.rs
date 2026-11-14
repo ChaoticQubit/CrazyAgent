@@ -1,9 +1,9 @@
 use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
 use super::{
-    KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF,
-    LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, OWNER_PORTS,
-    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
-    clean_absolute, invalid,
+    GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED,
+    LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP,
+    LinuxSockets, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
+    SandboxRemote, agent_env, clean_absolute, invalid,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -635,7 +635,8 @@ pub enum LinuxBackend {
 
 /// The Linux boundary for one project agent. It keeps the [`ProjectSandbox`] policy on both
 /// backends: the project folder is read-only, its existing entries are writable except the
-/// protected paths, symbolic links and the git metadata git follows (`GIT_FOLLOWED`), and
+/// protected paths, symbolic links, the git metadata git follows (`GIT_FOLLOWED`) and the
+/// git state the Seatbelt profile denies ([`GIT_STATE_TREES`], [`GIT_STATE_FILES`]), and
 /// the agent's home, temp dir and worktrees are writable. A policy confined to one worktree
 /// is refused, since neither backend can hold its git denies. Landlock limits outbound TCP to the model endpoint ports
 /// and, under the owner's [`LinuxSockets`] setting, the socket filter refuses every other kind
@@ -863,7 +864,12 @@ impl Grants {
         let protected = sandbox.protected_paths();
         let objects = git.join("objects");
         let objects_info = objects.join("info");
-        let followed: Vec<PathBuf> = GIT_FOLLOWED.iter().map(|name| git.join(name)).collect();
+        let followed: Vec<PathBuf> = GIT_FOLLOWED
+            .iter()
+            .chain(&GIT_STATE_TREES)
+            .chain(&GIT_STATE_FILES)
+            .map(|name| git.join(name))
+            .collect();
         let followed: Vec<&PathBuf> = followed.iter().collect();
         let folder = |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
         let mut write = Vec::new();

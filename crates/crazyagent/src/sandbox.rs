@@ -838,6 +838,31 @@ pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
 /// runs another script: the check follows a `#!` line one level only and never guesses.
 pub const LINUX_HARNESS_UNCHECKED: &str = "linux_harness_unchecked";
 
+/// The `.git` folders whose contents the owner's git reads and runs: hook scripts, rebase
+/// and sequencer plans, and remote and branch definitions. No macOS or Linux agent writes
+/// in them: Seatbelt denies each with everything below it, and Linux never grants one
+/// (RV-DS241-85).
+pub const GIT_STATE_TREES: [&str; 6] = [
+    "hooks",
+    "rebase-merge",
+    "rebase-apply",
+    "remotes",
+    "branches",
+    "sequencer",
+];
+
+/// The single `.git` files no macOS or Linux agent writes: the config, the index, their
+/// locks, and the links git follows to a common dir or a worktree config. Seatbelt denies
+/// each by name and Linux never grants one (RV-DS241-85).
+pub const GIT_STATE_FILES: [&str; 6] = [
+    "config",
+    "config.lock",
+    "index",
+    "index.lock",
+    "commondir",
+    "config.worktree",
+];
+
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
 pub enum SandboxError {
@@ -2822,34 +2847,14 @@ impl ProjectSandbox {
         let context = any_case("context");
         let objects = format!("{git}/{}", any_case("objects"));
         let mut below = vec![context.clone(), format!("{state}/{context}")];
-        below.extend(
-            [
-                "hooks",
-                "rebase-merge",
-                "rebase-apply",
-                "remotes",
-                "branches",
-                "sequencer",
-            ]
-            .map(|name| format!("{git}/{}", any_case(name))),
-        );
+        below.extend(GIT_STATE_TREES.map(|name| format!("{git}/{}", any_case(name))));
         let mut entries = vec![
             git.clone(),
             state,
             format!("{objects}/{}", any_case("info")),
             objects,
         ];
-        entries.extend(
-            [
-                "config",
-                "config.lock",
-                "index",
-                "index.lock",
-                "commondir",
-                "config.worktree",
-            ]
-            .map(|name| format!("{git}/{}", any_case(name))),
-        );
+        entries.extend(GIT_STATE_FILES.map(|name| format!("{git}/{}", any_case(name))));
         let mut text = String::from("(deny file-write*");
         for path in &below {
             text.push_str(&format!("\n  (regex #\"^{project}/{path}(/.*)?$\")"));
