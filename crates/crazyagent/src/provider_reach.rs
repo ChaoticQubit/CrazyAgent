@@ -83,8 +83,8 @@ impl ProviderReach {
 
     /// Tells whether a remote provider known by name can't be reached: the name has no
     /// address within the lookup's bound, or every address it gives that the engine may dial
-    /// refuses ([`Self::unreached_at`]). A lookup that ran out of time names nothing.
-    /// Inputs: the name and port. Output: the answer.
+    /// refuses ([`Self::unreached_at`]). A lookup that ran out of time or failed on this
+    /// machine names nothing. Inputs: the name and port. Output: the answer.
     pub(crate) fn unreached_name(&self, name: &str, port: u16) -> bool {
         match self.find(name, port) {
             Found::Nowhere => true,
@@ -125,16 +125,21 @@ impl ProviderReach {
             .all(|(name, port)| self.find(name, *port) == Found::Nowhere)
     }
 
-    /// Looks one name up: no address for an empty answer or any error other than TimedOut,
-    /// which the lib cannot tell from a transient one without unsafe code; nothing sure for
-    /// TimedOut or more than [`ADDRESSES_MAX`] addresses. Inputs: the name and port. Output:
-    /// what the lookup told.
+    /// Looks one name up: no address for an empty answer or the resolver's own error, which
+    /// carries no system error number and which the lib cannot tell from a transient one
+    /// without unsafe code; nothing sure for TimedOut, an error with a system error number,
+    /// such as too many open files on this machine (r1 F1), or more than [`ADDRESSES_MAX`]
+    /// addresses. Inputs: the name and port. Output: what the lookup told.
     fn find(&self, name: &str, port: u16) -> Found {
         match (self.lookup)(name, port) {
             Ok(addresses) if addresses.is_empty() => Found::Nowhere,
             Ok(addresses) if addresses.len() > ADDRESSES_MAX => Found::Unsure,
             Ok(addresses) => Found::Addresses(addresses),
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => Found::Unsure,
+            Err(error)
+                if error.kind() == io::ErrorKind::TimedOut || error.raw_os_error().is_some() =>
+            {
+                Found::Unsure
+            }
             Err(_) => Found::Nowhere,
         }
     }
