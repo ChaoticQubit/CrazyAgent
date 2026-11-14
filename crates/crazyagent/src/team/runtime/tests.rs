@@ -18233,6 +18233,62 @@ fn failing_a_task_the_owner_cancelled_keeps_it_cancelled() {
     );
 }
 
+/// The owner cancels a task the dispatch pass has just claimed, and the turn for it then
+/// cannot reach its agent: the cancel lands as the claim does, as a trigger does here. The
+/// task ends cancelled, never back in the queue for another agent to run (RV-DS241-124).
+#[test]
+fn an_owner_cancel_of_a_claimed_task_whose_turn_cannot_be_sent_keeps_it_cancelled() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Delete the release branch.','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+            params![task, PROJECT, agent],
+        )
+        .unwrap();
+    let mut worker = between_turns(&project, AgentRole::Sub, true, true);
+    let (orders, turns) = channel();
+    drop(turns);
+    worker.orders = orders;
+    team.workers.insert(agent, worker);
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER owner_cancel_at_claim AFTER UPDATE OF status ON team_tasks
+             WHEN NEW.id={task} AND NEW.status='running'
+             BEGIN
+               UPDATE team_tasks SET cancel_requested=1, cancel_by='task' WHERE id={task};
+             END;"
+        ))
+        .unwrap();
+
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+
+    let status: String = fixture
+        .connection
+        .query_row(
+            "SELECT status FROM team_tasks WHERE id=?1",
+            [task],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    assert!(team.workers[&agent].busy.is_none());
+    team.workers.clear();
+}
+
 /// F30: the Task-start reminder marks the start of a task, not every turn. While the setting
 /// is On, a kept session's turn that only carries its team messages (`WAKE_TASK`) gets no
 /// reminder, while a real task pinned to the same kind of kept session still gets it once.
