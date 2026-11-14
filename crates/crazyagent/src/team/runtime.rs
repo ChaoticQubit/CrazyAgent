@@ -6873,6 +6873,19 @@ impl TeamRuntime {
                 super::time_limits(&self.connection, &stored.project_id)?,
                 self.workers[&agent].ran(),
             );
+            let claimed = self
+                .connection
+                .execute(
+                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL, wait=NULL
+                     WHERE id=?1 AND status='queued'",
+                    params![task, agent, now_ms()],
+                )
+                .map_err(error)?;
+            assert!(claimed <= 1);
+            if claimed == 0 {
+                delivery::ended(&self.connection, Some(Busy::Task(task)), false)?;
+                continue;
+            }
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker
                 .orders
@@ -6886,6 +6899,13 @@ impl TeamRuntime {
                 ))
                 .is_err()
             {
+                self.connection
+                    .execute(
+                        "UPDATE team_tasks SET status='queued', agent=NULL, attempts=MAX(attempts-1,0), started_ms=NULL
+                         WHERE id=?1 AND status='running'",
+                        [task],
+                    )
+                    .map_err(error)?;
                 delivery::ended(&self.connection, Some(Busy::Task(task)), false)?;
                 continue;
             }
@@ -6898,12 +6918,6 @@ impl TeamRuntime {
                 let _ = crate::instruction_files::delivered(edit, &home);
             }
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
-            self.connection
-                .execute(
-                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL, wait=NULL WHERE id=?1",
-                    params![task, agent, now_ms()],
-                )
-                .map_err(error)?;
             self.connection
                 .execute(
                     "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",
@@ -7336,10 +7350,13 @@ impl TeamRuntime {
         }))
     }
 
+    /// Ends a task dispatch could not hand out as failed with `reason`, only while it still
+    /// waits queued, so a task the owner cancelled meanwhile stays cancelled (RV-DS241-124).
+    /// Takes the task and the reason. Returns any SQLite failure.
     fn fail_task(&mut self, task: i64, reason: &str) -> Result<(), EngineError> {
         self.connection
             .execute(
-                "UPDATE team_tasks SET status='failed', agent=NULL, error=?2, finished_ms=?3 WHERE id=?1",
+                "UPDATE team_tasks SET status='failed', agent=NULL, error=?2, finished_ms=?3 WHERE id=?1 AND status='queued'",
                 params![task, reason, now_ms()],
             )
             .map_err(error)?;
