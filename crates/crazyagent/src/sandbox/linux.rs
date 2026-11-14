@@ -39,6 +39,11 @@ const LIMIT_NETWORK: &str = "--limit-network";
 const OPEN_SOCKETS: &str = "--open-sockets";
 const KEEP_FREE: &str = "--keep-free";
 const PROBE: &str = "--probe";
+const FILTER_SOCKETS: &str = "--filter-sockets";
+const RESOLVER_ROOT: &str = "/run/systemd/resolve";
+const HELPER_MISSING: &str = "this Linux cannot fully enforce Landlock file rules (Linux 6.2 \
+     or newer), and CrazyAgent's sandbox helper, which keeps a bubblewrap agent off Unix \
+     sockets, is missing; reinstall CrazyAgent";
 /// The most ports one agent is kept off: the owner's fixed ports, the kept local model
 /// ports and every model proxy port.
 const KEEP_FREE_MAX: usize =
@@ -85,7 +90,7 @@ const SYSTEM_READ_ROOTS: &[&str] = &[
     "/libx32",
     "/etc",
     "/opt",
-    "/run/systemd/resolve",
+    RESOLVER_ROOT,
     "/home/linuxbrew/.linuxbrew",
     "/nix/store",
     "/sys/devices/system/cpu",
@@ -210,7 +215,8 @@ pub(crate) fn holds_file_rules(helper: &Path) -> bool {
 }
 
 /// What the `crazyagent-landlock` helper was asked to do: probe whether this kernel holds a
-/// Landlock ruleset, or apply a policy and start a harness.
+/// Landlock ruleset, apply a policy and start a harness, or, inside bubblewrap, install only
+/// the socket filter and start a harness.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HelperRequest {
     Probe {
@@ -223,27 +229,43 @@ pub enum HelperRequest {
         program: PathBuf,
         args: Vec<OsString>,
     },
+    Filter {
+        program: PathBuf,
+        args: Vec<OsString>,
+    },
 }
 
 impl HelperRequest {
     /// Parses the helper arguments after its own name. Input: flags from
     /// [`LandlockPolicy::args`] then `--`, an absolute program and its arguments, or
     /// `--probe` with an optional `--limit-network`, `--open-sockets` and `--keep-free`
-    /// with a port. `--open-sockets` needs `--limit-network`. Output: the request, or the
-    /// reason the arguments are refused.
+    /// with a port, or `--filter-sockets` alone then `--` and the harness. `--open-sockets`
+    /// needs `--limit-network`. Output: the request, or the reason the arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
         let mut policy = LandlockPolicy::default();
         let mut probe = false;
+        let mut filter = false;
         let mut rest = args.into_iter();
         while let Some(flag) = rest.next() {
             match flag.to_str() {
                 Some(PROBE) => probe = true,
+                Some(FILTER_SOCKETS) => filter = true,
                 Some(LIMIT_NETWORK) => policy.limit_network = true,
                 Some(OPEN_SOCKETS) => policy.open_sockets = true,
                 Some(READ) => policy.read.push(absolute(rest.next())?),
                 Some(WRITE) => policy.write.push(absolute(rest.next())?),
                 Some(CONNECT) => policy.connect.push(port(rest.next())?),
                 Some(KEEP_FREE) => policy.keep_free.push(port(rest.next())?),
+                Some("--") if !probe && filter => {
+                    if policy != LandlockPolicy::default() {
+                        return Err(format!("{FILTER_SOCKETS} takes no policy"));
+                    }
+                    let program = absolute(rest.next())?;
+                    return Ok(Self::Filter {
+                        program,
+                        args: rest.collect(),
+                    });
+                }
                 Some("--") if !probe => {
                     open_needs_limit(&policy)?;
                     binds_fit(&policy)?;
@@ -261,7 +283,7 @@ impl HelperRequest {
             }
         }
         let bare = policy.read.is_empty() && policy.write.is_empty() && policy.connect.is_empty();
-        if probe && bare {
+        if probe && bare && !filter {
             open_needs_limit(&policy)?;
             binds_fit(&policy)?;
             return Ok(Self::Probe {
@@ -562,6 +584,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         }
     };
     let (policy, launch) = match request {
+        HelperRequest::Filter { program, args } => return filtered(&program, args),
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -625,12 +648,31 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     ExitCode::from(126)
 }
 
+/// Starts a harness bubblewrap launched, behind the socket filter alone: no Unix-domain
+/// socket and no io_uring ring ([`refuse_sockets`]), so a closed agent reaches no socket in
+/// the folders bound for it. Bubblewrap already holds the files, the network and the
+/// session. Input: the harness. Output: 3 when the filter cannot be installed, 126 when the
+/// harness cannot start.
+fn filtered(program: &Path, args: Vec<OsString>) -> ExitCode {
+    if let Err(reason) = refuse_sockets(false, false) {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
+    let error = Command::new(program).args(args).exec();
+    eprintln!(
+        "crazyagent-landlock: cannot start {}: {error}",
+        program.display()
+    );
+    ExitCode::from(126)
+}
+
 /// The Linux mechanism holding a project agent's boundary: the `crazyagent-landlock` helper,
-/// or bubblewrap where the kernel cannot fully enforce its Landlock rules.
+/// or bubblewrap where the kernel cannot fully enforce its Landlock rules, with that helper
+/// started inside it to install the socket filter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinuxBackend {
     Landlock { helper: PathBuf },
-    Bubblewrap { bwrap: PathBuf },
+    Bubblewrap { bwrap: PathBuf, helper: PathBuf },
 }
 
 /// The Linux boundary for one project agent. It keeps the [`ProjectSandbox`] policy on both
@@ -651,21 +693,24 @@ pub struct LinuxSandbox {
 }
 
 impl LinuxSandbox {
-    /// Binds the policy to one backend. Input: the project policy and the helper or bwrap
-    /// executable as an absolute file. Output: the sandbox, `Invalid` for a bad executable,
-    /// or `Unavailable` for a network limit or an open network on bubblewrap, which keeps no
-    /// port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
+    /// Binds the policy to one backend. Input: the project policy and the helper, or bwrap
+    /// and the helper, each an absolute file. Output: the sandbox, `Invalid` for a bad
+    /// executable, or `Unavailable` for a network limit or an open network on bubblewrap,
+    /// which keeps no port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
     /// worktree, whose git denies neither backend can hold, for a limited network the
     /// sockets setting starts no agent on, or on Landlock for a kept port Linux could hand
     /// out by itself ([`kept_outside_picked`]). Bubblewrap starts only a closed agent, in a
     /// network of its own, where no port it takes is a host port.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
-        let executable = match &backend {
-            LinuxBackend::Landlock { helper } => helper,
-            LinuxBackend::Bubblewrap { bwrap } => bwrap,
+        let (launcher, inside) = match &backend {
+            LinuxBackend::Landlock { helper } => (helper, None),
+            LinuxBackend::Bubblewrap { bwrap, helper } => (bwrap, Some(helper)),
         };
-        if !clean_absolute(executable) || !executable.is_file() {
+        if std::iter::once(launcher)
+            .chain(inside)
+            .any(|executable| !clean_absolute(executable) || !executable.is_file())
+        {
             return Err(invalid("sandbox executable must be an absolute file"));
         }
         if matches!(backend, LinuxBackend::Bubblewrap { .. }) {
@@ -692,7 +737,8 @@ impl LinuxSandbox {
     }
 
     /// Picks the backend this machine holds: Landlock when the helper exists and its probe
-    /// passes for the policy's network needs, otherwise bubblewrap from a fixed path. An open
+    /// passes for the policy's network needs, otherwise bubblewrap from a fixed path with the
+    /// helper started inside it, so no bubblewrap agent starts without the helper. An open
     /// network probes the TCP bind rules that keep ports free and never falls back to
     /// bubblewrap. Input: the project policy and the helper executable. Output: the
     /// sandbox, or `Unavailable` when neither backend can hold it.
@@ -732,6 +778,9 @@ impl LinuxSandbox {
                 LINUX_OPEN_NETWORK_NEEDS_LANDLOCK.into(),
             ));
         }
+        if !clean_absolute(helper) || !helper.is_file() {
+            return Err(SandboxError::Unavailable(HELPER_MISSING.into()));
+        }
         match BWRAP_PATHS
             .iter()
             .map(Path::new)
@@ -741,6 +790,7 @@ impl LinuxSandbox {
                 sandbox,
                 LinuxBackend::Bubblewrap {
                     bwrap: bwrap.to_path_buf(),
+                    helper: helper.to_path_buf(),
                 },
             ),
             None => Err(SandboxError::Unavailable(
@@ -765,7 +815,7 @@ impl LinuxSandbox {
     pub fn launcher(&self) -> &Path {
         match &self.backend {
             LinuxBackend::Landlock { helper } => helper,
-            LinuxBackend::Bubblewrap { bwrap } => bwrap,
+            LinuxBackend::Bubblewrap { bwrap, .. } => bwrap,
         }
     }
 }
@@ -823,8 +873,8 @@ impl Sandbox for LinuxSandbox {
                 command.args(landlock_policy(&grants, &self.sandbox).args());
                 command
             }
-            LinuxBackend::Bubblewrap { bwrap } => {
-                bwrap_command(bwrap, &grants, cwd, self.sandbox.network())
+            LinuxBackend::Bubblewrap { bwrap, helper } => {
+                bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
             }
         };
         let mut base = vec![
@@ -1015,7 +1065,19 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
     ports
 }
 
-fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path, network: &SandboxNetwork) -> Command {
+/// The bubblewrap command for a closed agent, up to its harness: its own session, process,
+/// IPC and network namespaces when nothing is allowed, the system folders read-only but the
+/// name resolver's ([`RESOLVER_ROOT`]), the grants, then the helper bound read-only and
+/// started to install the socket filter ([`FILTER_SOCKETS`]). Inputs: bwrap, the helper, the
+/// grants, the working folder and the network. Output: the command, which the harness
+/// follows after `--`.
+fn bwrap_command(
+    bwrap: &Path,
+    helper: &Path,
+    grants: &Grants,
+    cwd: &Path,
+    network: &SandboxNetwork,
+) -> Command {
     let mut command = Command::new(bwrap);
     command.args([
         "--die-with-parent",
@@ -1034,7 +1096,10 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path, network: &SandboxNet
     if matches!(network, SandboxNetwork::Only(remotes) if remotes.is_empty()) {
         command.arg("--unshare-net");
     }
-    for &root in SYSTEM_READ_ROOTS {
+    for &root in SYSTEM_READ_ROOTS
+        .iter()
+        .filter(|root| **root != RESOLVER_ROOT)
+    {
         command.args(["--ro-bind-try", root, root]);
     }
     for root in &grants.read {
@@ -1043,13 +1108,20 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path, network: &SandboxNet
     for root in &grants.write {
         command.arg("--bind").arg(root).arg(root);
     }
+    command.arg("--ro-bind").arg(helper).arg(helper);
     command.arg("--chdir").arg(cwd);
+    command.arg("--").arg(helper).arg(FILTER_SOCKETS);
+    assert!(command.get_args().all(|arg| arg != RESOLVER_ROOT));
     command
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn helper() -> PathBuf {
+        Path::new("/opt/crazyagent").join(HELPER_NAME)
+    }
 
     #[test]
     fn only_fully_enforced_rules_with_no_new_privs_hold_the_boundary() {
@@ -1068,6 +1140,7 @@ mod tests {
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
+            &helper(),
             &grants,
             Path::new("/tmp"),
             &SandboxNetwork::Open,
@@ -1084,6 +1157,7 @@ mod tests {
         let unshares = |network: SandboxNetwork| {
             bwrap_command(
                 Path::new(BWRAP_PATHS[0]),
+                &helper(),
                 &grants,
                 Path::new("/tmp"),
                 &network,
@@ -1205,6 +1279,7 @@ mod tests {
         let closed = sandbox.keep_ports(&[inside]).unwrap();
         let bubblewrap = LinuxBackend::Bubblewrap {
             bwrap: helper.clone(),
+            helper: helper.clone(),
         };
         assert!(
             LinuxSandbox::new(closed, bubblewrap).is_ok(),
@@ -1318,6 +1393,7 @@ mod tests {
         let bwrap = std::env::current_exe().unwrap();
         let backend = || LinuxBackend::Bubblewrap {
             bwrap: bwrap.clone(),
+            helper: bwrap.clone(),
         };
         let (_open, sandbox) = project(SandboxNetwork::Open);
         match LinuxSandbox::new(sandbox, backend()) {
@@ -1355,6 +1431,7 @@ mod tests {
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
+            &helper(),
             &grants,
             Path::new("/tmp"),
             &SandboxNetwork::Only(Vec::new()),
@@ -1378,6 +1455,22 @@ mod tests {
             .windows(3)
             .any(|three| three[0] == "--ro-bind" && three[1] == helper && three[2] == helper);
         assert!(bound, "the helper is bound into the namespace: {args:?}");
+    }
+
+    #[test]
+    fn the_socket_filter_request_takes_no_policy_and_names_the_harness() {
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        assert_eq!(
+            parse(&[FILTER_SOCKETS, "--", "/bin/true", "-x"]),
+            Ok(HelperRequest::Filter {
+                program: PathBuf::from("/bin/true"),
+                args: vec![OsString::from("-x")],
+            })
+        );
+        assert!(parse(&[FILTER_SOCKETS, READ, "/usr", "--", "/bin/true"]).is_err());
+        assert!(parse(&[FILTER_SOCKETS, "--", "bin/true"]).is_err());
+        assert!(parse(&[PROBE, FILTER_SOCKETS]).is_err());
     }
 
     #[test]
