@@ -2490,3 +2490,28 @@ fn an_update_of_a_resolver_refused_harness_never_runs_it() {
     }
     assert!(!ran.exists(), "a refused harness file is never run");
 }
+
+/// rv-sec4 r1 addendum F2 (RV-DS241-59 sibling): the usage User-Agent's version read runs a
+/// Claude entry's `--version` only where the tool resolver would run it. An npm entry whose
+/// `env node` first line finds, in the entry's own folder, a node that leads into a folder
+/// every user can write is never asked its version, and that node never runs.
+#[test]
+fn the_user_agent_version_read_never_runs_a_node_others_can_change() {
+    let machine = Machine::new();
+    let entry = machine.root.path().join("claude/bin/claude");
+    executable(&entry, "#!/usr/bin/env node\n");
+    let open = machine.root.path().join("open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let marker = machine.root.path().join("marker");
+    executable(
+        &open.join("node"),
+        &format!(
+            "#!/bin/sh\n: > '{}'\necho 2.1.300\n",
+            marker.to_str().unwrap()
+        ),
+    );
+    std::os::unix::fs::symlink(open.join("node"), entry.with_file_name("node")).unwrap();
+    assert_eq!(version_under_home(&entry), None);
+    assert!(!marker.exists(), "a node others can change never runs");
+}
