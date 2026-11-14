@@ -13691,9 +13691,11 @@ fn leads_native_team(connection: &Connection, project: &ProjectId, agent: i64) -
     )
 }
 
-/// Tells whether a team call starts or changes work: `spawn`, `merge`, `start_work` and
-/// `update_work`, which a stopping, held or stopped agent is refused while its mailbox is
-/// still drained (RV-DS241-122). Takes the call. Returns the answer.
+/// Tells whether a team call starts or changes work: `spawn`, `merge`, `start_work`,
+/// `update_work` and a `transfer_work` that hands work on, takes it or reopens it (assign,
+/// handoff, accept, reopen), which a stopping, held or stopped agent is refused while its
+/// mailbox is still drained (RV-DS241-122). Release and decline hand work back, as
+/// `finish_work` does, so they stay answered. Takes the call. Returns the answer.
 fn changes_work(call: &tool::Call) -> bool {
     matches!(
         call,
@@ -13701,6 +13703,13 @@ fn changes_work(call: &tool::Call) -> bool {
             | tool::Call::Merge { .. }
             | tool::Call::StartWork { .. }
             | tool::Call::UpdateWork { .. }
+            | tool::Call::TransferWork {
+                action: tool::Handover::Assign
+                    | tool::Handover::Handoff
+                    | tool::Handover::Accept
+                    | tool::Handover::Reopen,
+                ..
+            }
     )
 }
 
