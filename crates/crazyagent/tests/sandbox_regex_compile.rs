@@ -22,13 +22,14 @@ impl Drop for Case {
     /// Clears every immutable flag a failed row may have left, so the temporary folder can
     /// be removed. Input: the case. Output: none.
     fn drop(&mut self) {
-        let _ = Command::new("/usr/bin/chflags")
+        let mut command = Command::new("/usr/bin/chflags");
+        command
             .args(["-R", "nouchg"])
             .arg(self.temp.path())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .stderr(Stdio::null());
+        let _ = crazyagent::spawn_gate::status(&mut command);
     }
 }
 
@@ -199,8 +200,8 @@ fn the_codex_system_skills_flag_deny_compiles_clean_and_holds_for_every_spelling
 
 /// SANDBOX-REGEX: the rule that keeps every top-level entry of the project closed but the
 /// open names compiles with no libsandbox error. An open name reads in any letter case;
-/// a closed one, in any case, and one made after the profile was installed stay closed
-/// though each path resolves outside the sandbox.
+/// a closed one, in any case, one whose name only starts with an open name and one made
+/// after the profile was installed stay closed though each path resolves outside the sandbox.
 #[test]
 fn the_closed_tops_rule_compiles_clean_and_keeps_only_the_open_names_readable() {
     let case = case();
@@ -209,6 +210,9 @@ fn the_closed_tops_rule_compiles_clean_and_keeps_only_the_open_names_readable() 
     fs::write(case.project.join("README.md"), "readme").unwrap();
     fs::create_dir_all(case.project.join("drafts")).unwrap();
     fs::write(case.project.join("drafts").join("draft.txt"), "draft").unwrap();
+    fs::create_dir_all(case.project.join("notes2")).unwrap();
+    fs::write(case.project.join("notes2").join("x.txt"), "near").unwrap();
+    fs::write(case.project.join("README.md.bak"), "near").unwrap();
     let sandbox = sandbox(&case)
         .keep_project_secrets(&case.project, &[])
         .unwrap()
@@ -228,7 +232,13 @@ fn the_closed_tops_rule_compiles_clean_and_keeps_only_the_open_names_readable() 
     for open in ["notes/plan.txt", "NOTES/plan.txt", "README.md", "readme.md"] {
         assert!(read(open), "{open}");
     }
-    for closed in ["drafts/draft.txt", "DRAFTS/draft.txt", "later.txt"] {
+    for closed in [
+        "drafts/draft.txt",
+        "DRAFTS/draft.txt",
+        "notes2/x.txt",
+        "README.md.bak",
+        "later.txt",
+    ] {
         assert!(!read(closed), "{closed}");
     }
     log_caught_up(&case.profiles);
