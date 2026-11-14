@@ -310,7 +310,7 @@ impl ResearchJobs {
         error: &str,
     ) -> Result<ResearchStatus, JobError> {
         assert!(held.attempts >= 1, "a held job's claim counted an attempt");
-        let error: String = error.chars().take(ERROR_BYTES_MAX / 4).collect();
+        let error = kept_error(error);
         let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
         let now = now_ms();
         let status = self
@@ -350,7 +350,7 @@ impl ResearchJobs {
         if !(1..=ATTEMPTS_MAX).contains(&attempts_max) {
             return Err(JobError::Invalid("attempt limit must be 1..10"));
         }
-        let error: String = error.chars().take(ERROR_BYTES_MAX / 4).collect();
+        let error = kept_error(error);
         let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
         let now = now_ms();
         let status = self
@@ -704,6 +704,16 @@ fn bounded(value: &str, max: usize) -> Result<(), JobError> {
         ));
     }
     Ok(())
+}
+
+/// Cuts a failure line to the stored bound on a character boundary, so a plain line keeps
+/// every byte up to `ERROR_BYTES_MAX`. Input: the line. Output: its longest prefix within
+/// the bound that ends on a character.
+fn kept_error(error: &str) -> &str {
+    let kept = &error[..error.floor_char_boundary(ERROR_BYTES_MAX)];
+    assert!(kept.len() <= ERROR_BYTES_MAX && error.starts_with(kept));
+    assert!(kept.len() == error.len() || error.len() > ERROR_BYTES_MAX);
+    kept
 }
 
 fn now_ms() -> i64 {
