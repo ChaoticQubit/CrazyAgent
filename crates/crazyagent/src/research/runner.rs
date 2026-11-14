@@ -6480,6 +6480,90 @@ mod tests {
         );
     }
 
+    /// The engine's setup git runs unconfined with the agent's own tmp folder as its home,
+    /// so a global config an agent planted there names hooks that git 2.54 runs whatever
+    /// `core.hooksPath` says. The project repository the setup makes runs none of them
+    /// (RV-DS241-39 r2 F1).
+    #[test]
+    fn engine_setup_git_runs_no_hook_a_config_in_its_home_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (project, tmp, markers) = (
+            base.join("project"),
+            base.join("tmp"),
+            base.join("markers"),
+        );
+        for folder in [&project, &tmp, &markers] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let mut config = String::new();
+        for event in [
+            "pre-commit",
+            "commit-msg",
+            "post-commit",
+            "reference-transaction",
+            "post-index-change",
+        ] {
+            config.push_str(&format!(
+                "[hook \"{event}\"]\n\tcommand = touch '{}'\n\tevent = {event}\n",
+                markers.join(event).display()
+            ));
+        }
+        fs::write(tmp.join(".gitconfig"), config).unwrap();
+        ensure_repository(&project, &tmp).unwrap();
+        assert!(project.join(".git").is_dir());
+        let ran: Vec<String> = fs::read_dir(&markers)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(ran, Vec::<String>::new());
+    }
+
+    /// A project whose own git config names hooks, which git 2.54 runs whatever
+    /// `core.hooksPath` says, gets no agent worktree: the setup refuses before its first git
+    /// write with a line naming the key, and no hook runs (RV-DS241-39 r2 F1).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_project_whose_config_names_a_hook_gets_no_agent_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (project, home, tmp, profiles) = (
+            base.join("project"),
+            base.join("home"),
+            base.join("tmp"),
+            base.join("profiles"),
+        );
+        for folder in [&project, &home, &tmp, &profiles] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let worktrees = project.join("worktrees");
+        fs::create_dir_all(&worktrees).unwrap();
+        for (name, event) in [("x", "post-index-change"), ("y", "post-checkout")] {
+            let marker = worktrees.join(format!("hook-{name}"));
+            for (key, value) in [
+                ("command", format!("touch '{}'", marker.display())),
+                ("event", event.to_owned()),
+            ] {
+                let key = format!("hook.{name}.{key}");
+                assert!(engine_git(&project, &tmp, &["config", &key, &value]).unwrap());
+            }
+        }
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = profiles.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let refused = add_worktree(&sandbox, &profile, &worktrees.join("agent-1")).unwrap_err();
+        let RunError::Invalid(line) = &refused else {
+            panic!("{refused:?}");
+        };
+        assert!(line.contains("hook.x.command"), "{line}");
+        for name in ["x", "y"] {
+            let marker = worktrees.join(format!("hook-{name}"));
+            assert!(fs::symlink_metadata(&marker).is_err(), "{name}");
+        }
+    }
+
     /// Many agent worktrees add at once, each project in its own sandbox under one profile,
     /// the way a run of the team tests drives the setup path. Every add must succeed; a
     /// refusal here is the load flake the real-git setup fixes.

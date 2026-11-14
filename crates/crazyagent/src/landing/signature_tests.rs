@@ -270,7 +270,7 @@ fn engine_git_refuses_an_owner_repository_whose_config_names_a_hook() {
         assert_eq!(signed.ran(), Vec::<String>::new(), "included {included}");
         assert_eq!(
             opened.err().map(|error| error.0),
-            Some("changes_git_unsupported".to_owned()),
+            Some("changes_git_hooks".to_owned()),
             "included {included}"
         );
     }
