@@ -528,9 +528,8 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
     );
     server.join().unwrap();
 
-    let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let address = closed.local_addr().unwrap();
-    drop(closed);
+    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let address = format!("127.0.0.1:{port}");
     let mut received = Vec::new();
     assert_eq!(
         said(

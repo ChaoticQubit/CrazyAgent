@@ -593,15 +593,17 @@ fn to_tab(pty: &Pty, project: &str, tab: &str, keys: &[&str]) {
     }
 }
 
-fn unreachable_provider(engine: &Engine) {
-    let closed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+/// Points the engine's model access at a loopback provider that refuses every connect.
+/// Input: the engine. Output: the held port's two ends, which the row keeps until it ends so
+/// no other listener takes the port meanwhile.
+fn unreachable_provider(engine: &Engine) -> [std::net::TcpStream; 2] {
+    let (held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
     std::fs::write(
         engine.path().join("global.toml"),
         MODEL_ACCESS.replace("PORT", &port.to_string()),
     )
     .unwrap();
+    held
 }
 
 async fn setup_status(engine: &Engine) -> SetupStatus {
@@ -659,7 +661,7 @@ fn settled(turn: &MasterTurnView) -> bool {
 #[test]
 fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui() {
     let mut engine = Engine::new("ca-e2e-flow-");
-    unreachable_provider(&engine);
+    let _provider = unreachable_provider(&engine);
     engine.launch();
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-disk-");

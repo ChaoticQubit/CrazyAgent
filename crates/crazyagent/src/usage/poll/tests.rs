@@ -247,9 +247,7 @@ fn poll_failures_map_to_plain_codes_and_odd_replies_are_refused() {
     assert_eq!(refused.unwrap_err().0, "usage_rate_limited");
     let plain = poll(Provider::Claude, local(&server, "/401"), &owner, false, NOW);
     assert_eq!(plain.unwrap_err().0, "usage_request_invalid");
-    let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
     let gone = url::Url::parse(&format!("http://127.0.0.1:{port}/api/oauth/usage")).unwrap();
     let refused = poll(Provider::Claude, gone, &owner, true, NOW);
     assert_eq!(refused.unwrap_err().0, "usage_unreachable");
