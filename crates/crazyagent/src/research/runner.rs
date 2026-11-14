@@ -6192,6 +6192,63 @@ mod tests {
         assert_eq!(ends, [ResearchStatus::Queued; 5]);
     }
 
+    /// DEC-170 addendum 6 (RV-DS241-27): a research job its runner hands back because a
+    /// projects home move holds its folder spends no attempt, is not claimed again until its
+    /// backoff ends, shows why it waits and records no start, since no harness ran.
+    #[test]
+    fn a_research_job_refused_for_a_home_move_backs_off_shows_why_and_records_no_start() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        register_project(&root.database, "alpha", &folder);
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"repo\"]')",
+                rusqlite::params![
+                    root.base.to_str().unwrap(),
+                    root.base.join("next").to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits::default(),
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: None,
+        };
+        let run = runner.run_once(&project).unwrap().unwrap();
+        assert_eq!((run.job, run.status), (id, ResearchStatus::Queued));
+        assert!(
+            runner.run_once(&project).unwrap().is_none(),
+            "the job waits out its backoff"
+        );
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!((job.attempts, job.claimer), (0, None));
+        assert_eq!(
+            job.error.as_deref(),
+            Some("Waiting for the projects home move to finish")
+        );
+        let started: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM project_activity WHERE kind='research_started'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(started, 0, "no harness started");
+    }
+
     #[test]
     fn the_research_prompt_asks_for_owner_questions_in_the_shared_shape() {
         let folder = tempfile::tempdir().unwrap();
