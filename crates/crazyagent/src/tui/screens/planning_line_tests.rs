@@ -288,6 +288,7 @@ fn checked(states: &[ItemStatus]) -> RoadmapStatus {
         refresh: Refresh::AfterLanding,
         source: Some("docs/plan.md".into()),
         problem: None,
+        waiting_for_account: false,
     }
 }
 
@@ -360,6 +361,7 @@ fn a_check_waiting_for_an_account_says_why_without_the_failure_mark_until_the_ch
         let mut line = StatusLine::new(alpha());
         let mut waiting = checked(&[ItemStatus::Pending]);
         waiting.problem = Some(reason.into());
+        waiting.waiting_for_account = true;
         waiting.stale = stale;
         waiting.running = running;
         exchange(&mut line, NOW, Ok(RoadmapReply::Status(Box::new(waiting))));
@@ -370,9 +372,30 @@ fn a_check_waiting_for_an_account_says_why_without_the_failure_mark_until_the_ch
     let mut line = StatusLine::new(alpha());
     let mut ended = checked(&[ItemStatus::Pending]);
     ended.problem = Some(reason.into());
+    ended.waiting_for_account = true;
     exchange(&mut line, NOW, Ok(RoadmapReply::Status(Box::new(ended))));
     let text = shown(&line);
     assert!(text.contains(&format!("! {reason}")), "{text}");
+}
+
+/// An ended real failure keeps its failure mark while the next check is due and while it
+/// runs (IW-L1, DEC-147 addendum): only the engine's wait for an account is shown as a wait.
+#[test]
+fn an_ended_failure_keeps_its_mark_while_a_new_check_is_due_or_runs() {
+    let reason = crate::roadmap_status::UNFINISHED;
+    for (stale, running) in [(true, false), (true, true), (false, true)] {
+        let mut line = StatusLine::new(alpha());
+        let mut status = checked(&[ItemStatus::Pending]);
+        status.problem = Some(reason.into());
+        status.stale = stale;
+        status.running = running;
+        exchange(&mut line, NOW, Ok(RoadmapReply::Status(Box::new(status))));
+        let text = shown(&line);
+        assert!(
+            text.contains(&format!("! {reason}")),
+            "stale {stale} running {running}: {text}"
+        );
+    }
 }
 
 #[test]

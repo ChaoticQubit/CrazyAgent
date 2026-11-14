@@ -212,7 +212,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         off: &[],
     };
     assert!(require_master_tool_policy(&command, Some(unused)).is_err());
-    let caches = default_master_tool_caches(&root.path, &repository);
+    let caches = default_master_tool_caches(root.engine_root().unwrap(), &repository);
     let off_tmp = off_turn.join("tmp");
     assert_eq!(
         sandbox.sandbox().writable_roots().collect::<Vec<_>>(),

@@ -732,3 +732,76 @@ fn an_answer_after_the_team_message_ended_still_reaches_the_asker_once() {
         notes[0].text
     );
 }
+
+/// V241-QUESTION-UX P1, P3 (S4-R1): a linked team question names its asker by the name the
+/// team kept for it (DEC-096) and, while it waits, says it is urgent and that its asker is
+/// paused, each only while that holds. An asker with no kept name, or whose name is gone,
+/// is named by none, so each client says "Agent <id>"; an answered question holds no mark.
+#[test]
+fn a_linked_team_question_carries_its_asker_s_name_and_its_urgent_and_paused_marks_while_they_hold()
+{
+    let mut engine = Engine::new();
+    engine.register();
+    let project = engine.project.clone();
+    let named = engine.agent("working");
+    let unnamed = engine.agent("working");
+    let persona = super::super::names::assign_persona(&engine.connection, &project, named).unwrap();
+    engine
+        .connection
+        .execute(
+            "UPDATE team_names SET handle='menu-prices' WHERE agent=?1",
+            [named],
+        )
+        .unwrap();
+    engine.ask(named, Severity::High, "Ship on Friday?");
+    engine.ask(unnamed, Severity::Normal, "Which region?");
+    engine.tick(NOW);
+    engine.tick(NOW + 1);
+    let linked = engine.linked();
+    assert_eq!(linked.len(), 2, "{linked:?}");
+    let (urgent, normal) = (&linked[0], &linked[1]);
+    assert_eq!(urgent.asker, format!("agent:{named}"));
+    assert_eq!(
+        urgent.asker_name.as_deref(),
+        Some(format!("{persona} (@menu-prices)").as_str()),
+        "the name every client shows for that agent"
+    );
+    assert!(urgent.urgent && urgent.paused, "{urgent:?}");
+    assert_eq!(normal.asker, format!("agent:{unnamed}"));
+    assert_eq!(
+        normal.asker_name, None,
+        "no kept name: the client says Agent <id>"
+    );
+    assert!(!normal.urgent && !normal.paused, "{normal:?}");
+
+    engine
+        .connection
+        .execute(
+            "UPDATE coord_activity SET waiting=NULL, waiting_since=NULL WHERE agent=?1",
+            [named],
+        )
+        .unwrap();
+    let lifted = &engine.linked()[0];
+    assert!(
+        lifted.urgent && !lifted.paused,
+        "the pause no longer holds: {lifted:?}"
+    );
+
+    engine
+        .connection
+        .execute("DELETE FROM team_names WHERE agent=?1", [named])
+        .unwrap();
+    assert_eq!(engine.linked()[0].asker_name, None, "the name is gone");
+
+    let answer = crate::questions::Answer {
+        picks: Vec::new(),
+        comment: Some("Friday is fine.".into()),
+    };
+    assert_eq!(
+        crate::questions::answer(&engine.connection, urgent.id, 0, &answer).unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    let answered = &engine.linked()[0];
+    assert_eq!(answered.status, crate::questions::QuestionStatus::Answered);
+    assert!(!answered.urgent && !answered.paused, "{answered:?}");
+}

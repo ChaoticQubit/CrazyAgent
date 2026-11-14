@@ -177,7 +177,8 @@ impl Drafted {
 
 /// The bounded project files a mapping agent is given: top-level entry
 /// names, the README, the build manifests, the code graph report, an
-/// existing overview, the text of the project's own documents, the paths
+/// existing overview that leaves no code fence open, the text of the
+/// project's own documents, the paths
 /// and sizes of documents whose text is not read and whether the project's git
 /// could not say which files it ignores, so no document was read. No file is
 /// read through a link, and no `.env`, hidden, private, secret-named,
@@ -200,7 +201,9 @@ pub(crate) struct Evidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FoundKind {
     Roadmap,
+    #[cfg_attr(not(unix), allow(dead_code))]
     Research,
+    #[cfg_attr(not(unix), allow(dead_code))]
     Other,
 }
 
@@ -216,6 +219,69 @@ pub(crate) struct Document {
     pub cut: bool,
     pub kind: FoundKind,
     pub marks: Vec<String>,
+}
+
+const IGNORES_UNKNOWN: &str =
+    "No project document was read: the project's git could not tell which files it ignores.";
+
+/// The Project documents part of the mapping prompt: each document read under its path and
+/// size in a fence longer than any backtick run in its text, the local heading scan's
+/// roadmap or research line with its marks first inside the fence, as the marks are file
+/// text, then the paths and sizes of the
+/// documents whose text is not read, or why none was read when the project's git could not
+/// say what it ignores. Takes the documents, the listed paths and whether git said nothing.
+/// Returns the text, empty when there are none.
+pub(crate) fn documents_section(
+    documents: &[Document],
+    unread: &[(String, u64)],
+    ignores_unknown: bool,
+) -> String {
+    if ignores_unknown {
+        assert!(documents.is_empty() && unread.is_empty());
+        return format!("\n## Project documents\n\n{IGNORES_UNKNOWN}\n");
+    }
+    let mut text = String::new();
+    if documents.is_empty() && unread.is_empty() {
+        return text;
+    }
+    text.push_str("\n## Project documents\n\n");
+    for document in documents {
+        let shown = if document.cut {
+            format!(", the first {} shown", document.text.len())
+        } else {
+            String::new()
+        };
+        let scan = match document.kind {
+            FoundKind::Roadmap if document.marks.is_empty() => "Local scan: roadmap\n".to_owned(),
+            FoundKind::Roadmap => format!("Local scan: roadmap ({})\n", document.marks.join("; ")),
+            FoundKind::Research => "Local scan: research\n".to_owned(),
+            FoundKind::Other => String::new(),
+        };
+        let fence = "`".repeat(longest_run(&format!("{scan}{}", document.text)).max(2) + 1);
+        text.push_str(&format!(
+            "### {} ({} bytes{shown})\n\n{fence}\n{scan}{}\n{fence}\n\n",
+            document.path, document.size, document.text
+        ));
+    }
+    if !unread.is_empty() {
+        let listed: Vec<String> = unread
+            .iter()
+            .map(|(path, size)| format!("{path} ({size} bytes)"))
+            .collect();
+        text.push_str(&format!(
+            "Also in the repository, text not read: {}\n",
+            listed.join(", ")
+        ));
+    }
+    text
+}
+
+/// The longest run of backticks in `text`.
+fn longest_run(text: &str) -> usize {
+    text.split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0)
 }
 
 /// What the agent's answer held: its overview text, the draft fields it proposed, the
@@ -469,7 +535,8 @@ pub(crate) fn gather(repo: &Path, hidden: &[std::path::PathBuf]) -> Evidence {
     }
     if let Some(layout) = open_folder(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY)) {
         evidence.overview = open_in(&layout, OVERVIEW_FILE)
-            .and_then(|file| file_text(file, OVERVIEW_EVIDENCE_BYTES_MAX));
+            .and_then(|file| file_text(file, OVERVIEW_EVIDENCE_BYTES_MAX))
+            .filter(|text| fences_closed(text));
     }
     #[cfg(unix)]
     {
@@ -721,7 +788,7 @@ pub(crate) fn prompt(evidence: &Evidence, found: &MappingFacts) -> String {
             "\n## Existing overview (keep what is still true)\n\n{overview}\n"
         ));
     }
-    text.push_str(&documents::section(
+    text.push_str(&documents_section(
         &evidence.documents,
         &evidence.unread,
         evidence.ignores_unknown,
@@ -784,10 +851,24 @@ fn first_paragraph(overview: &str) -> String {
     String::new()
 }
 
+/// Whether every code fence `text` opens is closed again, counting the lines that start
+/// with a fence. An answer cut to its last part, or one that sent a cut json block again,
+/// leaves one open, and such text is no overview (DEC-160). Input: the text. Output: the
+/// answer.
+pub(crate) fn fences_closed(text: &str) -> bool {
+    let fences = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count();
+    assert!(fences <= text.len() / 3);
+    fences % 2 == 0
+}
+
 /// Splits the agent's answer into its overview and the draft fields of its
 /// last fenced json block. A missing or unreadable block leaves the fields
 /// empty; `about` then falls back to the overview's first paragraph. Overview lines,
-/// entries and an `about` naming a path that looks like it holds a secret are dropped.
+/// entries and an `about` naming a path that looks like it holds a secret are dropped,
+/// and an overview that leaves a code fence open is no overview.
 #[cfg(unix)]
 pub(crate) fn parse_answer(text: &str) -> Answer {
     let text = clip(text, OVERVIEW_BYTES_MAX * 2);
@@ -807,6 +888,11 @@ pub(crate) fn parse_answer(text: &str) -> Answer {
     let overview = names::without_secret_paths(clip(overview, OVERVIEW_BYTES_MAX))
         .trim()
         .to_owned();
+    let overview = if fences_closed(&overview) {
+        overview
+    } else {
+        String::new()
+    };
     let clean = |list: &[String]| -> Vec<String> {
         let mut cleaned = Vec::new();
         for value in list.iter().take(FACTS_MAX) {

@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, STEP_MS, owner, required, serveApp, silentProvider, start as launch, stop, value } from "./e2e-harness.mjs";
+import { answering } from "./codex-task-engine.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -25,6 +26,8 @@ const DUE_LINE = "A new check is waiting to run.";
 const STALE_LINE = `${DUE_LINE} After a landed change set it starts about 10 minutes after the last one.`;
 const OFF_LINE = "Roadmap status is off in Project settings.";
 const FAILED = "The last check failed:";
+const NO_STATUS = "The agent's reply held no roadmap status";
+const CODEX = answering("The roadmap check stand-in has no item states to give.");
 
 /** Runs git in a folder with no system or user config. Inputs: the folder and git's
  * arguments. Output: git's trimmed stdout. */
@@ -97,7 +100,7 @@ test("Roadmap status: each Refresh option decides when a check runs, after a lan
   git(repo, "checkout", "-q", "-b", "owner-work");
   git(repo, "config", "user.name", "E2E Owner");
   git(repo, "config", "user.email", "owner@example.invalid");
-  const provider = await closedPort();
+  const provider = await silentProvider();
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
 allowed_destinations = []
@@ -105,10 +108,13 @@ allowed_destinations = []
 [model_access]
 accounts = ["local-account"]
 connections = [
-  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/v1" }, model = { id = "e2e-model", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider.port}/v1" }, model = { id = "e2e-model", author = "openai-compatible" }, auth = { method = "none" } },
 ]
 pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
+  mkdirSync(join(root, "bin"), { recursive: true, mode: 0o700 });
+  const codex = join(root, "bin", "codex");
+  writeFileSync(codex, CODEX, { mode: 0o700 });
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
   const log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
   let engine;
@@ -116,7 +122,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   let site;
   try {
     ({ child: engine } = await launch(engineBinary,
-      ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"],
+      ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings", "--codex-executable", codex],
       { ...env }, evidence, "engine", /^ready$/m));
     const started = await launch(bridgeBinary, [join(runtime, "engine.sock")], { ...env }, evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
     bridgeProcess = started.child;
@@ -133,6 +139,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       assert.ok(Date.now() < deadline, `onboarding still running: ${JSON.stringify(view)}`);
     }
     assert.ok(existsSync(join(runtime, "engine.db")), "the engine keeps its database in its root");
+    assert.equal((await value(bridge, "desktop_open_project", { id: project })).project_id, project, "the new project opens");
+    const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
+    assert.equal(pools.writable, true, "the test engine's settings are writable");
+    const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 4 });
+    assert.equal(assigned.outcome, "applied", `the project gets the pool its checks run on, as the app's onboarding does: ${JSON.stringify(assigned)}`);
+    const context = join(repo, ".crazyagent", "context");
+    assert.ok(existsSync(context), "onboarding made the project's context folder, where a planning job writes the roadmap");
+    writeFileSync(join(context, "roadmap.md"), ROADMAP, { mode: 0o600 });
     const first = await value(bridge, "desktop_roadmap_status", { id: project });
     assert.deepEqual([first.items, first.checked_ms, first.running, first.stale, first.refresh], [[], null, false, false, "after_landing"], "a new project has no status and follows landings");
 
@@ -190,7 +204,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("roadmap-status-after-landing-due");
         const ran = await until(runtime, project, "no check ran after the quiet period", (now) => now.stale === 0 && now.running === null && now.problem !== null, QUIET_MS + 2 * CHECK_MS);
         assert.ok(Date.now() >= marked.due, "the one check ran only once the quiet period was over");
-        assert.equal(ran.checked, null, "a check with no usable account stores no states");
+        assert.equal(ran.problem, NO_STATUS, "the check ran on the pool's account and its stand-in answered no states");
+        assert.equal(ran.checked, null, "a check that answered no states stores none");
         await me.waitFor("the failed check in the view", (text) => text.includes(FAILED));
         await me.capture("roadmap-status-after-landing-ran");
 
@@ -233,6 +248,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     log.closing = true;
     writeFileSync(join(evidence, "calls.json"), JSON.stringify(log.calls, null, 1));
     site?.server.close();
+    provider.server.close();
     await stop(bridgeProcess);
     await stop(engine);
   }

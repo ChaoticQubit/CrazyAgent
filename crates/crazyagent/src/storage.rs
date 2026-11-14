@@ -163,11 +163,23 @@ pub(crate) enum Job {
     HomeAddPlan(
         Admission,
         Cursor,
+        RequestId,
         String,
         crate::projects_home::AddMode,
         Vec<crate::projects_home::AddOverride>,
         oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
     ),
+    HomeAddCheck(
+        Admission,
+        RequestId,
+        String,
+        crate::projects_home::AddMode,
+        Vec<crate::projects_home::AddOverride>,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    HomeAddSettle(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
+    HomeAddForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeMovePlan(
         Admission,
         Cursor,
@@ -353,6 +365,9 @@ impl Storage {
                 if !readonly {
                     if let Err(e) = projects_home::settle_pending(&mut connection, &path, None, true) {
                         eprintln!("projects_home_move_not_settled cause={}", e.0);
+                    }
+                    if let Err(e) = projects_home::add_settle(&mut connection, None) {
+                        eprintln!("home_add_not_settled cause={}", e.0);
                     }
                     if let Err(e) = projects_home::project_move_settle(&mut connection, None, true) {
                         eprintln!("project_move_not_settled cause={}", e.0);
@@ -617,11 +632,38 @@ impl Storage {
                                 &control,
                             ));
                         }
-                        Job::HomeAddPlan(admission, expected, source, mode, overrides, reply) => {
+                        Job::HomeAddPlan(admission, expected, request, source, mode, overrides, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &source, mode, &overrides)
+                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &request, &source, mode, &overrides)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddCheck(admission, request, source, mode, overrides, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_check(&mut connection, &path, &admission, &request, &source, mode, &overrides)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddSettle(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_settle(&mut connection, Some(&request)).map(drop)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddEnded(reply) => {
+                            let _ = reply.send(projects_home::add_ended(&connection));
+                        }
+                        Job::HomeAddForget(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_forget(&connection, &request)
                             };
                             let _ = reply.send(result);
                         }
@@ -2531,11 +2573,10 @@ fn owner_apply_with(
     assert_eq!(next > revision, changed);
     if changed
         && let OwnerOperation::Apply {
-            mutation: OwnerMutation::CreateDemo { .. },
+            mutation: OwnerMutation::CreateDemo { project_id, .. },
         } = &request.operation
-        && let Err(e) = crate::demo::plant_question(db)
     {
-        eprintln!("demo_question_not_planted cause={}", e.0);
+        crate::questions::refresh_page(db, project_id);
     }
     Ok(OwnerApplied {
         result,

@@ -25,7 +25,16 @@ fn the_claude_custodian_status_never_loads_what_a_tools_on_agent_wrote() {
     let planted = String::from_utf8_lossy(&planted.stdout).into_owned();
     assert!(planted.starts_with("helper written\n"), "{planted}");
     let status = crate::spawn_gate::output(
-        &mut auth_command(&claude, &agent.profile_home, ClaudeAuthCommand::Status).unwrap(),
+        &mut auth_command(
+            &crate::harnesses::interactive::launch_words(&claude)
+                .unwrap()
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>(),
+            &agent.profile_home,
+            ClaudeAuthCommand::Status,
+        )
+        .unwrap(),
     )
     .unwrap();
     let stdout = String::from_utf8_lossy(&status.stdout).into_owned();

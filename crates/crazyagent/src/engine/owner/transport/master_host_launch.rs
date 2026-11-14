@@ -893,14 +893,11 @@ fn delegate_servers(
     Ok(setting)
 }
 
-/// Builds and installs the Seatbelt boundary for one master turn with its tools off. The
-/// master writes only in its leased worktree, the account's managed home, the turn's own
-/// temp folder and, on macOS, the tool cache its policy gives a linked worktree (T8); it
-/// reads the project repository, never writing its refs, reflogs or other worktrees' admin
-/// folders, since the engine makes every ref move, and it reads the harness install folder
-/// and the turn directory, and reaches only its model endpoint's port, on loopback for a
-/// local model, otherwise on any host (443 for a native account). Output: the installed
-/// sandbox, or `master_sandbox_unavailable` on a refusal.
+/// Builds and installs the Seatbelt boundary of one tools-off master turn. The master writes
+/// only in its leased worktree, its turn home that holds a copy of the account's sign-in (an
+/// rcli master: its profile's home), its temp folder and, on macOS, its tool cache (T8); it
+/// reads the repository without writing refs or admin folders, the harness install and the
+/// turn folder, and reaches only its model endpoint. Output: the sandbox, or the refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
@@ -996,6 +993,7 @@ fn turn_sandbox(
     let name = format!("master-runtime-{}", runtime_ref.as_str());
     let runtime = Root::open(&root.path.join(&name))?;
     verify_master_runtime(root, &runtime, &name)?;
+    let engine_root = root.engine_root()?;
     let tmp = runtime.path.join(MASTER_TMP);
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -1027,11 +1025,12 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_read(&runtime.path))
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
+    .and_then(|sandbox| sandbox.guard_engine_around(engine_root, &root.path))
     .map_err(refused)?;
     #[cfg(target_os = "macos")]
     let sandbox = crate::sandbox::tool_cache::grant(
         sandbox,
-        &root.path,
+        engine_root,
         &std::fs::canonicalize(repository).map_err(io_error)?,
         policy,
         crate::sandbox::tool_cache::CacheShape::Worktree,
@@ -1079,15 +1078,19 @@ fn turn_sandbox(
     Ok(installed)
 }
 
-/// Reads the owner's sandbox settings from the engine database without writing to it.
-/// Input: the owner root. Output: the settings, or `master_sandbox_unavailable` when they
-/// cannot be read, so the turn fails closed rather than start under another option.
-#[cfg(target_os = "linux")]
+/// Reads the owner's sandbox settings from the engine database in the engine root around
+/// the owner generation, without writing to it. Input: the generation's root. Output: the
+/// settings, or `master_sandbox_unavailable` when they cannot be read, so the turn fails
+/// closed rather than start under another option.
+#[cfg(any(target_os = "linux", test))]
 fn stored_sandbox_settings(
     root: &Root,
 ) -> Result<crate::sandbox_settings::SandboxSettings, EngineError> {
+    let engine = root
+        .engine_root()
+        .map_err(|_| failure("master_sandbox_unavailable"))?;
     let connection = rusqlite::Connection::open_with_flags(
-        root.path.join("engine.db"),
+        engine.join("engine.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -1332,6 +1335,115 @@ mod tests {
         )
         .unwrap();
         assert!(base.join("engine.db").is_file());
+    }
+
+    /// Makes the real owner layout in a private temp folder: the engine root, holding the
+    /// engine database with the settings_db sockets setting, and an owner generation folder
+    /// inside it, which is what a master turn's Root opens. Input: the temp folder. Output:
+    /// the generation's path.
+    fn owner_generation(temporary: &tempfile::TempDir) -> PathBuf {
+        let engine = temporary.path().canonicalize().unwrap();
+        settings_db(&engine);
+        let generation = engine.join("o0123abcd");
+        private_directory(&generation);
+        generation
+    }
+
+    /// Builds a master turn's sandbox in an owner generation from owner_generation, with
+    /// the project folders inside the generation as the other rows keep them and a stand-in
+    /// harness. Input: the generation's path. Output: the installed sandbox, or the refusal.
+    fn master_in_generation(base: &Path) -> Result<InstalledSandbox, EngineError> {
+        let root = Root::open(base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+        master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        )
+    }
+
+    /// A master reads its sandbox settings from the engine database in the engine root, the
+    /// folder around its owner generation, as the real layout has it; the generation holds
+    /// no database and none is made there. Linux reads them before every master boundary.
+    #[test]
+    fn a_master_reads_its_sandbox_settings_from_the_engine_root_around_its_generation() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let settings = stored_sandbox_settings(&root).unwrap();
+        assert_eq!(
+            settings.linux_sockets,
+            crate::sandbox::LinuxSockets::TcpPorts
+        );
+        assert!(!base.join("engine.db").exists());
+    }
+
+    /// T8: a master's tool cache is the project's cache in the engine root, where the team
+    /// names it too, not a folder in the owner generation, which shutdown removes and the
+    /// next start replaces. Runs on macOS only, where a master gets a tool cache.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_master_tool_cache_is_the_project_cache_in_the_engine_root() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let engine = base.parent().unwrap().to_path_buf();
+        master_in_generation(&base).unwrap();
+        let project = std::fs::canonicalize(base.join("repository")).unwrap();
+        let project = project.to_str().unwrap();
+        assert!(crate::sandbox::tool_cache::project_folder(&engine, project).is_dir());
+        assert!(!crate::sandbox::tool_cache::project_folder(&base, project).exists());
+    }
+
+    /// A master's boundary denies the engine root's secrets as well as its own owner
+    /// generation's: the database, the GitHub sign-in, the saved account keys, an engine
+    /// socket and an older generation holding a socket. The generation the master's home
+    /// lives in is not itself a secret, so the launch still succeeds.
+    #[test]
+    fn a_master_boundary_denies_the_engine_root_secrets_around_its_generation() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let engine = base.parent().unwrap().to_path_buf();
+        let older = engine.join("o0badc0de");
+        private_directory(&older);
+        let _sockets = [
+            crate::spawn_gate::bind_unix_std(engine.join("e.sock")).unwrap(),
+            crate::spawn_gate::bind_unix_std(older.join("owner.sock")).unwrap(),
+            crate::spawn_gate::bind_unix_std(base.join("owner.sock")).unwrap(),
+        ];
+        let sandbox = master_in_generation(&base).unwrap();
+        let secrets = sandbox.sandbox().secret_paths();
+        for name in ["engine.db", "github.json", "account-keys", "owner.sock"] {
+            assert!(
+                secrets.contains(&base.join(name)),
+                "{name} in the generation"
+            );
+        }
+        for secret in [
+            engine.join("engine.db"),
+            engine.join("github.json"),
+            engine.join("account-keys"),
+            engine.join("e.sock"),
+            older,
+        ] {
+            assert!(secrets.contains(&secret), "{}", secret.display());
+        }
+        assert!(!secrets.contains(&base));
     }
 
     #[test]
@@ -1668,9 +1780,8 @@ mod tests {
     fn a_master_turn_folder_goes_with_everything_its_turn_wrote_when_the_launch_lets_go() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -1739,9 +1850,8 @@ mod tests {
     fn the_live_master_keeps_only_its_model_port_under_every_project_choice() {
         use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -1791,9 +1901,8 @@ mod tests {
     fn the_live_master_sandbox_is_confined_under_sandboxed_and_own_branch() {
         use crate::sandbox::policy::AgentPolicy;
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -1856,7 +1965,7 @@ mod tests {
     fn master_sandbox_lets_a_real_child_write_only_in_the_project_worktree_and_its_own_dirs() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
@@ -1893,7 +2002,7 @@ mod tests {
             std::fs::symlink_metadata(&tmp).unwrap().mode() & 0o7777,
             0o700
         );
-        let caches = default_master_tool_caches(&root.path, &repository);
+        let caches = default_master_tool_caches(root.engine_root().unwrap(), &repository);
         assert_eq!(
             sandbox
                 .sandbox()
@@ -2150,6 +2259,108 @@ mod tests {
         assert!(!text.contains("(allow network*)"));
     }
 
+    /// CONFIGURED-HOMES-GUARD: an rcli master whose home is one configured SDK home in the
+    /// engine root reads, writes and resolves that home and keeps its launch denies there,
+    /// while the folder of homes stays denied, so a real child can neither list it nor read
+    /// another keyed account's config. The profile denies the folder and allows the own home
+    /// right after that deny, naming no other home. Runs on macOS only: it checks Seatbelt.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_rcli_master_reaches_its_own_configured_home_and_no_other() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let engine = root.engine_root().unwrap().to_path_buf();
+        let homes = engine.join("configured-sdk-homes");
+        let own = homes.join("a".repeat(64));
+        let other = homes.join("b".repeat(64));
+        let own_text = "configured-homes-guard-dummy-own-config";
+        let other_text = "configured-homes-guard-dummy-other-config";
+        for (home, text) in [(&own, own_text), (&other, other_text)] {
+            private_directory(&home.join(".backboard"));
+            std::fs::write(home.join(".backboard").join("config.json"), text).unwrap();
+        }
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&homes, &repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("rcli");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _capture_ref, _capture) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &own,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        )
+        .unwrap();
+        let text = sandbox.sandbox().profile();
+        let deny = text
+            .find(&format!("\n  (subpath \"{}\")", homes.display()))
+            .expect("the profile denies the configured homes");
+        let allow = text
+            .find(&format!(
+                "(allow file-read* file-write*\n  (subpath \"{}\"))",
+                own.display()
+            ))
+            .expect("the profile allows the master's own home");
+        assert!(deny < allow, "{text}");
+        assert!(!text.contains(&other.display().to_string()), "{text}");
+        let run = |script: &str| {
+            let mut harness = Command::new("/bin/sh");
+            harness.arg("-c").arg(script).current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::spawn_gate::output(&mut child).unwrap()
+        };
+        let quoted = |path: &Path| format!("'{}'", path.display());
+        let own_config = own.join(".backboard").join("config.json");
+        let read = run(&format!("cat {}", quoted(&own_config)));
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(String::from_utf8_lossy(&read.stdout), own_text);
+        let resolved = run(&format!(
+            "/bin/realpath {} && cd {} && pwd -P",
+            quoted(&own_config),
+            quoted(&own)
+        ));
+        assert!(resolved.status.success(), "{resolved:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&resolved.stdout),
+            format!("{}\n{}\n", own_config.display(), own.display())
+        );
+        let write = run(&format!("echo turn > {}", quoted(&own.join("turn.txt"))));
+        assert!(write.status.success(), "{write:?}");
+        assert_eq!(
+            std::fs::read_to_string(own.join("turn.txt")).unwrap(),
+            "turn\n"
+        );
+        let launch = run(&format!("echo x > {}", quoted(&own.join("settings.json"))));
+        assert!(!launch.status.success());
+        assert!(!own.join("settings.json").exists());
+        let other_config = other.join(".backboard").join("config.json");
+        let stolen = run(&format!("cat {}", quoted(&other_config)));
+        assert!(!stolen.status.success());
+        assert!(!String::from_utf8_lossy(&stolen.stdout).contains(other_text));
+        let planted = run(&format!("echo x > {}", quoted(&other.join("planted"))));
+        assert!(!planted.status.success());
+        assert!(!other.join("planted").exists());
+        let listed = run(&format!("ls {}", quoted(&homes)));
+        assert!(!listed.status.success());
+        assert!(!String::from_utf8_lossy(&listed.stdout).contains(&"b".repeat(64)));
+    }
+
     /// A hidden folder inside the project reaches the master's own boundary: the installed
     /// master profile denies it and a real sandboxed read of a file inside it is refused,
     /// while a plain file elsewhere in the repository stays readable. Runs on macOS only:
@@ -2159,7 +2370,7 @@ mod tests {
     fn master_sandbox_hides_a_listed_folder_from_a_real_child() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
@@ -2221,9 +2432,8 @@ mod tests {
     #[test]
     fn master_sandbox_refuses_a_listed_folder_off_macos() {
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -2268,7 +2478,7 @@ mod tests {
     fn master_sandbox_refuses_a_folder_git_now_tracks() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
@@ -2327,9 +2537,8 @@ mod tests {
     fn a_tools_off_master_reads_the_repository_but_cannot_move_its_refs() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let leases = base.join("worktrees");
         let home = base.join("profile-home");
@@ -2504,9 +2713,8 @@ mod tests {
     fn a_tools_on_master_turn_under_no_network_is_refused_rather_than_reaching_every_host() {
         use crate::sandbox::policy::AgentNetwork;
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -2571,9 +2779,8 @@ mod tests {
     fn a_tools_on_master_writes_only_in_its_worktree_and_own_folders_and_runs_the_engine() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
-        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -2629,7 +2836,7 @@ mod tests {
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
         let tmp = turn.join(MASTER_TMP);
-        let caches = default_master_tool_caches(&root.path, &repository);
+        let caches = default_master_tool_caches(root.engine_root().unwrap(), &repository);
         assert_eq!(
             sandbox
                 .sandbox()

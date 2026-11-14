@@ -241,9 +241,11 @@ test("only a failed mapping of an unfinished setup offers Retry, from the projec
   assert.equal(intake.projectFolder(stored({ folder: "/Users/mira/Projects/shop" })), "/Users/mira/Projects/shop");
 });
 
-test("missing items name the form fields, once each", () => {
-  assert.deepEqual(intake.missingLabels(["about", "tech_stack", "about", "build_commands"]), ["What is it about", "Tech stack", "build commands"]);
-  assert.deepEqual(intake.missingLabels([]), []);
+test("the missing line says in plain words what the mapping couldn't work out and what to do, once each (DEC-160)", () => {
+  assert.equal(intake.missingLine(["about"]), "CrazyAgent couldn't work out what the project is about from the project's files. Fill it in below.");
+  assert.equal(intake.missingLine(["about", "platforms", "about"]), "CrazyAgent couldn't work out what the project is about and the target platforms from the project's files. Fill them in below.");
+  assert.equal(intake.missingLine(["name", "tech_stack", "build_commands"]), "CrazyAgent couldn't work out the project name, the tech stack and build commands from the project's files. Fill them in below.");
+  assert.equal(intake.missingLine([]), null);
 });
 
 test("the review form starts from the mapping agent's draft and keeps the saved pool and team", () => {
@@ -350,6 +352,19 @@ test("setup lists each tool's state in plain words", () => {
   assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "  ")).title, "uv");
 });
 
+test("a tmux that comes with the app says Bundled with CrazyAgent, and a missing bundle shows its reason", () => {
+  assert.deepEqual(intake.dependencyView(dep("tmux", { state: "bundled", version: "3.5a" })),
+    { title: "tmux", about: "Runs each agent in a live terminal.", word: "Bundled", tone: "ok", line: "Bundled with CrazyAgent, version 3.5a." });
+  assert.equal(intake.dependencyView(dep("tmux", { state: "failed", reason: "Reinstall CrazyAgent." })).line, "Reinstall CrazyAgent.");
+});
+
+test("a system tmux used in place of the bundled one reads Found with the engine's note, as the TUI does (leader 20:08)", () => {
+  for (const note of ["Using the system tmux, the bundled one can't run; reinstall CrazyAgent.", "Using the system tmux, the bundled one is missing; reinstall CrazyAgent."]) {
+    assert.deepEqual(intake.dependencyView(dep("tmux", { state: "system", version: "3.5a", note })),
+      { title: "tmux", about: "Runs each agent in a live terminal.", word: "Found", tone: "ok", line: note });
+  }
+});
+
 const entry = (id, kind, group, on_by_default, state, extra = {}) => ({ id, kind, group, source: `github.com/example/${id}`, license: "MIT", on_by_default, state, ...extra });
 const pack = [
   entry("graphify", "skill", "graph", true, { state: "available" }),
@@ -407,6 +422,10 @@ test("setup progress counts every tool and only the ticked pack, so an unticked 
   };
   assert.deepEqual(intake.setupProgress(status, ["superpowers"]), { done: 2, total: 4, failed: 1 });
   assert.deepEqual(intake.setupProgress(status, []), { done: 2, total: 3, failed: 1 });
+  const bundled = { ...status, dependencies: [dep("tmux", { state: "bundled", version: "3.5a" }), ...status.dependencies.slice(1)] };
+  assert.deepEqual(intake.setupProgress(bundled, []), { done: 2, total: 3, failed: 1 });
+  const system = { ...status, dependencies: [dep("tmux", { state: "system", version: "3.5a", note: "Using the system tmux, the bundled one can't run; reinstall CrazyAgent." }), ...status.dependencies.slice(1)] };
+  assert.deepEqual(intake.setupProgress(system, []), { done: 2, total: 3, failed: 1 });
 });
 
 test("the graphify command and the graphify pack entry have names that can't be confused", () => {
@@ -866,9 +885,12 @@ test("the setup review shows the steps, the overview, missing items and a confir
   const draft = intake.onboardingDraft(view(), stored());
   const done = html(OnboardingReviewView, { ...base, view: ok(view({ missing: ["platforms", "about"] })), draft });
   assert.match(done, /<h2[^>]*>Plant shop<\/h2>/);
-  assert.match(done, /Not found: Target platforms, What is it about\./);
+  assert.match(done, /CrazyAgent couldn&#x27;t work out the target platforms and what the project is about from the project&#x27;s files\. Fill them in below\./);
+  assert.doesNotMatch(done, /Not found:/);
+  assert.match(done, /<div class="notice info"[^>]*>(?:(?!<\/div>)[\s\S])*CrazyAgent couldn&#x27;t work out/);
   assert.match(done, /id="ob-name"[^>]*value="Plant shop"/);
-  assert.match(done, /Target platforms[\s\S]*Missing/);
+  assert.match(done, /Target platforms[\s\S]*Fill in/);
+  assert.doesNotMatch(done, /> ?Missing</);
   assert.match(done, /Research is off for existing code/);
   assert.doesNotMatch(done, /<button[^>]*disabled=""[^>]*>Confirm and finish setup<\/button>/);
   assert.match(html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind: "failed", reason: "graphify isn't installed." }, mapping: { kind: "waiting" } })), draft }), /<span class="pj-small pj-error">graphify isn&#x27;t installed\.<\/span>/);
@@ -926,6 +948,23 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   assert.match(running, /Installing: 1 of 5 done\. You can continue; setup keeps going\./);
   assert.match(running, />Continue<\/button>/);
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
+});
+
+test("after a run with failures the tools step offers Try again, which runs the tools and only the ticked entries not installed", () => {
+  const listed = [entry("superpowers", "skill", "workflow", true, { state: "on" }), entry("caveman", "skill", "workflow", true, { state: "failed", reason: "The source could not be downloaded." }),
+    entry("serena", "mcp_server", "optional", false, { state: "available" })];
+  const value = { dependencies: [dep("tmux", { state: "failed", reason: "Homebrew is not installed." })], pack: listed, running: false };
+  assert.deepEqual(intake.retryTicks(value, ["superpowers", "caveman"]), ["caveman"]);
+  assert.deepEqual(intake.retryTicks({ ...value, pack: listed.slice(0, 1) }, ["superpowers"]), []);
+  const base = { status: ok(value), ticks: ["superpowers", "caveman"], onTick: noop, busy: false, started: true, problem: "", onRun: noop, onRetry: noop, onContinue: noop };
+  const finished = html(ToolsSetupView, base);
+  assert.match(finished, /Setup finished: 3 of 3 done, 2 failed\. Each failure shows its reason above\./);
+  assert.match(finished, />Try again<\/button>/);
+  assert.match(finished, />Continue<\/button>/);
+  assert.doesNotMatch(html(ToolsSetupView, { ...base, status: ok({ ...value, running: true }) }), />Try again</);
+  const clean = { ...value, dependencies: [dep("tmux", { state: "found", version: "3.5a" })], pack: listed.slice(0, 1) };
+  assert.doesNotMatch(html(ToolsSetupView, { ...base, status: ok(clean), ticks: ["superpowers"] }), />Try again</);
+  assert.doesNotMatch(html(ToolsSetupView, { ...base, started: false }), />Try again</);
 });
 
 test("the tools step says why an installed entry's hooks were not added, on that entry only", () => {
@@ -1148,4 +1187,79 @@ test("after an iCloud download Add folder adds only when it finished and was nei
   assert.deepEqual(intake.icloudOutcome("go", ended), { next: "say", text: ended.message });
   assert.deepEqual(intake.icloudOutcome("go", { kind: "not_ready" }), { next: "say", text: "Downloading from iCloud isn't in this build." });
   for (const result of [ok, ended, { kind: "not_ready" }]) assert.deepEqual(intake.icloudOutcome("left", result), { next: "none" });
+});
+
+test("the Node row says what Node is for and offers its own Install only while it is missing or failed and setup is idle", () => {
+  const node = (state) => ({ name: "node", label: "Node.js", state });
+  const status = (row, running = false) => ({ dependencies: [row], pack: [], running, version: 1 });
+  const missing = node({ state: "missing" });
+  assert.equal(intake.dependencyView(missing).title, "Node.js");
+  assert.equal(intake.dependencyView(missing).about, "Runs the harnesses CrazyAgent installs with npm.");
+  for (const row of [missing, node({ state: "failed", reason: "The download failed." })]) {
+    assert.equal(intake.rowInstall(row, status(row)), true, row.state.state);
+  }
+  for (const state of [{ state: "found", version: "22.11.0" }, { state: "installed", version: "26.13.1" }, { state: "installing" }, { state: "checking" }]) {
+    assert.equal(intake.rowInstall(node(state), status(node(state))), false, state.state);
+  }
+  assert.equal(intake.rowInstall(missing, status(missing, true)), false, "not while a setup run goes on");
+  const uv = { name: "uv", label: "uv", state: { state: "missing" } };
+  assert.equal(intake.rowInstall(uv, status(uv)), false, "only Node installs alone");
+  const found = (name) => ({ name, label: name, state: { state: "found", version: "1.0" } });
+  const unsupported = node({ state: "unsupported" });
+  assert.deepEqual(intake.dependencyView(unsupported), { title: "Node.js", about: "Runs the harnesses CrazyAgent installs with npm.", word: "Not supported", tone: "neutral", line: "Not supported on this system." });
+  assert.equal(intake.rowInstall(unsupported, status(unsupported)), false, "no Install where setup can't install it");
+  const windows = { dependencies: [found("tmux"), found("uv"), found("graphify"), unsupported], pack: [], running: false, version: 1 };
+  assert.equal(intake.toolsOffer(windows), false, "Settings, Pack offers no Install tools for an unsupported tool alone");
+  assert.equal(intake.toolsOffer({ ...windows, dependencies: [...windows.dependencies, missing] }), true);
+  assert.deepEqual(intake.setupProgress(windows, []), { done: 4, total: 4, failed: 0 });
+  const tools = { kind: "ok", value: { dependencies: [found("tmux"), found("uv"), found("graphify"), missing], pack: [], running: false, version: 1 } };
+  assert.equal(intake.toolsStep(tools).done, true, "Node is not one of the tools the first run needs");
+  for (const file of ["../src/screens/intake/setup-step.tsx", "../src/screens/settings/pack.tsx"]) {
+    const screen = readFileSync(new URL(file, import.meta.url), "utf8");
+    assert.match(screen, /rowInstall\(dependency, /, file);
+    assert.match(screen, /installDependency\(dependency\.name\)/, file);
+  }
+  const pack = readFileSync(new URL("../src/screens/settings/pack.tsx", import.meta.url), "utf8");
+  assert.match(pack, /toolsOffer\(status\)/, "Settings, Pack offers Install tools through the one test");
+});
+
+const FIX = { tree: "/h/py", recursive: true, command: "chmod -R go-w '/h/py'" };
+const refusedRow = (extra = {}) => dep("graphify", { state: "refused", line: "graphify can't start: /h/g/bin/python3 is not used.", file: "/h/g/bin/python3", part: "/h/py/bin/python3.13", fix: FIX, ...extra }, "Graphify command");
+
+test("a refused tool reads Found, not used with its line, offers its fix by the setting and still offers CrazyAgent's own copy", () => {
+  const status = (row, extra = {}) => ({ dependencies: [row], pack: [], running: false, version: 1, refused_tool: "fix_button", ...extra });
+  const row = refusedRow();
+  assert.deepEqual(intake.stateView(row.state), { word: "Found, not used", tone: "warn", line: "graphify can't start: /h/g/bin/python3 is not used." });
+  assert.deepEqual(intake.rowFix(row, status(row)), FIX);
+  assert.deepEqual(intake.rowFix(row, { ...status(row), refused_tool: undefined }), FIX, "an engine without the setting reads as the fix button");
+  assert.equal(intake.fixCommand(row, status(row)), null);
+  assert.equal(intake.rowFix(row, status(row, { refused_tool: "command_only" })), null);
+  assert.equal(intake.fixCommand(row, status(row, { refused_tool: "command_only" })), FIX.command);
+  assert.equal(intake.rowFix(row, status(row, { running: true })), null, "not while setup runs");
+  const unfixable = refusedRow({ fix: null });
+  assert.equal(intake.rowFix(unfixable, status(unfixable)), null);
+  assert.equal(intake.fixCommand(unfixable, status(unfixable, { refused_tool: "command_only" })), null);
+  assert.equal(intake.toolsOffer(status(row)), true, "installing CrazyAgent's own copy stays offered");
+  const words = intake.fixConfirm("Graphify command", FIX);
+  assert.equal(words.title, "Fix permissions for Graphify command?");
+  assert.match(words.body, /removes write access for group and others from \/h\/py and everything in it/);
+  assert.match(intake.fixConfirm("uv", { ...FIX, recursive: false }).body, /from \/h\/py, the same/);
+  assert.equal(words.command, FIX.command);
+  assert.equal(words.confirm, "Fix permissions");
+  assert.deepEqual(intake.REFUSED_TOOL_CHOICES.map((choice) => choice.value), ["fix_button", "command_only"]);
+});
+
+test("the tools step shows a refused tool's fix, its command only by the setting and a failed fix in red", () => {
+  const value = (row, extra = {}) => ({ dependencies: [dep("tmux", { state: "found", version: "3.5a" }), row], pack, running: false, refused_tool: "fix_button", ...extra });
+  const base = (status) => ({ status: ok(status), ticks: [], onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop, onFix: noop });
+  const rowOf = (markup) => markup.split('<li class="in-row">').find((row) => row.includes("Graphify command"));
+  const offered = rowOf(html(ToolsSetupView, base(value(refusedRow()))));
+  assert.match(offered, /Found, not used/);
+  assert.match(offered, /graphify can&#x27;t start/);
+  assert.match(offered, /<button[^>]*>(<svg[\s\S]*?<\/svg>)?Fix permissions<\/button>/);
+  const failed = rowOf(html(ToolsSetupView, base(value(refusedRow({ fix_failed: "The permissions could not be changed. Run the command shown instead." })))));
+  assert.match(failed, /class="pj-small pj-error">The permissions could not be changed\./);
+  const command = rowOf(html(ToolsSetupView, base(value(refusedRow(), { refused_tool: "command_only" }))));
+  assert.doesNotMatch(command, /Fix permissions/);
+  assert.match(command, /To fix it, run in Terminal:[\s\S]*<code>chmod -R go-w &#x27;\/h\/py&#x27;<\/code>/);
 });

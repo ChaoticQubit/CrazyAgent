@@ -1,7 +1,9 @@
 use super::*;
-use crate::harnesses::update::{CheckWhen, LastUpdate};
+use crate::harnesses::update::{CheckWhen, HarnessNeeds, LastUpdate};
 use crate::harnesses::{Search, catalog};
+use crate::setup::{Dependency, DependencyState, DependencyStatus, SetupStatus, Version};
 use crate::tui::client::OwnerEvent;
+use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::screens::settings_accounts::tests::{dataset, fixture, list_ctx, render};
 use crate::tui::seam::Request;
 use crate::tui::shell::Shell;
@@ -234,6 +236,8 @@ enum Sent {
     Find(String),
     Choose(String, Option<String>),
     Catalog,
+    Setup,
+    InstallNode,
     Other,
 }
 
@@ -249,6 +253,11 @@ fn sent(ctx: &mut Ctx) -> Vec<Sent> {
                 SettingsJob::HarnessFind { id } => Sent::Find(id),
                 SettingsJob::HarnessChoosePath { id, path } => Sent::Choose(id, path),
                 SettingsJob::Harnesses => Sent::Catalog,
+                SettingsJob::AppSetup(AppSetupJob::Status) => Sent::Setup,
+                SettingsJob::AppSetup(AppSetupJob::Install {
+                    name: Dependency::Node,
+                    ..
+                }) => Sent::InstallNode,
                 _ => Sent::Other,
             });
         }
@@ -270,6 +279,7 @@ fn versions_of(installed: &str, latest: Latest) -> HarnessVersions {
         guide: None,
         running: false,
         last: None,
+        needs: None,
     }
 }
 
@@ -836,10 +846,17 @@ fn the_settings_decide_the_keys_and_whether_opening_the_page_checks() {
     shell.arrive(arrival(SettingsEvent::HarnessUpdateSettings(Ok(
         settings_with(UpdateMode::Off, CheckWhen::OnOpen),
     ))));
+    let reads = sent(&mut shell.ctx);
     assert_eq!(
-        sent(&mut shell.ctx).len(),
-        found.entries.len() - installed,
-        "Off reads only the harnesses that are not installed, for Install"
+        reads.len(),
+        found.entries.len(),
+        "Off still reads every harness, for Install and for what a found one needs to run"
+    );
+    assert!(
+        reads
+            .iter()
+            .all(|call| matches!(call, Sent::Versions(_, false))),
+        "Off never looks for a newer version: {reads:?}"
     );
     let hints = footer(&mut shell);
     assert!(!hints.contains("Check for updates"), "{hints}");
@@ -945,6 +962,7 @@ fn missing(id: &str, install: Option<&str>, guide: &str) -> HarnessVersions {
         guide: Some(guide.into()),
         running: false,
         last: None,
+        needs: None,
     }
 }
 
@@ -1127,6 +1145,32 @@ fn codex_missing() -> Found {
 }
 
 #[test]
+fn where_it_looked_shows_a_temp_folder_it_passed_over_with_the_whole_reason() {
+    use crate::harnesses::finding::{Found as Look, TEMP_SKIPPED};
+    let missing = codex_missing();
+    let mut shell = on(&missing, "codex");
+    shell.key(Key::Char('w'));
+    shell.key(Key::Char('w'));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Find("codex".into())]);
+    let looked = vec![
+        format!("/private/tmp/cad-bin{TEMP_SKIPPED}"),
+        "/opt/homebrew/bin".to_owned(),
+    ];
+    shell.arrive(arrival(SettingsEvent::HarnessFound(
+        "codex".into(),
+        Ok(Look::Missing { looked }),
+    )));
+    let shown = frame(&mut shell);
+    assert!(shown.contains("/private/tmp/cad-bin"), "{shown}");
+    assert!(
+        shown.contains("(skipped: in a temp folder or links to one,"),
+        "{shown}"
+    );
+    assert!(shown.contains("users can change)"), "{shown}");
+    assert!(shown.contains("/opt/homebrew/bin"), "{shown}");
+}
+
+#[test]
 fn w_lists_where_the_engine_looked_for_a_missing_codex_and_f_chooses_its_file_by_path() {
     use crate::harnesses::finding::Found as Look;
     let missing = codex_missing();
@@ -1267,4 +1311,344 @@ fn the_file_choice_is_offered_only_for_a_missing_codex_or_claude_code() {
     );
     assert_eq!(file_name("claude-code"), "claude");
     assert_eq!(file_name("codex"), "codex");
+}
+
+const NEEDS_LINE: &str = "codex needs node, which is missing. Install Node.js from nodejs.org, or run brew install node in Terminal. Then try again.";
+const RUNTIME_LINE: &str = "codex needs ca-missing-runtime, which is missing. Install it, or run setup again from Settings. Then try again.";
+const NODE_FAILED: &str = "Node.js didn't download. Check the connection, then try again.";
+
+/// The engine's read of an npm Codex the tool resolver finds but can't run. Inputs: the
+/// program its first line asks for and the resolver's line. Output: the read.
+fn codex_needing(program: &str, line: &str) -> HarnessVersions {
+    HarnessVersions {
+        id: "codex".into(),
+        method: Method::Npm {
+            package: "@openai/codex".into(),
+        },
+        installed: None,
+        latest: Latest::NotChecked,
+        command: Some("/opt/homebrew/bin/npm install -g @openai/codex@latest".into()),
+        needs: Some(HarnessNeeds {
+            program: Some(program.into()),
+            line: line.into(),
+        }),
+        ..newer()
+    }
+}
+
+fn codex_runs(installed: Option<&str>) -> HarnessVersions {
+    HarnessVersions {
+        id: "codex".into(),
+        installed: installed.map(str::to_owned),
+        latest: Latest::NotChecked,
+        ..newer()
+    }
+}
+
+fn setup_node(state: DependencyState) -> Arrival {
+    arrival(SettingsEvent::AppSetup(AppSetupEvent::Status(Ok(
+        SetupStatus {
+            dependencies: vec![DependencyStatus {
+                name: Dependency::Node,
+                label: "Node.js".into(),
+                state,
+            }],
+            pack: Vec::new(),
+            running: false,
+            notes: Vec::new(),
+            version: 1,
+            refused_tool: Default::default(),
+        },
+    ))))
+}
+
+fn table_row(text: &str, name: &str) -> String {
+    text.lines()
+        .find(|line| line.contains(&format!("> {name} ")))
+        .unwrap_or_else(|| panic!("no selected {name} row:\n{text}"))
+        .to_owned()
+}
+
+/// v241 (L7c open item, DEC-141): a found harness the tool resolver can't run reads Can't run
+/// with the resolver's line, the first-run step's words, never Ready or a version line.
+#[test]
+fn a_found_harness_the_resolver_cant_run_reads_cant_run_with_its_line_never_ready() {
+    let found = found();
+    let mut shell = on(&found, "codex");
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    let text = frame(&mut shell);
+    let row = table_row(&text, "Codex");
+    assert!(row.contains("Can't run"), "{row}");
+    assert!(!row.contains("Ready"), "{row}");
+    assert!(
+        text.contains("codex needs node, which is missing."),
+        "{text}"
+    );
+    assert!(!text.contains("Version unknown."), "{text}");
+    let help = footer(&mut shell);
+    assert!(help.contains("r Try again"), "{help}");
+    assert!(!help.contains("Check for updates"), "{help}");
+}
+
+/// v241: r on a harness that can't run reads it again; a clean read brings back Ready and
+/// its version line, and a program other than Node offers no Node.js install.
+#[test]
+fn r_on_a_harness_that_cant_run_reads_it_again_and_a_clean_read_shows_ready() {
+    let found = found();
+    let mut shell = on(&found, "codex");
+    deliver(
+        &mut shell,
+        codex_needing("ca-missing-runtime", RUNTIME_LINE),
+    );
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![],
+        "a need other than Node reads no setup row"
+    );
+    assert!(!footer(&mut shell).contains("Install Node.js"));
+    shell.key(Key::Char('r'));
+    let calls = sent(&mut shell.ctx);
+    assert!(calls.contains(&Sent::Catalog), "{calls:?}");
+    assert!(
+        calls.contains(&Sent::Versions("codex".into(), false)),
+        "Try again reads the harness again: {calls:?}"
+    );
+    deliver(&mut shell, codex_runs(Some("0.167.1")));
+    let text = frame(&mut shell);
+    let row = table_row(&text, "Codex");
+    assert!(row.contains("Ready"), "{row}");
+    assert!(text.contains("Version 0.167.1."), "{text}");
+    assert!(!text.contains("Can't run"), "{text}");
+}
+
+/// v241 (DEC-157): a harness that needs Node reads setup's Node row once; one n installs
+/// Node.js through setup's one-tool install, the page says it installs, and once Node settles
+/// the harnesses that needed it are read again. A failed install says why and offers n again.
+#[test]
+fn one_n_installs_node_for_the_harnesses_that_need_it_and_they_read_again_once_it_settles() {
+    let found = found();
+    let mut shell = on(&found, "codex");
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Setup],
+        "a harness that needs Node reads setup's Node row"
+    );
+    shell.arrive(setup_node(DependencyState::Missing {
+        line: String::new(),
+    }));
+    let help = footer(&mut shell);
+    assert_eq!(help.matches("n Install Node.js").count(), 1, "{help}");
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    assert!(frame(&mut shell).contains("Installing Node.js."));
+    assert!(!footer(&mut shell).contains("Install Node.js"));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Setup]);
+    shell.arrive(setup_node(DependencyState::Installing));
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Setup],
+        "the page reads setup's Node row again on each refresh while Node installs"
+    );
+    shell.arrive(setup_node(DependencyState::Failed {
+        reason: NODE_FAILED.into(),
+    }));
+    assert!(frame(&mut shell).contains(NODE_FAILED));
+    assert!(footer(&mut shell).contains("n Install Node.js"));
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    shell.refresh();
+    sent(&mut shell.ctx);
+    shell.arrive(setup_node(DependencyState::Installed {
+        version: Version::parse("26.13.1").unwrap(),
+    }));
+    assert!(
+        sent(&mut shell.ctx).contains(&Sent::Versions("codex".into(), false)),
+        "the harness that needed Node is read again once Node is installed"
+    );
+    deliver(&mut shell, codex_runs(Some("0.167.1")));
+    let text = frame(&mut shell);
+    assert!(!text.contains("Installing Node.js."), "{text}");
+    assert!(table_row(&text, "Codex").contains("Ready"), "{text}");
+}
+
+/// v241: with harness updates off a harness that can't run still reads Can't run, and a
+/// harness that runs shows no version line, since Off starts nothing.
+#[test]
+fn with_updates_off_a_harness_that_cant_run_still_reads_cant_run_and_no_version_line() {
+    let found = found();
+    let mut shell = on(&found, "codex");
+    shell.arrive(arrival(SettingsEvent::HarnessUpdateSettings(Ok(
+        settings_with(UpdateMode::Off, CheckWhen::OnButton),
+    ))));
+    sent(&mut shell.ctx);
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    let text = frame(&mut shell);
+    assert!(table_row(&text, "Codex").contains("Can't run"), "{text}");
+    assert!(
+        text.contains("codex needs node, which is missing."),
+        "{text}"
+    );
+    deliver(&mut shell, codex_runs(None));
+    let text = frame(&mut shell);
+    assert!(table_row(&text, "Codex").contains("Ready"), "{text}");
+    assert!(!text.contains("Version unknown."), "{text}");
+}
+
+/// v241 HR-L1: a harness the engine lists as Can't run reads Can't run with the engine's line
+/// and Try again before its versions arrive, and once a Node.js install the page waited on
+/// settles and the read no longer needs Node, the page reads the catalog again too, so its
+/// status and the Home count follow.
+#[test]
+fn a_harness_the_catalog_lists_cant_run_shows_its_line_and_node_settling_reads_the_catalog_again() {
+    let mut found = found();
+    let codex = found
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == "codex")
+        .unwrap();
+    codex.status = HarnessStatus::CantRun {
+        reason: NEEDS_LINE.into(),
+    };
+    codex.status_label = codex.status.label();
+    let mut shell = on(&found, "codex");
+    let text = frame(&mut shell);
+    let row = table_row(&text, "Codex");
+    assert!(row.contains("Can't run"), "{row}");
+    assert!(!row.contains("Ready"), "{row}");
+    assert!(
+        text.contains("codex needs node, which is missing."),
+        "{text}"
+    );
+    assert!(footer(&mut shell).contains("r Try again"));
+
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    sent(&mut shell.ctx);
+    shell.arrive(setup_node(DependencyState::Missing {
+        line: String::new(),
+    }));
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    sent(&mut shell.ctx);
+    shell.arrive(setup_node(DependencyState::Installed {
+        version: Version::parse("26.13.1").unwrap(),
+    }));
+    let calls = sent(&mut shell.ctx);
+    assert!(
+        calls.contains(&Sent::Versions("codex".into(), false)),
+        "{calls:?}"
+    );
+    deliver(&mut shell, codex_runs(Some("0.167.1")));
+    let calls = sent(&mut shell.ctx);
+    assert!(
+        calls.contains(&Sent::Catalog),
+        "the read that no longer needs Node reads the catalog again: {calls:?}"
+    );
+    let row = table_row(&frame(&mut shell), "Codex");
+    assert!(
+        row.contains("Ready"),
+        "a fresh read that runs wins over the catalog's older word: {row}"
+    );
+    assert!(!row.contains("Can't run"), "{row}");
+}
+
+/// v241 leader 20:31 fix 2: with Node already settled, a later read that no longer needs Node
+/// on a row the catalog lists as Can't run reads the catalog again at once, so a harness the
+/// engine holds as Limited shows Can't start, never Ready; a clean read of a row the catalog
+/// no longer lists as Can't run reads nothing more.
+#[test]
+fn a_read_that_clears_a_harness_needs_reads_the_catalog_again_so_its_real_state_shows() {
+    let mut found = found();
+    let codex = found
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == "codex")
+        .unwrap();
+    codex.status = HarnessStatus::CantRun {
+        reason: NEEDS_LINE.into(),
+    };
+    codex.status_label = codex.status.label();
+    let mut shell = on(&found, "codex");
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    sent(&mut shell.ctx);
+    shell.arrive(setup_node(DependencyState::Found {
+        version: Version::parse("22.11.0").unwrap(),
+    }));
+    sent(&mut shell.ctx);
+    shell.arrive(arrival(SettingsEvent::Harnesses(Ok(found.entries.clone()))));
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    assert!(
+        !sent(&mut shell.ctx).contains(&Sent::Catalog),
+        "a read that still needs Node agrees with the catalog"
+    );
+
+    deliver(&mut shell, codex_runs(Some("0.167.1")));
+    let calls = sent(&mut shell.ctx);
+    assert!(
+        calls.contains(&Sent::Catalog),
+        "the read that no longer needs Node reads the catalog again: {calls:?}"
+    );
+    let mut limited = found.entries.clone();
+    let codex = limited
+        .iter_mut()
+        .find(|entry| entry.id == "codex")
+        .unwrap();
+    codex.status = HarnessStatus::Limited {
+        reason: "installed, but CrazyAgent cannot start it yet".into(),
+    };
+    codex.status_label = codex.status.label();
+    shell.arrive(arrival(SettingsEvent::Harnesses(Ok(limited))));
+    let row = table_row(&frame(&mut shell), "Codex");
+    assert!(row.contains("Can't start"), "{row}");
+    assert!(!row.contains("Ready"), "{row}");
+    deliver(&mut shell, codex_runs(Some("0.167.1")));
+    assert!(
+        !sent(&mut shell.ctx).contains(&Sent::Catalog),
+        "a clean read the catalog agrees with reads nothing more"
+    );
+}
+
+/// v241 HR-M1: while a listed harness needs Node and setup's Node row still reads Checking, the
+/// page reads setup again on each refresh until the row settles, so the Install Node.js offer
+/// shows once it reads Missing; r reads setup's Node row again too.
+#[test]
+fn a_node_row_still_checking_is_read_again_until_it_settles_and_r_reads_it_again() {
+    let found = found();
+    let mut shell = on(&found, "codex");
+    deliver(&mut shell, codex_needing("node", NEEDS_LINE));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Setup]);
+    shell.arrive(setup_node(DependencyState::Checking));
+    assert!(!footer(&mut shell).contains("Install Node.js"));
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Setup],
+        "a Node row still checking is read again on the next refresh"
+    );
+    shell.arrive(setup_node(DependencyState::Missing {
+        line: String::new(),
+    }));
+    assert_eq!(footer(&mut shell).matches("n Install Node.js").count(), 1);
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![],
+        "a settled Node row is not read again"
+    );
+    shell.key(Key::Char('r'));
+    let calls = sent(&mut shell.ctx);
+    assert!(
+        calls.contains(&Sent::Setup),
+        "r reads setup's Node row again: {calls:?}"
+    );
 }

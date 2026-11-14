@@ -148,10 +148,11 @@ test("an agent level the owner reset sends the version its Reset left, so the ne
   assert.match(rust, /pub cleared: Vec<ClearedRule>,/);
 });
 
-test("an urgent question's toast opens the project's Questions tab where the linked question waits (F12), an agent waiting in its terminal at Waiting on you, and other alerts open nothing", () => {
+test("an urgent question's toast opens the project's Questions tab at its urgent question (F12, V241-QUESTION-UX P2), an agent waiting in its terminal at Waiting on you, and other alerts open nothing", () => {
   const urgent = wake.alertRoute({ kind: "urgent_question", project_id: "p 1" });
-  assert.deepEqual(urgent, { name: "project", id: "p 1", tab: "questions" });
-  assert.equal(router.formatRoute(urgent), "#/projects/p%201/questions");
+  assert.deepEqual(urgent, { name: "project", id: "p 1", tab: "questions", section: "urgent" });
+  assert.equal(router.formatRoute(urgent), "#/projects/p%201/questions?section=urgent");
+  assert.equal(shared.routeSection(router.formatRoute(urgent)), "urgent", "the Questions tab reads the section the toast wrote");
   const asked = router.formatRoute({ name: "project", id: "p1", tab: "agents", section: "questions" });
   assert.equal(shared.routeSection(asked), "questions", "the project page still reads a section written by hand");
   const waiting = wake.alertRoute({ kind: "waiting_on_you", project_id: "p1" });

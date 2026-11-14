@@ -317,8 +317,9 @@ impl Connection {
                                 .as_mut()
                                 .expect("creation requires paired configuration");
                             let was_ready = native.ready;
+                            let delivery = job.delivery;
                             let event = runtime.block_on(native.creation(*job));
-                            let problem = event.result.as_ref().err().map(String::as_str);
+                            let problem = creation_loss(&event, delivery);
                             if !report_loss(was_ready, native, problem, &mut client, &owner_replies)
                             {
                                 break;
@@ -659,13 +660,7 @@ impl Connection {
                             let event = match native.as_mut() {
                                 Some(native) => {
                                     let was_ready = native.ready;
-                                    let progress = |event| {
-                                        let _ = owner_replies.try_send(OwnerReply {
-                                            finished: false,
-                                            event: OwnerEvent::Intake(Box::new(event)),
-                                        });
-                                    };
-                                    let event = runtime.block_on(native.intake(*job, progress));
+                                    let event = runtime.block_on(native.intake(*job));
                                     let problem = None;
                                     if !report_loss(
                                         was_ready,
@@ -2331,6 +2326,39 @@ impl NativeOwner {
     }
 }
 
+/// The problem a creation job hands the loss check: the job's failure, except a late answer
+/// to the first send of a creation the worker keeps, which the page checks by the same
+/// identity next. A late answer to that check or to a retry counts: a live engine answers
+/// the check at once (DEC-159 D1), and a revoked client's stream closes unanswered.
+/// Input: the creation event and its delivery. Output: the problem the loss check reads.
+fn creation_loss(event: &CreationEvent, delivery: MutationDelivery) -> Option<&str> {
+    let problem = event.result.as_ref().err().map(String::as_str);
+    assert!(
+        problem.is_none_or(|code| !code.is_empty()),
+        "every problem carries a code"
+    );
+    assert!(
+        !event.retained || event.operation.is_some(),
+        "a kept creation names its change"
+    );
+    let checked_next = matches!(delivery, MutationDelivery::Submit) && event.retained;
+    problem.filter(|code| !(checked_next && answer_late(code)))
+}
+
+/// True for an owner change whose answer did not come in time or could not be read: the
+/// engine may still run it. The same codes as the desktop bridge's check.
+/// Input: the problem code. Output: whether it is that kind.
+fn answer_late(problem: &str) -> bool {
+    assert!(!problem.is_empty(), "every owner problem carries a code");
+    let late = problem.starts_with("owner_outcome_unknown")
+        || problem == "owner_actor_stopped_outcome_unknown";
+    assert!(
+        !late || job_lost(problem),
+        "a late answer is one the loss check counts"
+    );
+    late
+}
+
 /// Tells whether a failed owner job means the trusted connection is gone.
 /// Takes the job's problem: a plain code, possibly followed by "; " and advice.
 /// Returns true only for a lost, replaced or unreachable engine connection.
@@ -3147,6 +3175,63 @@ mod creation_recovery_tests {
         assert_exact_creation_snapshot(&h.native, &submission).await;
         assert_eq!(creation_table_counts(&db), expected);
         drop(db);
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_late_answer_on_a_kept_creation_is_checked_before_the_connection_counts_as_lost() {
+        let h = RealNative::new().await;
+        let id = RequestId::new("late-creation").unwrap();
+        let event = |result: Result<Box<OwnerResponse>, String>, retained: bool| CreationEvent {
+            submission: h.submission(),
+            operation: retained.then(|| (id.clone(), "hash".to_owned())),
+            result,
+            retained,
+        };
+        for late in [
+            "owner_outcome_unknown_reconcile_same_identity",
+            "owner_actor_stopped_outcome_unknown",
+        ] {
+            assert_eq!(
+                creation_loss(&event(Err(late.into()), true), MutationDelivery::Submit),
+                None,
+                "a late answer on a kept creation is reconciled, never read as a lost engine: {late}"
+            );
+            assert_eq!(
+                creation_loss(&event(Err(late.into()), false), MutationDelivery::Submit),
+                Some(late),
+                "with nothing kept to check, a late answer still counts: {late}"
+            );
+            for unchecked in [MutationDelivery::Reconcile, MutationDelivery::Retry] {
+                assert_eq!(
+                    creation_loss(&event(Err(late.into()), true), unchecked),
+                    Some(late),
+                    "no check follows a late check or retry, and a revoked client's \
+                     stream closes unanswered, so it counts as lost: {late}"
+                );
+            }
+        }
+        for gone in [
+            "trusted_owner_connection_failed",
+            "controller_disconnected",
+            "owner_socket_replaced",
+        ] {
+            assert_eq!(
+                creation_loss(&event(Err(gone.into()), true), MutationDelivery::Submit),
+                Some(gone),
+                "a failed connection is lost even with a kept creation: {gone}"
+            );
+        }
+        let running = OwnerResponse::InProgress {
+            operation_id: id.clone(),
+        };
+        assert_eq!(
+            creation_loss(
+                &event(Ok(Box::new(running)), true),
+                MutationDelivery::Reconcile
+            ),
+            None
+        );
         h.close().await;
     }
 }

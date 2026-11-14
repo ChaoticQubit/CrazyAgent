@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
+import { connect } from "node:net";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
@@ -33,6 +34,28 @@ export async function closedPort() {
   return port;
 }
 
+/** Holds a free local port that refuses every connect, as a stopped model provider: a
+ * listener takes one connection from this process and stops listening, so the port stays
+ * in use by that connection, no other listener gets it, and a connect is refused at once.
+ * Input: none. Output: the port and a function that frees it. */
+export async function refusingPort() {
+  const server = createServer();
+  const accepted = new Promise((done) => server.once("connection", done));
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  const { port } = server.address();
+  const near = connect(port, "127.0.0.1");
+  near.on("error", () => {});
+  await new Promise((done, fail) => {
+    near.once("connect", done);
+    near.once("error", fail);
+  });
+  const far = await accepted;
+  far.on("error", () => {});
+  server.close();
+  assert.equal(server.listening, false, "the held port has no listener");
+  return { port, free: () => { near.destroy(); far.destroy(); } };
+}
+
 /** Opens a local port that takes connections but answers no request, for the provider of an
  * engine whose runs a stand-in harness serves: the engine's reach check finds it listening,
  * and a request that does reach it has its connection closed unanswered. Input: none.
@@ -43,7 +66,8 @@ export async function silentProvider() {
   return { server, port: server.address().port };
 }
 
-/** Starts a child with its output kept as evidence and waits for its ready line.
+/** Starts a child with its output kept as evidence and waits for its ready line; a child that
+ * never gets there is stopped before the failure goes up, so no caller leaks it.
  * Input: the binary, its arguments, environment, evidence folder, name and ready pattern.
  * Output: the child and the ready line's match. */
 export async function start(binary, args, env, evidence, name, ready) {
@@ -52,6 +76,7 @@ export async function start(binary, args, env, evidence, name, ready) {
   const out = createWriteStream(join(evidence, `${name}.out`), { mode: 0o600 });
   const match = await new Promise((done, fail) => {
     let seen = "";
+    child.once("error", fail);
     const timer = setTimeout(() => fail(new Error(`${name} printed no ready line in ${READY_MS} ms; see ${name}.err`)), READY_MS);
     child.stdout.on("data", (chunk) => {
       out.write(String(chunk).replace(/[0-9a-f]{64}/g, "<token>"));
@@ -66,6 +91,9 @@ export async function start(binary, args, env, evidence, name, ready) {
       clearTimeout(timer);
       fail(new Error(`${name} exited before ready: ${code ?? signal}; see ${name}.err`));
     });
+  }).catch(async (error) => {
+    if (child.pid !== undefined) await stop(child);
+    throw error;
   });
   return { child, match };
 }
@@ -242,7 +270,7 @@ export const INTERNALS = `(() => {
  * opening a fold by its label, and opening the Agents toolbar's questions drawer. Input: the
  * page's evaluate and send. Output: the helpers. */
 export function owner({ evaluate, send }, evidence) {
-  const seen = () => evaluate("document.body.innerText");
+  const seen = () => evaluate("document.body?.innerText ?? \"\"");
   let shots = 0;
   const capture = async (label) => {
     shots += 1;

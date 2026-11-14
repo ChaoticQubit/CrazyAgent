@@ -23,6 +23,8 @@ const SHIFT_RIGHT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "43"];
 const SHIFT_LEFT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "44"];
 const SETTLE_TIME: Duration = Duration::from_secs(180);
 const TURN_TIME: Duration = Duration::from_secs(60);
+const NODE_TIME: Duration = Duration::from_secs(600);
+const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const REPO: &str = "plant-shop";
 const ABOUT: &str = "A small shop that sells house plants online.";
 const STACK: &str = "TypeScript";
@@ -1070,13 +1072,17 @@ impl ScriptPty {
     }
 
     fn until(&self, what: &str, check: impl Fn(&str) -> bool) {
+        self.until_within(what, SCREEN_TIME, check);
+    }
+
+    fn until_within(&self, what: &str, limit: Duration, check: impl Fn(&str) -> bool) {
         let start = Instant::now();
         loop {
             let screen = self.screen();
             if check(&screen) {
                 return;
             }
-            assert!(start.elapsed() < SCREEN_TIME, "{what}:\n{screen}");
+            assert!(start.elapsed() < limit, "{what}:\n{screen}");
             std::thread::sleep(POLL_TIME);
         }
     }
@@ -1607,6 +1613,7 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
         screen.contains("c Continue without")
     });
     pty.type_bytes(b"c");
+    pass_harness_step(&mut pty);
     pty.until("the Accounts step opens with the ticked guide", |screen| {
         screen.contains("Add an account")
             && screen.contains("[> Add account ]   [ Skip for now ]")
@@ -1614,6 +1621,143 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
             && screen.contains("[x] Show the guide on Home")
     });
     pty
+}
+
+/// Waits for first run's Harnesses step with only RCLI picked and Continue focused, then
+/// continues without installing anything. Input: the TUI after Setup. Output: none; the TUI
+/// is on its way to the Accounts step.
+fn pass_harness_step(pty: &mut ScriptPty) {
+    pty.until("the Harnesses step opens with only RCLI picked", |screen| {
+        screen.contains("Choose your harnesses")
+            && screen.contains("[x] RCLI")
+            && screen.contains("[> Continue ]")
+    });
+    pty.type_bytes(b"\r");
+}
+
+/// DEC-157: after Setup, first run asks for harnesses with only RCLI picked and locked,
+/// Codex and Claude Code unpicked, and Continue with no picks goes on to Accounts without
+/// starting an install.
+#[test]
+fn first_run_shows_the_harness_step_with_only_rcli_picked() {
+    let mut engine = Engine::start("ca-e2e-harness-step-");
+    let home = scratch("ca-e2e-harness-step-home-");
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty.type_bytes(b"c");
+    pty.until(
+        "the Harnesses step lists RCLI picked and the others unpicked",
+        |screen| {
+            screen.contains("Choose your harnesses")
+                && screen.contains("[x] RCLI")
+                && screen.contains("Comes with CrazyAgent.")
+                && screen.contains("[ ] Codex")
+                && screen.contains("[ ] Claude Code")
+                && screen.contains("Enter Continue")
+                && !screen.contains("Install picked harnesses")
+        },
+    );
+    pty.type_bytes(b"\r");
+    pty.until("Continue goes on to the Accounts step", |screen| {
+        screen.contains("Add an account") && !screen.contains("Choose your harnesses")
+    });
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-157: on a clean Mac whose Codex was built by npm and that has no Node, the Harnesses
+/// step says Codex can't run with the resolver's line and offers Node.js; n installs the
+/// pinned Node into the engine root, the step shows it installing, and the Codex row then
+/// leaves Can't run. Needs the clean-Mac gate build and the network to nodejs.org.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate and the network: Node.js downloads from nodejs.org"
+)]
+fn first_run_installs_node_for_a_codex_that_cannot_run_and_its_row_leaves_cant_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = scratch("ca-e2e-node-home-");
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    let codex = home.path().join(".local/bin/codex");
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    std::fs::write(&codex, "#!/usr/bin/env node\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let gate = scratch("ca-e2e-node-gate-");
+    let mut engine = Engine::new("ca-e2e-node-");
+    engine.home = Some(home.path().to_path_buf());
+    engine.env.push(("PATH", SYSTEM_PATH.into()));
+    engine
+        .env
+        .push(("CRAZYAGENT_GATE_SYSTEM_ROOT", gate.path().into()));
+    engine.launch();
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty.type_bytes(b"c");
+    pty.until_within(
+        "the Harnesses step says Codex can't run without Node and offers Node.js once setup's check ends",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Choose your harnesses")
+                && screen.contains("Can't run")
+                && screen.contains("codex needs node, which is missing.")
+                && screen.contains("n Install Node.js")
+                && !screen.contains("Already on this Mac.")
+        },
+    );
+    pty.type_bytes(b"n");
+    pty.until("the step shows Node.js installing", |screen| {
+        screen.contains("Installing Node.js.") && !screen.contains("n Install Node.js")
+    });
+    pty.until_within(
+        "the Codex row leaves Can't run once the engine's Node is in",
+        NODE_TIME,
+        |screen| {
+            screen.contains("Already on this Mac.")
+                && !screen.contains("Can't run")
+                && !screen.contains("Installing Node.js.")
+        },
+    );
+    assert!(
+        engine.path().join("setup/bin/node").exists(),
+        "Node went into the engine root, not the computer"
+    );
+    pty.type_bytes(b"\r");
+    pty.until("Continue goes on to the Accounts step", |screen| {
+        screen.contains("Add an account") && !screen.contains("Choose your harnesses")
+    });
+    drop(pty);
+    engine.stop();
 }
 
 /// DEC-153: keeping the Learn CrazyAgent guide ticked and picking Skip for now ends first run
@@ -1750,6 +1894,7 @@ fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_th
         screen.contains("c Continue without")
     });
     pty.type_bytes(b"c");
+    pass_harness_step(&mut pty);
     pty.until("the Accounts step opens with the ticked guide", |screen| {
         screen.contains("[x] Show the guide on Home")
     });
@@ -1831,7 +1976,7 @@ async fn stored_retry(engine: &Engine) -> crazyagent::provider_retry::ProviderRe
     settings.choice
 }
 
-/// Opens Settings, Setup through Go to, presses p and saves the option `keys` move to,
+/// Opens Settings, Setup through Go to, presses e and saves the option `keys` move to,
 /// waiting until the page names it, and returns what the engine then keeps. Inputs: the
 /// TUI, the runtime, the engine, the arrow keys and the option's title. Output: the
 /// stored option.
@@ -1842,9 +1987,9 @@ fn save_retry(
     keys: &[&str],
     title: &str,
 ) -> crazyagent::provider_retry::ProviderRetry {
-    pty.keys(&["p"]);
+    pty.keys(&["e"]);
     pty.until(
-        "p asks what harnesses do, with each harness line",
+        "e asks what harnesses do, with each harness line",
         |screen| {
             screen.contains("When a model provider can't be reached: what harnesses do.")
                 && screen.contains("Harness default")
@@ -1943,4 +2088,216 @@ fn the_tui_saves_harness_default_for_a_model_provider_that_cant_be_reached() {
         "Harness default",
         crazyagent::provider_retry::ProviderRetry::HarnessDefault,
     );
+}
+
+/// Makes a graphify in `home` that the resolver finds and passes over (DEC-162), laid out as
+/// uv lays out a tool: `.local/bin/graphify` links to the tool's script, whose Python links
+/// to a real `python3.9` (a copy of `/bin/bash`) in an installation whose folders the group
+/// can change (0775); a link in the installation points out to a 0777 file elsewhere in
+/// the home. Input: the home. Output: the installation folder and the file outside it.
+fn refused_graphify(home: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let mode = std::fs::Permissions::from_mode;
+    let prefix = home.join(".local/share/uv/python/cpython-9.9.9-dummy");
+    let real = prefix.join("bin");
+    let tool = home.join(".local/share/uv/tools/graphifyy/bin");
+    let bin = home.join(".local/bin");
+    for folder in [&real, &tool, &bin] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    std::fs::copy("/bin/bash", real.join("python3.9")).unwrap();
+    std::fs::set_permissions(real.join("python3.9"), mode(0o755)).unwrap();
+    symlink(real.join("python3.9"), tool.join("python")).unwrap();
+    let script = tool.join("graphify");
+    let text = format!(
+        "#!{}\necho 'graphify 0.9.9'\n",
+        tool.join("python").display()
+    );
+    std::fs::write(&script, text).unwrap();
+    std::fs::set_permissions(&script, mode(0o755)).unwrap();
+    symlink(&script, bin.join("graphify")).unwrap();
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let outside = elsewhere.join("kept");
+    std::fs::write(&outside, "kept").unwrap();
+    std::fs::set_permissions(&outside, mode(0o777)).unwrap();
+    symlink(&outside, prefix.join("outside")).unwrap();
+    for folder in [&real, &prefix] {
+        std::fs::set_permissions(folder, mode(0o775)).unwrap();
+    }
+    (prefix, outside)
+}
+
+/// A first-run home for the refused-tool rows: a Projects folder and the Shift-Enter
+/// preference saved, as the Node row makes it. Input: a scratch prefix. Output: the home.
+fn first_run_home(prefix: &str) -> tempfile::TempDir {
+    let home = scratch(prefix);
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    home
+}
+
+/// Starts a clean-Mac engine on `home`: the system PATH and an empty gate root, so the only
+/// graphify it can find is the one in the home. Inputs: a scratch prefix, the home and the
+/// gate root. Output: the running engine.
+fn clean_engine(prefix: &str, home: &Path, gate: &Path) -> Engine {
+    let mut engine = Engine::new(prefix);
+    engine.home = Some(home.to_path_buf());
+    engine.env.push(("PATH", SYSTEM_PATH.into()));
+    engine
+        .env
+        .push(("CRAZYAGENT_GATE_SYSTEM_ROOT", gate.into()));
+    engine.launch();
+    engine
+}
+
+/// Goes through first run to the Setup page, where the tools check shows. Inputs: the
+/// engine and the home. Output: the TUI on the Setup page.
+fn first_run_setup_page(engine: &Engine, home: &Path) -> ScriptPty {
+    let mut pty = ScriptPty::launch(&engine.socket(), home);
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("the Setup page opens", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty
+}
+
+fn folder_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// DEC-162, Unused tools on Fix button (the default): first run's Setup page reads the
+/// graphify the resolver passed over as Found, not used with its line; p names the tree and
+/// the command, nothing changes before y, y removes group and other write from that tree
+/// alone, a link out of the tree leaves its file as it was, the row then reads Found and the
+/// engine logs the tree and counts. Needs the clean-Mac gate build.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate: the gate root hides this machine's own graphify"
+)]
+fn first_run_fixes_a_refused_graphify_only_after_the_confirm_names_its_tree() {
+    let home = first_run_home("ca-e2e-fix-home-");
+    let (prefix, outside) = refused_graphify(home.path());
+    let gate = scratch("ca-e2e-fix-gate-");
+    let mut engine = clean_engine("ca-e2e-fix-", home.path(), gate.path());
+    let mut pty = first_run_setup_page(&engine, home.path());
+    pty.until_within(
+        "the Graphify command row reads Found, not used with its line and the Setup page offers p",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found, not used")
+                && screen.contains("graphify can't start")
+                && screen.contains("p Fix")
+        },
+    );
+    pty.type_bytes(b"p");
+    pty.until(
+        "the confirm names the tool, the tree and the command",
+        |screen| {
+            screen.contains("Fix permissions for Graphify command?")
+                && screen.contains("cpython-9.9.9-dummy")
+                && screen.contains("chmod -R go-w")
+                && screen.contains("y Fix")
+        },
+    );
+    assert_eq!(folder_mode(&prefix), 0o775, "nothing changes before y");
+    pty.type_bytes(b"y");
+    pty.until_within(
+        "the fix ends and the Graphify command row reads Found",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found 0.9.9")
+                && !screen.contains("Found, not used")
+                && !screen.contains("p Fix")
+        },
+    );
+    for folder in [&prefix, &prefix.join("bin")] {
+        assert_eq!(folder_mode(folder), 0o755, "{}", folder.display());
+    }
+    assert_eq!(
+        folder_mode(&outside),
+        0o777,
+        "a link out of the tree leaves its file as it was"
+    );
+    drop(pty);
+    let log = engine.stop();
+    assert!(
+        log.contains("tool_fix_done tool=graphify") && log.contains("changed="),
+        "the engine logs the fix with its tree and counts:\n{log}"
+    );
+}
+
+/// DEC-162, Unused tools on Show the command only: first run's Setup page shows the command
+/// for the graphify the resolver passed over and no fix key, p says fixing is turned off,
+/// and the engine itself refuses a fix request with `tool_fix_off`, changing nothing. Needs
+/// the clean-Mac gate build.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate: the gate root hides this machine's own graphify"
+)]
+fn first_run_shows_only_the_command_for_a_refused_graphify_when_unused_tools_is_command_only() {
+    let home = first_run_home("ca-e2e-fixoff-home-");
+    let (prefix, _) = refused_graphify(home.path());
+    let gate = scratch("ca-e2e-fixoff-gate-");
+    let mut engine = clean_engine("ca-e2e-fixoff-", home.path(), gate.path());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let saved = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let reply = owner
+            .controller
+            .set_refused_tool(crazyagent::setup::RefusedTool::CommandOnly, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(saved, OwnerResult::Applied);
+    let mut pty = first_run_setup_page(&engine, home.path());
+    pty.until_within(
+        "the Graphify command row shows the command and the page offers no fix key",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found, not used")
+                && screen.contains("To fix it, run in Terminal: chmod -R go-w")
+                && !screen.contains("p Fix")
+        },
+    );
+    pty.type_bytes(b"p");
+    pty.until("p says fixing permissions is turned off", |screen| {
+        screen.contains("Fixing permissions from CrazyAgent is turned off in Settings.")
+    });
+    let answer = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let tree = prefix.canonicalize().unwrap().display().to_string();
+        let reply = owner
+            .controller
+            .fix_tool_permissions(Dependency::Graphify, tree, true, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(answer, e2e_support::rejected("tool_fix_off"));
+    assert_eq!(folder_mode(&prefix), 0o775, "a refused fix changes nothing");
+    drop(pty);
+    engine.stop();
 }

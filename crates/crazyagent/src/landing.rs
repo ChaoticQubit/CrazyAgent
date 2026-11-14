@@ -16,6 +16,7 @@ pub(crate) mod evidence;
 mod flow;
 #[cfg(unix)]
 mod git;
+mod hold;
 #[cfg(unix)]
 pub(crate) mod ide;
 #[cfg(unix)]
@@ -432,7 +433,7 @@ pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
 /// the folder while it moves. Dropping it lets landing work start again.
 #[derive(Debug)]
 pub(crate) struct RepositoryHolds {
-    _held: Vec<flow::Held>,
+    _held: Vec<hold::Held>,
 }
 
 /// Takes the landing hold on each repository, in path order, waiting no longer than
@@ -447,7 +448,7 @@ pub(crate) fn hold_repositories(
     let mut held = Vec::with_capacity(repositories.len());
     for repository in repositories {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        held.push(flow::hold_within(repository, left)?);
+        held.push(hold::hold_within(repository, left)?);
     }
     assert_eq!(held.len(), repositories.len());
     Some(RepositoryHolds { _held: held })

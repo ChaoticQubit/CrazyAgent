@@ -543,6 +543,47 @@ async fn a_long_scrollback_replay_outlives_the_attach_deadline_and_stays_whole()
     sub.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_that_stalls_past_its_buffer_gets_the_screen_again_and_never_a_skipped_line() {
+    let mut sub = SubAgent::start().await;
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+    let flood = 3 * 1024 * 1024;
+    control
+        .input(
+            format!("head -c {flood} /dev/zero | tr '\\0' a; echo; echo flood-$((6*7))-done\r")
+                .into_bytes(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(
+        read_until(&mut output, &mut seen, b"flood-42-done").await,
+        "the view shows the end of the flood after it fell behind"
+    );
+    assert!(
+        !contains(&seen, b"bytes of output skipped"),
+        "the owner never reads the engine's skipped-output line"
+    );
+    control.input(b"echo caught-up\r".to_vec()).await.unwrap();
+    assert!(
+        read_until(&mut output, &mut seen, b"\r\ncaught-up\r\n").await,
+        "live output follows the redrawn screen"
+    );
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+    sub.stop().await;
+}
+
 fn prompts(database: &std::path::Path) -> Vec<String> {
     let connection = rusqlite::Connection::open(database).unwrap();
     connection.busy_timeout(Duration::from_secs(5)).unwrap();

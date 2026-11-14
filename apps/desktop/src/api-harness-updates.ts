@@ -3,7 +3,10 @@ import { call, type Result } from "./api";
 export type UpdateMethod = { kind: "self_update" } | { kind: "homebrew"; cask: string } | { kind: "homebrew_formula"; formula: string } | { kind: "npm"; package: string } | { kind: "with_app" } | { kind: "unknown" };
 export type LatestVersion = { kind: "not_checked" } | { kind: "no_check" } | { kind: "up_to_date" } | { kind: "newer"; version: string } | { kind: "failed"; code: string };
 export interface LastUpdate { ok: boolean; code: string | null; output: string; from: string | null; to: string | null; ended_ms: number }
-export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null }
+/** What an installed harness lacks before it can run, as the engine's tool resolver reads it: the
+ * program its first line asks for, such as node, and the resolver's one owner line. */
+export interface HarnessNeeds { program: string | null; line: string }
+export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null; needs?: HarnessNeeds | null }
 export type UpdateMode = "check_and_update" | "check_only" | "off";
 export type CheckWhen = "on_button" | "on_open";
 export type OnlineLookup = "on" | "off";
@@ -43,6 +46,8 @@ const COPY: Record<string, string> = {
   harness_install_already: "It's already installed on this Mac.",
   harness_install_not_found: "The install finished, but CrazyAgent can't find the harness. Choose Check again.",
   harness_install_failed: "The install didn't finish.",
+  harness_install_needs_node: "CrazyAgent installs this one with npm, and Node.js isn't on this Mac yet.",
+  harness_install_list_invalid: "CrazyAgent couldn't install that list of harnesses. Pick them again.",
 };
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -69,6 +74,20 @@ export function updateHarness(id: string): Promise<Result<void>> {
 export function installHarness(id: string): Promise<Result<void>> {
   assert(id.length > 0, "harness id");
   return call<void>("desktop_harness_install", { id });
+}
+
+/** Starts installing several harnesses one after another; the engine keeps going if the step
+ * closes, and a failure does not stop the rest. Input: the harness ids, RCLI left out.
+ * Output: ok once queued, or a plain error with its code. */
+export function installHarnesses(ids: readonly string[]): Promise<Result<void>> {
+  assert(ids.length > 0 && ids.every((id) => id.length > 0), "harness ids");
+  return call<void>("desktop_harness_install_many", { ids });
+}
+
+/** Reads the harness ids still waiting to install, in the order they will run.
+ * Output: the ids, not ready, or a plain error. */
+export function queuedHarnesses(): Promise<Result<string[]>> {
+  return call<string[]>("desktop_harness_queued");
 }
 
 /** Reads the harness update settings. Output: the four settings, not ready, or a plain error. */

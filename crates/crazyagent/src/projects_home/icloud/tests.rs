@@ -1,4 +1,5 @@
 use super::*;
+use crate::projects_home::COPY_BOUNDS;
 
 fn seconds(count: u64) -> Duration {
     Duration::from_secs(count)
@@ -113,6 +114,140 @@ fn brctl_runs_by_absolute_path_with_each_placeholder_as_its_own_argument() {
     assert_eq!(command.get_envs().count(), 0);
 }
 
+/// Stands in for iCloud: `count` placeholders under /icloud, each landing the moment its ask
+/// ends, with every ask taking `ask_time`.
+struct FakeIcloud {
+    paths: Vec<PathBuf>,
+    landed: std::sync::atomic::AtomicUsize,
+    asks: std::sync::atomic::AtomicUsize,
+    ask_time: Duration,
+}
+
+impl FakeIcloud {
+    fn new(count: usize, ask_time: Duration) -> Self {
+        assert!(count > 0);
+        Self {
+            paths: (0..count)
+                .map(|n| PathBuf::from(format!("/icloud/f{n:05}")))
+                .collect(),
+            landed: Default::default(),
+            asks: Default::default(),
+            ask_time,
+        }
+    }
+
+    fn ask(&self, batch: &[PathBuf]) -> Result<(), EngineError> {
+        assert!(!batch.is_empty() && batch.len() <= BATCH_PATHS_MAX);
+        self.asks.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.ask_time);
+        let landed = self.landed.fetch_add(batch.len(), Ordering::SeqCst);
+        assert_eq!(
+            batch.first(),
+            self.paths.get(landed),
+            "batches are asked in order"
+        );
+        Ok(())
+    }
+
+    fn list(&self) -> Result<Placeholders, EngineError> {
+        let landed = self.landed.load(Ordering::SeqCst);
+        assert!(landed <= self.paths.len());
+        Ok(Placeholders {
+            paths: self.paths[landed..].to_vec(),
+            largest_bytes: 0,
+        })
+    }
+}
+
+#[test]
+fn files_that_land_while_slow_asks_still_go_are_counted_before_the_last_ask_ends() {
+    let batches = 6;
+    let icloud = FakeIcloud::new(BATCH_PATHS_MAX * batches, Duration::from_millis(80));
+    let download = Download::default();
+    let seen = AtomicU64::new(0);
+    let ask = |batch: &[PathBuf], _stop: &dyn Fn() -> bool| {
+        seen.fetch_max(download.progress().done, Ordering::SeqCst);
+        icloud.ask(batch)
+    };
+    let list = |_: &Path| icloud.list();
+    let poll = Duration::from_millis(10);
+    let files = run(
+        Path::new("/icloud"),
+        &download,
+        &ask,
+        &list,
+        COPY_BOUNDS,
+        poll,
+    )
+    .unwrap();
+    let total = (BATCH_PATHS_MAX * batches) as u64;
+    assert_eq!(files, total);
+    assert_eq!(download.progress(), Progress { total, done: total });
+    assert_eq!(icloud.asks.load(Ordering::SeqCst), batches);
+    let counted = seen.load(Ordering::SeqCst);
+    assert!(
+        counted >= BATCH_PATHS_MAX as u64,
+        "progress read {counted} while later asks still waited"
+    );
+    assert!(counted < total);
+}
+
+#[test]
+fn a_failed_ask_ends_the_download_with_its_code_and_asks_nothing_more() {
+    let icloud = FakeIcloud::new(BATCH_PATHS_MAX * 4, Duration::from_millis(20));
+    let download = Download::default();
+    let ask = |batch: &[PathBuf], _stop: &dyn Fn() -> bool| {
+        if icloud.asks.load(Ordering::SeqCst) == 1 {
+            icloud.asks.fetch_add(1, Ordering::SeqCst);
+            return Err(refused(NOT_DOWNLOADED));
+        }
+        icloud.ask(batch)
+    };
+    let list = |_: &Path| icloud.list();
+    let started = Instant::now();
+    let failed = run(
+        Path::new("/icloud"),
+        &download,
+        &ask,
+        &list,
+        COPY_BOUNDS,
+        Duration::from_millis(10),
+    );
+    assert_eq!(failed.unwrap_err().0, NOT_DOWNLOADED);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(icloud.asks.load(Ordering::SeqCst), 2);
+    assert!(download.progress().done < download.progress().total);
+}
+
+#[test]
+fn a_cancel_during_slow_asks_stops_the_ask_and_the_download_within_one_check() {
+    let icloud = FakeIcloud::new(BATCH_PATHS_MAX * 4, Duration::from_millis(10));
+    let download = Download::default();
+    let ask = |_: &[PathBuf], stop: &dyn Fn() -> bool| {
+        icloud.asks.fetch_add(1, Ordering::SeqCst);
+        download.cancel();
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until && !stop() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(stop(), "the ask sees the cancel");
+        Err(stopped("stopped"))
+    };
+    let list = |_: &Path| icloud.list();
+    let started = Instant::now();
+    let cancelled = run(
+        Path::new("/icloud"),
+        &download,
+        &ask,
+        &list,
+        COPY_BOUNDS,
+        Duration::from_millis(10),
+    );
+    assert_eq!(cancelled.unwrap_err().0, NOT_DOWNLOADED);
+    assert!(started.elapsed() < CANCEL_EVERY * 5);
+    assert_eq!(icloud.asks.load(Ordering::SeqCst), 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_folder_with_no_placeholders_downloads_nothing_and_never_runs_brctl() {
@@ -121,12 +256,12 @@ fn a_folder_with_no_placeholders_downloads_nothing_and_never_runs_brctl() {
     fs::write(folder.path().join("src/deep/main.rs"), "fn main() {}\n").unwrap();
     std::os::unix::fs::symlink("/", folder.path().join("root-link")).unwrap();
     assert_eq!(
-        placeholders(folder.path()).unwrap(),
+        placeholders(folder.path(), COPY_BOUNDS).unwrap(),
         Placeholders::default()
     );
     let download = Download::default();
     let path = folder.path().to_str().unwrap();
-    assert_eq!(super::download(path, &download).unwrap(), 0);
+    assert_eq!(super::download(path, &download, COPY_BOUNDS).unwrap(), 0);
     assert_eq!(download.progress(), Progress { total: 0, done: 0 });
     for (path, code) in [
         ("relative", "icloud_path_invalid"),
@@ -134,7 +269,7 @@ fn a_folder_with_no_placeholders_downloads_nothing_and_never_runs_brctl() {
         ("/", "icloud_folder_unsafe"),
     ] {
         assert_eq!(
-            super::download(path, &download).unwrap_err().0,
+            super::download(path, &download, COPY_BOUNDS).unwrap_err().0,
             code,
             "{path}"
         );
@@ -214,7 +349,7 @@ fn placeholders_in_icloud_drive_are_counted_downloaded_and_a_cancel_stops_the_wa
         files.push(file);
     }
     probe.evict(&files);
-    let left = placeholders(&folder).unwrap();
+    let left = placeholders(&folder, COPY_BOUNDS).unwrap();
     assert_eq!(left.paths.len(), files.len());
     assert_eq!(left.largest_bytes, "probe 10\n".len() as u64);
     let measured =
@@ -223,17 +358,20 @@ fn placeholders_in_icloud_drive_are_counted_downloaded_and_a_cancel_stops_the_wa
     let cancelled = Download::default();
     cancelled.cancel();
     assert_eq!(
-        super::download(folder.to_str().unwrap(), &cancelled)
+        super::download(folder.to_str().unwrap(), &cancelled, COPY_BOUNDS)
             .unwrap_err()
             .0,
         "home_icloud_not_downloaded"
     );
     let download = Download::default();
     assert_eq!(
-        super::download(folder.to_str().unwrap(), &download).unwrap(),
+        super::download(folder.to_str().unwrap(), &download, COPY_BOUNDS).unwrap(),
         files.len() as u64
     );
-    assert_eq!(placeholders(&folder).unwrap(), Placeholders::default());
+    assert_eq!(
+        placeholders(&folder, COPY_BOUNDS).unwrap(),
+        Placeholders::default()
+    );
     assert_eq!(
         download.progress(),
         Progress {
@@ -267,4 +405,66 @@ fn a_copy_or_move_meeting_a_placeholder_refuses_and_leaves_the_source_as_it_was(
     assert!(still.unwrap(), "the placeholder was fetched");
     assert_eq!(fs::read_to_string(folder.join("a.txt")).unwrap(), "kept\n");
     assert!(fs::symlink_metadata(target.path().join("moved")).is_err());
+}
+
+/// Downloads an evicted folder of iCloud Drive that the runner names in
+/// `CRAZYAGENT_ICLOUD_SCRATCH` through the real brctl, each ask held `SLOW_ASK` first as the
+/// engine's asks took seconds in the owner's run, and checks that the recorded progress never
+/// trails the files on disk by more than two polls while later batches still wait to be asked.
+/// Run with `--ignored` by its exact name. The folder is kept; its files are local afterwards.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs an evicted folder of iCloud Drive named in CRAZYAGENT_ICLOUD_SCRATCH"]
+fn progress_follows_files_landing_from_icloud_within_two_polls() {
+    const SLOW_ASK: Duration = Duration::from_secs(3);
+    let folder = PathBuf::from(std::env::var_os("CRAZYAGENT_ICLOUD_SCRATCH").unwrap());
+    let drive = PathBuf::from(std::env::var_os("HOME").unwrap())
+        .join("Library/Mobile Documents/com~apple~CloudDocs");
+    let root = folder.canonicalize().unwrap();
+    assert!(folder.starts_with(&drive) && folder != drive);
+    let total = placeholders(&root, COPY_BOUNDS).unwrap().paths.len() as u64;
+    assert!(total > 8 * BATCH_PATHS_MAX as u64, "evict the folder first");
+    let slow = |batch: &[PathBuf], stop: &dyn Fn() -> bool| {
+        std::thread::sleep(SLOW_ASK);
+        request(batch, stop)
+    };
+    let list = |root: &Path| placeholders(root, COPY_BOUNDS);
+    let download = Download::default();
+    let mut landed: Vec<(Instant, u64)> = Vec::new();
+    let (mut moved_early, mut trailed) = (false, None);
+    let outcome = std::thread::scope(|scope| {
+        let running = scope.spawn(|| run(&root, &download, &slow, &list, COPY_BOUNDS, POLL_EVERY));
+        for _ in 0..30 * 60 * 4 {
+            if running.is_finished() || trailed.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            let left = placeholders(&root, COPY_BOUNDS).unwrap().paths.len() as u64;
+            let now = Instant::now();
+            let shown = download.progress();
+            landed.push((now, total.saturating_sub(left)));
+            let floor = landed
+                .iter()
+                .filter(|(at, _)| now.duration_since(*at) >= 2 * POLL_EVERY)
+                .map(|(_, done)| *done)
+                .max()
+                .unwrap_or(0);
+            if shown.done < floor {
+                trailed = Some((shown, floor));
+            }
+            moved_early |= shown.done > 0 && shown.done < total;
+        }
+        download.cancel();
+        running.join().unwrap()
+    });
+    assert_eq!(
+        trailed, None,
+        "shown progress, files on disk two polls earlier"
+    );
+    assert_eq!(outcome.unwrap(), total);
+    assert!(moved_early, "progress moved only at the end");
+    assert_eq!(
+        placeholders(&root, COPY_BOUNDS).unwrap(),
+        Placeholders::default()
+    );
 }

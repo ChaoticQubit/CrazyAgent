@@ -43,7 +43,7 @@ function leases(runtime, project) {
 /** Lets the project's master use the test pool, as the owner does on the Models page: the
  * pool serves the project and the project leader role. Inputs: the bridge, the project and
  * the next generation. Output: none. */
-async function poolForMaster(bridge, project, next) {
+export async function poolForMaster(bridge, project, next) {
   const basis = await value(bridge, "desktop_inspect_model_access", { collection: "pools", id: "local-pool" });
   const now = basis.record.pool;
   const pool = {
@@ -59,7 +59,7 @@ async function poolForMaster(bridge, project, next) {
 /** Sets the test's key-less connection up for agents, as the app does once an account is in
  * a pool, so the engine registers the configured RCLI master before it leases its worktree.
  * Inputs: the bridge and the next generation. Output: none. */
-async function readyForAgents(bridge, next) {
+export async function readyForAgents(bridge, next) {
   const { ticket } = await value(bridge, "desktop_inspect_model_access", { collection: "connections", id: CONNECTION });
   const configured = await value(bridge, "desktop_configure_account_profile", { ticket, secret: null, generation: next() });
   assert.ok(!configured.pending && configured.reply.outcome !== "not_recorded", `the connection is set up for agents: ${JSON.stringify(configured)}`);

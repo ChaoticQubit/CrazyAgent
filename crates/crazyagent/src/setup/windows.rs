@@ -209,6 +209,7 @@ impl Installer for WindowsInstaller {
                     Ok(None)
                 }
             }
+            Dependency::Node => Err(InstallError(super::PLATFORM_UNSUPPORTED)),
         }
     }
 

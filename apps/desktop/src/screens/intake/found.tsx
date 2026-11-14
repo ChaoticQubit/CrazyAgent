@@ -1,16 +1,17 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
-import { intakeCopy, loadFoundProjects, loadProjectsHome, startOnboarding } from "../../api-intake";
+import { dismissIntake, intakeCopy, loadFoundProjects, loadProjectsHome, startIntake, startOnboarding, stopIntake } from "../../api-intake";
 import { loadPools, receiptState, removeProject, type PoolChoice } from "../../api-projects";
-import type { FoundProject, ProjectsHome } from "../../engine-client";
+import type { AddOverride, FoundProject, IntakeJob, IntakeJobState, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Dialog, Icon, RadioCard, StatusBadge, formatRoute, navigate, type IconName } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Icon, RadioCard, StatusBadge, formatRoute, navigate, type IconName, type Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
 import { NotReady } from "../project/shared";
+import { AnywayDialog } from "./add-folder";
 import { HomeFolderPicker } from "./home-folder";
-import { FOUND_POLL_MS, foundRow, homeLine, pendingFolders, startedProject, type FoundAction } from "./intake";
+import { folderName, foundRow, homeLine, jobActions, jobLine, jobQuestion, pendingFolders, startedProject, type FoundAction } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -22,12 +23,45 @@ const ACTION_ICONS: Record<Exclude<FoundAction, null>, IconName> = {
   setup: "list-checks", continue: "arrow-right", open: "folder-open", remove: "trash",
 };
 
+const JOB_BADGES: Record<IntakeJobState["state"], { word: string; tone: Tone }> = {
+  downloading: { word: "Downloading", tone: "info" }, copying: { word: "Adding", tone: "info" }, clearing: { word: "Finishing", tone: "info" },
+  done: { word: "Added", tone: "ok" }, failed: { word: "Failed", tone: "danger" }, cancelled: { word: "Stopped", tone: "neutral" },
+  needs_answer: { word: "Needs answer", tone: "warn" },
+};
+
+const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", dismiss: "Dismiss" };
+
+/** Home's row for the engine's intake job: the folder, a badge for its state, its line with the
+ * counts as files land, and only the actions its state allows. Inputs: the job, a busy flag and
+ * the four action handlers. Output: the row. */
+export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss }: {
+  job: IntakeJob;
+  busy: boolean;
+  onStop: () => void;
+  onRetry: () => void;
+  onAnswer: () => void;
+  onDismiss: () => void;
+}) {
+  const badge = JOB_BADGES[job.state.state];
+  const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, dismiss: onDismiss };
+  return <div className="in-row">
+    <span className="in-row-main">
+      <span className="pj-row"><Icon name="folder" size={14} /><strong>{displayText(folderName(job.source))}</strong><StatusBadge word={badge.word} tone={badge.tone} /></span>
+      <span className="pj-small pj-secondary" role="status">{displayText(jobLine(job))}</span>
+    </span>
+    <span className="pj-row">{jobActions(job).map((action) => <Button key={action} size="small" variant={action === "answer" ? "primary" : "secondary"}
+      disabled={busy} onClick={handlers[action]}>{JOB_LABELS[action]}</Button>)}</span>
+  </div>;
+}
+
 /** Home's projects folder section as a view of its reads: the chooser while no folder is set, then
- * the found, setting up and missing folders with one action each. Inputs: the two reads, an
- * optional chooser, and the action and retry handlers. Output: the section, or nothing to say. */
-export function FoundProjectsView({ home, found, chooser, onSetUp, onOpen, onRemove, onRetry }: {
+ * the intake job's row, if any, and the found, setting up and missing folders with one action
+ * each. Inputs: the two reads, the job row, an optional chooser, and the action and retry
+ * handlers. Output: the section, or nothing to say. */
+export function FoundProjectsView({ home, found, job, chooser, onSetUp, onOpen, onRemove, onRetry }: {
   home: Loaded<ProjectsHome>;
   found: Loaded<FoundProject[]>;
+  job?: ReactNode;
   chooser?: ReactNode;
   onSetUp: (folder: FoundProject) => void;
   onOpen: (id: string, setup: boolean) => void;
@@ -51,6 +85,7 @@ export function FoundProjectsView({ home, found, chooser, onSetUp, onOpen, onRem
   };
   return <section className="pj in-found" aria-label="Projects folder">
     {line && <p className="pj-small pj-muted">{line}</p>}
+    {job}
     {found.kind === "not_ready" && <NotReady what="new project folders aren't listed in this build." />}
     {found.kind === "error" && <div className="pj-row" role="alert"><span className="pj-error">{found.message}</span>
       <Button size="small" icon="refresh-cw" onClick={onRetry}>Try again</Button></div>}
@@ -145,34 +180,49 @@ export function SetUpDialog({ folder, onClose, onStarted }: { folder: SetUpFolde
   </Dialog>;
 }
 
-/** Home's projects folder section: reads the folder and its found projects every few seconds,
- * sets one up on a pool, opens or continues one, and removes a project whose folder is gone. */
+/** Home's intake job: the row for the job the session reads, Stop, Try again with the same way and
+ * overrides, the Move anyway or Copy anyway question for a soft refusal, whose Use where it is
+ * opens setup in place, and Dismiss. Input: what Use where it is opens. Output: the row and its
+ * question, or nothing without a job. */
+function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void }) {
+  const session = useAppSession();
+  const job = session.intake;
+  const [busy, setBusy] = useState(false);
+  const [answering, setAnswering] = useState(false);
+  if (job === null) return null;
+  const run = async <T,>(call: () => Promise<Result<T>>, started: (value: T) => IntakeJob | undefined = () => undefined) => {
+    if (busy) return;
+    setBusy(true);
+    const result = await call();
+    setBusy(false);
+    if (result.kind === "error") session.showToast(result.message);
+    if (result.kind === "not_ready") session.showToast("Adding a folder isn't in this build.");
+    session.refreshIntake(result.kind === "ok" ? started(result.value) : undefined);
+  };
+  const restart = (overrides: AddOverride[]) => {
+    setAnswering(false);
+    void run(() => startIntake(job.source, job.mode, overrides), (view) => view);
+  };
+  const question = job.state.state === "needs_answer" ? jobQuestion(job) : null;
+  const name = folderName(job.source);
+  return <>
+    <IntakeJobView job={job} busy={busy} onStop={() => void run(() => stopIntake(job.id))} onRetry={() => restart(job.overrides)}
+      onAnswer={() => setAnswering(true)} onDismiss={() => void run(() => dismissIntake(job.id))} />
+    {question && <AnywayDialog open={answering} way={job.mode} name={name} size={null} refused={null} issues={question.issues} busy={busy}
+      onUseHere={() => { setAnswering(false); onSetUp({ name, path: job.source }); }} onAnyway={() => restart(question.overrides)}
+      onCancel={() => setAnswering(false)} />}
+  </>;
+}
+
+/** Home's projects folder section: the found folders the session reads every few seconds and the
+ * intake job's row; sets one up on a pool, opens or continues one, and removes a project whose
+ * folder is gone. */
 export function FoundProjects() {
   const session = useAppSession();
   const [home, reloadHome] = useLoad(loadProjectsHome, [], "projects-home");
-  const [found, setFound] = useState<Loaded<FoundProject[]>>({ kind: "loading" });
-  const [tick, setTick] = useState(0);
-  const [settingUp, setSettingUp] = useState<FoundProject | null>(null);
+  const [settingUp, setSettingUp] = useState<SetUpFolder | null>(null);
   const [removing, setRemoving] = useState<FoundProject | null>(null);
   const [busy, setBusy] = useState(false);
-  const path = home.kind === "ok" ? home.value.path : null;
-
-  useEffect(() => {
-    if (!path) return;
-    let live = true;
-    let timer: number | undefined;
-    const read = async () => {
-      const result = await loadFoundProjects();
-      if (!live) return;
-      setFound(result);
-      if (result.kind !== "not_ready") timer = window.setTimeout(() => void read(), FOUND_POLL_MS);
-    };
-    void read();
-    return () => { live = false; window.clearTimeout(timer); };
-  }, [path, tick]);
-
-  const ready = found.kind === "ok" ? found.value.filter((folder) => folder.state === "ready").map((folder) => folder.project_id ?? folder.path).sort().join("\n") : "";
-  useEffect(() => { if (ready) void session.refreshProjects(); }, [ready]);
 
   const remove = async (folder: FoundProject) => {
     if (!folder.project_id || busy) return;
@@ -186,15 +236,16 @@ export function FoundProjects() {
     else if (state.kind === "unconfirmed") session.showToast("We couldn't confirm the project was removed. Check Home.");
     else session.showToast(`${folder.name} was removed.`);
     void session.refreshProjects();
-    setTick((old) => old + 1);
+    session.refreshFound();
   };
 
   return <>
-    <FoundProjectsView home={home} found={found} chooser={<HomeFolderPicker onSaved={reloadHome} />}
-      onSetUp={setSettingUp} onRemove={setRemoving} onRetry={() => setTick((old) => old + 1)}
+    <FoundProjectsView home={home} found={session.found} job={<IntakeJobPanel onSetUp={setSettingUp} />}
+      chooser={<HomeFolderPicker onSaved={() => { reloadHome(); session.refreshFound(); }} />}
+      onSetUp={setSettingUp} onRemove={setRemoving} onRetry={session.refreshFound}
       onOpen={(id, setup) => navigate(setup ? { name: "onboarding", id } : { name: "project", id, tab: "overview" })} />
     {settingUp && <SetUpDialog folder={settingUp} onClose={() => setSettingUp(null)}
-      onStarted={() => { setSettingUp(null); setTick((old) => old + 1); session.showToast(`Setting up ${settingUp.name}. Continue setup from Home.`); }} />}
+      onStarted={() => { setSettingUp(null); session.refreshFound(); session.showToast(`Setting up ${settingUp.name}. Continue setup from Home.`); }} />}
     <ConfirmDialog open={removing !== null} title={`Remove ${removing?.name ?? "this project"}?`} confirmLabel="Remove project" cancelLabel="Keep project" pending={busy}
       onCancel={() => setRemoving(null)} onConfirm={() => { if (removing) void remove(removing); }}>
       CrazyAgent forgets this project. Its folder is no longer in your projects folder, so nothing on disk changes.

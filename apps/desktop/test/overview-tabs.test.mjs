@@ -14,7 +14,7 @@ const NOW = 10 * 60_000;
 
 const base = () => ({
   readme: null, tabs: TAB_IDS.map((tab) => ({ tab, text: null, version: "", edited: false, proposal: null, proposal_version: "", blocked: null })),
-  competitors: { kind: "missing" }, running: false, stale: false, checked_ms: null, failure: null, refresh: "after_landing", apply: "always_ask", needs_home: false,
+  competitors: { kind: "missing" }, running: false, stale: false, checked_ms: null, failure: null, waiting_for_account: false, refresh: "after_landing", apply: "always_ask", needs_home: false,
 });
 const blockedTab = (overview, id, blocked) => ({ ...overview, tabs: overview.tabs.map((tab) => tab.tab === id ? { ...tab, blocked } : tab) });
 const withTab = (overview, id, text) => ({ ...overview, tabs: overview.tabs.map((tab) => tab.tab === id ? { ...tab, text, version: `v-${id}` } : tab) });
@@ -134,17 +134,26 @@ test("a failed run shows its plain reason and keeps the tab text", () => {
 
 test("a run that waits for an account says why under a status, never as a failed refresh alert, while it is queued or running", () => {
   const reason = "No account in this project's pool can run the refresh";
-  const waiting = { ...base(), stale: true, failure: reason };
+  const waiting = { ...base(), stale: true, failure: reason, waiting_for_account: true };
   for (const overview of [waiting, { ...waiting, stale: false, running: true }]) {
     const html = page({ selected: "features", overview });
     assert.doesNotMatch(html, /role="alert"/);
     assert.doesNotMatch(html, /Couldn&#x27;t refresh the tabs/);
     assert.match(html, /<p class="pj-muted" role="status">No account in this project&#x27;s pool can run the refresh<\/p>/);
   }
-  const ended = page({ selected: "features", overview: { ...base(), failure: reason } });
+  const ended = page({ selected: "features", overview: { ...base(), failure: reason, waiting_for_account: true } });
   assert.match(ended, /<p class="pj-error" role="alert">Couldn&#x27;t refresh the tabs\. No account in this project&#x27;s pool can run the refresh<\/p>/);
   const off = page({ selected: "features", overview: { ...waiting, refresh: "off" } });
   assert.match(off, /role="alert"[^>]*>Couldn&#x27;t refresh the tabs\./);
+});
+
+test("an ended failure stays a failed refresh alert while a new run is queued and while it writes (IW-L1)", () => {
+  const ended = { ...base(), failure: "The last refresh did not finish" };
+  for (const overview of [{ ...ended, stale: true }, { ...ended, running: true }, { ...ended, stale: true, running: true }]) {
+    const html = page({ selected: "features", overview });
+    assert.match(html, /<p class="pj-error" role="alert">Couldn&#x27;t refresh the tabs\. The last refresh did not finish<\/p>/, JSON.stringify(overview));
+    assert.doesNotMatch(html, /<p class="pj-muted" role="status">The last refresh did not finish<\/p>/);
+  }
 });
 
 test("the strip says when the tabs were last checked and that a run is writing", () => {
@@ -193,6 +202,17 @@ test("the tabs are read again only while a run is going or a change set landed",
   assert.equal(view.pollEvery(base()), null);
   assert.equal(view.pollEvery(null), null);
   assert.equal(api.OVERVIEW_POLL_MS, 5_000);
+});
+
+test("a failed read again keeps the tabs a good read showed, as the TUI does, so a tab pick never blanks them", () => {
+  const good = { kind: "ok", value: base() };
+  const newer = { kind: "ok", value: { ...base(), checked_ms: NOW } };
+  const failed = { kind: "error", code: "engine_unreachable", message: "The engine isn't running." };
+  assert.equal(view.keptRead(good, failed), good);
+  assert.equal(view.keptRead(good, { kind: "not_ready" }), good);
+  assert.equal(view.keptRead(good, newer), newer);
+  assert.equal(view.keptRead(undefined, failed), failed, "with nothing shown yet the failure is said");
+  assert.equal(view.keptRead(failed, failed), failed);
 });
 
 test("every Overview call names its bridge command, and each command is in the handler list", () => {

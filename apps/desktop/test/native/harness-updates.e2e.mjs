@@ -53,12 +53,11 @@ function quoted(path) {
   return `'${path}'`;
 }
 
-/** Puts a fake Codex 0.0.1 in the npm prefix `~/.npm-global` of the test HOME, a HOME place the
- * engine looks in (it drops PATH folders in a temp folder), with a fake npm that logs every call,
- * answers 0.0.2 to `view` and turns the harness into 0.0.2 on `install`; the log path is written
- * into the script. Inputs: the test HOME and folder. Output: the bin folder, harness and log. */
-function npmCodex(home, root) {
-  const prefix = join(home, ".npm-global");
+/** Puts a fake Codex 0.0.1 in an npm prefix, with a fake npm that logs every call, answers
+ * 0.0.2 to `view` and turns the harness into 0.0.2 on `install`. The engine runs these with a
+ * cleared environment, so the log path is written into the script. Inputs: the test folder and
+ * the prefix. Output: the prefix, its bin folder, the harness and the npm log. */
+function npmCodex(root, prefix) {
   const harness = join(prefix, "lib", "node_modules", "@openai", "codex", "bin", "codex");
   const log = join(root, "npm.log");
   mkdirSync(join(prefix, "bin"), { recursive: true, mode: 0o700 });
@@ -74,7 +73,7 @@ case "$1" in
   *) exit 2 ;;
 esac
 `);
-  return { bin: join(prefix, "bin"), harness, log };
+  return { prefix, bin: join(prefix, "bin"), harness, log };
 }
 
 /** Puts a fake self-updating Claude Code 0.0.1 where its own installer would, under the test
@@ -143,11 +142,11 @@ async function until(what, wanted, read, ms = STEP_MS) {
   }
 }
 
-/** Starts the real engine and the bridge with fake harnesses first on the engine's PATH, makes
- * one project, serves the built app to a browser page, runs the steps and stops everything.
+/** Starts the real engine and the bridge with fake harnesses in the test HOME's harness folders,
+ * makes one project, serves the built app to a browser page, runs the steps and stops all.
  * Inputs: the test context, the folder prefix, the steps, whether HTTPS goes through a refusing
- * proxy, whether the fake Codex is on PATH at start, and the page's local answers. The steps get
- * the bridge, the owner, the page and its helpers, the fakes, the proxy and the engine. */
+ * proxy, whether the fake Codex is installed at start, and the page's local answers. The steps
+ * get the bridge, the owner, the page and its helpers, the fakes, the proxy and the engine. */
 async function onEngine(t, prefix, steps, { offline = false, codexAtStart = true, local = {} } = {}) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -165,7 +164,7 @@ async function onEngine(t, prefix, steps, { offline = false, codexAtStart = true
   const repo = join(root, "repos", "tool-shop");
   for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, repo]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   ownerRepo(repo);
-  const codex = codexAtStart ? npmCodex(home, root) : null;
+  const codex = codexAtStart ? npmCodex(root, join(home, ".npm-global")) : null;
   const fakes = { codex, claude: selfUpdatingClaude(home), opencode: plainOpencode(home), root };
   const proxy = await refusingProxy();
   const provider = await closedPort();
@@ -298,7 +297,7 @@ test("Harness updates Check and update: Check shows the newer version, and Updat
     await me.waitFor("the Update confirm", (text) => text.includes(`Update ${name("codex")}?`));
     const asked = await dialog();
     assert.equal(asked.title, `Update ${name("codex")}?`);
-    assert.equal(asked.line, `${join(fakes.codex.bin, "npm")} install -g @openai/codex`, "the confirm shows exactly the line the engine runs");
+    assert.equal(asked.line, `${fakes.codex.prefix}/bin/npm install -g @openai/codex`, "the confirm shows exactly the line the engine runs");
     assert.match(asked.text, /Installed with npm \(@openai\/codex\)\./);
     assert.match(asked.text, /When it finishes, new agents use the new version with no restart\./);
     await me.capture("update-confirm");
@@ -335,9 +334,36 @@ test("Harness updates Off: no Check or Update button, and a direct bridge call a
     await until("Off on the page that opened again", "Off", () => shownChoice("mode"));
     await rowShows("aider", "its install line or reason, read once the settings are known", /Install|Homebrew or npm/);
     assert.deepEqual(await buttons("codex"), [], "Off shows no harness buttons");
-    assert.doesNotMatch(await row("codex"), /Version 0\.0\.1/, "Off reads no versions");
+    assert.doesNotMatch(await row("codex"), /Version 0\.0\.1/, "Off shows no version");
     assert.equal(await refused(bridge, "desktop_harness_update", "codex"), "harness_update_off");
     assert.deepEqual(npmCalls(fakes.codex.log), [], "npm never ran");
+  }));
+
+test("A found harness the tool resolver can't run is listed and grouped Can't run with the resolver's line and Try again, never Ready, and Try again reads it and moves it back to Ready once it runs", { timeout: 600000 }, (t) =>
+  onEngine(t, "ca-harness-cant-run-", async ({ bridge, me, page, open, name, rowShows, buttons, fakes }) => {
+    const line = "codex needs ca-e2e-missing-runtime, which is missing. Install it, or run setup again from Settings. Then try again.";
+    script(fakes.codex.harness, "#!/usr/bin/env ca-e2e-missing-runtime\n");
+    await open();
+    const blocked = await rowShows("codex", "the resolver's line", line);
+    assert.match(blocked, /Can't run/);
+    assert.doesNotMatch(blocked, /Ready|Version/, "a harness that can't run never reads Ready or a version");
+    assert.deepEqual(await buttons("codex"), [`Try again: ${name("codex")}`], "Try again is its only button");
+    assert.equal((await versions(bridge, "codex")).needs?.line, line, "the row shows the engine's needs line");
+    const listed = (await value(bridge, "desktop_harness_catalog", { check: false })).find((item) => item.id === "codex");
+    assert.deepEqual(listed?.status, { kind: "cant_run", reason: line }, "the engine lists it Can't run, never Ready");
+    assert.match(await page.evaluate("document.body.innerText"), /can't run \(1\)/i, "the page groups it under Can't run");
+    assert.doesNotMatch(await page.evaluate("document.body.innerText"), /Install Node\.js/, "a need other than Node offers no Node.js install");
+    await me.capture("cant-run");
+    script(fakes.codex.harness, "#!/bin/sh\necho \"codex-cli 0.0.1\"\n");
+    await me.click(`Try again: ${name("codex")}`, "button");
+    const runs = await rowShows("codex", "the version once it runs", "Version 0.0.1.");
+    assert.match(runs, /Ready/);
+    assert.doesNotMatch(runs, /Can't run/);
+    assert.deepEqual(npmCalls(fakes.codex.log), [], "Try again asked npm nothing");
+    await until("Codex leaves the Can't run group once it runs", false, async () => /can't run \(1\)/i.test(await page.evaluate("document.body.innerText")));
+    const back = (await value(bridge, "desktop_harness_catalog", { check: false })).find((item) => item.id === "codex");
+    assert.deepEqual(back?.status, { kind: "ready" }, "the engine lists it Ready once it runs");
+    await me.capture("runs-again");
   }));
 
 test("Check for harness updates Only when I choose: opening the page runs no check", { timeout: 600000 }, (t) =>

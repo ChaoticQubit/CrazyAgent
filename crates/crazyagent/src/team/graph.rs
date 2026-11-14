@@ -397,6 +397,14 @@ pub fn name_kept(graph: &mut TeamGraph, kept: impl Fn(&AgentId) -> bool) {
     );
 }
 
+/// Whether an agent's terminal can be opened: it is live and its pane runs, which the engine
+/// marks by recording the pane's process group when the pane reports ready, so an agent
+/// still starting or being taken over by a restarted engine has none yet. A teammate row
+/// lives in its lead's pane and never gets a group of its own. Takes the agent. Returns whether.
+fn pane_runs(agent: &TeamAgent) -> bool {
+    agent.status.live() && (agent.process_group.is_some() || agent.role == AgentRole::Teammate)
+}
+
 /// Builds a project's who-leads-whom graph from its team status and the facts read beside
 /// it. The master is on top; a sub-agent with no lead is a harness lead under it, and one
 /// with a listed lead sits under that lead, as `lead_tree` orders them, a teammate row too.
@@ -468,7 +476,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         account: master.and_then(|agent| agent.account.clone()),
         branch: status.master_branch.clone(),
         terminal: master
-            .filter(|agent| agent.status.live())
+            .filter(|agent| pane_runs(agent))
             .and_then(|agent| AgentId::team(agent.id).ok()),
         questions: None,
         agent: master.map(|agent| agent.id),
@@ -505,7 +513,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             |lead| AgentId::team(lead).map_or_else(|_| MASTER_NODE.to_owned(), |l| l.to_string()),
         );
         assert!(parent == MASTER_NODE || agents.contains(&parent));
-        let live = agent.status.live() && !agent.owner_stopped;
+        let live = pane_runs(agent) && !agent.owner_stopped;
         let state = states.get(&agent.id);
         agents.insert(id.clone());
         nodes.push(GraphNode {
@@ -524,7 +532,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             status_label: Some(status_words(agent)),
             account: agent.account.clone(),
             branch: facts.branches.get(&agent.id).cloned(),
-            terminal: agent.status.live().then(|| terminal.clone()),
+            terminal: pane_runs(agent).then(|| terminal.clone()),
             questions: Some(
                 status
                     .events
