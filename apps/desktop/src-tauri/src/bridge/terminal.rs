@@ -538,17 +538,20 @@ impl Terminals {
         })
     }
 
-    /// Runs a window's own check, the team graph read of a wall window, then takes a place
-    /// for one more view as [`Terminals::room`] does. Inputs: the window label, the terminal
-    /// name and the check. Output: the held place, the check's error or the room errors.
+    /// Takes a place for one more view as [`Terminals::room`] does, then runs the window's
+    /// own check, the team graph read of a wall window, so a page load during that read
+    /// refuses the place when it lands, and a failed check gives the place back. Inputs: the
+    /// window label, the terminal name and the check. Output: the held place, the room
+    /// errors or the check's error.
     pub async fn checked_room(
         self: &Arc<Self>,
         window: &str,
         agent: &AgentId,
         check: impl std::future::Future<Output = Result<(), BridgeError>>,
     ) -> Result<Reservation, BridgeError> {
+        let place = self.room(window, agent)?;
         check.await?;
-        self.room(window, agent)
+        Ok(place)
     }
 
     /// Queues one input, prompt or resize request for an agent terminal a window shows.
