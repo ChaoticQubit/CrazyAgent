@@ -926,7 +926,7 @@ fn skip_record(
     kept: &SessionConversation,
 ) -> Result<(), EngineError> {
     assert!(seq > 0);
-    let length = crate::harnesses::transcript::open_plain(&kept.resume.record)
+    let length = crate::harnesses::transcript::open_record(&kept.harness, &kept.resume.record)
         .and_then(|record| record.metadata().ok())
         .map(|metadata| metadata.len());
     let Some(length) = length else {
@@ -2928,7 +2928,8 @@ fn old_live(connection: &Connection, project: &str, session: &str) -> Result<Old
         .filter(|kept| kept.resume.id != crate::team::master::REFUSED_CONVERSATION)
         .filter(|kept| (1..=128).contains(&kept.resume.id.len()))
         .and_then(|kept| {
-            let record = crate::harnesses::transcript::open_plain(&kept.resume.record)?;
+            let record =
+                crate::harnesses::transcript::open_record(&kept.harness, &kept.resume.record)?;
             Some((kept.resume.id.clone(), record.metadata().ok()?.len()))
         });
     let spoken = kept
