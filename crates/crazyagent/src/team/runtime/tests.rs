@@ -279,6 +279,14 @@ fn names(ids: &[i64]) -> Vec<AgentId> {
     ids.iter().map(|id| AgentId::team(*id).unwrap()).collect()
 }
 
+/// The live switch a row hands `prepare`, read as each launch read it before `keep_live`
+/// read it once for the start (RV-DS241-121): on only for a master while the project's live
+/// switch is on. Takes the runtime, the project and the role. Returns the switch.
+#[cfg(target_os = "macos")]
+fn live_switch(runtime: &TeamRuntime, project: &ProjectId, role: AgentRole) -> bool {
+    role == AgentRole::Master && super::super::master::live(&runtime.connection, project).unwrap()
+}
+
 /// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
 /// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
 #[cfg(target_os = "macos")]
@@ -1809,6 +1817,7 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
                 &account,
                 false,
                 crate::agent_git::Layout::Linked,
+                false,
             )
             .unwrap()
             .1
@@ -1990,6 +1999,7 @@ fn a_new_agent_s_worktree_starts_from_the_land_on_branch_tip() {
             &account,
             false,
             crate::agent_git::Layout::Linked,
+            false,
         )
         .unwrap();
     assert_eq!(folder, root);
@@ -2117,6 +2127,7 @@ fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
                 &account,
                 false,
                 crate::agent_git::Layout::Linked,
+                live_switch(&runtime, &fixture.setup.project_id, role),
             )
             .unwrap();
         let own = runtime.agent_folder(id).join("home");
@@ -2876,6 +2887,7 @@ fn a_prepared_agent_renews_its_credential_through_the_harness_entry_after_an_upd
         &account,
         false,
         crate::agent_git::Layout::Linked,
+        false,
     );
     let (_, plan, _) = match prepared {
         Ok(prepared) => prepared,
@@ -2935,6 +2947,7 @@ fn a_harness_installed_after_engine_start_is_prepared_only_through_the_engines_l
             &account,
             false,
             crate::agent_git::Layout::Linked,
+            false,
         )
     };
     let runtime = open();
@@ -3006,7 +3019,8 @@ fn a_team_agent_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
                 true,
                 &account,
                 false,
-                crate::agent_git::Layout::Linked
+                crate::agent_git::Layout::Linked,
+                false
             )
             .is_ok()
     );
@@ -3024,6 +3038,7 @@ fn a_team_agent_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
         &account,
         false,
         crate::agent_git::Layout::Linked,
+        live_switch(&runtime, &fixture.setup.project_id, AgentRole::Master),
     ) else {
         panic!("a master was prepared with a delegate engine it can write");
     };
@@ -3038,6 +3053,7 @@ fn a_team_agent_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
             &account,
             false,
             crate::agent_git::Layout::Linked,
+            false,
         ) else {
             panic!("sub-agent {id} was prepared with a delegate engine it can write");
         };
@@ -3099,6 +3115,7 @@ fn a_native_lead_is_refused_when_its_teammates_can_write_the_delegate_engine() {
         &account,
         false,
         Layout::Linked,
+        false,
     ) else {
         panic!("a native lead was prepared with teammates that can write the delegate engine");
     };
@@ -3156,6 +3173,7 @@ fn a_tools_on_launch_whose_settings_do_not_read_is_refused() {
             &account,
             false,
             crate::agent_git::Layout::Linked,
+            false,
         )
     };
     let Err(refused) = launch(1) else {
@@ -3227,6 +3245,7 @@ fn the_master_s_own_git_is_the_free_copy_only_at_full_access() {
                 &account,
                 false,
                 crate::agent_git::Layout::Linked,
+                live_switch(&runtime, &fixture.setup.project_id, AgentRole::Master),
             )
             .unwrap();
         let home = agent_home(&runtime.state, 1);
@@ -3289,6 +3308,7 @@ fn a_sub_agent_s_own_git_merges_main_only_while_catch_up_with_main_is_on() {
                 &account,
                 false,
                 crate::agent_git::Layout::Linked,
+                false,
             )
             .unwrap();
         let home = agent_home(&runtime.state, 1);
@@ -3374,6 +3394,7 @@ fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRo
             &account,
             kept,
             crate::agent_git::Layout::Linked,
+            live_switch(&runtime, &fixture.setup.project_id, role),
         )
         .unwrap();
     if !kept {
@@ -3534,6 +3555,7 @@ fn a_team_agent_starts_the_delegation_engine_from_its_app_bundle_but_no_other_bu
                 &account,
                 false,
                 crate::agent_git::Layout::Linked,
+                live_switch(&runtime, &fixture.setup.project_id, role),
             )
             .unwrap();
         for (program, starts) in [(&engine, true), (&other, false)] {
@@ -3610,6 +3632,7 @@ fn a_clone_launch_that_fails_after_making_the_clone_leaves_no_clone_behind() {
             &account,
             false,
             layout,
+            false,
         )
     };
     assert!(prepare(1, crate::agent_git::Layout::Linked).is_ok());
@@ -23579,6 +23602,7 @@ fn endpoint_claude_agent_is_hookless_and_refused_under_block() {
             &endpoint_account(),
             false,
             Layout::Linked,
+            false,
         )
     };
 
@@ -23633,6 +23657,7 @@ fn endpoint_claude_agent_is_hookless_and_refused_under_wait() {
         &endpoint_account(),
         false,
         Layout::Linked,
+        false,
     ) else {
         panic!("a hookless agent with tools started under Overlaps Wait");
     };
@@ -23672,6 +23697,7 @@ fn a_team_agent_starts_with_the_tool_cache_its_policy_gives() {
                 &endpoint_account(),
                 false,
                 Layout::Linked,
+                false,
             )
             .unwrap();
         std::fs::read_to_string(&plan.sandbox_profile).unwrap()
@@ -23704,6 +23730,7 @@ fn team_terminal_display(fixture: &Fixture, runtime: &TeamRuntime) -> Vec<(Strin
             &endpoint_account(),
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     let Mode::Kept { account, context } = mode else {
@@ -23817,6 +23844,7 @@ fn native_lead_on_endpoint_refused() {
         &endpoint_account(),
         false,
         Layout::Linked,
+        false,
     ) else {
         panic!("a native lead on an endpoint account started");
     };
@@ -23851,6 +23879,7 @@ fn native_lead_own_turn_reports_result_and_lands() {
             &endpoint_account(),
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     let landing = agent_git_dir(&root, &plan.working_dir, Layout::Linked).unwrap();
@@ -25093,6 +25122,7 @@ fn prepare_tools_on(
         account,
         false,
         crate::agent_git::Layout::Linked,
+        false,
     );
     (id, prepared.map(|(_, plan, _)| plan))
 }
@@ -25279,6 +25309,7 @@ fn a_live_master_with_tools_under_no_network_reaches_the_network_only_through_it
             &account,
             false,
             crate::agent_git::Layout::Linked,
+            live_switch(&runtime, &fixture.setup.project_id, AgentRole::Master),
         )
         .unwrap();
     assert!(plan.live, "the master runs in its live terminal");
@@ -29474,6 +29505,7 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -30061,6 +30093,7 @@ fn ended_native_lead_on<T>(
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -30640,6 +30673,7 @@ fn a_native_lead_s_teammate_starts_through_the_command_its_lead_s_app_runs() {
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -30770,6 +30804,7 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -30913,6 +30948,7 @@ fn native_lead_in(fixture: &Fixture, layout: Layout, adopt: bool) -> (TeamRuntim
             &account,
             adopt,
             layout,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -31073,6 +31109,7 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -31238,6 +31275,7 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -31433,6 +31471,7 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     let home = agent_home(&runtime.state, id);
@@ -31647,6 +31686,7 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -31859,6 +31899,7 @@ fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -32044,6 +32085,7 @@ fn a_native_teammate_cannot_move_or_replace_its_lead_s_home() {
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
@@ -32227,6 +32269,7 @@ fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");

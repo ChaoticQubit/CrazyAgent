@@ -523,6 +523,7 @@ impl NativeLead {
                 &account,
                 false,
                 Layout::Linked,
+                false,
             )
             .unwrap();
         assert!(plan.native, "the lead starts with native teammates");
