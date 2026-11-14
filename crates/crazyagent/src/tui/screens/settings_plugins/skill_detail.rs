@@ -59,7 +59,7 @@ fn skill_header(text: &str) -> Vec<&str> {
 
 /// Wraps one header line to the width, keeping its leading spaces on every part so an
 /// indented continuation still reads as part of the field above it.
-/// Inputs: the printable line and the width. Output: the parts.
+/// Inputs: the visible line and the width. Output: the parts.
 fn indented(line: &str, limit: usize) -> Vec<String> {
     let body = line.trim_start_matches(' ');
     let indent = (line.len() - body.len()).min(limit / 2);
@@ -82,6 +82,13 @@ pub fn file_size(bytes: u64) -> String {
     }
 }
 
+/// Shows one SKILL.md line as agents read it, safe to draw: hidden and control characters,
+/// escape sequences included, become visible escapes and tabs four spaces. Input: the
+/// line. Output: the shown line, with every other character kept.
+fn visible_line(line: &str) -> String {
+    crate::memory::visible_text(&line.replace('\t', "    "))
+}
+
 /// Draws a SKILL.md body for review as agents read it: every line in full, broken only at
 /// the width, hidden and control characters shown as escapes and tabs as four spaces, with
 /// headings and fenced code only styled. Inputs: the body, the width and the theme.
@@ -100,9 +107,8 @@ fn review_lines(body: &str, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
             None
         };
         fenced ^= fence;
-        let shown = crate::memory::visible_text(&line.replace('\t', "    "));
         lines.extend(
-            exact_lines(&shown, limit)
+            exact_lines(&visible_line(line), limit)
                 .into_iter()
                 .map(|part| match role {
                     Some(role) => styled(part, role, theme),
@@ -331,7 +337,7 @@ impl SkillDetailPage {
             lines.push(styled(HEADER_EXTRA, Role::Warning, theme));
             for line in extra {
                 lines.extend(
-                    indented(&printable(line.to_owned()), limit)
+                    indented(&visible_line(line), limit)
                         .into_iter()
                         .map(|part| styled(part, Role::Muted, theme)),
                 );
