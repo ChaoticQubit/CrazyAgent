@@ -26,6 +26,25 @@ pub const PROCESS_BYTES_MAX: usize = TITLE.len()
 /// refused with a code naming the largest part, never cut or moved out of the prompt.
 pub const GIVEN_BYTES_MAX: usize = 64 * 1024;
 const STALE_CONTEXT_FOLDER: &str = "crazyagent-context";
+/// The startup files zsh reads from `$HOME` ahead of a command, as every zsh a harness starts
+/// in an agent home does, since no `ZDOTDIR` reaches it (SA vid 12).
+pub(crate) const ZSH_STARTUP: [&str; 5] = [".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout"];
+/// The suffix of the compiled form zsh runs in place of a startup file.
+pub(crate) const ZSH_COMPILED: &str = ".zwc";
+/// The startup files bash and sh read from `$HOME` ahead of a command (SA vid 12).
+pub(crate) const SH_STARTUP: [&str; 5] = [
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".profile",
+];
+/// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
+/// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
+pub(crate) const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
+/// The folder of a Codex home holding the shell snapshots Codex 0.167 sources ahead of its
+/// shell commands.
+const CODEX_SHELL_SNAPSHOTS: &str = "shell_snapshots";
 const TOO_LARGE: &str = "agent_instructions_too_large_";
 const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
@@ -689,7 +708,8 @@ pub fn with_agent(mut text: String, agent: &str) -> String {
 /// Writes the owner's instructions into one agent's private home for one launch: the
 /// harness's global instruction file holds exactly the given text, and is removed when it
 /// is empty, so a stale copy never outlives a cleared page; the engine's own record of the
-/// instruction files it found, kept outside the home, replaces the last launch's.
+/// instruction files it found, kept outside the home, replaces the last launch's; no shell
+/// code an earlier run left in the home stays for this one ([`remove_shell_code`]).
 /// Input: the agent's 0700 home (its CLAUDE_CONFIG_DIR or CODEX_HOME), the harness, the
 /// project and what `text` built. Output: unit, or a plain code.
 pub fn prepare(
@@ -708,6 +728,7 @@ pub fn prepare(
     record_files(&project.data, home, &given.files)?;
     write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;
     remove_entry(&home.join(STALE_CONTEXT_FOLDER))?;
+    remove_shell_code(home)?;
     let name = harness.instruction_file();
     if given.text.is_empty() {
         return remove_entry(&home.join(name));
@@ -996,6 +1017,27 @@ pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
         Ok(_) => fs::remove_file(path),
     };
     removed.map_err(|_| failure("agent_home_unwritable"))
+}
+
+/// Removes from an agent home what a shell its harness starts there runs ahead of its
+/// command: the zsh, bash and sh startup files, zsh's compiled forms of its own, and the
+/// folders whose scripts Claude Code and Codex source before each shell command, which the
+/// harness writes again as it starts. Nothing an earlier run left there runs in the next
+/// (SA vid 12). Input: the agent home. Output: unit, or `agent_home_unwritable` when one
+/// cannot be removed, which refuses the launch.
+fn remove_shell_code(home: &Path) -> Result<(), AgentHomeError> {
+    assert!(home.is_absolute());
+    for name in ZSH_STARTUP {
+        remove_entry(&home.join(name))?;
+        remove_entry(&home.join(format!("{name}{ZSH_COMPILED}")))?;
+    }
+    let folders = CLAUDE_BASH_PRELUDES
+        .iter()
+        .chain(std::iter::once(&CODEX_SHELL_SNAPSHOTS));
+    for name in SH_STARTUP.iter().chain(folders) {
+        remove_entry(&home.join(name))?;
+    }
+    Ok(())
 }
 
 /// Clears a directory planted where a file is about to be written; a file or link stays

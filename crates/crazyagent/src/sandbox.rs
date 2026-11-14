@@ -159,10 +159,6 @@ const FIXED_WRITES: &str =
 /// home for its own skills, while no folder built elsewhere replaces the one holding the
 /// engine's copies and no flag keeps the engine from removing what is in it (CTX-M1 r1).
 const PINNED_WRITES: &str = "file-write-unlink file-write-mode file-write-acl file-write-flags";
-/// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
-/// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
-#[cfg(unix)]
-const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
 /// The folders of a Claude Code config home that its agent team shares, the members'
 /// mailboxes and task lists. Claude Code 2.1.309 keeps them under each member's config home,
 /// with no variable of their own, so a native lead's teammates write the lead's (TPH-2).
@@ -2221,9 +2217,11 @@ impl ProjectSandbox {
             home.join(crate::launch_context::STATE),
             home.join(crate::coord::relay::PLUGIN_FOLDER),
         ];
-        teammates
-            .read_only
-            .extend(CLAUDE_BASH_PRELUDES.iter().map(|folder| home.join(folder)));
+        teammates.read_only.extend(
+            crate::agent_home::CLAUDE_BASH_PRELUDES
+                .iter()
+                .map(|folder| home.join(folder)),
+        );
         teammates.read_only.extend(
             self.scratch
                 .iter()
@@ -3936,9 +3934,11 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// output styles and rules folders Claude Code reads or the `.agents` folder whose skills
 /// Codex reads from its home, none to the global instruction files of Claude Code and Codex,
 /// the Codex override that would replace them, the Codex `config.toml` holding its developer
-/// instructions or Claude Code's `settings.json`, none under `skills` but Codex's own
-/// `.system` skills, which Codex installs at its start and the engine removes before each
-/// Codex launch, and no move or removal of the `skills` folder, so no folder built elsewhere
+/// instructions or Claude Code's `settings.json`, nor to a zsh, bash or sh startup file,
+/// which every shell its harness starts there runs first (SA vid 12), none under `skills`
+/// but Codex's own `.system` skills, which Codex installs at its start and the engine
+/// removes before each Codex launch, and no move or removal of the `skills` folder, so no
+/// folder built elsewhere
 /// is moved in, nor a flag on `skills` or anywhere in `.system` that would keep the engine
 /// from removing it (CTX-M1 r1), each name in any letter case. Its own run cannot change the
 /// text it runs with until the next launch rewrites it. They also keep the agent's own
@@ -3981,6 +3981,7 @@ fn launch_denies(home: &Path) -> String {
     for file in files {
         text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
     }
+    text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", shell_startup()));
     let system = any_case(crate::launch_context::CODEX_SYSTEM_SKILLS);
     text.push_str(&format!(
         "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n(deny file-write-flags\n  (regex #\"^{skills}/{system}$\")\n  (regex #\"^{skills}/{system}/\"))\n",
@@ -3991,8 +3992,29 @@ fn launch_denies(home: &Path) -> String {
     text.push_str(&format!(
         "(deny {PINNED_WRITES}\n  (regex #\"^{library}$\")\n  (regex #\"^{preferences}$\"))\n(deny file-write-create\n  (require-all\n    (require-any\n      (regex #\"^{library}$\")\n      (regex #\"^{preferences}$\"))\n    (vnode-type SYMLINK)))\n"
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 22);
+    assert_eq!(text.matches("(regex #\"^/").count(), 23);
     text
+}
+
+/// Spells the Seatbelt pattern of the shell startup files directly in a home, each in any
+/// letter case: zsh's, alone or in the compiled form zsh runs in its place, and bash's and
+/// sh's (SA vid 12). Output: the pattern, a group without anchors.
+fn shell_startup() -> String {
+    let spelled = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| any_case(name))
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    let pattern = format!(
+        "(({})({})?|{})",
+        spelled(&crate::agent_home::ZSH_STARTUP[..]),
+        any_case(crate::agent_home::ZSH_COMPILED),
+        spelled(&crate::agent_home::SH_STARTUP[..]),
+    );
+    assert!(pattern.len() <= SBPL_STRING_MAX / 2);
+    pattern
 }
 
 /// Spells a Seatbelt regex for one path component other than `name` in any letter case,
