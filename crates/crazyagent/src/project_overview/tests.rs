@@ -1995,7 +1995,7 @@ fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach
     );
     let db = Connection::open_in_memory().unwrap();
     let project = ProjectId::new("plant-shop").unwrap();
-    match agent::answer(&runner, &db, &project, &root, &account) {
+    match agent::answer(&runner, &db, &project, &root, &account, &mut None) {
         Err(agent::Unwritten::Failed(words)) => assert_eq!(words, line),
         _ => panic!("the writing run did not fail with the reach line"),
     }
@@ -2074,4 +2074,42 @@ fn a_finished_overview_run_is_removed_like_a_status_run() {
     left.remove();
     assert!(std::fs::symlink_metadata(&folder).is_err());
     assert!(std::fs::symlink_metadata(&profile).is_err());
+}
+
+/// RV-DS241-80: a writing run's state name is read back as its own project's only, for a
+/// project id long enough to be cut too, whatever the digits of its start time, so Delete
+/// everything takes no other project's run and every run of its own.
+#[cfg(unix)]
+#[test]
+fn the_name_of_an_overview_run_is_read_back_as_its_own_projects_only() {
+    let demo = ProjectId::new("demo").unwrap();
+    let name = run_name(&demo, 1_794_000_000_000);
+    assert_eq!(name, "overview-demo-1794000000000");
+    assert!(names_run(&demo, &name));
+    for other in ["demo-2", "dem", "demonstration"] {
+        let other = ProjectId::new(other).unwrap();
+        assert!(!names_run(&other, &name), "{other:?}");
+        assert!(
+            !names_run(&demo, &run_name(&other, 1_794_000_000_000)),
+            "{other:?}"
+        );
+    }
+    let long = ProjectId::new("l".repeat(128)).unwrap();
+    for time in [7, 1_794_000_000_000, i64::MAX] {
+        let name = run_name(&long, time);
+        assert!(name.len() <= 96 && names_run(&long, &name), "{name}");
+        assert!(!names_run(&demo, &name));
+    }
+    for odd in [
+        "overview-demo",
+        "overview-demo-",
+        "overview-demo-later",
+        "overview-demo-1-",
+        "overview-demo--1",
+        "overview-demo-12345678901234567890",
+        "roadmap-status-demo-1794000000000",
+        "job-1-1",
+    ] {
+        assert!(!names_run(&demo, odd), "{odd}");
+    }
 }

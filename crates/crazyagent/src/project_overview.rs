@@ -334,6 +334,60 @@ pub fn needs_home(folder: &Path) -> bool {
     crate::projects_home::state_folder(folder).as_path() == folder
 }
 
+/// The start of the research state name of every Overview writing run.
+pub(crate) const RUN_NAME_HEAD: &str = "overview-";
+const RUN_NAME_BYTES_MAX: usize = 96;
+const RUN_TIME_DIGITS_MAX: usize = 19;
+
+/// The research state name of one writing run: the head, the project id with every byte
+/// outside ASCII letters, digits, `-` and `_` written as `_` and cut so the name fits
+/// `RUN_NAME_BYTES_MAX`, then `-` and the start time. Inputs: the project and the time in
+/// plain digits. Output: the name.
+fn run_name_at(project: &ProjectId, time: &str) -> String {
+    assert!((1..=RUN_TIME_DIGITS_MAX).contains(&time.len()));
+    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - time.len();
+    let named: String = project
+        .as_str()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(room)
+        .collect();
+    let name = format!("{RUN_NAME_HEAD}{named}-{time}");
+    assert!(name.is_ascii() && name.len() <= RUN_NAME_BYTES_MAX);
+    name
+}
+
+/// The research state name of one writing run of `project` started at `now_ms`, so no run
+/// reuses the folder of an earlier one and [`names_run`] reads it back as this project's.
+/// Inputs: the project and now. Output: the name.
+#[cfg(unix)]
+pub(crate) fn run_name(project: &ProjectId, now_ms: i64) -> String {
+    let name = run_name_at(project, &now_ms.max(0).to_string());
+    assert!(names_run(project, &name));
+    name
+}
+
+/// Whether a research state name is a writing run of this project, the exact shape only:
+/// [`run_name`] gives that name for the start time it ends in, so the runs of a project whose
+/// id merely starts the same are not taken for it (RV-DS241-80). Inputs: the project and the
+/// name. Output: whether the name is one of its runs.
+pub(crate) fn names_run(project: &ProjectId, name: &str) -> bool {
+    assert!(name.len() <= 4096, "a file name is bounded by the system");
+    name.strip_prefix(RUN_NAME_HEAD)
+        .and_then(|run| run.rsplit_once('-'))
+        .is_some_and(|(_, time)| {
+            (1..=RUN_TIME_DIGITS_MAX).contains(&time.len())
+                && time.bytes().all(|byte| byte.is_ascii_digit())
+                && run_name_at(project, time) == name
+        })
+}
+
 fn unavailable<E>(_: E) -> EngineError {
     failure(UNAVAILABLE)
 }

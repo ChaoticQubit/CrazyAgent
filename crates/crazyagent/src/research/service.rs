@@ -281,9 +281,9 @@ enum Upkeep {
 }
 
 /// The roadmap status and Overview tabs upkeep of the research loop: its own engine
-/// connection, the runs going now, what finished status checks left for later removal and
-/// the loop passes counted, so each store is asked for due runs every `STATUS_EVERY_TICKS`
-/// passes.
+/// connection, the runs going now, what finished status checks and Overview runs left for
+/// later removal and the loop passes counted, so each store is asked for due runs every
+/// `STATUS_EVERY_TICKS` passes.
 #[cfg(unix)]
 struct StatusUpkeep {
     db: Option<rusqlite::Connection>,
@@ -475,12 +475,9 @@ where
                         Upkeep::Roadmap => crate::roadmap_status::run::check(
                             &runner, &project, claim, &root, &account,
                         ),
-                        Upkeep::Overview => {
-                            crate::project_overview::agent::write(
-                                &runner, &project, claim, &root, &account,
-                            );
-                            None
-                        }
+                        Upkeep::Overview => crate::project_overview::agent::write(
+                            &runner, &project, claim, &root, &account,
+                        ),
                     }
                 }));
                 Ok(true)

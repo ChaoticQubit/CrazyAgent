@@ -832,10 +832,10 @@ impl DeletePlan {
     }
 
     /// Names the engine's own files of this deleted project for the record its row removal
-    /// writes: each agent, each research run of its jobs, each roadmap status run and, on
-    /// macOS, the tool caches of its folders (T8), with the identity of the folder that
-    /// holds it. A folder that is no real run, or that is not there, is left out. Input: the
-    /// project's research jobs. Output: the records.
+    /// writes: each agent, each research run of its jobs, each roadmap status run, each
+    /// Overview writing run (RV-DS241-80) and, on macOS, the tool caches of its folders (T8),
+    /// with the identity of the folder that holds it. A folder that is no real run, or that
+    /// is not there, is left out. Input: the project's research jobs. Output: the records.
     pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
         let Some(root) = self.database.parent() else {
             return Vec::new();
@@ -854,6 +854,7 @@ impl DeletePlan {
                     .iter()
                     .any(|job| name.starts_with(&format!("job-{job}-")))
                     || crate::roadmap_status::names_run(&self.project, &name)
+                    || crate::project_overview::names_run(&self.project, &name)
                 {
                     names.push(name);
                 }
@@ -944,10 +945,17 @@ impl EngineFile {
 
 /// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
 /// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling,
-/// or `roadmap-status-<project>-<time>`, or `tool-cache-<digest>` with 32 lowercase hex
-/// digits (T8). Input: the name. Output: what it names, or None for anything else.
+/// or `roadmap-status-<project>-<time>` or `overview-<project>-<time>`, a run whose folder
+/// and profile both go, or `tool-cache-<digest>` with 32 lowercase hex digits (T8). Input:
+/// the name. Output: what it names, or None for anything else.
 fn engine_file(name: &str) -> Option<EngineFile> {
-    if let Some(run) = name.strip_prefix(crate::roadmap_status::RUN_NAME_HEAD) {
+    let status_run = [
+        crate::roadmap_status::RUN_NAME_HEAD,
+        crate::project_overview::RUN_NAME_HEAD,
+    ]
+    .into_iter()
+    .find_map(|head| name.strip_prefix(head));
+    if let Some(run) = status_run {
         let (project, time) = run.rsplit_once('-')?;
         let plain = !project.is_empty()
             && project

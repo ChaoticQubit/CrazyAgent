@@ -24,9 +24,10 @@ pub(crate) const RUN_KEPT: Duration = Duration::from_secs(60);
 
 const _: () = assert!(RUN_KEPT.as_secs() >= 6 * crate::usage::service::SCAN_EVERY.as_secs());
 
-/// What a finished status run left in the research state: its folder, which holds the
-/// prompt with the evidence pack and the agent's home, its Seatbelt profile and when the
-/// run ended. The research loop removes both once [`RunLeft::due`] says so.
+/// What a finished status run or Overview writing run left in the research state: its
+/// folder, which holds the prompt with the evidence pack and the agent's home, its Seatbelt
+/// profile and when the run ended. The research loop removes both once [`RunLeft::due`]
+/// says so.
 #[derive(Debug)]
 pub(crate) struct RunLeft {
     folder: PathBuf,
@@ -35,15 +36,16 @@ pub(crate) struct RunLeft {
 }
 
 impl RunLeft {
-    /// Names what one run left. Inputs: the run's folder, whose name starts with
-    /// `RUN_NAME_HEAD`, its profile file and when the run ended. Output: the record.
+    /// Names what one run left. Inputs: the run's folder, whose name starts with a status
+    /// run's or an Overview run's head ([`run_head`]), its profile file and when the run
+    /// ended. Output: the record.
     pub(crate) fn at(folder: PathBuf, profile: PathBuf, ended: Instant) -> Self {
         assert!(folder.is_absolute() && profile.is_absolute());
         assert!(
             folder
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(RUN_NAME_HEAD))
+                .is_some_and(run_head)
         );
         Self {
             folder,
@@ -73,6 +75,12 @@ impl RunLeft {
             eprintln!("{RUN_LEFT} parts={left}");
         }
     }
+}
+
+/// Whether a research state name starts as a run whose folder and profile the research loop
+/// removes: a status run's or an Overview writing run's. Input: the name. Output: the answer.
+fn run_head(name: &str) -> bool {
+    name.starts_with(RUN_NAME_HEAD) || name.starts_with(crate::project_overview::RUN_NAME_HEAD)
 }
 
 /// How a check ended without a status: with words for the owner, or too early to say, so it
@@ -171,14 +179,15 @@ pub(super) fn answer(
 /// Runs the status agent and names what the run left in the research state, its folder
 /// and its Seatbelt profile, for removal once the usage upkeep has counted the run. A run
 /// whose end is uncertain names nothing, since its agent may still use them, and a name
-/// that was already taken is not this run's to remove. Inputs: the runner, the run and
-/// `stop`. Output: how the run ended and what it left.
-pub(super) fn asked(
+/// that was already taken is not this run's to remove. A status run and an Overview writing
+/// run both run through here. Inputs: the runner, the run and `stop`. Output: how the run
+/// ended and what it left.
+pub(crate) fn asked(
     runner: &ResearchRunner,
     run: &ReadOnlyRun<'_>,
     stop: &dyn Fn() -> bool,
 ) -> (Result<ReadOnlyEnding, RunError>, Option<RunLeft>) {
-    assert!(run.name.starts_with(RUN_NAME_HEAD));
+    assert!(run_head(run.name));
     assert!(run.name.len() <= RUN_NAME_BYTES_MAX);
     let folder = runner.state().join("agents").join(run.name);
     let profile = runner
