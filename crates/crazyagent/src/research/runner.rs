@@ -1728,10 +1728,13 @@ impl ResearchRunner {
             ));
         }
         let agent = self.state.join("agents").join(run.name);
-        if fs::symlink_metadata(&agent).is_ok() {
-            return Err(RunError::Invalid(RUN_NAME_USED.into()));
+        match fs::DirBuilder::new().mode(0o700).create(&agent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(RunError::Invalid(RUN_NAME_USED.into()));
+            }
+            Err(error) => return Err(error.into()),
         }
-        private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
         self.register_usage(

@@ -1,6 +1,6 @@
 use super::*;
 use crate::research::runner::{
-    ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError,
+    RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError,
 };
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -187,7 +187,8 @@ pub(super) fn asked(
         .join(format!("{}.sb", run.name));
     let fresh = std::fs::symlink_metadata(&folder).is_err();
     let ending = runner.run_read_only(run, stop);
-    let left = (fresh && !matches!(ending, Err(RunError::Uncertain(_))))
+    let taken = matches!(&ending, Err(RunError::Invalid(reason)) if reason == RUN_NAME_USED);
+    let left = (fresh && !taken && !matches!(ending, Err(RunError::Uncertain(_))))
         .then(|| RunLeft::at(folder, profile, Instant::now()));
     (ending, left)
 }

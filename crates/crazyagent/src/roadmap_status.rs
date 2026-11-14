@@ -1075,12 +1075,22 @@ pub fn held(db: &Connection, project: &ProjectId, claim: Claim) -> bool {
 pub(crate) const RUN_NAME_HEAD: &str = "roadmap-status-";
 const RUN_NAME_BYTES_MAX: usize = 96;
 const RUN_TIME_DIGITS_MAX: usize = 19;
+const RUN_ID_HASH_BYTES: usize = 8;
 
-/// The part of a status run's state name that names its project: the head and the project
-/// id with every byte outside ASCII letters, digits, `-` and `_` written as `_`, cut so the
-/// name with its time fits `RUN_NAME_BYTES_MAX`. Input: the project. Output: the stem.
+/// The part of a status run's state name that names its project: the head, the project id
+/// with every byte outside ASCII letters, digits, `-` and `_` written as `_` and cut so the
+/// name with its time fits `RUN_NAME_BYTES_MAX`, then `-` and the first
+/// `RUN_ID_HASH_BYTES` of the SHA-256 of the whole id in lowercase hex, so two ids that read
+/// the same once written or cut still get stems of their own (RV-DS241-45). Input: the
+/// project. Output: the stem.
 pub(crate) fn run_stem(project: &ProjectId) -> String {
-    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - RUN_TIME_DIGITS_MAX;
+    use sha2::{Digest, Sha256};
+    let hash: String = Sha256::digest(project.as_str().as_bytes())[..RUN_ID_HASH_BYTES]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(hash.len(), 2 * RUN_ID_HASH_BYTES);
+    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - hash.len() - 1 - RUN_TIME_DIGITS_MAX;
     let named: String = project
         .as_str()
         .chars()
@@ -1093,7 +1103,7 @@ pub(crate) fn run_stem(project: &ProjectId) -> String {
         })
         .take(room)
         .collect();
-    let stem = format!("{RUN_NAME_HEAD}{named}");
+    let stem = format!("{RUN_NAME_HEAD}{named}-{hash}");
     assert!(stem.is_ascii());
     assert!(stem.len() + 1 + RUN_TIME_DIGITS_MAX <= RUN_NAME_BYTES_MAX);
     stem
