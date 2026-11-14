@@ -1122,7 +1122,22 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
 /// and the project's IDE folder.
 fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command, PathBuf) {
     let folder = servers.prepare(project).unwrap();
-    let (token_path, _) = token::issue(&folder).unwrap();
+    (
+        server_command(servers, project, root, &folder).unwrap(),
+        folder,
+    )
+}
+
+/// One project's server command as [`command`] builds it at a launch, refusal included.
+/// Inputs: the register, the project, its folder and its prepared IDE folder. Output: the
+/// command, or the refusal that stops the start.
+fn server_command(
+    servers: &Servers,
+    project: &ProjectId,
+    root: &Path,
+    folder: &Path,
+) -> Result<Command, EngineError> {
+    let (token_path, _) = token::issue(folder).unwrap();
     let info = ServerInfo {
         url: "http://127.0.0.1:47963/".to_owned(),
         port: 47_963,
@@ -1132,11 +1147,11 @@ fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command
         workspace: folder.join(WORKSPACE),
     };
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
-    let built = command(
+    command(
         Launch {
             project,
             build: &cached_build(),
-            folder: &folder,
+            folder,
             root,
             socket: &servers.socket,
             policy: ide_policy(servers.folder.parent().unwrap(), project).unwrap(),
@@ -1145,8 +1160,94 @@ fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command
         &info,
         writer,
     )
-    .unwrap();
-    (built, folder)
+}
+
+/// A `.git` a server of an older profile left in its data folder, as a folder, a gitdir file,
+/// a link, a hard link or a deep folder in any letter case, stops a confined start with
+/// `ide_server_data_git` and stays where it was, so no later server renames it into the
+/// project, since a rename checks only the two paths it names (SA vid 101 residue).
+#[test]
+fn a_git_left_in_the_server_data_folder_stops_a_confined_start() {
+    let (checkout, data, outside) = (scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let plants: [(&str, fn(&Path, &Path)); 5] = [
+        (".git/hooks", |home, _| {
+            fs::create_dir_all(home.join(".git").join("hooks")).unwrap();
+        }),
+        (".Git", |home, _| {
+            fs::write(home.join(".Git"), "gitdir: /private/tmp/x\n").unwrap();
+        }),
+        (".GIT", |home, outside| {
+            std::os::unix::fs::symlink(outside, home.join(".GIT")).unwrap();
+        }),
+        ("r/sub/.gIt", |home, _| {
+            fs::create_dir_all(home.join("r").join("sub").join(".gIt")).unwrap();
+        }),
+        (".git", |home, _| {
+            fs::write(home.join("plain"), "x").unwrap();
+            fs::hard_link(home.join("plain"), home.join(".git")).unwrap();
+        }),
+    ];
+    for (at, (name, plant)) in plants.iter().enumerate() {
+        let id = project(&format!("planted-{at}"));
+        let folder = servers.prepare(&id).unwrap();
+        let home = folder.join(SERVER_DATA);
+        assert_ne!(
+            ide_policy(data.path(), &id).unwrap().access,
+            AgentAccess::Full
+        );
+        plant(&home, outside.path());
+        let refused = server_command(&servers, &id, &root, &folder).unwrap_err();
+        assert_eq!(refused.0, "ide_server_data_git", "{name}");
+        assert!(
+            fs::symlink_metadata(home.join(name)).is_ok(),
+            "{name} was removed instead of refusing the start"
+        );
+    }
+}
+
+/// A folder in the server data folder the check cannot read stops a confined start, since a
+/// `.git` can sit in it and the server can open it again once it runs.
+#[test]
+fn an_unreadable_folder_in_the_server_data_folder_stops_a_confined_start() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("unreadable");
+    let folder = servers.prepare(&id).unwrap();
+    let shut = folder.join(SERVER_DATA).join("x");
+    fs::create_dir_all(shut.join(".git")).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let started = server_command(&servers, &id, &root, &folder);
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(started.unwrap_err().0, "ide_server_data_git");
+}
+
+/// Names near `.git` and a link to an outside folder that holds one leave a confined start
+/// alone, as links are never followed, and a Full access start, which no profile confines,
+/// is not checked.
+#[test]
+fn names_near_git_and_links_out_of_the_server_data_folder_leave_a_start_alone() {
+    let (checkout, data, outside) = (scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("near-git");
+    let folder = servers.prepare(&id).unwrap();
+    let home = folder.join(SERVER_DATA);
+    fs::create_dir_all(home.join(".github")).unwrap();
+    fs::create_dir_all(home.join("git")).unwrap();
+    fs::write(home.join(".gitignore"), "x\n").unwrap();
+    fs::write(home.join(".git.bak"), "x").unwrap();
+    fs::create_dir_all(outside.path().join(".git")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), home.join("linked")).unwrap();
+    assert!(server_command(&servers, &id, &root, &folder).is_ok());
+
+    let full = project("full-access");
+    set_level(data.path(), &full, AgentAccess::Full);
+    let folder = servers.prepare(&full).unwrap();
+    fs::create_dir_all(folder.join(SERVER_DATA).join(".git")).unwrap();
+    assert!(server_command(&servers, &full, &root, &folder).is_ok());
 }
 
 /// Runs git as a built IDE server starts it: the engine's shim under the server's installed
