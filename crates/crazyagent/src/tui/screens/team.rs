@@ -165,7 +165,8 @@ struct Instructions {
 /// TerminalAttach, TerminalInput, TerminalResize and TerminalDetach requests.
 /// s opens the team settings over the whole body, read with `SetupQuery::Team`.
 /// The master view is the same screen showing only the live master's terminal; it starts the
-/// live master on a read that shows it off, and once more per open after a stale refusal.
+/// live master on a read that shows it off, and once more per open after a stale refusal;
+/// a read naming a master with no live terminal takes it back to the console instead.
 pub struct Team {
     project: ProjectId,
     name: String,
@@ -864,6 +865,17 @@ impl Team {
         self.master
             && matches!(&event.query, SetupQuery::Team { project } if *project == self.project)
             && matches!(&event.result, Ok(SetupView::Team(status)) if !status.master_live_terminal)
+    }
+
+    /// Whether a team read names a saved master with no live terminal, such as rcli, which
+    /// takes the master view back to the console before it asks for any start, as the
+    /// desktop's area shows that master's conversation (DEC-141). Input: the setup event.
+    /// Output: true for a good team read of this project naming such a master.
+    fn no_live_terminal(&self, event: &crate::tui::client::SetupEvent) -> bool {
+        use super::project_team::master_runs_live;
+        self.master
+            && matches!(&event.query, SetupQuery::Team { project } if *project == self.project)
+            && matches!(&event.result, Ok(SetupView::Team(status)) if !master_runs_live(status))
     }
 
     fn detach(&mut self, ctx: &mut Ctx) {
@@ -1779,6 +1791,11 @@ impl Screen for Team {
                     if self.live_terminal_off(event) {
                         self.detach(ctx);
                         ctx.say(Message::warning(LIVE_TERMINAL_OFF, LIVE_TERMINAL_HOW));
+                        return Flow::Back;
+                    }
+                    if self.no_live_terminal(event) {
+                        self.detach(ctx);
+                        ctx.say(Message::warning(super::project_team::NO_LIVE_TERMINAL, ""));
                         return Flow::Back;
                     }
                     self.took_setup(&event.query, &event.result, ctx);

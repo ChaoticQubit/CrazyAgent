@@ -139,6 +139,13 @@ test("a refused Create the demo says why in the demo's own words, and an unknown
   assert.ok(text(html).includes(words.DEMO_REFUSALS.demo_name_taken));
 });
 
+test("a Create the demo refused as not ready names the account kinds to add, never a sign-in alone", () => {
+  const said = words.DEMO_REFUSALS.demo_pool_not_ready;
+  assert.ok(said.includes("Add a ChatGPT or Claude sign-in, or an OpenAI or Anthropic API key"), said);
+  assert.doesNotMatch(said, /Sign one in/);
+  assert.equal(model.refusalCopy({ code: "demo_pool_not_ready" }), said);
+});
+
 test("the guide shows only on the demo project's page and ticks each step from the engine's demo read", () => {
   assert.equal(model.guideSteps(demo(), "crazyagent-demo"), null);
   assert.equal(model.guideSteps(demo({ project_id: "crazyagent-demo" }), "another"), null);

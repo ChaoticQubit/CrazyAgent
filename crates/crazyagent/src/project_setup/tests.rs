@@ -3,6 +3,10 @@ use crate::config::{EffectiveConfig, resolve_config_bytes};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Barrier};
 
+/// The default team status when no account of the pool can lead the team: the account kinds
+/// both lead harnesses take, in the team start line's words (V241-MASTER-WORDS).
+const NEEDS_ACCOUNT: &str = "Needs a ChatGPT or Claude sign-in, or an OpenAI or Anthropic API key";
+
 const POOLED: &str = r#"
 timeout_ms = 1000
 [model_access]
@@ -393,11 +397,11 @@ fn research_toggles_leave_the_default_team_open_and_the_master_follows_the_best_
     assert_eq!(nobody.max_agents, TEAM_AGENTS_MAX);
     assert_eq!(
         default_team_status(&config, Some(&managed), &signed(&[])),
-        Some("Needs a signed-in account")
+        Some(NEEDS_ACCOUNT)
     );
     assert_eq!(
         default_team_status(&config, Some(&managed), &signed(&["m-rcli"])),
-        Some("Needs a signed-in account"),
+        Some(NEEDS_ACCOUNT),
         "an RCLI account never leads the default team"
     );
     assert_eq!(
@@ -405,7 +409,7 @@ fn research_toggles_leave_the_default_team_open_and_the_master_follows_the_best_
             .unwrap()
             .default_team_status
             .as_deref(),
-        Some("Needs a signed-in account")
+        Some(NEEDS_ACCOUNT)
     );
     assert_eq!(
         default_team_status(&config, Some(&absent), &signed(&[])),
@@ -1683,7 +1687,8 @@ fallback_allowed = false
 
 /// DEC-161 bug 1: a pool whose only account is an Anthropic API key leads with Claude Code,
 /// never Codex, which no account of it can run; Codex leads where a key account can run it,
-/// and a pool where nothing can run keeps Codex with the status that says so.
+/// and a pool where nothing can run keeps Codex with the status that names the account kinds
+/// to add, never a sign-in alone (V241-MASTER-WORDS).
 #[test]
 fn a_pool_with_only_an_anthropic_api_key_leads_with_claude_code_not_codex() {
     let config = resolve_config_bytes(KEYED_ONLY, "").unwrap();
@@ -1704,6 +1709,6 @@ fn a_pool_with_only_an_anthropic_api_key_leads_with_claude_code_not_codex() {
     assert_eq!(default_team(&config, Some(&rcli), &signed).master, "codex");
     assert_eq!(
         default_team_status(&config, Some(&rcli), &signed),
-        Some("Needs a signed-in account")
+        Some(NEEDS_ACCOUNT)
     );
 }
