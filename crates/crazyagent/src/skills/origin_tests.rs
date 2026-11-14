@@ -1,6 +1,5 @@
 use super::*;
-use crate::setup::pack::{PackManifestEntry, PackSource, default_pack, repo_key};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const SETUP: &str = "/engine/setup";
 const HOME: &str = "/home/mira";
