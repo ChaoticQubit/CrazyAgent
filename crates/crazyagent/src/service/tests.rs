@@ -1579,12 +1579,18 @@ fn an_appimage_copy_is_judged_by_the_app_engine_it_was_copied_from() {
     .unwrap();
     assert_eq!(copy.repair(&bundled, true, false), Repair::Install);
     assert_eq!(copy.repair(&bundled, true, true), Repair::Install);
+    std::fs::write(copy.root.join("setup").join("bin-version"), "99.0.0\n").unwrap();
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Keep);
+    assert_eq!(copy.repair(&bundled, false, false), Repair::Install);
 }
 
 /// DS-118 r3 F1 (rv-code): an older AppImage never writes its bytes over the private copy
-/// in `<root>/setup/bin` while the data root reports a newer engine, since every AppImage
-/// runs that one path: the copy and the files beside it keep the newer bytes. A copy that is
-/// not this user's private file, or one with no newer engine reported, gets the app's bytes.
+/// in `<root>/setup/bin` while the data root knows a newer engine, since every AppImage runs
+/// that one path: the copy and the files beside it keep the newer bytes. A newer engine is
+/// known from its locator while it runs, or from the version the app that last wrote the
+/// copy recorded beside it, which outlives a clean stop. A copy that is not this user's
+/// private file, or one with no newer engine known, gets the app's bytes and its version.
 #[cfg(unix)]
 #[test]
 fn persistable_keeps_the_copy_of_a_newer_engine_the_data_root_reports() {
@@ -1625,6 +1631,20 @@ fn persistable_keeps_the_copy_of_a_newer_engine_the_data_root_reports() {
     );
     assert_eq!(read(&installed), "crazyagent bytes");
     assert_eq!(read(&runner), "crazyagent-runner bytes");
+    let recorded = layout.root().join("setup").join("bin-version");
+    assert_eq!(read(&recorded), crate::version::VERSION);
+    write_mode(&installed, "crazyagent newer bytes", 0o700);
+    std::fs::write(&recorded, "99.0.0\n").unwrap();
+    assert_eq!(
+        persistable(&bundled, &layout, Some(&mount)).unwrap(),
+        installed
+    );
+    assert_eq!(
+        read(&installed),
+        "crazyagent newer bytes",
+        "the newer app's copy outlives its engine's locator"
+    );
+    assert_eq!(read(&recorded), "99.0.0\n");
 }
 
 /// DS-118 r1 F1 (rv-code): a refused start removes an installed definition naming a broken
