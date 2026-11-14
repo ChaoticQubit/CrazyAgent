@@ -77,7 +77,7 @@ const OPEN_FAILURES: Record<string, string> = {
   ide_capability_capacity: LINK_FAILED,
   ide_capability_unavailable: LINK_FAILED,
   ide_server_exited: "The IDE stopped while it started. Try again.",
-  ide_server_data_git: "The IDE didn't start: its data folder for this project holds something named .git, or couldn't be fully checked for one, and a .git there could carry git hooks into the project. Delete this project's server-data folder in the ide folder of CrazyAgent's data folder, then open the IDE again.",
+  ide_server_data_git: "The IDE didn't start: its data or temp folder for this project holds something named .git, or couldn't be fully checked for one, and a .git there could carry git hooks into the project. Delete this project's server-data folder in the ide folder of CrazyAgent's data folder, then open the IDE again. If it still doesn't start, restart the computer, which empties the IDE's temp folder.",
   ide_server_port_taken: "Another program took the IDE's port. Try again.",
   ide_port_unavailable: "No free port was found for the IDE. Try again.",
   ide_token_unreadable: "The IDE's sign-in file couldn't be read. Try again.",
