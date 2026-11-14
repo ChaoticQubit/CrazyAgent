@@ -182,7 +182,11 @@ fn current_harness(
 /// every folder agents can write, in folders no other user can change, and the rest of
 /// [`crate::harnesses::finding::check_file`]. Inputs: the authority, the entry used and HOME.
 /// Output: Ok, or the refusal code of engine start.
-fn start_trusted(authority: &Authority, used: &Path, home: Option<&Path>) -> Result<(), EngineError> {
+fn start_trusted(
+    authority: &Authority,
+    used: &Path,
+    home: Option<&Path>,
+) -> Result<(), EngineError> {
     use crate::harnesses::finding;
     let root = super::changes::engine_root(authority)?;
     let space = finding::AgentSpace::open(&root)?;
@@ -613,27 +617,25 @@ impl OwnerRuntimeHandle {
         };
         if let Some(held) = held {
             let shown = held.entry().map(Path::to_path_buf);
-            return Ok(
-                match current_harness(&self.authority, slot) {
-                    Ok(Some(host)) => Found::Ready {
-                        path: host.entry().map_or_else(
-                            || {
-                                host.verified_path()
-                                    .map(Path::to_path_buf)
-                                    .unwrap_or_default()
-                            },
-                            Path::to_path_buf,
-                        ),
-                    },
-                    Ok(None) => Found::Missing {
-                        looked: crate::harnesses::finding::looked(search, harness),
-                    },
-                    Err(error) => Found::Refused {
-                        path: shown.unwrap_or_default(),
-                        code: error.0,
-                    },
+            return Ok(match current_harness(&self.authority, slot) {
+                Ok(Some(host)) => Found::Ready {
+                    path: host.entry().map_or_else(
+                        || {
+                            host.verified_path()
+                                .map(Path::to_path_buf)
+                                .unwrap_or_default()
+                        },
+                        Path::to_path_buf,
+                    ),
                 },
-            );
+                Ok(None) => Found::Missing {
+                    looked: crate::harnesses::finding::looked(search, harness),
+                },
+                Err(error) => Found::Refused {
+                    path: shown.unwrap_or_default(),
+                    code: error.0,
+                },
+            });
         }
         let root = super::changes::engine_root(&self.authority)?;
         let space = {

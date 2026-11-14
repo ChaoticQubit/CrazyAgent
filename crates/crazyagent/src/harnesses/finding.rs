@@ -169,7 +169,11 @@ impl AgentSpace {
         }
         folders.sort();
         folders.dedup();
-        let temp: Vec<PathBuf> = temp.iter().filter(|folder| usable(folder)).cloned().collect();
+        let temp: Vec<PathBuf> = temp
+            .iter()
+            .filter(|folder| usable(folder))
+            .cloned()
+            .collect();
         assert!(engine.len() <= 2);
         assert!(temp.len() <= 2);
         assert!(folders.len() <= AGENT_FOLDERS_MAX);

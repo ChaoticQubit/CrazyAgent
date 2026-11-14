@@ -697,14 +697,8 @@ fn a_chosen_file_in_the_engines_own_temp_folder_is_refused_as_agent_space() {
     let link = case.root.join("bin/codex");
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    assert_eq!(
-        case.check("codex", &real),
-        Err(PATH_AGENT_SPACE.to_owned())
-    );
-    assert_eq!(
-        case.check("codex", &link),
-        Err(PATH_AGENT_SPACE.to_owned())
-    );
+    assert_eq!(case.check("codex", &real), Err(PATH_AGENT_SPACE.to_owned()));
+    assert_eq!(case.check("codex", &link), Err(PATH_AGENT_SPACE.to_owned()));
 }
 
 /// RV-DS241-61 premise: a chosen harness file under the shared temp folder, outside the

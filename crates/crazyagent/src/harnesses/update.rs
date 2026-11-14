@@ -820,8 +820,7 @@ fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'stati
 /// the resolver vetted. Inputs: the command and the resolver's places. Output: Ok, or
 /// `TOOL_UNSAFE`.
 fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<(), &'static str> {
-    let resolved =
-        crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
+    let resolved = crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
     let mut at = &resolved;
     for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
         let crate::tools::Kind::Script {
@@ -834,10 +833,14 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<(), &'static s
         };
         if *by_name {
             let name = interpreter.entry.file_name().ok_or(TOOL_UNSAFE)?;
-            let refused = fixed.search.iter().map(|folder| folder.join(name)).any(|copy| {
-                std::fs::metadata(&copy).is_ok()
-                    && crate::tools::resolve_entry(&copy, places).is_err()
-            });
+            let refused = fixed
+                .search
+                .iter()
+                .map(|folder| folder.join(name))
+                .any(|copy| {
+                    std::fs::metadata(&copy).is_ok()
+                        && crate::tools::resolve_entry(&copy, places).is_err()
+                });
             if refused {
                 return Err(TOOL_UNSAFE);
             }
@@ -884,7 +887,10 @@ pub fn update_command(
             modules,
             npm,
         } => {
-            let fixed = checked(npm_for(&prefix, roots, npm_install_args(npm)), &roots.places)?;
+            let fixed = checked(
+                npm_for(&prefix, roots, npm_install_args(npm)),
+                &roots.places,
+            )?;
             if owned(&modules) {
                 Ok(fixed)
             } else {
@@ -940,7 +946,11 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
     let with_npm = || {
         let npm = recipe.npm.as_ref()?;
         let engine = roots.npm.as_ref()?;
-        checked(engine_npm_fixed(engine, npm_install_args(npm)), &roots.places).ok()
+        checked(
+            engine_npm_fixed(engine, npm_install_args(npm)),
+            &roots.places,
+        )
+        .ok()
     };
     let refusal = if recipe.npm.is_some() && roots.npm.is_none() {
         NEEDS_NODE

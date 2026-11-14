@@ -506,7 +506,10 @@ fn native_auth_registered_entry_moves_to_a_new_install_while_the_old_one_is_kept
     let link = root.path().join("claude");
     symlink(&old, &link).unwrap();
     let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
-    assert!(Arc::ptr_eq(&registered, &registered.current(trusted).unwrap()));
+    assert!(Arc::ptr_eq(
+        &registered,
+        &registered.current(trusted).unwrap()
+    ));
     std::fs::remove_file(&link).unwrap();
     symlink(&new, &link).unwrap();
     let current = registered.current(trusted).unwrap();
@@ -745,7 +748,10 @@ fn a_host_whose_change_time_alone_moved_keeps_verifying_and_a_later_write_is_sti
             path,
             "linked: {linked}"
         );
-        assert!(Arc::ptr_eq(&registered, &registered.current(trusted).unwrap()));
+        assert!(Arc::ptr_eq(
+            &registered,
+            &registered.current(trusted).unwrap()
+        ));
     }
     assert_eq!(
         registered.verified_sha256().unwrap(),
