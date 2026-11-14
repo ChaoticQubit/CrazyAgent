@@ -184,7 +184,15 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     assert!(identity.ends_with(".unexchangeable"), "{identity}");
     assert!(!identity.contains("unit-identity-signature"), "{identity}");
     assert!(tool_record.is_none());
-    let today = master_command(&codex, &home, &worktree, "unit-model", None).unwrap();
+    let today = master_command(
+        &codex,
+        &home,
+        &worktree,
+        "unit-model",
+        None,
+        crate::provider_retry::ProviderRetry::RetryBriefly,
+    )
+    .unwrap();
     assert!(command.get_args().eq(today.get_args()));
     assert!(command.get_envs().eq(today.get_envs()));
     assert!(
@@ -635,7 +643,15 @@ fn the_installed_codex_reads_a_tools_on_master_with_its_own_sub_agents_off() {
         mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
         off: &[],
     };
-    let command = master_command(&codex, &home, &base, ACCOUNT_DEFAULT_MODEL, Some(tools)).unwrap();
+    let command = master_command(
+        &codex,
+        &home,
+        &base,
+        ACCOUNT_DEFAULT_MODEL,
+        Some(tools),
+        crate::provider_retry::ProviderRetry::RetryBriefly,
+    )
+    .unwrap();
     let mut features = Command::new(&codex);
     features
         .args(

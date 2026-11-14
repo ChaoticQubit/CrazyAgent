@@ -35,7 +35,15 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
     let codex = crate::team::runtime::managed_agent::codex();
     let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
     let folder = MasterRuntimeFolder::new(&root, &runtime_ref);
-    let command = master_command(&codex, &managed, &worktree, &connection.model.id, None).unwrap();
+    let command = master_command(
+        &codex,
+        &managed,
+        &worktree,
+        &connection.model.id,
+        None,
+        crate::provider_retry::ProviderRetry::RetryBriefly,
+    )
+    .unwrap();
     let sandbox = master_sandbox(
         &root,
         &runtime_ref,
