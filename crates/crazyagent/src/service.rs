@@ -756,9 +756,10 @@ pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
 }
 
 /// Like [`changeable_by_others`] for the tools the resolver runs, where a sticky folder
-/// others can write, such as `/tmp`, also passes as a store above an entry's own folder,
-/// since no one can replace a part this user or root owns there. Input: the absolute path.
-/// Output: the entry, or none.
+/// others can write, such as `/tmp`, also passes as a store above an entry's own folder, and
+/// a sticky store only its group can write, such as /nix/store, also as the entry's own
+/// folder ([`first_changeable_part`]), since no one can replace a part this user or root
+/// owns there. Input: the absolute path. Output: the entry, or none.
 #[cfg(unix)]
 pub(crate) fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
     changeable(path, true)
@@ -895,7 +896,10 @@ fn read_part(entry: &Path) -> Part {
 /// The first part, the entry first, that someone other than `me` or root can change. A
 /// sticky folder `me` or root owns, two or more parts above the entry with the part below
 /// it present, is a store: its group's write passes, and with `open_stores` everyone's
-/// does too. Inputs: the parts, `me` and `open_stores`. Output: the part's index, or none.
+/// does too. With `open_stores` a group store also passes as the entry's own folder when
+/// the entry is present, as /nix/store holds nix-darwin's brew: its group can neither
+/// unlink nor rename the entry, and any file it adds there is its member's, which this rule
+/// refuses. Inputs: the parts, `me` and `open_stores`. Output: the part's index, or none.
 #[cfg(unix)]
 pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) -> Option<usize> {
     let mut below_exists = false;
@@ -911,10 +915,12 @@ pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) 
                 link,
             } => {
                 let owned = owner == me || owner == 0;
-                let store = depth >= 2 && below_exists && owned && folder && mode & 0o1000 != 0;
+                let sticky = below_exists && owned && folder && mode & 0o1000 != 0;
+                let store = sticky && (depth >= 2 || (depth == 1 && open_stores));
+                let open_store = sticky && depth >= 2 && open_stores;
                 let world = !link && mode & 0o002 != 0;
                 let grouped = !link && mode & 0o020 != 0 && !trusted_group(group);
-                !owned || (world && !(store && open_stores)) || (grouped && !store)
+                !owned || (world && !open_store) || (grouped && !store)
             }
         };
         if changeable {
