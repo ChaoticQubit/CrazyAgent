@@ -7,6 +7,9 @@ const FEATURES: &str = ".crazyagent/overview/features.md";
 
 fn case() -> (Connection, ProjectId, tempfile::TempDir) {
     let db = Connection::open_in_memory().unwrap();
+    crate::project_setup::initialize(&db).unwrap();
+    db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
+        .unwrap();
     crate::roadmap_status::initialize(&db).unwrap();
     initialize(&db).unwrap();
     let folder = tempfile::tempdir().unwrap();
@@ -457,6 +460,32 @@ fn a_landed_set_marks_the_overview_stale_only_when_refresh_follows_landing() {
         )
         .unwrap();
     assert_eq!(due, 2_000 + crate::roadmap_status::QUIET_MS);
+}
+
+/// A landing that ends after its project was removed makes no Overview row, so no run of a
+/// removed project is listed due and retried every minute, and an id added again inherits
+/// no row; a project still set up is marked as before (RV-DS241-81 r1 F1, code track).
+#[test]
+fn a_landing_after_its_project_was_removed_makes_no_overview_row() {
+    let (db, project, _folder) = case();
+    let rows = |db: &Connection| -> i64 {
+        db.query_row("SELECT COUNT(*) FROM project_overview", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    db.execute(
+        "DELETE FROM project_setups WHERE project=?1",
+        [project.as_str()],
+    )
+    .unwrap();
+    mark_landed(&db, &project);
+    assert_eq!(rows(&db), 0, "a removed project got an Overview row");
+    db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
+        .unwrap();
+    mark_landed(&db, &project);
+    assert_eq!(rows(&db), 1);
+    assert!(state(&db, &project).unwrap().stale);
 }
 
 #[test]
@@ -2062,7 +2091,7 @@ fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach
     );
     let db = Connection::open_in_memory().unwrap();
     let project = ProjectId::new("plant-shop").unwrap();
-    match agent::answer(&runner, &db, &project, &root, &account) {
+    match agent::answer(&runner, &db, &project, &root, &account, &mut None) {
         Err(agent::Unwritten::Failed(words)) => assert_eq!(words, line),
         _ => panic!("the writing run did not fail with the reach line"),
     }
@@ -2071,4 +2100,141 @@ fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach
             .map_or(true, |mut entries| entries.next().is_none()),
         "no agent folder was made"
     );
+}
+
+/// RV-DS241-80: Delete everything records the project's Overview writing runs as engine
+/// files and removes each run's folder, which holds the evidence prompt and the session
+/// transcript, and its Seatbelt profile; the runs of a project whose id only starts the
+/// same or adds a `_`, a name in no run's shape and a research job's run all stay. Every run
+/// name is built as the engine builds it, with its run-id hash.
+#[test]
+fn delete_everything_removes_the_projects_overview_runs_and_no_other_projects() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let agents = base.join("research").join("agents");
+    let profiles = base.join("research").join("profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    let time = "1794000000000";
+    let named = |id: &str| run_name_at(&ProjectId::new(id).unwrap(), time);
+    let own = named("demo");
+    let others = [
+        named("demo-2"),
+        named("demonstration"),
+        named("demo_"),
+        "overview-demo-later".to_owned(),
+        "job-7-1".to_owned(),
+    ];
+    for name in others.iter().chain([&own]) {
+        std::fs::create_dir_all(agents.join(name).join("home")).unwrap();
+        std::fs::write(agents.join(name).join("prompt.md"), "evidence").unwrap();
+        std::fs::write(profiles.join(format!("{name}.sb")), "(version 1)").unwrap();
+    }
+    let plan = crate::projects_home::DeletePlan {
+        database: base.join("engine.db"),
+        project: ProjectId::new("demo").unwrap(),
+        home: base.join("home"),
+        folders: vec![],
+        agents: vec![],
+    };
+    let files = plan.engine_files(&[]);
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, [own.as_str()]);
+    assert_eq!(
+        crate::projects_home::remove_engine_files(&plan.database, &files),
+        [own.clone()]
+    );
+    assert!(std::fs::symlink_metadata(agents.join(&own)).is_err());
+    assert!(std::fs::symlink_metadata(profiles.join(format!("{own}.sb"))).is_err());
+    for name in others {
+        assert!(agents.join(&name).join("prompt.md").is_file(), "{name}");
+        assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
+    }
+}
+
+/// RV-DS241-80: what a finished Overview writing run left in the research state, its folder
+/// and its Seatbelt profile, is named for the research loop's later removal as a roadmap
+/// status run's is, and removed once the usage upkeep has counted the run.
+#[cfg(unix)]
+#[test]
+fn a_finished_overview_run_is_removed_like_a_status_run() {
+    use crate::roadmap_status::run::{RUN_KEPT, RunLeft};
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().canonicalize().unwrap();
+    let folder = state.join("agents").join("overview-demo-1794000000000");
+    std::fs::create_dir_all(folder.join("home")).unwrap();
+    std::fs::write(folder.join("prompt.md"), "evidence").unwrap();
+    std::fs::create_dir(state.join("profiles")).unwrap();
+    let profile = state
+        .join("profiles")
+        .join("overview-demo-1794000000000.sb");
+    std::fs::write(&profile, "(version 1)").unwrap();
+    let ended = std::time::Instant::now().checked_sub(RUN_KEPT).unwrap();
+    let left = RunLeft::at(folder.clone(), profile.clone(), ended);
+    assert!(left.due());
+    left.remove();
+    assert!(std::fs::symlink_metadata(&folder).is_err());
+    assert!(std::fs::symlink_metadata(&profile).is_err());
+}
+
+/// RV-DS241-80: a writing run's state name is read back as its own project's only, for a
+/// project id long enough to be cut too, ids that differ only in `.`, `:` or `_`, and ids
+/// that differ only past the cut, whatever the digits of its start time, so Delete
+/// everything takes no other project's run and every run of its own (r1 F1).
+#[cfg(unix)]
+#[test]
+fn the_name_of_an_overview_run_is_read_back_as_its_own_projects_only() {
+    let demo = ProjectId::new("demo").unwrap();
+    let name = run_name(&demo, 1_794_000_000_000);
+    let hash = crate::roadmap_status::run_stem(&demo)
+        .strip_prefix("roadmap-status-demo-")
+        .unwrap()
+        .to_owned();
+    assert_eq!(name, format!("overview-demo-{hash}-1794000000000"));
+    assert!(names_run(&demo, &name));
+    for other in ["demo-2", "dem", "demonstration"] {
+        let other = ProjectId::new(other).unwrap();
+        assert!(!names_run(&other, &name), "{other:?}");
+        assert!(
+            !names_run(&demo, &run_name(&other, 1_794_000_000_000)),
+            "{other:?}"
+        );
+    }
+    let long = ProjectId::new("l".repeat(128)).unwrap();
+    for time in [7, 1_794_000_000_000, i64::MAX] {
+        let name = run_name(&long, time);
+        assert!(name.len() <= 96 && names_run(&long, &name), "{name}");
+        assert!(!names_run(&demo, &name));
+    }
+    let past = |end: &str| ProjectId::new(format!("{}{end}", "a".repeat(100))).unwrap();
+    for (one, two) in [
+        ("web.app", "web_app"),
+        ("web:app", "web_app"),
+        ("web.app", "web:app"),
+        ("x.y", "x_2ey"),
+    ]
+    .map(|(one, two)| (ProjectId::new(one).unwrap(), ProjectId::new(two).unwrap()))
+    .into_iter()
+    .chain([(past("b"), past("c"))])
+    {
+        assert!(
+            !names_run(&one, &run_name(&two, 1_794_000_000_000)),
+            "{one:?} takes the runs of {two:?}"
+        );
+        assert!(
+            !names_run(&two, &run_name(&one, 1_794_000_000_000)),
+            "{two:?} takes the runs of {one:?}"
+        );
+    }
+    for odd in [
+        "overview-demo",
+        "overview-demo-",
+        "overview-demo-later",
+        "overview-demo-1-",
+        "overview-demo--1",
+        "overview-demo-12345678901234567890",
+        "roadmap-status-demo-1794000000000",
+        "job-1-1",
+    ] {
+        assert!(!names_run(&demo, odd), "{odd}");
+    }
 }

@@ -3,6 +3,7 @@ use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1077,20 +1078,18 @@ const RUN_NAME_BYTES_MAX: usize = 96;
 const RUN_TIME_DIGITS_MAX: usize = 19;
 const RUN_ID_HASH_BYTES: usize = 8;
 
-/// The part of a status run's state name that names its project: the head, the project id
-/// with every byte outside ASCII letters, digits, `-` and `_` written as `_` and cut so the
-/// name with its time fits `RUN_NAME_BYTES_MAX`, then `-` and the first
-/// `RUN_ID_HASH_BYTES` of the SHA-256 of the whole id in lowercase hex, so two ids that read
-/// the same once written or cut still get stems of their own (RV-DS241-45). Input: the
-/// project. Output: the stem.
-pub(crate) fn run_stem(project: &ProjectId) -> String {
-    use sha2::{Digest, Sha256};
+/// The bytes of a run's state name that stand for its project: the project id with every
+/// byte outside ASCII letters, digits, `-` and `_` written as `_` and cut to fit `room`, then
+/// `-` and the first `RUN_ID_HASH_BYTES` of the SHA-256 of the whole id in lowercase hex, so
+/// two ids that read the same once written or cut still get parts of their own (RV-DS241-45,
+/// RV-DS241-80 r1 F1). Inputs: the project and the room. Output: at most `room` bytes.
+pub(crate) fn run_project_part(project: &ProjectId, room: usize) -> String {
     let hash: String = Sha256::digest(project.as_str().as_bytes())[..RUN_ID_HASH_BYTES]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
     assert_eq!(hash.len(), 2 * RUN_ID_HASH_BYTES);
-    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - hash.len() - 1 - RUN_TIME_DIGITS_MAX;
+    assert!(room > hash.len() + 1);
     let named: String = project
         .as_str()
         .chars()
@@ -1101,9 +1100,19 @@ pub(crate) fn run_stem(project: &ProjectId) -> String {
                 '_'
             }
         })
-        .take(room)
+        .take(room - 1 - hash.len())
         .collect();
-    let stem = format!("{RUN_NAME_HEAD}{named}-{hash}");
+    let part = format!("{named}-{hash}");
+    assert!(part.is_ascii() && part.len() <= room);
+    part
+}
+
+/// The part of a status run's state name that names its project: the head and the
+/// project's [`run_project_part`], sized so the name with its time fits
+/// `RUN_NAME_BYTES_MAX`. Input: the project. Output: the stem.
+pub(crate) fn run_stem(project: &ProjectId) -> String {
+    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - RUN_TIME_DIGITS_MAX;
+    let stem = format!("{RUN_NAME_HEAD}{}", run_project_part(project, room));
     assert!(stem.is_ascii());
     assert!(stem.len() + 1 + RUN_TIME_DIGITS_MAX <= RUN_NAME_BYTES_MAX);
     stem
