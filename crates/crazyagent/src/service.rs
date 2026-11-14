@@ -612,17 +612,20 @@ WantedBy=default.target\n",
     /// What to do with the engine service when no engine answers: install this definition
     /// when asked, when none is installed, when the installed one names a broken program
     /// ([`Self::broken_program`]), when it is [`Self::stale`], or when it runs another program
-    /// this engine may replace ([`Self::may_replace`]); otherwise start it as it is. An engine
-    /// that is itself [`transient`] is never installed: it starts a usable installed definition
-    /// and is refused otherwise. Inputs: the bundled engine, whether a definition is installed
-    /// and whether the owner asked for a reinstall. Output: the repair.
+    /// this engine may replace ([`Self::may_replace`]); otherwise start it as it is. A forced
+    /// reinstall keeps another program that still exists and this engine may not replace
+    /// (RV-DS241-129). An engine that is itself [`transient`] is never installed: it starts a
+    /// usable installed definition and is refused otherwise. Inputs: the bundled engine,
+    /// whether a definition is installed and whether the owner asked for a reinstall. Output:
+    /// the repair.
     pub fn repair(&self, bundled: &Path, installed: bool, reinstall: bool) -> Repair {
         let broken = installed && self.broken_program().is_some();
-        let replace = reinstall
-            || !installed
-            || broken
-            || self.stale(bundled)
-            || (self.runs_another_program() && self.may_replace());
+        let another = installed && !broken && self.runs_another_program();
+        let replaceable = another && self.may_replace();
+        if reinstall && another && !replaceable {
+            return Repair::Keep;
+        }
+        let replace = reinstall || !installed || broken || self.stale(bundled) || replaceable;
         if !replace {
             return Repair::Start;
         }
@@ -641,7 +644,17 @@ WantedBy=default.target\n",
     /// /Volumes or translocated path at login or on a restart; a usable definition stays.
     /// Output: the error saying to move the app to Applications, with any removal failure.
     pub fn refuse(&self) -> ServiceError {
-        transient_refused(&self.executable)
+        let refused = transient_refused(&self.executable);
+        if self.broken_program().is_none() {
+            return refused;
+        }
+        match self.uninstall() {
+            Ok(()) => refused,
+            Err(error) => failure(format!(
+                "{}; the login service naming a gone or temporary path could not be removed: {}",
+                refused.0, error.0
+            )),
+        }
     }
 
     /// The executable as [`Self::definition_text`] writes it on this platform: XML-escaped in
@@ -1597,7 +1610,7 @@ pub async fn ensure_running(
                 kept.install()?;
                 retire_old_copies(layout, &kept.executable);
             }
-            Repair::Refuse => return Err(transient_refused(&service.executable)),
+            Repair::Refuse => return Err(service.refuse()),
         }
         wait_started(layout, service, bound, since).await?;
         return Ok(Started::Service);

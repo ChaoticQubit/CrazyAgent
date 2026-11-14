@@ -36,6 +36,7 @@ const COPY: Record<string, string> = {
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
   engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",
+  engine_newer_than_app: "Your login service runs a newer CrazyAgent engine than this app, or this app is a test build, so Restart engine keeps that engine. Open the newer CrazyAgent or update this one, then restart the engine.",
   engine_app_not_installed: "Move CrazyAgent to your Applications folder, then open it again. Its engine can't run at login from a disk image, another disk or a temporary folder.",
   engine_restart_unavailable: "This window uses an engine you started yourself. Restart that engine, then try again.",
   uncertain: "We couldn't confirm your last change. Check it and save again.",

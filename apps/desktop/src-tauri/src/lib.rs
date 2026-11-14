@@ -166,7 +166,9 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
 /// Installs the service or starts it as it is, as [`crazyagent::service::Service::repair`]
 /// says: a definition naming a gone, /Volumes or translocated program is never started as
 /// it is (RV-DS241-118), and a sidecar on a disk image or in a temporary folder is never
-/// installed (`engine_app_not_installed`). Then it waits for the engine while the service
+/// installed (`engine_app_not_installed`); a refusal removes a definition naming a broken
+/// program first. Restart engine never replaces another program this engine may not
+/// (`engine_newer_than_app`, RV-DS241-129). Then it waits for the engine while the service
 /// still runs it ([`crazyagent::service::wait_started`]). The service runs the sidecar, or its
 /// private copy when the sidecar sits in the AppImage mount folder; a sidecar other users can
 /// change is refused. Inputs: the layout, the service and whether to replace the definition
@@ -190,6 +192,7 @@ async fn start_engine(
     };
     match service.repair(bundled, installed, reinstall) {
         crazyagent::service::Repair::Refuse => {
+            service.refuse();
             return Err(engine_failure("engine_app_not_installed"));
         }
         crazyagent::service::Repair::Keep => {
