@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
 pub(super) const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
+/// The code for a grant found stale or revoked after a change reached the disk: no client
+/// reads it as "nothing changed", so the reply is an outcome to reconcile from state.
+const STALE_AFTER_CHANGE: &str = "owner_grant_stale_after_change";
 const UNSETTLED: [&str; 2] = [UNKNOWN, "owner_actor_stopped_outcome_unknown"];
 const OLD_FOLDER_LEFT: &str = "move_project_old_folder_left";
 const SETTLE_TRIES: usize = 3;
@@ -261,14 +264,16 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 
 /// Reads a grant check made while a change is answered. Inputs: the check, the admission
 /// the request came with and whether the disk already changed. Output: Ok while the grant
-/// is the same, else the check's refusal.
+/// is the same; else `STALE_AFTER_CHANGE` once the disk changed, which clients reconcile,
+/// or the check's own refusal before any change.
 pub(super) fn regranted(
     checked: Result<Admission, EngineError>,
     a: &Admission,
-    _changed: bool,
+    changed: bool,
 ) -> Result<(), EngineError> {
     match checked {
         Ok(current) if &current == a => Ok(()),
+        _ if changed => Err(failure(STALE_AFTER_CHANGE)),
         Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
         Err(e) => Err(e),
     }
