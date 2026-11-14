@@ -2244,3 +2244,39 @@ fn keeping_team_agents_says_an_agent_under_network_none_is_frozen_until_crazyage
         "They go on with their work, and CrazyAgent takes them over when it opens again. An agent under network None is frozen instead, until CrazyAgent opens again."
     );
 }
+
+/// On a fresh Mac at the smallest window, 80x24, with every tool missing and its line under
+/// it, the Tools section is taller than the body; the top scrolls away so part of the pack
+/// list and the note naming the MCP servers Enter approves stay on screen.
+#[test]
+fn at_80x24_with_every_tool_missing_the_approval_note_and_pack_rows_stay_on_screen() {
+    let mut status = first_run_status();
+    status.dependencies = Dependency::ALL
+        .into_iter()
+        .map(|name| {
+            tool(
+                name,
+                DependencyState::Missing {
+                    line: name.not_found().line(),
+                },
+            )
+        })
+        .collect();
+    let mut shell = Shell::with(ctx(80, 24), Box::new(AppSetup::new(true)));
+    assert!(matches!(jobs(&mut shell).as_slice(), [AppSetupJob::Status]));
+    shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+    let tall = render(&mut shell, 80, 60);
+    let at = tall
+        .iter()
+        .position(|row| row.contains("approves them for your agents"))
+        .expect("the approval note shows in a tall window");
+    assert!(at >= 24, "the Tools section fills an 80x24 body");
+    let rows = render(&mut shell, 80, 24);
+    find(&rows, "approves them for your agents");
+    find(&rows, "context-mode, headroom.");
+    assert!(
+        rows.iter().any(|row| row.contains("[x] ")),
+        "no pack row is on screen"
+    );
+    assert!(rows.last().unwrap().contains("Enter Install and continue"));
+}
