@@ -1737,6 +1737,12 @@ async fn delete_removes_a_parked_session_and_its_transcript_inside_the_master_ho
     std::fs::create_dir_all(outside.join("conversation-kept")).unwrap();
     std::fs::write(outside.join("conversation-kept.jsonl"), "outside\n").unwrap();
     std::fs::write(outside.join("conversation-linked.jsonl"), "outside\n").unwrap();
+    std::fs::write(outside.join("conversation-kept/agent-b.jsonl"), "outside\n").unwrap();
+    std::os::unix::fs::symlink(
+        outside.join("conversation-kept"),
+        projects.join("conversation-kept/subagents/escape"),
+    )
+    .unwrap();
     keep_conversation(&case, &kept.session_id, 4, "conversation-kept", &record);
     std::os::unix::fs::symlink(&outside, home.join(".claude/projects/linked")).unwrap();
     let through_link = home.join(".claude/projects/linked/conversation-linked.jsonl");
@@ -1818,6 +1824,11 @@ async fn delete_removes_a_parked_session_and_its_transcript_inside_the_master_ho
         "a same-named record outside the home is untouched"
     );
     assert!(outside.join("conversation-kept").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(outside.join("conversation-kept/agent-b.jsonl")).unwrap(),
+        "outside\n",
+        "a link inside the removed folder goes as itself, its target stays"
+    );
     assert_eq!(
         listed_ids(&case.sessions().await),
         vec![live.session_id.clone(), linked.session_id.clone()]
