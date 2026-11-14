@@ -195,3 +195,83 @@ fn engine_setup_git_runs_no_repository_signature_program_in_any_armor() {
         assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
     }
 }
+
+/// Engine git reads a signed owner tip's commit time alone when the repository asks every
+/// log for signatures but names no allowed signers, so git has nothing to verify with and
+/// would print `No signature` ahead of the format, as a clone's freshness check reads it
+/// (RV-DS241-39 r2 F2).
+#[test]
+fn engine_git_reads_a_signed_owner_tip_with_no_allowed_signers_as_its_commit_time_alone() {
+    let signed = signed(Armor::Ssh);
+    let home = signed.base.join("home");
+    git(
+        &signed.root,
+        &home,
+        &["config", "--unset", "gpg.ssh.allowedSignersFile"],
+    );
+    let owner = Repo::open(&signed.root, &signed.root.join(".git"), None).unwrap();
+    let shown = owner
+        .capture(&["show", "-s", "--format=%ct", "HEAD"], 64)
+        .unwrap();
+    assert_eq!(String::from_utf8(shown).unwrap(), format!("{SIGNED_AT}\n"));
+    assert_eq!(signed.ran(), Vec::<String>::new());
+}
+
+/// Git 2.54 runs a hook its config names (`hook.<name>.command` with `hook.<name>.event`)
+/// whatever `core.hooksPath` says, so the engine's index and ref writes on the owner
+/// repository would start one with the owner's rights. Engine git refuses to open an owner
+/// repository whose config names any hook key, in its own config or through an include,
+/// before it writes anything; the refusal reads the keys, so it holds on a git without
+/// config hooks too (RV-DS241-39 r2 F1).
+#[test]
+fn engine_git_refuses_an_owner_repository_whose_config_names_a_hook() {
+    for included in [false, true] {
+        let signed = signed(Armor::Pgp);
+        let home = signed.base.join("home");
+        let config = if included {
+            let file = signed.base.join("hooks.inc");
+            git(
+                &signed.root,
+                &home,
+                &["config", "include.path", file.to_str().unwrap()],
+            );
+            file
+        } else {
+            signed.root.join(".git").join("config")
+        };
+        for (name, event) in [
+            ("x", "post-index-change"),
+            ("y", "reference-transaction"),
+            ("z", "pre-commit"),
+        ] {
+            let marker = signed.markers.join(format!("hook-{name}"));
+            for (key, value) in [
+                ("command", format!("touch '{}'", marker.display())),
+                ("event", event.to_owned()),
+            ] {
+                git(
+                    &signed.root,
+                    &home,
+                    &[
+                        "config",
+                        "--file",
+                        config.to_str().unwrap(),
+                        &format!("hook.{name}.{key}"),
+                        &value,
+                    ],
+                );
+            }
+        }
+        let opened = Repo::open(&signed.root, &signed.root.join(".git"), None);
+        if let Ok(owner) = &opened {
+            let _ = owner.capture(&["read-tree", "HEAD"], 64);
+            let _ = owner.capture(&["update-ref", "refs/heads/probe", "HEAD"], 64);
+        }
+        assert_eq!(signed.ran(), Vec::<String>::new(), "included {included}");
+        assert_eq!(
+            opened.err().map(|error| error.0),
+            Some("changes_git_unsupported".to_owned()),
+            "included {included}"
+        );
+    }
+}
