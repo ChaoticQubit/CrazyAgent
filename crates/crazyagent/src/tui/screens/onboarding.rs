@@ -7,7 +7,10 @@ use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
 use crate::onboarding::{MappingTry, OnboardingView, Step};
 use crate::pools::PoolSummary;
-use crate::project_setup::{KeptFile, Platform, ResearchKind, SetupAction, SetupQuery, SetupView};
+use crate::project_setup::{
+    ABOUT_BYTES_MAX, KeptFile, Platform, ResearchKind, SetupAction, SetupQuery, SetupView,
+    TECH_ENTRIES_MAX, TECH_ENTRY_BYTES_MAX,
+};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::intake::{IntakeQuery, IntakeView};
@@ -34,9 +37,9 @@ const MISSING_WORDS: [(&str, &str); 4] = [
     ("tech_stack", "the tech stack"),
     ("platforms", "the target platforms"),
 ];
-const ABOUT_CHARS_MAX: usize = 2_000;
-const STACK_CHARS_MAX: usize = 1_000;
-const STACK_ITEMS_MAX: usize = 32;
+/// The most characters the stack field holds: every entry the engine keeps, at its longest,
+/// with the comma and space between entries.
+const STACK_CHARS_MAX: usize = TECH_ENTRIES_MAX * (TECH_ENTRY_BYTES_MAX + 2);
 const PLATFORMS_PER_ROW: usize = 3;
 const LINKED_LABEL: &str = "Use these files";
 const LINKED_NOTE: &str = "CrazyAgent reads them from your repo; edits go to those files.";
@@ -88,6 +91,8 @@ struct Review {
     name: TextField,
     about: TextField,
     stack: TextField,
+    shown_about: String,
+    shown_stack: String,
     platforms: Vec<Platform>,
     platform: usize,
     roadmap: bool,
@@ -101,10 +106,12 @@ impl Review {
     fn new(onboarding: Box<OnboardingView>) -> Self {
         let mut name = TextField::new("Name", NAME_BYTES_MAX);
         name.set(&onboarding.name);
-        let mut about = TextField::new("About", ABOUT_CHARS_MAX);
+        let mut about = TextField::new("About", ABOUT_BYTES_MAX).multiline();
         about.set(&onboarding.draft.about);
         let mut stack = TextField::new("Tech stack", STACK_CHARS_MAX).note("Separate with commas.");
         stack.set(&onboarding.draft.tech_stack.join(", "));
+        let shown_about = about.value().to_owned();
+        let shown_stack = stack.value().to_owned();
         let platforms = onboarding.draft.platforms.clone();
         let roadmap = (!onboarding.finished && onboarding.facts.roadmap.is_empty())
             || onboarding
@@ -116,6 +123,8 @@ impl Review {
             name,
             about,
             stack,
+            shown_about,
+            shown_stack,
             platforms,
             platform: 0,
             roadmap,
@@ -195,7 +204,7 @@ impl Review {
             .split(',')
             .map(str::trim)
             .filter(|item| !item.is_empty())
-            .take(STACK_ITEMS_MAX)
+            .take(TECH_ENTRIES_MAX)
             .map(str::to_owned)
             .collect()
     }
@@ -229,8 +238,12 @@ impl Review {
     fn action(&self, revision: u64) -> SetupAction {
         let name = self.name.value().trim().to_owned();
         let mut setup = self.onboarding.draft.clone();
-        setup.about = self.about.value().trim().to_owned();
-        setup.tech_stack = self.stack();
+        if self.about.value() != self.shown_about {
+            setup.about = self.about.value().trim().to_owned();
+        }
+        if self.stack.value() != self.shown_stack {
+            setup.tech_stack = self.stack();
+        }
         setup.platforms = self.platforms.clone();
         setup.documents = Vec::new();
         setup
@@ -963,6 +976,12 @@ impl Screen for OnboardingPage {
                 Focus::Roadmap | Focus::Linked => vec![
                     hint("Space", "Turn on or off"),
                     hint("Tab", "Next"),
+                    hint("Esc", "Back"),
+                ],
+                Focus::About => vec![
+                    hint("Ctrl-J", "New line"),
+                    hint("Tab", "Next"),
+                    hint("Shift-Tab", "Previous"),
                     hint("Esc", "Back"),
                 ],
                 Focus::Confirm => {
