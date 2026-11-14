@@ -166,6 +166,49 @@ impl LandlockPolicy {
     }
 }
 
+/// The Landlock rules of one engine git step on an agent's linked worktree, the Linux form
+/// of the macOS step profile (SECAUDIT unconfined-git-add-reads-through-raced-symlink,
+/// unconfined-read-tree-u): it reads the system, `/proc` and `read`, and writes the devices
+/// and `write`, with no network rule and no kept port. Inputs: the absolute places the step
+/// reads and writes. Output: the policy.
+pub(crate) fn git_step_policy(read: &[PathBuf], write: &[PathBuf]) -> LandlockPolicy {
+    assert!(read.iter().chain(write).all(|path| path.is_absolute()));
+    let policy = LandlockPolicy {
+        read: SYSTEM_READ_ROOTS
+            .iter()
+            .chain(&["/proc"])
+            .map(PathBuf::from)
+            .chain(read.iter().cloned())
+            .collect(),
+        write: LANDLOCK_DEVICES
+            .iter()
+            .map(PathBuf::from)
+            .chain(write.iter().cloned())
+            .collect(),
+        ..LandlockPolicy::default()
+    };
+    assert!(policy.read.len() + policy.write.len() <= HELPER_PATHS_MAX);
+    assert!(!policy.limit_network && policy.keep_free.is_empty());
+    policy
+}
+
+/// Tells whether this kernel holds the helper's file rules, as a landing git step needs
+/// them: the helper's probe with no network flag. Input: the helper. Output: true only when
+/// it is an absolute file and its probe exits 0.
+pub(crate) fn holds_file_rules(helper: &Path) -> bool {
+    clean_absolute(helper)
+        && helper.is_file()
+        && crate::spawn_gate::status(
+            Command::new(helper)
+                .arg(PROBE)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .is_ok_and(|status| status.success())
+}
+
 /// What the `crazyagent-landlock` helper was asked to do: probe whether this kernel holds a
 /// Landlock ruleset, or apply a policy and start a harness.
 #[derive(Debug, PartialEq, Eq)]

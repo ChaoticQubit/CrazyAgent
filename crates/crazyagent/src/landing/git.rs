@@ -24,6 +24,76 @@ thread_local! {
     pub(super) static GIT_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    /// The Landlock helper a landing test stands in for the build folder's, so a test can
+    /// take it away. None keeps the build folder's helper.
+    pub(super) static LANDLOCK_HELPER: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The folder the engine makes in a linked worktree's git folder for a confined Linux step:
+/// the only place in the git folder the step writes, holding its copy of the index.
+#[cfg(target_os = "linux")]
+const STEP_FOLDER: &str = "crazyagent-step";
+
+/// The exit git gives when it finds the index already locked, which a confined Linux step
+/// answers with in git's place, since the engine takes that lock for it.
+#[cfg(target_os = "linux")]
+const INDEX_LOCKED: i32 = 128;
+
+/// The most folders of a repository's `.git/worktrees` the start sweep looks in for a lock
+/// a stopped confined Linux step left ([`clear_step_locks`]).
+#[cfg(target_os = "linux")]
+const STEP_LOCK_FOLDERS_MAX: usize = 512;
+
+/// Removes the `index.lock` a confined Linux step of a stopped engine left: only in a linked
+/// worktree's git folder that holds the engine's step folder, only a plain file, and never
+/// through a link. The engine runs it once at start, before any landing step, so no step of
+/// its own holds such a lock then. Input: the repository's canonical root. Output: how many
+/// locks it removed.
+#[cfg(target_os = "linux")]
+pub(super) fn clear_step_locks(root: &Path) -> usize {
+    let real = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+    let worktrees = root.join(".git").join("worktrees");
+    if !real(&root.join(".git")) || !real(&worktrees) {
+        return 0;
+    }
+    let Ok(folders) = std::fs::read_dir(&worktrees) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for folder in folders.take(STEP_LOCK_FOLDERS_MAX).flatten() {
+        let private = folder.path();
+        let lock = private.join("index.lock");
+        if real(&private)
+            && real(&private.join(STEP_FOLDER))
+            && std::fs::symlink_metadata(&lock).is_ok_and(|meta| meta.is_file())
+            && std::fs::remove_file(&lock).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    assert!(removed <= STEP_LOCK_FOLDERS_MAX);
+    removed
+}
+
+/// The Landlock helper a confined Linux step starts: the one shipped beside the engine, or
+/// for a unit test, which runs from the build folder's `deps`, the one built in that build
+/// folder unless the test stands in another (`LANDLOCK_HELPER`). Output: the path, or None
+/// when the engine's own executable is unknown.
+#[cfg(target_os = "linux")]
+fn landlock_helper() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(helper) = LANDLOCK_HELPER.with(|helper| helper.borrow().clone()) {
+        return Some(helper);
+    }
+    let engine = std::env::current_exe().ok()?;
+    #[cfg(test)]
+    let engine = engine.parent()?.to_path_buf();
+    Some(engine.with_file_name(crate::sandbox::linux::HELPER_NAME))
+}
+
 /// The settings every engine git call carries on top of the research runner's
 /// `GIT_SAFE`: no attributes file from outside the repository, no automatic upkeep, the
 /// case-folding path checks on, no signing, no untracked or split index caches, no
@@ -334,10 +404,75 @@ impl Repo {
         })
     }
 
-    /// This repository unchanged, since only macOS has a confined step: elsewhere the step
-    /// runs as any engine git call does. Input: what the step may write. Output: the
-    /// repository.
-    #[cfg(not(target_os = "macos"))]
+    /// This repository with its git calls started by the Landlock helper under
+    /// [`crate::sandbox::linux::git_step_policy`], for a step on a linked agent worktree whose
+    /// agent may still be changing it, as `WORK_TREE_PROFILE` holds it on macOS. The step
+    /// reads the system, the work tree, the repository's git folder, git and the owner's
+    /// ignore file. It writes only what it names and the engine's step folder in the
+    /// worktree's git folder, where it works on a copy of the index ([`Self::swapped`]), so a
+    /// link swapped in during the step reaches nothing else. Input: what the step may write.
+    /// Output: the repository, `changes_workspace_invalid` for one that is not a linked
+    /// worktree's, or `changes_git_unsupported` where git, the helper or this kernel's
+    /// Landlock file rules are missing: the step fails closed and never runs unconfined.
+    #[cfg(target_os = "linux")]
+    pub(super) fn confined(&self, writes: Writes) -> Result<Self, EngineError> {
+        use std::ffi::OsString;
+        assert!(
+            self.index.is_none(),
+            "a confined step uses the worktree's own index"
+        );
+        let invalid = || failure("changes_workspace_invalid");
+        let real = |path: &Path| std::fs::canonicalize(path).map_err(|_| invalid());
+        let work = real(self.work_tree.as_deref().ok_or_else(invalid)?)?;
+        let private = real(&self.git_dir)?;
+        let common = private
+            .parent()
+            .filter(|parent| parent.ends_with("worktrees"))
+            .and_then(Path::parent)
+            .ok_or_else(invalid)?
+            .to_path_buf();
+        let unsupported = || failure("changes_git_unsupported");
+        let git = std::fs::canonicalize(crate::research::runner::sandboxed_git())
+            .map_err(|_| unsupported())?;
+        let helper = landlock_helper()
+            .filter(|helper| crate::sandbox::linux::holds_file_rules(helper))
+            .ok_or_else(unsupported)?;
+        let step = private.join(STEP_FOLDER);
+        match std::fs::create_dir(&step) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(invalid()),
+        }
+        if !std::fs::symlink_metadata(&step).is_ok_and(|meta| meta.is_dir()) {
+            return Err(invalid());
+        }
+        let mut read = vec![work.clone(), common.clone(), git.clone()];
+        read.extend(
+            self.excludes
+                .as_deref()
+                .and_then(|setting| setting.strip_prefix("core.excludesFile="))
+                .and_then(|path| std::fs::canonicalize(path).ok()),
+        );
+        let target = match writes {
+            Writes::Objects => common.join("objects"),
+            Writes::WorkTree => work,
+        };
+        let policy = crate::sandbox::linux::git_step_policy(&read, &[target, step.clone()]);
+        let mut confinement = vec![helper.into_os_string()];
+        confinement.extend(policy.args());
+        confinement.extend([OsString::from("--"), git.into_os_string()]);
+        assert!(confinement.len() > 4);
+        Ok(Self {
+            index: Some(step.join("index")),
+            confinement,
+            ..self.clone()
+        })
+    }
+
+    /// This repository unchanged, since only macOS and Linux have a confined step: elsewhere
+    /// the step runs as any engine git call does. Input: what the step may write. Output:
+    /// the repository.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub(super) fn confined(&self, _writes: Writes) -> Result<Self, EngineError> {
         Ok(self.clone())
     }
@@ -360,6 +495,10 @@ impl Repo {
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
         let mut command = if self.confinement.is_empty() {
             Command::new(crate::research::runner::setup_git())
+        } else if cfg!(target_os = "linux") {
+            let mut confined = Command::new(&self.confinement[0]);
+            confined.args(&self.confinement[1..]);
+            confined
         } else {
             let mut confined = Command::new(crate::sandbox::SANDBOX_EXEC);
             confined.args(&self.confinement);
@@ -402,10 +541,115 @@ impl Repo {
     }
 
     /// Runs one git command within `STEP_TIME`, feeding it `input` and keeping at most
-    /// `limit` bytes of its output. Inputs: the arguments, the input, extra environment
-    /// and the bound. Output: the exit code, the output and whether it ran over; an
-    /// error when git cannot start, is stopped by a signal or runs past the time.
+    /// `limit` bytes of its output; a confined Linux step runs on a copy of the worktree's
+    /// index ([`Self::swapped`]). Inputs: the arguments, the input, extra environment and
+    /// the bound. Output: the exit code, the output and whether it ran over; an error when
+    /// git cannot start, is stopped by a signal or runs past the time.
     pub(super) fn exec(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+        env: &[(&str, &str)],
+        limit: usize,
+    ) -> Result<Output, EngineError> {
+        #[cfg(target_os = "linux")]
+        if !self.confinement.is_empty() {
+            return self.swapped(|| self.spawned(args, input, env, limit));
+        }
+        self.spawned(args, input, env, limit)
+    }
+
+    /// Runs one confined Linux step on the copy of the worktree's index in the engine's step
+    /// folder, holding the worktree's `index.lock` the whole time as git would. The folder
+    /// starts empty and is emptied after, and the index is copied only from a plain file with
+    /// one link, opened without following a link or waiting on a FIFO. Once git exits 0
+    /// having rewritten the copy, the copy takes the index's place only when it too is a
+    /// plain file with one link, so whatever a raced step leaves there is never taken, and a
+    /// step that only reads leaves the index as it was; the step itself never writes the git
+    /// folder ([`Self::confined`]). Input: the step. Output: its output, git's
+    /// [`INDEX_LOCKED`] exit when the lock is already held, or `changes_git_failed` when the
+    /// index cannot be locked, copied or put back.
+    #[cfg(target_os = "linux")]
+    pub(super) fn swapped(
+        &self,
+        step: impl FnOnce() -> Result<Output, EngineError>,
+    ) -> Result<Output, EngineError> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let copy = self
+            .index
+            .as_deref()
+            .expect("a confined Linux step works on a copy of the index");
+        assert!(
+            copy.parent()
+                .is_some_and(|folder| folder.ends_with(STEP_FOLDER))
+        );
+        let index = self.git_dir.join("index");
+        let lock = self.git_dir.join("index.lock");
+        let failed = || failure("changes_git_failed");
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(Output {
+                    code: INDEX_LOCKED,
+                    stdout: Vec::new(),
+                    overflow: false,
+                });
+            }
+            Err(_) => return Err(failed()),
+        }
+        let folder = copy.parent().expect("the copy sits in the step folder");
+        let plain = |meta: &std::fs::Metadata| meta.file_type().is_file() && meta.nlink() == 1;
+        let renewed = std::fs::remove_dir_all(folder)
+            .err()
+            .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
+            && std::fs::create_dir(folder).is_ok();
+        let copied = renewed
+            && match std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&index)
+            {
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                Ok(mut real) => {
+                    real.metadata().is_ok_and(|meta| plain(&meta))
+                        && std::fs::File::create_new(copy)
+                            .and_then(|mut written| std::io::copy(&mut real, &mut written))
+                            .is_ok()
+                }
+            };
+        let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
+        let ran = if copied {
+            let before = std::fs::symlink_metadata(copy)
+                .ok()
+                .map(|meta| identity(&meta));
+            step().map(|output| (before, output))
+        } else {
+            Err(failed())
+        };
+        let left = std::fs::symlink_metadata(copy).ok();
+        let rewritten = matches!(&ran, Ok((before, output))
+            if output.code == 0 && left.as_ref().is_some_and(|meta| Some(identity(meta)) != *before));
+        let kept = rewritten
+            && left.as_ref().is_some_and(plain)
+            && std::fs::rename(copy, &lock).is_ok()
+            && std::fs::rename(&lock, &index).is_ok();
+        if !kept {
+            let _ = std::fs::remove_file(&lock);
+        }
+        let _ = std::fs::remove_dir_all(folder);
+        match ran {
+            Ok(_) if rewritten && !kept => Err(failed()),
+            ran => ran.map(|(_, output)| output),
+        }
+    }
+
+    /// Starts one git command and collects what [`Self::exec`] answers. Inputs and output:
+    /// as there.
+    fn spawned(
         &self,
         args: &[&str],
         input: Option<&[u8]>,
