@@ -1,10 +1,11 @@
-use super::runner::{ResearchAccount, ResearchHarness, unreached_provider_here};
+use super::runner::{ResearchAccount, ResearchHarness, unreached_loopback_here};
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint,
 };
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::protocol::CredentialRef;
+use crate::provider_reach::ProviderReach;
 use crate::scheduling::{Candidate, Choice};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -205,7 +206,7 @@ fn members_pick<'a>(
         match paused_until(&connection.id) {
             None => {
                 if reach == Reach::Reachable
-                    && let Some(line) = unreached_provider_here(account)
+                    && let Some(line) = unreached_loopback_here(&ProviderReach::system(), account)
                 {
                     eprintln!("{}", skipped_line(&connection.id, &line));
                     waiting = waiting.or_wait(AccountPick::Unreached { line });

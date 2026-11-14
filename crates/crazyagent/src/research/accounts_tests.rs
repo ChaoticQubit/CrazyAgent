@@ -205,7 +205,7 @@ fn the_log_line_of_a_passed_over_member_names_it_and_its_providers_host_and_port
         model: "some-model".into(),
         key: Some(reference("owner-key")),
     };
-    let line = unreached_provider_here(&account).unwrap();
+    let line = unreached_loopback_here(&ProviderReach::system(), &account).unwrap();
     assert_eq!(
         skipped_line(&reference("member-0"), &line),
         format!(

@@ -1947,6 +1947,11 @@ fn an_empty_file_a_failed_run_and_an_unusable_reply_change_nothing() {
             "instructions_cleanup_provider_unreachable",
         ),
         (
+            Err(cleanup::REMOTE_PROVIDER_UNREACHABLE),
+            "instructions_cleanup_remote_provider_unreachable",
+        ),
+        (Err(cleanup::NO_NETWORK), "instructions_cleanup_no_network"),
+        (
             Ok("I would rather not."),
             "instructions_cleanup_no_proposal",
         ),

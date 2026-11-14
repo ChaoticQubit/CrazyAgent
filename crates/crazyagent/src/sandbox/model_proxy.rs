@@ -771,9 +771,7 @@ fn open_upstream(host: &ModelHost, deadline: Instant, any_address: bool) -> io::
             let allowed: Vec<std::net::SocketAddr> = resolved
                 .iter()
                 .copied()
-                .filter(|address| {
-                    any_address || (dialable(address.ip()) && !on_this_machine(address.ip()))
-                })
+                .filter(|address| any_address || may_dial(address.ip()))
                 .collect();
             if allowed.is_empty() && !resolved.is_empty() {
                 return Err(io::Error::from(io::ErrorKind::PermissionDenied));
@@ -788,6 +786,14 @@ fn open_upstream(host: &ModelHost, deadline: Instant, any_address: bool) -> io::
     let stream = connected?;
     stream.set_nonblocking(false)?;
     Ok(stream)
+}
+
+/// Tells whether the engine may dial `address`, one a remote model host's name gave, from
+/// outside the sandbox: [`dialable`] and not held by this machine ([`on_this_machine`]). The
+/// one rule for the proxy's tunnels and the reach check before a run (DEC-163 addendum 8).
+/// Input: the address. Output: true when the engine may dial it.
+pub(crate) fn may_dial(address: IpAddr) -> bool {
+    dialable(address) && !on_this_machine(address)
 }
 
 /// Tells whether a tunnel may dial `address`, one a model host's name resolved to: not

@@ -38,6 +38,11 @@ pub const OFF: &str = "instructions_cleanup_off";
 pub const UNAVAILABLE: &str = "instructions_cleanup_unavailable";
 /// The pool's loopback model provider refused every connect, so nothing was sent.
 pub const PROVIDER_UNREACHABLE: &str = "instructions_cleanup_provider_unreachable";
+/// The pool's remote model provider has no address or refused on every address, so
+/// nothing was sent.
+pub const REMOTE_PROVIDER_UNREACHABLE: &str = "instructions_cleanup_remote_provider_unreachable";
+/// This machine finds none of the pool's managed sign-in hosts, so nothing was sent.
+pub const NO_NETWORK: &str = "instructions_cleanup_no_network";
 
 /// The longest one cleanup may take, every try included.
 pub const WALL_TIME: Duration = Duration::from_secs(5 * 60);
@@ -202,17 +207,29 @@ pub struct Request<'a> {
     pub prompt: &'a str,
 }
 
+/// The code an Edit with AI run ends with when its pool's model provider can't be reached,
+/// one per reason, so each client says what to do (DEC-163 addendum 8). Input: why.
+/// Output: the code.
+#[cfg(any(unix, test))]
+fn unreached_code(unreached: &crate::research::runner::Unreached) -> &'static str {
+    use crate::research::runner::Unreached;
+    match unreached {
+        Unreached::Loopback(_) => PROVIDER_UNREACHABLE,
+        Unreached::Remote(_) => REMOTE_PROVIDER_UNREACHABLE,
+        Unreached::Offline(_) => NO_NETWORK,
+    }
+}
+
 #[cfg(unix)]
 mod run {
     use super::{
         BUSY, CleanupPool, FAILED, NO_ACCOUNT, OUTPUT_TOKENS_MAX, PAUSED, POOL_UNKNOWN,
-        PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
-        WALL_TIME,
+        PROJECT_POOL_MISSING, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE, WALL_TIME,
     };
     use crate::research::accounts::{AccountPick, Reach, SettingsResolver};
     use crate::research::runner::{
         ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchLimits,
-        ResearchRunner, unreached_provider_here,
+        ResearchRunner,
     };
     use std::os::unix::fs::DirBuilderExt;
     use std::path::{Path, PathBuf};
@@ -397,9 +414,10 @@ mod run {
                 Err(code) if number == 1 || code == PROVIDER_UNREACHABLE => return Err(code),
                 Err(_) => return Err(cause),
             };
-            if let Some(line) = unreached_provider_here(&account) {
-                eprintln!("{PROVIDER_UNREACHABLE} try={number} {line}");
-                return Err(PROVIDER_UNREACHABLE);
+            if let Some(unreached) = runner.unreached(&account) {
+                let code = super::unreached_code(&unreached);
+                eprintln!("{code} try={number} {}", unreached.line());
+                return Err(code);
             }
             let name = run_name(started_ms, number);
             let run = ReadOnlyRun {
