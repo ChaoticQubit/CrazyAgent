@@ -1833,7 +1833,9 @@ fn injected_instructions_and_summaries_are_never_typed_and_keep_their_own_roles(
     );
 
     let case = Case::new();
-    let codex = case.path().join("rollout.jsonl");
+    let day = case.path().join("sessions/2026/11/14");
+    std::fs::create_dir_all(&day).unwrap();
+    let codex = day.join("rollout.jsonl");
     std::fs::write(&codex, format!("{instructions}\n{summary}\n{typed}\n")).unwrap();
     assert_eq!(
         conversation_messages("codex", &codex),
