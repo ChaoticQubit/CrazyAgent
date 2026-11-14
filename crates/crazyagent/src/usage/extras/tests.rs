@@ -704,6 +704,7 @@ fn the_extras_store_has_no_column_for_any_id() {
             "resets_count",
             "resets_expire_ms",
             "resets_gained_ms",
+            "resets_unread",
         ]
     );
 }
