@@ -227,6 +227,10 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.end_kept_server(agent)
     }
 
+    fn server_keepers(&self, agent: &AgentId) -> Vec<(u32, bool)> {
+        self.inner.server_keepers(agent)
+    }
+
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
         self.inner.alive()
     }

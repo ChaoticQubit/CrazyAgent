@@ -28,6 +28,10 @@ mod keyed_relay_tests;
 #[path = "live_terminal_probe_tests.rs"]
 mod live_terminal_probe_tests;
 
+#[cfg(target_os = "macos")]
+#[path = "freeze_tests.rs"]
+mod freeze_tests;
+
 const PROJECT: &str = "team-panes";
 
 const ENDPOINT: &str = "local-a";
@@ -15332,6 +15336,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         hookless: false,
         scratch_pin: None,
         proxy: None,
+        freeze_record: None,
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
@@ -17331,6 +17336,7 @@ fn between_turns(
         checked: None,
         narrowed: None,
         ran_before: Duration::ZERO,
+        proxy: None,
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,
@@ -22959,6 +22965,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         scratch_pin: None,
         toolchains: Vec::new(),
         proxy: None,
+        freeze_record: None,
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
@@ -24546,7 +24553,7 @@ fn adopt_refuses_per_turn_pane_with_reason() {
             .unwrap();
         let record = fixture.pane(&host, id);
         assert_eq!(
-            team.adopt(&host, id, &record, &access).unwrap(),
+            team.adopt(&host, id, &record, &access, None).unwrap(),
             Err(reason.to_owned())
         );
         let status: String = fixture
@@ -24686,6 +24693,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         scratch_pin: None,
         toolchains: Vec::new(),
         proxy: None,
+        freeze_record: None,
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
