@@ -11,7 +11,7 @@ const section = await import("../src/screens/settings/spend-settings.tsx");
 const poolsScreen = await import("../src/screens/settings/pools.tsx");
 
 const NOW = Date.UTC(2026, 10, 12, 13, 0);
-const settings = (confirm, all_limited = "notice") => ({ confirm, all_limited });
+const settings = (confirm, all_limited = "notice", resets_source = "through_claude_code") => ({ confirm, all_limited, resets_source });
 const attempt = (patch = {}) => ({ account: "codex-a", origin: "owner", state: "settled", outcome: "reset", requested_ms: NOW - 1000, settled_ms: NOW, ...patch });
 const view = (patch = {}) => ({ settings: settings("confirm_each"), attempts: [], limited_pools: [], ...patch });
 const noop = () => {};
@@ -67,6 +67,27 @@ test("both spend settings show every option, the defaults first and unchanged", 
   assert.match(markup, /aria-label="When every pool account is limited"/);
   for (const option of [...section.CONFIRM_OPTIONS, ...section.ALL_LIMITED_OPTIONS]) assert.match(markup, new RegExp(`>${option.label}<`));
   assert.doesNotMatch(markup, /changed/);
+});
+
+test("the Claude free resets setting shows its three options, the default first, each with its own help line", () => {
+  assert.deepEqual(section.RESETS_SOURCE_OPTIONS.map((option) => [option.value, option.label]), [
+    ["through_claude_code", "Through Claude Code"],
+    ["as_claude_code", "As Claude Code"],
+    ["off", "Don't read"],
+  ]);
+  assert.equal(client.SPEND_DEFAULTS.resets_source, "through_claude_code");
+  assert.equal(section.resetsSourceHelp("through_claude_code"), "CrazyAgent asks Claude Code first. Claude Code can't report free resets yet, so CrazyAgent asks Anthropic as Claude Code.");
+  assert.equal(section.resetsSourceHelp("as_claude_code"), "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks.");
+  assert.equal(section.resetsSourceHelp("off"), "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings.");
+  const markup = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: client.SPEND_DEFAULTS, refused: "", onChange: noop }));
+  assert.match(markup, /aria-label="Claude free resets"/);
+  for (const option of section.RESETS_SOURCE_OPTIONS) assert.match(markup, new RegExp(`>${option.label}<`));
+  assert.doesNotMatch(markup, /changed/);
+  for (const source of ["as_claude_code", "off"]) {
+    const picked = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: settings("confirm_each", "notice", source), refused: "", onChange: noop }));
+    assert.match(picked, /changed/, source);
+    assert.ok(picked.includes(section.resetsSourceHelp(source).replace("'", "&#x27;")), source);
+  }
 });
 
 test("each option has its own help line, and auto-spend says it does nothing while spending is off", () => {

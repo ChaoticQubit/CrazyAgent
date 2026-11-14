@@ -14,6 +14,7 @@ fn settings(confirm: SpendConfirm, all_limited: AllLimited) -> SpendSettings {
     SpendSettings {
         confirm,
         all_limited,
+        ..SpendSettings::default()
     }
 }
 
@@ -176,6 +177,60 @@ fn c_steps_spend_confirmation_and_stores_it() {
         spend.key(&Key::Char('c'), &mut ctx);
         assert!(
             matches!(job(&mut ctx), Some(SettingsJob::SetSpend(sent)) if sent == settings(to, AllLimited::NoHint))
+        );
+    }
+}
+
+fn with_source(source: ResetsSource) -> SpendSettings {
+    SpendSettings {
+        resets_source: source,
+        ..settings(SpendConfirm::ConfirmEach, AllLimited::NoHint)
+    }
+}
+
+#[test]
+fn option_claude_free_resets_through_claude_code_says_it_asks_as_claude_code_for_now() {
+    let (spend, ctx) = ready(view(
+        with_source(ResetsSource::ThroughClaudeCode),
+        Vec::new(),
+    ));
+    let text = shown(&spend, &ctx);
+    assert!(text.contains(
+        "Claude free resets (f): Through Claude Code. CrazyAgent asks Claude Code first. Claude Code can't report free resets yet, so CrazyAgent asks Anthropic as Claude Code."
+    ), "{text}");
+    assert!(keys(&spend, &ctx).contains(&"f".to_owned()));
+}
+
+#[test]
+fn option_claude_free_resets_as_claude_code_says_it_asks_the_way_claude_code_does() {
+    let (spend, ctx) = ready(view(with_source(ResetsSource::AsClaudeCode), Vec::new()));
+    let text = shown(&spend, &ctx);
+    assert!(text.contains(
+        "Claude free resets (f): As Claude Code. CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks."
+    ), "{text}");
+}
+
+#[test]
+fn option_claude_free_resets_dont_read_says_claude_accounts_say_off() {
+    let (spend, ctx) = ready(view(with_source(ResetsSource::Off), Vec::new()));
+    let text = shown(&spend, &ctx);
+    assert!(text.contains(
+        "Claude free resets (f): Don't read. CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings."
+    ), "{text}");
+}
+
+#[test]
+fn f_steps_the_claude_free_resets_source_and_keeps_the_spend_settings() {
+    for (from, to) in [
+        (ResetsSource::ThroughClaudeCode, ResetsSource::AsClaudeCode),
+        (ResetsSource::AsClaudeCode, ResetsSource::Off),
+        (ResetsSource::Off, ResetsSource::ThroughClaudeCode),
+    ] {
+        let (mut spend, mut ctx) = ready(view(with_source(from), Vec::new()));
+        spend.key(&Key::Char('f'), &mut ctx);
+        assert!(
+            matches!(job(&mut ctx), Some(SettingsJob::SetSpend(sent)) if sent == with_source(to)),
+            "{from:?}"
         );
     }
 }

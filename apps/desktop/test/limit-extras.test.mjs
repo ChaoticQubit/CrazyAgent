@@ -2,7 +2,7 @@ import "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { extrasLine, expiryText, resetsText, creditsText, newResetLine, freshResets } = await import("../src/screens/metrics/extras.ts");
+const { extrasLine, expiryText, resetsText, creditsText, newResetLine, freshResets, unreadText } = await import("../src/screens/metrics/extras.ts");
 
 const NOW = new Date(2026, 10, 12, 9, 0).getTime();
 const TODAY_1430 = new Date(2026, 10, 12, 14, 30).getTime();
@@ -63,11 +63,31 @@ test("a count read through a private call carries may break; a count that is not
 
 test("a free resets read that found no count reads couldn't read, never No free resets or not reported", () => {
   const claude = { harness: "Claude Code", adapter: "claude", may_break: true, not_reported: "not reported by Claude Code" };
-  const unread = extras({ ...claude, resets_checked_ms: NOW, resets_unread: true });
+  const unread = extras({ ...claude, resets_checked_ms: NOW, resets_unread: "unspecified" });
   assert.equal(resetsText(unread, NOW), "Free resets: couldn't read");
   assert.equal(extrasLine(unread, NOW), "Free resets: couldn't read · Credits: not reported by Claude Code");
   assert.equal(extrasLine(extras(claude), NOW), "Free resets and credits: not reported by Claude Code");
   assert.equal(resetsText(extras({ ...claude, resets_checked_ms: NOW }), NOW), "Free resets: not reported by Claude Code", "an engine without the flag reads as before");
+});
+
+test("each reason a count could not be read has its own short words, and Don't read says off in Settings", () => {
+  const claude = { harness: "Claude Code", adapter: "claude", may_break: true, not_reported: "not reported by Claude Code" };
+  const words = {
+    unspecified: "Free resets: couldn't read",
+    asker: "Free resets: couldn't read (Anthropic answers only Claude Code)",
+    withheld: "Free resets: couldn't read (Anthropic withheld them)",
+    no_reason: "Free resets: couldn't read (Anthropic gave no reason)",
+    no_answer: "Free resets: couldn't read (no answer)",
+    not_understood: "Free resets: couldn't read (answer not understood)",
+    off: "Free resets: off in Settings",
+  };
+  for (const [kind, text] of Object.entries(words)) {
+    assert.equal(unreadText(kind), text, kind);
+    const row = extras({ ...claude, resets_unread: kind });
+    assert.equal(resetsText(row, NOW), text, kind);
+    assert.equal(extrasLine(row, NOW), `${text} · Credits: not reported by Claude Code`, kind);
+  }
+  assert.equal(unreadText("a_class_from_a_later_engine"), "Free resets: couldn't read", "a class this build has no words for still says couldn't read");
 });
 
 test("credits read in the provider's words, or not reported by the harness", () => {

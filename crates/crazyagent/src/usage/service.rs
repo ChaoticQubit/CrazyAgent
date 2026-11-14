@@ -199,6 +199,24 @@ pub fn pool_of(
         .map(|pool| pool.id.clone())
 }
 
+/// The User-Agent the Claude detail call sends under the owner's source, none when the read
+/// is off. Inputs: the source and the installed Claude Code version. Output: the header.
+pub(super) fn detail_agent(
+    _source: spend::ResetsSource,
+    _installed: Option<&str>,
+) -> Option<String> {
+    None
+}
+
+/// Forgets the stored free resets of every Claude account, as "Don't read" asks. Inputs:
+/// the store and the access. Output: done, or `usage_unavailable`.
+pub(super) fn forget_claude_resets(
+    _db: &Connection,
+    _access: &ModelAccess,
+) -> Result<(), EngineError> {
+    Ok(())
+}
+
 /// One engine's usage upkeep: it counts what every team agent and research run's records
 /// gained and polls every signed-in subscription account's limits. `doing` names the part
 /// of the step running now, so a panic is counted against it, and `unrecovered` holds the
@@ -585,7 +603,13 @@ impl Usage {
             };
             let (claude, _, loopback) = &self.endpoints;
             let read = Extras {
-                resets: claude_detail(claude.clone(), &credential, *loopback, now_ms),
+                resets: claude_detail(
+                    claude.clone(),
+                    &credential,
+                    *loopback,
+                    now_ms,
+                    &super::poll::claude_user_agent(None),
+                ),
                 credits: Field::NotAsked,
             };
             extras::record_extras(&self.db, &connection.id, &read, now_ms)?;
@@ -639,6 +663,8 @@ impl Usage {
             Provider::Claude => claude.clone(),
             Provider::Codex => codex.clone(),
         };
+        let agent = super::poll::claude_user_agent(None);
+        let detail = detail.then_some(agent.as_str());
         poll_with_extras(provider, url, &credential, *loopback, now_ms, detail).map(Some)
     }
 

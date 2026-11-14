@@ -12,7 +12,8 @@ use crate::tui::text::{styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::buttons;
 use crate::usage::spend::{
-    AllLimited, AttemptState, LimitedPool, SpendAttempt, SpendConfirm, SpendSettings, SpendView,
+    AllLimited, AttemptState, LimitedPool, ResetsSource, SpendAttempt, SpendConfirm, SpendSettings,
+    SpendView,
 };
 use ratatui::text::Line;
 use std::collections::HashMap;
@@ -106,6 +107,22 @@ pub(in crate::tui) fn next_all_limited(value: AllLimited) -> AllLimited {
         AllLimited::NoHint => AllLimited::AutoSpend,
         AllLimited::AutoSpend => AllLimited::Notice,
     }
+}
+
+/// The words of a Claude free resets source. Input: the source. Output: the words.
+pub(in crate::tui) fn resets_source_words(_value: ResetsSource) -> &'static str {
+    ""
+}
+
+/// The help line of a Claude free resets source, the desktop's words. Input: the source.
+/// Output: the sentence.
+pub(in crate::tui) fn resets_source_help(_value: ResetsSource) -> &'static str {
+    ""
+}
+
+/// The next Claude free resets source, wrapping. Input: the source. Output: the next.
+pub(in crate::tui) fn next_resets_source(value: ResetsSource) -> ResetsSource {
+    value
 }
 
 /// One plain sentence for where an account's latest spend stands, the desktop's words.

@@ -322,6 +322,7 @@ pub fn claude_detail(
     credential: &PollCredential,
     loopback: bool,
     now_ms: i64,
+    _user_agent: &str,
 ) -> Field<Resets> {
     url.set_query(Some(CLAUDE_DETAIL_QUERY));
     let Ok(body) = fetch(Provider::Claude, url, credential, loopback) else {
@@ -329,6 +330,16 @@ pub fn claude_detail(
     };
     serde_json::from_slice::<Value>(&body)
         .map_or(Field::Absent, |value| claude_resets(&value, now_ms))
+}
+
+/// The Claude Code version the detail call names when the installed one is not known: the
+/// one whose call this was traced from (DEC-154 addendum 2026-11-13 22:01).
+pub const CLAUDE_CODE_PINNED: &str = "2.1.322";
+
+/// The User-Agent Claude Code sends on the detail call, naming a version. Input: the
+/// installed version, none when unknown. Output: the header value.
+pub fn claude_user_agent(_version: Option<&str>) -> String {
+    String::new()
 }
 
 /// Reads one account's windows as `poll` does, with its free resets and credits: Codex's from
@@ -342,7 +353,7 @@ pub fn poll_with_extras(
     credential: &PollCredential,
     loopback: bool,
     now_ms: i64,
-    detail: bool,
+    detail: Option<&str>,
 ) -> Result<(Observation, Extras), EngineError> {
     let body = fetch(provider, url.clone(), credential, loopback)?;
     let observation = observe(provider, &body, credential, now_ms)?;
@@ -350,10 +361,9 @@ pub fn poll_with_extras(
     let extras = match provider {
         Provider::Codex => codex_from_usage(&value),
         Provider::Claude => Extras {
-            resets: if detail {
-                claude_detail(url, credential, loopback, now_ms)
-            } else {
-                Field::NotAsked
+            resets: match detail {
+                Some(user_agent) => claude_detail(url, credential, loopback, now_ms, user_agent),
+                None => Field::NotAsked,
             },
             credits: claude_credits(&value),
         },

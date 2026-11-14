@@ -524,3 +524,73 @@ fn an_open_pools_page_between_polls_makes_only_the_detail_reads() {
         PollPlan::Nothing
     );
 }
+
+/// Each source picks the detail call's User-Agent: through Claude Code and as Claude Code
+/// both name Claude Code's version (installed, else pinned) while no Claude Code version can
+/// report free resets itself, and "Don't read" makes no detail call.
+#[test]
+fn each_claude_free_resets_source_picks_the_detail_user_agent_or_none() {
+    use super::spend::ResetsSource;
+    for source in [ResetsSource::ThroughClaudeCode, ResetsSource::AsClaudeCode] {
+        assert_eq!(
+            detail_agent(source, Some("2.1.330")).as_deref(),
+            Some("claude-cli/2.1.330 (external, cli)"),
+            "{source:?}"
+        );
+        assert_eq!(
+            detail_agent(source, None).as_deref(),
+            Some("claude-cli/2.1.322 (external, cli)"),
+            "{source:?}"
+        );
+    }
+    assert_eq!(detail_agent(ResetsSource::Off, Some("2.1.330")), None);
+    assert_eq!(detail_agent(ResetsSource::Off, None), None);
+}
+
+/// "Don't read" forgets the stored free resets of every Claude account and only those, so
+/// spend and the limited pool notice never act on an old count.
+#[test]
+fn dont_read_forgets_the_stored_claude_free_resets_and_keeps_codex() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let account = |id: &str, harness: &str| ModelConnection {
+        id: CredentialRef::new(id).unwrap(),
+        provider: CredentialRef::new("vendor").unwrap(),
+        harness: CredentialRef::new(harness).unwrap(),
+        protocol: CredentialRef::new("native").unwrap(),
+        account_ref: CredentialRef::new(id).unwrap(),
+        endpoint: ModelEndpoint::Native {},
+        model: crate::config::ModelReference {
+            id: "e2e-model".into(),
+            author: CredentialRef::new("vendor").unwrap(),
+        },
+        auth: ModelAuthentication::NativeManaged {
+            profile_ref: CredentialRef::new(id).unwrap(),
+        },
+    };
+    let access = ModelAccess {
+        accounts: vec![
+            CredentialRef::new("claude-a").unwrap(),
+            CredentialRef::new("codex-a").unwrap(),
+        ],
+        connections: vec![account("claude-a", "claude"), account("codex-a", "codex")],
+        pools: Vec::new(),
+    };
+    let two = Extras {
+        resets: Field::Known(extras::Resets {
+            count: 2,
+            kinds: Vec::new(),
+            next_expiry_ms: None,
+        }),
+        credits: Field::NotAsked,
+    };
+    for connection in &access.connections {
+        extras::record_extras(&db, &connection.id, &two, NOW).unwrap();
+    }
+    forget_claude_resets(&db, &access).unwrap();
+    let claude = extras::extras_of(&db, &access.connections[0].id, NOW).unwrap();
+    assert_eq!(claude.resets, None);
+    assert_eq!(claude.resets_unread, None);
+    let codex = extras::extras_of(&db, &access.connections[1].id, NOW).unwrap();
+    assert_eq!(codex.resets.map(|resets| resets.count), Some(2));
+}

@@ -1415,7 +1415,7 @@ fn not_reported(harness: &str) -> crate::usage::extras::LimitExtras {
         resets_checked_ms: None,
         credits_checked_ms: None,
         resets_gained_ms: None,
-        resets_unread: false,
+        resets_unread: None,
     }
 }
 

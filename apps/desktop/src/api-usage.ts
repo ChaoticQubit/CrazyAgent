@@ -93,9 +93,13 @@ export interface FreeResets {
 /** Where the owner spends a free reset or credit. */
 export type SpendWay = { kind: "in_app" } | { kind: "elsewhere"; place: string } | { kind: "not_reported" };
 
+/** Why a free resets count could not be read, in the class the clients word, or off when the
+ * owner turned the Claude read off. */
+export type UnreadClass = "unspecified" | "asker" | "withheld" | "no_reason" | "no_answer" | "not_understood" | "off";
+
 /** The engine's limits contract for one account (DEC-154): null resets or credits mean not
  * reported, never 0. `resets_gained_ms` is when the count last rose, for the new-reset notice;
- * `resets_unread` says the last resets read found no count, absent from an older engine. */
+ * `resets_unread` says why the last resets read found no count, absent from an older engine. */
 export interface LimitExtras {
   harness: string;
   adapter: LimitAdapter;
@@ -107,7 +111,7 @@ export interface LimitExtras {
   resets_checked_ms: number | null;
   credits_checked_ms: number | null;
   resets_gained_ms?: number | null;
-  resets_unread?: boolean;
+  resets_unread?: UnreadClass | null;
 }
 
 /** One account's limits contract, by account id. */
@@ -168,10 +172,16 @@ export type SpendConfirm = "confirm_each" | "one_click" | "off";
 /** What the app does when every account in a pool is limited. */
 export type AllLimited = "notice" | "no_hint" | "auto_spend";
 
-/** The owner's two spend settings (DEC-154 slice 3). */
+/** Where the engine reads Claude free resets from: through Claude Code (the default), always
+ * as Claude Code, or not at all. */
+export type ResetsSource = "through_claude_code" | "as_claude_code" | "off";
+
+/** The owner's Pools settings: the two spend settings (DEC-154 slice 3) and where Claude free
+ * resets are read from, absent from an older engine. */
 export interface SpendSettings {
   confirm: SpendConfirm;
   all_limited: AllLimited;
+  resets_source?: ResetsSource;
 }
 
 /** One account's latest spend: who asked, where it stands and its outcome code. */

@@ -2,6 +2,7 @@ use super::*;
 use crate::github::test_server::{Answer, Server};
 
 const NOW: i64 = 1_793_000_000_000;
+const IDENTIFY: &str = "claude-cli/2.1.330 (external, cli)";
 
 fn token() -> String {
     let mut bytes = [0_u8; 12];
@@ -288,7 +289,7 @@ fn a_background_claude_poll_makes_one_request_without_the_private_query() {
         &credential(&secret, None, None),
         true,
         NOW,
-        false,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -324,14 +325,18 @@ fn a_refused_claude_detail_keeps_the_windows_and_reads_resets_absent() {
             &credential(&secret, None, None),
             true,
             NOW,
-            true,
+            Some(IDENTIFY),
         )
         .unwrap();
         assert!(
             observed.five_hour.is_some() && observed.weekly.is_some(),
             "{status}"
         );
-        assert_eq!(extras.resets, Field::Absent, "{status}");
+        assert_eq!(
+            extras.resets,
+            Field::Unread(super::super::extras::Unread::NoAnswer),
+            "{status}"
+        );
         assert_eq!(extras.credits, Field::Known("Extra usage off".into()));
         let seen = server.seen();
         assert_eq!(seen.len(), 2, "{status}");
@@ -366,7 +371,7 @@ fn a_good_claude_detail_reads_the_free_resets() {
         &credential(&secret, None, None),
         true,
         NOW,
-        true,
+        Some(IDENTIFY),
     )
     .unwrap();
     assert_eq!(
@@ -388,7 +393,7 @@ fn a_failed_main_poll_makes_no_detail_request() {
         &credential(&token(), None, None),
         true,
         NOW,
-        true,
+        Some(IDENTIFY),
     )
     .unwrap_err();
     assert_eq!(failed.0, "usage_sign_in_lapsed");
@@ -414,7 +419,7 @@ fn a_malformed_codex_reset_field_keeps_the_windows_from_the_one_request() {
         &credential(&token(), Some("acct-1"), None),
         true,
         NOW,
-        true,
+        Some(IDENTIFY),
     )
     .unwrap();
     assert!(observed.five_hour.is_some());
@@ -514,6 +519,7 @@ fn a_detail_only_read_makes_one_request_with_the_private_query() {
         &credential(&secret, None, None),
         true,
         NOW,
+        IDENTIFY,
     );
     assert_eq!(
         read,
@@ -530,4 +536,78 @@ fn a_detail_only_read_makes_one_request_with_the_private_query() {
         seen[0].header("authorization"),
         Some(format!("Bearer {secret}").as_str())
     );
+}
+
+/// Identifying as Claude Code changes only the detail call's User-Agent, to the one given;
+/// the windows call keeps CrazyAgent's.
+#[test]
+fn the_detail_call_sends_the_given_user_agent_and_the_windows_call_keeps_crazyagent() {
+    let server = Server::start(|seen, _| {
+        if seen.query.is_empty() {
+            Answer::json(200, claude_windows())
+        } else {
+            Answer::json(
+                200,
+                serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "cli_version"}}),
+            )
+        }
+    });
+    let (_, extras) = poll_with_extras(
+        Provider::Claude,
+        local(&server, "/api/oauth/usage"),
+        &credential(&token(), None, None),
+        true,
+        NOW,
+        Some(IDENTIFY),
+    )
+    .unwrap();
+    assert_eq!(
+        extras.resets,
+        Field::Unread(super::super::extras::Unread::CliVersion)
+    );
+    let seen = server.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].header("user-agent"), Some("CrazyAgent"));
+    assert_eq!(seen[1].header("user-agent"), Some(IDENTIFY));
+    assert_eq!(seen[1].header("anthropic-beta"), Some("oauth-2025-04-20"));
+    assert_eq!(seen[1].header("x-app"), None);
+}
+
+/// A detail reply that is not JSON reads not understood, never absent or none.
+#[test]
+fn a_detail_reply_that_is_not_json_reads_not_understood() {
+    let server = Server::start(|_, _| Answer::bytes(200, b"<html>later</html>".to_vec()));
+    let read = claude_detail(
+        local(&server, "/api/oauth/usage"),
+        &credential(&token(), None, None),
+        true,
+        NOW,
+        IDENTIFY,
+    );
+    assert_eq!(
+        read,
+        Field::Unread(super::super::extras::Unread::NotUnderstood)
+    );
+}
+
+/// The User-Agent names the installed Claude Code's version the way Claude Code does on this
+/// call, and the pinned version for none or for anything but a plain version.
+#[test]
+fn the_claude_user_agent_names_the_installed_version_else_the_pinned_one() {
+    assert_eq!(
+        claude_user_agent(Some("2.1.330")),
+        "claude-cli/2.1.330 (external, cli)"
+    );
+    let pinned = format!("claude-cli/{CLAUDE_CODE_PINNED} (external, cli)");
+    assert_eq!(CLAUDE_CODE_PINNED, "2.1.322");
+    for odd in [
+        None,
+        Some(""),
+        Some("2.1"),
+        Some("2.1.330\nx: y"),
+        Some("v2.1.330"),
+        Some("2.1.330 (x)"),
+    ] {
+        assert_eq!(claude_user_agent(odd), pinned, "{odd:?}");
+    }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { SPEND_DEFAULTS, setSpendSettings, usageRefusal, type AllLimited, type LimitedPool, type SpendConfirm, type SpendSettings, type SpendView } from "../../api-usage";
+import { SPEND_DEFAULTS, setSpendSettings, usageRefusal, type AllLimited, type LimitedPool, type ResetsSource, type SpendConfirm, type SpendSettings, type SpendView } from "../../api-usage";
 import { Notice, Segmented, SettingLine, SettingSection } from "../../ui";
 import { andList } from "./account-drawer";
 import { SpendReset } from "./spend-reset";
@@ -17,6 +17,14 @@ export const ALL_LIMITED_OPTIONS: { value: AllLimited; label: string }[] = [
   { value: "no_hint", label: "No hint" },
   { value: "auto_spend", label: "Spend on its own" },
 ];
+
+/** The Claude free resets sources, the default first. */
+export const RESETS_SOURCE_OPTIONS: { value: ResetsSource; label: string }[] = [];
+
+/** The help line under Claude free resets. Input: the source. Output: the sentence. */
+export function resetsSourceHelp(_value: ResetsSource): string {
+  return "";
+}
 
 const CONFIRM_HELP: Record<SpendConfirm, string> = {
   confirm_each: "Each free reset asks you before CrazyAgent uses it.",

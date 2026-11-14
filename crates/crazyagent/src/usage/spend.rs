@@ -100,12 +100,27 @@ pub enum AllLimited {
     AutoSpend,
 }
 
-/// The owner's two spend settings, shown in the Pools settings section.
+/// Where the engine reads Claude free resets from (DEC-154 addendum 2026-11-13, owner):
+/// through Claude Code (the default: its own report when its version has one, else the detail
+/// call identifying as Claude Code), always as Claude Code, or not at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetsSource {
+    #[default]
+    ThroughClaudeCode,
+    AsClaudeCode,
+    Off,
+}
+
+/// The owner's Pools settings: the two spend settings and where Claude free resets are read
+/// from, which an older client leaves out and so reads as the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpendSettings {
     pub confirm: SpendConfirm,
     pub all_limited: AllLimited,
+    #[serde(default)]
+    pub resets_source: ResetsSource,
 }
 
 impl SpendSettings {
@@ -236,6 +251,7 @@ pub fn read(db: &Connection) -> Result<SpendSettings, EngineError> {
             "auto_spend" => AllLimited::AutoSpend,
             _ => AllLimited::Notice,
         },
+        resets_source: ResetsSource::default(),
     })
 }
 

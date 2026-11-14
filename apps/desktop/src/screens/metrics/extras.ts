@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { accountLabels, listAccounts } from "../../api";
-import { loadExtras, type AccountExtras, type LimitExtras, type ResetKind } from "../../api-usage";
+import { loadExtras, type AccountExtras, type LimitExtras, type ResetKind, type UnreadClass } from "../../api-usage";
 import type { Route } from "../../ui";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -17,6 +17,13 @@ export const PART_GAP = " · ";
 
 /** The words for free resets the last read found no count of, the same as the TUI's. */
 export const UNREAD = "Free resets: couldn't read";
+
+/** The words for a free resets count the engine could not read, by why, the same as the TUI's:
+ * the plain words with a short reason, or off when the owner turned the read off. Input: the
+ * class. Output: the words. */
+export function unreadText(_kind: UnreadClass | string): string {
+  return UNREAD;
+}
 
 /** How long before the first look a gain still counts as new, in milliseconds: one usage
  * poll and some slack, so a reset that arrived while the app was closed for long is not
@@ -62,7 +69,7 @@ function kindWords(kind: string): string {
  * bare 0. */
 export function resetsText(extras: LimitExtras, nowMs: number): string {
   const resets = liveResets(extras, nowMs);
-  if (resets === null) return extras.resets_unread === true ? UNREAD : `Free resets: ${extras.not_reported}`;
+  if (resets === null) return extras.resets_unread ? unreadText(extras.resets_unread) : `Free resets: ${extras.not_reported}`;
   const label = extras.may_break ? " (may break)" : "";
   if (resets.count === 0) return `No free resets${label}`;
   const counted = resets.count === 1 ? "1 free reset" : `${resets.count} free resets`;
@@ -82,7 +89,7 @@ export function creditsText(extras: LimitExtras): string {
  * contract and now. Output: the line. */
 export function extrasLine(extras: LimitExtras, nowMs: number): string {
   const resets = liveResets(extras, nowMs);
-  const parts = resets === null && extras.resets_unread !== true && extras.credits === null
+  const parts = resets === null && !extras.resets_unread && extras.credits === null
     ? [`Free resets and credits: ${extras.not_reported}`]
     : [resetsText(extras, nowMs), creditsText(extras)];
   if (extras.spend.kind === "elsewhere") parts.push(`Spend at ${extras.spend.place}`);
