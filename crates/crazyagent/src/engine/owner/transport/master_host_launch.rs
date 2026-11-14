@@ -174,6 +174,7 @@ impl OwnerRuntimeHandle {
                 wall_time,
                 delegate,
                 &prepared.tools_off,
+                prepared.provider_retry,
             )?
         };
         require_master_delegate(
@@ -399,8 +400,10 @@ pub(super) fn claude_master_turn(
 /// macOS refuses a Seatbelt profile inside the master's, which keeps writes to the leased worktree
 /// and the turn's own folders, and only the engine's team server, as for Claude Code. Inputs: where
 /// the turn runs, the account lease, the registered executable, the attempt's connection, the
-/// turn's time limit (none for no limit), the engine executable for tools on and the team tools
-/// switched off. Output: the launch parts with the copy, or the refusal of the part that failed.
+/// turn's time limit (none for no limit), the engine executable for tools on, the team tools
+/// switched off and the owner's connection-retry choice (DEC-163 Q7). Output: the launch parts
+/// with the copy, or the refusal of the part that failed.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn codex_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -409,13 +412,14 @@ pub(super) fn codex_master_turn(
     wall_time: Option<Duration>,
     engine: Option<&Path>,
     tools_off: &[String],
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let model = &connection.model.id;
     let home = master_turn_home(place.root, place.runtime_ref)?;
     let credential = profile.hand_to_turn(&home, wall_time, executable)?;
     let Some(engine) = engine else {
         return Ok(MasterTurnLaunch {
-            command: master_command(executable, &home, place.worktree, model, None)?,
+            command: master_command(executable, &home, place.worktree, model, None, retry)?,
             sandbox: master_sandbox(
                 place.root,
                 place.runtime_ref,
@@ -459,6 +463,7 @@ pub(super) fn codex_master_turn(
             mailbox: &mailbox,
             off: tools_off,
         }),
+        retry,
     )?;
     Ok(MasterTurnLaunch {
         command,
@@ -623,7 +628,8 @@ fn require_master_tool_policy(
             }
             _ if fixed.contains(setting)
                 || setting.starts_with("model=\"")
-                || *setting == trust => {}
+                || *setting == trust
+                || *setting == crate::provider_retry::CODEX_UNBOUNDED_OFF => {}
             _ => return Err(refused()),
         }
     }
@@ -773,8 +779,9 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
 
 /// Builds the Codex master app-server command: tools off with the fixed read-only settings,
 /// or with `tools` the tools-on settings and one `mcp_servers` entry for the engine's
-/// `delegate` server. Inputs: the registered executable, the home, the working directory, the
-/// model and the tools-on parts. Output: the command, or `master_runtime_binding`.
+/// `delegate` server, plus the built-in provider's settings for `retry` (DEC-163 Q7). Inputs:
+/// the registered executable, the home, the working directory, the model, the tools-on parts
+/// and the connection-retry choice. Output: the command, or `master_runtime_binding`.
 #[cfg(unix)]
 fn master_command(
     executable: &Path,
@@ -782,6 +789,7 @@ fn master_command(
     cwd: &Path,
     model: &str,
     tools: Option<crate::engine::claude_host::MasterTools<'_>>,
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<Command, EngineError> {
     if !executable.is_absolute()
         || !home.is_absolute()
@@ -807,6 +815,9 @@ fn master_command(
     };
     for config in fixed {
         command.arg("-c").arg(config);
+    }
+    for setting in retry.codex_settings(crate::provider_retry::CodexProvider::BuiltIn) {
+        command.arg("-c").arg(setting);
     }
     let trust = crate::harnesses::codex_folder::untrusted(cwd)
         .map_err(|_| failure("master_runtime_binding"))?;
@@ -834,8 +845,8 @@ fn master_command(
 }
 
 /// Refuses the master app-server command where the engine cannot give it its own
-/// process group to stop as a whole. Takes the executable, home, working directory and
-/// model, all unused. Returns `master_host_unavailable`.
+/// process group to stop as a whole. Takes the executable, home, working directory, model,
+/// tools-on parts and retry choice, all unused. Returns `master_host_unavailable`.
 #[cfg(not(unix))]
 fn master_command(
     _executable: &Path,
@@ -843,6 +854,7 @@ fn master_command(
     _cwd: &Path,
     _model: &str,
     _tools: Option<crate::engine::claude_host::MasterTools<'_>>,
+    _retry: crate::provider_retry::ProviderRetry,
 ) -> Result<Command, EngineError> {
     Err(failure("master_host_unavailable"))
 }

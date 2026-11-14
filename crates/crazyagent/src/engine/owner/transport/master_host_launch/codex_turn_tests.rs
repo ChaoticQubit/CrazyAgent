@@ -171,6 +171,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         Some(Duration::from_secs(3600)),
         None,
         &[],
+        crate::provider_retry::ProviderRetry::RetryBriefly,
     )
     .unwrap();
     let off_turn = runtime.join(format!("master-runtime-{}", off_ref.as_str()));
@@ -240,6 +241,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         Some(Duration::from_secs(3600)),
         Some(&engine),
         &[crate::team::tool::RECALL_TOOL.to_owned()],
+        crate::provider_retry::ProviderRetry::RetryBriefly,
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
