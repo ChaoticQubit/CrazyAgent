@@ -1093,6 +1093,18 @@ pub fn remove_tmp_keeping(home: &Path, kept: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether `path` is itself one short temp folder ([`tmp_path`]) this user owns privately,
+/// so the engine may remove it with all it holds: exactly a `ca-` and 16 lowercase hex
+/// digits name in [`TMP_PARENT`], a real folder, not a link, with no access for others.
+/// Input: the path. Output: the answer.
+#[cfg(unix)]
+pub(crate) fn own_short_tmp(path: &Path) -> bool {
+    in_agent_tmp(path)
+        && path.parent() == Some(Path::new(TMP_PARENT))
+        && path.as_os_str().len() == TMP_PARENT.len() + 1 + TMP_PREFIX.len() + 2 * TMP_HASH_BYTES
+        && private_folder(path)
+}
+
 #[cfg(unix)]
 fn own_folder(path: &Path) -> bool {
     fs::symlink_metadata(path)

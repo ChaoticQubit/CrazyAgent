@@ -48,6 +48,11 @@ pub const RECONNECTION_GRACE: Duration = Duration::from_secs(30);
 pub const WORKSPACE: &str = super::workspace::FILE;
 
 const GROUP: &str = "server.pid";
+/// The file in a project's IDE folder naming the temp folder its last confined start made
+/// ([`fresh_tmp`]), so the server's stop, or the next start after a crash, removes it.
+const TMP_RECORD: &str = "server-tmp";
+/// The most bytes [`TMP_RECORD`] is read with: a short temp folder path and its newline.
+const TMP_RECORD_BYTES_MAX: u64 = 256;
 pub(crate) const SERVER_DATA: &str = "server-data";
 const EXTENSIONS: &str = "extensions";
 const LAUNCHER: &str = "bin/codium-server";
@@ -57,6 +62,9 @@ const PROJECTS_MAX: usize = 256;
 /// timed-out open can hold one for as long as its lookup hangs.
 const STOP_LEFTOVER_WAIT: Duration = Duration::from_secs(10);
 const GROUP_BYTES_MAX: u64 = 256;
+/// How many entries a confined start reads in its server data folder before it refuses:
+/// far above what a VSCodium server keeps there, so only a padded folder reaches it.
+const SERVER_DATA_ENTRIES_MAX: usize = 200_000;
 const READY_POLL: Duration = Duration::from_millis(100);
 const CONNECT_TIME: Duration = Duration::from_millis(500);
 const WATCH_POLL: Duration = Duration::from_secs(1);
@@ -720,6 +728,7 @@ impl Drop for Servers {
             let _ = running.child.wait();
             let _ = token::remove(&running.folder);
             let _ = fs::remove_file(running.folder.join(GROUP));
+            remove_recorded_tmp(&running.folder);
         }
     }
 }
@@ -847,9 +856,10 @@ async fn follow(slot: &Slot, launch: u64) {
 }
 
 /// Ends a launch: the proxy, its built-in extension's capability, the process group, its
-/// token and group record. A Full access launch's lineage takes its stop read before the
-/// group ends and settles after, off the async runtime; what still runs then is named in
-/// the slot's [`Slot::left`], and a clean end clears it. Inputs: the slot and its launch.
+/// token and group record, and the temp folder a confined start recorded. A Full access
+/// launch's lineage takes its stop read before the group ends and settles after, off the
+/// async runtime; what still runs then is named in the slot's [`Slot::left`], and a clean
+/// end clears it. Inputs: the slot and its launch.
 async fn finish(slot: &Slot, mut running: Running) {
     running.proxy.abort();
     let _ = running.grants.revoke(&running.project);
@@ -865,6 +875,8 @@ async fn finish(slot: &Slot, mut running: Running) {
     end_group(&mut running.child, running.group).await;
     let _ = token::remove(&running.folder);
     let _ = fs::remove_file(running.folder.join(GROUP));
+    let folder = running.folder.clone();
+    let _ = tokio::task::spawn_blocking(move || remove_recorded_tmp(&folder)).await;
     if let Some(lineage) = lineage {
         let settled = tokio::task::spawn_blocking(move || lineage.and_then(Lineage::settle))
             .await
@@ -1038,7 +1050,10 @@ async fn holding_start<T: Send + 'static>(
 /// the project's hooks run in `root` only when the policy's switch is on, and every git it starts
 /// is held by [`confined_git`]. A Full access server's git is the owner's own, hooks and
 /// config included, so its shim holds no hooks path, whose count line needs the forced keys.
-/// Inputs: the launch, the server's info and the output pipe.
+/// A confined start is refused while its server data folder holds a `.git`
+/// ([`refuse_planted_git`]) and gets a temp folder no earlier start used ([`fresh_tmp`]),
+/// recorded so it is removed later; every start first removes the one recorded before
+/// ([`remove_recorded_tmp`]). Inputs: the launch, the server's info and the output pipe.
 fn command(
     launch: Launch<'_>,
     info: &ServerInfo,
@@ -1054,14 +1069,22 @@ fn command(
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
     let confined = policy.access != AgentAccess::Full;
+    remove_recorded_tmp(folder);
+    let tmp = if confined {
+        refuse_planted_git(&home, SERVER_DATA_ENTRIES_MAX)?;
+        let tmp = fresh_tmp(&home)?;
+        record_tmp(folder, &tmp);
+        tmp
+    } else {
+        crate::sandbox::toolchains::make_tmp(&home).map_err(|_| failure("ide_state_unavailable"))?
+    };
     let hooks = (confined && policy.hooks).then_some(launch.root);
     let index_project = confined.then_some(launch.root);
     let written = settings::write(folder, &home, data, hooks, policy.access, index_project)?;
     let ceiling = confined.then(|| confined_git(data, &launch)).transpose()?;
     let places = Places {
         data,
-        tmp: crate::sandbox::toolchains::make_tmp(&home)
-            .map_err(|_| failure("ide_state_unavailable"))?,
+        tmp,
         user_data: settings::user_data_folder(&home),
         extensions: folder.join(EXTENSIONS),
         locked: &written.locked,
@@ -1124,6 +1147,97 @@ fn confined_git(data: &Path, launch: &Launch<'_>) -> Result<OsString, EngineErro
         owner_home.as_deref().map(Path::new),
     )?;
     Ok(ceiling)
+}
+
+/// Refuses a start while the server data folder holds an entry named `.git` in any ASCII
+/// letter case at any depth, folder, file or link alike, which a server of an older profile
+/// could leave to rename into the project later (SA vid 101 residue). Links are never
+/// followed. Inputs: the folder and the most entries to read. Output: Ok, or
+/// `ide_server_data_git` for a `.git`, a folder it cannot read or more than `limit` entries.
+fn refuse_planted_git(home: &Path, limit: usize) -> Result<(), EngineError> {
+    let refused = |_| failure("ide_server_data_git");
+    let mut folders = vec![home.to_path_buf()];
+    let mut read = 0usize;
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).map_err(refused)? {
+            let entry = entry.map_err(refused)?;
+            read += 1;
+            if read > limit || entry.file_name().eq_ignore_ascii_case(".git") {
+                return Err(failure("ide_server_data_git"));
+            }
+            if entry.file_type().map_err(refused)?.is_dir() {
+                folders.push(entry.path());
+            }
+        }
+        assert!(folders.len() <= read, "only folders read are queued");
+    }
+    assert!(read <= limit);
+    Ok(())
+}
+
+/// Makes a confined start's own short temp folder, one no earlier start used: the folder
+/// [`crate::sandbox::toolchains::make_tmp`] keys by a fresh random name under the server
+/// data folder's path, where nothing is made. What an earlier session left in its temp
+/// folder, a `.git`, a shut folder or any number of entries, is then outside this start's
+/// profile. Input: the server data folder. Output: the new folder,
+/// `ide_entropy_unavailable`, or `ide_state_unavailable`.
+fn fresh_tmp(home: &Path) -> Result<PathBuf, EngineError> {
+    let mut start = [0u8; 16];
+    getrandom::fill(&mut start).map_err(|_| failure("ide_entropy_unavailable"))?;
+    let name: String = start.iter().map(|byte| format!("{byte:02x}")).collect();
+    let key = home.join(format!("start-{name}"));
+    if fs::symlink_metadata(crate::sandbox::toolchains::tmp_path(&key)).is_ok() {
+        return Err(failure("ide_state_unavailable"));
+    }
+    crate::sandbox::toolchains::make_tmp(&key).map_err(|_| failure("ide_state_unavailable"))
+}
+
+/// Records the temp folder a confined start made in the project's IDE folder, never through
+/// a link, so its stop or the next start removes it ([`remove_recorded_tmp`]). A record that
+/// cannot be written is logged and the start goes on. Inputs: the IDE folder and the temp
+/// folder.
+fn record_tmp(folder: &Path, tmp: &Path) {
+    let mut line = tmp.as_os_str().as_encoded_bytes().to_vec();
+    line.push(b'\n');
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(folder.join(TMP_RECORD))
+        .and_then(|mut file| file.write_all(&line));
+    if written.is_err() {
+        eprintln!("ide_server_tmp_unrecorded");
+    }
+}
+
+/// Removes the temp folder a project's last confined start recorded, with all it holds,
+/// never following a link, then the record. Only one short temp folder this user owns
+/// privately is removed ([`crate::sandbox::toolchains::own_short_tmp`]); any other recorded
+/// path, the server data folder or a link included, is left as it is. A folder that cannot
+/// be removed is logged and never stops a start. Input: the IDE folder.
+fn remove_recorded_tmp(folder: &Path) {
+    let record = folder.join(TMP_RECORD);
+    if let Some(tmp) = recorded_tmp(&record)
+        && crate::sandbox::toolchains::own_short_tmp(&tmp)
+        && fs::remove_dir_all(&tmp).is_err()
+    {
+        eprintln!("ide_server_tmp_left");
+    }
+    let _ = fs::remove_file(&record);
+}
+
+/// The temp folder a [`TMP_RECORD`] names, read only from a plain UTF-8 file of at most
+/// [`TMP_RECORD_BYTES_MAX`] bytes ending in a newline. Input: the record. Output: the path,
+/// or none.
+fn recorded_tmp(record: &Path) -> Option<PathBuf> {
+    let metadata = fs::symlink_metadata(record).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > TMP_RECORD_BYTES_MAX {
+        return None;
+    }
+    let text = fs::read_to_string(record).ok()?;
+    Some(PathBuf::from(text.strip_suffix('\n')?))
 }
 
 /// The launcher's command at the project's level: under the Seatbelt profile installed for

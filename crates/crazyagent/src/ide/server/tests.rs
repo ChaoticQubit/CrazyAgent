@@ -1122,7 +1122,22 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
 /// and the project's IDE folder.
 fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command, PathBuf) {
     let folder = servers.prepare(project).unwrap();
-    let (token_path, _) = token::issue(&folder).unwrap();
+    (
+        server_command(servers, project, root, &folder).unwrap(),
+        folder,
+    )
+}
+
+/// One project's server command as [`command`] builds it at a launch, refusal included.
+/// Inputs: the register, the project, its folder and its prepared IDE folder. Output: the
+/// command, or the refusal that stops the start.
+fn server_command(
+    servers: &Servers,
+    project: &ProjectId,
+    root: &Path,
+    folder: &Path,
+) -> Result<Command, EngineError> {
+    let (token_path, _) = token::issue(folder).unwrap();
     let info = ServerInfo {
         url: "http://127.0.0.1:47963/".to_owned(),
         port: 47_963,
@@ -1132,11 +1147,11 @@ fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command
         workspace: folder.join(WORKSPACE),
     };
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
-    let built = command(
+    command(
         Launch {
             project,
             build: &cached_build(),
-            folder: &folder,
+            folder,
             root,
             socket: &servers.socket,
             policy: ide_policy(servers.folder.parent().unwrap(), project).unwrap(),
@@ -1145,8 +1160,353 @@ fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command
         &info,
         writer,
     )
-    .unwrap();
-    (built, folder)
+}
+
+/// A `.git` a server of an older profile left in its data folder, as a folder, a gitdir file,
+/// a link, a hard link or a deep folder in any letter case, stops a confined start with
+/// `ide_server_data_git` and stays where it was, so no later server renames it into the
+/// project, since a rename checks only the two paths it names (SA vid 101 residue).
+#[test]
+fn a_git_left_in_the_server_data_folder_stops_a_confined_start() {
+    let (checkout, data, outside) = (scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let plants: [(&str, fn(&Path, &Path)); 5] = [
+        (".git/hooks", |home, _| {
+            fs::create_dir_all(home.join(".git").join("hooks")).unwrap();
+        }),
+        (".Git", |home, _| {
+            fs::write(home.join(".Git"), "gitdir: /private/tmp/x\n").unwrap();
+        }),
+        (".GIT", |home, outside| {
+            std::os::unix::fs::symlink(outside, home.join(".GIT")).unwrap();
+        }),
+        ("r/sub/.gIt", |home, _| {
+            fs::create_dir_all(home.join("r").join("sub").join(".gIt")).unwrap();
+        }),
+        (".git", |home, _| {
+            fs::write(home.join("plain"), "x").unwrap();
+            fs::hard_link(home.join("plain"), home.join(".git")).unwrap();
+        }),
+    ];
+    for (at, (name, plant)) in plants.iter().enumerate() {
+        let id = project(&format!("planted-{at}"));
+        let folder = servers.prepare(&id).unwrap();
+        let home = folder.join(SERVER_DATA);
+        assert_ne!(
+            ide_policy(data.path(), &id).unwrap().access,
+            AgentAccess::Full
+        );
+        plant(&home, outside.path());
+        let refused = server_command(&servers, &id, &root, &folder).unwrap_err();
+        assert_eq!(refused.0, "ide_server_data_git", "{name}");
+        assert!(
+            fs::symlink_metadata(home.join(name)).is_ok(),
+            "{name} was removed instead of refusing the start"
+        );
+    }
+}
+
+/// The check reads at most its limit of entries and refuses past it, so a padded server data
+/// folder cannot hold a start on a walk without end.
+#[test]
+fn a_server_data_folder_past_the_entry_limit_stops_a_start() {
+    let home = scratch();
+    fs::create_dir(home.path().join("a")).unwrap();
+    for name in ["1", "a/2", "a/3"] {
+        fs::write(home.path().join(name), "").unwrap();
+    }
+    assert!(refuse_planted_git(home.path(), 4).is_ok());
+    fs::write(home.path().join("a").join("4"), "").unwrap();
+    assert_eq!(
+        refuse_planted_git(home.path(), 4).unwrap_err().0,
+        "ide_server_data_git"
+    );
+}
+
+/// A folder in the server data folder the check cannot read stops a confined start, since a
+/// `.git` can sit in it and the server can open it again once it runs.
+#[test]
+fn an_unreadable_folder_in_the_server_data_folder_stops_a_confined_start() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("unreadable");
+    let folder = servers.prepare(&id).unwrap();
+    let shut = folder.join(SERVER_DATA).join("x");
+    fs::create_dir_all(shut.join(".git")).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let started = server_command(&servers, &id, &root, &folder);
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(started.unwrap_err().0, "ide_server_data_git");
+}
+
+/// Names near `.git` and a link to an outside folder that holds one leave a confined start
+/// alone, as links are never followed, and a Full access start, which no profile confines,
+/// is not checked.
+#[test]
+fn names_near_git_and_links_out_of_the_server_data_folder_leave_a_start_alone() {
+    let (checkout, data, outside) = (scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("near-git");
+    let folder = servers.prepare(&id).unwrap();
+    let home = folder.join(SERVER_DATA);
+    fs::create_dir_all(home.join(".github")).unwrap();
+    fs::create_dir_all(home.join("git")).unwrap();
+    fs::write(home.join(".gitignore"), "x\n").unwrap();
+    fs::write(home.join(".git.bak"), "x").unwrap();
+    fs::create_dir_all(outside.path().join(".git")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), home.join("linked")).unwrap();
+    assert!(server_command(&servers, &id, &root, &folder).is_ok());
+
+    let full = project("full-access");
+    set_level(data.path(), &full, AgentAccess::Full);
+    let folder = servers.prepare(&full).unwrap();
+    fs::create_dir_all(folder.join(SERVER_DATA).join(".git")).unwrap();
+    assert!(server_command(&servers, &full, &root, &folder).is_ok());
+}
+
+/// A repository a server of an older profile moved from its data folder into the temp
+/// folder every start of the project used to share is outside the next confined start: that
+/// start gets a temp folder of its own, its profile never names the old one, so no server
+/// renames the repository from there into the project, and nothing is deleted (SA vid 101
+/// residue one rename further, rv-sec2 r1 F1, rv-sec3 r4 addendum).
+#[test]
+fn a_git_moved_into_the_old_server_temp_folder_is_outside_the_next_confined_start() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("moved-to-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let tmp = crate::sandbox::toolchains::make_tmp(&folder.join(SERVER_DATA)).unwrap();
+    let planted = tmp.join("x").join(".git");
+    fs::create_dir_all(planted.join("hooks")).unwrap();
+    let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+    let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap_or_default();
+    let kept = planted.is_dir();
+    for made in [Some(&tmp), started.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    let started = started.expect("a .git in the old temp folder refused a confined start");
+    assert_ne!(started, tmp);
+    assert!(
+        profile.contains(started.to_str().unwrap()),
+        "the confined start's profile names its own temp folder"
+    );
+    assert!(
+        !profile.contains(tmp.to_str().unwrap()),
+        "the confined start's profile names the old temp folder"
+    );
+    assert!(kept, "the planted .git was removed");
+}
+
+/// A confined session that leaves a `.git` or a folder it shut with mode 000 in its temp
+/// folder never stops the next confined start of the project: each confined start gets a
+/// temp folder no earlier start used, and the old one is outside its profile, so no count
+/// of entries left there matters either (rv-sec3 r4 addendum).
+#[test]
+fn a_confined_start_never_reuses_an_earlier_start_s_temp_folder() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("left-its-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let first = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
+    let shut = first.join("shut");
+    fs::create_dir_all(first.join("clone").join(".git")).unwrap();
+    fs::create_dir_all(&shut).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let next = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+    let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap_or_default();
+    let _ = fs::set_permissions(&shut, fs::Permissions::from_mode(0o700));
+    for made in [Some(&first), next.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    let next = next.expect("an earlier start's temp folder refused the next confined start");
+    assert_ne!(next, first);
+    assert!(
+        profile.contains(next.to_str().unwrap()),
+        "the next start's profile names its own temp folder"
+    );
+    assert!(
+        !profile.contains(first.to_str().unwrap()),
+        "the next start's profile names the earlier start's temp folder"
+    );
+}
+
+/// The temp folder a built server command gives the server as `TMPDIR`. Input: the command.
+/// Output: the folder.
+fn server_tmp(built: &Command) -> PathBuf {
+    PathBuf::from(
+        built
+            .get_envs()
+            .find(|(key, _)| key.to_str() == Some("TMPDIR"))
+            .and_then(|(_, value)| value)
+            .unwrap(),
+    )
+}
+
+/// A `.git` a Full access session left in its temp folder, as a temporary clone or a git
+/// build leaves one, never refuses a later confined start of the project, which gets a temp
+/// folder of its own (rv-sec3 r2+r3 F1).
+#[test]
+fn a_git_a_full_access_session_left_in_its_temp_folder_leaves_a_confined_start_alone() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("full-then-confined");
+    set_level(data.path(), &id, AgentAccess::Full);
+    let folder = servers.prepare(&id).unwrap();
+    let full = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
+    fs::create_dir_all(full.join("clone").join(".git").join("hooks")).unwrap();
+    set_level(data.path(), &id, AgentAccess::Sandboxed);
+    let confined = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+    for made in [Some(&full), confined.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    let confined =
+        confined.expect("a .git in the Full access temp folder refused a confined start");
+    assert_ne!(confined, full);
+}
+
+/// Names a folder as the temp folder a project's last confined start recorded, as a start
+/// writes it. Inputs: the project's IDE folder and the recorded path.
+fn record_server_tmp(folder: &Path, tmp: &Path) {
+    fs::write(folder.join("server-tmp"), format!("{}\n", tmp.display())).unwrap();
+}
+
+/// The temp folder a server's installed profile binds its sockets in, which is the one its
+/// start made. Input: the project's IDE folder. Output: the folder.
+fn profile_tmp(folder: &Path) -> PathBuf {
+    let text = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+    let bind = "(local unix-socket (subpath \"";
+    let at = text.find(bind).unwrap() + bind.len();
+    PathBuf::from(&text[at..at + text[at..].find('"').unwrap()])
+}
+
+/// A confined server's stop removes the temp folder its start made, so confined starts
+/// leave no folder behind in the system temp folder (rv-code2 r5 F1).
+#[tokio::test]
+async fn a_confined_server_s_stop_removes_its_temp_folder() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let id = project("stop-removes-tmp");
+    servers
+        .open(&id, checkout.path(), &cached_build())
+        .await
+        .unwrap();
+    let folder = servers.project_folder(&id).unwrap();
+    let tmp = profile_tmp(&folder);
+    let made = tmp.is_dir();
+    assert!(servers.stop(&id).await);
+    let left = fs::symlink_metadata(&tmp).is_ok();
+    let _ = fs::remove_dir_all(&tmp);
+    assert!(made, "the start made its temp folder");
+    assert!(!left, "the stop left the server's temp folder");
+}
+
+/// The next start of a project removes the temp folder a crashed or killed engine left
+/// recorded for it, with whatever the session left there, before it makes its own, and
+/// records the new one (rv-code2 r5 F1).
+#[test]
+fn the_next_start_removes_the_temp_folder_a_crash_left_recorded() {
+    let (checkout, data, keys) = (scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("crash-left-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let left = crate::sandbox::toolchains::make_tmp(&keys.path().join("crashed")).unwrap();
+    fs::create_dir_all(left.join("pip-req-build").join(".git")).unwrap();
+    record_server_tmp(&folder, &left);
+    let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+    let gone = fs::symlink_metadata(&left).is_err();
+    let recorded = fs::read_to_string(folder.join("server-tmp")).unwrap_or_default();
+    for made in [Some(&left), started.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    let started = started.unwrap();
+    assert!(gone, "the start kept the temp folder a crash left recorded");
+    assert_eq!(recorded, format!("{}\n", started.display()));
+}
+
+/// A recorded temp folder is removed only when it is one short temp folder this user owns
+/// privately: a link in its place, the server data folder, a folder in the system temp
+/// folder named otherwise, and one open to others stay, as does everything they hold. A
+/// folder of another user cannot be planted without root; the same ownership check covers
+/// it (rv-code2 r5 F1).
+#[test]
+fn a_recorded_path_that_is_not_an_own_short_temp_folder_is_left_alone() {
+    let (checkout, data, keys, outside) = (scratch(), scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let keep = outside.path().join("keep");
+    fs::write(&keep, "owner data\n").unwrap();
+    let link = crate::sandbox::toolchains::tmp_path(&keys.path().join("link"));
+    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+    let open = crate::sandbox::toolchains::make_tmp(&keys.path().join("open")).unwrap();
+    fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+    let named = scratch();
+    let plants: [(&str, Option<&Path>); 4] = [
+        ("link", Some(link.as_path())),
+        ("server-data", None),
+        ("named-otherwise", Some(named.path())),
+        ("open-to-others", Some(open.as_path())),
+    ];
+    let mut kept = Vec::new();
+    for (at, (name, recorded)) in plants.iter().enumerate() {
+        let id = project(&format!("left-alone-{at}"));
+        let folder = servers.prepare(&id).unwrap();
+        let home = folder.join(SERVER_DATA);
+        fs::write(home.join("keep"), "server data\n").unwrap();
+        let recorded = recorded.map_or_else(|| home.clone(), Path::to_path_buf);
+        record_server_tmp(&folder, &recorded);
+        let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+        kept.push((
+            *name,
+            fs::symlink_metadata(&recorded).is_ok() && home.join("keep").is_file(),
+        ));
+        if let Ok(made) = started {
+            let _ = fs::remove_dir_all(made);
+        }
+    }
+    let outside_kept = keep.is_file();
+    let _ = fs::remove_file(&link);
+    let _ = fs::remove_dir_all(&open);
+    for (name, stayed) in kept {
+        assert!(stayed, "{name} was removed");
+    }
+    assert!(outside_kept, "a file behind the recorded link was removed");
+}
+
+/// Removing a recorded temp folder never follows a link in it: a link to an outside file
+/// and one to an outside folder go with the temp folder, and what they point at stays
+/// (rv-code2 r5 F1).
+#[test]
+fn removing_a_recorded_temp_folder_never_follows_a_link_in_it() {
+    let (checkout, data, keys, outside) = (scratch(), scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("links-in-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let file = outside.path().join("keep");
+    let inner = outside.path().join("kept").join("inner");
+    fs::write(&file, "owner data\n").unwrap();
+    fs::create_dir_all(inner.parent().unwrap()).unwrap();
+    fs::write(&inner, "owner data\n").unwrap();
+    let left = crate::sandbox::toolchains::make_tmp(&keys.path().join("links")).unwrap();
+    std::os::unix::fs::symlink(&file, left.join("file-link")).unwrap();
+    std::os::unix::fs::symlink(inner.parent().unwrap(), left.join("folder-link")).unwrap();
+    record_server_tmp(&folder, &left);
+    let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+    let gone = fs::symlink_metadata(&left).is_err();
+    for made in [Some(&left), started.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    assert!(started.is_ok());
+    assert!(gone, "the recorded temp folder was kept");
+    assert!(file.is_file(), "a file a link in the temp folder named was removed");
+    assert!(inner.is_file(), "a folder a link in the temp folder named was emptied");
 }
 
 /// Runs git as a built IDE server starts it: the engine's shim under the server's installed
