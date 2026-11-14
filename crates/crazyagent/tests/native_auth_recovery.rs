@@ -30,6 +30,7 @@ struct Case {
     codex: &'static str,
     claude: &'static str,
     home: tempfile::TempDir,
+    temp: tempfile::TempDir,
 }
 
 impl Case {
@@ -61,7 +62,8 @@ impl Case {
     }
 
     /// Starts the engine with a scratch HOME in this user's own temp folder, which no other
-    /// user can change, and a Codex stand-in whose first line asks `env` for
+    /// user can change and which is never the engine's TMPDIR, whatever the runner's is, and a
+    /// Codex stand-in whose first line asks `env` for
     /// `crazyagent-test-login-shell`, an interpreter only the login shell's PATH names: the
     /// scratch login files wait until the test opens [`Self::release_probe`], at most 9 s so
     /// a failed test still lets the shell end inside the probe's 10 s limit, then leave
@@ -183,6 +185,7 @@ done
             codex,
             claude,
             home,
+            temp: scratch("ca-nar-tmp-"),
         };
         case.launch("first.sock");
         case
@@ -214,6 +217,7 @@ done
             .env("CRAZYAGENT_DEBUG_CUSTODIAN", "1")
             .env("HOME", self.home.path())
             .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", self.temp.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log));
