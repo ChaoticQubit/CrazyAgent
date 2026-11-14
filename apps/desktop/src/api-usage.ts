@@ -418,9 +418,16 @@ export function refreshUsage(): Promise<Result<void>> {
   return call<void>("desktop_usage_refresh");
 }
 
-/** Stores the owner's main number and price source. Input: the settings. Output: done. */
-export function setMoney(settings: MoneySettings): Promise<Result<void>> {
-  return call<void>("desktop_usage_set_money", { settings });
+/** One of the owner's dollars and Metrics page choices with its new value. */
+export type MoneyChoice =
+  | { field: "main_number"; value: MoneySettings["main_number"] }
+  | { field: "prices"; value: MoneySettings["prices"] }
+  | { field: "project_limits"; value: NonNullable<MoneySettings["project_limits"]> };
+
+/** Stores one of the owner's dollars and Metrics page choices; the engine keeps the other
+ * two as stored. Input: the choice and its value. Output: done. */
+export function setMoneyOne(choice: MoneyChoice): Promise<Result<void>> {
+  return call<void>("desktop_usage_set_money", { choice });
 }
 
 /** Applies the owner's choice of the recount, once. Input: whether to use the new numbers.

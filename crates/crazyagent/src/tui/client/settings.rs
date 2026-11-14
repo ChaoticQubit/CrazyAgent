@@ -19,7 +19,7 @@ use crate::memory::library::{
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView, ToolView};
 use crate::protocol::CredentialRef;
-use crate::usage::money::MoneySettings;
+use crate::usage::money::MoneyChoice;
 use crate::usage::report::UsageReport;
 use crate::usage::spend::SpendChoice;
 
@@ -71,7 +71,7 @@ pub(in crate::tui) enum SettingsJob {
     Extras {
         detail: bool,
     },
-    SetMoney(MoneySettings),
+    SetMoneyOne(MoneyChoice),
     SetSpendOne(SpendChoice),
     Spend {
         account: CredentialRef,
@@ -261,7 +261,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
             Self::Extras { .. } => "Extras",
-            Self::SetMoney(_) => "SetMoney",
+            Self::SetMoneyOne(_) => "SetMoneyOne",
             Self::SetSpendOne(_) => "SetSpendOne",
             Self::Spend { .. } => "Spend",
             Self::DecideRecount(_) => "DecideRecount",
@@ -462,7 +462,7 @@ impl SettingsEvent {
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
             SettingsJob::Extras { .. } => Self::Extras(Err(problem)),
-            SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
+            SettingsJob::SetMoneyOne(_) => Self::MoneySet(Err(problem)),
             SettingsJob::SetSpendOne(_) => Self::SpendSet(Err(problem)),
             SettingsJob::Spend { .. } => Self::Spent(Err(problem)),
             SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
@@ -736,10 +736,10 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
-            SettingsJob::SetMoney(settings) => {
+            SettingsJob::SetMoneyOne(choice) => {
                 SettingsEvent::MoneySet(match self.settings_controller() {
                     Ok(controller) => controller
-                        .usage_set_money(settings)
+                        .usage_set_money_one(choice)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),

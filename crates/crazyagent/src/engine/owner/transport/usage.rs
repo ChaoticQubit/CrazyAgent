@@ -2,7 +2,7 @@ use super::*;
 use crate::protocol::{CredentialRef, ProjectId, encode_frame};
 use crate::usage::extras::LimitExtras;
 use crate::usage::metrics::Metrics;
-use crate::usage::money::MoneySettings;
+use crate::usage::money::{MoneyChoice, MoneySettings};
 use crate::usage::report::UsageReport;
 use crate::usage::spend::{SpendChoice, SpendSettings};
 use crate::usage::{self, WindowKind};
@@ -64,6 +64,9 @@ enum Action {
     },
     SetMoney {
         settings: MoneySettings,
+    },
+    SetMoneyOne {
+        choice: MoneyChoice,
     },
     DecideRecount {
         use_new: bool,
@@ -196,6 +199,16 @@ impl OwnerClient {
         }
     }
 
+    /// Stores one of the owner's dollars and Metrics page choices and keeps the other two as
+    /// stored. Input: the choice and its value. Output: done; an engine before this request
+    /// answers `usage_request_invalid`.
+    pub async fn usage_set_money_one(&self, choice: MoneyChoice) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetMoneyOne { choice }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
     /// Applies the owner's choice of the recount, once. Input: whether to use the new
     /// numbers. Output: done, or `usage_recount_not_ready`.
     pub async fn usage_decide_recount(&self, use_new: bool) -> Result<(), EngineError> {
@@ -315,6 +328,7 @@ enum Change {
     Refresh,
     SetReset(CredentialRef, WindowKind, Option<i64>),
     SetMoney(MoneySettings),
+    SetMoneyOne(MoneyChoice),
     DecideRecount(bool),
     Spend(CredentialRef, bool),
     SetSpend(SpendSettings),
@@ -438,6 +452,7 @@ async fn prepare(
             at_ms,
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
         Action::SetMoney { settings } => Prepared::Change(root, Change::SetMoney(settings)),
+        Action::SetMoneyOne { choice } => Prepared::Change(root, Change::SetMoneyOne(choice)),
         Action::DecideRecount { use_new } => Prepared::Change(root, Change::DecideRecount(use_new)),
         Action::Spend { account, confirmed } => {
             Prepared::Change(root, Change::Spend(account, confirmed))
@@ -537,6 +552,7 @@ async fn finish(
                 usage::set_reset_override(&db, &account, window, at_ms)
             }
             Change::SetMoney(settings) => usage::money::write(&db, settings),
+            Change::SetMoneyOne(choice) => usage::money::write_one(&db, choice),
             Change::DecideRecount(use_new) => {
                 usage::recount::decide(&db, use_new, crate::team::now_ms())
             }

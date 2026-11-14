@@ -980,7 +980,7 @@ fn the_summary_shows_each_rows_dollars_and_the_total_with_prices_on() {
 
 #[test]
 fn the_money_keys_flip_one_setting_and_send_it() {
-    use crate::usage::money::{MainNumber, MoneySettings, PriceSource};
+    use crate::usage::money::{MainNumber, MoneyChoice, PriceSource};
     let mut ctx = ctx(100, 40);
     let mut page = UsagePage::new();
     page.shown(&mut ctx);
@@ -1000,31 +1000,23 @@ fn the_money_keys_flip_one_setting_and_send_it() {
         labels.contains(&("p".to_owned(), "Prices on or off".to_owned())),
         "{labels:?}"
     );
-    let sent = |key: char, page: &mut UsagePage, ctx: &mut Ctx| -> MoneySettings {
+    let sent = |key: char, page: &mut UsagePage, ctx: &mut Ctx| -> MoneyChoice {
         assert!(matches!(page.key(&Key::Char(key), ctx), Flow::Handled));
         let Some(Request::Settings(job)) = ctx.next_request() else {
             panic!("the money key asks the engine");
         };
-        let SettingsJob::SetMoney(settings) = *job else {
+        let SettingsJob::SetMoneyOne(choice) = *job else {
             panic!("the money key sets the money choice");
         };
-        settings
+        choice
     };
     assert_eq!(
         sent('m', &mut page, &mut ctx),
-        MoneySettings {
-            main_number: MainNumber::Tokens,
-            prices: PriceSource::Bundled,
-            ..MoneySettings::default()
-        }
+        MoneyChoice::MainNumber(MainNumber::Tokens)
     );
     assert_eq!(
         sent('p', &mut page, &mut ctx),
-        MoneySettings {
-            main_number: MainNumber::Dollars,
-            prices: PriceSource::Off,
-            ..MoneySettings::default()
-        }
+        MoneyChoice::Prices(PriceSource::Off)
     );
 }
 

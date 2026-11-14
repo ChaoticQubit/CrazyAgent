@@ -77,7 +77,7 @@ export function tileParts(tiles) {
 /** Turns dollars off through the engine's own command, so a spec about token figures reads
  * exactly those. Input: the bridge. Output: none. */
 export async function pricesOff(bridge) {
-  await value(bridge, "desktop_usage_set_money", { settings: { main_number: "dollars", prices: "off" } });
+  await value(bridge, "desktop_usage_set_money", { choice: { field: "prices", value: "off" } });
 }
 
 /** Makes the owner's project folder: a git repository on main with one commit. Input: the

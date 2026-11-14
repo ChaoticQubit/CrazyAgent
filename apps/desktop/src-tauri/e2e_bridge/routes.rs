@@ -34,7 +34,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::sandbox_settings::SandboxSettings;
     use crazyagent::scheduling::ScheduleChange;
     use crazyagent::team::TerminalsPerWindow;
-    use crazyagent::usage::money::MoneySettings;
+    use crazyagent::usage::money::MoneyChoice;
     use crazyagent::usage::spend::SpendChoice;
     match command {
         "desktop_connect" => {
@@ -3085,13 +3085,13 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
-                settings: MoneySettings,
+                choice: MoneyChoice,
             }
-            let Args { settings } = match parse(args) {
+            let Args { choice } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_set_money(settings)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_set_money_one(choice)?; call.await }.await;
             routed(result)
         }
         "desktop_usage_spend" => {
