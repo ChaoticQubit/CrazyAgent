@@ -314,12 +314,12 @@ export const FOLLOW_TRIES = 30;
 export const FOLLOW_STEADY_MS = 5000;
 
 /** Counts one more try for a following view whose terminal ended or would not open; only a
- * view that stayed open `FOLLOW_STEADY_MS` starts the count afresh. Inputs: the tries so
- * far, when the view that just ended opened (null when it never opened) and now, in ms.
+ * view that stayed open `FOLLOW_STEADY_MS` starts the count afresh, and an end that reads
+ * earlier than the open, as a clock stepped back would give, is not steady. Inputs: the tries
+ * so far, when the view that just ended opened (null when it never opened) and now, in ms.
  * Output: the next try's count, or null once `FOLLOW_TRIES` are spent and it says why. */
 export function followTry(tries: number, opened: number | null, now: number): number | null {
   assert(tries >= 0 && tries <= FOLLOW_TRIES, "follow tries out of bounds");
-  assert(opened === null || opened <= now, "a view cannot open after now");
   const counted = opened !== null && now - opened >= FOLLOW_STEADY_MS ? 0 : tries;
   return counted < FOLLOW_TRIES ? counted + 1 : null;
 }

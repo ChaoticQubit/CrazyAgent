@@ -463,7 +463,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
       const end = (copy: string) => {
         live = false;
         if (disposed) return;
-        const next = following.current ? followTry(tries.current, openedAt, Date.now()) : null;
+        const next = following.current ? followTry(tries.current, openedAt, performance.now()) : null;
         if (next !== null) {
           tries.current = next;
           terminal.reset();
@@ -522,7 +522,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
         } else if (event.kind === "attached") {
           const size = terminalSize(event.cols, event.rows);
           if (size) terminal.resize(size.cols, size.rows);
-          openedAt = Date.now();
+          openedAt = performance.now();
           live = true;
           setView({ kind: "live" });
           terminal.focus();
