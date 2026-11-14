@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, GrantLogRow, IdeAgentFiles, PolicyView, SharedAccess, SharedFolders, SharedScope, ToolCacheScope } from "../../api-projects";
+import { desktopPlatform } from "../../api-ide";
 import { Switch } from "../../ui";
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -263,11 +264,12 @@ function toolchainNote(row: PolicyView["toolchains"][number]): string {
   return "";
 }
 
-/** The access level choice as radio cards, with the reason a level can't run here and the Full
- * access warning when it is chosen. Inputs: the radio group name, the chosen level, the reason
- * each level is unavailable (null when it runs) and the change handler. Output: the fieldset. */
-export function AccessLevels({ name, value, unavailable, onChange }: {
-  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; onChange: (access: AgentAccess) => void;
+/** The access level choice as radio cards, with the reason a level can't run here, the Full
+ * access warning when it is chosen and, on Linux below Full access, the nested git gap. Inputs:
+ * the radio group name, the chosen level, the reason each level is unavailable (null when it
+ * runs), the change handler and this desktop's platform. Output: the fieldset. */
+export function AccessLevels({ name, value, unavailable, onChange, platform = desktopPlatform() }: {
+  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; onChange: (access: AgentAccess) => void; platform?: string;
 }) {
   return <fieldset className="pj-field">
     <legend>Agent access</legend>
@@ -285,14 +287,15 @@ export function AccessLevels({ name, value, unavailable, onChange }: {
       })}
     </div>
     {value === "full" && <p className="pj-note warn" role="alert">{FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}</p>}
+    {value !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_NESTED_GIT}</p>}
   </fieldset>;
 }
 
-/** The network choice as radio cards, with a note when Full access makes it moot. Inputs: the
- * radio group name, the chosen network, the chosen access level and the change handler.
- * Output: the fieldset. */
-export function NetworkChoices({ name, value, access, onChange }: {
-  name: string; value: AgentNetwork; access: AgentAccess; onChange: (network: AgentNetwork) => void;
+/** The network choice as radio cards, with a note when Full access makes it moot or, on Linux,
+ * that limits hold ports, not hosts. Inputs: the radio group name, the chosen network, the
+ * chosen access level, the change handler and this desktop's platform. Output: the fieldset. */
+export function NetworkChoices({ name, value, access, onChange, platform = desktopPlatform() }: {
+  name: string; value: AgentNetwork; access: AgentAccess; onChange: (network: AgentNetwork) => void; platform?: string;
 }) {
   return <fieldset className="pj-field">
     <legend>Network for agents with tools on</legend>
@@ -306,6 +309,7 @@ export function NetworkChoices({ name, value, access, onChange }: {
       </label>)}
     </div>
     {access === "full" && <p className="pj-note" role="note">{NETWORK_IGNORED_UNDER_FULL}</p>}
+    {access !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_PORTS_ANY_HOST}</p>}
   </fieldset>;
 }
 

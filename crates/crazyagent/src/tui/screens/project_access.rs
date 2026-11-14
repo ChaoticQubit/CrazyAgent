@@ -6,6 +6,7 @@ use crate::sandbox::policy::{
 use crate::sandbox::shared_folders::{
     CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
 };
+use crate::sandbox::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
@@ -277,6 +278,13 @@ impl AccessEdit {
                     .map(|line| Row::of(line, look.warning)),
             );
         }
+        if self.linux && self.access != AgentAccess::Full {
+            body.extend(
+                wrap_words(LINUX_NESTED_GIT_LINE, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning)),
+            );
+        }
         body.extend(
             wrap_words(LOWERING_STOPS_AGENTS, TEXT_WIDTH)
                 .into_iter()
@@ -352,6 +360,12 @@ impl AccessEdit {
         if self.access == AgentAccess::Full {
             body.extend(
                 wrap_words(NETWORK_IGNORED_UNDER_FULL, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning)),
+            );
+        } else if self.linux {
+            body.extend(
+                wrap_words(LINUX_PORTS_ANY_HOST_LINE, TEXT_WIDTH)
                     .into_iter()
                     .map(|line| Row::of(line, look.warning)),
             );
