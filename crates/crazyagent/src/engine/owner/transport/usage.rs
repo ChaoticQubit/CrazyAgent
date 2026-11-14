@@ -7,6 +7,7 @@ use crate::usage::report::UsageReport;
 use crate::usage::spend::SpendSettings;
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedRwLockWriteGuard;
 
 const REQUEST_BYTES_MAX: usize = 1024;
 pub(super) const USAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -307,11 +308,12 @@ enum Change {
     SetSpend(SpendSettings),
 }
 
-/// Serves one usage request. The report is built first; then, under the owner barrier, the
-/// grant is checked again, any change is made and the reply is written, so a revocation
-/// that returned saw every change and reply admitted before it and lets none through after.
-/// Inputs: the connection, engine, authority, packet, admission and request body.
-/// Output: done once the reply is written.
+/// Serves one usage request. The report is built first; then the owner barrier is waited
+/// for at most the engine timeout and held while the grant is checked again, any change is
+/// made and the reply is written, so a revocation that returned saw every change and reply
+/// admitted before it and lets none through after, even when the request is cut short while
+/// its change commits. Inputs: the connection, engine, authority, packet, admission and
+/// request body. Output: done once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -321,11 +323,12 @@ pub(super) async fn serve(
     bytes: &[u8],
 ) -> Result<(), EngineError> {
     let prepared = prepare(engine, authority, packet, admission, bytes).await;
-    let _barrier = engine.owner_egress.write().await;
-    let reply = match finish(authority, packet, admission, prepared).await {
-        Ok(reply) => reply,
-        Err(error) => Reply::Rejected { code: error.0 },
+    let barrier = Arc::clone(&engine.owner_egress).write_owned();
+    let (answer, _barrier) = match tokio::time::timeout(engine.timeout, barrier).await {
+        Ok(barrier) => finish(authority, packet, admission, prepared, barrier).await,
+        Err(_) => (Err(failure("owner_busy")), None),
     };
+    let reply = answer.unwrap_or_else(|error| Reply::Rejected { code: error.0 });
     let frame = match encode_frame(&reply) {
         Ok(frame) => frame,
         Err(_) => encode_frame(&Reply::Rejected {
@@ -487,53 +490,83 @@ async fn saved_connections(
     }
 }
 
-/// Answers a prepared request under the owner barrier its caller holds: checks the grant
-/// again, then makes any change. Inputs: the authority, packet, admission and the prepared
-/// request. Output: the reply, or the refusal.
+/// Answers a prepared request under the owner barrier it is handed: checks the grant again,
+/// then makes any write on a blocking thread that owns the barrier until the write returns,
+/// so a request cut short never lets a revocation pass a change still committing
+/// (RV-DS241-68). Inputs: the authority, packet, admission, prepared request and barrier.
+/// Output: the reply or refusal, with the barrier to hold while it is written; no barrier
+/// when the blocking thread failed.
 async fn finish(
     authority: &Authority,
     packet: &[u8; 37],
     admission: &Admission,
     prepared: Result<Prepared, EngineError>,
-) -> Result<Reply, EngineError> {
-    let prepared = prepared?;
-    if &authority.authenticate(packet)? != admission {
-        return Err(failure("owner_grant_stale_or_revoked"));
-    }
-    let (root, change) = match prepared {
-        Prepared::Report(report) => return Ok(Reply::Report { report }),
-        Prepared::Metrics(metrics) => return Ok(Reply::Metrics { metrics }),
-        Prepared::Extras(accounts, None) => return Ok(Reply::Extras { accounts }),
-        Prepared::Extras(accounts, Some(root)) => {
-            tokio::task::spawn_blocking(move || {
-                usage::extras::request_detail(&usage::open(&root)?, crate::team::now_ms())
-            })
-            .await
-            .map_err(|_| failure("usage_unavailable"))??;
-            return Ok(Reply::Extras { accounts });
+    barrier: OwnedRwLockWriteGuard<()>,
+) -> (
+    Result<Reply, EngineError>,
+    Option<OwnedRwLockWriteGuard<()>>,
+) {
+    let admitted = prepared.and_then(|prepared| {
+        if &authority.authenticate(packet)? != admission {
+            return Err(failure("owner_grant_stale_or_revoked"));
         }
-        Prepared::Change(root, change) => (root, change),
+        Ok(prepared)
+    });
+    let (root, change) = match admitted {
+        Err(error) => return (Err(error), Some(barrier)),
+        Ok(Prepared::Report(report)) => return (Ok(Reply::Report { report }), Some(barrier)),
+        Ok(Prepared::Metrics(metrics)) => return (Ok(Reply::Metrics { metrics }), Some(barrier)),
+        Ok(Prepared::Extras(accounts, None)) => {
+            return (Ok(Reply::Extras { accounts }), Some(barrier));
+        }
+        Ok(Prepared::Extras(accounts, Some(root))) => {
+            return owned_write(barrier, root, move |db| {
+                usage::extras::request_detail(db, crate::team::now_ms())?;
+                Ok(Reply::Extras { accounts })
+            })
+            .await;
+        }
+        Ok(Prepared::Change(root, change)) => (root, change),
     };
-    tokio::task::spawn_blocking(move || {
-        let db = usage::open(&root)?;
-        match change {
-            Change::Refresh => usage::service::request_refresh(&db, crate::team::now_ms()),
+    owned_write(barrier, root, move |db| {
+        let written = match change {
+            Change::Refresh => usage::service::request_refresh(db, crate::team::now_ms()),
             Change::SetReset(account, window, at_ms) => {
-                usage::set_reset_override(&db, &account, window, at_ms)
+                usage::set_reset_override(db, &account, window, at_ms)
             }
-            Change::SetMoney(settings) => usage::money::write(&db, settings),
+            Change::SetMoney(settings) => usage::money::write(db, settings),
             Change::DecideRecount(use_new) => {
-                usage::recount::decide(&db, use_new, crate::team::now_ms())
+                usage::recount::decide(db, use_new, crate::team::now_ms())
             }
             Change::Spend(account, confirmed) => {
-                usage::spend::request(&db, &account, confirmed, crate::team::now_ms())
+                usage::spend::request(db, &account, confirmed, crate::team::now_ms())
             }
-            Change::SetSpend(settings) => usage::spend::write(&db, settings),
-        }
+            Change::SetSpend(settings) => usage::spend::write(db, settings),
+        };
+        written.map(|_| Reply::Done)
     })
     .await
-    .map_err(|_| failure("usage_unavailable"))??;
-    Ok(Reply::Done)
+}
+
+/// Runs one usage write on a blocking thread that owns the owner barrier until the write
+/// returns. Inputs: the barrier, the engine root and the write over the usage store.
+/// Output: the write's reply or refusal, with the barrier; no barrier when the blocking
+/// thread failed.
+async fn owned_write(
+    barrier: OwnedRwLockWriteGuard<()>,
+    root: PathBuf,
+    write: impl FnOnce(&rusqlite::Connection) -> Result<Reply, EngineError> + Send + 'static,
+) -> (
+    Result<Reply, EngineError>,
+    Option<OwnedRwLockWriteGuard<()>>,
+) {
+    let written = tokio::task::spawn_blocking(move || {
+        (usage::open(&root).and_then(|db| write(&db)), barrier)
+    });
+    match written.await {
+        Ok((result, barrier)) => (result, Some(barrier)),
+        Err(_) => (Err(failure("usage_unavailable")), None),
+    }
 }
 
 #[cfg(test)]
