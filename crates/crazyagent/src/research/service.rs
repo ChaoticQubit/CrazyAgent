@@ -1,6 +1,6 @@
-use super::accounts::AccountPick;
 #[cfg(unix)]
 use super::accounts::SettingsResolver;
+use super::accounts::{AccountPick, Reach};
 use super::jobs::{JobError, ResearchJobs, ResearchStatus};
 #[cfg(unix)]
 use super::runner::ResearchAccount;
@@ -107,15 +107,17 @@ pub struct ResearchService {
 }
 
 impl ResearchService {
-    /// Starts the loop. `resolve` maps a project id and a job harness to the
+    /// Starts the loop. `resolve` maps a project id, a job harness and a reach rule to the
     /// project folder and the account picked for that harness from its pool,
-    /// or `None` for a project the engine does not know yet.
+    /// or `None` for a project the engine does not know yet. Jobs and the tick pick
+    /// with [`Reach::Unprobed`]; a started upkeep run picks again in its own thread.
     pub fn start<F>(runner: Arc<ResearchRunner>, resolve: F, tick: Duration) -> Self
     where
-        F: Fn(&str, &str) -> Option<(PathBuf, AccountPick)> + Send + 'static,
+        F: Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)> + Send + Sync + 'static,
     {
         assert!(!tick.is_zero());
         let stop = Arc::new(AtomicBool::new(false));
+        let resolve = Arc::new(resolve);
         let worker = {
             let runner = runner.clone();
             let stop = stop.clone();
@@ -149,9 +151,9 @@ impl Drop for ResearchService {
     }
 }
 
-fn serve<F>(runner: &Arc<ResearchRunner>, resolve: &F, tick: Duration, stop: &AtomicBool)
+fn serve<F>(runner: &Arc<ResearchRunner>, resolve: &Arc<F>, tick: Duration, stop: &AtomicBool)
 where
-    F: Fn(&str, &str) -> Option<(PathBuf, AccountPick)>,
+    F: Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)> + Send + Sync + 'static,
 {
     let mut runs: Vec<JoinHandle<Result<ResearchRun, RunError>>> = Vec::new();
     let Ok(jobs) = ResearchJobs::open(runner.database()) else {
@@ -165,7 +167,7 @@ where
             if stop.load(Ordering::SeqCst) || runs.len() >= RUNS_MAX {
                 break;
             }
-            match resolve(&project, &harness) {
+            match resolve(&project, &harness, Reach::Unprobed) {
                 None => {}
                 Some((root, _)) if ResearchHarness::of(&harness).is_none() => {
                     let _ = jobs.resume_waiting(&project, &harness);
@@ -174,7 +176,10 @@ where
                 Some((_, AccountPick::NeedsPool)) => {
                     let _ = jobs.park_waiting(&project, &harness, None);
                 }
-                Some((_, pick @ AccountPick::NoUsableAccount)) => {
+                Some((
+                    _,
+                    pick @ (AccountPick::NoUsableAccount | AccountPick::Unreached { .. }),
+                )) => {
                     let _ = jobs.park_waiting(&project, &harness, Some(pick.label()));
                 }
                 Some((_, pick @ AccountPick::Paused { until_ms })) => {
@@ -235,10 +240,35 @@ fn picked(resolved: impl Iterator<Item = Option<(PathBuf, AccountPick)>>) -> Pic
             AccountPick::Paused { until_ms } => {
                 paused = Some(paused.map_or(until_ms, |earliest| earliest.min(until_ms)));
             }
-            AccountPick::NeedsPool | AccountPick::NoUsableAccount => {}
+            AccountPick::NeedsPool
+            | AccountPick::NoUsableAccount
+            | AccountPick::Unreached { .. } => {}
         }
     }
     paused.map_or(Picked::Nothing, Picked::Paused)
+}
+
+/// Picks again in a started upkeep run's own thread, never on the service tick, with each
+/// loopback provider probed so a member whose provider refuses connects is passed over.
+/// Inputs: the resolver, the project and the harnesses the tick asked, in order. Output: the
+/// folder and the first reachable account, or none, when the run keeps the tick's pick and
+/// its own reach check gives the owner the down provider's line.
+#[cfg(unix)]
+fn reachable<F>(
+    resolve: &F,
+    project: &ProjectId,
+    harnesses: &[ResearchHarness],
+) -> Option<(PathBuf, Box<ResearchAccount>)>
+where
+    F: Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)>,
+{
+    let resolved = harnesses
+        .iter()
+        .map(|harness| resolve(project.as_str(), harness.id(), Reach::Reachable));
+    match picked(resolved) {
+        Picked::Account(root, account) => Some((root, account)),
+        Picked::Paused(_) | Picked::Nothing => None,
+    }
 }
 
 /// Which store a started run belongs to: the roadmap status check or the Overview tabs'
@@ -331,9 +361,9 @@ impl StatusUpkeep {
     /// Counts one loop pass and, on every `STATUS_EVERY_TICKS`th with room for more checks,
     /// starts the due ones. A store failure is logged once by its plain code. Inputs: the
     /// runner and the account resolver.
-    fn tick<F>(&mut self, runner: &Arc<ResearchRunner>, resolve: &F)
+    fn tick<F>(&mut self, runner: &Arc<ResearchRunner>, resolve: &Arc<F>)
     where
-        F: Fn(&str, &str) -> Option<(PathBuf, AccountPick)>,
+        F: Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)> + Send + Sync + 'static,
     {
         self.reap();
         self.passes = self.passes.wrapping_add(1);
@@ -398,7 +428,7 @@ impl StatusUpkeep {
 #[cfg(unix)]
 struct StatusStarts<'a, F> {
     runner: &'a Arc<ResearchRunner>,
-    resolve: &'a F,
+    resolve: &'a Arc<F>,
     db: &'a rusqlite::Connection,
     checks: &'a mut Vec<JoinHandle<Option<crate::roadmap_status::run::RunLeft>>>,
     upkeep: Upkeep,
@@ -408,13 +438,16 @@ struct StatusStarts<'a, F> {
 #[cfg(unix)]
 impl<F> crate::roadmap_status::Runs for StatusStarts<'_, F>
 where
-    F: Fn(&str, &str) -> Option<(PathBuf, AccountPick)>,
+    F: Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)> + Send + Sync + 'static,
 {
     fn start(&mut self, project: &ProjectId, claim: crate::roadmap_status::Claim) {
-        let resolved = STATUS_HARNESSES
+        let harnesses: Vec<ResearchHarness> = STATUS_HARNESSES
             .into_iter()
             .filter(|harness| self.runner.can_run(*harness))
-            .map(|harness| (self.resolve)(project.as_str(), harness.id()));
+            .collect();
+        let resolved = harnesses
+            .iter()
+            .map(|harness| (self.resolve)(project.as_str(), harness.id(), Reach::Unprobed));
         let now = crate::team::now_ms();
         let stored = match picked(resolved) {
             Picked::Account(root, account) => {
@@ -434,15 +467,20 @@ where
                     );
                 }
                 let (runner, project, upkeep) = (self.runner.clone(), project.clone(), self.upkeep);
-                self.checks.push(std::thread::spawn(move || match upkeep {
-                    Upkeep::Roadmap => {
-                        crate::roadmap_status::run::check(&runner, &project, claim, &root, &account)
-                    }
-                    Upkeep::Overview => {
-                        crate::project_overview::agent::write(
+                let resolve = self.resolve.clone();
+                self.checks.push(std::thread::spawn(move || {
+                    let (root, account) =
+                        reachable(&*resolve, &project, &harnesses).unwrap_or((root, account));
+                    match upkeep {
+                        Upkeep::Roadmap => crate::roadmap_status::run::check(
                             &runner, &project, claim, &root, &account,
-                        );
-                        None
+                        ),
+                        Upkeep::Overview => {
+                            crate::project_overview::agent::write(
+                                &runner, &project, claim, &root, &account,
+                            );
+                            None
+                        }
                     }
                 }));
                 Ok(true)
@@ -568,7 +606,7 @@ pub fn start_for_engine(
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
     Ok(ResearchService::start(
         Arc::new(runner),
-        move |id: &str, harness: &str| resolver.resolve(id, harness),
+        move |id: &str, harness: &str, reach: Reach| resolver.resolve_with(id, harness, reach),
         ENGINE_TICK,
     ))
 }
@@ -770,7 +808,8 @@ mod tests {
         let (_temp, runner, db) = engine_without_accounts(None);
         let project = ProjectId::new("alpha").unwrap();
         crate::project_overview::refresh(&db, &project).unwrap();
-        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let resolve =
+            Arc::new(|_: &str, _: &str, _: Reach| -> Option<(PathBuf, AccountPick)> { None });
         let mut checks = Vec::new();
         let mut starts = StatusStarts {
             runner: &runner,
@@ -802,7 +841,8 @@ mod tests {
         let (_temp, runner, db) = engine_without_accounts(None);
         let project = ProjectId::new("alpha").unwrap();
         crate::roadmap_status::refresh(&db, &project).unwrap();
-        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let resolve =
+            Arc::new(|_: &str, _: &str, _: Reach| -> Option<(PathBuf, AccountPick)> { None });
         let mut checks = Vec::new();
         let mut starts = StatusStarts {
             runner: &runner,
@@ -834,7 +874,8 @@ mod tests {
         let project = ProjectId::new("alpha").unwrap();
         crate::project_overview::refresh(&db, &project).unwrap();
         crate::roadmap_status::refresh(&db, &project).unwrap();
-        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let resolve =
+            Arc::new(|_: &str, _: &str, _: Reach| -> Option<(PathBuf, AccountPick)> { None });
         let mut checks = Vec::new();
         let mut starts = StatusStarts {
             runner: &runner,
@@ -897,7 +938,8 @@ mod tests {
         let (temp, runner, db) = engine_without_accounts(None);
         fence_of_an_account_check(&db, "checking_account");
         let project = ProjectId::new("alpha").unwrap();
-        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let resolve =
+            Arc::new(|_: &str, _: &str, _: Reach| -> Option<(PathBuf, AccountPick)> { None });
         let engine = temp.path().canonicalize().unwrap().join("engine");
         let mut upkeep = StatusUpkeep::open(&engine.join("engine.db"));
         let pass = |upkeep: &mut StatusUpkeep| {
@@ -947,7 +989,8 @@ mod tests {
         let (temp, runner, db) = engine_without_accounts(None);
         fence_of_an_account_check(&db, "uncertain");
         let project = ProjectId::new("alpha").unwrap();
-        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let resolve =
+            Arc::new(|_: &str, _: &str, _: Reach| -> Option<(PathBuf, AccountPick)> { None });
         let engine = temp.path().canonicalize().unwrap().join("engine");
         let mut upkeep = StatusUpkeep::open(&engine.join("engine.db"));
         crate::project_overview::refresh(&db, &project).unwrap();
@@ -964,4 +1007,5 @@ mod tests {
         );
         assert_eq!(roadmap.as_deref(), Some(crate::roadmap_status::NO_ACCOUNT));
     }
+
 }

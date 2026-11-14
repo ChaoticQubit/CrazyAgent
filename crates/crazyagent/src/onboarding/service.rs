@@ -9,7 +9,7 @@ use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
 use crate::research::accounts::AccountPick;
 #[cfg(unix)]
-use crate::research::accounts::SettingsResolver;
+use crate::research::accounts::{Reach, SettingsResolver};
 use crate::research::jobs::JobError;
 #[cfg(unix)]
 use crate::research::runner::ResearchLimits;
@@ -1005,6 +1005,7 @@ fn mapping_step(
                     kept,
                 );
             }
+            AccountPick::Unreached { line } => return (Step::failed(&line), kept),
             _ => return (Step::failed(NO_ACCOUNT), kept),
         };
         if let Some(line) = unreached_provider_here(&account) {
@@ -1256,7 +1257,7 @@ pub fn start_for_engine(
     Ok(OnboardingService::begin(
         Arc::new(runner),
         move |project: &str, pool: &CredentialRef, harnesses: &[ResearchHarness]| {
-            resolver.pool_pick(project, pool, harnesses)
+            resolver.pool_pick_with(project, pool, harnesses, Reach::Reachable)
         },
         move || engine_graphify(&runtime),
         OnboardingLimits::default(),
