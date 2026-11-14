@@ -19,12 +19,12 @@ function entry(sections, heading, name) {
   return found;
 }
 
-test("the tab shows its title and purpose, then one section per pack group, then Tools", async () => {
+test("the tab shows its title and purpose, then one section per pack group, then Tools and Unused tools", async () => {
   const seen = await on({}, async (page) => ({ top: await top(page), sections: await read(page) }));
   assert.equal(seen.top?.heading, "Pack", JSON.stringify(seen.top));
   assert.equal(seen.top.purpose, PURPOSE);
   assert.deepEqual(seen.top.actions, []);
-  assert.deepEqual(seen.sections.map((item) => item.heading), ["Code graph", "Workflow skills", "Design skills", "Reply style", "Context plugins", "Optional", "Other", "Tools"]);
+  assert.deepEqual(seen.sections.map((item) => item.heading), ["Code graph", "Workflow skills", "Design skills", "Reply style", "Context plugins", "Optional", "Other", "Tools", "Unused tools"]);
   assert.equal(section(seen.sections, "Workflow skills").about, "How agents plan, build, test and review.");
   assert.equal(section(seen.sections, "Other").about, "");
   assert.equal(section(seen.sections, "Tools").about, "tmux, uv and graphify are installed.");
@@ -32,7 +32,7 @@ test("the tab shows its title and purpose, then one section per pack group, then
 
 test("a pack group is marked changed only when an installed entry differs from its shipped default", async () => {
   const sections = await on({}, read);
-  assert.deepEqual(sections.map((item) => [item.heading, item.mark]), [["Code graph", null], ["Workflow skills", "changed"], ["Design skills", null], ["Reply style", null], ["Context plugins", null], ["Optional", null], ["Other", "changed"], ["Tools", null]]);
+  assert.deepEqual(sections.map((item) => [item.heading, item.mark]), [["Code graph", null], ["Workflow skills", "changed"], ["Design skills", null], ["Reply style", null], ["Context plugins", null], ["Optional", null], ["Other", "changed"], ["Tools", null], ["Unused tools", null]]);
 });
 
 test("an entry has its name and state on the left, its source under it and its controls on the right", async () => {
@@ -88,7 +88,7 @@ test("a missing or failed tool offers Install tools, keeps its reason and the re
   assert.ok(tools.rows[2].help.includes("uv could not fetch it"), tools.rows[2].help);
   assert.ok(seen.says.includes("Agent git needs the Command Line Tools."), seen.says);
   assert.deepEqual(seen.runs.map((args) => args.pack), [[]]);
-  assert.deepEqual(seen.toasts, ["Installing tmux, uv and graphify."]);
+  assert.deepEqual(seen.toasts, ["Installing the missing tools."]);
 });
 
 test("a double press on Install tools starts setup once", async () => {

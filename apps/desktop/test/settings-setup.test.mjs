@@ -253,9 +253,9 @@ test("Settings, Pack picks what an unused tool offers, the fix button until the 
   const markup = (choice) => html(PackSettingsView, packProps(ok(setup({ refused_tool: choice, dependencies: tools(present, present, present) })), { onRefusedTool: forbidden }));
   const fixButton = markup(undefined);
   assert.match(fixButton, /<h3[^>]*>Unused tools<\/h3>/);
-  assert.match(fixButton, /<input type="radio" name="unused-tools" value="fix_button" checked=""/);
+  assert.match(fixButton, /<input type="radio" name="unused-tools" checked="" value="fix_button"\/>/);
   assert.match(fixButton, /Show a fix button \(recommended\)[\s\S]*Show the command only/);
-  assert.match(markup("command_only"), /<input type="radio" name="unused-tools" value="command_only" checked=""/);
+  assert.match(markup("command_only"), /<input type="radio" name="unused-tools" checked="" value="command_only"\/>/);
 });
 
 test("the permission fix confirm names the tool, the tree and the command, and can't be cancelled while it starts", () => {
