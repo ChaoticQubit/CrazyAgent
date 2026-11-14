@@ -300,6 +300,42 @@ impl ResearchJobs {
         Ok(())
     }
 
+    /// Ends the job of the claim `held` failed with `error` and gives back the attempt its
+    /// claim counted, for a run stopped before its harness started, such as one whose model
+    /// provider refuses every connect; a job whose cancel was requested ends cancelled. The
+    /// project's activity records the run as stopped. Returns the new status.
+    pub fn fail_unspent(
+        &self,
+        held: &ResearchJob,
+        error: &str,
+    ) -> Result<ResearchStatus, JobError> {
+        assert!(held.attempts >= 1, "a held job's claim counted an attempt");
+        let error: String = error.chars().take(ERROR_BYTES_MAX / 4).collect();
+        let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let now = now_ms();
+        let status = self
+            .connection
+            .query_row(
+                "UPDATE research_jobs
+                 SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'failed' END,
+                     error = ?4, finished_ms = ?5, claimer = NULL, attempts = attempts - 1
+                 WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
+                 RETURNING status",
+                params![held.id, claimer, held.attempts, error, now],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(JobError::NotHeld)?;
+        let status = ResearchStatus::parse(&status).ok_or(JobError::Invalid("status"))?;
+        assert!(matches!(
+            status,
+            ResearchStatus::Failed | ResearchStatus::Cancelled
+        ));
+        let stopped = ActivityKind::ResearchStopped;
+        crate::activity::note_research(&self.connection, held.id, stopped, now);
+        Ok(status)
+    }
+
     /// Records a failed attempt of the claim `held`: a job whose cancel was
     /// requested ends cancelled, otherwise it requeues while attempts remain under
     /// `attempts_max`, otherwise it is marked failed; a failed or cancelled run is

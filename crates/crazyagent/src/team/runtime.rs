@@ -9560,6 +9560,7 @@ impl TeamRuntime {
             run_time: RUN_TIME_MAX,
             stop_grace: self.limits.stop_grace,
             stale_turn: self.limits.stale_turn,
+            provider_retry: crate::provider_retry::for_launch(&self.connection),
         }
     }
 
