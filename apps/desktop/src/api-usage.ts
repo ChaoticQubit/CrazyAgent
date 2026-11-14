@@ -172,8 +172,8 @@ export type SpendConfirm = "confirm_each" | "one_click" | "off";
 /** What the app does when every account in a pool is limited. */
 export type AllLimited = "notice" | "no_hint" | "auto_spend";
 
-/** Where the engine reads Claude free resets from: through Claude Code (the default), always
- * as Claude Code, or not at all. */
+/** Where the engine reads Claude free resets from: not at all (the default), through Claude
+ * Code, or always as Claude Code. */
 export type ResetsSource = "through_claude_code" | "as_claude_code" | "off";
 
 /** The owner's Pools settings: the two spend settings (DEC-154 slice 3) and where Claude free
@@ -209,8 +209,9 @@ export interface SpendView {
   limited_pools: LimitedPool[];
 }
 
-/** The settings an engine that never stored any reads as. */
-export const SPEND_DEFAULTS: SpendSettings = { confirm: "confirm_each", all_limited: "notice", resets_source: "through_claude_code" };
+/** The settings an engine that never stored any reads as, every field set, so a missing
+ * Claude free resets source falls back to Don't read. */
+export const SPEND_DEFAULTS: Required<SpendSettings> = { confirm: "confirm_each", all_limited: "notice", resets_source: "off" };
 
 export interface MetricsBucket {
   start_ms: number;

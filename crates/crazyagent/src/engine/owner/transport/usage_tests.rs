@@ -430,7 +430,9 @@ async fn a_recount_choice_with_nothing_to_decide_is_refused_by_its_own_code() {
 }
 
 /// The extras read answers one entry per saved account, named by its harness, with nothing
-/// read yet as not reported and never as 0, and it shows what the usage store holds.
+/// read yet as not reported and never as 0. On a fresh install a Claude account's free
+/// resets say off in Settings, Don't read being the default (owner answer 2026-11-14);
+/// with Through Claude Code stored, it shows what the usage store holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_extras_read_answers_each_saved_account_with_its_stored_resets_and_credits() {
     let usage = Usage::start().await;
@@ -443,8 +445,21 @@ async fn the_extras_read_answers_each_saved_account_with_its_stored_resets_and_c
     assert_eq!(unread[0].extras.not_reported, "not reported by Claude Code");
     assert_eq!(unread[0].extras.resets, None);
     assert_eq!(unread[0].extras.credits, None);
+    assert_eq!(
+        unread[0].extras.resets_unread,
+        Some(crate::usage::extras::UnreadClass::Off),
+        "a fresh install reads Claude free resets as Don't read"
+    );
 
     let db = crate::usage::open(&usage.engine_root).unwrap();
+    crate::usage::spend::write(
+        &db,
+        crate::usage::spend::SpendSettings {
+            resets_source: crate::usage::spend::ResetsSource::ThroughClaudeCode,
+            ..crate::usage::spend::SpendSettings::default()
+        },
+    )
+    .unwrap();
     let now = crate::team::now_ms();
     let read = crate::usage::extras::Extras {
         resets: crate::usage::extras::Field::Known(crate::usage::extras::Resets {

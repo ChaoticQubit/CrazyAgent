@@ -144,16 +144,16 @@ fn every_spend_option_is_stored_and_read_back() {
     }
 }
 
-/// Claude free resets are read through Claude Code until the owner picks another source;
-/// each source is stored and read back beside the spend settings, which it never changes.
+/// Nothing stored reads Don't read until the owner picks another source (owner answer
+/// 2026-11-14); each source is stored and read back beside the spend settings, which it
+/// never changes, and a stored source stays as stored when the store opens again.
 #[test]
-fn every_claude_free_resets_source_is_stored_and_read_back() {
+fn every_claude_free_resets_source_is_stored_and_read_back_and_nothing_stored_reads_dont_read() {
     let (_root, db) = store();
-    assert_eq!(
-        read(&db).unwrap().resets_source,
-        ResetsSource::ThroughClaudeCode
-    );
+    assert_eq!(read(&db).unwrap().resets_source, ResetsSource::Off);
+    assert_eq!(ResetsSource::default(), ResetsSource::Off);
     for source in [
+        ResetsSource::ThroughClaudeCode,
         ResetsSource::AsClaudeCode,
         ResetsSource::Off,
         ResetsSource::ThroughClaudeCode,
@@ -165,12 +165,19 @@ fn every_claude_free_resets_source_is_stored_and_read_back() {
         write(&db, chosen).unwrap();
         assert_eq!(read(&db).unwrap(), chosen, "{source:?}");
     }
+    crate::usage::initialize(&db).unwrap();
+    assert_eq!(
+        read(&db).unwrap().resets_source,
+        ResetsSource::ThroughClaudeCode,
+        "a stored Through Claude Code stays as stored"
+    );
 }
 
-/// A store made before the source column gains it on open with the default, keeps the
-/// owner's spend settings and takes only the three source codes.
+/// A store made before the source column gains it on open as Don't read, the default, since
+/// no source was stored; it keeps the owner's spend settings and takes only the three source
+/// codes.
 #[test]
-fn a_spend_store_from_before_the_source_column_gains_it_with_the_default() {
+fn a_spend_store_from_before_the_source_column_gains_it_as_dont_read() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("usage.db");
     {
@@ -193,10 +200,13 @@ fn a_spend_store_from_before_the_source_column_gains_it_with_the_default() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(source, "through_claude_code");
+    assert_eq!(source, "off");
     assert_eq!(
         read(&db).unwrap(),
-        settings(SpendConfirm::OneClick, AllLimited::AutoSpend)
+        SpendSettings {
+            resets_source: ResetsSource::Off,
+            ..settings(SpendConfirm::OneClick, AllLimited::AutoSpend)
+        }
     );
     assert!(
         db.execute("UPDATE usage_spend SET resets_source='maybe'", [])
@@ -204,13 +214,14 @@ fn a_spend_store_from_before_the_source_column_gains_it_with_the_default() {
     );
 }
 
-/// A client from before the source sends the spend settings without it, which reads as the
-/// default; the wire names each source in snake case and refuses any other.
+/// A client from before the source sends the spend settings without it, which reads as Don't
+/// read, the default; the wire names each source in snake case and refuses any other.
 #[test]
-fn the_source_rides_the_spend_settings_on_the_wire_and_an_older_client_reads_the_default() {
+fn the_source_rides_the_spend_settings_on_the_wire_and_an_older_client_reads_dont_read() {
     let older: SpendSettings =
         serde_json::from_str(r#"{"confirm":"one_click","all_limited":"no_hint"}"#).unwrap();
-    assert_eq!(older.resets_source, ResetsSource::ThroughClaudeCode);
+    assert_eq!(older.resets_source, ResetsSource::Off);
+    assert_eq!(SpendSettings::default().resets_source, ResetsSource::Off);
     for (source, wire) in [
         (ResetsSource::ThroughClaudeCode, "through_claude_code"),
         (ResetsSource::AsClaudeCode, "as_claude_code"),

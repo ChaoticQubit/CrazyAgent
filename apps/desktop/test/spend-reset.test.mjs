@@ -11,7 +11,7 @@ const section = await import("../src/screens/settings/spend-settings.tsx");
 const poolsScreen = await import("../src/screens/settings/pools.tsx");
 
 const NOW = Date.UTC(2026, 10, 12, 13, 0);
-const settings = (confirm, all_limited = "notice", resets_source = "through_claude_code") => ({ confirm, all_limited, resets_source });
+const settings = (confirm, all_limited = "notice", resets_source = "off") => ({ confirm, all_limited, resets_source });
 const attempt = (patch = {}) => ({ account: "codex-a", origin: "owner", state: "settled", outcome: "reset", requested_ms: NOW - 1000, settled_ms: NOW, ...patch });
 const view = (patch = {}) => ({ settings: settings("confirm_each"), attempts: [], limited_pools: [], ...patch });
 const noop = () => {};
@@ -69,25 +69,35 @@ test("both spend settings show every option, the defaults first and unchanged", 
   assert.doesNotMatch(markup, /changed/);
 });
 
-test("the Claude free resets setting shows its three options, the default first, each with its own help line", () => {
+test("the Claude free resets setting shows its three options, Don't read first as the default, each with its own help line", () => {
   assert.deepEqual(section.RESETS_SOURCE_OPTIONS.map((option) => [option.value, option.label]), [
+    ["off", "Don't read"],
     ["through_claude_code", "Through Claude Code"],
     ["as_claude_code", "As Claude Code"],
-    ["off", "Don't read"],
   ]);
-  assert.equal(client.SPEND_DEFAULTS.resets_source, "through_claude_code");
-  assert.equal(section.resetsSourceHelp("through_claude_code"), "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code.");
-  assert.equal(section.resetsSourceHelp("as_claude_code"), "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks.");
-  assert.equal(section.resetsSourceHelp("off"), "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings.");
+  assert.equal(client.SPEND_DEFAULTS.resets_source, "off");
+  assert.equal(section.resetsSourceHelp("through_claude_code"), "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts.");
+  assert.equal(section.resetsSourceHelp("as_claude_code"), "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts.");
+  assert.equal(section.resetsSourceHelp("off"), "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings. Don't read is the default.");
+  const escaped = (text) => text.replaceAll("'", "&#x27;");
   const markup = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: client.SPEND_DEFAULTS, refused: "", onChange: noop }));
   assert.match(markup, /aria-label="Claude free resets"/);
-  for (const option of section.RESETS_SOURCE_OPTIONS) assert.ok(markup.includes(`>${option.label.replace("'", "&#x27;")}<`), option.label);
+  for (const option of section.RESETS_SOURCE_OPTIONS) assert.ok(markup.includes(`>${escaped(option.label)}<`), option.label);
+  assert.ok(markup.includes(escaped(section.resetsSourceHelp("off"))), "the default shows the Don't read help line");
   assert.doesNotMatch(markup, /changed/);
-  for (const source of ["as_claude_code", "off"]) {
+  for (const source of ["through_claude_code", "as_claude_code"]) {
     const picked = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: settings("confirm_each", "notice", source), refused: "", onChange: noop }));
     assert.match(picked, /changed/, source);
-    assert.ok(picked.includes(section.resetsSourceHelp(source).replace("'", "&#x27;")), source);
+    assert.ok(picked.includes(escaped(section.resetsSourceHelp(source))), source);
   }
+});
+
+test("settings from an engine that sends no Claude free resets source read as Don't read, never as a Claude Code option", () => {
+  const older = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: { confirm: "confirm_each", all_limited: "notice" }, refused: "", onChange: noop }));
+  assert.ok(older.includes(section.resetsSourceHelp("off").replaceAll("'", "&#x27;")), "the help line is Don't read's");
+  assert.doesNotMatch(older, /changed/);
+  const source = readFileSync(new URL("../src/screens/settings/spend-settings.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /\?\? "through_claude_code"|\?\? "as_claude_code"/);
 });
 
 test("each option has its own help line, and auto-spend says it does nothing while spending is off", () => {

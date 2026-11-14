@@ -188,25 +188,37 @@ fn with_source(source: ResetsSource) -> SpendSettings {
     }
 }
 
+/// A spend view read from a fresh install says Don't read, the default, in the same words
+/// as the option (owner answer 2026-11-14).
 #[test]
-fn option_claude_free_resets_through_claude_code_says_it_asks_as_claude_code_for_now() {
+fn the_default_claude_free_resets_source_is_dont_read_and_says_so() {
+    let (spend, ctx) = ready(view(SpendSettings::default(), Vec::new()));
+    let text = shown(&spend, &ctx);
+    assert!(text.contains(
+        "Claude free resets (f): Don't read. CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings. Don't read is the default."
+    ), "{text}");
+    assert!(keys(&spend, &ctx).contains(&"f".to_owned()));
+}
+
+#[test]
+fn option_claude_free_resets_through_claude_code_says_it_asks_as_claude_code_at_the_accounts_risk() {
     let (spend, ctx) = ready(view(
         with_source(ResetsSource::ThroughClaudeCode),
         Vec::new(),
     ));
     let text = shown(&spend, &ctx);
     assert!(text.contains(
-        "Claude free resets (f): Through Claude Code. Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code."
+        "Claude free resets (f): Through Claude Code. Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts."
     ), "{text}");
     assert!(keys(&spend, &ctx).contains(&"f".to_owned()));
 }
 
 #[test]
-fn option_claude_free_resets_as_claude_code_says_it_asks_the_way_claude_code_does() {
+fn option_claude_free_resets_as_claude_code_says_it_asks_the_way_claude_code_does_at_the_accounts_risk() {
     let (spend, ctx) = ready(view(with_source(ResetsSource::AsClaudeCode), Vec::new()));
     let text = shown(&spend, &ctx);
     assert!(text.contains(
-        "Claude free resets (f): As Claude Code. CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks."
+        "Claude free resets (f): As Claude Code. CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts."
     ), "{text}");
 }
 
@@ -215,16 +227,18 @@ fn option_claude_free_resets_dont_read_says_claude_accounts_say_off() {
     let (spend, ctx) = ready(view(with_source(ResetsSource::Off), Vec::new()));
     let text = shown(&spend, &ctx);
     assert!(text.contains(
-        "Claude free resets (f): Don't read. CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings."
+        "Claude free resets (f): Don't read. CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings. Don't read is the default."
     ), "{text}");
 }
 
+/// f steps from the default, Don't read, through the two Claude Code options and back, the
+/// desktop's order.
 #[test]
 fn f_steps_the_claude_free_resets_source_and_keeps_the_spend_settings() {
     for (from, to) in [
+        (ResetsSource::Off, ResetsSource::ThroughClaudeCode),
         (ResetsSource::ThroughClaudeCode, ResetsSource::AsClaudeCode),
         (ResetsSource::AsClaudeCode, ResetsSource::Off),
-        (ResetsSource::Off, ResetsSource::ThroughClaudeCode),
     ] {
         let (mut spend, mut ctx) = ready(view(with_source(from), Vec::new()));
         spend.key(&Key::Char('f'), &mut ctx);
@@ -403,6 +417,15 @@ fn the_terminal_says_every_spend_outcome_and_help_line_in_the_desktop_words() {
             words,
             "{code}"
         );
+    }
+    let sources = desktop_table(
+        "screens/settings/spend-settings.tsx",
+        "const RESETS_SOURCE_HELP",
+    );
+    assert_eq!(sources.len(), 3, "{sources:?}");
+    for (code, words) in sources {
+        let value: ResetsSource = serde_json::from_value(serde_json::json!(code)).unwrap();
+        assert_eq!(resets_source_help(value), words, "{code}");
     }
 }
 

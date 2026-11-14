@@ -20,15 +20,15 @@ export const ALL_LIMITED_OPTIONS: { value: AllLimited; label: string }[] = [
 
 /** The Claude free resets sources, the default first. */
 export const RESETS_SOURCE_OPTIONS: { value: ResetsSource; label: string }[] = [
+  { value: "off", label: "Don't read" },
   { value: "through_claude_code", label: "Through Claude Code" },
   { value: "as_claude_code", label: "As Claude Code" },
-  { value: "off", label: "Don't read" },
 ];
 
 const RESETS_SOURCE_HELP: Record<ResetsSource, string> = {
-  through_claude_code: "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code.",
-  as_claude_code: "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks.",
-  off: "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings.",
+  off: "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings. Don't read is the default.",
+  through_claude_code: "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts.",
+  as_claude_code: "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts.",
 };
 
 /** The help line under Claude free resets. Input: the source. Output: the sentence. */
@@ -68,7 +68,7 @@ export function SpendSettingsView({ settings, refused, onChange }: {
 }) {
   const confirmChanged = settings.confirm !== SPEND_DEFAULTS.confirm;
   const limitedChanged = settings.all_limited !== SPEND_DEFAULTS.all_limited;
-  const source = settings.resets_source ?? "through_claude_code";
+  const source = settings.resets_source ?? SPEND_DEFAULTS.resets_source;
   const sourceChanged = source !== SPEND_DEFAULTS.resets_source;
   return <SettingSection title="Free resets" about="Some accounts hold free resets that start their limits over. These choose how CrazyAgent uses them.">
     <SettingLine label="Spend confirmation" help={confirmHelp(settings.confirm)} changed={confirmChanged}>
@@ -93,7 +93,7 @@ export function SpendSettingsSection({ spend, onDone }: { spend: SpendView | und
   const stored = spend?.settings;
   useEffect(() => {
     if (shown && stored && shown.confirm === stored.confirm && shown.all_limited === stored.all_limited
-      && (shown.resets_source ?? "through_claude_code") === (stored.resets_source ?? "through_claude_code")) setShown(undefined);
+      && (shown.resets_source ?? SPEND_DEFAULTS.resets_source) === (stored.resets_source ?? SPEND_DEFAULTS.resets_source)) setShown(undefined);
   }, [shown, stored]);
   const change = (next: SpendSettings) => {
     setShown(next);

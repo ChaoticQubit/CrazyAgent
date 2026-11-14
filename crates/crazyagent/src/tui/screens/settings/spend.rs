@@ -112,34 +112,36 @@ pub(in crate::tui) fn next_all_limited(value: AllLimited) -> AllLimited {
 /// The words of a Claude free resets source. Input: the source. Output: the words.
 pub(in crate::tui) fn resets_source_words(value: ResetsSource) -> &'static str {
     match value {
+        ResetsSource::Off => "Don't read",
         ResetsSource::ThroughClaudeCode => "Through Claude Code",
         ResetsSource::AsClaudeCode => "As Claude Code",
-        ResetsSource::Off => "Don't read",
     }
 }
 
-/// The help line of a Claude free resets source, the desktop's words. Input: the source.
-/// Output: the sentence.
+/// The help line of a Claude free resets source, the desktop's words: Don't read says it is
+/// the default, and both Claude Code options say the risk to the Claude accounts. Input: the
+/// source. Output: the sentence.
 pub(in crate::tui) fn resets_source_help(value: ResetsSource) -> &'static str {
     match value {
+        ResetsSource::Off => {
+            "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings. Don't read is the default."
+        }
         ResetsSource::ThroughClaudeCode => {
-            "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code."
+            "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts."
         }
         ResetsSource::AsClaudeCode => {
-            "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks."
-        }
-        ResetsSource::Off => {
-            "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings."
+            "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts."
         }
     }
 }
 
-/// The next Claude free resets source, wrapping. Input: the source. Output: the next.
+/// The next Claude free resets source in the desktop's order, the default first, wrapping.
+/// Input: the source. Output: the next.
 pub(in crate::tui) fn next_resets_source(value: ResetsSource) -> ResetsSource {
     match value {
+        ResetsSource::Off => ResetsSource::ThroughClaudeCode,
         ResetsSource::ThroughClaudeCode => ResetsSource::AsClaudeCode,
         ResetsSource::AsClaudeCode => ResetsSource::Off,
-        ResetsSource::Off => ResetsSource::ThroughClaudeCode,
     }
 }
 
