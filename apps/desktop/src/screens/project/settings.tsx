@@ -1,6 +1,6 @@
 import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api";
 import type { Result } from "../../api";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
@@ -18,7 +18,7 @@ import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
 import { MoveHome } from "./move-home";
-import { RemoveDialogView, deleteReady, removeTitle } from "./remove-dialog";
+import { RemoveDialogView, deleteReady, removeChoices, removeTitle } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
 import { SessionContext, useHeld, useLoad } from "../../state";
@@ -214,9 +214,14 @@ export function removeLine(folder: string | null): string {
   return `Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk ${where}, with every file in it.`;
 }
 
+/** Settings' Remove project: the section, and its dialog, opened by the button or by a route
+ * asking for it; a route asking for a delete again, after one an engine stop cut short, opens it
+ * on Delete everything once the preview offers it. Inputs: the project and its stored setup. */
 function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
   const session = useContext(SessionContext);
-  const [confirming, setConfirming] = useState(() => hashParam("ask") === "remove");
+  const asked = hashParam("ask");
+  const wanted = useRef<RemoveChoice>(asked === "delete" ? "everything" : "dashboard");
+  const [confirming, setConfirming] = useState(() => asked === "remove" || asked === "delete");
   const [preview, setPreview] = useState<Result<RemovalPreview>>();
   const [choice, setChoice] = useState<RemoveChoice>("dashboard");
   const [typed, setTyped] = useState("");
@@ -228,13 +233,13 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     if (!confirming) return;
     let live = true;
     setPreview(undefined);
-    setChoice("dashboard");
+    setChoice(wanted.current);
     setTyped("");
     void loadRemovalPreview(data.id).then((result) => { if (live) setPreview(result); });
     return () => { live = false; };
   }, [confirming, data.id]);
   async function remove() {
-    const deleting = choice === "everything";
+    const deleting = choice === "everything" && removeChoices(read).includes("everything");
     if (deleting && !deleteReady(read, typed)) return;
     setBusy(true);
     const result = await removeProject(data.id, nextGeneration(), deleting ? typed : null);
@@ -256,7 +261,7 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     <h2>Remove project</h2>
     <p>Remove {displayText(data.name)} from CrazyAgent? {displayText(line)}</p>
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <div><button type="button" className="btn danger" onClick={() => setConfirming(true)}>Remove project</button></div>
+    <div><button type="button" className="btn danger" onClick={() => { wanted.current = "dashboard"; setConfirming(true); }}>Remove project</button></div>
     <Dialog open={confirming} title={removeTitle(displayText(data.name))} onClose={() => setConfirming(false)} busy={busy} wide>
       {preview === undefined
         ? <p className="pj-muted" role="status">Reading what removing would do...</p>

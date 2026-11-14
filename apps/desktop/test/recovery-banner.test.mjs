@@ -89,7 +89,29 @@ test("Retry and Dismiss call the engine for the item shown, and one choice runs 
   assert.match(page, /onRetry=\{\(agent\) => void choose\(choiceKey\(\{ agent \}\), \(\) => retryRecovery\(agent\)/);
   assert.match(page, /onDismiss=\{\(notice\) => void choose\(choiceKey\(notice\), \(\) => dismissRecovery\(notice\)/);
   const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
-  assert.match(index, /<RecoveryBanner key=\{projectId\} project=\{projectId\} \/>/);
+  assert.match(index, /<RecoveryBanner key=\{projectId\} project=\{projectId\} onDeleteAgain=\{deleteAgain\} \/>/);
+});
+
+test("a delete an engine stop cut short says so and offers Keep the project and Delete again", () => {
+  const cut = { action_kind: "project_delete", id: 11, agent: null, label: null, change_set: null, shown: "unknown", started_ms: 1_800_000_000_000 };
+  const only = { runs: [], notices: [cut], more: 0 };
+  const text = words(renderToStaticMarkup(createElement(banner.RecoveryBannerView, view({ banner: only, onDeleteAgain: never("onDeleteAgain") }))));
+  assert.match(text, /A delete was cut short\. Some folders may already be in the Trash\./);
+  assert.match(text, /If you keep the project, its agents stay stopped until you start them again with Start all again in the project menu\./);
+  const chosen = [];
+  const buttons = elements(rendered({
+    banner: only,
+    onDismiss: (item) => chosen.push(["keep", item.action_kind, item.id]),
+    onDeleteAgain: () => chosen.push(["delete again"]),
+  })).filter((element) => element.type === Button);
+  assert.deepEqual(buttons.map((button) => button.props.children), ["Keep the project", "Delete again"]);
+  for (const button of buttons) button.props.onClick();
+  assert.deepEqual(chosen, [["keep", "project_delete", 11], ["delete again"]]);
+  const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
+  assert.match(index, /<SettingsTab key=\{`\$\{settingsSection \?\? ""\}-\$\{deleteAsks\}`\} data=\{data\} section=\{settingsSection\} \/>/);
+  const settings = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(settings, /const asked = hashParam\("ask"\);/);
+  assert.match(settings, /useRef<RemoveChoice>\(asked === "delete" \? "everything" : "dashboard"\)/);
 });
 
 test("one agent's several runs each get their own row key in every group", () => {

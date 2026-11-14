@@ -422,6 +422,8 @@ const copy: Record<string, string> = {
   delete_agents_running: "Its agents didn't stop in time, so nothing was deleted. They stay stopped; try again.",
   delete_trash_partial: "Some of its folders are in the Trash and the rest couldn't be moved. The project stays listed; try again.",
   delete_unavailable: "The engine couldn't check the project's agents. Nothing was deleted.",
+  delete_in_progress: "This project is already being deleted. Wait for that to finish; nothing else was changed.",
+  delete_not_recorded: "Nothing was deleted. CrazyAgent couldn't record the delete before starting it. Try again; if it keeps failing, restart CrazyAgent.",
   home_trash_failed: "The folder couldn't be moved to the Trash. Nothing was deleted.",
   home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
   project_delete_interrupted: "Deleting the project stopped part way. Check the Trash and the project list before trying again.",

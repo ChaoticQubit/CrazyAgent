@@ -5695,3 +5695,132 @@ async fn a_requested_memory_is_approved_from_the_project_context_tab_on_a_real_e
         })
     );
 }
+
+/// A delete an engine stop cut short shows on the project's banner in plain words, with Ctrl-D
+/// Keep the project, which clears the mark, and Ctrl-X Delete again, which opens the remove ask
+/// with Delete everything picked once the engine's preview offers it (DEC-141, DEC-118).
+#[test]
+fn a_delete_cut_short_offers_keep_the_project_and_delete_again_on_the_banner() {
+    use crate::engine::owner::{BannerNotice, RecoveryBanner};
+    use crate::tui::client::SetupEvent;
+    use crate::tui::client::recovery::{RecoveryEvent, RecoveryQuery, RecoveryReply};
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(110, 40);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let asked = |shell: &mut Shell| {
+        let mut recovery = Vec::new();
+        let mut setup = Vec::new();
+        while let Some(request) = shell.ctx.next_request() {
+            match request {
+                Request::Recovery(query) => recovery.push(*query),
+                Request::Setup(query) => setup.push(query),
+                _ => {}
+            }
+        }
+        (recovery, setup)
+    };
+    let (read, first) = asked(&mut shell);
+    assert_eq!(
+        read,
+        [RecoveryQuery::Read {
+            project: notes.clone()
+        }]
+    );
+    for query in first {
+        shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+            SetupEvent {
+                query,
+                result: Err("project_setup_missing".into()),
+            },
+        )))));
+    }
+    let notice: BannerNotice = serde_json::from_value(serde_json::json!({
+        "action_kind": "project_delete",
+        "id": 9,
+        "agent": null,
+        "label": null,
+        "change_set": null,
+        "shown": "unknown",
+        "started_ms": 1_800_000_000_000_i64,
+    }))
+    .expect("the engine names a delete cut short");
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Recovery(Box::new(
+        RecoveryEvent {
+            query: read[0].clone(),
+            result: Ok(RecoveryReply::Banner(RecoveryBanner {
+                runs: Vec::new(),
+                notices: vec![notice.clone()],
+                more: 0,
+            })),
+        },
+    )))));
+    let out = render(&mut shell, 110, 40);
+    for words in [
+        "A delete was cut short. Some folders may already be in the Trash.",
+        "Ctrl-D Keep the project",
+        "Ctrl-X Delete again",
+    ] {
+        assert!(out.contains(words), "{words:?} is drawn:\n{out}");
+    }
+
+    shell.key(Key::Ctrl('x'));
+    let (recovery, setup) = asked(&mut shell);
+    assert!(recovery.is_empty(), "Delete again clears nothing by itself");
+    let removal: Vec<SetupQuery> = setup
+        .into_iter()
+        .filter(|query| matches!(query, SetupQuery::Removal { .. }))
+        .collect();
+    assert_eq!(
+        removal,
+        [SetupQuery::Removal {
+            project: notes.clone()
+        }],
+        "Delete again reads what removing would do, as x does"
+    );
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: removal[0].clone(),
+            result: Ok(SetupView::Removal(Box::new(
+                crate::team::cleanup::RemovalPreview {
+                    name: "Notes CLI".into(),
+                    folders: vec!["/Users/owner/CrazyAgent/notes-cli".into()],
+                    can_delete: true,
+                    blocked: None,
+                    running: Vec::new(),
+                    open_change_sets: 0,
+                    losses: Vec::new(),
+                },
+            ))),
+        },
+    )))));
+    let ask = render(&mut shell, 110, 40);
+    assert!(
+        ask.contains("[ Delete everything ]") && ask.contains("Type the project name:"),
+        "the remove ask opens on Delete everything:\n{ask}"
+    );
+    shell.key(Key::Esc);
+    let kept = render(&mut shell, 110, 40);
+    assert!(
+        !kept.contains("[ Delete everything ]"),
+        "Esc keeps the project:\n{kept}"
+    );
+
+    shell.key(Key::Ctrl('d'));
+    let (recovery, _) = asked(&mut shell);
+    assert_eq!(recovery.len(), 1, "Keep the project sends one dismiss");
+    let RecoveryQuery::Dismiss { project, kind, id } = &recovery[0] else {
+        panic!("Keep the project dismisses the notice: {recovery:?}");
+    };
+    assert_eq!(project, &notes);
+    assert_eq!(serde_json::to_value(kind).unwrap(), "project_delete");
+    assert_eq!(*id, 9);
+}

@@ -1811,6 +1811,59 @@ async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
     engine.stop().await;
 }
 
+/// Makes a folder `name` under `place` holding one file, as a staging folder an engine stop
+/// left. Output: the folder.
+fn staged(place: &Path, name: &str) -> PathBuf {
+    let folder = place.join(name);
+    fs::create_dir_all(folder.join("src")).unwrap();
+    fs::write(folder.join("src/a.txt"), "a\n").unwrap();
+    assert!(folder.join("src/a.txt").is_file());
+    folder
+}
+
+/// An engine start removes the staging folders an add or a New Project left in the projects
+/// home when an engine stop cut them short, with no add row left to name them: only the
+/// names the engine makes, directly in the home, never through a link.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_start_sweeps_the_staging_an_engine_stop_left_in_the_home() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    fs::create_dir(&home).unwrap();
+    let mut engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let id = "0123456789abcdef".repeat(4);
+    let new = staged(&home, &format!(".crazyagent-new-{id}"));
+    let adding = staged(&home, ".crazyagent-adding-00ff00ff00ff00ff");
+    let unlike = staged(&home, ".crazyagent-new-notes");
+    let nested = staged(&home, &format!("kept/.crazyagent-new-{id}"));
+    let outside = staged(&place, "outside");
+    let link = home.join(format!(".crazyagent-new-{}", "f".repeat(64)));
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    owner.controller.detach();
+    engine.restart().await;
+    assert!(!new.exists(), "a New Project's staging");
+    assert!(!adding.exists(), "an add's staging with no add row");
+    assert!(
+        unlike.join("src/a.txt").is_file(),
+        "a name the engine never makes",
+    );
+    assert!(
+        nested.join("src/a.txt").is_file(),
+        "a staging name below the home",
+    );
+    let kept = fs::symlink_metadata(&link).unwrap();
+    assert!(
+        kept.file_type().is_symlink(),
+        "a link with a staging name stays",
+    );
+    assert!(
+        outside.join("src/a.txt").is_file(),
+        "the link's target is untouched",
+    );
+    engine.stop().await;
+}
+
 /// How many files and folders [`same_files`] walks at most.
 const WALK_ENTRIES_MAX: usize = 20_000;
 

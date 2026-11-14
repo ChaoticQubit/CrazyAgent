@@ -104,9 +104,12 @@ test("a refused Delete everything reads as its own plain sentence, never the gen
     "home_trash_failed",
     "home_move_in_progress",
     "project_delete_interrupted",
+    "delete_in_progress",
+    "delete_not_recorded",
   ]) {
     assert.doesNotMatch(failureCopy(code), /Something went wrong/, code);
   }
+  assert.match(failureCopy("delete_not_recorded"), /Nothing was deleted\..*restart CrazyAgent/);
 });
 
 test("at the app's smallest and default windows the Delete everything dialog fits its frame, and the top choice, the whole loss list and the Delete button stay in view while the name is typed (AL20)", async () => {

@@ -17,6 +17,7 @@ const SQLITE = "/usr/bin/sqlite3";
 const CHFLAGS = "/usr/bin/chflags";
 const KEEP = "Remove from dashboard (keep files)";
 const DELETE = "Delete everything";
+const CUT_SHORT = "A delete was cut short. Some folders may already be in the Trash.";
 const run = { generation: 10 };
 
 /** Counts the entries of the owner's own Trash, never listing them, so a run can prove it put
@@ -95,6 +96,22 @@ function framed(page) {
   })()`);
 }
 
+/** Stops the bridge and the engine, runs `between` while neither runs, then starts both again on
+ * the same data folder, as quitting and opening the app does. Input: what to do in between.
+ * Output: none. */
+async function restart(between) {
+  run.starts = (run.starts ?? 0) + 1;
+  await stop(run.bridgeProcess);
+  await stop(run.engine);
+  between();
+  ({ child: run.engine } = await launch(run.engineBinary, run.engineArgs, { ...run.env }, run.evidence, `engine-${run.starts}`, /^ready$/m));
+  const again = await launch(run.bridgeBinary, [run.socket], { ...run.env }, run.evidence, `bridge-${run.starts}`, /^ready (\d+) ([0-9a-f]{64})$/m);
+  run.bridgeProcess = again.child;
+  run.bridge.port = Number(again.match[1]);
+  run.bridge.token = again.match[2];
+  assert.equal((await value(run.bridge, "desktop_connect")).connected, true, "the bridge connects to the engine started again");
+}
+
 /** Runs one case in a fresh page against the shared engine, keeping a failure capture.
  * Inputs: the evidence label and the steps. Output: none. */
 async function onPage(label, steps) {
@@ -148,10 +165,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   run.database = join(runtime, "engine.db");
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
   run.log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
-  ({ child: run.engine } = await launch(run.engineBinary,
-    ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"],
-    { ...env }, run.evidence, "engine", /^ready$/m));
-  const started = await launch(run.bridgeBinary, [join(runtime, "engine.sock")], { ...env }, run.evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
+  run.env = env;
+  run.engineArgs = ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"];
+  run.socket = join(runtime, "engine.sock");
+  ({ child: run.engine } = await launch(run.engineBinary, run.engineArgs, { ...env }, run.evidence, "engine", /^ready$/m));
+  const started = await launch(run.bridgeBinary, [run.socket], { ...env }, run.evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
   run.bridgeProcess = started.child;
   run.bridge = { port: Number(started.match[1]), token: started.match[2] };
   assert.equal((await value(run.bridge, "desktop_connect")).connected, true, "the bridge connects to the test engine");
@@ -311,4 +329,32 @@ test("a project set up from a folder outside the projects folder offers only Rem
   });
   assert.equal(await listed(id), true, "Keep project changes nothing");
   assert.equal(readFileSync(join(run.outside, "notes.md"), "utf8"), "kept where it is\n");
+});
+
+test("a delete an engine stop cut short shows on the project with Keep the project and Delete again, and Keep clears it", { timeout: 300000 }, async () => {
+  const name = "Cut Short";
+  const { id, folder } = await made(name);
+  const sql = (statement) => execFileSync(SQLITE, [run.database, statement], { encoding: "utf8" }).trim();
+  await value(run.bridge, "desktop_recovery_banner", { projectId: id });
+  await restart(() => sql(`INSERT INTO projects_delete_pending(exchange) VALUES (900);
+    INSERT INTO ledger_actions(kind,action_key,payload,started_ms) VALUES ('project_delete','${id}','{"project":"${id}","exchange":900}',1);`));
+  assert.equal(sql("SELECT count(*) FROM projects_delete_pending"), "0", "the start still forgets the plan, so a home move may go");
+  await onPage("cut-short", async (page, me) => {
+    await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/projects/${encodeURIComponent(id)}/overview` });
+    await me.waitFor("the delete cut short on the project", (text) => text.includes(CUT_SHORT) && text.includes("its agents stay stopped until you start them again"));
+    await me.capture("cut-short-banner");
+    await me.click("Delete again", "button");
+    await me.waitFor("the remove dialog on Delete everything", (text) => text.includes(KEEP) && text.includes(folder) && text.includes("Type"));
+    const shown = await dialog(page);
+    assert.equal(shown.checked, "everything", `Delete again opens on Delete everything: ${JSON.stringify(shown)}`);
+    assert.equal(shown.deleteEnabled, false, "the delete still waits for the typed name");
+    await me.capture("cut-short-delete-again");
+    await me.click("Keep project", "dialog[open] button");
+    await me.click("Keep the project", "button");
+    await me.waitFor("the banner without the delete", (text) => !text.includes(CUT_SHORT));
+    await me.capture("cut-short-kept");
+  });
+  assert.equal(await listed(id), true, "Keep the project keeps it");
+  assert.ok(existsSync(join(folder, ".crazyagent")), "its folder stays where it is");
+  assert.equal(sql("SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND outcome IS NULL"), "0", "Keep the project clears the mark");
 });

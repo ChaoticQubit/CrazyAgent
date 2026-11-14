@@ -57,6 +57,7 @@ export function noticeSubject(notice: RecoveryNotice): string {
   if (notice.action_kind === "agent_spawn") return `${agent}'s start`;
   if (notice.action_kind === "worktree_create") return `${agent}'s worktree`;
   if (notice.action_kind === "landing_accept") return `Change set ${displayText(notice.change_set ?? "")}`;
+  if (notice.action_kind === "project_delete") return "This project's delete";
   return "This notice";
 }
 
@@ -64,6 +65,7 @@ export function noticeSubject(notice: RecoveryNotice): string {
  * Output: one sentence. */
 export function noticeLine(notice: RecoveryNotice): string {
   const subject = noticeSubject(notice);
+  if (notice.action_kind === "project_delete") return "A delete was cut short. Some folders may already be in the Trash. If you keep the project, its agents stay stopped until you start them again with Start all again in the project menu.";
   if (notice.shown === "landed") return `${subject} landed while CrazyAgent stopped.`;
   if (notice.shown === "dropped") return `${subject} did not land. Accept it again from Changes.`;
   if (notice.action_kind === "agent_spawn") return `${subject} may or may not have run. Check the agent, then dismiss this to let it start again.`;
@@ -83,15 +85,17 @@ export function choiceKey(choice: { agent: number } | RecoveryNotice): string {
 }
 
 /** What an engine stop cut short in one project: what is still interrupted, what resumed and
- * what failed, with Retry on each failed resume, and the notices to check and dismiss.
- * Renders nothing when nothing waits. Inputs: the banner, the choice running, the result of
- * the last choice and the two choices. */
-export function RecoveryBannerView({ banner, busy, note, onRetry, onDismiss }: {
+ * what failed, with Retry on each failed resume, and the notices to check and dismiss; a delete
+ * cut short offers Keep the project, which dismisses it, and Delete again. Renders nothing when
+ * nothing waits. Inputs: the banner, the choice running, the result of the last choice and the
+ * three choices. */
+export function RecoveryBannerView({ banner, busy, note, onRetry, onDismiss, onDeleteAgain }: {
   banner: Banner;
   busy: string | null;
   note: string;
   onRetry: (agent: number) => void;
   onDismiss: (notice: RecoveryNotice) => void;
+  onDeleteAgain: () => void;
 }) {
   const waiting = openItems(banner);
   if (waiting === 0) return null;
@@ -118,7 +122,12 @@ export function RecoveryBannerView({ banner, busy, note, onRetry, onDismiss }: {
         <span className="secondary">Check before you start again</span>
         <ul>{groups.notices.map((notice) => <li key={choiceKey(notice)} className="row">
           <span>{noticeLine(notice)}</span>
-          <Button size="small" pending={busy === choiceKey(notice)} pendingLabel="Dismissing..." disabled={busy !== null} onClick={() => onDismiss(notice)}>Dismiss</Button>
+          {notice.action_kind === "project_delete"
+            ? <>
+              <Button size="small" pending={busy === choiceKey(notice)} pendingLabel="Keeping..." disabled={busy !== null} onClick={() => onDismiss(notice)}>Keep the project</Button>
+              <Button size="small" variant="danger" disabled={busy !== null} onClick={onDeleteAgain}>Delete again</Button>
+            </>
+            : <Button size="small" pending={busy === choiceKey(notice)} pendingLabel="Dismissing..." disabled={busy !== null} onClick={() => onDismiss(notice)}>Dismiss</Button>}
         </li>)}</ul>
       </section>}
       {banner.more > 0 && <p className="secondary">{`${banner.more} more aren't shown. They appear as you resolve these.`}</p>}
@@ -141,8 +150,9 @@ export function latestBanner(loaded: Loaded<Banner>, last: Banner | null): { ban
 
 /** One project's recovery banner: reads the engine's list, reads again while a run waits to
  * resume, also after a failed read, and sends Retry and Dismiss to the engine, reading the list
- * again after each. A failed first read offers Try again. Input: the project id. */
-export function RecoveryBanner({ project }: { project: string }) {
+ * again after each; Delete again is the page's to open. A failed first read offers Try again.
+ * Inputs: the project id and what Delete again does. */
+export function RecoveryBanner({ project, onDeleteAgain }: { project: string; onDeleteAgain: () => void }) {
   const [loaded, reload] = useLoad(() => loadRecovery(project), [project]);
   const [last, setLast] = useState<Banner | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -173,5 +183,6 @@ export function RecoveryBanner({ project }: { project: string }) {
   }
   return <RecoveryBannerView banner={banner} busy={busy} note={[note, problem].filter(Boolean).join(" ")}
     onRetry={(agent) => void choose(choiceKey({ agent }), () => retryRecovery(agent), "It will try to resume again.")}
-    onDismiss={(notice) => void choose(choiceKey(notice), () => dismissRecovery(notice), "Dismissed.")} />;
+    onDismiss={(notice) => void choose(choiceKey(notice), () => dismissRecovery(notice), notice.action_kind === "project_delete" ? "The project stays." : "Dismissed.")}
+    onDeleteAgain={onDeleteAgain} />;
 }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::projects_home::{
     self as home, AddMode, AddOverride, AddPlan, FoundProject, HomeAction, HomeEffect, HomeWatch,
-    MovePlan, ProjectsHome, Registered,
+    MovePlan, ProjectsHome, Registered, delete_mark,
 };
 use std::ffi::OsStr;
 use std::path::{Component, PathBuf};
@@ -625,19 +625,50 @@ pub(crate) fn delete_recheck(
     Ok(delete_blocked(tx, project, &projects, moved)?.map(|refusal| refusal.code))
 }
 
+/// Removes the staging folders that adds and New Projects an engine stop cut short left in
+/// the saved projects home, whether or not an add row names them. Run at engine start,
+/// after a pending home move settled and before any plan, so none is live. Input: the
+/// connection. Output: how many were removed, 0 with no home saved.
+pub(super) fn sweep_home(db: &Connection) -> Result<usize, EngineError> {
+    let Some(saved) = home::load(db)? else {
+        return Ok(0);
+    };
+    assert!(saved.is_absolute());
+    let removed = home::sweep_staging(&saved);
+    eprintln!("home_staging_swept count={removed}");
+    Ok(removed)
+}
+
 /// Forgets a Delete everything's plan once its exchange ended, whatever its outcome, so a
-/// projects home move may go again; with no exchange, as the engine starts, it forgets every
-/// plan an earlier engine process left. Inputs: the connection and the exchange. Output: Ok,
-/// or any SQLite failure.
+/// projects home move may go again, after ending its mark; with no exchange, as the engine
+/// starts, it first turns each mark of a project still there into "A delete was cut short" on
+/// its banner, continuing nothing, then forgets every plan an earlier engine process left.
+/// The marks settle in their own write and the plans after, so a settle that fails is tried
+/// again whole: a mark already ended is not ended twice. Inputs: the connection and the
+/// exchange. Output: Ok, or any SQLite or ledger failure.
 pub(super) fn delete_settle(db: &Connection, exchange: Option<u64>) -> Result<(), EngineError> {
+    let exchange = exchange.map(i64::try_from).transpose().map_err(error)?;
+    let tx = db.unchecked_transaction().map_err(error)?;
+    match exchange {
+        Some(exchange) => {
+            delete_mark::settle(&tx, exchange)?;
+        }
+        None => {
+            let shown = delete_mark::start(&tx)?;
+            eprintln!("project_delete_cut_short count={shown}");
+        }
+    }
+    tx.commit().map_err(error)?;
     match exchange {
         Some(exchange) => db.execute(
             "DELETE FROM projects_delete_pending WHERE exchange=?1",
-            [i64::try_from(exchange).map_err(error)?],
+            [exchange],
         ),
         None => db.execute("DELETE FROM projects_delete_pending", []),
     }
     .map_err(error)?;
+    assert!(exchange.is_some() || !delete_planned(db)?);
+    assert!(exchange.is_none_or(|exchange| exchange > 0));
     Ok(())
 }
 
@@ -821,6 +852,14 @@ pub(super) fn delete_plan(
     };
     let agents = ids("SELECT id FROM team_agents WHERE project=?1 ORDER BY id LIMIT ?2")?;
     let research = ids("SELECT id FROM research_jobs WHERE project=?1 ORDER BY id LIMIT ?2")?;
+    match delete_mark::begin(&tx, project_id, exchange) {
+        Ok(Ok(())) => {}
+        Ok(Err(code)) => return Ok(Err(code.into())),
+        Err(e) => {
+            eprintln!("project_delete_not_marked cause={}", e.0);
+            return Ok(Err("delete_not_recorded".into()));
+        }
+    }
     crate::team::pause(&tx, project_id, crate::team::now_ms())?;
     tx.execute(
         "INSERT INTO projects_delete_pending(exchange) VALUES (?1)",

@@ -1656,6 +1656,9 @@ impl Screen for ProjectPage {
         }
         self.screen.width = ctx.width;
         if self.recovery_has_keys() && self.screen.recovery.key(key) {
+            if self.screen.recovery.take_delete_again() {
+                self.screen.ask_delete_again();
+            }
             self.pump(ctx);
             self.redraw(ctx);
             return Flow::Handled;

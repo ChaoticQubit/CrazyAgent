@@ -13,10 +13,11 @@ const REQUEST_BYTES_MAX: usize = 1024;
 pub const BANNER_RUNS_MAX: usize = 32;
 /// The most notices one banner lists, so its reply fits one owner frame.
 pub const BANNER_NOTICES_MAX: usize = 32;
-const NOTICE_KINDS: [ActionKind; 3] = [
+const NOTICE_KINDS: [ActionKind; 4] = [
     ActionKind::AgentSpawn,
     ActionKind::WorktreeCreate,
     ActionKind::LandingAccept,
+    ActionKind::ProjectDelete,
 ];
 pub(super) const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_WRITE_TIME: Duration = Duration::from_secs(2);
@@ -438,19 +439,11 @@ fn banner_notice(
         shown,
         started_ms: action.started_ms,
     };
-    if action.kind == ActionKind::LandingAccept {
-        let owner = payload.get("project").and_then(serde_json::Value::as_str);
-        let set = payload
-            .get("change_set")
-            .and_then(serde_json::Value::as_str);
-        let (Some(owner), Some(set)) = (owner, set) else {
-            return Err(invalid());
-        };
-        if owner != project.as_str() {
-            return Ok(None);
-        }
-        notice.change_set = Some(set.to_owned());
-        return Ok(Some(notice));
+    if matches!(
+        action.kind,
+        ActionKind::LandingAccept | ActionKind::ProjectDelete
+    ) {
+        return project_notice(&payload, project, notice);
     }
     let agent = payload
         .get("team_agent")
@@ -478,6 +471,36 @@ fn banner_notice(
     };
     notice.agent = Some(agent);
     notice.label = Some(agent_label(db, agent, role)?);
+    Ok(Some(notice))
+}
+
+/// Scopes a notice that names its project in its payload: an interrupted Accept, which also
+/// names its change set, or a delete an engine stop cut short. Inputs: the payload, the
+/// project the banner is for and the notice. Output: the notice, none for another project's,
+/// or `recovery_record_invalid` when the payload names no project or an Accept no change set.
+fn project_notice(
+    payload: &serde_json::Value,
+    project: &ProjectId,
+    mut notice: BannerNotice,
+) -> Result<Option<BannerNotice>, EngineError> {
+    let accept = notice.action_kind == ActionKind::LandingAccept;
+    assert!(accept || notice.action_kind == ActionKind::ProjectDelete);
+    assert!(notice.agent.is_none());
+    assert!(notice.change_set.is_none());
+    let invalid = || failure("recovery_record_invalid");
+    let owner = payload.get("project").and_then(serde_json::Value::as_str);
+    let set = payload
+        .get("change_set")
+        .and_then(serde_json::Value::as_str);
+    let Some(owner) = owner else {
+        return Err(invalid());
+    };
+    if accept {
+        notice.change_set = Some(set.ok_or_else(invalid)?.to_owned());
+    }
+    if owner != project.as_str() {
+        return Ok(None);
+    }
     Ok(Some(notice))
 }
 
