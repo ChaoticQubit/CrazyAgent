@@ -2054,3 +2054,124 @@ fn a_tmux_whose_version_read_fails_is_asked_again_so_a_fix_outside_the_file_coun
     assert!(!runs(&tmux));
     assert_eq!(started(&ran), 2, "a failed read is not kept");
 }
+
+/// Starts a test's own tmux host in a private folder with one sleeping agent per id.
+/// Takes the home folder and the agent ids. Returns the host and its server, which ends
+/// the server when dropped.
+#[cfg(target_os = "macos")]
+fn host_with_agents(home: &Path, ids: &[i64]) -> (Tmux, Server) {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = home.join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    for id in ids {
+        let command = InteractiveCommand {
+            argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 60".into()],
+            cwd: home.to_path_buf(),
+            env: Vec::new(),
+            transcript: crate::harnesses::interactive::Transcript::Unavailable,
+        };
+        host.spawn(&AgentId::team(*id).unwrap(), &command).unwrap();
+    }
+    (host, server)
+}
+
+/// Live views count per pane, not per tmux server: eight views of one agent leave room for
+/// a view of another agent on the engine's same server, as a nine-tile wall needs, while a
+/// ninth view of that same pane is still refused (RV-DS241-96).
+#[cfg(target_os = "macos")]
+#[test]
+fn views_count_per_pane_so_eight_of_one_agent_leave_room_for_another() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server) = host_with_agents(home.path(), &[1, 2]);
+    let (one, two) = (AgentId::team(1).unwrap(), AgentId::team(2).unwrap());
+    let views: Vec<TerminalStream> = (0..VIEWERS_MAX)
+        .map(|_| host.attach(&one).unwrap())
+        .collect();
+    assert_eq!(
+        host.attach(&one).err().map(|problem| problem.0),
+        Some("terminal_viewers_full".to_owned())
+    );
+    let other = host.attach(&two);
+    assert!(other.is_ok(), "{:?}", other.err());
+    drop(views);
+}
+
+/// A view of a teammate pane ends once that pane closes while its window stays, so a closed
+/// pane keeps no frozen view holding a view slot (RV-DS241-98).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_view_of_a_closed_pane_ends_though_its_window_stays() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server) = host_with_agents(home.path(), &[1]);
+    let lead = AgentId::team(1).unwrap();
+    let kept = host.panes(&lead).unwrap()[0].id.clone();
+    split(&server, &kept, "exec /bin/sleep 60");
+    let teammate = host
+        .panes(&lead)
+        .unwrap()
+        .into_iter()
+        .find(|pane| pane.id != kept)
+        .unwrap()
+        .id;
+    let mut view = host.attach_pane(&lead, &teammate).unwrap();
+    host.kill_pane(&lead, &teammate).unwrap();
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        while view.next_blocking().is_some() {}
+        let _ = done.send(());
+    });
+    assert!(
+        ended.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "the closed pane's view never ended"
+    );
+    assert_eq!(host.panes(&lead).unwrap().len(), 1);
+}
+
+/// A capture block whose located reply came back cut has no known row count: the reader
+/// closes the control rather than search the pane's own text for the block's end, so a pane
+/// row that reads as the closing guard forges no later control line (RV-DS241-100).
+#[test]
+fn a_capture_whose_row_count_is_unknown_closes_the_control_and_forges_nothing() {
+    let (reply, _answer) = sync_channel(1);
+    let (feed, mut chunks) = buffer();
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(Pending::Attach {
+            agent: AgentId::team(1).unwrap(),
+            located: Some(vec![b"%9 @1 0 ".to_vec()]),
+            history: 0,
+            view: true,
+            reply,
+        });
+        state.viewers.push(Viewer {
+            pane: b"%9".to_vec(),
+            window: b"@1".to_vec(),
+            feed,
+        });
+    }
+    let text = "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%end 1 7 1\n";
+    let mut printf = Command::new("/usr/bin/printf");
+    printf
+        .args(["%s", text])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut printf).unwrap();
+    let output = child.stdout.take().unwrap();
+    read(output, &state);
+    let _ = child.wait();
+    assert!(state.lock().unwrap().closed);
+    assert!(
+        chunks.try_recv().is_err(),
+        "a pane row forged output for another view"
+    );
+}

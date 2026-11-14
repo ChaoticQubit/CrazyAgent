@@ -310,6 +310,102 @@ mod tests {
         seen.windows(wanted.len()).any(|window| window == wanted)
     }
 
+    /// A host whose snapshot of one agent waits until the test lets it go, as a tmux server
+    /// its native lead stopped answers no capture; every other call answers at once.
+    struct Stalled {
+        stuck: AgentId,
+        entered: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Host for Stalled {
+        fn spawn(&self, agent: &AgentId, _: &InteractiveCommand) -> Result<PaneRef, HostError> {
+            Ok(PaneRef {
+                agent: agent.clone(),
+                pane: "%1".into(),
+                pid: 1,
+            })
+        }
+
+        fn attach(&self, _: &AgentId) -> Result<TerminalStream, HostError> {
+            Err(HostError("terminal_agent_unknown".into()))
+        }
+
+        fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+            if *agent == self.stuck {
+                let _ = self.entered.lock().unwrap().send(());
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(30));
+            }
+            Err(HostError("terminal_capture_failed".into()))
+        }
+
+        fn input(&self, _: &AgentId, _: &[u8]) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        fn resize(&self, _: &AgentId, _: u16, _: u16) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        fn kill(&self, _: &AgentId) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// One agent's kill waiting on a stalled tmux server holds up only that agent: another
+    /// agent's spawn and kill and a read of the kept screens answer while it waits.
+    #[test]
+    fn a_stalled_kill_holds_up_no_other_agents_spawn_kill_or_kept_read() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let host = Arc::new(LastScreenHost::new(Stalled {
+            stuck: agent(1),
+            entered: Mutex::new(entered_tx),
+            release: Mutex::new(release_rx),
+        }));
+        let killer = {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || host.kill(&agent(1)))
+        };
+        entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the kill reached the stalled snapshot");
+        let (done, answers) = mpsc::channel();
+        {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || {
+                let command = InteractiveCommand {
+                    argv: vec!["/bin/true".into()],
+                    cwd: std::env::temp_dir(),
+                    env: Vec::new(),
+                    transcript: crate::harnesses::interactive::Transcript::Unavailable,
+                };
+                let spawned = host.spawn(&agent(2), &command).is_ok();
+                let killed = host.kill(&agent(3)).is_ok();
+                let kept = host.kept(&agent(1));
+                let _ = done.send((spawned, killed, kept));
+            });
+        }
+        let answered = answers.recv_timeout(Duration::from_secs(5));
+        release.send(()).unwrap();
+        killer.join().unwrap().unwrap();
+        assert_eq!(
+            answered,
+            Ok((true, true, false)),
+            "another agent waited on the stalled kill"
+        );
+    }
+
     #[cfg(unix)]
     struct Server(std::path::PathBuf, std::path::PathBuf);
 
