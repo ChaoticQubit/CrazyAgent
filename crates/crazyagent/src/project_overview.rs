@@ -4,7 +4,7 @@ use crate::onboarding::draft::{self, Folder, overview_seal};
 use crate::project_setup::ResearchKind;
 use crate::project_setup::links::{self, LinkKind};
 use crate::protocol::ProjectId;
-use crate::roadmap_status::{QUIET_MS, Refresh};
+use crate::roadmap_status::{QUIET_MS, Refresh, run_project_part};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -339,25 +339,14 @@ pub(crate) const RUN_NAME_HEAD: &str = "overview-";
 const RUN_NAME_BYTES_MAX: usize = 96;
 const RUN_TIME_DIGITS_MAX: usize = 19;
 
-/// The research state name of one writing run: the head, the project id with every byte
-/// outside ASCII letters, digits, `-` and `_` written as `_` and cut so the name fits
-/// `RUN_NAME_BYTES_MAX`, then `-` and the start time. Inputs: the project and the time in
-/// plain digits. Output: the name.
+/// The research state name of one writing run: the head, the project's
+/// [`run_project_part`] sized for the longest start time, so a project's part never changes,
+/// then `-` and the start time. Inputs: the project and the time in plain digits. Output:
+/// the name.
 fn run_name_at(project: &ProjectId, time: &str) -> String {
     assert!((1..=RUN_TIME_DIGITS_MAX).contains(&time.len()));
-    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - time.len();
-    let named: String = project
-        .as_str()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(room)
-        .collect();
+    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - RUN_TIME_DIGITS_MAX;
+    let named = run_project_part(project, room);
     let name = format!("{RUN_NAME_HEAD}{named}-{time}");
     assert!(name.is_ascii() && name.len() <= RUN_NAME_BYTES_MAX);
     name
