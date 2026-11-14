@@ -63,6 +63,11 @@ static REPOSITORIES_SETTING_UP: Mutex<std::collections::BTreeSet<PathBuf>> =
 static REPOSITORY_FREED: Condvar = Condvar::new();
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
+/// The lines a job shows while it waits out a refused launch, the same in the desktop app
+/// and the terminal app (DEC-141, DEC-170 addendum 6).
+const HOME_MOVE_WAITING: &str = "Waiting for the projects home move to finish";
+const PROFILE_BUSY_WAITING: &str = "Waiting for another run to finish with this account's sign-in";
+const ACCOUNT_WAITING: &str = "Waiting for this account to be ready";
 const LINKS_MAX: usize = 100;
 const POLL: Duration = Duration::from_millis(100);
 const HEARTBEAT: Duration = Duration::from_millis(250);
@@ -765,10 +770,7 @@ impl ResearchRunner {
             process_group,
         };
         if jobs.home_moving(project.root)? {
-            jobs.release(&job, None)?;
-            let status = jobs
-                .get(job.id)?
-                .map_or(ResearchStatus::Queued, |job| job.status);
+            let status = jobs.refused(&job, HOME_MOVE_WAITING)?;
             return Ok(run(status, None, None));
         }
         let Some(harness) = ResearchHarness::of(&job.harness) else {
@@ -846,14 +848,12 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(RunError::Busy) => {
-                jobs.release(&job, None)?;
-                let status = jobs
-                    .get(job.id)?
-                    .map_or(ResearchStatus::Queued, |job| job.status);
+                let status = jobs.refused(&job, PROFILE_BUSY_WAITING)?;
                 Ok(run(status, None, None))
             }
-            Err(RunError::Account(_)) => {
-                let status = jobs.needs_pool(&job)?;
+            Err(RunError::Account(code)) => {
+                eprintln!("research job {} account not ready: {code}", job.id);
+                let status = jobs.refused(&job, ACCOUNT_WAITING)?;
                 Ok(run(status, None, None))
             }
             Err(error) => {
@@ -1396,6 +1396,7 @@ impl ResearchRunner {
         counted: &AtomicU64,
         limited: &AtomicBool,
     ) -> Result<Ending, RunError> {
+        noted_launch(jobs, job);
         let started = Instant::now();
         let mut beat = Instant::now();
         let ending = loop {
@@ -1450,6 +1451,7 @@ impl ResearchRunner {
             }
             return Ok(Ending::Exited(false));
         }
+        noted_launch(jobs, job);
         let mut beat = Instant::now();
         let ending = loop {
             if self.is_stopping() {
@@ -3931,6 +3933,15 @@ fn document_names(_context: &Path, documents: &Path) -> Vec<String> {
         .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
         .filter(|name| !name.chars().any(char::is_control))
         .collect()
+}
+
+/// Records that a claimed job's harness really started, so the project's activity shows a
+/// start only for a run that launched (DEC-170 addendum 6); a lost claim is left to the next
+/// heartbeat. Takes the job store and the job.
+fn noted_launch(jobs: &ResearchJobs, job: &ResearchJob) {
+    if let Err(error) = jobs.launched(job) {
+        eprintln!("research job {} start not recorded: {error}", job.id);
+    }
 }
 
 /// Reads a report or brief an agent may have replaced, opened from a folder the engine
