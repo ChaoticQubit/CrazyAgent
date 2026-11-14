@@ -128,6 +128,7 @@ fn setup(state: DependencyState, running: bool) -> Arrival {
             running,
             notes: Vec::new(),
             version: 1,
+            refused_tool: Default::default(),
         },
     ))))
 }
@@ -178,6 +179,17 @@ fn answer_with(
     queued: &[&str],
     state: DependencyState,
 ) {
+    answer_setup(shell, catalog, codex, claude, queued, node(state));
+}
+
+fn answer_setup(
+    shell: &mut Shell,
+    catalog: &Entries,
+    codex: HarnessVersions,
+    claude: HarnessVersions,
+    queued: &[&str],
+    status: Arrival,
+) {
     shell.arrive(arrival(SettingsEvent::Harnesses(Ok(catalog.all.clone()))));
     shell.arrive(arrival(SettingsEvent::HarnessQueue(Ok(queued
         .iter()
@@ -191,7 +203,7 @@ fn answer_with(
         "claude-code".into(),
         Ok(claude),
     )));
-    shell.arrive(node(state));
+    shell.arrive(status);
 }
 
 fn read_step(width: u16, height: u16) -> (Shell, Entries) {
@@ -771,17 +783,29 @@ fn n_installs_node_for_a_harness_that_needs_it_and_shows_its_progress_and_failur
         Ok(()),
     ))));
     assert_eq!(sent(&mut shell), reads());
-    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
-    shell.arrive(node(DependencyState::Installing));
+    answer_with(
+        &mut shell,
+        &found,
+        needs_node("codex"),
+        claude(),
+        &[],
+        DependencyState::Installing,
+    );
     let rows = render(&mut shell, 120, 36);
     assert!(shows(&rows, INSTALLING_NODE), "{rows:#?}");
     assert!(!bar(&rows).contains(INSTALL_NODE), "{rows:#?}");
     shell.refresh();
     assert_eq!(sent(&mut shell), reads(), "reads again while Node installs");
-    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
-    shell.arrive(node(DependencyState::Failed {
-        reason: NODE_FAILED.into(),
-    }));
+    answer_with(
+        &mut shell,
+        &found,
+        needs_node("codex"),
+        claude(),
+        &[],
+        DependencyState::Failed {
+            reason: NODE_FAILED.into(),
+        },
+    );
     let rows = render(&mut shell, 120, 36);
     assert!(shows(&rows, NODE_FAILED), "{rows:#?}");
     assert!(
@@ -847,13 +871,19 @@ fn a_running_setup_keeps_the_node_install_shown_and_read_until_its_row_settles()
         Ok(()),
     ))));
     assert_eq!(sent(&mut shell), reads());
-    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
-    shell.arrive(setup(
-        DependencyState::Missing {
-            line: String::new(),
-        },
-        true,
-    ));
+    answer_setup(
+        &mut shell,
+        &found,
+        needs_node("codex"),
+        claude(),
+        &[],
+        setup(
+            DependencyState::Missing {
+                line: String::new(),
+            },
+            true,
+        ),
+    );
     let rows = render(&mut shell, 120, 36);
     assert!(shows(&rows, INSTALLING_NODE), "{rows:#?}");
     assert!(!bar(&rows).contains(INSTALL_NODE), "{rows:#?}");

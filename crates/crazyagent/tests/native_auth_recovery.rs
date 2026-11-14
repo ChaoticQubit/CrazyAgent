@@ -256,6 +256,7 @@ done
 
     /// Waits until the engine's log holds one line exactly, at most 10 s. Input: the line.
     /// Output: none; it fails the test with the log when the line never comes.
+    #[cfg(target_os = "macos")]
     async fn logged(&self, line: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !self.log().lines().any(|logged| logged == line) {

@@ -112,13 +112,6 @@ fn key(value: &str) -> Option<AccountSecret> {
     Some(AccountSecret::new(value.as_bytes().to_vec()).unwrap())
 }
 
-async fn closed_port() -> u16 {
-    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
-        .await
-        .unwrap();
-    listener.local_addr().unwrap().port()
-}
-
 async fn all_accounts(client: &OwnerClient) -> Vec<AccountView> {
     let mut accounts = Vec::new();
     let mut after = None;
@@ -199,7 +192,8 @@ async fn every_add_path_lists_plain_statuses_and_supports_rename_and_remove() {
         .await
         .unwrap();
     let up_url = format!("http://127.0.0.1:{}/v1", up.local_addr().unwrap().port());
-    let down_url = format!("http://127.0.0.1:{}/v1", closed_port().await);
+    let (_down, down_port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let down_url = format!("http://127.0.0.1:{down_port}/v1");
 
     let chatgpt = client
         .add_account(
@@ -990,7 +984,8 @@ async fn an_openai_compatible_account_check_lists_the_real_ollama_models() {
 async fn one_thousand_accounts_are_created_and_listed_within_bounds() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
-    let url = format!("http://127.0.0.1:{}/v1", closed_port().await);
+    let (_held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let url = format!("http://127.0.0.1:{port}/v1");
     let created = Instant::now();
     for index in 0..1000 {
         client

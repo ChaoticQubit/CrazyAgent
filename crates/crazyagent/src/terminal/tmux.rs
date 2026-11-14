@@ -1,4 +1,4 @@
-use super::buffer::{Feed, buffer, skipped_marker};
+use super::buffer::{Feed, buffer};
 pub use super::harness_socket;
 use super::{
     AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo,
@@ -201,7 +201,8 @@ enum Pending {
 }
 
 /// Finds the tmux program the engine uses, anew on each call, through the one tool resolver:
-/// the app's folder, `<root>/setup/bin`, then everywhere [`crate::tools::Places`] looks.
+/// the app's folder, the owner's own installs, the system folders, then `<root>/setup/bin`
+/// last ([`crate::tools::Places::engine`]).
 /// Takes the engine root. Returns the real program, or none when tmux is not installed.
 pub fn installed(engine_root: &Path) -> Option<PathBuf> {
     installed_at(&crate::tools::Places::from_environment(Some(engine_root)))
@@ -1824,8 +1825,12 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
         if dropped > 0 {
             if let Some(rest) = guard(&line, b"%output") {
                 let pane = rest.split(|byte| *byte == b' ').next().unwrap_or_default();
-                let lost = u64::try_from(line.len() + dropped).unwrap_or(u64::MAX);
-                deliver(&mut state, pane, &skipped_marker(lost));
+                state.viewers.retain(|viewer| {
+                    if viewer.pane != pane {
+                        return viewer.feed.open();
+                    }
+                    viewer.feed.lost()
+                });
             }
             continue;
         }

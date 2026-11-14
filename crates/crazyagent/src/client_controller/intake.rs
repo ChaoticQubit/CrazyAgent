@@ -3,8 +3,9 @@ use crate::engine::owner::AccountSecret;
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::icloud::{DOWNLOAD_TIME_MAX, Progress};
+use crate::projects_home::job::JobView;
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
-use crate::protocol::{CredentialRef, ProjectId};
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const ICLOUD_PROGRESS_EVERY: Duration = Duration::from_secs(1);
@@ -160,6 +161,41 @@ impl OwnerController {
     /// Returns the receipt with the new folder.
     pub async fn clone_repo(&mut self, full_name: String) -> Result<CloneReceipt, EngineError> {
         self.owner_client()?.clone_repo(full_name).await
+    }
+
+    /// Starts the engine's intake job for a folder, which downloads what is only in iCloud and
+    /// then moves or copies it into the projects home apart from this client, or attaches to
+    /// the job adding that folder already. Takes the start's fresh id, which a job it makes
+    /// carries, the absolute folder, Move or Copy and the overrides. Returns the job, or
+    /// `intake_busy` while another folder is being added.
+    pub async fn intake_start(
+        &mut self,
+        id: RequestId,
+        source: String,
+        mode: AddMode,
+        overrides: Vec<AddOverride>,
+    ) -> Result<JobView, EngineError> {
+        let view = self
+            .owner_client()?
+            .intake_start(id, source, mode, overrides)
+            .await?;
+        assert!(!view.source.is_empty());
+        Ok(view)
+    }
+
+    /// Reads the engine's intake job, running or last ended. Returns it, or None.
+    pub async fn intake_status(&mut self) -> Result<Option<JobView>, EngineError> {
+        self.owner_client()?.intake_status().await
+    }
+
+    /// Asks the running intake job to stop between files. Takes its id. Returns whether it ran.
+    pub async fn intake_stop(&mut self, id: RequestId) -> Result<bool, EngineError> {
+        self.owner_client()?.intake_stop(id).await
+    }
+
+    /// Forgets an ended intake job. Takes its id. Returns whether it was forgotten.
+    pub async fn intake_dismiss(&mut self, id: RequestId) -> Result<bool, EngineError> {
+        self.owner_client()?.intake_dismiss(id).await
     }
 
     /// Downloads every file of a folder that is only in iCloud, reading the progress about

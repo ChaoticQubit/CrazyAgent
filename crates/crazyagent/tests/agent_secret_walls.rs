@@ -659,9 +659,7 @@ fn tools_on_agent_reaches_ip_endpoints_but_no_engine_unix_socket() {
         .collect();
     let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
-    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let served = free.local_addr().unwrap().port();
-    drop(free);
+    let served = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
     let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
         .unwrap()
         .guard_engine(&case.runtime)

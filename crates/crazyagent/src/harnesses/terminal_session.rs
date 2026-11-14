@@ -9,6 +9,7 @@ use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::coord::delivery::typing::APP_QUIET;
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
+use crate::terminal::buffer::Chunk;
 use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
@@ -728,11 +729,16 @@ impl TerminalSession {
                 first.stream.insert(stream)
             }
         };
+        let mut behind = false;
         loop {
             match stream.chunks.try_recv() {
-                Ok(chunk) => {
+                Ok(Chunk::Output(chunk)) => {
                     first.drawn |= !chunk.is_empty();
                     first.quiet = Instant::now();
+                }
+                Ok(Chunk::Behind) => {
+                    behind = true;
+                    break;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -743,6 +749,11 @@ impl TerminalSession {
                     return Err(failure("launch_closed"));
                 }
             }
+        }
+        if behind {
+            first.stream = None;
+            first.drawn = true;
+            first.quiet = Instant::now();
         }
         let ready = first.drawn
             && first.quiet.elapsed() >= READY_QUIET

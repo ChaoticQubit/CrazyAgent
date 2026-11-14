@@ -1380,6 +1380,7 @@ fn setup_node(state: DependencyState) -> Arrival {
             running: false,
             notes: Vec::new(),
             version: 1,
+            refused_tool: Default::default(),
         },
     ))))
 }

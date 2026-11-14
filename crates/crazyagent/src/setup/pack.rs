@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::plugins::validate_server_name;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub const VERSION: u32 = 1;
@@ -105,6 +106,20 @@ fn sha512_integrity(text: &str) -> bool {
 
 fn error(code: &str) -> EngineError {
     EngineError(code.into())
+}
+
+/// Names the key a pinned git source's checkout folder starts with, `<repo key>` in
+/// `<setup>/pack/<repo key>-<commit>`, on every platform. Input: the repository URL.
+/// Output: the first 8 bytes of the SHA-256 of the URL as 16 lowercase hex characters.
+pub fn repo_key(repo: &str) -> String {
+    let key: String = Sha256::digest(repo.as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(key.len(), 16);
+    assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    key
 }
 
 /// Loads the default pack compiled into the engine from `pack.toml`, with no file or

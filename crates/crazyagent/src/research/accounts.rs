@@ -1,4 +1,4 @@
-use super::runner::{ResearchAccount, ResearchHarness};
+use super::runner::{ResearchAccount, ResearchHarness, unreached_provider_here};
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint,
 };
@@ -16,6 +16,16 @@ const DATABASE_WAIT: Duration = Duration::from_secs(5);
 /// The custody and sign-in code for a managed profile another launch holds.
 pub(crate) const PROFILE_BUSY: &str = "native_profile_in_use";
 
+/// Whether a pick probes the model provider of each loopback endpoint member it would pick.
+/// Read-only runs (Edit with AI, the mapping step, the overview and the roadmap check) pick
+/// with `Reachable` and pass over a member whose provider refuses every connect; research
+/// jobs and the service tick pick with `Unprobed` and make no connect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    Unprobed,
+    Reachable,
+}
+
 /// The account a research job should run on, or why it has to wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountPick {
@@ -23,6 +33,9 @@ pub enum AccountPick {
     NoUsableAccount,
     Paused {
         until_ms: i64,
+    },
+    Unreached {
+        line: String,
     },
     Account {
         connection: CredentialRef,
@@ -39,7 +52,26 @@ impl AccountPick {
             Self::Paused { .. } => {
                 "Every account in this project's pool that can run this research hit its rate limit"
             }
+            Self::Unreached { .. } => {
+                "No account in this project's pool can reach its model provider"
+            }
             Self::Account { .. } => "Ready",
+        }
+    }
+
+    /// Folds another member's or harness's wait into this one when nothing can run now: the
+    /// first down provider's line wins, since a run there failed at once before failover too;
+    /// else the earlier pause end; else this wait. Input: the next wait, not an account.
+    /// Output: the kept wait.
+    pub(crate) fn or_wait(self, next: AccountPick) -> AccountPick {
+        assert!(!matches!(self, Self::Account { .. }) && !matches!(next, Self::Account { .. }));
+        match (self, next) {
+            (kept @ Self::Unreached { .. }, _) | (_, kept @ Self::Unreached { .. }) => kept,
+            (Self::Paused { until_ms }, Self::Paused { until_ms: end }) => Self::Paused {
+                until_ms: until_ms.min(end),
+            },
+            (kept @ Self::Paused { .. }, _) | (_, kept @ Self::Paused { .. }) => kept,
+            (kept, _) => kept,
         }
     }
 }
@@ -88,6 +120,29 @@ pub fn pick_scheduled(
     paused_until: impl Fn(&CredentialRef) -> Option<i64>,
     choice: &Choice,
 ) -> AccountPick {
+    scheduled_pick(
+        access,
+        project,
+        harness,
+        &signed_in,
+        &paused_until,
+        choice,
+        Reach::Unprobed,
+    )
+}
+
+/// [`pick_scheduled`] with the reach rule `reach`. Takes the same inputs plus the rule.
+/// Returns the pick, or [`AccountPick::Unreached`] with the first down provider's line when
+/// `reach` probes and every member that could run has a provider that refuses connects.
+fn scheduled_pick(
+    access: &ModelAccess,
+    project: &str,
+    harness: &str,
+    signed_in: &impl Fn(&ModelConnection) -> bool,
+    paused_until: &impl Fn(&CredentialRef) -> Option<i64>,
+    choice: &Choice,
+    reach: Reach,
+) -> AccountPick {
     let assigned: Vec<_> = access
         .pools
         .iter()
@@ -100,17 +155,18 @@ pub fn pick_scheduled(
         access,
         assigned.iter().flat_map(|pool| pool.members.iter()),
         harness,
-        &signed_in,
-        &paused_until,
+        signed_in,
+        paused_until,
         choice,
+        reach,
     )
 }
 
 /// Picks the first of `members` that `harness` can use and that is not paused, in the
-/// schedule's order. Takes the model access, the members in pool order, the harness id,
-/// the signed-in check for managed connections, the pause lookup and the scheduling
-/// choice. Returns the account, else [`AccountPick::Paused`] with the earliest end when
-/// only paused or held members fit, else [`AccountPick::NoUsableAccount`].
+/// schedule's order; under [`Reach::Reachable`] a member whose loopback provider refuses
+/// connects is passed over with one log line. Takes the access, the members in pool order,
+/// the harness id, the sign-in check, the pause lookup, the choice and the reach rule.
+/// Returns the account, else the wait [`AccountPick::or_wait`] kept, else none usable.
 fn members_pick<'a>(
     access: &ModelAccess,
     members: impl IntoIterator<Item = &'a CredentialRef>,
@@ -118,6 +174,7 @@ fn members_pick<'a>(
     signed_in: &impl Fn(&ModelConnection) -> bool,
     paused_until: &impl Fn(&CredentialRef) -> Option<i64>,
     choice: &Choice,
+    reach: Reach,
 ) -> AccountPick {
     let mut fitting = Vec::new();
     for member in members {
@@ -140,33 +197,40 @@ fn members_pick<'a>(
     let mut waiting = AccountPick::NoUsableAccount;
     for (_, why) in &order.excluded {
         if let Some(until_ms) = why.until_ms() {
-            waiting = earlier(waiting, until_ms);
+            waiting = waiting.or_wait(AccountPick::Paused { until_ms });
         }
     }
     for index in order.ready {
         let (connection, account) = &fitting[index];
         match paused_until(&connection.id) {
             None => {
+                if reach == Reach::Reachable
+                    && let Some(line) = unreached_provider_here(account)
+                {
+                    eprintln!("{}", skipped_line(&connection.id, &line));
+                    waiting = waiting.or_wait(AccountPick::Unreached { line });
+                    continue;
+                }
                 return AccountPick::Account {
                     connection: connection.id.clone(),
                     account: Box::new(account.clone()),
                 };
             }
-            Some(until_ms) => waiting = earlier(waiting, until_ms),
+            Some(until_ms) => waiting = waiting.or_wait(AccountPick::Paused { until_ms }),
         }
     }
+    assert!(reach == Reach::Reachable || !matches!(waiting, AccountPick::Unreached { .. }));
     waiting
 }
 
-/// Keeps the earlier of two waits. Takes the wait so far, a non-pause pick for none,
-/// and another pause's end. Returns [`AccountPick::Paused`] with the earlier end.
-fn earlier(waiting: AccountPick, until_ms: i64) -> AccountPick {
-    match waiting {
-        AccountPick::Paused { until_ms: end } => AccountPick::Paused {
-            until_ms: end.min(until_ms),
-        },
-        _ => AccountPick::Paused { until_ms },
-    }
+/// The engine log line for a pool member a read-only pick passed over: its connection id and
+/// the owner's line, which names only the provider's host and port, so no key, URL path or
+/// account detail reaches the log. Inputs: the connection id and the line. Output: the line.
+fn skipped_line(connection: &CredentialRef, line: &str) -> String {
+    format!(
+        "read_only_pick_skipped connection={} {line}",
+        connection.as_str()
+    )
 }
 
 /// Picks the first member of `pool` that `harness` can use, in member order,
@@ -286,8 +350,20 @@ impl SettingsResolver {
 
     /// The project's folder and the account `harness` would run on, or
     /// `None` when the project has no plain folder yet or the settings cannot
-    /// be read.
+    /// be read. Probes no provider: [`Self::resolve_with`] under [`Reach::Unprobed`].
     pub fn resolve(&self, project: &str, harness: &str) -> Option<(PathBuf, AccountPick)> {
+        self.resolve_with(project, harness, Reach::Unprobed)
+    }
+
+    /// [`Self::resolve`] under the reach rule `reach`. Takes the project id, the harness id
+    /// and the rule. Returns the folder and the pick, which under [`Reach::Reachable`] skips
+    /// a member whose loopback provider refuses connects, or `None` as [`Self::resolve`].
+    pub fn resolve_with(
+        &self,
+        project: &str,
+        harness: &str,
+        reach: Reach,
+    ) -> Option<(PathBuf, AccountPick)> {
         CredentialRef::new(project).ok()?;
         let database = self.engine();
         let folder = database
@@ -317,11 +393,11 @@ impl SettingsResolver {
             .ok()?,
             None => Choice::default(),
         };
-        let pick = pick_scheduled(
+        let pick = scheduled_pick(
             &access,
             project,
             harness,
-            |connection| {
+            &|connection| {
                 database.as_ref().is_some_and(|database| {
                     match managed_sign_in(database, connection) {
                         Ok(_) => true,
@@ -329,7 +405,7 @@ impl SettingsResolver {
                     }
                 })
             },
-            |connection| {
+            &|connection| {
                 database
                     .as_ref()
                     .and_then(|database| {
@@ -338,6 +414,7 @@ impl SettingsResolver {
                     .flatten()
             },
             &choice,
+            reach,
         );
         Some((folder, pick))
     }
@@ -350,12 +427,26 @@ impl SettingsResolver {
     /// every call. Returns [`AccountPick::NeedsPool`] for an unknown pool or
     /// unreadable settings, [`AccountPick::Paused`] with the earliest end when
     /// only paused or held members fit, else [`AccountPick::NoUsableAccount`]
-    /// when none fits.
+    /// when none fits. Probes no provider.
     pub fn pool_pick(
         &self,
         project: &str,
         pool: &CredentialRef,
         harnesses: &[ResearchHarness],
+    ) -> AccountPick {
+        self.pool_pick_with(project, pool, harnesses, Reach::Unprobed)
+    }
+
+    /// [`Self::pool_pick`] under the reach rule `reach`. Takes the project id, the pool, the
+    /// installed harnesses and the rule. Returns the pick, which under [`Reach::Reachable`]
+    /// skips a member whose loopback provider refuses connects and is
+    /// [`AccountPick::Unreached`] when only such members could run.
+    pub fn pool_pick_with(
+        &self,
+        project: &str,
+        pool: &CredentialRef,
+        harnesses: &[ResearchHarness],
+        reach: Reach,
     ) -> AccountPick {
         let Ok(config) = crate::config::resolve_config(&self.global, &self.project) else {
             return AccountPick::NeedsPool;
@@ -397,6 +488,7 @@ impl SettingsResolver {
                 &signed_in,
                 &paused_until,
                 &choice,
+                reach,
             ) {
                 pick @ AccountPick::Account { .. } => {
                     assert!(
@@ -404,8 +496,7 @@ impl SettingsResolver {
                     );
                     return pick;
                 }
-                AccountPick::Paused { until_ms } => waiting = earlier(waiting, until_ms),
-                AccountPick::NeedsPool | AccountPick::NoUsableAccount => {}
+                pick => waiting = waiting.or_wait(pick),
             }
         }
         waiting

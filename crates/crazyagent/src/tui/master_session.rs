@@ -1352,7 +1352,8 @@ impl State {
                 )
                 .into();
             }
-            OwnerResponse::OutcomeUnknown { operation_id } => {
+            OwnerResponse::OutcomeUnknown { operation_id }
+            | OwnerResponse::InProgress { operation_id } => {
                 if !retained || !operation.is_some_and(|operation| operation.0 == operation_id) {
                     return Err("Master unknown outcome lost original identity".into());
                 }

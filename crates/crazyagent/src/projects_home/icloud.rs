@@ -1,4 +1,4 @@
-use super::intake::COPY_BOUNDS;
+use super::intake::{CopyBounds, FORCED_COPY_BOUNDS};
 use super::{holds_owner_home, owner_home, path_text, real_folder, refused};
 use crate::engine::EngineError;
 use serde::{Deserialize, Serialize};
@@ -98,11 +98,17 @@ impl Downloads {
     /// Takes the slot for a new download. Output: the claim, which cancels the download and
     /// frees the slot when dropped, or `icloud_download_busy` while another one runs.
     pub fn claim(&self) -> Result<Claim<'_>, EngineError> {
+        self.claim_for(Arc::new(Download::default()))
+    }
+
+    /// Takes the slot for a download whose state another holder reads too, an intake job;
+    /// one already cancelled stops at its first check. Input: the download. Output: as
+    /// [`Downloads::claim`].
+    pub fn claim_for(&self, download: Arc<Download>) -> Result<Claim<'_>, EngineError> {
         let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.is_some() {
             return Err(refused("icloud_download_busy"));
         }
-        let download = Arc::new(Download::default());
         *slot = Some(Arc::clone(&download));
         assert!(slot.is_some());
         Ok(Claim {
@@ -168,9 +174,9 @@ pub struct Placeholders {
 /// Lists the placeholders under a folder without following links and without listing a
 /// placeholder folder, which a process that may not download cannot read; a folder that is
 /// a placeholder itself is the one placeholder found.
-/// Input: the real folder. Output: the placeholders, `home_copy_too_large` past the copy
-/// bounds, or the code of the read that failed.
-pub fn placeholders(root: &Path) -> Result<Placeholders, EngineError> {
+/// Inputs: the real folder and the add's copy bounds. Output: the placeholders,
+/// `home_copy_too_large` past those bounds, or the code of the read that failed.
+pub fn placeholders(root: &Path, bounds: CopyBounds) -> Result<Placeholders, EngineError> {
     let top = fs::symlink_metadata(root).map_err(|e| read_failed(&e))?;
     if dataless(&top) {
         return Ok(Placeholders {
@@ -184,7 +190,7 @@ pub fn placeholders(root: &Path) -> Result<Placeholders, EngineError> {
     while let Some((folder, depth)) = stack.pop() {
         for entry in fs::read_dir(&folder).map_err(|e| read_failed(&e))? {
             entries += 1;
-            if entries > COPY_BOUNDS.entries {
+            if entries > bounds.entries {
                 return Err(refused("home_copy_too_large"));
             }
             let path = entry.map_err(|e| read_failed(&e))?.path();
@@ -193,7 +199,7 @@ pub fn placeholders(root: &Path) -> Result<Placeholders, EngineError> {
                 found.largest_bytes = found.largest_bytes.max(metadata.len());
                 found.paths.push(path);
             } else if metadata.is_dir() && !metadata.file_type().is_symlink() {
-                if depth + 1 > COPY_BOUNDS.depth {
+                if depth + 1 > bounds.depth {
                     return Err(refused("home_copy_too_large"));
                 }
                 stack.push((path, depth + 1));
@@ -208,13 +214,26 @@ pub fn placeholders(root: &Path) -> Result<Placeholders, EngineError> {
 /// Downloads every placeholder in a folder: asks macOS once per placeholder through
 /// `brctl download`, in batches, from a second thread, while this one lists the folder every
 /// `POLL_EVERY` until no placeholder is left and records progress as files land.
-/// Inputs: the owner's folder text and the claimed download. Output: how many placeholders
-/// were downloaded, `home_icloud_not_downloaded` when cancelled, when no file arrives for
+/// Inputs: the owner's folder text, the claimed download and the copy bounds of the add it
+/// serves ([`super::add_bounds`]). Output: how many placeholders were downloaded,
+/// `home_icloud_not_downloaded` when cancelled, when no file arrives for
 /// `STALL_MAX` plus the largest file's time at 1 MiB/s, after `DOWNLOAD_TIME_MAX` or when
-/// brctl fails, `home_copy_too_large` past the copy bounds, `home_permission_denied` when
+/// brctl fails, `home_copy_too_large` past those bounds, `home_permission_denied` when
 /// macOS keeps the folder from CrazyAgent, or the folder check's code. The folder's files are
 /// never moved or changed; downloads macOS already started may still finish after a stop.
-pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
+pub fn download(path: &str, download: &Download, bounds: CopyBounds) -> Result<u64, EngineError> {
+    assert!(bounds.entries <= FORCED_COPY_BOUNDS.entries);
+    assert!(bounds.depth <= FORCED_COPY_BOUNDS.depth);
+    let root = folder(path)?;
+    let list = |root: &Path| placeholders(root, bounds);
+    run(&root, download, &request, &list, bounds, POLL_EVERY)
+}
+
+/// The real folder a download or an intake job may work on, checked without reading its
+/// files. Input: the owner's folder text. Output: the real folder, or
+/// `icloud_path_invalid`, `icloud_folder_missing` or `icloud_folder_unsafe` for a folder
+/// that holds the owner's home.
+pub fn folder(path: &str) -> Result<PathBuf, EngineError> {
     path_text(path, "icloud_path_invalid")?;
     let root = real_folder(
         Path::new(path),
@@ -224,7 +243,8 @@ pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
     if holds_owner_home(&root, &owner_home()?) {
         return Err(refused("icloud_folder_unsafe"));
     }
-    run(&root, download, &request, &placeholders, POLL_EVERY)
+    assert!(root.is_absolute());
+    Ok(root)
 }
 
 /// Asks macOS for one batch of placeholders. Inputs: the batch and a stop check that ends
@@ -239,13 +259,14 @@ type List<'a> = dyn Fn(&Path) -> Result<Placeholders, EngineError> + Sync + 'a;
 /// test can stand in for iCloud. A second thread asks for the batches in order while this one
 /// lists the folder every `poll` and records progress, because an ask from the engine can take
 /// seconds and files land while later batches still wait to be asked. Inputs: the real
-/// folder, the download, the ask, the listing and the time between listings. Output: as
-/// [`download`]; the asking thread has ended when it returns.
+/// folder, the download, the ask, the listing, the copy bounds and the time between
+/// listings. Output: as [`download`]; the asking thread has ended when it returns.
 fn run(
     root: &Path,
     download: &Download,
     ask: &Ask<'_>,
     list: &List<'_>,
+    bounds: CopyBounds,
     poll: Duration,
 ) -> Result<u64, EngineError> {
     assert!(root.is_absolute());
@@ -260,7 +281,7 @@ fn run(
             move || send(queue, ask, stop, failed)
         };
         scope.spawn(asking);
-        let outcome = count(root, download, list, poll, &batches, &failed);
+        let outcome = count(root, download, list, bounds, poll, &batches, &failed);
         ended.store(true, Ordering::SeqCst);
         drop(batches);
         outcome
@@ -271,12 +292,14 @@ fn run(
 
 /// Lists the folder every `poll`, records how many placeholders it has seen and how many of
 /// them are on this Mac now, and queues each placeholder for the asking thread once.
-/// Inputs: the real folder, the download, the listing, the poll, the queue and the asking
-/// thread's failure slot. Output: as [`download`], the asking thread's failure included.
+/// Inputs: the real folder, the download, the listing, the copy bounds, the poll, the queue
+/// and the asking thread's failure slot. Output: as [`download`], the asking thread's
+/// failure included.
 fn count(
     root: &Path,
     download: &Download,
     list: &List<'_>,
+    bounds: CopyBounds,
     poll: Duration,
     batches: &mpsc::Sender<Vec<PathBuf>>,
     failed: &Mutex<Option<EngineError>>,
@@ -296,7 +319,7 @@ fn count(
             .cloned()
             .collect();
         let total = asked.len() as u64;
-        if total > COPY_BOUNDS.entries {
+        if total > bounds.entries {
             return Err(refused("home_copy_too_large"));
         }
         let done = total.saturating_sub(left.paths.len() as u64);

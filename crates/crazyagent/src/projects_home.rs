@@ -1,5 +1,6 @@
 pub mod icloud;
 mod intake;
+pub mod job;
 mod layout;
 mod move_project;
 #[cfg(all(test, unix))]
@@ -9,7 +10,7 @@ mod watch;
 
 pub use intake::{
     AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, OldSource, Placed,
-    copy_tree, folder_size, move_by_copy, verify_tree,
+    Tally, add_left, copy_tree, folder_size, move_by_copy, sweep_staging, verify_tree,
 };
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
@@ -50,6 +51,14 @@ CREATE TABLE IF NOT EXISTS projects_home_project_move (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     mode TEXT NOT NULL CHECK(mode IN ('move', 'copy'))
+);
+CREATE TABLE IF NOT EXISTS projects_home_add (
+    request TEXT PRIMARY KEY CHECK(length(request) BETWEEN 1 AND 128),
+    owner TEXT NOT NULL CHECK(length(owner) BETWEEN 1 AND 256),
+    source TEXT NOT NULL CHECK(length(CAST(source AS BLOB)) BETWEEN 1 AND 1024),
+    destination TEXT NOT NULL CHECK(length(CAST(destination AS BLOB)) BETWEEN 1 AND 1024),
+    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy')),
+    ended TEXT CHECK(ended IS NULL OR length(ended) BETWEEN 1 AND 64)
 );
 CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
@@ -468,8 +477,38 @@ pub fn same_volume(folder: &Path, home: &Path) -> Option<bool> {
 /// a project uses, and a Copy of a folder that is itself a linked worktree or
 /// submodule checkout. Each override lifts exactly one soft refusal for this add:
 /// `worktrees` the git worktree links, `linked_checkout` the linked checkout, and
-/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`].
+/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`]. A Copy's linked checkout
+/// is checked again and a Move's git worktree links last, after every refusal of
+/// [`check_add`], so a source still only in iCloud is not copied or moved past them.
 pub fn plan_add(
+    home: &Path,
+    engine_root: &Path,
+    source: &str,
+    mode: AddMode,
+    overrides: &[AddOverride],
+    registered: &[Registered],
+) -> Result<AddPlan, EngineError> {
+    let plan = check_add(home, engine_root, source, mode, overrides, registered)?;
+    if copy_linked(plan.source(), mode, overrides) {
+        return Err(refused("home_copy_linked_checkout"));
+    }
+    let asked_past = overrides.contains(&AddOverride::Worktrees);
+    if mode == AddMode::Move && !asked_past && git_links(plan.source()) {
+        return Err(refused("home_move_worktrees"));
+    }
+    assert!(plan.source().is_absolute());
+    assert_eq!(plan.destination().parent(), Some(home));
+    Ok(plan)
+}
+
+/// Checks bringing an existing folder into the projects home without reading inside it, so
+/// it can run before the folder's iCloud files are on this Mac: every refusal of
+/// [`plan_add`] but a Move's git worktree links, which reads the folder's git data, and a
+/// Copy's linked checkout of a source that is itself an iCloud placeholder, whose entries
+/// only its download can read. It reads only the source's own path and metadata, its `.git`
+/// entry's type otherwise, and the home. Inputs: as [`plan_add`]. Output: the plan, or the
+/// refusal.
+pub fn check_add(
     home: &Path,
     engine_root: &Path,
     source: &str,
@@ -499,27 +538,42 @@ pub fn plan_add(
         return Err(refused("home_source_hidden"));
     }
     folder_name(name).map_err(|_| refused("home_source_name"))?;
-    if mode == AddMode::Move {
-        if !overrides.contains(&AddOverride::Worktrees) && git_links(&real) {
-            return Err(refused("home_move_worktrees"));
-        }
-        if registered.iter().any(|project| in_use(&real, project)) {
-            return Err(refused("home_move_project"));
-        }
+    if mode == AddMode::Move && registered.iter().any(|project| in_use(&real, project)) {
+        return Err(refused("home_move_project"));
     }
-    if mode == AddMode::Copy
-        && !overrides.contains(&AddOverride::LinkedCheckout)
-        && linked_checkout(&real)
-    {
+    let top = std::fs::symlink_metadata(&real);
+    let placeholder = top.is_ok_and(|metadata| icloud::dataless(&metadata));
+    if !placeholder && copy_linked(&real, mode, overrides) {
         return Err(refused("home_copy_linked_checkout"));
     }
+    let bounds = add_bounds(overrides);
+    let destination = destination(home, name)?;
+    assert!(real.is_absolute());
+    assert!(!destination.starts_with(&real));
+    Ok(AddPlan::new(real, destination, mode, bounds))
+}
+
+/// True when a Copy of `folder` is refused as a [`linked_checkout`] the owner did not go
+/// past. Inputs: the real folder, the mode and the add's overrides. Output: the answer.
+fn copy_linked(folder: &Path, mode: AddMode, overrides: &[AddOverride]) -> bool {
+    assert!(folder.is_absolute());
+    let asked_past = overrides.contains(&AddOverride::LinkedCheckout);
+    assert!(!asked_past || mode == AddMode::Copy);
+    mode == AddMode::Copy && !asked_past && linked_checkout(folder)
+}
+
+/// The bounds an add's download listing and copy work within: [`FORCED_COPY_BOUNDS`] once
+/// the owner went past `too_large`, else [`COPY_BOUNDS`]. Input: the add's overrides.
+/// Output: the bounds.
+pub fn add_bounds(overrides: &[AddOverride]) -> CopyBounds {
     let bounds = if overrides.contains(&AddOverride::TooLarge) {
         FORCED_COPY_BOUNDS
     } else {
         COPY_BOUNDS
     };
-    let destination = destination(home, name)?;
-    Ok(AddPlan::new(real, destination, mode, bounds))
+    assert!(bounds.entries >= COPY_BOUNDS.entries);
+    assert!(bounds.depth >= COPY_BOUNDS.depth);
+    bounds
 }
 
 /// Checks a name for a folder directly inside the projects home. This one rule
@@ -1105,8 +1159,10 @@ pub fn found(
 }
 
 /// Creates the projects home table, the table that holds a home move recorded
-/// before its folders move and the table that holds each Delete everything planned
-/// and not yet settled, when the engine database opens.
+/// before its folders move, the table that holds each add from its plan until its record
+/// (or, after an engine stop cut it short, how it ended until the owner dismisses it) and
+/// the table that holds each Delete everything planned and not yet settled, when the
+/// engine database opens; a database from before gains the tables it lacks.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {

@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, bridgeCall, closedPort, owner, required, serveApp, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, STEP_MS, bridgeCall, closedPort, freeLowPort, owner, required, serveApp, stop, value } from "./e2e-harness.mjs";
 import { BUILD_MS, FOLDER, GIT, IDE_FAILED, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, SETUP_MS, WORKBENCH_MS, git, ideAnswers, input, onboard, stack, terminalRunner, workbench, workbenchUrl } from "./ide-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -50,7 +50,7 @@ function listening(port) {
  * included. The IDE sandbox has no network, so the IDE reaches it only through the engine.
  * Input: the folder. Output: the daemon process and the URL of one served repository. */
 async function gitDaemon(served) {
-  const port = await closedPort();
+  const port = await freeLowPort();
   const daemon = spawn(GIT, ["daemon", "--reuseaddr", "--listen=127.0.0.1", `--port=${port}`, `--base-path=${served}`, "--export-all", "--enable=receive-pack", "--informative-errors", served], {
     env: { PATH: "/usr/bin:/bin", HOME: served, GIT_CONFIG_NOSYSTEM: "1" },
     stdio: ["pipe", "ignore", "ignore"],

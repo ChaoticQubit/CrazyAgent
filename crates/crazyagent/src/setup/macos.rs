@@ -129,6 +129,26 @@ impl Installer for MacInstaller {
         self.pinned.program(name)
     }
 
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+        self.pinned.lookup_program(name)
+    }
+
+    fn fix_target(
+        &self,
+        missing: &crate::tools::Missing,
+    ) -> Option<crate::tools::permission_fix::Target> {
+        self.pinned.fix_target(missing)
+    }
+
+    fn fix_permissions(
+        &self,
+        dep: Dependency,
+        confirmed: &str,
+        recursive: bool,
+    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+        self.pinned.fix_permissions(dep, confirmed, recursive)
+    }
+
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {
         let Pin::Homebrew { formula } = pin else {
             return self.pinned.install(dep, pin);

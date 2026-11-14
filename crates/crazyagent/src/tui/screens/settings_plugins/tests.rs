@@ -22,6 +22,7 @@ fn skill(name: &str, enabled: bool) -> SkillView {
         enabled,
         on_here: None,
         source: format!("/Users/mira/Skills/{name}"),
+        origin: "Added by you".into(),
         folder: format!("/private/tmp/engine/skills/{name}"),
         version: 2,
         refused: None,
@@ -56,11 +57,17 @@ fn stdio(command: &str, args: &[&str]) -> ServerSpec {
 }
 
 fn lists() -> (Vec<SkillView>, Vec<ServerView>) {
+    let mut imported = skill("linear-method", false);
+    imported.source = "/Users/mira/.claude/skills/linear-method".into();
+    imported.origin = "Imported from Claude Code".into();
+    let mut packed = skill("release-notes", true);
+    packed.source = "/Users/mira/Library/Application Support/CrazyAgent/engine/setup/bundled/skills/release-notes".into();
+    packed.origin = "Default pack: release-notes".into();
     let skills = vec![
         skill("frontend-design", true),
         skill("tiger-style", true),
-        skill("linear-method", false),
-        skill("release-notes", true),
+        imported,
+        packed,
     ];
     let mut postgres = server(
         "postgres-local",
@@ -112,6 +119,36 @@ fn plugin_frames_match_the_design() {
             &render(&mut shell, width, height),
             &[],
             None,
+        );
+    }
+}
+
+#[test]
+fn each_skill_row_says_where_the_skill_came_from_before_its_folder() {
+    for (width, height) in [(80, 24), (120, 36)] {
+        let (skills, servers) = lists();
+        let mut shell = Shell::with(
+            plugin_ctx(width, height),
+            Box::new(Plugins::with(skills, servers)),
+        );
+        let rows = render(&mut shell, width, height);
+        let row = |name: &str| {
+            rows.iter()
+                .find(|row| row.contains(&format!(" {name} ")))
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert!(
+            row("frontend-design").contains("Added by you  ~/Skills/frontend-design"),
+            "{width}: {rows:?}"
+        );
+        assert!(
+            row("linear-method").contains("Imported from Claude Code  ~/.claude/skill"),
+            "{width}: {rows:?}"
+        );
+        assert!(
+            row("release-notes").contains("Default pack: release-notes  ~/Library/"),
+            "the label comes first, so a cut keeps it: {width}: {rows:?}"
         );
     }
 }
@@ -872,6 +909,11 @@ fn the_skill_page_renders_skill_md_and_files_and_switches_the_skill() {
         lines.contains(&"From ~/Skills/frontend-design".to_owned()),
         "{lines:?}"
     );
+    let from = lines
+        .iter()
+        .position(|line| line == "From ~/Skills/frontend-design")
+        .unwrap();
+    assert_eq!(lines[from - 1], "Added by you", "{lines:?}");
     assert!(lines.iter().any(|line| line == "Steps"), "{lines:?}");
     assert!(lines.iter().any(|line| line.contains("Read the brief")));
     assert!(lines.iter().any(|line| line.contains("npm run build")));
@@ -1344,6 +1386,11 @@ fn a_skill_agents_no_longer_get_says_why_on_the_list_and_its_page() {
     );
     assert!(
         rows.iter()
+            .any(|row| row.contains("Added by you  Agents don't get this skill.")),
+        "a refused skill still says where it came from: {rows:?}"
+    );
+    assert!(
+        rows.iter()
             .any(|row| row.contains("tiger-style") && row.contains("~/Skills/tiger-style")),
         "a skill agents get still shows its folder: {rows:?}"
     );
@@ -1433,4 +1480,192 @@ fn every_plugins_hint_stays_on_the_bar_at_80_by_24_with_the_last_server_in_view(
         "{}",
         rows.join("\n")
     );
+}
+
+#[test]
+fn a_check_while_context_mode_is_set_up_reads_the_setting_up_words() {
+    assert_eq!(
+        plugin_plain("server_setting_up"),
+        "context-mode is still being set up. Check again in a minute."
+    );
+    for code in [
+        "server_install_failed",
+        "server_npm_missing",
+        "server_version_unpinned",
+        "server_installs_busy",
+    ] {
+        assert_eq!(
+            Some(plugin_plain(code)),
+            crate::plugins::plain_problem(code),
+            "the TUI shows the engine's words for {code}"
+        );
+    }
+}
+
+fn hook(plugin: &str, event: &str, matcher: Option<&str>, enabled: bool) -> HookView {
+    HookView {
+        id: format!("hook-{plugin}-{event}-{}", matcher.unwrap_or("all")),
+        name: format!("{plugin}/{event}/1"),
+        plugin: plugin.into(),
+        event: event.into(),
+        matcher: matcher.map(str::to_owned),
+        command: format!("node hooks/{}.mjs", event.to_lowercase()),
+        scope: Scope::Global,
+        scope_label: Scope::Global.label().into(),
+        enabled,
+        on_here: None,
+        follows: Some(plugin.into()),
+        source: format!("/private/tmp/engine/setup/pack/{plugin}"),
+        version: 2,
+    }
+}
+
+fn pack_hooks() -> Vec<HookView> {
+    vec![
+        hook("caveman", "SessionStart", None, true),
+        hook("caveman", "UserPromptSubmit", None, true),
+        hook("caveman", "SubagentStart", None, true),
+        hook("caveman", "SessionEnd", None, true),
+        hook("context-mode", "PreToolUse", Some("Bash"), true),
+        hook("context-mode", "PreToolUse", Some("Read"), false),
+        hook("context-mode", "SessionStart", None, true),
+    ]
+}
+
+fn hooks_arrive(screen: &mut Plugins, hooks: Vec<HookView>, ctx: &mut Ctx) {
+    screen.hooks_waiting = true;
+    let event = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::Hooks(None, Ok(hooks)),
+    ))));
+    screen.arrive(&event, ctx);
+}
+
+fn body_text(screen: &mut Plugins, ctx: &Ctx) -> String {
+    screen
+        .body(118, ctx)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn hooks_group_per_plugin_and_scope_counting_distinct_events() {
+    let mut hooks = pack_hooks();
+    let mut project = hook("caveman", "SessionStart", None, true);
+    project.scope = Scope::Project {
+        project_id: ProjectId::new("app").unwrap(),
+    };
+    hooks.push(project);
+    let groups = hook_groups(&hooks);
+    let shape: Vec<(&str, usize, Vec<usize>)> = groups
+        .iter()
+        .map(|group| (group.plugin.as_str(), group.events, group.hooks.clone()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("caveman", 4, vec![0, 1, 2, 3]),
+            ("context-mode", 2, vec![4, 5, 6]),
+            ("caveman", 1, vec![7]),
+        ],
+        "one group per plugin and scope, in the engine's order, counting each event once"
+    );
+    assert_eq!(groups[0].follows, vec!["caveman".to_owned()]);
+    let on = |hook: &HookView| hook.enabled;
+    assert_eq!(hook_group_state(&hooks, &groups[0], on), HookGroupState::On);
+    assert_eq!(
+        hook_group_state(&hooks, &groups[1], on),
+        HookGroupState::Partly
+    );
+    assert_eq!(HookGroupState::Partly.word(), "Partly on");
+    assert_eq!(hook_group_line(&groups[0]), "4 events, runs while caveman is on");
+    assert_eq!(hook_group_line(&groups[2]), "1 event, runs while caveman is on");
+}
+
+#[test]
+fn the_hooks_list_shows_one_row_per_plugin_and_enter_shows_its_events() {
+    let mut ctx = plugin_ctx(120, 36);
+    let mut screen = Plugins::with(Vec::new(), Vec::new());
+    hooks_arrive(&mut screen, pack_hooks(), &mut ctx);
+    let folded = body_text(&mut screen, &ctx);
+    assert!(
+        folded.contains("Hooks  2"),
+        "the heading counts plugins, not hooks:\n{folded}"
+    );
+    assert_eq!(
+        folded.matches("caveman").count(),
+        2,
+        "one caveman row, naming the skill it runs with:\n{folded}"
+    );
+    assert!(folded.contains("4 events, runs while caveman is on"), "{folded}");
+    assert!(folded.contains("Partly on"), "{folded}");
+    assert!(
+        !folded.contains("SubagentStart"),
+        "events stay folded until asked for:\n{folded}"
+    );
+    screen.key(&Key::Enter, &mut ctx);
+    let open = body_text(&mut screen, &ctx);
+    for event in ["SessionStart", "UserPromptSubmit", "SubagentStart", "SessionEnd"] {
+        assert!(open.contains(event), "{event} shows under caveman:\n{open}");
+    }
+    assert!(
+        open.contains("node hooks/subagentstart.mjs"),
+        "each event shows its command:\n{open}"
+    );
+    assert!(
+        !open.contains("Bash: node hooks/pretooluse.mjs"),
+        "context-mode stays folded:\n{open}"
+    );
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(!body_text(&mut screen, &ctx).contains("SubagentStart"));
+}
+
+#[test]
+fn space_on_a_plugin_row_sets_every_hook_and_on_an_event_row_sets_that_hook() {
+    let mut ctx = plugin_ctx(120, 36);
+    let mut screen = Plugins::with(Vec::new(), Vec::new());
+    hooks_arrive(&mut screen, pack_hooks(), &mut ctx);
+    screen.key(&Key::Char(' '), &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(
+            matches!(*job, SettingsJob::Plugin(PluginChange::SetHooks { ref ids, enabled: false }) if ids.len() == 4 && ids[0] == "hook-caveman-SessionStart-all"),
+            "turning the caveman row off turns its four hooks off"
+        ),
+        other => panic!("change expected, got {other:?}"),
+    }
+    let done = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::PluginChanged(Ok(None)),
+    ))));
+    screen.arrive(&done, &mut ctx);
+    assert_eq!(ctx.message().unwrap().lead, "caveman hooks are off.");
+    while ctx.next_request().is_some() {}
+    screen.waiting = false;
+    screen.key(&Key::Down, &mut ctx);
+    screen.key(&Key::Char(' '), &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(
+            matches!(*job, SettingsJob::Plugin(PluginChange::SetHooks { ref ids, enabled: true }) if ids == &vec!["hook-context-mode-PreToolUse-Read".to_owned()]),
+            "turning a partly on row on turns on only the hooks that are off"
+        ),
+        other => panic!("change expected, got {other:?}"),
+    }
+    screen.arrive(&done, &mut ctx);
+    while ctx.next_request().is_some() {}
+    screen.waiting = false;
+    screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Down, &mut ctx);
+    screen.key(&Key::Char(' '), &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(
+            matches!(*job, SettingsJob::Plugin(PluginChange::SetHook { ref id, enabled: false }) if id == "hook-context-mode-PreToolUse-Bash"),
+            "an event row still turns its one hook off"
+        ),
+        other => panic!("change expected, got {other:?}"),
+    }
 }

@@ -213,6 +213,14 @@ pub enum OwnerMutation {
     InstallDependency {
         name: crate::setup::Dependency,
     },
+    FixToolPermissions {
+        name: crate::setup::Dependency,
+        tree: String,
+        recursive: bool,
+    },
+    SetRefusedTool {
+        choice: crate::setup::RefusedTool,
+    },
     SetProjectsHome {
         path: String,
     },
@@ -269,6 +277,9 @@ pub enum OwnerMutation {
     },
     SetQuitSettings {
         settings: crate::quit_settings::QuitSettings,
+    },
+    SetProviderRetry {
+        choice: crate::provider_retry::ProviderRetry,
     },
     SetMasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,
@@ -478,6 +489,20 @@ impl OwnerMutation {
             Self::InstallDependency { name } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Install { name: *name },
             },
+            Self::FixToolPermissions {
+                name,
+                tree,
+                recursive,
+            } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::FixPermissions {
+                    name: *name,
+                    tree: tree.clone(),
+                    recursive: *recursive,
+                },
+            },
+            Self::SetRefusedTool { choice } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::SetRefusedTool { choice: *choice },
+            },
             Self::RemovePackEntry { id, version } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Remove {
                     id: id.clone(),
@@ -598,6 +623,7 @@ impl OwnerMutation {
             Self::SetQuitSettings { settings } => Command::OwnerAgentQuit {
                 settings: *settings,
             },
+            Self::SetProviderRetry { choice } => Command::OwnerProviderRetry { choice: *choice },
             Self::SetMasterStepSettings { settings } => Command::OwnerMasterSteps {
                 settings: *settings,
             },
@@ -812,6 +838,7 @@ pub enum OwnerRead {
     SandboxSettings,
     CleanupSettings,
     QuitSettings,
+    ProviderRetry,
     MasterStepSettings,
     MasterTimeSettings,
     MasterFrameSettings,
@@ -917,6 +944,7 @@ impl OwnerRead {
             | Self::SandboxSettings
             | Self::CleanupSettings
             | Self::QuitSettings
+            | Self::ProviderRetry
             | Self::MasterStepSettings
             | Self::MasterTimeSettings
             | Self::MasterFrameSettings
@@ -1367,6 +1395,9 @@ pub enum OwnerData {
     QuitSettings {
         settings: crate::quit_settings::QuitSettings,
     },
+    ProviderRetry {
+        settings: crate::provider_retry::ProviderRetryView,
+    },
     MasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,
     },
@@ -1497,10 +1528,15 @@ pub struct OwnerReadReply {
     pub data: OwnerData,
 }
 
+/// The engine's answer to one owner request. `InProgress` names a request id the engine is
+/// still running from an earlier send: a resend or a check of it answers that, plans nothing
+/// and touches no disk, and the client keeps the change, never resends it while that holds,
+/// and checks again later.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerResponse {
     OutcomeUnknown { operation_id: RequestId },
+    InProgress { operation_id: RequestId },
     Applied { operation: OwnerApplied },
     Read { state: OwnerReadReply },
     Committed { operation: OwnerApplied },

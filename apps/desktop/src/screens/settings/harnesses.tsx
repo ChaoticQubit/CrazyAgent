@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { harnessCatalog, type HarnessAccountKind, type HarnessEntry, type Result } from "../../api";
 import { openLink } from "../../api-projects";
 import {
@@ -13,6 +13,7 @@ import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode,
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
 import { SettingRow } from "../../ui/setting";
+import { ProviderRetrySettings } from "./provider-retry";
 import "../project/projects.css";
 
 const KIND_LABEL: Record<HarnessAccountKind, string> = {
@@ -443,13 +444,13 @@ function UpdateSettingsRows({ settings, onSaved }: { settings: UpdateSettings; o
 }
 
 /** The harness list as a pure view of the catalog read, with a Check again action, the update
- * settings when the engine has them, and the one Install Node.js offer while a listed harness
- * needs Node. Inputs: the catalog read, when it was checked, the recheck action, the settings and
- * their save and read failure, the Node.js offer with its install, and the rows' re-read count and
- * read report. Output: the page. */
-export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, onSettings, settingsError, node = NO_NODE, nodeBusy = false, nodeProblem, onInstallNode, again = 0, onRead, onNodeAgain }: {
+ * settings when the engine has them, the retry setting's section, and the one Install Node.js
+ * offer while a listed harness needs Node. Inputs: the catalog read, when it was checked, the
+ * recheck action, the settings and their save and read failure, the retry section, the Node.js
+ * offer with its install, and the rows' re-read count and read report. Output: the page. */
+export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, onSettings, settingsError, retry = null, node = NO_NODE, nodeBusy = false, nodeProblem, onInstallNode, again = 0, onRead, onNodeAgain }: {
   catalog: Loaded<HarnessEntry[]>; checkedAt?: string; onCheck: () => void; settings?: UpdateSettings | null; onSettings?: (settings: UpdateSettings) => void;
-  settingsError?: { message: string; onRetry: () => void }; node?: NodeOffer; nodeBusy?: boolean; nodeProblem?: string; onInstallNode?: () => void;
+  settingsError?: { message: string; onRetry: () => void }; retry?: ReactNode; node?: NodeOffer; nodeBusy?: boolean; nodeProblem?: string; onInstallNode?: () => void;
   again?: number; onRead?: (id: string, versions: HarnessVersions | null) => void; onNodeAgain?: () => void;
 }) {
   return <div className="stack">
@@ -460,6 +461,7 @@ export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, on
     </div>
     {settingsError && <LoadError message={settingsError.message} onRetry={settingsError.onRetry} />}
     {settings !== null && onSettings && <UpdateSettingsRows settings={settings} onSaved={onSettings} />}
+    {retry}
     {node.kind !== "none" && onInstallNode && <span className="pj-row">
       {node.kind === "installing" && <span className="pj-small pj-secondary" role="status">{HARNESS_WORDS.installingNode}</span>}
       {node.kind === "failed" && <span className="pj-small pj-error">{node.reason}</span>}
@@ -550,6 +552,6 @@ export function Harnesses() {
   useEffect(() => { if (loaded.kind === "ok") setSettings(loaded.value); }, [loaded]);
   const settingsError = loaded.kind === "error" ? { message: failureCopy(loaded) ?? updateCopy("harness_update_settings_unreadable"), onRetry: reloadSettings } : undefined;
   return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)} settings={settings} onSettings={setSettings} settingsError={settingsError}
-    node={offer.node} nodeBusy={offer.busy} nodeProblem={offer.problem} onInstallNode={() => void offer.install()} again={offer.again} onRead={offer.onRead} onNodeAgain={offer.reread}
+    retry={<ProviderRetrySettings />} node={offer.node} nodeBusy={offer.busy} nodeProblem={offer.problem} onInstallNode={() => void offer.install()} again={offer.again} onRead={offer.onRead} onNodeAgain={offer.reread}
     onCheck={() => { reload(); offer.reread(); setCheckedAt(`at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`); }} />;
 }

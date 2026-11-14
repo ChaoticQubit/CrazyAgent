@@ -9,6 +9,7 @@ const { ProjectsHomeSettingsView, homePickProblem, homeMoveLine, sizedAsk } = aw
 const { GitHubSettingsView, GitHubAccountView } = await import("../src/screens/settings/github.tsx");
 const { GitHubSignIn } = await import("../src/screens/intake/clone.tsx");
 const { Icon } = await import("../src/ui/icon.tsx");
+const toolFixDialog = await import("../src/screens/intake/setup-step.tsx");
 
 const ok = (value) => ({ kind: "ok", value });
 const notReady = { kind: "not_ready" };
@@ -229,4 +230,43 @@ test("Move my projects waits for a size and names why a folder could not be meas
     { path: "/Users/mira/Work", bytes: null, sizeProblem: "Some files in that folder can't be read." });
   assert.deepEqual(sizedAsk("/Users/mira/Work", notReady), { path: "/Users/mira/Work", bytes: null, sizeProblem: "Measuring the folder isn't in this build." });
   assert.equal(sizedAsk("/Users/mira/Work", { kind: "error", code: "folder_size_unsafe", message: "That folder can't be measured." }).sizeProblem, "That folder can't be measured.");
+});
+
+const FIX = { tree: "/h/py", recursive: true, command: "chmod -R go-w '/h/py'" };
+const refused = (extra = {}) => ({ state: "refused", line: "graphify can't start: /h/g/bin/python3 is not used.", file: "/h/g/bin/python3", part: "/h/py/bin/python3.13", fix: FIX, ...extra });
+
+test("Settings, Pack reads a refused tool as Found, not used and offers Fix permissions beside Install tools", () => {
+  const markup = html(PackSettingsView, packProps(ok(setup({ refused_tool: "fix_button", dependencies: tools(present, present, refused()) })), { onFix: forbidden, onRefusedTool: forbidden }));
+  const row = rowOf(markup, "graphify");
+  assert.match(row, /Found, not used/);
+  assert.match(row, /graphify can&#x27;t start/);
+  assert.match(row, /<button[^>]*>(<svg[\s\S]*?<\/svg>)?Fix permissions<\/button>/);
+  assert.match(markup, /Install tools<\/button>/);
+  const failed = rowOf(html(PackSettingsView, packProps(ok(setup({ dependencies: tools(present, present, refused({ fix_failed: "The permissions could not be changed." })) })), { onFix: forbidden, onRefusedTool: forbidden })), "graphify");
+  assert.match(failed, /class="pj-error">The permissions could not be changed\./);
+  const command = rowOf(html(PackSettingsView, packProps(ok(setup({ refused_tool: "command_only", dependencies: tools(present, present, refused()) })), { onFix: forbidden, onRefusedTool: forbidden })), "graphify");
+  assert.doesNotMatch(command, /Fix permissions/);
+  assert.match(command, /<code>chmod -R go-w &#x27;\/h\/py&#x27;<\/code>/);
+});
+
+test("Settings, Pack picks what an unused tool offers, the fix button until the command only is chosen", () => {
+  const markup = (choice) => html(PackSettingsView, packProps(ok(setup({ refused_tool: choice, dependencies: tools(present, present, present) })), { onRefusedTool: forbidden }));
+  const fixButton = markup(undefined);
+  assert.match(fixButton, /<h3[^>]*>Unused tools<\/h3>/);
+  assert.match(fixButton, /<input type="radio" name="unused-tools" value="fix_button" checked=""/);
+  assert.match(fixButton, /Show a fix button \(recommended\)[\s\S]*Show the command only/);
+  assert.match(markup("command_only"), /<input type="radio" name="unused-tools" value="command_only" checked=""/);
+});
+
+test("the permission fix confirm names the tool, the tree and the command, and can't be cancelled while it starts", () => {
+  const { ToolFixDialog } = toolFixDialog;
+  const ask = { dependency: { name: "graphify", label: "Graphify command", state: refused() }, fix: FIX };
+  const idle = html(ToolFixDialog, { ask, pending: false, onCancel: forbidden, onConfirm: forbidden });
+  assert.match(idle, /Fix permissions for Graphify command\?/);
+  assert.match(idle, /from \/h\/py and everything in it/);
+  assert.match(idle, /<code>chmod -R go-w &#x27;\/h\/py&#x27;<\/code>/);
+  assert.match(idle, /<button(?![^>]*disabled)[^>]*>Cancel<\/button>/);
+  const starting = html(ToolFixDialog, { ask, pending: true, onCancel: forbidden, onConfirm: forbidden });
+  assert.match(starting, /<button[^>]*disabled=""[^>]*>Cancel<\/button>/);
+  assert.equal(html(ToolFixDialog, { ask: null, pending: false, onCancel: forbidden, onConfirm: forbidden }), "");
 });

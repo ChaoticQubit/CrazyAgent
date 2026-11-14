@@ -178,7 +178,7 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
       const on = pluginSwitch(skill, projectId);
       return <SettingLine key={skill.id} label={skill.name} changed={pluginChanged(skill, projectId)}
         shown={<SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]} onOpen={() => onOpen(skill)} />}
-        help={<><span>{skill.description}</span><span className="mono small">{homePath(skill.source)}</span>
+        help={<><span>{skill.description}</span><span className="small">{skill.origin}</span><span className="mono small">{homePath(skill.source)}</span>
           {skill.refused && <span className="row"><StatusBadge word="Not given to agents" tone="danger" /><span>{skillUnused(skill.refused)}</span></span>}</>}>
         <Switch id={`skill-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
           disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
@@ -243,7 +243,7 @@ export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLi
     {extra.length > 0 && <Notice tone="warn"><span>Agents also read these lines of its SKILL.md header:</span>
       <pre className="mono small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{extra.map(displayText).join("\n")}</pre></Notice>}
     <div className="row between">
-      <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
+      <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="muted small">{skill.origin}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
       <Switch id="skill-detail-on" label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
         disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
     </div>
@@ -451,17 +451,85 @@ export function hookTrigger(hook: HookView): string {
   return hook.matcher ? `${hook.event}, matching ${hook.matcher}` : hook.event;
 }
 
-/** The hooks list as a pure view of the engine read: each hook with its plugin, event,
- * command and switch. Inputs: the read, the project id when shown in a project, the last
- * failure and the actions. */
-export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onRetry }: {
+/** One plugin's hooks as the Hooks list groups them: a key for the plugin and scope, the
+ * plugin's name, how many distinct events it runs on, the skills or servers it runs with
+ * and its hooks in the engine's order. */
+export type HookGroup = { key: string; plugin: string; events: number; follows: string[]; hooks: HookView[] };
+
+/** Groups hooks per plugin and scope in the order the engine lists them, so a plugin with
+ * several events reads as one plugin and not as several installs. Input: the hooks.
+ * Output: the groups, together holding every hook once. */
+export function hookGroups(hooks: HookView[]): HookGroup[] {
+  const groups = new Map<string, HookGroup>();
+  for (const hook of hooks) {
+    const key = `${hook.plugin}\n${hook.scope.kind === "project" ? hook.scope.project_id : ""}`;
+    const group = groups.get(key) ?? { key, plugin: hook.plugin, events: 0, follows: [], hooks: [] };
+    if (!group.hooks.some((seen) => seen.event === hook.event)) group.events += 1;
+    if (hook.follows && !group.follows.includes(hook.follows)) group.follows.push(hook.follows);
+    group.hooks.push(hook);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+/** The name a plugin's hooks row shows: the plugin and how many events it runs on.
+ * Input: the group. Output: the name, such as "caveman - 4 events". */
+export function hookGroupName(group: HookGroup): string {
+  return `${group.plugin} - ${group.events} ${group.events === 1 ? "event" : "events"}`;
+}
+
+/** What a plugin's hooks switch shows: on when every hook it can switch is on, "Partly on"
+ * when only some are. In a project, hooks turned off for every project in Settings are not
+ * the project's to switch and are left out. Inputs: the group and the project id, if any.
+ * Output: checked, label and whether the project switch applies. */
+export function hookGroupSwitch(group: HookGroup, projectId?: string): { checked: boolean; label: string; project: boolean } {
+  const first = pluginSwitch(group.hooks[0], projectId);
+  const each = group.hooks.map((hook) => pluginSwitch(hook, projectId)).filter((one, at) => !(one.project && !group.hooks[at].enabled));
+  const on = each.filter((one) => one.checked).length;
+  return { checked: each.length > 0 && on === each.length, label: on > 0 && on < each.length ? "Partly on" : first.label, project: first.project };
+}
+
+/** The hooks a plugin row's switch changes: those not already in the new state, leaving
+ * out, in a project, hooks turned off for every project in Settings. Inputs: the group,
+ * the new state and the project id, if any. Output: the hooks to set, in order. */
+export function hooksToSet(group: HookGroup, on: boolean, projectId?: string): HookView[] {
+  return group.hooks.filter((hook) => {
+    const target = pluginSwitch(hook, projectId);
+    return target.checked !== on && !(target.project && !hook.enabled);
+  });
+}
+
+/** The events of one plugin's hooks, each with its trigger, command and own switch.
+ * Inputs: the group, its place in the list, the project id when shown in a project and
+ * the action that turns one hook on or off. */
+export function HookEvents({ group, index, projectId, onToggle }: {
+  group: HookGroup;
+  index: number;
+  projectId?: string;
+  onToggle: (hook: HookView, on: boolean) => void;
+}) {
+  return <div className="review">{group.hooks.map((hook, at) => {
+    const on = pluginSwitch(hook, projectId);
+    return <SettingLine key={hook.id} label={hookTrigger(hook)} changed={pluginChanged(hook, projectId)} help={<span className="mono small">{hook.command}</span>}>
+      <Switch id={`hook-on-${index}-${at}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(hook, next)}
+        disabledReason={on.project && !hook.enabled ? "Turned off for every project in Settings." : undefined} />
+    </SettingLine>;
+  })}</div>;
+}
+
+/** The hooks list as a pure view of the engine read: one row per plugin with its events
+ * count, follow note and switch, and its events under the row once opened. Inputs: the
+ * read, the project id when shown in a project, the last failure and the actions. */
+export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onToggleGroup, onRetry }: {
   hooks: Loaded<HookView[]>;
   projectId?: string;
   failure: string;
   onAdd: () => void;
   onToggle: (hook: HookView, on: boolean) => void;
+  onToggleGroup: (group: HookGroup, on: boolean) => void;
   onRetry: () => void;
 }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   if (hooks.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (hooks.kind === "not_ready") return <NotReady what="Hooks" compact />;
   if (hooks.kind === "error") return <LoadError message="Couldn't load hooks." onRetry={onRetry} />;
@@ -469,13 +537,20 @@ export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onRetry 
   return <SettingSection title="Hooks" actions={hooks.value.length > 0 ? add : undefined}
     about={`Hooks are commands Claude Code and Codex agents run on events such as session start or a tool call. ${CODEX_HOOK_EVENTS_ONLY} ${BARE_NO_HOOKS} ${RCLI_NO_HOOKS} They run inside the agent's sandbox. A hook that came with a skill or MCP server runs only while that item is on.`}>
     {failure && <div className="set-body"><Notice tone="danger" alert>{failure}</Notice></div>}
-    {hooks.value.length === 0 ? <div className="set-body"><EmptyState icon="zap" title="No hooks yet" compact action={add} /></div> : hooks.value.map((hook, index) => {
-      const on = pluginSwitch(hook, projectId);
-      return <SettingLine key={hook.id} label={hook.plugin} changed={pluginChanged(hook, projectId)}
-        help={<><span>{hookTrigger(hook)}</span><span className="mono small">{hook.command}</span>{hook.follows && <span>Runs while {hook.follows} is on.</span>}</>}>
-        <Switch id={`hook-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(hook, next)}
-          disabledReason={on.project && !hook.enabled ? "Turned off for every project in Settings." : undefined} />
-      </SettingLine>;
+    {hooks.value.length === 0 ? <div className="set-body"><EmptyState icon="zap" title="No hooks yet" compact action={add} /></div> : hookGroups(hooks.value).map((group, index) => {
+      const on = hookGroupSwitch(group, projectId);
+      const open = expanded === group.key;
+      return <Fragment key={group.key}>
+        <SettingLine label={hookGroupName(group)} changed={group.hooks.some((hook) => pluginChanged(hook, projectId))} help={<>
+          {group.follows.length > 0 && <span>Runs while {group.follows.join(", ")} is on.</span>}
+          <span><Button size="small" variant="quiet" icon={open ? "chevron-down" : "chevron-right"} aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} ${group.plugin} events`}
+            onClick={() => setExpanded(open ? null : group.key)}>{open ? "Hide events" : "Show events"}</Button></span>
+        </>}>
+          <Switch id={`hook-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggleGroup(group, next)}
+            disabledReason={on.project && group.hooks.every((hook) => !hook.enabled) ? "Turned off for every project in Settings." : undefined} />
+        </SettingLine>
+        {open && <HookEvents group={group} index={index} projectId={projectId} onToggle={onToggle} />}
+      </Fragment>;
     })}
   </SettingSection>;
 }
@@ -737,10 +812,20 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
     if (folder === null) return;
     await act(folder, () => addHooks(scope, folder), (added) => `Added ${added.length} ${added.length === 1 ? "hook" : "hooks"}.`, reloadHooks);
   };
+  const setHook = (hook: HookView, on: boolean): Promise<Result<unknown>> =>
+    pluginSwitch(hook, projectId).project && projectId ? switchPlugin(projectId, hook.id, on, hook.version) : setHookEnabled(hook.id, on);
   const toggleHook = (hook: HookView, on: boolean) => {
-    const target = pluginSwitch(hook, projectId);
-    void act<unknown>(hook.id, () => target.project && projectId ? switchPlugin(projectId, hook.id, on, hook.version) : setHookEnabled(hook.id, on),
-      () => on ? "Hook turned on." : "Hook turned off.", reloadHooks);
+    void act<unknown>(hook.id, () => setHook(hook, on), () => on ? "Hook turned on." : "Hook turned off.", reloadHooks);
+  };
+  const toggleHookGroup = (group: HookGroup, on: boolean) => {
+    const changing = hooksToSet(group, on, projectId);
+    void act<unknown>(group.key, async () => {
+      for (const [at, hook] of changing.entries()) {
+        const result = await setHook(hook, on);
+        if (result.kind !== "ok") { if (at > 0) reloadHooks(); return result; }
+      }
+      return { kind: "ok", value: null };
+    }, () => `${group.plugin} hooks turned ${on ? "on" : "off"}.`, reloadHooks);
   };
   const toggleServer = (server: McpServerView, on: boolean) => {
     const target = pluginSwitch(server, projectId);
@@ -761,7 +846,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
   return <div className="stack">
     {projectId ? picker : <div className="settings-top"><h2>Plugins and skills</h2>{picker}</div>}
     {section === "tools" && <ToolsSection projectId={projectId} onAddTool={() => setAdding({ kind: "server" })} />}
-    {section === "hooks" && <HooksView hooks={hooks} projectId={projectId} failure={failure} onRetry={reloadHooks} onAdd={() => void addHooksFromChooser()} onToggle={toggleHook} />}
+    {section === "hooks" && <HooksView hooks={hooks} projectId={projectId} failure={failure} onRetry={reloadHooks} onAdd={() => void addHooksFromChooser()} onToggle={toggleHook} onToggleGroup={toggleHookGroup} />}
     {section === "hooks" || section === "tools" ? null : section === "skills"
       ? <SkillsView skills={skills} projectId={projectId} failure={failure} onRetry={reloadSkills} onAdd={() => void addSkillFromChooser()}
         onImport={projectId ? undefined : () => setImporting(true)} onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />

@@ -204,6 +204,17 @@ test("the tabs are read again only while a run is going or a change set landed",
   assert.equal(api.OVERVIEW_POLL_MS, 5_000);
 });
 
+test("a failed read again keeps the tabs a good read showed, as the TUI does, so a tab pick never blanks them", () => {
+  const good = { kind: "ok", value: base() };
+  const newer = { kind: "ok", value: { ...base(), checked_ms: NOW } };
+  const failed = { kind: "error", code: "engine_unreachable", message: "The engine isn't running." };
+  assert.equal(view.keptRead(good, failed), good);
+  assert.equal(view.keptRead(good, { kind: "not_ready" }), good);
+  assert.equal(view.keptRead(good, newer), newer);
+  assert.equal(view.keptRead(undefined, failed), failed, "with nothing shown yet the failure is said");
+  assert.equal(view.keptRead(failed, failed), failed);
+});
+
 test("every Overview call names its bridge command, and each command is in the handler list", () => {
   const source = readFileSync(new URL("../src/api-overview.ts", import.meta.url), "utf8");
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
