@@ -682,6 +682,112 @@ async fn an_engine_start_forgets_a_delete_plan_left_behind() {
     engine.stop().await;
 }
 
+/// Leaves what an engine stop in the middle of a Delete everything leaves: its plan and its
+/// intent in the action ledger. Inputs: the engine, the project the intent names and the
+/// plan's exchange. Output: none.
+#[cfg(target_os = "macos")]
+fn cut_short(engine: &Engine, project: &str, exchange: i64) {
+    drop(crate::ledger::open(engine.root.path()).unwrap());
+    write_db(
+        engine,
+        &format!(
+            "INSERT INTO projects_delete_pending(exchange) VALUES ({exchange});
+             INSERT INTO ledger_actions(kind,action_key,payload,started_ms)
+             VALUES ('project_delete','{project}',
+                     '{{\"project\":\"{project}\",\"exchange\":{exchange}}}',1);"
+        ),
+    );
+}
+
+/// The delete notices one project's banner shows. Inputs: the owner client and the project.
+/// Output: the notices whose kind is a project delete.
+#[cfg(target_os = "macos")]
+async fn delete_notices(
+    owner: &OwnerController,
+    project: &ProjectId,
+) -> Vec<crate::engine::owner::BannerNotice> {
+    let banner = owner.recovery_banner(project.clone()).await.unwrap();
+    banner
+        .notices
+        .into_iter()
+        .filter(|notice| serde_json::to_value(notice.action_kind).unwrap() == "project_delete")
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+const DELETES_PENDING: &str =
+    "SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND outcome IS NULL";
+
+/// An engine start after a Delete everything cut short keeps the project, never continues the
+/// delete, and shows it on the project's banner until the owner keeps the project, which
+/// clears the mark, or deletes it again, which runs the delete and finishes the mark. An
+/// intent left for a project whose records already went is finished with nothing shown.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_delete_cut_short_by_an_engine_stop_waits_for_keep_or_delete_again() {
+    let mut engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    drop(owner);
+    cut_short(&engine, PROJECT, 7);
+    cut_short(&engine, "gone-project", 8);
+    engine.restart().await;
+    let owner = engine.owner().await;
+    let shown = delete_notices(&owner, &project).await;
+    assert_eq!(shown.len(), 1, "the project shows its delete cut short");
+    assert_eq!(serde_json::to_value(shown[0].shown).unwrap(), "unknown");
+    assert_eq!(kept(&engine), 2, "a start never continues the delete");
+    assert!(folder.is_dir(), "a start moves nothing to the Trash");
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_delete_pending"),
+        0,
+        "the plan still stops holding a home move"
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT count(*) FROM ledger_actions
+             WHERE action_key='gone-project' AND outcome='done'"
+        ),
+        1,
+        "a delete whose records went is finished, not shown"
+    );
+    owner
+        .recovery_dismiss(shown[0].action_kind, shown[0].id)
+        .await
+        .unwrap();
+    assert!(
+        delete_notices(&owner, &project).await.is_empty(),
+        "Keep the project clears the mark"
+    );
+    assert_eq!(kept(&engine), 2, "Keep the project keeps it");
+    assert_eq!(engine.rows(DELETES_PENDING), 0);
+    drop(owner);
+
+    cut_short(&engine, PROJECT, 9);
+    engine.restart().await;
+    let mut owner = engine.owner().await;
+    assert_eq!(delete_notices(&owner, &project).await.len(), 1);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied, "Delete again deletes");
+    assert_eq!(kept(&engine), 0);
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while engine.rows(DELETES_PENDING) != 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        engine.rows(DELETES_PENDING),
+        0,
+        "the delete's settle finishes its own mark and the one it replaced"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// While a projects home move is pending, the owner can neither pick another home nor move it
 /// without its projects, so the move's own pick is never overwritten. Both go once the move
 /// is forgotten.
