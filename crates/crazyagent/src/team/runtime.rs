@@ -6902,10 +6902,11 @@ impl TeamRuntime {
                 self.connection
                     .execute(
                         "UPDATE team_tasks SET status='queued', agent=NULL, attempts=MAX(attempts-1,0)
-                         WHERE id=?1 AND status='running'",
+                         WHERE id=?1 AND status='running' AND cancel_requested=0",
                         [task],
                     )
                     .map_err(error)?;
+                cancel_requested_tasks(&self.connection, Some(task), CancelPath::Held, now_ms())?;
                 delivery::ended(&self.connection, Some(Busy::Task(task)), false)?;
                 continue;
             }
