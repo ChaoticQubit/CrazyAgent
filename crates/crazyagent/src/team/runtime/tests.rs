@@ -2947,9 +2947,13 @@ fn a_harness_installed_after_engine_start_is_prepared_only_through_the_engines_l
     assert_eq!(plan.executable, std::fs::canonicalize(&codex).unwrap());
 }
 
+/// RV-DS241-127: no team agent starts with the delegate engine in a folder it can write. An
+/// engine in the project's shared git object store, which a linked agent writes, refuses the
+/// master, a tools-on sub-agent and a tools-off sub-agent alike with `team_delegate_writable`,
+/// since every launch is granted the engine and a swapped engine runs the team's tools.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
+fn a_team_agent_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
     let fixture = Fixture::new(1);
     let bin = fixture.base.join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -2979,6 +2983,7 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
         (1, AgentRole::Sub),
         (2, AgentRole::Master),
         (3, AgentRole::Sub),
+        (4, AgentRole::Sub),
     ] {
         assert_eq!(fixture.agent(role, "codex", AgentStatus::Starting), id);
     }
@@ -3015,20 +3020,81 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
         panic!("a master was prepared with a delegate engine it can write");
     };
     assert!(refused.contains("team_delegate_writable"), "{refused}");
-    assert!(
-        runtime
-            .prepare(
-                &fixture.setup,
-                3,
-                AgentRole::Sub,
-                "codex",
-                true,
-                &account,
-                false,
-                crate::agent_git::Layout::Linked
-            )
-            .is_ok()
-    );
+    for (id, tools) in [(3, true), (4, false)] {
+        let Err(refused) = runtime.prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "codex",
+            tools,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+        ) else {
+            panic!("sub-agent {id} was prepared with a delegate engine it can write");
+        };
+        assert!(refused.contains("team_delegate_writable"), "{refused}");
+    }
+}
+
+/// RV-DS241-127: a native lead is refused with `team_delegate_writable` when the delegate
+/// engine sits in its teammates' home. Only the teammates write that folder, so the lead's
+/// own sandbox passes and the refusal proves the teammates' sandbox is checked as well.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_is_refused_when_its_teammates_can_write_the_delegate_engine() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture).with_terminal(host).unwrap();
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let home = agent_home(&runtime.state, id);
+    let mates = crate::launch_context::mates_home(&home);
+    let bin = mates.join("engine-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for folder in [home.parent().unwrap(), mates.as_path()] {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let engine = bin.join("crazyagent");
+    engine_file(&engine);
+    let runtime = runtime.with_delegation_tool(&engine).unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let Err(refused) = runtime.prepare(
+        &fixture.setup,
+        id,
+        AgentRole::Sub,
+        "claude-code",
+        true,
+        &account,
+        false,
+        Layout::Linked,
+    ) else {
+        panic!("a native lead was prepared with teammates that can write the delegate engine");
+    };
+    assert!(refused.contains("team_delegate_writable"), "{refused}");
 }
 
 /// OWNER-PORTS-FAIL-OPEN r1 L2: a tools-on launch of a team runtime whose settings files

@@ -9512,19 +9512,6 @@ impl TeamRuntime {
         expose_graph(&root, &working_dir, &hidden);
         #[cfg(not(unix))]
         expose_graph(&root, &working_dir)?;
-        if let Some(engine) = self
-            .delegation_tool
-            .as_ref()
-            .filter(|_| role == AgentRole::Master && tools)
-        {
-            let changed = |e: EngineError| with_code("the delegate engine changed", Some(&e.0));
-            if sandbox.writes(engine.verified_path().map_err(changed)?) {
-                return Err(with_code(
-                    "the delegate engine is in a folder the agent can write",
-                    Some("team_delegate_writable"),
-                ));
-            }
-        }
         #[cfg(target_os = "macos")]
         if let Some(runtime) = self.state.parent() {
             use crate::sandbox::tool_cache::{CacheShape, grant};
@@ -9537,6 +9524,19 @@ impl TeamRuntime {
             let mates = format!("{agent}-teammates");
             teammates = teammates
                 .map(|team| grant(team, runtime, &root, &policy, CacheShape::Teammate, &mates));
+        }
+        if let Some(engine) = &self.delegation_tool {
+            let changed = |e: EngineError| with_code("the delegate engine changed", Some(&e.0));
+            let engine = engine.verified_path().map_err(changed)?;
+            if std::iter::once(&sandbox)
+                .chain(teammates.as_ref())
+                .any(|agent| agent.writes(engine))
+            {
+                return Err(with_code(
+                    "the delegate engine is in a folder the agent can write",
+                    Some("team_delegate_writable"),
+                ));
+            }
         }
         if let Some(mates) = &teammates {
             mates
