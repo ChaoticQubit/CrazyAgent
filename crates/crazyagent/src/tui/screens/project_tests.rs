@@ -2861,6 +2861,119 @@ fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
     );
 }
 
+fn next_hidden_read(screen: &mut ProjectScreen, from: i64) -> SetupQuery {
+    for now in from..from + 6 {
+        let query = screen.next_query(now).expect("a read is due");
+        if matches!(query, SetupQuery::HiddenPaths { .. }) {
+            return query;
+        }
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+    panic!("the Settings tab reads the hidden folders");
+}
+
+#[test]
+fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
+    let project = ProjectId::new("hidden-stale").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_hidden_read(&mut screen, 20);
+    screen.apply(
+        &read,
+        Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
+            paths: vec!["/Users/owner/project/secret".into()],
+            version: 3,
+        })),
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
+    screen.hidden.as_mut().unwrap().input.set("");
+    let save_at = |version: u64| SetupAction::SetHiddenPaths {
+        project_id: project.clone(),
+        version,
+        paths: vec![],
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(3))),
+        "the save sends the version the box opened at"
+    );
+    let change = SetupQuery::Change {
+        action: save_at(3),
+        generation: 2,
+    };
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "stale_revision".into(),
+        })),
+    );
+    let hidden = screen.hidden.as_ref().unwrap();
+    assert!(!hidden.busy);
+    assert_eq!(hidden.input.value(), "");
+    assert_eq!(
+        hidden.error.as_deref(),
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
+    );
+    assert_eq!(screen.hidden_paths, None);
+
+    let read = next_hidden_read(&mut screen, 40);
+    screen.apply(
+        &read,
+        Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
+            paths: vec![
+                "/Users/owner/project/secret".into(),
+                "/Users/owner/project/keys".into(),
+            ],
+            version: 4,
+        })),
+    );
+    let hidden = screen.hidden.as_ref().unwrap();
+    assert_eq!(hidden.input.value(), "", "the typed list is kept");
+    assert_eq!(
+        hidden.error.as_deref(),
+        Some(
+            "Saved now: /Users/owner/project/secret:/Users/owner/project/keys. Enter saves your edit over it; Esc keeps the saved one."
+        )
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(4))),
+        "Enter keeps the owner's list over the saved one it was shown"
+    );
+
+    screen.apply(
+        &SetupQuery::Change {
+            action: save_at(4),
+            generation: 3,
+        },
+        Err("stale_revision".into()),
+    );
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let read = next_hidden_read(&mut screen, 60);
+    screen.apply(
+        &read,
+        Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
+            paths: vec!["/Users/owner/project/secret".into()],
+            version: 5,
+        })),
+    );
+    assert!(screen.hidden.is_none(), "Esc keeps the saved one");
+    screen.key(key(KeyCode::Char('k')));
+    let hidden = screen.hidden.as_ref().unwrap();
+    assert_eq!(hidden.input.value(), "/Users/owner/project/secret");
+    assert_eq!(
+        hidden.error, None,
+        "a box opened afresh carries no stale note"
+    );
+    screen.hidden.as_mut().unwrap().input.set("");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(5)))
+    );
+}
+
 /// Once the research jobs and a context with no roadmap document are read, `p` on the
 /// Settings tab plans a roadmap at once and `k` opens the hidden folders box, so neither
 /// action takes the other's key.
