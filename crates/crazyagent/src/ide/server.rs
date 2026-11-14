@@ -57,15 +57,9 @@ const PROJECTS_MAX: usize = 256;
 /// timed-out open can hold one for as long as its lookup hangs.
 const STOP_LEFTOVER_WAIT: Duration = Duration::from_secs(10);
 const GROUP_BYTES_MAX: u64 = 256;
-/// How many entries a confined start reads in its server data folder, and again in its temp
-/// folder, before it refuses: far above what a VSCodium server keeps there, so only a padded
-/// folder reaches it.
+/// How many entries a confined start reads in its server data folder before it refuses:
+/// far above what a VSCodium server keeps there, so only a padded folder reaches it.
 const SERVER_DATA_ENTRIES_MAX: usize = 200_000;
-/// The name a Full access start's temp folder is keyed by, beside its server data folder. A
-/// Full access session's tools leave what they like in their temp folder, a temporary clone
-/// included, so that folder is never the one a confined start walks and hands its server.
-/// Nothing is made at this path; only its name keys the temp folder.
-const FULL_ACCESS_TMP: &str = "full-access-tmp";
 const READY_POLL: Duration = Duration::from_millis(100);
 const CONNECT_TIME: Duration = Duration::from_millis(500);
 const WATCH_POLL: Duration = Duration::from_secs(1);
@@ -1047,9 +1041,9 @@ async fn holding_start<T: Send + 'static>(
 /// the project's hooks run in `root` only when the policy's switch is on, and every git it starts
 /// is held by [`confined_git`]. A Full access server's git is the owner's own, hooks and
 /// config included, so its shim holds no hooks path, whose count line needs the forced keys.
-/// A confined start is refused while its server data folder or its temp folder holds a
-/// `.git` ([`refuse_planted_git`]); a Full access start gets a temp folder of its own
-/// ([`FULL_ACCESS_TMP`]). Inputs: the launch, the server's info and the output pipe.
+/// A confined start is refused while its server data folder holds a `.git`
+/// ([`refuse_planted_git`]) and gets a temp folder no earlier start used ([`fresh_tmp`]).
+/// Inputs: the launch, the server's info and the output pipe.
 fn command(
     launch: Launch<'_>,
     info: &ServerInfo,
@@ -1065,17 +1059,12 @@ fn command(
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
     let confined = policy.access != AgentAccess::Full;
-    let tmp = crate::sandbox::toolchains::make_tmp(&if confined {
-        home.clone()
+    let tmp = if confined {
+        refuse_planted_git(&home, SERVER_DATA_ENTRIES_MAX)?;
+        fresh_tmp(&home)?
     } else {
-        folder.join(FULL_ACCESS_TMP)
-    })
-    .map_err(|_| failure("ide_state_unavailable"))?;
-    if confined {
-        for place in [&home, &tmp] {
-            refuse_planted_git(place, SERVER_DATA_ENTRIES_MAX)?;
-        }
-    }
+        crate::sandbox::toolchains::make_tmp(&home).map_err(|_| failure("ide_state_unavailable"))?
+    };
     let hooks = (confined && policy.hooks).then_some(launch.root);
     let index_project = confined.then_some(launch.root);
     let written = settings::write(folder, &home, data, hooks, policy.access, index_project)?;
@@ -1147,12 +1136,11 @@ fn confined_git(data: &Path, launch: &Launch<'_>) -> Result<OsString, EngineErro
     Ok(ceiling)
 }
 
-/// Refuses a start while the server data folder or the server's temp folder holds an entry
-/// named `.git` in any ASCII letter case at any depth, folder, file or link alike, which a
-/// server of an older profile could leave, or move from one to the other, to rename into the
-/// project later (SA vid 101 residue). Links are never followed. Inputs: the folder and the
-/// most entries to read. Output: Ok, or `ide_server_data_git` for a `.git`, a folder it
-/// cannot read or more than `limit` entries.
+/// Refuses a start while the server data folder holds an entry named `.git` in any ASCII
+/// letter case at any depth, folder, file or link alike, which a server of an older profile
+/// could leave to rename into the project later (SA vid 101 residue). Links are never
+/// followed. Inputs: the folder and the most entries to read. Output: Ok, or
+/// `ide_server_data_git` for a `.git`, a folder it cannot read or more than `limit` entries.
 fn refuse_planted_git(home: &Path, limit: usize) -> Result<(), EngineError> {
     let refused = |_| failure("ide_server_data_git");
     let mut folders = vec![home.to_path_buf()];
@@ -1172,6 +1160,23 @@ fn refuse_planted_git(home: &Path, limit: usize) -> Result<(), EngineError> {
     }
     assert!(read <= limit);
     Ok(())
+}
+
+/// Makes a confined start's own short temp folder, one no earlier start used: the folder
+/// [`crate::sandbox::toolchains::make_tmp`] keys by a fresh random name beside the server
+/// data folder. What an earlier session left in its temp folder, a `.git`, a shut folder or
+/// any number of entries, is then outside this start's profile, and nothing is deleted.
+/// Input: the server data folder. Output: the new folder, `ide_entropy_unavailable`, or
+/// `ide_state_unavailable`.
+fn fresh_tmp(home: &Path) -> Result<PathBuf, EngineError> {
+    let mut start = [0u8; 16];
+    getrandom::fill(&mut start).map_err(|_| failure("ide_entropy_unavailable"))?;
+    let name: String = start.iter().map(|byte| format!("{byte:02x}")).collect();
+    let key = home.join(format!("start-{name}"));
+    if fs::symlink_metadata(crate::sandbox::toolchains::tmp_path(&key)).is_ok() {
+        return Err(failure("ide_state_unavailable"));
+    }
+    crate::sandbox::toolchains::make_tmp(&key).map_err(|_| failure("ide_state_unavailable"))
 }
 
 /// The launcher's command at the project's level: under the Seatbelt profile installed for
