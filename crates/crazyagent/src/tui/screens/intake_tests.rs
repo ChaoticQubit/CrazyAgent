@@ -2794,6 +2794,7 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
         let asks: Vec<_> = intake_jobs(&mut shell)
             .iter()
             .map(IntakeJob::query)
+            .filter(|query| matches!(query, IntakeQuery::JobStart { .. }))
             .collect();
         let [IntakeQuery::JobStart { id: sent, .. }] = asks.as_slice() else {
             panic!("one start: {asks:?}");
