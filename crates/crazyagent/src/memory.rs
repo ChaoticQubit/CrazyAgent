@@ -353,6 +353,40 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     library::initialize(connection)
 }
 
+/// The knowledge tables whose rows belong to one project by its id.
+const KNOWLEDGE_OF_PROJECT: [&str; 7] = [
+    "knowledge_heads",
+    "knowledge_entries",
+    "knowledge_nominations",
+    "knowledge_activity",
+    "knowledge_sources",
+    "knowledge_jobs",
+    "knowledge_watermarks",
+];
+
+/// Deletes every knowledge row of one project id, its kept research among them, and the
+/// app-wide candidates made from its entries, so a project removed and a different folder
+/// later added under the same id never shares them (SA research id reuse, owner decision
+/// 11-14). Inputs: the open transaction and the project. Output: done, or the database's
+/// refusal.
+pub(crate) fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    tx.execute(
+        "DELETE FROM knowledge_globals WHERE entry IN
+         (SELECT id FROM knowledge_entries WHERE project=?1)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    for table in KNOWLEDGE_OF_PROJECT {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE project=?1"),
+            [project.as_str()],
+        )
+        .map_err(error)?;
+    }
+    assert!(!tx.is_autocommit());
+    Ok(())
+}
+
 pub(crate) fn capacity(
     tx: &Transaction<'_>,
     table: &str,

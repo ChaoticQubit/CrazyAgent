@@ -2811,6 +2811,7 @@ fn remove(
         .map_err(error)?;
     assert_eq!(removed, 1);
     crate::memory::library::forget_orphan_agent_memories(tx)?;
+    crate::memory::forget_project(tx, project_id)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
 }
