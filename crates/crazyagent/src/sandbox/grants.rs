@@ -43,7 +43,8 @@ const REQUESTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS access_requests (
     reason TEXT NOT NULL,
     question INTEGER,
     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','allowed','denied')),
-    created_ms INTEGER NOT NULL
+    created_ms INTEGER NOT NULL,
+    identity TEXT
 )";
 
 const GRANT_JSON_BYTES_MAX: usize = 256;
@@ -564,7 +565,7 @@ pub fn history(connection: &Connection, project: &str) -> rusqlite::Result<Vec<L
 /// transaction and the project. Output: done, or the database error.
 pub fn forget_project(connection: &Connection, project: &str) -> rusqlite::Result<()> {
     connection.execute(LOG_TABLE, [])?;
-    connection.execute(REQUESTS_TABLE, [])?;
+    requests_table(connection)?;
     connection.execute("DELETE FROM access_grant_log WHERE project=?1", [project])?;
     connection.execute("DELETE FROM access_requests WHERE project=?1", [project])?;
     Ok(())
@@ -573,9 +574,10 @@ pub fn forget_project(connection: &Connection, project: &str) -> rusqlite::Resul
 /// Turns an agent's access request into a real owner question (F08): the grant is checked
 /// as a save checks it, one the policy already holds asks nothing, and otherwise the engine
 /// raises a question with the options [`ALLOW`] and [`DONT_ALLOW`], the words written by the
-/// engine from the checked grant and the agent's reason only as quoted context. Inputs: the
-/// engine connection, the project, who asked, the grant and the reason. Output: the
-/// outcome, or a plain refusal code.
+/// engine from the checked grant and the agent's reason only as quoted context. A socket's
+/// request keeps the identity of the socket file the question names, so the Allow binds to
+/// it ([`decide`]). Inputs: the engine connection, the project, who asked, the grant and
+/// the reason. Output: the outcome, or a plain refusal code.
 pub fn request(
     db: &Connection,
     project: &ProjectId,
@@ -586,6 +588,10 @@ pub fn request(
     let reason = plain_reason(reason)?;
     let data = data_root(db).ok_or("grant_requests_unavailable")?;
     let grant = checked(grant, &data)?;
+    let identity = match &grant {
+        AccessGrant::Socket { path } => Some(socket_identity(path).ok_or("grant_socket_missing")?),
+        AccessGrant::Port { .. } | AccessGrant::TempFolder => None,
+    };
     let policy =
         super::policy::load(db, project.as_str()).map_err(|_| "grant_requests_unavailable")?;
     let full_reach = policy.access == AgentAccess::Full && grant != AccessGrant::TempFolder;
@@ -598,8 +604,7 @@ pub fn request(
         return Err("grant_full".into());
     }
     let body = serde_json::to_string(&grant).map_err(|_| "grant_requests_unavailable")?;
-    db.execute(REQUESTS_TABLE, [])
-        .map_err(|_| "grant_requests_unavailable")?;
+    requests_table(db).map_err(|_| "grant_requests_unavailable")?;
     let waiting: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM access_requests WHERE project=?1 AND status='pending'",
@@ -611,8 +616,8 @@ pub fn request(
         return Err("grant_requests_full".into());
     }
     db.execute(
-        "INSERT INTO access_requests(project,asker,grant_json,reason,created_ms) VALUES (?1,?2,?3,?4,?5)",
-        params![project.as_str(), asker.name(), body, &reason, crate::team::now_ms()],
+        "INSERT INTO access_requests(project,asker,grant_json,reason,created_ms,identity) VALUES (?1,?2,?3,?4,?5,?6)",
+        params![project.as_str(), asker.name(), body, &reason, crate::team::now_ms(), identity],
     )
     .map_err(|_| "grant_requests_unavailable")?;
     let id = db.last_insert_rowid();
@@ -651,8 +656,11 @@ pub fn request(
 
 /// Settles the access request behind an engine question the owner answered or dismissed,
 /// in the caller's transaction: an Allow adds the grant to the project's policy with its own
-/// versioned owner write when it still passes its check and fits, and every outcome is
-/// logged. A question of another asker is left alone. Inputs: the transaction, the
+/// versioned owner write when it still passes its check unchanged, as the question showed
+/// it, and fits. A socket must still resolve to the same path and be the same socket file
+/// the request kept; one swapped for a link or another socket after the question was asked,
+/// or asked by an engine that kept no identity, is denied and needs a fresh request
+/// (RV-DS241-82). Every outcome is logged. A question of another asker is left alone. Inputs: the transaction, the
 /// project, the question's asker, whether the owner allowed it and the time. Output: done,
 /// or the store error.
 pub(crate) fn decide(
@@ -666,16 +674,16 @@ pub(crate) fn decide(
         return Ok(());
     };
     let unavailable = |_| failure("grant_requests_unavailable");
-    tx.execute(REQUESTS_TABLE, []).map_err(unavailable)?;
-    let row: Option<(String, Option<i64>)> = tx
+    requests_table(tx).map_err(unavailable)?;
+    let row: Option<(String, Option<i64>, Option<String>)> = tx
         .query_row(
-            "SELECT grant_json,question FROM access_requests WHERE id=?1 AND project=?2 AND status='pending'",
+            "SELECT grant_json,question,identity FROM access_requests WHERE id=?1 AND project=?2 AND status='pending'",
             params![id, project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(unavailable)?;
-    let Some((body, question)) = row else {
+    let Some((body, question, identity)) = row else {
         return Ok(());
     };
     let by = question.map_or_else(|| "owner".to_owned(), |q| format!("question {q}"));
@@ -683,7 +691,15 @@ pub(crate) fn decide(
         serde_json::from_str(&body).map_err(|_| failure("grant_requests_unavailable"))?;
     let data = data_root(tx).ok_or_else(|| failure("grant_requests_unavailable"))?;
     let kept = if allowed {
-        checked(&grant, &data).ok()
+        checked(&grant, &data)
+            .ok()
+            .filter(|now| *now == grant)
+            .filter(|now| match now {
+                AccessGrant::Socket { path } => {
+                    identity.is_some() && socket_identity(path) == identity
+                }
+                AccessGrant::Port { .. } | AccessGrant::TempFolder => true,
+            })
     } else {
         None
     };
@@ -757,6 +773,39 @@ fn capital(text: &str) -> String {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
     }
+}
+
+/// Makes the access requests table, and adds the `identity` column to one an older engine
+/// made, whose rows keep none. Input: the connection. Output: done, or the store error.
+fn requests_table(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute(REQUESTS_TABLE, [])?;
+    let kept: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('access_requests') WHERE name='identity')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !kept {
+        connection.execute("ALTER TABLE access_requests ADD COLUMN identity TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// The identity of the socket file a checked socket grant names: its device and inode,
+/// read without following a link, so the file the owner was asked about can be told from
+/// one put at its path later. Input: the canonical path. Output: `device:inode`, or none
+/// when it cannot be read.
+#[cfg(unix)]
+fn socket_identity(real: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(real).ok()?;
+    Some(format!("{}:{}", meta.dev(), meta.ino()))
+}
+
+/// The identity of a socket file where no socket grant is kept. Input: the path, unused.
+/// Output: none.
+#[cfg(not(unix))]
+fn socket_identity(_real: &Path) -> Option<String> {
+    None
 }
 
 fn table_exists(connection: &Connection, name: &str) -> rusqlite::Result<bool> {
