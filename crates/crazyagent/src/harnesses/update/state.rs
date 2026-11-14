@@ -220,16 +220,28 @@ fn failed(code: &str) -> Latest {
 /// Inputs: the harness executable and the home folder. Output: the version, None when the
 /// harness cannot be asked or prints no plain version.
 pub(super) fn version_of(executable: &Path, home: &Path) -> Option<String> {
+    version_ran(&version_command(executable)?, home)
+}
+
+/// The command that asks a harness for its version: the harness with `--version` and its
+/// own folder as the search. Input: the harness executable. Output: the command, or none for
+/// a relative path or one with no folder.
+fn version_command(executable: &Path) -> Option<Fixed> {
     if !executable.is_absolute() {
         return None;
     }
-    let fixed = Fixed {
+    Some(Fixed {
         program: executable.to_path_buf(),
         args: VERSION_ARGS.to_vec(),
         search: vec![executable.parent()?.to_path_buf()],
         prefix: None,
-    };
-    let raw = run_raw(&fixed, home, VERSION_TIME).ok()?;
+    })
+}
+
+/// Runs a version command, bounded like every other run. Inputs: the command and the home
+/// folder. Output: the version it printed, or none.
+fn version_ran(fixed: &Fixed, home: &Path) -> Option<String> {
+    let raw = run_raw(fixed, home, VERSION_TIME).ok()?;
     installed_version(&String::from_utf8_lossy(&raw.stdout))
         .or_else(|| installed_version(&String::from_utf8_lossy(&raw.stderr)))
 }
@@ -342,16 +354,18 @@ fn updated(
 }
 
 /// Asks a harness for its version only when the tool resolver would run it and every
-/// interpreter its first line names, so a file agents can write, or one whose program is
-/// missing, is never started for a version. Inputs: the harness executable, the home folder
-/// and the resolver's places. Output: the version, or none.
+/// interpreter its first line names, with no refused copy of one in its own folder
+/// ([`super::vetted`]), so a file agents can write, or one whose program is missing, is never
+/// started for a version. Inputs: the harness executable, the home folder and the resolver's
+/// places. Output: the version, or none.
 fn version_if_runs(
     executable: &Path,
     home: &Path,
     places: &crate::tools::Places,
 ) -> Option<String> {
-    crate::tools::resolve_entry(executable, places).ok()?;
-    version_of(executable, home)
+    let fixed = version_command(executable)?;
+    super::vetted(&fixed, places).ok()?;
+    version_ran(&fixed, home)
 }
 
 /// Runs one install, then looks for the harness with the caller's search and reads its
@@ -564,7 +578,7 @@ impl Updates {
         let installed = if off || !asked || !runs {
             None
         } else {
-            version_of(executable, &roots.home)
+            version_if_runs(executable, &roots.home, &roots.places)
         };
         let latest = if off {
             Latest::NotChecked

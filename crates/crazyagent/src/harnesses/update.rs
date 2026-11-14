@@ -806,12 +806,45 @@ fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
 /// code of the tool check.
 fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'static str> {
     trusted(&fixed.program)?;
-    crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
+    vetted(&fixed, places)?;
     assert!(fixed.program.is_absolute());
     assert!(fixed.args.len() <= ARGS_MAX);
     assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
     assert!(fixed.prefix.as_deref().is_none_or(Path::is_absolute));
     Ok(fixed)
+}
+
+/// Passes a command only when the tool resolver would run its program and every copy of an
+/// interpreter the program asks `env` for by name that the command's own search folders
+/// hold, since the child's PATH looks there first and would find that copy ahead of the one
+/// the resolver vetted. Inputs: the command and the resolver's places. Output: Ok, or
+/// `TOOL_UNSAFE`.
+fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<(), &'static str> {
+    let resolved =
+        crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
+    let mut at = &resolved;
+    for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
+        let crate::tools::Kind::Script {
+            interpreter,
+            by_name,
+            ..
+        } = &at.kind
+        else {
+            return Ok(());
+        };
+        if *by_name {
+            let name = interpreter.entry.file_name().ok_or(TOOL_UNSAFE)?;
+            let refused = fixed.search.iter().map(|folder| folder.join(name)).any(|copy| {
+                std::fs::metadata(&copy).is_ok()
+                    && crate::tools::resolve_entry(&copy, places).is_err()
+            });
+            if refused {
+                return Err(TOOL_UNSAFE);
+            }
+        }
+        at = interpreter;
+    }
+    Err(TOOL_UNSAFE)
 }
 
 /// Builds the one update command of an installed harness: its own updater, or the Homebrew
