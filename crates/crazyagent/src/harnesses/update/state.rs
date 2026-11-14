@@ -258,12 +258,14 @@ fn tool_check(id: &str, method: &Method, real: &Path, roots: &Roots, installed: 
 }
 
 /// What an installed harness lacks before it can run, read as a launch reads it: the program
-/// its first line asks for when the tool resolver finds none, with the resolver's owner line.
-/// Any other read leaves the file to run as it is. Nothing is run. Inputs: the catalog's file
+/// its first line asks for when the tool resolver finds none, or the resolver's refusal of the
+/// file or its interpreter, such as one agents can write, with the resolver's owner line. Any
+/// other read leaves the file to run as it is. Nothing is run. Inputs: the catalog's file
 /// and the resolver's places. Output: the need, or none.
 pub(crate) fn needs(executable: &Path, places: &crate::tools::Places) -> Option<HarnessNeeds> {
+    use crate::tools::Reason;
     let missing = crate::tools::resolve_entry(executable, places).err()?;
-    (missing.reason == crate::tools::Reason::NeedsInterpreter).then(|| HarnessNeeds {
+    matches!(missing.reason, Reason::NeedsInterpreter | Reason::Refused).then(|| HarnessNeeds {
         line: missing.line(),
         program: missing.needs,
     })
@@ -323,22 +325,43 @@ fn outcome(
     }
 }
 
-/// Runs one update and reads the harness's version before and after it.
-/// Inputs: the update command, the harness executable and the home folder.
-/// Output: the record of how it ended.
-fn updated(fixed: &Fixed, executable: &Path, home: &Path) -> LastUpdate {
-    let from = version_of(executable, home);
+/// Runs one update and reads the harness's version before and after it, each read only while
+/// the tool resolver would run the harness ([`version_if_runs`]). Inputs: the update command,
+/// the harness executable, the home folder and the resolver's places. Output: the record of
+/// how it ended.
+fn updated(
+    fixed: &Fixed,
+    executable: &Path,
+    home: &Path,
+    places: &crate::tools::Places,
+) -> LastUpdate {
+    let from = version_if_runs(executable, home, places);
     let ran = run(fixed, home, UPDATE_TIME);
-    let to = version_of(executable, home);
+    let to = version_if_runs(executable, home, places);
     outcome(ran, UPDATE_FAILED, from, to)
 }
 
+/// Asks a harness for its version only when the tool resolver would run it and every
+/// interpreter its first line names, so a file agents can write, or one whose program is
+/// missing, is never started for a version. Inputs: the harness executable, the home folder
+/// and the resolver's places. Output: the version, or none.
+fn version_if_runs(
+    executable: &Path,
+    home: &Path,
+    places: &crate::tools::Places,
+) -> Option<String> {
+    crate::tools::resolve_entry(executable, places).ok()?;
+    version_of(executable, home)
+}
+
 /// Runs one install, then looks for the harness with the caller's search and reads its
-/// version. Inputs: the install command, the home folder and the search.
-/// Output: the record; an install that ends well but leaves no harness is not found.
+/// version while the tool resolver would run it ([`version_if_runs`]). Inputs: the install
+/// command, the home folder, the resolver's places and the search. Output: the record; an
+/// install that ends well but leaves no harness is not found.
 fn installed_now(
     fixed: &Fixed,
     home: &Path,
+    places: &crate::tools::Places,
     after: impl FnOnce() -> Option<PathBuf>,
 ) -> LastUpdate {
     assert!(fixed.args.first() == Some(&"install"));
@@ -347,7 +370,12 @@ fn installed_now(
         other => return outcome(other, INSTALL_FAILED, None, None),
     };
     match after() {
-        Some(found) => outcome(Ok(ran), INSTALL_FAILED, None, version_of(&found, home)),
+        Some(found) => outcome(
+            Ok(ran),
+            INSTALL_FAILED,
+            None,
+            version_if_runs(&found, home, places),
+        ),
         None => LastUpdate {
             ok: false,
             code: Some(INSTALL_NOT_FOUND.to_owned()),
@@ -627,11 +655,21 @@ impl Updates {
             UpdateMode::CheckAndUpdate => {}
         }
         let executable = entry.executable.clone().ok_or(NOT_INSTALLED)?;
+        if let Err(missing) = crate::tools::resolve_entry(&executable, &roots.places)
+            && missing.reason == crate::tools::Reason::Refused
+        {
+            return Err(super::TOOL_UNSAFE);
+        }
         let running = self.begin(id)?;
         let real = std::fs::canonicalize(&executable).unwrap_or_else(|_| executable.clone());
         let fixed = update_command(id, &executable, &real, roots)?;
         let home = roots.home.clone();
-        Self::spawn(running, move || updated(&fixed, &executable, &home), after)
+        let places = roots.places.clone();
+        Self::spawn(
+            running,
+            move || updated(&fixed, &executable, &home, &places),
+            after,
+        )
     }
 
     /// Starts the one install of a harness that is not installed, in the background, with
@@ -656,7 +694,12 @@ impl Updates {
         let fixed = install_command(id, roots)?;
         ready_prefix(&fixed, roots)?;
         let home = roots.home.clone();
-        Self::spawn(running, move || installed_now(&fixed, &home, after), |_| {})
+        let places = roots.places.clone();
+        Self::spawn(
+            running,
+            move || installed_now(&fixed, &home, &places, after),
+            |_| {},
+        )
     }
 
     /// The harnesses waiting in the install queue, in the order they install; the one

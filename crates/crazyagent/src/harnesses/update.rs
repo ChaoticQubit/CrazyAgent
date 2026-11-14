@@ -791,10 +791,14 @@ fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
     args
 }
 
-/// Passes a built command only when its program is a tool this user can trust.
-/// Input: the command. Output: the same command, or the refusal code of the tool check.
-fn checked(fixed: Fixed) -> Result<Fixed, &'static str> {
+/// Passes a built command only when its program is a tool this user can trust and one the
+/// tool resolver would run: no part of its path, as written or real, that agents or another
+/// user can change, and an interpreter its first line names vetted the same way.
+/// Inputs: the command and the resolver's places. Output: the same command, or the refusal
+/// code of the tool check.
+fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'static str> {
     trusted(&fixed.program)?;
+    crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
     assert!(fixed.program.is_absolute());
     assert!(fixed.args.len() <= ARGS_MAX);
     assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
@@ -820,23 +824,26 @@ pub fn update_command(
             if std::fs::canonicalize(entry).ok().as_deref() != Some(real) {
                 return Err(UNKNOWN_INSTALL);
             }
-            checked(Fixed {
-                program: entry.to_path_buf(),
-                args: own.args.to_vec(),
-                search: vec![folder.to_path_buf()],
-                prefix: None,
-            })
+            checked(
+                Fixed {
+                    program: entry.to_path_buf(),
+                    args: own.args.to_vec(),
+                    search: vec![folder.to_path_buf()],
+                    prefix: None,
+                },
+                &roots.places,
+            )
         }
-        Found::Brew { prefix, brew } => checked(brew_fixed(
-            prefix,
-            vec!["upgrade", flag(brew.kind), brew.name],
-        )),
+        Found::Brew { prefix, brew } => checked(
+            brew_fixed(prefix, vec!["upgrade", flag(brew.kind), brew.name]),
+            &roots.places,
+        ),
         Found::Npm {
             prefix,
             modules,
             npm,
         } => {
-            let fixed = checked(npm_for(&prefix, roots, npm_install_args(npm)))?;
+            let fixed = checked(npm_for(&prefix, roots, npm_install_args(npm)), &roots.places)?;
             if owned(&modules) {
                 Ok(fixed)
             } else {
@@ -857,13 +864,12 @@ pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixe
                 BrewKind::Cask => vec!["outdated", flag(brew.kind), GREEDY, "--json=v2", brew.name],
                 BrewKind::Formula => vec!["outdated", flag(brew.kind), "--json=v2", brew.name],
             };
-            checked(brew_fixed(prefix, args)).map(Some)
+            checked(brew_fixed(prefix, args), &roots.places).map(Some)
         }
-        Found::Npm { prefix, npm, .. } => checked(npm_for(
-            &prefix,
-            roots,
-            vec!["view", npm.package, "version"],
-        ))
+        Found::Npm { prefix, npm, .. } => checked(
+            npm_for(&prefix, roots, vec!["view", npm.package, "version"]),
+            &roots.places,
+        )
         .map(Some),
     }
 }
@@ -888,12 +894,12 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
         roots
             .brew_prefixes
             .iter()
-            .find_map(|prefix| checked(brew_fixed(prefix, args())).ok())
+            .find_map(|prefix| checked(brew_fixed(prefix, args()), &roots.places).ok())
     });
     let with_npm = || {
         let npm = recipe.npm.as_ref()?;
         let engine = roots.npm.as_ref()?;
-        checked(engine_npm_fixed(engine, npm_install_args(npm))).ok()
+        checked(engine_npm_fixed(engine, npm_install_args(npm)), &roots.places).ok()
     };
     let refusal = if recipe.npm.is_some() && roots.npm.is_none() {
         NEEDS_NODE
