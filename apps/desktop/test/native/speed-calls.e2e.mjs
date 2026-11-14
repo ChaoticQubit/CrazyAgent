@@ -36,17 +36,23 @@ function artifacts(name) {
   return side;
 }
 
-/** Starts one side's real engine and bridge on a stand-in HOME, with the owner's profile and
- * one project made through the bridge, and serves its dist. Inputs: the label, the artifacts and
- * the evidence folder. Output: the running side. */
-async function boot(label, side, evidence) {
+/** Makes one side's run record and its private folders before anything starts, so the caller
+ * can stop whatever a failed boot did start. Input: the label. Output: the run. */
+function newRun(label) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `ca-sc-${label}-`)));
-  const runtime = join(root, "engine");
-  const home = join(root, "home");
-  for (const folder of [runtime, home, join(home, ".codex"), join(root, "projects")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const run = { label, root, runtime: join(root, "engine"), home: join(root, "home"),
+    log: { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false } };
+  for (const folder of [run.runtime, run.home, join(run.home, ".codex"), join(root, "projects")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  return run;
+}
+
+/** Starts one side's real engine and bridge on a stand-in HOME, with the owner's profile and
+ * one project made through the bridge, and serves its dist, filling the run as each part
+ * starts. Inputs: the run, the artifacts and the evidence folder. Output: none. */
+async function boot(run, side, evidence) {
+  const { label, root, runtime, home } = run;
   writeFileSync(join(runtime, "global.toml"), speedSettings(await closedPort()), { mode: 0o600 });
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
-  const run = { label, root, runtime, log: { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false } };
   ({ child: run.engine } = await launch(side.engine,
     ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"],
     { ...env }, evidence, `${label}-engine`, /^ready$/m));
@@ -56,13 +62,11 @@ async function boot(label, side, evidence) {
   run.seeded = await seedSide(run.bridge, join(root, "projects"), SESSIONS_C1);
   assert.equal(run.seeded.sessions, SESSIONS_C1, `${label}: the project has its master sessions`);
   run.site = await serveApp(side.dist, run.bridge, [], run.log);
-  return run;
 }
 
-/** Stops one side's file server, bridge, engine and agent terminals. Input: the side. Output:
- * none. */
+/** Stops one side's file server, bridge, engine and agent terminals, whichever started. Input:
+ * the side. Output: none. */
 async function halt(run) {
-  if (!run) return;
   run.log.closing = true;
   run.site?.server.close();
   await stop(run.bridgeProcess);
@@ -138,14 +142,14 @@ test("C1: the candidate makes no bridge call 2.3.2 never made and none more than
   const evidence = kept ?? realpathSync(mkdtempSync(join(tmpdir(), "ca-sc-evidence-")));
   const counts = {};
   for (const [label, side] of [["base", base], ["candidate", candidate]]) {
-    let run;
+    const run = newRun(label);
     try {
-      run = await boot(label, side, evidence);
+      await boot(run, side, evidence);
       counts[label] = await walk(run, evidence);
       writeFileSync(join(evidence, `calls-${label}.json`), JSON.stringify({ engine_sha256: side.sha256, folder: side.folder, counts: counts[label], calls: run.log.calls }, null, 1));
     } finally {
       await halt(run);
-      if (run && !kept) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      if (!kept) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   }
   const findings = countFindings(counts.base, counts.candidate);

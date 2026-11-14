@@ -43,7 +43,8 @@ export async function silentProvider() {
   return { server, port: server.address().port };
 }
 
-/** Starts a child with its output kept as evidence and waits for its ready line.
+/** Starts a child with its output kept as evidence and waits for its ready line; a child that
+ * never gets there is stopped before the failure goes up, so no caller leaks it.
  * Input: the binary, its arguments, environment, evidence folder, name and ready pattern.
  * Output: the child and the ready line's match. */
 export async function start(binary, args, env, evidence, name, ready) {
@@ -52,6 +53,7 @@ export async function start(binary, args, env, evidence, name, ready) {
   const out = createWriteStream(join(evidence, `${name}.out`), { mode: 0o600 });
   const match = await new Promise((done, fail) => {
     let seen = "";
+    child.once("error", fail);
     const timer = setTimeout(() => fail(new Error(`${name} printed no ready line in ${READY_MS} ms; see ${name}.err`)), READY_MS);
     child.stdout.on("data", (chunk) => {
       out.write(String(chunk).replace(/[0-9a-f]{64}/g, "<token>"));
@@ -66,6 +68,9 @@ export async function start(binary, args, env, evidence, name, ready) {
       clearTimeout(timer);
       fail(new Error(`${name} exited before ready: ${code ?? signal}; see ${name}.err`));
     });
+  }).catch(async (error) => {
+    if (child.pid !== undefined) await stop(child);
+    throw error;
   });
   return { child, match };
 }
