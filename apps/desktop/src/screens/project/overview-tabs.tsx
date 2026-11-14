@@ -780,9 +780,9 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
   </section>;
 }
 
-/** The Overview tabs of one project, read from the engine: reads once per visit and after
- * each action, and again every `OVERVIEW_POLL_MS` only while a run is writing or a landed
- * change set waits for one; keeps the picked tab for the session.
+/** The Overview tabs of one project, read from the engine once per visit, on each tab pick (a
+ * tab file can change outside CrazyAgent), after each action, and every `OVERVIEW_POLL_MS` only
+ * while a run writes or a landed change set waits for one; keeps the picked tab for the session.
  * Inputs: the project data, how Quick info renders a text, the Activity panel and the read.
  * Output: the strip and its panel. */
 export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOverview }: {
@@ -815,7 +815,7 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
   const problem = read?.kind === "not_ready" ? "Not ready yet: the Overview tabs aren't in this build."
     : read?.kind === "error" ? `Couldn't load the Overview tabs. ${overviewCopy(read)}` : undefined;
   return <OverviewTabs key={data.id} data={data} overview={overview} problem={problem} now={data.now} selected={selected}
-    onSelect={(tab) => { storeTab(data.id, tab); setSelected(tab); }}
+    onSelect={(tab) => { storeTab(data.id, tab); setSelected(tab); setRound((count) => count + 1); }}
     actions={{ refresh: () => refreshOverview(data.id), save: saveOverviewTab, accept: acceptOverviewTab, reject: rejectOverviewTab, reload: () => setRound((count) => count + 1) }}
     runMode={runMode} quickInfo={quickInfo} activity={activity} />;
 }
