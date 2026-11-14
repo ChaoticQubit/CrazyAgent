@@ -4998,11 +4998,13 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     const PROFILE_CREDENTIAL: &str = "sec-ro-guard-dummy-profile-credential";
 
     /// Writes a dummy sign-in credential where a native profile keeps its own, under
     /// `<engine>/native-profiles/<key>/home`. Input: the engine root. Output: the path of
     /// the dummy `.credentials.json`, which holds [`PROFILE_CREDENTIAL`].
+    #[cfg(target_os = "macos")]
     fn native_profile_credential(engine: &Path) -> PathBuf {
         let home = engine
             .join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER)
@@ -5018,6 +5020,7 @@ mod tests {
     /// A runner whose Codex is a stand-in at `codex` that prints the file at `target` and
     /// exits. Inputs: the engine root fixture, the stand-in path and the file it reads.
     /// Output: the runner.
+    #[cfg(target_os = "macos")]
     fn reading_runner(root: &EngineRoot, codex: &Path, target: &Path) -> ResearchRunner {
         fs::create_dir_all(codex.parent().unwrap()).unwrap();
         fs::write(
@@ -5036,6 +5039,7 @@ mod tests {
 
     /// Tells whether any regular file under `folder`, not following links, holds `text`.
     /// Input: the folder and the text. Output: true when one does.
+    #[cfg(target_os = "macos")]
     fn holds_text(folder: &Path, text: &str) -> bool {
         fs::read_dir(folder)
             .into_iter()
