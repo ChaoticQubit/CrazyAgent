@@ -224,7 +224,8 @@ fn unreached_code(unreached: &crate::research::runner::Unreached) -> &'static st
 mod run {
     use super::{
         BUSY, CleanupPool, FAILED, NO_ACCOUNT, OUTPUT_TOKENS_MAX, PAUSED, POOL_UNKNOWN,
-        PROJECT_POOL_MISSING, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE, WALL_TIME,
+        PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
+        WALL_TIME,
     };
     use crate::research::accounts::{AccountPick, Reach, SettingsResolver};
     use crate::research::runner::{
