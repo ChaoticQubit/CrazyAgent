@@ -894,4 +894,11 @@ mod tests {
             assert_eq!(plain_problem(code), Some(words), "{code}");
         }
     }
+
+    #[test]
+    fn a_check_on_a_node_too_old_for_context_mode_names_the_version_it_needs() {
+        let words = "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.";
+        assert_eq!(check_problem("server_node_too_old"), words);
+        assert_eq!(plain_problem("server_node_too_old"), Some(words));
+    }
 }

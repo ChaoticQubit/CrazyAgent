@@ -4541,3 +4541,47 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
         "the resumed turn is not told the new text replaces the old"
     );
 }
+
+#[test]
+fn a_launch_whose_context_mode_was_dropped_on_an_old_node_says_why_in_its_tools_section() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let line = "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n";
+    let plugins = |dropped: bool| LaunchPlugins {
+        skills: Vec::new(),
+        servers: vec![command_server("graph")],
+        context_mode_needs_node: dropped,
+    };
+    let claude = private_home(&root, "claude");
+    let installed = context_with(&root, plugins(true), Vec::new())
+        .install("claude-code", &claude, true)
+        .unwrap();
+    let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    let section = tools_section(&prompt);
+    assert!(section.contains(line), "{section}");
+    assert!(!section.contains("ctx_execute"), "{section}");
+
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, plugins(true), Vec::new())
+        .install("codex", &codex, true)
+        .unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(installed);
+    assert!(tools_section(&developer).contains(line), "{developer}");
+
+    let kept = private_home(&root, "kept");
+    let installed = context_with(&root, plugins(false), Vec::new())
+        .install("claude-code", &kept, true)
+        .unwrap();
+    let prompt = fs::read_to_string(kept.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    assert!(!prompt.contains("context-mode is off"), "{prompt}");
+}

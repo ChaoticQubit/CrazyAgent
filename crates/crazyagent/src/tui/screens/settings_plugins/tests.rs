@@ -1502,6 +1502,18 @@ fn a_check_while_context_mode_is_set_up_reads_the_setting_up_words() {
     }
 }
 
+#[test]
+fn a_check_on_a_node_too_old_for_context_mode_reads_the_engine_words() {
+    assert_eq!(
+        plugin_plain("server_node_too_old"),
+        "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again."
+    );
+    assert_eq!(
+        Some(plugin_plain("server_node_too_old")),
+        crate::plugins::plain_problem("server_node_too_old")
+    );
+}
+
 fn hook(plugin: &str, event: &str, matcher: Option<&str>, enabled: bool) -> HookView {
     HookView {
         id: format!("hook-{plugin}-{event}-{}", matcher.unwrap_or("all")),
