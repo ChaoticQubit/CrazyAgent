@@ -5357,6 +5357,38 @@ mod overview_tabs {
         assert!(!shown.contains("Share lists"));
     }
 
+    /// RV-DS241-2: a tab whose file came with the project's files, not written by the engine
+    /// nor saved by the owner, says so above its text in the desktop's words (DEC-141), and
+    /// only on that tab; a tab the owner edited does not.
+    #[test]
+    fn a_foreign_tab_file_says_it_came_with_the_projects_files() {
+        let line = concat!(
+            "This tab's file came with the project's files: CrazyAgent didn't write it and ",
+            "you didn't save it. Check it before you use its commands."
+        );
+        let mut overview = overview_with(Tab::InstallAndUse, "Run setup.sh first.\n");
+        overview.tabs[3].foreign = true;
+        let mut page = page_with_overview(overview.clone());
+        assert!(!flat(&mut page).contains(line), "only on its own tab");
+        for _ in 0..3 {
+            press(&mut page, KeyCode::Right);
+        }
+        assert!(frame(&mut page).contains(&marked("Install & use")));
+        let shown = flat(&mut page);
+        assert!(shown.contains(line), "{shown}");
+        assert!(shown.contains("Run setup.sh first."));
+        overview.tabs[3].foreign = false;
+        overview.tabs[3].edited = true;
+        let mut mine = page_with_overview(overview);
+        for _ in 0..3 {
+            press(&mut mine, KeyCode::Right);
+        }
+        assert!(
+            !flat(&mut mine).contains(line),
+            "the owner's edit is not foreign"
+        );
+    }
+
     #[test]
     fn a_tab_not_written_yet_says_what_will_write_it() {
         let shown = |change: fn(&mut Overview)| {
