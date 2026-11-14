@@ -712,7 +712,7 @@ export function Pools({ creating }: { creating: boolean }) {
         onSelect={(id) => { edits.drop(); setAdding(false); setRefusal(undefined); setSelected(id); }} onNew={() => { edits.open(read.map((item) => item.name)); setRefusal(undefined); setAdding(true); }}
         onToggleAdd={() => setAdding(!adding)} onDoneAdd={closeAdd} onAdd={(pool, account) => (draft ? edits.addToDraft(account) : edits.add(pool, account))} onRemove={edits.remove} onRename={edits.rename} onDraftName={edits.setName}
         onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} preparing={preparing} />
-      <div className="pool-spend"><SpendSettingsSection spend={spend} onDone={rereadUsage} /></div>
+      <div className="pool-spend"><SpendSettingsSection usage={usage} onDone={rereadUsage} onRetry={rereadUsage} /></div>
     </div>
     <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel={copy?.confirmLabel ?? "Delete pool"} pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { SPEND_DEFAULTS, setSpendSettings, usageRefusal, type AllLimited, type LimitedPool, type ResetsSource, type SpendConfirm, type SpendSettings, type SpendView } from "../../api-usage";
-import { Notice, Segmented, SettingLine, SettingSection } from "../../ui";
+import { SPEND_DEFAULTS, setSpendSettings, usageRefusal, type AllLimited, type LimitedPool, type ResetsSource, type SpendConfirm, type SpendSettings, type SpendView, type UsageReport } from "../../api-usage";
+import type { Loaded } from "../../state";
+import { LoadError, Notice, NotReady, Segmented, SettingLine, SettingSection } from "../../ui";
 import { andList } from "./account-drawer";
 import { SpendReset } from "./spend-reset";
 
@@ -70,7 +71,7 @@ export function SpendSettingsView({ settings, refused, onChange }: {
   const limitedChanged = settings.all_limited !== SPEND_DEFAULTS.all_limited;
   const source = settings.resets_source ?? SPEND_DEFAULTS.resets_source;
   const sourceChanged = source !== SPEND_DEFAULTS.resets_source;
-  return <SettingSection title="Free resets" about="Some accounts hold free resets that start their limits over. These choose how CrazyAgent uses them.">
+  return <SettingSection title="Free resets" about={SPEND_ABOUT}>
     <SettingLine label="Spend confirmation" help={confirmHelp(settings.confirm)} changed={confirmChanged}>
       <Segmented label="Spend confirmation" value={settings.confirm} options={CONFIRM_OPTIONS} onValue={(confirm) => onChange({ ...settings, confirm })} />
     </SettingLine>
@@ -84,13 +85,16 @@ export function SpendSettingsView({ settings, refused, onChange }: {
   </SettingSection>;
 }
 
-/** The three free resets settings on Pools: shows the choice at once, stores it, and rereads the usage
- * once the engine kept it. Inputs: the spend view read with the usage and the reread. Output:
- * the section. */
-export function SpendSettingsSection({ spend, onDone }: { spend: SpendView | undefined; onDone: () => void }) {
+const SPEND_ABOUT = "Some accounts hold free resets that start their limits over. These choose how CrazyAgent uses them.";
+
+/** The three free resets settings on Pools: until the usage read holds the stored settings, a
+ * loading line, its failure with Try again or a not ready line and no control, so nothing shows
+ * a default as stored or saves one; then shows a choice at once, stores it, and rereads the usage
+ * once the engine kept it. Inputs: the usage read, the reread and the retry. Output: the section. */
+export function SpendSettingsSection({ usage, onDone, onRetry }: { usage: Loaded<UsageReport>; onDone: () => void; onRetry: () => void }) {
   const [shown, setShown] = useState<SpendSettings>();
   const [refused, setRefused] = useState("");
-  const stored = spend?.settings;
+  const stored = usage.kind === "ok" ? usage.value.spend?.settings : undefined;
   useEffect(() => {
     if (shown && stored && shown.confirm === stored.confirm && shown.all_limited === stored.all_limited
       && (shown.resets_source ?? SPEND_DEFAULTS.resets_source) === (stored.resets_source ?? SPEND_DEFAULTS.resets_source)) setShown(undefined);
@@ -103,7 +107,14 @@ export function SpendSettingsSection({ spend, onDone }: { spend: SpendView | und
       else setShown(undefined);
     });
   };
-  return <SpendSettingsView settings={shown ?? stored ?? SPEND_DEFAULTS} refused={refused} onChange={change} />;
+  if (stored === undefined) {
+    return <SettingSection title="Free resets" about={SPEND_ABOUT}><div className="set-body">
+      {usage.kind === "loading" && <p className="secondary" role="status">Loading your free resets settings...</p>}
+      {usage.kind === "error" && <LoadError message={usage.message} onRetry={onRetry} />}
+      {(usage.kind === "not_ready" || usage.kind === "ok") && <NotReady what="Free resets settings" compact />}
+    </div></SettingSection>;
+  }
+  return <SpendSettingsView settings={shown ?? stored} refused={refused} onChange={change} />;
 }
 
 /** The notice line for a pool whose every account is at its limit. Inputs: the pool and the
