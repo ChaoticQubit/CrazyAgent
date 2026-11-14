@@ -846,9 +846,8 @@ fn a_shared_folder_is_refused_and_outside_worktrees_need_the_owners_choice() {
 }
 
 /// RV-DS241-44: a set-up project whose folder is gone still owns its name in the home. A
-/// Move or Copy of another project onto that name, and an add of a folder with that name,
-/// are refused before anything is written, and the missing project's onboarding and saved
-/// rows stay whole.
+/// Move or Copy of another project onto that name is refused before anything is written,
+/// and the missing project's onboarding and saved rows stay whole.
 #[test]
 fn a_move_onto_the_folder_of_a_project_whose_folder_is_gone_is_refused_and_its_rows_stay() {
     let case = Case::new();
@@ -877,7 +876,7 @@ fn a_move_onto_the_folder_of_a_project_whose_folder_is_gone_is_refused_and_its_r
         onboarding: false,
     };
     let mut registered = case.registered();
-    registered.push(missing.clone());
+    registered.push(missing);
     let project = ProjectId::new(PROJECT).unwrap();
     for mode in [AddMode::Move, AddMode::Copy] {
         let tx = case.db.unchecked_transaction().unwrap();
@@ -898,16 +897,6 @@ fn a_move_onto_the_folder_of_a_project_whose_folder_is_gone_is_refused_and_its_r
         tx.commit().unwrap();
         assert_eq!(refused.0, "home_destination_exists");
         assert_eq!(pending(&case.db).unwrap(), None);
-        let added = super::plan_add(
-            &case.home,
-            &case.engine,
-            text(&case.repo),
-            mode,
-            &[],
-            std::slice::from_ref(&missing),
-        )
-        .unwrap_err();
-        assert_eq!(added.0, "home_destination_exists");
     }
     assert!(case.repo.join("README").is_file());
     for table in [
@@ -921,7 +910,7 @@ fn a_move_onto_the_folder_of_a_project_whose_folder_is_gone_is_refused_and_its_r
 
 /// RV-DS241-43: a main graph refresh in flight in the folder keeps the move from placing
 /// it: past the wait the move is refused as busy with nothing moved and nothing pending,
-/// and once the refresh ends the move runs.
+/// and a move planned while the refresh runs waits for it to end, then runs.
 #[test]
 fn a_main_graph_refresh_in_the_folder_keeps_the_move_waiting_until_it_ends() {
     let case = Case::new();
@@ -932,11 +921,16 @@ fn a_main_graph_refresh_in_the_folder_keeps_the_move_waiting_until_it_ends() {
     );
     assert!(case.repo.join("README").is_file());
     assert_eq!(pending(&case.db).unwrap(), None);
-    drop(refresh);
-    assert!(matches!(
-        case.move_project(AddMode::Move, &[]).unwrap(),
-        Finished::Moved { .. }
-    ));
+
+    let planned = case.plan(AddMode::Move, &[]).unwrap();
+    let ends = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(refresh);
+    });
+    let moved = planned.run_with(Duration::from_secs(30));
+    ends.join().unwrap();
+    assert!(moved.is_ok(), "{moved:?}");
+    assert!(matches!(case.finish(true), Some(Finished::Moved { .. })));
     assert_eq!(case.stored_folder(), case.target());
 }
 

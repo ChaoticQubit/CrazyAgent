@@ -644,8 +644,9 @@ fn a_held_step_first_in_line_lets_the_next_project_be_claimed_and_halts_no_refre
     assert_eq!(claimed(&database).as_deref(), Some("alpha"));
 }
 
-/// RV-DS241-43: a refresh build gives way once a project move holds its folder, and a
-/// refresh in flight is seen in its folder until its last mark is dropped.
+/// RV-DS241-43: a refresh build gives way once a project move holds its folder, a folder a
+/// move holds is not listed for a refresh, and a refresh in flight is seen in its folder
+/// until its last mark is dropped.
 #[cfg(unix)]
 #[test]
 fn a_refresh_build_gives_way_to_a_move_of_its_folder_and_is_seen_while_it_runs() {
@@ -664,6 +665,31 @@ fn a_refresh_build_gives_way_to_a_move_of_its_folder_and_is_seen_while_it_runs()
         "and of a folder holding it"
     );
     assert!(!gives_way(&database, Path::new("/repos/beta"), &running)());
+
+    database
+        .execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    for id in ["alpha", "beta"] {
+        let body = serde_json::json!({
+            "project_id": id,
+            "spec": {"name": id, "repositories": [format!("/repos/{id}")]}
+        });
+        database
+            .execute(
+                "INSERT INTO projects(id,body) VALUES (?1,?2)",
+                params![id, body.to_string()],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        refreshable(&database).unwrap(),
+        [("beta".to_owned(), PathBuf::from("/repos/beta"))],
+        "a folder a move holds is not refreshed"
+    );
+    database
+        .execute("DELETE FROM projects_home_project_move", [])
+        .unwrap();
+    assert_eq!(refreshable(&database).unwrap().len(), 2);
 
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().canonicalize().unwrap();
