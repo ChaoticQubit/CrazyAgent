@@ -241,11 +241,13 @@ impl Shell {
             .as_ref()
     }
 
-    /// Records a new window size.
+    /// Records a new window size, capped to the area the TUI draws, so screens size agent
+    /// terminals for what is shown and drawing never resizes them again.
     /// Inputs: width and height. Output: none.
     pub fn resize(&mut self, width: u16, height: u16) {
-        self.ctx.width = width;
-        self.ctx.height = height;
+        let area = super::bounded_area(width, height);
+        self.ctx.width = area.width;
+        self.ctx.height = area.height;
         let ctx = &mut self.ctx;
         self.stack
             .last_mut()

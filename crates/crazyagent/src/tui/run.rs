@@ -30,7 +30,8 @@ const FRAMES_PER_PASS: usize = 64;
 const REFRESH: Duration = Duration::from_secs(5);
 const REPLY_WATCH: Duration = Duration::from_secs(1);
 const RECONNECT: Duration = Duration::from_secs(3);
-const PASTE_CHARS_MAX: usize = 100_000;
+/// The most characters of one paste the TUI takes; the rest is dropped.
+pub(in crate::tui) const PASTE_CHARS_MAX: usize = 100_000;
 
 struct Extras;
 
@@ -56,7 +57,8 @@ impl Drop for Extras {
     }
 }
 
-static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+/// Whether this TUI pushed the enhanced keyboard protocol and has not popped it yet.
+pub(in crate::tui) static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 
 /// Turns on the enhanced keyboard protocol (disambiguated escape codes) under Auto when the
 /// terminal says it has it, so Shift-Enter arrives as its own key; Off never asks. The flag
@@ -73,6 +75,25 @@ fn push_keyboard(
         return Ok(());
     }
     pushed.store(true, Ordering::SeqCst);
+    execute!(
+        out,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+}
+
+/// Pushes the keyboard protocol again on the screen a child that took the terminal handed
+/// back, when the restore before the child popped it, so Shift-Enter stays its own key. The
+/// terminal already said it has the protocol, so it is not asked again; the flag is set
+/// before the push is written, so the next restore pops it. Inputs: the writer, whether it
+/// was pushed before the handoff and the pushed flag. Output: the write result.
+pub(in crate::tui) fn push_back(
+    out: &mut impl std::io::Write,
+    was_pushed: bool,
+    pushed: &AtomicBool,
+) -> std::io::Result<()> {
+    if !was_pushed || pushed.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
     execute!(
         out,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -124,7 +145,12 @@ pub(super) fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
     restore_with(out, &KEYBOARD_PUSHED)
 }
 
-fn restore_with(out: &mut impl std::io::Write, pushed: &AtomicBool) -> std::io::Result<()> {
+/// Writes what `restore` writes, popping the keyboard protocol when the given flag says
+/// it was pushed. Inputs: the writer and the pushed flag. Output: the write result.
+pub(in crate::tui) fn restore_with(
+    out: &mut impl std::io::Write,
+    pushed: &AtomicBool,
+) -> std::io::Result<()> {
     let popped = pop_keyboard(out, pushed);
     execute!(
         out,

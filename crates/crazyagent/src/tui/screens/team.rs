@@ -1156,10 +1156,11 @@ impl Team {
             }
             return Flow::Handled;
         }
-        for chunk in attached.pane.encode(key).chunks(INPUT_BYTES_MAX) {
+        let bytes = attached.pane.encode(key);
+        if !bytes.is_empty() {
             ctx.request(Request::TerminalInput {
                 agent: attached.agent.clone(),
-                bytes: chunk.to_vec(),
+                bytes,
             });
         }
         Flow::Handled
