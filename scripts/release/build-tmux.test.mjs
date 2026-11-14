@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -20,13 +20,24 @@ function pin(text, name) {
 }
 
 /**
- * Runs the build script with arguments that must be refused before any download, under a
- * PATH with no curl, so a refusal that came after a fetch would fail differently.
- * Input: the arguments. Output: the exit status and stderr.
+ * Runs the build script with arguments that must be refused before any download, with a fake
+ * curl first on PATH that records each call and fetches nothing. The script sets its own PATH
+ * only after its checks, so any fetch made before or among them reaches the fake. Inputs: the
+ * arguments and the script, the real one by default. Output: the exit status, stderr and
+ * whether curl ran.
  */
-function refused(args) {
-  const run = spawnSync("/bin/bash", [SCRIPT, ...args], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" }, timeout: 10000 });
-  return { status: run.status, stderr: run.stderr };
+function refused(args, script = SCRIPT) {
+  const root = mkdtempSync(join(tmpdir(), "build-tmux-curl-"));
+  try {
+    const bin = join(root, "bin");
+    const record = join(root, "curl-called");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "curl"), `#!/bin/sh\necho "$@" >> '${record}'\n`, { mode: 0o755 });
+    const run = spawnSync("/bin/bash", [script, ...args], { encoding: "utf8", env: { PATH: `${bin}:/usr/bin:/bin` }, timeout: 10000 });
+    return { status: run.status, stderr: run.stderr, downloaded: existsSync(record) };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 test("the bundled tmux is the latest stable tmux 3.8 and every source tarball is pinned by its https URL and SHA-256 (DEC-157)", () => {
