@@ -39,7 +39,7 @@ const COPY: Record<string, string> = {
   home_copy_unverified: "The copy didn't match the original, so the original was kept.",
   home_copy_linked_checkout: "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder.",
   home_move_failed: "Couldn't move the folder. Nothing was removed. Try again.",
-  home_move_source_left: "The folder was added, but part of the original couldn't be removed. Check its old place.",
+  home_move_source_left: "The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything.",
   home_move_same: "This is already your projects folder.",
   home_move_nested: "Choose a projects folder that isn't inside the current one.",
   home_move_partial: "Some projects were moved and couldn't be moved back. Check both folders.",
