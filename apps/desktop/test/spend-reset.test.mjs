@@ -192,8 +192,11 @@ test("Free resets shows no choice while the usage read loads, failed or has no s
   assert.doesNotMatch(failed, /role="radiogroup"/);
   assert.match(failed, /Usage couldn&#x27;t be read\. Try again\./);
   assert.match(failed, />Try again</);
-  assert.doesNotMatch(draw({ kind: "not_ready" }), /role="radiogroup"/);
-  assert.doesNotMatch(draw({ kind: "ok", value: {} }), /role="radiogroup"/);
+  for (const missing of [draw({ kind: "not_ready" }), draw({ kind: "ok", value: {} })]) {
+    assert.doesNotMatch(missing, /role="radiogroup"/);
+    assert.match(missing, /role="status"[^>]*>The free resets settings aren&#x27;t in this build yet\.</);
+    assert.doesNotMatch(missing, /<h2/);
+  }
   const stored = draw({ kind: "ok", value: { spend: view({ settings: settings("off", "no_hint", "as_claude_code") }) } });
   for (const label of ["Off", "No hint", "As Claude Code"]) assert.match(stored, new RegExp(`aria-checked="true"[^>]*>${label}<`), label);
   for (const label of ["Confirm each", "Notice", "Don&#x27;t read"]) assert.match(stored, new RegExp(`aria-checked="false"[^>]*>${label}<`), label);
