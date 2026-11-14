@@ -2041,6 +2041,80 @@ async fn stale_read_paths_write_is_refused() {
     engine.stop().await;
 }
 
+/// RV-DS241-64: removing a project finishes the start and worktree notices of the agents
+/// the removal deletes, so no pending notice names an agent that is gone; another project's
+/// notice stays pending.
+#[tokio::test]
+async fn a_removed_project_finishes_the_notices_of_the_agents_it_deletes() {
+    use crate::ledger::ActionKind;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(ENGINE_WAIT).unwrap();
+    crate::ledger::initialize(&connection).unwrap();
+    let agent = |project: &str| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,stopped_ms) VALUES (?1,'sub','codex',0,'stopped',1,1,1)",
+                [project],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let removed_agent = agent("setup-pooled");
+    let kept_agent = agent("elsewhere");
+    let notice = |kind: ActionKind, agent: i64, payload: String| {
+        crate::ledger::begin(&connection, kind, &format!("team-{agent}"), &payload)
+            .unwrap()
+            .get()
+    };
+    let unknown_start =
+        |agent: i64| format!("{{\"team_agent\":{agent},\"pane\":false,\"unknown\":true}}");
+    notice(
+        ActionKind::AgentSpawn,
+        removed_agent,
+        unknown_start(removed_agent),
+    );
+    notice(
+        ActionKind::WorktreeCreate,
+        removed_agent,
+        format!(
+            "{{\"team_agent\":{removed_agent},\"repository\":\"/r\",\"worktree\":\"/r/w\",\"unknown\":true}}"
+        ),
+    );
+    let kept = notice(
+        ActionKind::AgentSpawn,
+        kept_agent,
+        unknown_start(kept_agent),
+    );
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    let pending = |kind: ActionKind| {
+        crate::ledger::pending(&connection, kind)
+            .unwrap()
+            .into_iter()
+            .map(|action| action.id.get())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pending(ActionKind::AgentSpawn), [kept]);
+    assert_eq!(pending(ActionKind::WorktreeCreate), Vec::<i64>::new());
+    drop(connection);
+    drop(owner);
+    engine.stop().await;
+}
+
 /// A removed project's team settings version moves on once more, so a team setting saved
 /// from a screen read before the removal is refused on a project added again under the same
 /// id, which keeps its defaults until a change from a fresh read (V2SYNC-2).
