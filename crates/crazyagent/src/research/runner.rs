@@ -6579,6 +6579,57 @@ mod tests {
         assert!(rustix::process::test_kill_process_group(pid).is_err());
     }
 
+    /// A setup command that leads no process group of its own is still stopped at its
+    /// limit: the stop ends the command itself, not only a group it does not lead
+    /// (RV-DS241-28).
+    #[test]
+    fn a_bounded_setup_command_that_leads_no_group_is_stopped_at_its_limit() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = crate::spawn_gate::spawn(&mut command).unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            wait_bounded(child, Duration::from_millis(200)).unwrap(),
+            Ended::TimedOut
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The engine's own git leads a process group of its own, so the setup time limit
+    /// stops git and every program git started (RV-DS241-28).
+    #[test]
+    fn engine_git_leads_its_own_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let folder = base.join("folder");
+        let tmp = base.join("tmp");
+        for made in [&folder, &tmp] {
+            fs::create_dir_all(made).unwrap();
+        }
+        let ran = engine_git(
+            &folder,
+            &tmp,
+            &["-c", "alias.group=!ps -o pgid= -p $$ > group.txt", "group"],
+        )
+        .unwrap();
+        assert!(ran);
+        let group: i32 = fs::read_to_string(folder.join("group.txt"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(group > 1);
+        assert_ne!(group, rustix::process::getpgrp().as_raw_nonzero().get());
+    }
+
     /// A worktree add that git refuses names its own step, not the generic setup refusal:
     /// a repository with no commit has no HEAD to add a worktree at.
     #[cfg(target_os = "macos")]
