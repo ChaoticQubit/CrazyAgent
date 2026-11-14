@@ -1,0 +1,171 @@
+use super::*;
+
+const STOPPED_LEAD_REFUSAL: &str = "Not done: you were stopped, so you cannot start a worker, merge or change work now. End your turn here.";
+
+/// Calls `spawn` as the sub-agent `lead` does through its team tools, on a database
+/// connection of its own. Takes the fixture, the lead and the task. Returns the answer
+/// text and whether it is a refusal.
+fn lead_spawn_answer(fixture: &Fixture, lead: i64, task: &str) -> (String, bool) {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let folder = fixture.base.join("team");
+    let answering = super::super::super::master::Answering {
+        access: &fixture.access,
+        stored: &fixture.setup,
+        landing: &folder,
+        agents: &folder,
+        events: None,
+        host: None,
+    };
+    super::super::super::master::answer_sub(
+        &mut connection,
+        &answering,
+        lead,
+        super::super::super::tool::Call::Spawn {
+            task: task.into(),
+            harness: None,
+            role: None,
+            mode: None,
+        },
+    )
+    .unwrap()
+    .unwrap()
+}
+
+/// Counts the tasks queued under one prompt. Takes the fixture and the prompt.
+fn tasks_named(fixture: &Fixture, prompt: &str) -> i64 {
+    fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_tasks WHERE prompt=?1",
+            [prompt],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// Counts the agents whose row names `lead` as their lead. Takes the fixture and the lead.
+fn workers_of(fixture: &Fixture, lead: i64) -> i64 {
+    fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_agents WHERE parent=?1",
+            [lead],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// RV-DS241-122 (a): a lead's `spawn` call still in its mailbox on the tick that stops the
+/// lead is drained with a plain refusal, and no task is queued from it, so a stopping lead
+/// never starts a worker.
+#[test]
+fn a_stopping_leads_spawn_drained_on_its_stop_tick_starts_no_worker() {
+    let mut fixture = Fixture::new(2);
+    let lead = 7;
+    let (host, mut team) = asking_team(&mut fixture, &[lead]);
+    let mailbox = team.mailbox(lead);
+    let tmp = mailbox.parent().unwrap().to_path_buf();
+    for folder in [team.agent_folder(lead), tmp, mailbox.clone()] {
+        private_directory(&folder).unwrap();
+    }
+    let prompt = "Write the help page.";
+    let call = format!("{:032x}", 1);
+    std::fs::write(
+        mailbox.join(format!("{call}.call")),
+        serde_json::to_vec(&serde_json::json!({"tool": "spawn", "task": prompt})).unwrap(),
+    )
+    .unwrap();
+    team.workers
+        .get_mut(&lead)
+        .expect("the lead runs")
+        .stop_for("rate_limited");
+    team.serve_agent_calls(&fixture.setup, &fixture.access);
+    let reply: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(mailbox.join(format!("{call}.reply"))).unwrap())
+            .unwrap();
+    assert_eq!(
+        (
+            reply["text"].as_str().unwrap(),
+            reply["error"].as_bool().unwrap()
+        ),
+        (STOPPED_LEAD_REFUSAL, true)
+    );
+    assert_eq!(tasks_named(&fixture, prompt), 0, "no task is queued");
+    assert_eq!(workers_of(&fixture, lead), 0);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// RV-DS241-122 (b): a lead whose stop is recorded, by the owner, the master or its own
+/// lead, is refused a new worker in the same words, while the same lead before the stop
+/// has its worker queued, so the refusal is the stop's and no other check's.
+#[test]
+fn a_stopped_lead_is_refused_a_new_worker() {
+    let fixture = Fixture::new(2);
+    let _home = committed_project(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = idle_sub_agent(&fixture, &mut team);
+    let (queued, refused) = lead_spawn_answer(&fixture, lead, "Write the notes page.");
+    assert!(!refused && queued.starts_with("Task "), "{queued}");
+
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'master')",
+            params![lead, PROJECT],
+        )
+        .unwrap();
+    let prompt = "Write the help page.";
+    assert_eq!(
+        lead_spawn_answer(&fixture, lead, prompt),
+        (STOPPED_LEAD_REFUSAL.to_owned(), true)
+    );
+    assert_eq!(tasks_named(&fixture, prompt), 0, "no task is queued");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// RV-DS241-122 (c): a worker task a lead queued before the owner stopped that lead is held
+/// with a wait line that says so, never dispatched to a new worker of the stopped lead.
+#[test]
+fn a_task_queued_by_a_lead_the_owner_stopped_waits_for_the_lead() {
+    let fixture = Fixture::new(2);
+    let _home = committed_project(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = idle_sub_agent(&fixture, &mut team);
+    let prompt = "Write the notes page.";
+    let (queued, refused) = lead_spawn_answer(&fixture, lead, prompt);
+    assert!(!refused, "{queued}");
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::StopAgent {
+            project_id: fixture.setup.project_id.clone(),
+            agent: lead,
+        }],
+    );
+    fixture.until(&mut team, "the owner's stop ends the lead", |f| {
+        f.agent_status(lead).0 == AgentStatus::Stopped
+    });
+    idle_ticks(&mut team);
+    let (status, wait): (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,wait FROM team_tasks WHERE prompt=?1",
+            [prompt],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (status.as_str(), wait.as_deref()),
+        ("queued", Some("Waits for you to start its lead again"))
+    );
+    assert_eq!(
+        workers_of(&fixture, lead),
+        0,
+        "no worker of the stopped lead"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}

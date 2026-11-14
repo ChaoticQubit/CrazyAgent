@@ -32,6 +32,10 @@ mod live_terminal_probe_tests;
 #[path = "freeze_tests.rs"]
 mod freeze_tests;
 
+#[cfg(target_os = "macos")]
+#[path = "lead_stop_tests.rs"]
+mod lead_stop_tests;
+
 const PROJECT: &str = "team-panes";
 
 const ENDPOINT: &str = "local-a";
