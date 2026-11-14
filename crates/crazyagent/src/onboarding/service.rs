@@ -18,7 +18,7 @@ use crate::research::runner::{
     confined_unavailable,
 };
 use crate::sandbox::SandboxError;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
 use std::collections::HashMap;
@@ -40,7 +40,6 @@ const ENGINE_TICK: Duration = Duration::from_secs(2);
 /// takes effect while the claim still lets newer projects go first.
 const PAUSE_RECHECK_MS: i64 = 10_000;
 const RUN_NAME_BYTES_MAX: usize = 96;
-#[cfg(unix)]
 const ONBOARDED_MAX: i64 = 256;
 #[cfg(unix)]
 const REFRESH_PREFIX: &str = "graph-main-";
@@ -325,51 +324,85 @@ const CLAIMABLE: &str = "claimer IS NULL AND (graph_state='waiting'
         AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
             AND json_extract(s.body,'$.revision')>?1)))";
 
+/// One onboarding row a worker may claim, as [`first_unheld`] reads it: the project, its
+/// folder, pool and draft as stored, its runs so far, whether its graph step waits, and
+/// when its onboarding began.
+struct Waiting {
+    project: String,
+    repo: String,
+    pool: String,
+    drafted: String,
+    runs: i64,
+    graph: bool,
+    created_ms: i64,
+}
+
+/// The oldest claimable row ([`CLAIMABLE`]) whose folder no pending project move holds,
+/// looking at no more than [`ONBOARDED_MAX`] rows in claim order, so one held project never
+/// stalls the others. Takes a connection, the time now and the pause recheck cut-off.
+/// Returns the row, None when none waits, or any SQLite failure.
+fn first_unheld(
+    connection: &Connection,
+    now: i64,
+    recheck: i64,
+) -> rusqlite::Result<Option<Waiting>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms
+         FROM onboarding o WHERE {CLAIMABLE} ORDER BY created_ms,project LIMIT ?4"
+    ))?;
+    let rows = statement.query_map(
+        params![
+            crate::project_setup::FIRST_REVISION as i64,
+            now,
+            recheck,
+            ONBOARDED_MAX
+        ],
+        |row| {
+            Ok(Waiting {
+                project: row.get(0)?,
+                repo: row.get(1)?,
+                pool: row.get(2)?,
+                drafted: row.get(3)?,
+                runs: row.get(4)?,
+                graph: row.get(5)?,
+                created_ms: row.get(6)?,
+            })
+        },
+    )?;
+    for row in rows {
+        let row = row?;
+        if !crate::projects_home::project_move_holds(connection, Path::new(&row.repo))? {
+            return Ok(Some(row));
+        }
+    }
+    Ok(None)
+}
+
 /// Claims the oldest waiting step ([`CLAIMABLE`]): a graph build, or a mapping once its
 /// graph step has finished either way, while the owner has not saved the
 /// setup and no account pause it waits on is still running, or that pause was
 /// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
 /// and counts the attempt; a row whose pool or draft cannot be read fails with
 /// [`ROW_UNREADABLE`] instead. A step of a project whose folder is being moved into the
-/// projects home is not claimed until the move is finished or forgotten. Returns `None`
-/// when nothing waits.
+/// projects home is not claimed until the move is finished or forgotten, and the next
+/// waiting step is claimed meanwhile ([`first_unheld`]). Returns `None` when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let now = now_ms();
-    let row = tx
-        .query_row(
-            &format!(
-                "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms
-                 FROM onboarding o WHERE {CLAIMABLE} ORDER BY created_ms,project LIMIT 1"
-            ),
-            params![
-                crate::project_setup::FIRST_REVISION as i64,
-                now,
-                now - PAUSE_RECHECK_MS
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, bool>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    let Some((project, repo, pool, drafted, runs, graph, created_ms)) = row else {
+    let row = first_unheld(&tx, now, now - PAUSE_RECHECK_MS).map_err(|error| error.to_string())?;
+    let Some(Waiting {
+        project,
+        repo,
+        pool,
+        drafted,
+        runs,
+        graph,
+        created_ms,
+    }) = row
+    else {
         return Ok(None);
     };
-    if crate::projects_home::project_move_holds(&tx, std::path::Path::new(&repo))
-        .map_err(|error| error.to_string())?
-    {
-        return Ok(None);
-    }
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
     let read = CredentialRef::new(pool)
         .ok()
@@ -703,25 +736,16 @@ fn graphs_wanted(database: &Connection) -> bool {
     main_graph::wanted(switch, std::env::consts::OS)
 }
 
-/// Whether a new or ready onboarding step waits to be claimed ([`CLAIMABLE`]): a graph step,
-/// or a mapping with no account pause or one whose pause has ended. The pause recheck
+/// Whether a new or ready onboarding step waits to be claimed ([`first_unheld`]): a graph
+/// step, or a mapping with no account pause or one whose pause has ended, in a folder no
+/// project move holds, so a held step halts no refresh. The pause recheck
 /// cut-off is bound to the smallest time, so a mapping that only rechecks its pause every
 /// [`PAUSE_RECHECK_MS`] never halts a refresh and waits one build instead. Takes the
 /// worker's database. Returns the answer; a table that cannot be read counts as no step
 /// waiting, since the claim then fails too.
 #[cfg(unix)]
 fn step_waits(database: &Connection) -> bool {
-    database
-        .query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM onboarding o WHERE {CLAIMABLE})"),
-            params![
-                crate::project_setup::FIRST_REVISION as i64,
-                now_ms(),
-                i64::MIN
-            ],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap_or(false)
+    first_unheld(database, now_ms(), i64::MIN).is_ok_and(|row| row.is_some())
 }
 
 /// The stop a main graph refresh build polls (DEC-123): yes once the engine halts, once
