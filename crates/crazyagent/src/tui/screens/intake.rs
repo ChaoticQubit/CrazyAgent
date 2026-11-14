@@ -386,8 +386,10 @@ mod tests {
 
     /// RV-DS241-102: what a move leaves of the original are the entries that changed after
     /// its copy check, which can be the only copy of newer edits. For an added folder and a
-    /// moved project alike the TUI says it in the desktop's own words (DEC-141), tells the
-    /// owner to check the old place and never to remove or delete what is there.
+    /// moved project alike the TUI says it in the desktop's own words (DEC-141), says what is
+    /// left may be newer than the copy, tells the owner to check it and never to remove or
+    /// delete what is there. A folder that did not arrive, a copy that did not match and an
+    /// add that stopped part way are told in the desktop's words too (r1 F1).
     #[test]
     fn a_move_that_left_part_of_the_original_says_check_it_in_the_desktop_words() {
         let read = |path: &str| {
@@ -405,6 +407,13 @@ mod tests {
         };
         let intake = read("api-intake.ts");
         let moved = read("screens/project/move-home.tsx");
+        for code in [
+            "home_add_unverified",
+            "home_copy_unverified",
+            "home_add_interrupted",
+        ] {
+            assert_eq!(copy(code), desktop(&intake, code), "{code}");
+        }
         for (code, said, words) in [
             (
                 "home_move_source_left",
@@ -420,6 +429,10 @@ mod tests {
             assert_eq!(said, words, "{code}");
             let lower = said.to_lowercase();
             assert!(lower.contains("check"), "{code}: {said}");
+            assert!(
+                lower.contains("newer than the copy"),
+                "{code} does not say what is left may be newer than the copy: {said}"
+            );
             for told in [
                 "yourself",
                 "remove it",
