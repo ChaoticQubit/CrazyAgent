@@ -306,7 +306,10 @@ async fn setup_status_projects_home_and_an_empty_team_graph_read_on_a_fresh_engi
         assert!(
             matches!(
                 dependency.state,
-                DependencyState::Missing { .. } | DependencyState::Found { .. }
+                DependencyState::Missing { .. }
+                    | DependencyState::Found { .. }
+                    | DependencyState::Bundled { .. }
+                    | DependencyState::System { .. }
             ),
             "a fresh engine finds each tool or reports it missing: {dependency:?}"
         );

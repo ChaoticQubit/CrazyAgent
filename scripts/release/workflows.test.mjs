@@ -174,6 +174,48 @@ test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust
   }
 });
 
+test("a release builds the bundled tmux from its pinned script before staging sidecars and the Tauri bundle, on macOS and Linux only, and checks it is signed on macOS (DEC-157)", async () => {
+  const release = await workflow("release.yml");
+  const build = steps(release, "build");
+  const index = (name) => build.findIndex((step) => new RegExp(`^\\s*(- )?name: ${name}$`, "m").test(step));
+  const tmux = index("Build bundled tmux");
+  const stage = index("Stage desktop sidecars");
+  const bundle = index("Build desktop bundle");
+  const verify = index("Check the bundled tmux signature");
+  assert(tmux >= 0 && stage >= 0 && bundle >= 0 && verify >= 0, "all four steps exist");
+  assert(tmux < stage && stage < bundle && bundle < verify, "tmux is built, then staged, then bundled, then checked");
+  assert.match(build[tmux], /^ {8}if: matrix\.os != 'windows'$/m);
+  assert.match(build[tmux], /scripts\/release\/build-tmux\.sh --target "\$TARGET" --work "\$work\/build" --out "\$work\/crazyagent-tmux"/);
+  assert.match(build[tmux], /TMUX_SIDECAR=\$work\/crazyagent-tmux" >> "\$GITHUB_ENV"/);
+  assert(!/continue-on-error/.test(build[tmux]), "a failed tmux check, such as a weak import, fails the release");
+  const rosetta = index("Install Rosetta for the x86_64 tmux start check");
+  assert(rosetta >= 0 && rosetta < tmux, "Rosetta is in place before the x86_64 tmux is built and started");
+  assert.match(build[rosetta], /^ {8}if: matrix\.target == 'x86_64-apple-darwin'$/m);
+  const install = build[rosetta].indexOf("sudo softwareupdate --install-rosetta --agree-to-license");
+  const ownRunner = build[rosetta].indexOf('if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then');
+  assert(install > 0 && ownRunner > 0 && ownRunner < install, "Rosetta is installed only on a GitHub-hosted runner");
+  assert.match(build[rosetta].slice(ownRunner, install), /::error::[^\n]*install Rosetta[^\n]*\n\s+exit 1\n/, "on the owner's runner CI installs nothing: it fails and says to install Rosetta");
+  assert.match(build[rosetta], /^ {10}if \[ "\$\(uname -m\)" = arm64 \] && ! \/usr\/bin\/arch -x86_64 \/usr\/bin\/true 2> \/dev\/null; then$/m, "only an Apple silicon runner without Rosetta needs it");
+  assert.match(build[rosetta], /^ {10}\/usr\/bin\/arch -x86_64 \/usr\/bin\/true$/m, "the step fails when x86_64 still cannot run");
+  assert(!/continue-on-error/.test(build[rosetta]), "a failed Rosetta install fails the release, never skips the start check");
+  assert.match(build[stage], /--tmux "\$TMUX_SIDECAR"/);
+  assert.match(build[index("Install Linux build packages")], /--no-install-recommends [^\n]*\bbison\b[^\n]*\bmusl-tools\b/);
+  assert.match(build[verify], /^ {8}if: matrix\.os == 'macos'$/m);
+  assert.match(build[verify], /Contents\/MacOS\/crazyagent-tmux/);
+  assert.match(build[verify], /codesign --verify --strict/);
+  assert.match(build[verify], /flags=.*runtime/);
+  const ci = await workflow("ci.yml");
+  assert(!/TMUX_(VERSION|SHA256)/.test(ci), "lint-only CI builds no tmux, so it pins none (DEC-143)");
+});
+
+test("no release step pipes a tool into grep -q, since under pipefail an early grep exit fails a good check or passes a bad one (DEC-157)", async () => {
+  const release = await workflow("release.yml");
+  assert.deepEqual(release.split("\n").filter((line) => /\|\s*grep\b[^|]*\s-[A-Za-z]*q/.test(line)), [], "each check captures its tool's output, then greps it");
+  const build = steps(release, "build");
+  const stage = build.find((step) => /^\s*(- )?name: Stage desktop sidecars$/m.test(step));
+  assert.match(stage, /\$\{tmux\[@\]\+"\$\{tmux\[@\]\}"\}/, "an empty tmux list expands to nothing under set -u on any bash");
+});
+
 test("every badal job refuses to run under Rosetta before anything else", async () => {
   const [ci] = steps(await workflow("ci.yml"), "macos");
   assert.match(ci, new RegExp(`^ {6}- name: ${ROSETTA}\n {8}run: \\|`));
@@ -883,4 +925,13 @@ test("the hdiutil retry runs every other hdiutil command, and a create over an e
   assert.deepEqual(over.calls, ["create present"]);
   assert.equal(over.kept, "kept", "an image that was there before is never deleted");
   assert.deepEqual(over.sleeps, []);
+});
+
+test("the release job marks every engine it builds for a target that ships crazyagent-tmux, at job level so no later cargo step rebuilds it unmarked, and the engine reads that exact mark (leader 20:15)", async () => {
+  const text = await workflow("release.yml");
+  const env = block(block(text, 2, "build").join("\n"), 4, "env");
+  assert(env.includes("      CRAZYAGENT_BUNDLES_TMUX: ${{ matrix.os != 'windows' && '1' || '0' }}"), env.join("\n"));
+  assert.equal(text.split("CRAZYAGENT_BUNDLES_TMUX").length - 1, 1, "no step sets the mark again");
+  const tools = readFileSync(fileURLToPath(new URL("../../crates/crazyagent/src/tools.rs", import.meta.url)), "utf8");
+  assert.match(tools, /pub const SHIPS_BUNDLED_TMUX: bool = match option_env!\("CRAZYAGENT_BUNDLES_TMUX"\) \{\n {4}Some\(mark\) => matches!\(mark\.as_bytes\(\), \[b'1'\]\),\n {4}None => false,\n\};/);
 });

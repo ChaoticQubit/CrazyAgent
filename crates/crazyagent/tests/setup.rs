@@ -113,7 +113,10 @@ async fn setup_status_lists_the_dependencies_and_the_shipped_pack() {
         assert!(
             matches!(
                 dependency.state,
-                DependencyState::Found { .. } | DependencyState::Missing { .. }
+                DependencyState::Found { .. }
+                    | DependencyState::Bundled { .. }
+                    | DependencyState::System { .. }
+                    | DependencyState::Missing { .. }
             ),
             "{dependency:?}"
         );

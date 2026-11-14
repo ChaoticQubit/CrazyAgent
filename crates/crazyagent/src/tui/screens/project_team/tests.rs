@@ -2280,6 +2280,49 @@ fn the_master_harness_picker_saves_the_picked_harness_through_the_project_setup(
     assert!(view.master_pick.is_none());
 }
 
+/// The master harness picker never offers a harness the engine lists as Can't run, the same
+/// rule New project and the desktop pickers follow (DEC-141): the found Claude Code whose
+/// program cannot start is left out, the ready ones stay.
+#[test]
+fn the_master_harness_picker_never_offers_a_harness_the_engine_lists_as_cant_run() {
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('H'))), TeamReply::Handled);
+    assert!(view.wants_catalog());
+    assert_eq!(
+        view.next_query(NOW + 1),
+        Some(SetupQuery::Setup { project: project() })
+    );
+    let mut entries = catalog();
+    assert_eq!(entries[1].id, "claude");
+    entries[1].status = crate::harnesses::HarnessStatus::CantRun {
+        reason: "claude needs node, which is missing. Install Node.js from Settings > Harnesses. Then try again.".into(),
+    };
+    view.take_catalog(&Ok(entries));
+    view.apply(
+        &SetupQuery::Setup { project: project() },
+        Ok(SetupView::Setup(Some(Box::new(stored())))),
+    );
+    let rows = frame(&view, 120, 36);
+    let at = rows
+        .iter()
+        .position(|row| row.contains("Harness for the master"))
+        .unwrap();
+    let picker: Vec<String> = rows[at + 1..]
+        .iter()
+        .map(|row| {
+            row.trim_matches(|c: char| c == ' ' || c == '\u{2502}')
+                .to_owned()
+        })
+        .filter(|row| row.ends_with("now") || ["Claude Code", "Gemini CLI"].contains(&row.as_str()))
+        .collect();
+    assert_eq!(
+        picker,
+        ["> Codex  now", "Gemini CLI"],
+        "{}",
+        rows.join("\n")
+    );
+}
+
 /// A failed setup read under the master harness picker is said once and read again only
 /// after the refresh interval, not on every arrival that asks for the next read
 /// (rv-code TP1-L1).

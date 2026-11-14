@@ -330,6 +330,22 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
     bind_tcp_std(address)
 }
 
+/// Holds a free loopback TCP port that refuses every connect, as a model provider that is
+/// down: a listener takes one connection from this process and is closed, so the port stays
+/// in use by that connection with nothing listening on it. The system then gives the port to
+/// no port-0 bind and refuses a bind that names it without `SO_REUSEADDR`. Input: none.
+/// Output: the connection's two ends, which free the port when dropped, and the port.
+#[cfg(unix)]
+pub fn refusing_tcp_port() -> io::Result<([std::net::TcpStream; 2], u16)> {
+    let listener = bind_tcp_std("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let near = connect_tcp_std(address)?;
+    let (far, _) = accept_tcp_std(&listener)?;
+    drop(listener);
+    assert_eq!(far.local_addr()?, address, "the kept end holds the port");
+    Ok(([near, far], address.port()))
+}
+
 /// Binds a blocking UDP socket inside the gate.
 /// Input: the address. Output: the socket.
 #[allow(clippy::disallowed_methods)]

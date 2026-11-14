@@ -146,9 +146,10 @@ fn the_newest_node_version_of_a_manager_is_found_first() {
     assert_eq!(resolve("node", &home_only(&home)).unwrap().program, newest);
 }
 
-/// The engine looks in the app's folder and its setup folder first, then Homebrew on Apple
-/// silicon and Intel, all before the PATH it inherited (R-M1), then HOME, and the system
-/// folders last.
+/// The engine looks in the app's folder, then Homebrew on Apple silicon and Intel, all
+/// before the PATH it inherited (R-M1), then HOME and the system folders, and last the app's
+/// own setup and npm harness folders, which no probed folder passes: the owner's own
+/// installs win and the app's are the fallback.
 #[test]
 fn the_engine_looks_in_homebrew_on_both_macs_and_the_system_folders_last() {
     let (_folder, home) = scratch();
@@ -165,15 +166,34 @@ fn the_engine_looks_in_homebrew_on_both_macs_and_the_system_folders_last() {
             .position(|f| f == Path::new(folder))
             .unwrap_or_else(|| panic!("{folder} is looked in"))
     };
+    let setup_bin = PathBuf::from("/engine/setup/bin");
+    let prefix_bin = crate::setup::harness_prefix(Path::new("/engine")).join("bin");
     assert_eq!(at("/app"), 0);
-    assert_eq!(at("/engine/setup/bin"), 1);
-    assert_eq!(at("/opt/homebrew/bin"), 2);
-    assert_eq!(at("/usr/local/bin"), 3);
-    assert_eq!(at("/custom/bin"), 4);
+    assert_eq!(at("/opt/homebrew/bin"), 1);
+    assert_eq!(at("/usr/local/bin"), 2);
+    assert_eq!(at("/custom/bin"), 3);
     assert!(at("/custom/bin") < folders.iter().position(|f| f.starts_with(&home)).unwrap());
+    let owners = folders.len() - 2;
     assert_eq!(
-        folders[folders.len() - 4..],
+        folders[owners - 4..owners],
         SYSTEM_FOLDERS.map(PathBuf::from)
+    );
+    assert_eq!(
+        folders[owners..],
+        [setup_bin.clone(), prefix_bin.clone()],
+        "the app's own installs are the fallback after every folder of the owner"
+    );
+    let probed = PathBuf::from("/probed/bin");
+    let with_probed = places
+        .clone()
+        .with_probed(vec![probed.clone(), setup_bin.clone()]);
+    let folders = with_probed.folders();
+    let probed_at = folders.iter().position(|f| *f == probed).unwrap();
+    assert!(probed_at < folders.len() - 6, "{folders:?}");
+    assert_eq!(
+        folders[folders.len() - 2..],
+        [setup_bin, prefix_bin],
+        "a probed folder never moves the app's folders ahead"
     );
     assert!(folders.contains(&home.join(".local/bin")));
     assert!(folders.contains(&home.join(".cargo/bin")));
@@ -383,6 +403,42 @@ fn a_link_into_a_project_is_refused() {
     );
 }
 
+/// Removes a folder a row made outside its scratch folder when the row ends, passed or not.
+struct Removed(PathBuf);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// 2.4.1 R4: an agent's short temp folder (`ca-` and 16 hex digits in `/private/tmp`, `/tmp`
+/// off macOS), which the agent writes, counts as a place agents can write though this user
+/// owns it, so a file there is refused even when an owner link in a trusted folder names it.
+#[test]
+fn a_file_in_an_agent_short_temp_folder_is_refused_even_through_an_owner_link() {
+    let (_folder, home) = scratch();
+    let agent_temp = crate::sandbox::toolchains::tmp_path(&home);
+    std::fs::create_dir(&agent_temp).unwrap();
+    let _removed = Removed(agent_temp.clone());
+    let planted = program(&agent_temp.join("bin/tmux"), NODE);
+    assert!(
+        Places::new(Vec::new(), None).agent_writable(&planted),
+        "{planted:?}"
+    );
+    std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+    std::os::unix::fs::symlink(&planted, home.join(".local/bin/tmux")).unwrap();
+    let missing = resolve("tmux", &home_only(&home)).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    let line = missing.line();
+    assert!(line.contains("an agent's temp folder"), "{line}");
+    assert!(!line.contains("outside your projects"), "{line}");
+    assert_eq!(
+        missing.refused.map(|refused| refused.why),
+        Some(Refusal::AgentsCanWrite)
+    );
+}
+
 /// R-L1 and F2: an interpreter named by path goes through the same checks as a tool found by
 /// name: one inside a project's `.crazyagent` folder, or inside a project, is reported as
 /// refused with its own file and why, never as a missing interpreter, and a pinned entry
@@ -475,6 +531,53 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
     }
 }
 
+/// 2.4.1 R3: an engine data folder inside a project, as a dev layout inside a repo has it,
+/// keeps its `setup/bin` refused, since agents of any engine that has the project may write
+/// there, and a tool found there is named in a plain refusal, never reported as missing.
+#[test]
+fn a_tool_in_the_setup_folder_of_an_engine_folder_inside_a_project_is_refused_by_name() {
+    let (_folder, home) = scratch();
+    let root = project(&home.join("work/repo")).join(".local-state/engine");
+    let planted = program(&root.join("setup/bin/crazyagent-dev-tool"), NODE);
+    let engine = Places::engine(Some(&root), None, Some(home), Some(OsStr::new("")));
+    assert!(
+        !engine.folders().contains(&root.join("setup/bin")),
+        "{:?}",
+        engine.folders()
+    );
+    let missing = resolve("crazyagent-dev-tool", &engine).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+    assert_eq!(
+        missing.refused,
+        Some(Box::new(Refused {
+            file: planted,
+            why: Refusal::AgentsCanWrite
+        }))
+    );
+}
+
+/// 2.4.1 R3: a script found in a trusted folder whose `env` interpreter sits only in the
+/// set-aside setup folder of an engine data folder inside a project is refused by the
+/// interpreter's file, never reported as needing an interpreter with an install hint.
+#[test]
+fn a_script_whose_interpreter_is_only_in_a_refused_setup_folder_names_that_file() {
+    let (_folder, home) = scratch();
+    let root = project(&home.join("work/repo")).join(".local-state/engine");
+    let interpreter = program(&root.join("setup/bin/crazyagent-dev-node"), NODE);
+    program(
+        &home.join(".local/bin/crazyagent-dev-script"),
+        "#!/usr/bin/env crazyagent-dev-node\n",
+    );
+    let engine = Places::engine(Some(&root), None, Some(home), Some(OsStr::new("")));
+    let missing = resolve("crazyagent-dev-script", &engine).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+    assert_eq!(missing.tool, "crazyagent-dev-script");
+    assert_eq!(
+        missing.refused.map(|refused| refused.file),
+        Some(interpreter)
+    );
+}
+
 /// R-M1: the engine's data folder holds the agents' HOMEs, worktrees and team state, which
 /// agents write. A PATH folder there is refused while the engine's own `setup/bin` is kept,
 /// and a file found in `setup/bin` whose real file sits in an agent's HOME is passed over.
@@ -497,14 +600,19 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
         resolve("tmux", &places).map_or(true, |tmux| tmux.program != planted),
         "a link into an agent's HOME is never used"
     );
+    assert!(resolve_entry(&setup.join("tmux"), &places).is_err());
     std::fs::remove_file(setup.join("tmux")).unwrap();
     let own = program(&setup.join("tmux"), NODE);
-    assert_eq!(resolve("tmux", &places).unwrap().program, own);
+    assert_eq!(
+        resolve_entry(&setup.join("tmux"), &places).unwrap().program,
+        own,
+        "the setup folder is kept, though an owner tmux found first wins by name"
+    );
 }
 
 /// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
 /// that sits in a temp folder, which agents with the temp folder grant and other users
-/// write, is refused. Probed folders pass the probes' own rule instead (`probe::kept`).
+/// write, is refused. Probed folders meet the same rule on the engine's places (2.4.1 R1).
 #[test]
 fn a_path_folder_in_a_temp_folder_is_refused() {
     let (_folder, home) = scratch();
@@ -522,6 +630,179 @@ fn a_path_folder_in_a_temp_folder_is_refused() {
         "{:?}",
         engine.folders()
     );
+}
+
+/// 2.4.1 R1: a folder the probes found, a login shell PATH folder or npm's global prefix,
+/// that sits in this user's temp folder or a shared one is refused on the engine's places,
+/// as written and by its real path: agents with the owner's temp folder grant write the one
+/// and other users the other, and the engine runs what it finds there outside any sandbox.
+#[test]
+fn a_probed_folder_in_a_temp_folder_is_refused_on_the_engine_places() {
+    let (_folder, home) = scratch();
+    let owner_temp = tempfile::Builder::new()
+        .prefix("tools-probed-")
+        .tempdir()
+        .unwrap();
+    let written = owner_temp.path().join("bin");
+    std::fs::create_dir_all(&written).unwrap();
+    let real = written.canonicalize().unwrap();
+    let shared = PathBuf::from("/private/tmp/tools-planted/bin");
+    let engine = Places::engine(None, None, Some(home), Some(OsStr::new("")));
+    let probed = engine.with_probed(vec![written.clone(), real.clone(), shared.clone()]);
+    for folder in [&written, &real, &shared] {
+        assert!(
+            !probed.folders().contains(folder),
+            "{folder:?} in {:?}",
+            probed.folders()
+        );
+    }
+}
+
+/// 2.4.1 r1 F1: a tool only in a temp folder the engine's places refuse, on the inherited
+/// PATH or found by the probes, is refused by its file with the temp folder line, never
+/// reported missing with an install hint, and so is a script whose `env` interpreter sits
+/// only there.
+#[test]
+fn a_tool_only_in_a_refused_temp_folder_is_named_as_refused_not_missing() {
+    let (_folder, home) = scratch();
+    let owner_temp = tempfile::Builder::new()
+        .prefix("tools-temp-")
+        .tempdir()
+        .unwrap();
+    let on_path = owner_temp.path().join("path/bin");
+    let probed = owner_temp.path().join("probed/bin");
+    let listed = program(&on_path.join("crazyagent-temp-tool"), NODE);
+    let found = program(&probed.join("crazyagent-probed-tool"), NODE);
+    let interpreter = program(&on_path.join("crazyagent-temp-node"), NODE);
+    program(
+        &home.join(".local/bin/crazyagent-temp-script"),
+        "#!/usr/bin/env crazyagent-temp-node\n",
+    );
+    let path = std::env::join_paths([&on_path]).unwrap();
+    let engine =
+        Places::engine(None, None, Some(home), Some(&path)).with_probed(vec![probed.clone()]);
+    for (tool, file) in [
+        ("crazyagent-temp-tool", &listed),
+        ("crazyagent-probed-tool", &found),
+        ("crazyagent-temp-script", &interpreter),
+    ] {
+        let missing = resolve(tool, &engine).unwrap_err();
+        assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+        assert_eq!(missing.tool, tool);
+        assert_eq!(
+            missing.refused,
+            Some(Box::new(Refused {
+                file: file.clone(),
+                why: Refusal::InTemp,
+            }))
+        );
+        assert!(
+            missing.line().contains("in a temp folder"),
+            "{}",
+            missing.line()
+        );
+    }
+}
+
+/// 2.4.1 r2 RH2-L1: a file found through a place outside every temp folder whose real file
+/// lies in one, such as an owner link in `~/.local/bin` into the temp folder, leads into
+/// temp; one whose place is itself in a temp folder, or whose real file is not, does not.
+#[test]
+fn a_link_from_a_place_outside_temp_into_a_temp_folder_leads_into_temp() {
+    let temps = [
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/private/var/folders/xy/T"),
+    ];
+    let link = Path::new("/Users/ana/.local/bin/tool");
+    assert!(leads_into_temp(
+        link,
+        Path::new("/private/var/folders/xy/T/x/tool"),
+        &temps
+    ));
+    assert!(leads_into_temp(
+        link,
+        Path::new("/private/tmp/x/tool"),
+        &temps
+    ));
+    assert!(!leads_into_temp(link, Path::new("/opt/tools/tool"), &temps));
+    assert!(
+        !leads_into_temp(
+            Path::new("/private/tmp/home/.local/bin/tool"),
+            Path::new("/private/tmp/other/tool"),
+            &temps
+        ),
+        "a place itself in a temp folder"
+    );
+    assert!(!leads_into_temp(
+        Path::new("/private/var/folders/xy/T/home/bin/tool"),
+        Path::new("/private/tmp/x/tool"),
+        &temps
+    ));
+}
+
+/// 2.4.1 r2 RH2-L1: a kept place that is itself in a temp folder, as a test HOME is, still
+/// gives its tools on the engine's places, a link from it into another temp folder included,
+/// and an entry written there passes the launch check.
+#[test]
+fn a_tool_in_a_kept_place_inside_a_temp_folder_still_resolves() {
+    let (_folder, home) = scratch();
+    let other = tempfile::Builder::new()
+        .prefix("tools-other-")
+        .tempdir()
+        .unwrap();
+    let real = program(&other.path().join("crazyagent-linked-tool"), NODE);
+    let plain = program(&home.join(".local/bin/crazyagent-plain-tool"), NODE);
+    std::os::unix::fs::symlink(&real, home.join(".local/bin/crazyagent-linked-tool")).unwrap();
+    let engine = Places::engine(None, None, Some(home.clone()), Some(OsStr::new("")));
+    assert_eq!(
+        resolve("crazyagent-plain-tool", &engine).unwrap().program,
+        plain
+    );
+    assert!(resolve("crazyagent-linked-tool", &engine).is_ok());
+    assert!(resolve_entry(&plain, &engine).is_ok());
+}
+
+/// leader 23:11 (RH2-L1 residual): a script found outside every temp folder whose first line
+/// names an absolute interpreter inside one is refused with the temp folder line, naming the
+/// interpreter; the same script whose own place is in a temp folder, as a test HOME is, and
+/// the same script on places that refuse no temp folder still resolve.
+#[test]
+fn a_script_outside_temp_naming_an_interpreter_inside_temp_is_refused() {
+    let (_folder, home) = scratch();
+    let interpreter = program(&home.join("tmp/bin/crazyagent-temp-interpreter"), NODE);
+    let script = program(
+        &home.join(".local/bin/crazyagent-shebang-tool"),
+        &format!("#!{}\n", interpreter.display()),
+    );
+    let engine = || Places::engine(None, None, Some(home.clone()), Some(OsStr::new("")));
+    let missing = resolve(
+        "crazyagent-shebang-tool",
+        &engine().with_temps(vec![home.join("tmp")]),
+    )
+    .unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused, "{}", missing.line());
+    assert_eq!(missing.tool, "crazyagent-shebang-tool");
+    assert_eq!(
+        missing.refused,
+        Some(Box::new(Refused {
+            file: interpreter.clone(),
+            why: Refusal::InTemp,
+        }))
+    );
+    assert!(
+        missing.line().contains("in a temp folder"),
+        "{}",
+        missing.line()
+    );
+    let kept = resolve(
+        "crazyagent-shebang-tool",
+        &engine().with_temps(vec![home.clone()]),
+    )
+    .unwrap();
+    assert_eq!(kept.program, script);
+    assert!(matches!(kept.kind, Kind::Script { .. }));
+    let explicit = Places::new(vec![home.join(".local/bin")], Some(home.clone()));
+    assert!(resolve("crazyagent-shebang-tool", &explicit).is_ok());
 }
 
 /// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
@@ -649,21 +930,222 @@ fn a_tool_file_the_staff_group_can_write_is_passed_over() {
     }
 }
 
-/// r2 item 5: a tool only in the engine's `<root>/setup/bin`, such as the node an in-app
-/// setup installed, is found by setup and by a harness launch alike. A launch names no root
-/// of its own, so it uses the root this process's engine recorded, given here explicitly
-/// so no row records the global.
+/// r2 item 5: a tool only in the engine's `<root>/setup/bin`, like the node an in-app setup
+/// installed, is found by setup and by a harness launch alike. Its name is one no machine
+/// has, since the engine's folders come last and an owner's own node would win. A launch
+/// uses the root this process's engine recorded, given here so no row records the global.
 #[test]
 fn a_launch_looks_in_the_engine_setup_folder_like_setup_does() {
     let (_folder, home) = scratch();
     let root = home.join("engine");
-    let node = program(&root.join("setup/bin/node"), NODE);
-    let codex = program(&home.join("npm/bin/codex"), "#!/usr/bin/env node\n");
+    let node = program(&root.join("setup/bin/crazyagent-dev-node"), NODE);
+    let codex = program(
+        &home.join("npm/bin/codex"),
+        "#!/usr/bin/env crazyagent-dev-node\n",
+    );
     let setup = Places::from_environment(Some(&root));
-    assert_eq!(resolve("node", &setup).unwrap().program, node);
+    assert_eq!(
+        resolve("crazyagent-dev-node", &setup).unwrap().program,
+        node
+    );
     let launch = Places::at_roots(None, Some(&root));
     let started = crate::harnesses::interactive::launch_tool(&codex, &launch).unwrap();
     assert_eq!(started.argv()[0], node.into_os_string());
+}
+
+/// The app's folder as a release lays it out, holding the engine and the bundled
+/// `crazyagent-tmux` beside it (DEC-157), plus a Homebrew-like folder with its own `tmux`.
+/// The places look only in that folder, past the app's folder, so no row reads the host's
+/// own tmux. Input: HOME. Output: the places, the sidecar and the Homebrew-like tmux.
+fn bundled_layout(home: &Path) -> (Places, PathBuf, PathBuf) {
+    let app = home.join("Applications/CrazyAgent.app/Contents/MacOS");
+    program(&app.join("crazyagent"), "#!/bin/sh\n");
+    let sidecar = program(&app.join("crazyagent-tmux"), "#!/bin/sh\necho tmux 3.8\n");
+    let brew = program(
+        &home.join("opt/homebrew/bin/tmux"),
+        "#!/bin/sh\necho tmux 3.5a\n",
+    );
+    let places = Places {
+        app_folder: Some(app),
+        ..Places::new(
+            vec![brew.parent().unwrap().to_path_buf()],
+            Some(home.to_path_buf()),
+        )
+    };
+    assert_eq!(places.folders().len(), 1);
+    (places, sidecar, brew)
+}
+
+/// DEC-157, leader 15:41 and 18:31: the engine uses the tmux it ships. The name `tmux` finds
+/// `<app folder>/crazyagent-tmux` before Homebrew or anything on PATH, read as any entry is,
+/// and its words and the sandbox grants start from that file, never the Homebrew one.
+#[test]
+fn the_bundled_tmux_beside_the_engine_wins_over_a_homebrew_tmux() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    let tmux = resolve("tmux", &places).unwrap();
+    assert_eq!(tmux.entry, sidecar);
+    assert_eq!(tmux.program, sidecar.canonicalize().unwrap());
+    assert_eq!(tmux.argv(), vec![sidecar.clone().into_os_string()]);
+    let grants = tmux.grants();
+    assert_eq!(grants[0], sidecar);
+    assert!(
+        !grants.contains(&brew),
+        "the Homebrew tmux is never granted"
+    );
+}
+
+/// The engine adds the probed folders to its places before any launch
+/// ([`Places::with_probed`]), which rebuilds them; the bundled tmux stays first through that
+/// step, so the shipped engine and the sandbox grant use it, not only places built by hand.
+#[test]
+fn the_bundled_tmux_stays_first_once_the_probed_folders_are_added() {
+    let (_folder, home) = scratch();
+    let (_places, sidecar, brew) = bundled_layout(&home);
+    let app = sidecar.parent().unwrap();
+    let engine = Places::engine(None, Some(app), Some(home.clone()), None);
+    let probed = engine.with_probed(vec![
+        brew.parent().unwrap().to_path_buf(),
+        home.join("probed/bin"),
+    ]);
+    assert_eq!(probed.bundled("tmux"), Some(sidecar.clone()));
+    assert_eq!(resolve("tmux", &probed).unwrap().entry, sidecar);
+}
+
+/// With no bundled tmux beside the engine, such as a 2.4.0 install or a dev build, the name
+/// `tmux` finds what the usual search order finds, here the Homebrew-like one, and no other
+/// tool name ever gets the bundled file.
+#[test]
+fn a_missing_bundled_tmux_falls_back_to_the_usual_search_order() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::remove_file(&sidecar).unwrap();
+    assert_eq!(resolve("tmux", &places).unwrap().entry, brew);
+    let (_other, home) = scratch();
+    let (places, sidecar, _brew) = bundled_layout(&home);
+    for name in ["uv", "node", "screen"] {
+        assert!(
+            !matches!(resolve(name, &places), Ok(found) if found.entry == sidecar),
+            "{name} never resolves to the bundled tmux"
+        );
+    }
+}
+
+/// rv-secreview (leader 16:05): the bundled tmux passes the same checks as any file found.
+/// One others can change, or one that cannot run, is passed over for the usual search order.
+#[test]
+fn a_bundled_tmux_others_can_change_or_that_cannot_run_is_passed_over_for_the_usual_search() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o757)).unwrap();
+    let found = resolve("tmux", &places).unwrap();
+    assert_ne!(
+        found.entry, sidecar,
+        "a world-writable bundled tmux is never used"
+    );
+    assert_eq!(found.entry, brew);
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let found = resolve("tmux", &places).unwrap();
+    assert_ne!(
+        found.entry, sidecar,
+        "a bundled tmux that cannot run is never used"
+    );
+    assert_eq!(found.entry, brew);
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(resolve("tmux", &places).unwrap().entry, sidecar);
+}
+
+/// Leader 20:08: a bundled tmux whose version read fails is passed over for the usual order,
+/// which says the bundled one can't run; only the bundled copy is ever asked whether it runs.
+#[test]
+fn a_bundled_tmux_that_cannot_run_falls_back_to_the_usual_order_and_says_so() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    let asked = std::cell::RefCell::new(Vec::new());
+    let (found, note) = resolve_tmux(&places, true, |tmux| {
+        asked.borrow_mut().push(tmux.entry.clone());
+        false
+    })
+    .unwrap();
+    assert_eq!(found.entry, brew);
+    assert_eq!(note, Some(BundleNote::CannotRun));
+    assert_eq!(asked.into_inner(), vec![sidecar]);
+}
+
+/// A bundled tmux that runs is the one used, with no note, whether or not the build is
+/// marked as shipping one.
+#[test]
+fn a_bundled_tmux_that_runs_is_used_with_no_note() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, _brew) = bundled_layout(&home);
+    for ships in [true, false] {
+        let (found, note) = resolve_tmux(&places, ships, |_| true).unwrap();
+        assert_eq!(found.entry, sidecar);
+        assert_eq!(note, None);
+    }
+}
+
+/// A build that ships tmux and has lost it uses the usual order and says the bundled one is
+/// missing; a build that ships none, such as a dev build, says nothing.
+#[test]
+fn a_lost_bundled_tmux_says_it_is_missing_only_in_a_build_that_ships_one() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::remove_file(&sidecar).unwrap();
+    let never = |_: &Resolved| -> bool { panic!("nothing to run") };
+    assert_eq!(
+        resolve_tmux(&places, true, never).unwrap(),
+        (resolve("tmux", &places).unwrap(), Some(BundleNote::Missing))
+    );
+    let (found, note) = resolve_tmux(&places, false, never).unwrap();
+    assert_eq!((found.entry, note), (brew, None));
+}
+
+/// A bundled file the entry checks pass over, one others can change or one that is not
+/// executable, is there but cannot run: the usual order runs and says so.
+#[test]
+fn a_refused_bundled_tmux_says_it_cannot_run() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    for mode in [0o757, 0o644] {
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (found, note) = resolve_tmux(&places, false, |_| true).unwrap();
+        assert_eq!(found.entry, brew, "mode {mode:o}");
+        assert_eq!(note, Some(BundleNote::CannotRun), "mode {mode:o}");
+    }
+}
+
+/// Leader 20:08: with no other tmux, a bundled one that cannot run or is refused ends in
+/// today's install offer, the plain tmux-missing line, never the refused file's line.
+#[test]
+fn with_no_other_tmux_a_bundled_one_that_cannot_run_ends_in_the_install_offer() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, brew) = bundled_layout(&home);
+    std::fs::remove_file(&brew).unwrap();
+    let missing = resolve_tmux(&places, true, |_| false).unwrap_err();
+    assert_eq!(
+        (missing.reason, missing.line()),
+        (Reason::NotFound, TMUX_MISSING.to_owned())
+    );
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o757)).unwrap();
+    let missing = resolve_tmux(&places, true, |_| true).unwrap_err();
+    assert_eq!(
+        (missing.reason, missing.line()),
+        (Reason::NotFound, TMUX_MISSING.to_owned())
+    );
+}
+
+/// The two notes, word for word as the TUI and the desktop app show them.
+#[test]
+fn the_bundle_notes_name_the_system_tmux_and_the_reinstall() {
+    assert_eq!(
+        BundleNote::Missing.line(),
+        "Using the system tmux, the bundled one is missing; reinstall CrazyAgent."
+    );
+    assert_eq!(
+        BundleNote::CannotRun.line(),
+        "Using the system tmux, the bundled one can't run; reinstall CrazyAgent."
+    );
 }
 
 /// rv-v3sec M16-S1: an engine started with a non-default `--home`, `CRAZYAGENT_HOME` unset,
@@ -687,4 +1169,71 @@ fn a_harness_in_an_agent_home_under_a_custom_engine_root_is_refused() {
     let crate::harnesses::launch::LaunchError(line, _) =
         crate::harnesses::interactive::launch_tool(&entry, &launch).unwrap_err();
     assert!(line.contains(&entry.display().to_string()), "{line}");
+}
+
+/// DEC-157: a harness the app installs with npm lives in the engine's prefix inside its setup
+/// folder, `<root>/setup/harnesses`, the one part of the engine data the resolver accepts as
+/// the engine's own. The engine places look in its `bin`, Codex there resolves with the app's
+/// Node, and the old `<root>/harnesses` is never looked in.
+#[test]
+fn an_app_installed_npm_harness_in_the_setup_prefix_resolves_and_the_old_prefix_is_never_looked_in()
+{
+    let (_folder, root) = scratch();
+    let prefix = root.join("setup").join("harnesses");
+    let script = npm_codex(&prefix);
+    let node = program(&root.join("setup/bin/node"), NODE);
+    program(&root.join("harnesses/bin/codex"), "#!/bin/sh\n");
+    let engine = Places::engine(Some(&root), None, None, Some(OsStr::new("")));
+    assert!(
+        engine.folders().contains(&prefix.join("bin")),
+        "{:?}",
+        engine.folders()
+    );
+    assert!(
+        !engine
+            .folders()
+            .iter()
+            .any(|folder| folder.starts_with(root.join("harnesses"))),
+        "{:?}",
+        engine.folders()
+    );
+    let places = Places::new(
+        engine
+            .folders()
+            .iter()
+            .filter(|folder| folder.starts_with(&root))
+            .cloned()
+            .collect(),
+        None,
+    );
+    let codex = resolve("codex", &places).unwrap();
+    assert_eq!(codex.entry, prefix.join("bin/codex"));
+    assert_eq!(codex.program, script);
+    assert_eq!(
+        codex
+            .interpreter()
+            .expect("a script names its interpreter")
+            .program,
+        node
+    );
+}
+
+/// Clean-Mac gate shape d: under the gate's stand-in system root, a folder the login shell
+/// probe found outside that root and HOME, such as this computer's real Homebrew, is never
+/// looked in, while the gate's own Homebrew and HOME folders are; a release, with no gate
+/// root, keeps every probed folder as before.
+#[test]
+fn under_the_gate_root_a_probed_folder_outside_the_gate_mac_is_dropped() {
+    let (_folder, run) = scratch();
+    let home = run.join("home");
+    let root = run.join("system");
+    let mapped = root.join("opt/homebrew/bin");
+    let npm = home.join(".npm-global/bin");
+    let host = PathBuf::from("/opt/homebrew/bin");
+    let probed = vec![host.clone(), mapped.clone(), npm.clone()];
+    assert_eq!(
+        probed_kept(probed.clone(), Some(&root), Some(&home)),
+        vec![mapped, npm]
+    );
+    assert_eq!(probed_kept(probed.clone(), None, Some(&home)), probed);
 }

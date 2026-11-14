@@ -701,6 +701,40 @@ fn an_answer_without_json_takes_about_from_its_first_paragraph() {
     assert!(answer.platforms.is_empty());
 }
 
+/// DEC-160: an answer cut to its last part, a JSON tail closed by a fence, or one that sent
+/// a cut json block again, leaves a code fence open; such text is no overview, so the
+/// mapping step fails into its next try and writes nothing.
+#[test]
+fn a_cut_mapping_answer_is_no_overview() {
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let base = Drafted::new("demo".into(), &pool());
+    let tail = "\", \"Later\"], \"recommended\": \"Later\"}]}\n```\n";
+    let resent = concat!(
+        "## Structure\n\nA CLI that greets people.\n\n",
+        "```json\n{\"about\": \"A CLI th\n",
+        "```json\n{\"about\": \"A CLI that greets people.\"}\n```\n",
+    );
+    assert_eq!(draft::parse_answer(tail).overview, "");
+    let answer = draft::parse_answer(resent);
+    assert_eq!(answer.overview, "");
+    assert_eq!(answer.about, "A CLI that greets people.");
+    for text in [tail, resent] {
+        let (step, _, wrote, asks) =
+            service::answered(&layout, &base, text, &MappingFacts::default(), &[]);
+        assert_eq!(wrote, None, "{text}");
+        assert_eq!(
+            step,
+            Step::Failed {
+                reason: service::MAPPING_NO_OVERVIEW.into()
+            }
+        );
+        assert!(asks.is_empty());
+        assert!(draft::overview(&layout).is_none());
+    }
+}
+
 #[test]
 fn merging_fills_only_the_gaps_and_keeps_research_off() {
     let mut base = Drafted::new("demo".into(), &pool());
@@ -785,6 +819,43 @@ fn only_an_overview_this_engine_wrote_is_shown_as_the_mapping_agents() {
         shown(&mut database),
         (None, Some("# Changed by hand".to_owned()))
     );
+}
+
+/// DEC-160 Q1: an overview this engine wrote before R2 from a cut answer stays in the
+/// folder, as the engine never replaces it, but is not shown, nor given to a later mapping
+/// as the existing overview.
+#[test]
+fn a_sealed_overview_that_leaves_a_fence_open_is_not_shown_or_reused() {
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let mut database = Connection::open_in_memory().unwrap();
+    crate::storage::plugins::initialize(&database).unwrap();
+    crate::storage::setup::initialize(&database).unwrap();
+    crate::project_setup::initialize(&database).unwrap();
+    initialize(&database).unwrap();
+    database
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
+             VALUES ('demo',?1,'main','done','done',?2,1,1)",
+            params![
+                dir.path().to_str().unwrap(),
+                serde_json::to_string(&Drafted::new("demo".into(), &pool())).unwrap()
+            ],
+        )
+        .unwrap();
+    let cut = "# Project overview\n\n\", \"Later\"], \"recommended\": \"Later\"}]}\n```";
+    std::fs::write(layout.join("overview.md"), cut).unwrap();
+    seal_overview(&database, dir.path(), cut).unwrap();
+    let tx = database.transaction().unwrap();
+    let view = status(&tx, &ProjectId::new("demo").unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!((view.overview, view.folder_overview), (None, None));
+    drop(tx);
+    assert_eq!(draft::gather(dir.path(), &[]).overview, None);
+    std::fs::write(layout.join("overview.md"), "# Kept\n\nGreets people.\n").unwrap();
+    assert!(draft::gather(dir.path(), &[]).overview.is_some());
 }
 
 #[test]
@@ -1129,24 +1200,30 @@ fn only_linux_refuses_the_graph_build_with_a_plain_line() {
     assert_eq!(graph::unavailable("macos"), None);
 }
 
-/// macOS only: by DEC-094 the graph build is refused on Linux, so a Linux host installs no
-/// graphify for the engine to find (`only_linux_refuses_the_graph_build_with_a_plain_line`).
+/// The graph step's installer finds the graphify setup put in `<engine root>/setup/bin`, a
+/// stand-in here, and looks again on each step: once it is gone it finds none. The installer
+/// looks only in that folder, not this Mac's own installs, which come first on the engine's
+/// places, so the row reads the same in any HOME. macOS only: by DEC-094 a Linux host
+/// installs no graphify (`only_linux_refuses_the_graph_build_with_a_plain_line`).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
-    let system = service::installed_graphify()
-        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    use crate::setup::Installer;
+    use std::os::unix::fs::PermissionsExt;
     let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     let bin = root.path().join("setup/bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    symlink(&system, bin.join("graphify")).unwrap();
-    assert_eq!(
-        service::engine_graphify(root.path()),
-        Some(bin.join("graphify"))
+    let installer = crate::setup::pinned::PinnedInstaller::with_places(
+        root.path(),
+        Vec::new(),
+        crate::tools::Places::new(vec![bin.clone()], None),
     );
+    let graphify = crate::setup::Dependency::Graphify.program();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("graphify"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("graphify"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(installer.program(graphify), Some(bin.join("graphify")));
     std::fs::remove_file(bin.join("graphify")).unwrap();
-    let found = service::engine_graphify(root.path()).expect("the system graphify");
-    assert_eq!(found.canonicalize().unwrap(), system);
+    assert_eq!(installer.program(graphify), None);
 }
 
 /// Makes a stand-in graphify below `root`, laid out as uv 0.13 lays out a tool: the
@@ -2506,4 +2583,36 @@ fn a_graph_mark_longer_than_what_is_read_back_is_never_written() {
     let folder = tempfile::tempdir().unwrap();
     let long = "m".repeat(graph::MARK_BYTES_MAX as usize + 1);
     let _ = graph::write_mark(folder.path(), &long);
+}
+
+#[test]
+fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
+    let refused = crate::tools::Missing {
+        tool: "graphify".into(),
+        reason: crate::tools::Reason::Refused,
+        needs: None,
+        looked: Vec::new(),
+        refused: Some(Box::new(crate::tools::Refused {
+            file: std::path::PathBuf::from("/h/tool/bin/python3"),
+            why: crate::tools::Refusal::OthersCanChange(std::path::PathBuf::from(
+                "/h/py/bin/python3.13",
+            )),
+        })),
+    };
+    assert!(refused.line().len() <= 256, "{}", refused.line());
+    assert_ne!(refused.line(), graph::GRAPHIFY_MISSING);
+    assert_eq!(service::graphify_failure(&refused), refused.line());
+    let deep = std::path::PathBuf::from(format!("/h/{}/python3", "deep/".repeat(40)));
+    let long = crate::tools::Missing {
+        refused: Some(Box::new(crate::tools::Refused {
+            file: deep.clone(),
+            why: crate::tools::Refusal::OthersCanChange(deep),
+        })),
+        ..refused
+    };
+    assert!(long.line().len() > 256);
+    assert_eq!(service::graphify_failure(&long), service::GRAPHIFY_REFUSED);
+    assert!(service::GRAPHIFY_REFUSED.len() <= 256);
+    let missing = crate::setup::Dependency::Graphify.not_found();
+    assert_eq!(service::graphify_failure(&missing), graph::GRAPHIFY_MISSING);
 }

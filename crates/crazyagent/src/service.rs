@@ -878,11 +878,15 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// The engine executable a login service or the command line link may keep naming: the
 /// bundled `executable` itself, unless it sits inside the running AppImage's mount folder
 /// `appdir`, which goes away when the app exits. Then it is a copy, private to this user,
-/// of the release executables beside it ([`crate::update::BINARIES`]) in `<data root>/bin`,
-/// one stable path across versions, each file refreshed by an atomic rename whenever it
-/// differs. Nothing is ever copied from another folder, so an engine other users can change
-/// is returned as it is and refused where it would be kept. Inputs: the bundled engine, the
-/// layout and the AppImage mount folder when there is one. Output: the executable to keep.
+/// of the release executables beside it ([`crate::update::BINARIES`]) in
+/// `<data root>/setup/bin`, which the tool resolver trusts so the bundled tmux there is used
+/// (leader 20:15), one stable path across versions, each file refreshed by an atomic rename
+/// whenever it differs. The copy an older version kept in `<data root>/bin` stays, since a
+/// login service may still name it; `service start` retires it after the service names this
+/// one ([`retire_old_copies`]). Nothing is ever copied from another folder, so an engine other
+/// users can change is returned as it is and refused where it would be kept. Inputs: the
+/// bundled engine, the layout and the AppImage mount folder when there is one. Output: the
+/// executable to keep.
 pub fn persistable(
     executable: &Path,
     layout: &Layout,
@@ -909,7 +913,7 @@ pub fn persistable(
         )));
     }
     layout.prepare()?;
-    let copies = layout.root().join("bin");
+    let copies = layout.root().join("setup").join("bin");
     crate::paths::private_folder(&copies)?;
     for name in &names {
         let copy = copies.join(name);
@@ -927,6 +931,48 @@ pub fn persistable(
     let installed = copies.join(main);
     assert!(installed.starts_with(&copies) && installed.is_file());
     Ok(installed)
+}
+
+/// Retires the copy an older version kept in `<data root>/bin` once the login service names
+/// the engine [`persistable`] keeps in `<data root>/setup/bin`, with the command line link in
+/// `~/.local/bin`. Inputs: the layout and the engine the service now runs.
+pub fn retire_old_copies(layout: &Layout, installed: &Path) {
+    let cli = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".local").join("bin"));
+    retire_old_copies_with(layout, installed, cli.as_deref());
+}
+
+/// Retires the copy an older version kept in `<data root>/bin`, a folder the tool resolver
+/// refuses as one agents can write, when `installed` is the copy in `<data root>/setup/bin`:
+/// the command line link in `cli` that names the old engine is pointed at the new one first,
+/// then every release file there is removed and the folder goes once empty. A link that
+/// cannot be moved keeps the old copy, so it never dangles; anything CrazyAgent did not put
+/// there stays. Only a real, private folder of this user's (700, as 2.4.0 made it) is
+/// touched, so a linked or shared `bin` never leads a removal outside the data root (rv-code
+/// F1). Inputs: the layout, the engine kept and the link folder.
+fn retire_old_copies_with(layout: &Layout, installed: &Path, cli: Option<&Path>) {
+    let old = &layout.root().join("bin");
+    if !installed.starts_with(layout.root().join("setup").join("bin"))
+        || !crate::paths::is_private_folder(old)
+    {
+        return;
+    }
+    assert!(installed.is_absolute() && !installed.starts_with(old));
+    let main = format!("crazyagent{}", std::env::consts::EXE_SUFFIX);
+    if let Some(cli) = cli
+        && std::fs::read_link(cli.join("crazyagent")).is_ok_and(|named| named == old.join(&main))
+        && link_cli(installed, cli).is_err()
+    {
+        return;
+    }
+    for name in crate::update::BINARIES {
+        let file = old.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        if std::fs::symlink_metadata(&file).is_ok_and(|metadata| metadata.is_file()) {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+    let _ = std::fs::remove_dir(old);
 }
 
 /// Whether `copy` is a regular file with exactly the bytes of `source`, private to this
@@ -1054,11 +1100,94 @@ fn trusted_group(group: u32) -> bool {
 }
 
 /// Whether a group that can write a folder holds only root or this user: root's group, or
-/// this user's own group, as user private groups give it. Input: the group id. Output:
-/// the answer.
+/// this process's own group when it is this user's private group ([`own_group_private`]);
+/// a shared primary group, whose other users can write the folder, is not trusted.
+/// Input: the group id. Output: the answer.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn trusted_group(group: u32) -> bool {
-    group == 0 || group == rustix::process::getegid().as_raw()
+    group == 0 || (group == rustix::process::getegid().as_raw() && own_group_private())
+}
+
+/// The largest local account file read to find a group's primary accounts.
+#[cfg(all(unix, not(target_os = "macos")))]
+const ACCOUNTS_BYTES_MAX: u64 = 4 * 1024 * 1024;
+
+/// Whether this process's own group is this user's private group ([`private_group`]), read
+/// once through the system's user and group lookup, which may ask a directory server, and
+/// the local account file for the accounts whose primary group it is ([`primary_users`]);
+/// a failed lookup or read counts as not private, so its folders fall to the stricter rule.
+/// Output: the answer.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn own_group_private() -> bool {
+    static PRIVATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PRIVATE.get_or_init(|| {
+        let gid = nix::unistd::getegid();
+        let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .ok()
+            .flatten();
+        let group = nix::unistd::Group::from_gid(gid).ok().flatten();
+        let primary = local_accounts().and_then(|text| primary_users(&text, gid.as_raw()));
+        match (user, group, primary) {
+            (Some(user), Some(group), Some(primary)) => {
+                private_group(&group.name, &group.mem, &primary, &user.name)
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Reads the local account file, `/etc/passwd`, at most [`ACCOUNTS_BYTES_MAX`]; a larger or
+/// unreadable file gives none. Output: the text, or none.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn local_accounts() -> Option<String> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::fs::File::open("/etc/passwd")
+        .ok()?
+        .take(ACCOUNTS_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= ACCOUNTS_BYTES_MAX).then_some(text)
+}
+
+/// Whether a group named `name`, listing `members`, is the user private group of the user
+/// named `user`: it bears the user's name, lists no other member and is the primary group of
+/// this user's account alone, as Debian, Ubuntu and Fedora make one per user; a shared
+/// primary group such as openSUSE's `users` is not, and neither is one whose user the local
+/// account file does not list. Inputs: the group's name, its listed members, the accounts
+/// whose primary group it is and the user's name. Output: the answer.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn private_group(name: &str, members: &[String], primary: &[String], user: &str) -> bool {
+    !user.is_empty()
+        && name == user
+        && members.iter().all(|member| member == user)
+        && primary.iter().any(|account| account == user)
+        && primary.iter().all(|account| account == user)
+}
+
+/// The accounts in a local account file (`/etc/passwd` lines) whose primary group is `gid`,
+/// which the group's member list leaves out. Inputs: the file's text and the group id.
+/// Output: the account names, or none when a line cannot be read or names accounts kept
+/// elsewhere.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn primary_users(passwd: &str, gid: u32) -> Option<Vec<String>> {
+    let mut accounts = Vec::new();
+    for line in passwd.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('+') || line.starts_with('-') {
+            return None;
+        }
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let primary: u32 = fields.nth(2)?.parse().ok()?;
+        if primary == gid {
+            accounts.push(name.to_owned());
+        }
+    }
+    assert!(accounts.len() <= passwd.len());
+    Some(accounts)
 }
 
 /// Names no user id where launchd domains do not exist. Output: zero, unused off macOS.

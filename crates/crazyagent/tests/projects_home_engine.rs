@@ -3,11 +3,15 @@
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
-    OwnerClientKind, OwnerData, OwnerMutation, OwnerRead, OwnerResponse, OwnerResult,
+    OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerRead, OwnerRequest,
+    OwnerResponse, OwnerResult,
 };
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
-use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, FoundState, ProjectsHome};
-use crazyagent::protocol::{ProjectId, ProjectSpec};
+use crazyagent::projects_home::job::{JobState, JobView, Phase};
+use crazyagent::projects_home::{
+    AddMode, AddOverride, COPY_BOUNDS, FoundProject, FoundState, ProjectsHome,
+};
+use crazyagent::protocol::{Cursor, PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1055,5 +1059,682 @@ async fn a_project_kept_outside_the_home_moves_into_it_through_the_owner_transpo
         rejected("move_project_already_home")
     );
     assert!(target.join("notes.txt").is_file());
+    engine.stop().await;
+}
+
+/// True while a copy into the projects home is still staged under its hidden name.
+fn staging(home: &Path) -> bool {
+    fs::read_dir(home).unwrap().flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".crazyagent-adding-")
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resend_or_a_check_of_an_add_still_copying_answers_in_progress_and_copies_once() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let source = place.join("sources/slow");
+    fs::create_dir(&home).unwrap();
+    for part in 0..40 {
+        let folder = source.join(format!("p{part}"));
+        fs::create_dir_all(&folder).unwrap();
+        for file in 0..100 {
+            fs::write(
+                folder.join(format!("f{file}.txt")),
+                format!("{part} {file}\n"),
+            )
+            .unwrap();
+        }
+    }
+    let engine = Engine::start().await;
+    let slow_client = Duration::from_secs(30);
+    let kind = OwnerClientKind::Desktop;
+    let mut owner = Owner {
+        controller: OwnerController::attach(engine.root.path(), kind, slow_client)
+            .await
+            .unwrap(),
+        generation: 0,
+    };
+    let home_text = home.to_str().unwrap().to_owned();
+    let set = OwnerMutation::SetProjectsHome { path: home_text };
+    assert_eq!(owner.apply(set).await, OwnerResult::Applied);
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    let pending = owner
+        .controller
+        .begin_mutation(add(&source, AddMode::Copy), owner.generation + 1)
+        .unwrap();
+    let (sent, hash) = (pending.request().clone(), pending.hash().to_owned());
+    let mut first = owner.controller;
+    let running = tokio::spawn(async move { first.send_pending().await });
+    let started = Instant::now();
+    while !staging(&home) {
+        assert!(!running.is_finished(), "the copy ended before it was seen");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the copy never started"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let second = engine.owner().await;
+    let client = second.owner_client().unwrap();
+    let resent = client.request(sent.clone()).await.unwrap().response;
+    let check = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new("check-running-add").unwrap(),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Reconcile {
+            operation_id: sent.request_id.clone(),
+            expected_hash: Some(hash),
+        },
+    };
+    let checked = client.request(check).await.unwrap().response;
+    let still = OwnerResponse::InProgress {
+        operation_id: sent.request_id.clone(),
+    };
+    assert_eq!(resent, still, "a resend while the copy runs");
+    assert_eq!(checked, still, "a check while the copy runs");
+    let answered = running.await.unwrap().unwrap();
+    assert!(
+        matches!(&answered, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied && !operation.historical_replay),
+        "{answered:?}"
+    );
+    let replayed = client.request(sent).await.unwrap().response;
+    assert!(
+        matches!(&replayed, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied && operation.historical_replay),
+        "{replayed:?}"
+    );
+    let copied = fs::read_to_string(home.join("slow/p39/f99.txt")).unwrap();
+    assert_eq!(copied, "39 99\n");
+    assert_eq!(
+        fs::read_to_string(source.join("p0/f0.txt")).unwrap(),
+        "0 0\n"
+    );
+    assert!(!staging(&home), "one copy, renamed into place");
+    engine.stop().await;
+}
+
+/// Writes `parts` folders of `files` small files each under `source`.
+fn tree(source: &Path, parts: usize, files: usize) {
+    for part in 0..parts {
+        let folder = source.join(format!("p{part}"));
+        fs::create_dir_all(&folder).unwrap();
+        for file in 0..files {
+            let text = format!("{part} {file}\n");
+            fs::write(folder.join(format!("f{file}.txt")), text).unwrap();
+        }
+    }
+}
+
+/// An owner whose projects home is `home`, attached with a 30 s client.
+async fn homed(engine: &Engine, home: &Path) -> Owner {
+    let kind = OwnerClientKind::Desktop;
+    let controller = OwnerController::attach(engine.root.path(), kind, Duration::from_secs(30))
+        .await
+        .unwrap();
+    let mut owner = Owner {
+        controller,
+        generation: 0,
+    };
+    let set = OwnerMutation::SetProjectsHome {
+        path: home.to_str().unwrap().into(),
+    };
+    assert_eq!(owner.apply(set).await, OwnerResult::Applied);
+    owner
+}
+
+/// Reads the intake job until `want` holds, failing at once when it ended otherwise.
+async fn job_until(owner: &OwnerController, want: impl Fn(&JobView) -> bool) -> JobView {
+    let client = owner.owner_client().unwrap();
+    let start = Instant::now();
+    loop {
+        let job = client.intake_status().await.unwrap().expect("a job");
+        if want(&job) {
+            return job;
+        }
+        let ended = matches!(
+            job.state,
+            JobState::Done
+                | JobState::Failed { .. }
+                | JobState::Cancelled { .. }
+                | JobState::NeedsAnswer { .. }
+        );
+        assert!(!ended, "the job ended otherwise: {job:?}");
+        assert!(start.elapsed() < Duration::from_secs(30), "{job:?}");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+fn copying(job: &JobView) -> bool {
+    matches!(job.state, JobState::Copying { copied, .. } if copied > 0)
+}
+
+fn text(path: &Path) -> String {
+    path.to_str().unwrap().to_owned()
+}
+
+fn id(text: &str) -> RequestId {
+    RequestId::new(text).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_adds_a_folder_apart_from_its_client_and_records_the_add() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources/site"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 3, 5);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    let started = client
+        .intake_start(id("intake-copy"), text(&source), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(started.id, id("intake-copy"));
+    assert_eq!(started.mode, AddMode::Copy);
+    let done = job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    assert!(!done.stopping);
+    assert_eq!(
+        fs::read_to_string(home.join("site/p2/f4.txt")).unwrap(),
+        "2 4\n"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("p2/f4.txt")).unwrap(),
+        "2 4\n"
+    );
+    let check = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: id("check-intake-copy"),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Reconcile {
+            operation_id: id("intake-copy"),
+            expected_hash: None,
+        },
+    };
+    let recorded = client.request(check).await.unwrap().response;
+    assert!(
+        matches!(&recorded, OwnerResponse::Committed { operation }
+            if operation.result == OwnerResult::Applied),
+        "{recorded:?}"
+    );
+    assert!(client.intake_dismiss(id("intake-copy")).await.unwrap());
+    assert_eq!(client.intake_status().await.unwrap(), None);
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_intake_job_ends_cancelled_with_no_copy_and_the_source_whole() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources/big"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 100, 100);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(id("intake-stop"), text(&source), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    assert!(client.intake_stop(id("intake-stop")).await.unwrap());
+    let ended = job_until(&owner.controller, |job| {
+        matches!(job.state, JobState::Cancelled { .. })
+    })
+    .await;
+    assert!(ended.stopping);
+    let cancelled = JobState::Cancelled {
+        phase: Phase::Copying,
+    };
+    assert_eq!(ended.state, cancelled);
+    assert!(!home.join("big").exists(), "no copy");
+    assert!(!staging(&home), "no staging");
+    assert_eq!(
+        fs::read_to_string(source.join("p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    assert!(!client.intake_stop(id("intake-stop")).await.unwrap());
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_start_attaches_to_the_running_job_and_another_folder_waits_for_it() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let (big, small) = (place.join("sources/big"), place.join("sources/small"));
+    fs::create_dir(&home).unwrap();
+    tree(&big, 100, 100);
+    tree(&small, 2, 2);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    let copy = AddMode::Copy;
+    client
+        .intake_start(id("intake-first"), text(&big), copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    let again = client
+        .intake_start(id("intake-again"), text(&big), copy, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(again.id, id("intake-first"), "the same folder attaches");
+    let other = client
+        .intake_start(id("intake-other"), text(&small), copy, Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(other.0, "intake_busy");
+    let check = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: id("check-intake-first"),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Reconcile {
+            operation_id: id("intake-first"),
+            expected_hash: None,
+        },
+    };
+    let checked = client.request(check).await.unwrap().response;
+    let still = OwnerResponse::InProgress {
+        operation_id: id("intake-first"),
+    };
+    assert_eq!(checked, still, "a check of the running job");
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    let next = client
+        .intake_start(id("intake-other"), text(&small), copy, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(next.id, id("intake-other"), "an ended job makes room");
+    job_until(&owner.controller, |job| {
+        job.id == id("intake-other") && job.state == JobState::Done
+    })
+    .await;
+    assert_eq!(
+        fs::read_to_string(home.join("big/p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("small/p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_is_refused_the_destination_a_running_add_planned() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let (first, second) = (place.join("sources/site"), place.join("other/site"));
+    fs::create_dir(&home).unwrap();
+    tree(&first, 100, 100);
+    tree(&second, 2, 2);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(id("intake-site"), text(&first), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    let mut other = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    assert_eq!(
+        other.apply(add(&second, AddMode::Copy)).await,
+        rejected("home_add_in_progress"),
+        "a folder of the same name while the first add copies"
+    );
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    assert_eq!(
+        fs::read_to_string(home.join("site/p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    assert_eq!(
+        fs::read_to_string(second.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    engine.stop().await;
+}
+
+/// Makes a source folder `name` under `place` whose folders nest one level past the copy
+/// depth bound, so a download's listing of it refuses `home_copy_too_large` at once.
+/// Output: the source folder.
+fn too_deep(place: &Path, name: &str) -> PathBuf {
+    let source = place.join("sources").join(name);
+    let deepest = (0..=COPY_BOUNDS.depth).fold(source.clone(), |folder, _| folder.join("d"));
+    fs::create_dir_all(&deepest).unwrap();
+    assert!(deepest.components().count() > COPY_BOUNDS.depth);
+    source
+}
+
+/// Starts an intake job, reads it until it ends and dismisses it. Inputs: the owner, the
+/// job id, the folder and the mode. Output: how the job ended.
+async fn ended(owner: &OwnerController, job: &str, source: &Path, mode: AddMode) -> JobState {
+    let client = owner.owner_client().unwrap();
+    client
+        .intake_start(id(job), text(source), mode, Vec::new())
+        .await
+        .unwrap();
+    let end = job_until(owner, |view| {
+        view.id == id(job)
+            && matches!(
+                view.state,
+                JobState::Done
+                    | JobState::Failed { .. }
+                    | JobState::Cancelled { .. }
+                    | JobState::NeedsAnswer { .. }
+            )
+    })
+    .await;
+    assert!(client.intake_dismiss(id(job)).await.unwrap());
+    end.state
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_refuses_what_the_plan_sees_before_it_downloads() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    fs::create_dir_all(home.join("taken")).unwrap();
+    let taken = too_deep(&place, "taken");
+    let linked = too_deep(&place, "linked");
+    fs::write(
+        linked.join(".git"),
+        "gitdir: /nowhere/.git/worktrees/linked\n",
+    )
+    .unwrap();
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let owner = &owner.controller;
+    assert_eq!(
+        ended(owner, "taken", &taken, AddMode::Copy).await,
+        JobState::Failed {
+            code: "home_destination_exists".into(),
+            phase: Phase::Downloading,
+        },
+        "a name the home holds is refused before the download"
+    );
+    assert_eq!(
+        ended(owner, "linked-copy", &linked, AddMode::Copy).await,
+        JobState::NeedsAnswer {
+            code: "home_copy_linked_checkout".into(),
+        },
+        "a soft refusal seen without reading the folder is asked before the download"
+    );
+    assert_eq!(
+        ended(owner, "linked-move", &linked, AddMode::Move).await,
+        JobState::NeedsAnswer {
+            code: "home_copy_too_large".into(),
+        },
+        "git links are read inside the folder, so they wait for the download"
+    );
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let running: i64 = db
+        .query_row(
+            "SELECT count(*) FROM projects_home_add WHERE ended IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(running, 0, "a check before the download writes no add row");
+    assert!(fs::read_dir(home.join("taken")).unwrap().next().is_none());
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_past_the_copy_bounds_lands_once_the_owner_goes_past_too_large() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    fs::create_dir(&home).unwrap();
+    let deep = too_deep(&place, "deep");
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    let past = vec![AddOverride::TooLarge];
+    client
+        .intake_start(id("intake-deep"), text(&deep), AddMode::Copy, past)
+        .await
+        .unwrap();
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    let landed = (0..=COPY_BOUNDS.depth).fold(home.join("deep"), |folder, _| folder.join("d"));
+    assert!(landed.is_dir(), "the deepest folder is copied");
+    assert!(deep.join("d").is_dir(), "a copy leaves the source");
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_stop_ends_a_running_intake_job_with_no_copy_left() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources/big"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 100, 100);
+    let mut engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(
+            id("intake-restart"),
+            text(&source),
+            AddMode::Copy,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    engine.restart().await;
+    assert!(!home.join("big").exists(), "no copy");
+    assert!(!staging(&home), "no staging");
+    assert_eq!(
+        fs::read_to_string(source.join("p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    let after = engine.owner().await;
+    let status = after.owner_client().unwrap().intake_status().await.unwrap();
+    assert_eq!(status, None, "a new engine has no job");
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_finishes_after_the_client_that_started_it_goes() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources/big"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 100, 100);
+    let engine = Engine::start().await;
+    let mut owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(id("intake-left"), text(&source), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    owner.controller.detach();
+    let after = engine.owner().await;
+    let done = job_until(&after, |job| job.state == JobState::Done).await;
+    assert_eq!(done.id, id("intake-left"));
+    assert_eq!(
+        fs::read_to_string(home.join("big/p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("p0/f0.txt")).unwrap(),
+        "0 0\n"
+    );
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let (source, landed) = (place.join("sources/site"), home.join("site"));
+    fs::create_dir(&home).unwrap();
+    tree(&source, 2, 2);
+    let staging = home.join(".crazyagent-adding-0011223344556677");
+    tree(&staging, 1, 1);
+    let mut engine = Engine::start().await;
+    let mut owner = homed(&engine, &home).await;
+    let database = engine.root.path().join("engine.db");
+    let cut = |request: &str| {
+        format!(
+            "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+             VALUES ('{request}', 'owner', '{}', '{}', 'move');",
+            text(&source),
+            text(&landed)
+        )
+    };
+    sql(&database, &cut("cut-1"));
+    let elsewhere = OwnerMutation::SetProjectsHome {
+        path: text(&place.join("elsewhere")),
+    };
+    assert_eq!(
+        owner.apply(elsewhere).await,
+        rejected("home_add_in_progress"),
+        "an add holds the projects home"
+    );
+    owner.controller.detach();
+    engine.restart().await;
+    let after = engine.owner().await;
+    let client = after.owner_client().unwrap();
+    let restored = client.intake_status().await.unwrap().expect("the cut add");
+    assert_eq!(restored.id, id("cut-1"));
+    let interrupted = JobState::Failed {
+        code: "home_add_interrupted".into(),
+        phase: Phase::Copying,
+    };
+    assert_eq!(restored.state, interrupted);
+    assert!(!staging.exists(), "the start removed the cut add's staging");
+    assert_eq!(
+        fs::read_to_string(source.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    assert!(client.intake_dismiss(id("cut-1")).await.unwrap());
+    assert_eq!(client.intake_status().await.unwrap(), None);
+
+    fs::create_dir(&landed).unwrap();
+    sql(&database, &cut("cut-2"));
+    engine.restart().await;
+    let again = engine.owner().await;
+    let client = again.owner_client().unwrap();
+    let restored = client
+        .intake_status()
+        .await
+        .unwrap()
+        .expect("the landed move");
+    let left = JobState::Failed {
+        code: "home_move_source_left".into(),
+        phase: Phase::Clearing,
+    };
+    assert_eq!(restored.state, left);
+    assert_eq!(
+        fs::read_to_string(source.join("p1/f1.txt")).unwrap(),
+        "1 1\n",
+        "a start deletes nothing of the old folder"
+    );
+    engine.stop().await;
+}
+
+/// How many files and folders [`same_files`] walks at most.
+const WALK_ENTRIES_MAX: usize = 20_000;
+
+/// Compares every file under `original` with the file at the same place under `copy`, byte
+/// for byte, walking at most [`WALK_ENTRIES_MAX`] entries. Input: the two folders. Output:
+/// how many files matched; any file missing or different fails the row.
+fn same_files(original: &Path, copy: &Path) -> usize {
+    assert!(original.is_dir(), "{original:?}");
+    assert!(copy.is_dir(), "{copy:?}");
+    let mut folders = vec![PathBuf::new()];
+    let (mut walked, mut files) = (0, 0);
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(original.join(&folder)).unwrap() {
+            let entry = entry.unwrap();
+            walked += 1;
+            assert!(
+                walked <= WALK_ENTRIES_MAX,
+                "more entries than a scratch folder holds"
+            );
+            let place = folder.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                folders.push(place);
+                continue;
+            }
+            let bytes = fs::read(original.join(&place)).unwrap();
+            assert!(
+                fs::read(copy.join(&place)).unwrap() == bytes,
+                "{place:?} differs"
+            );
+            files += 1;
+        }
+    }
+    assert!(files <= walked);
+    files
+}
+
+/// Adds a real evicted iCloud Drive folder through the engine's intake job: the job reads
+/// downloading with a count that moves as files land, then copies every file byte for byte
+/// and leaves the folder in place. The folder is named in `CRAZYAGENT_ICLOUD_SCRATCH` and
+/// must be evicted first; run by hand only, it downloads the whole folder.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an evicted folder of iCloud Drive named in CRAZYAGENT_ICLOUD_SCRATCH"]
+async fn an_intake_job_downloads_a_real_icloud_folder_with_moving_counts_and_copies_it() {
+    let source = PathBuf::from(std::env::var_os("CRAZYAGENT_ICLOUD_SCRATCH").unwrap());
+    let name = source.file_name().unwrap().to_owned();
+    let disk = tempfile::tempdir().unwrap();
+    let home = disk.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(
+            id("intake-icloud"),
+            text(&source),
+            AddMode::Copy,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let mut counts = std::collections::BTreeSet::new();
+    let ended = loop {
+        let job = client.intake_status().await.unwrap().expect("a job");
+        match &job.state {
+            JobState::Downloading { progress } => {
+                counts.insert(progress.done);
+            }
+            JobState::Copying { .. } | JobState::Clearing => {}
+            _ => break job,
+        }
+        assert!(start.elapsed() < Duration::from_secs(1800), "{job:?}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    assert_eq!(ended.state, JobState::Done, "{ended:?}");
+    assert!(
+        counts.len() >= 3,
+        "the count moved as files landed: {counts:?}"
+    );
+    let files = same_files(&source, &home.join(&name));
+    println!(
+        "downloaded and copied {files} files in {:?}, counts {counts:?}",
+        start.elapsed()
+    );
+    assert!(files > 0);
     engine.stop().await;
 }

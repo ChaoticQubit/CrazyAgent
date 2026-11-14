@@ -1183,6 +1183,51 @@ fn a_node_harness_reads_its_node_and_package_but_no_npm_credential_or_other_pack
 }
 
 #[test]
+fn a_node_harness_in_the_engine_prefix_runs_with_the_node_it_was_installed_with() {
+    let case = case();
+    let prefix = crazyagent::setup::harness_prefix(&case.tools.join("engine"));
+    let node = case.tools.join("setup-node/bin/node");
+    write(&node, "#!/bin/sh\necho \"linked node ran $1\"\n");
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+    crazyagent::setup::node::make_prefix(&prefix, &node).unwrap();
+    let script = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+    write(&script, "#!/usr/bin/env node\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(script.parent().unwrap())
+    .unwrap()
+    .allow_exec(&script)
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let profile = case.profiles.join("engine-node.sb");
+    sandbox.install(&profile).unwrap();
+    let mut harness = std::process::Command::new(&script);
+    harness.current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("linked node ran {}", script.display())
+    );
+}
+
+#[test]
 fn a_node_prefix_in_the_project_an_agent_worktree_or_the_agent_home_gives_no_path_entry() {
     let case = case();
     for prefix in [
@@ -1395,6 +1440,64 @@ fn tmux_at(tmux: &Path, socket: &Path, args: &[&str]) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crazyagent::spawn_gate::output(&mut command).unwrap()
+}
+
+/// The app ships tmux as `CrazyAgent.app/Contents/MacOS/crazyagent-tmux`, beside the engine
+/// and its other helpers, where no agent may start a program (DEC-157). A lead's tmux grant
+/// names that one file for reading and starting, never the folder, so the engine, rcli and
+/// runner beside it stay out of the profile.
+#[test]
+fn a_lead_may_read_and_start_only_the_bundled_tmux_file_never_its_app_folder() {
+    let case = case();
+    let macos = case
+        .project
+        .parent()
+        .unwrap()
+        .join("Applications/CrazyAgent.app/Contents/MacOS");
+    for name in [
+        "crazyagent",
+        "crazyagent-rcli",
+        "crazyagent-runner",
+        "crazyagent-tmux",
+    ] {
+        write(&macos.join(name), "#!/bin/sh\n");
+        fs::set_permissions(macos.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let tmux = macos.join("crazyagent-tmux");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap()
+    .allow_tmux_server(&tmp.join("tmux.sock"), &tmux)
+    .unwrap();
+    let text = sandbox.profile();
+    toolchains::remove_tmp(&case.home).unwrap();
+    let file = format!("(literal \"{}\")", tmux.display());
+    assert!(
+        text.contains(&format!("(allow process-exec\n  {file}")),
+        "the bundled tmux may be started past the app bundle exec deny: {text}"
+    );
+    assert!(
+        text.matches(&file).count() >= 2,
+        "the bundled tmux is readable as one file: {text}"
+    );
+    let macos = macos.display().to_string();
+    assert!(
+        !text.contains(&format!("(subpath \"{macos}\")")),
+        "the app folder is never granted: {text}"
+    );
+    for sibling in ["crazyagent\"", "crazyagent-rcli", "crazyagent-runner"] {
+        assert!(
+            !text.contains(&format!("{macos}/{sibling}")),
+            "{sibling} stays out of the profile: {text}"
+        );
+    }
 }
 
 #[test]

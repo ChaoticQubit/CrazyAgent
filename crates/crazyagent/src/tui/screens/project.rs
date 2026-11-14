@@ -832,10 +832,14 @@ impl ProjectScreen {
     }
 
     /// Opens one tab.
-    /// Takes the tab; the Conversation tab puts focus in the message input.
+    /// Takes the tab; the Conversation tab puts focus in the message input, and the Overview
+    /// reads its tabs again, since a tab file can change outside CrazyAgent.
     /// Returns nothing.
     pub fn open(&mut self, tab: Tab) {
         self.tab = tab;
+        if tab == Tab::Overview {
+            self.overview_read_ms = None;
+        }
         self.reading = false;
         self.confirm_delete = None;
         self.confirm_stop = None;
@@ -928,9 +932,10 @@ impl ProjectScreen {
         Some(query)
     }
 
-    /// Says whether the Overview tabs are read now: at once before the first read and after
-    /// a refresh was asked, then every `REFRESH_MS` only until they are read once, while a
-    /// run writes them, or while a landed change set waits for a run that can start.
+    /// Says whether the Overview tabs are read now: at once before the first read, after a
+    /// refresh was asked and when the owner opens the Overview or picks one of its tabs, then
+    /// every `REFRESH_MS` only until they are read once, while a run writes them, or while a
+    /// landed change set waits for a run that can start.
     /// Takes the screen and the current time in milliseconds. Returns whether to read.
     fn overview_due(&self, now_ms: i64) -> bool {
         let Some(read_ms) = self.overview_read_ms else {
@@ -2084,6 +2089,7 @@ impl ProjectScreen {
                 };
                 self.overview_tab = (self.overview_tab + step) % count;
                 self.overview_scroll = 0;
+                self.overview_read_ms = None;
             }
             KeyCode::Char('R') if tabs => return self.refresh_overview(),
             KeyCode::PageDown if tabs => {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
+import { connect } from "node:net";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
@@ -31,6 +32,28 @@ export async function closedPort() {
   const { port } = server.address();
   await new Promise((done) => server.close(done));
   return port;
+}
+
+/** Holds a free local port that refuses every connect, as a stopped model provider: a
+ * listener takes one connection from this process and stops listening, so the port stays
+ * in use by that connection, no other listener gets it, and a connect is refused at once.
+ * Input: none. Output: the port and a function that frees it. */
+export async function refusingPort() {
+  const server = createServer();
+  const accepted = new Promise((done) => server.once("connection", done));
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  const { port } = server.address();
+  const near = connect(port, "127.0.0.1");
+  near.on("error", () => {});
+  await new Promise((done, fail) => {
+    near.once("connect", done);
+    near.once("error", fail);
+  });
+  const far = await accepted;
+  far.on("error", () => {});
+  server.close();
+  assert.equal(server.listening, false, "the held port has no listener");
+  return { port, free: () => { near.destroy(); far.destroy(); } };
 }
 
 /** Opens a local port that takes connections but answers no request, for the provider of an
@@ -242,7 +265,7 @@ export const INTERNALS = `(() => {
  * opening a fold by its label, and opening the Agents toolbar's questions drawer. Input: the
  * page's evaluate and send. Output: the helpers. */
 export function owner({ evaluate, send }, evidence) {
-  const seen = () => evaluate("document.body.innerText");
+  const seen = () => evaluate("document.body?.innerText ?? \"\"");
   let shots = 0;
   const capture = async (label) => {
     shots += 1;

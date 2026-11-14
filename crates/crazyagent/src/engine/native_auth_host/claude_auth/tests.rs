@@ -1,22 +1,26 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 #[test]
 fn imp1035_claude_commands_use_only_official_auth_subcommands() {
     let home = Path::new("/private/tmp/imp1035-profile");
+    let temp = tempfile::tempdir().unwrap();
+    let claude = std::fs::canonicalize(temp.path()).unwrap().join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
     for (action, expected) in [
         (ClaudeAuthCommand::Login, "login"),
         (ClaudeAuthCommand::Status, "status"),
         (ClaudeAuthCommand::Logout, "logout"),
     ] {
-        let command =
-            auth_command(Path::new("/private/tmp/official-claude"), home, action).unwrap();
+        let command = auth_command(&[claude.clone().into_os_string()], home, action).unwrap();
         let args = command
             .get_args()
             .map(|value| value.to_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(args, ["auth", expected]);
-        assert_eq!(command.get_program(), "/private/tmp/official-claude");
+        assert_eq!(command.get_program(), claude.as_os_str());
         assert_eq!(command.get_current_dir(), Some(home));
         let variables = command
             .get_envs()
@@ -38,19 +42,44 @@ fn imp1035_claude_commands_use_only_official_auth_subcommands() {
     }
 }
 
+/// Every Claude Code auth child starts the launch words its custodian was handed, an
+/// interpreter and its first-line words before the script, never resolving a name itself.
+#[test]
+fn a_claude_auth_child_starts_the_handed_words_as_given() {
+    let home = Path::new("/private/tmp/imp1035-profile");
+    let words: Vec<std::ffi::OsString> = vec![
+        "/bin/sh".into(),
+        "--flag".into(),
+        "/private/tmp/cli.js".into(),
+    ];
+    for action in [
+        ClaudeAuthCommand::Login,
+        ClaudeAuthCommand::Status,
+        ClaudeAuthCommand::Logout,
+        ClaudeAuthCommand::Renew,
+    ] {
+        let command = auth_command(&words, home, action).unwrap();
+        assert_eq!(command.get_program(), "/bin/sh");
+        let args: Vec<_> = command.get_args().take(2).collect();
+        assert_eq!(args, ["--flag", "/private/tmp/cli.js"]);
+    }
+}
+
 #[test]
 fn imp1035_claude_command_rejects_relative_executable_and_profile() {
+    let profile = Path::new("/private/tmp/profile");
+    assert!(auth_command(&["claude".into()], profile, ClaudeAuthCommand::Login).is_err());
     assert!(
         auth_command(
-            Path::new("claude"),
-            Path::new("/private/tmp/profile"),
+            &["/bin/sh".into(), "cli.js".into()],
+            profile,
             ClaudeAuthCommand::Login
         )
         .is_err()
     );
     assert!(
         auth_command(
-            Path::new("/private/tmp/claude"),
+            &["/private/tmp/claude".into()],
             Path::new("profile"),
             ClaudeAuthCommand::Login
         )

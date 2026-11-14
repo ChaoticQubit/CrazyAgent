@@ -12,6 +12,7 @@ import { useLearningVisits } from "./screens/dashboard/learn";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
 import { CloneFromGitHub } from "./screens/intake/clone";
+import { sidebarFolders } from "./screens/intake/intake";
 import { OnboardingReview } from "./screens/intake/onboarding";
 import { AppMetrics } from "./screens/metrics";
 import { useResetNotice } from "./screens/metrics/extras";
@@ -182,16 +183,18 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
   const asked = route.name === "settings" && isUserMenuTab(route.tab) ? route.tab : null;
   const page = asked === null ? route : under ?? { name: "home" };
   const toastOpen = session.toastOpen;
-  const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => {
+  const projects = session.projects.kind === "ok" ? [...session.projects.value.map((project) => {
     const unseen = alerts?.get(project.id) ?? 0;
     return { id: project.id, name: displayText(project.name), flag: unseen > 0 ? String(unseen) : undefined, working: working?.get(project.id) };
-  }) : undefined;
+  }), ...sidebarFolders(session.found, session.intake, new Set(session.projects.value.map((project) => project.id)))
+    .map((folder) => ({ ...folder, name: displayText(folder.name) }))] : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} onOpen={toastOpen ? () => navigate(toastOpen) : undefined} />}
       sidebar={<ShellSidebar route={page} projects={projects} profileName={profile?.name} session={session} />}>
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
-        <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>
+        {session.unconfirmed.outcome !== "in_progress" &&
+          <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>}
         {session.unconfirmed.outcome === "not_recorded_at_barrier" &&
           <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.dropUnconfirmed()}>Dismiss</Button>}
       </span>}>

@@ -198,6 +198,9 @@ fn attach_failure(code: &str) -> BridgeError {
         "terminal_agent_unknown" => "terminal_agent_unknown",
         "terminal_agent_invalid" => "terminal_agent_invalid",
         "terminal_viewers_full" => "terminal_viewers_full",
+        "terminal_attach_timeout" => "terminal_attach_timeout",
+        "terminal_outcome_unknown" => "terminal_outcome_unknown",
+        "terminal_not_answering" => "terminal_not_answering",
         "controller_disconnected" => "not_connected",
         "terminal_owner_unavailable" | "owner_socket_replaced" => "owner_unavailable",
         _ => "terminal_attach_failed",
@@ -1096,5 +1099,24 @@ mod tests {
         for title in ["CrazyAgent", "", " \u{b7} Terminals 1 of 1"] {
             assert_eq!(wall_title_name(title), "Project", "{title:?}");
         }
+    }
+
+    /// An attach the engine or the tmux server did not answer in time keeps its own code,
+    /// so a view that tries again says the terminal was slow to open, not only that it
+    /// closed; every other engine code still reads as a failed attach.
+    #[test]
+    fn an_attach_that_timed_out_keeps_its_code_for_the_view() {
+        for slow in [
+            "terminal_attach_timeout",
+            "terminal_outcome_unknown",
+            "terminal_not_answering",
+        ] {
+            assert_eq!(attach_failure(slow).code, slow);
+        }
+        assert_eq!(
+            attach_failure("terminal_reply_cut").code,
+            "terminal_attach_failed"
+        );
+        assert_eq!(attach_failure("Not A Code").code, "terminal_attach_failed");
     }
 }

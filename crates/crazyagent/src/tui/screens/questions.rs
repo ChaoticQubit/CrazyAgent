@@ -5,8 +5,8 @@ use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::clock;
 use crate::protocol::ProjectId;
 use crate::questions::{
-    ANSWER_BYTES_MAX, Answer, COMMENT_BYTES_MAX, COMMENT_LABEL, OPTIONS_MAX, Question,
-    QuestionKind, QuestionStatus, Settlement, asker_label,
+    ANSWER_BYTES_MAX, Answer, COMMENT_BYTES_MAX, COMMENT_LABEL, OPTIONS_MAX, PAUSED_NOTE, Question,
+    QuestionKind, QuestionStatus, Settlement, URGENT_WORD, asker_label,
 };
 use crate::tui::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -447,7 +447,7 @@ impl ProjectQuestions {
         for (index, question) in self.items.iter().enumerate().skip(first).take(shown) {
             let cells = vec![
                 Row::of(question.question.replace('\n', " "), look.fg),
-                Row::of(asker_label(&question.asker), look.muted),
+                Row::of(asker_words(question), look.muted),
                 Row::of(
                     status_word(question.status),
                     status_style(question.status, look),
@@ -484,9 +484,12 @@ impl ProjectQuestions {
             content,
             Row::of("From", look.muted)
                 .pad(LABEL_WIDTH)
-                .push(asker_label(&question.asker), look.fg),
+                .push(asker_words(question), look.fg),
             Row::of(format!("Asked {}", clock(asked, offset)), look.muted),
         ));
+        if let Some(line) = marks(question) {
+            rows.extend(field("", &line, text, look.error, look));
+        }
         let (cursor, picks, commenting) = match &self.settling {
             Some(Settling::Answer {
                 cursor,
@@ -678,7 +681,10 @@ fn whole(
         .map(|line| Row::of(line, look.heading))
         .collect();
     all.push(Row::default());
-    all.extend(labelled("From", &asker_label(&question.asker), look.fg));
+    all.extend(labelled("From", &asker_words(question), look.fg));
+    if let Some(line) = marks(question) {
+        all.extend(labelled("", &line, look.error));
+    }
     all.push(
         Row::of("Asked", look.muted)
             .pad(LABEL_WIDTH)
@@ -796,6 +802,29 @@ fn recommended_option(question: &Question) -> Option<usize> {
         .options
         .iter()
         .position(|choice| choice == recommended)
+}
+
+/// Who asked, as the Questions tab shows it: the name the engine sent for a team sub-agent
+/// (S4-R1), else the engine's words for the asker. Input: the question. Output: the words.
+fn asker_words(question: &Question) -> String {
+    question
+        .asker_name
+        .clone()
+        .unwrap_or_else(|| asker_label(&question.asker))
+}
+
+/// The marks a waiting team question shows while they hold, in the desktop card's words
+/// (DEC-141): urgent, and that its asker is paused until the owner answers. Input: the
+/// question. Output: the line, or none when neither holds.
+fn marks(question: &Question) -> Option<String> {
+    let shown: Vec<&str> = [
+        (question.urgent, URGENT_WORD),
+        (question.paused, PAUSED_NOTE),
+    ]
+    .into_iter()
+    .filter_map(|(holds, words)| holds.then_some(words))
+    .collect();
+    (!shown.is_empty()).then(|| shown.join("  "))
 }
 
 fn status_word(status: QuestionStatus) -> &'static str {

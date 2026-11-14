@@ -1,5 +1,7 @@
 use super::*;
 use crate::projects_home::icloud::{self, DOWNLOAD_TIME_MAX, Progress};
+use crate::projects_home::job::JobView;
+use crate::projects_home::{AddMode, AddOverride};
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
 
@@ -10,9 +12,25 @@ pub(super) const ICLOUD_TIMEOUT: Duration = Duration::from_secs(DOWNLOAD_TIME_MA
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
-    Download { path: String },
+    Download {
+        path: String,
+    },
     Progress,
     Cancel,
+    Start {
+        request_id: RequestId,
+        path: String,
+        mode: AddMode,
+        #[serde(default)]
+        overrides: Vec<AddOverride>,
+    },
+    Status,
+    Stop {
+        request_id: RequestId,
+    },
+    Dismiss {
+        request_id: RequestId,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -27,6 +45,9 @@ enum Reply {
     Downloaded { files: u64 },
     Progress { progress: Option<Progress> },
     Cancelled { running: bool },
+    Job { job: Option<JobView> },
+    Stopped { running: bool },
+    Dismissed { forgotten: bool },
     Rejected { code: String },
 }
 
@@ -60,6 +81,55 @@ impl OwnerClient {
     pub async fn icloud_cancel(&self) -> Result<bool, EngineError> {
         match self.icloud_exchange(Action::Cancel).await? {
             Reply::Cancelled { running } => Ok(running),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Starts an intake job that adds a folder apart from this client: it downloads what
+    /// is only in iCloud, then moves or copies the folder into the projects home. A start
+    /// for the folder of the running job, or with its id, attaches to it. Inputs: the add's
+    /// request id, which names the job, the folder, the mode and the overrides. Output: the
+    /// job's view, or `intake_busy` while a job for another folder runs.
+    pub async fn intake_start(
+        &self,
+        request_id: RequestId,
+        path: String,
+        mode: AddMode,
+        overrides: Vec<AddOverride>,
+    ) -> Result<JobView, EngineError> {
+        let action = Action::Start {
+            request_id,
+            path,
+            mode,
+            overrides,
+        };
+        match self.icloud_exchange(action).await? {
+            Reply::Job { job: Some(job) } => Ok(job),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the intake job, running or last ended. Output: its view, or None.
+    pub async fn intake_status(&self) -> Result<Option<JobView>, EngineError> {
+        match self.icloud_exchange(Action::Status).await? {
+            Reply::Job { job } => Ok(job),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Asks the running intake job to stop between files. Input: its id. Output: whether it
+    /// was running; its view then reads cancelled, or done when its folder had landed.
+    pub async fn intake_stop(&self, request_id: RequestId) -> Result<bool, EngineError> {
+        match self.icloud_exchange(Action::Stop { request_id }).await? {
+            Reply::Stopped { running } => Ok(running),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Forgets an ended intake job. Input: its id. Output: whether it was forgotten.
+    pub async fn intake_dismiss(&self, request_id: RequestId) -> Result<bool, EngineError> {
+        match self.icloud_exchange(Action::Dismiss { request_id }).await? {
+            Reply::Dismissed { forgotten } => Ok(forgotten),
             _ => Err(unknown()),
         }
     }
@@ -107,8 +177,8 @@ impl OwnerClient {
 }
 
 /// Whether a request body is a download, which waits for iCloud and so is served past the
-/// owner exchange; progress and cancel are answered at once. Input: the body. Output: the
-/// answer, false for a body that does not parse.
+/// owner exchange; progress, cancel and the intake job's actions are answered at once.
+/// Input: the body. Output: the answer, false for a body that does not parse.
 pub(super) fn deferred(bytes: &[u8]) -> bool {
     matches!(
         serde_json::from_slice::<Envelope>(bytes),
@@ -181,9 +251,11 @@ async fn handle(
         Action::Download { path } => {
             let claim = authority.icloud.claim()?;
             let download = claim.download();
-            let files = tokio::task::spawn_blocking(move || icloud::download(&path, &download))
-                .await
-                .map_err(|_| failure("home_icloud_not_downloaded"))??;
+            let bounds = crate::projects_home::COPY_BOUNDS;
+            let files =
+                tokio::task::spawn_blocking(move || icloud::download(&path, &download, bounds))
+                    .await
+                    .map_err(|_| failure("home_icloud_not_downloaded"))??;
             drop(claim);
             Ok(Reply::Downloaded { files })
         }
@@ -193,5 +265,35 @@ async fn handle(
         Action::Cancel => Ok(Reply::Cancelled {
             running: authority.icloud.cancel(),
         }),
+        Action::Start {
+            request_id,
+            path,
+            mode,
+            overrides,
+        } => {
+            let asked = intake::Asked {
+                request_id,
+                path,
+                mode,
+                overrides,
+            };
+            intake::Intake::start(engine, authority, packet, admission, asked)
+                .map(|job| Reply::Job { job: Some(job) })
+        }
+        Action::Status => Ok(Reply::Job {
+            job: authority.intake.status(),
+        }),
+        Action::Stop { request_id } => Ok(Reply::Stopped {
+            running: authority.intake.stop(&request_id),
+        }),
+        Action::Dismiss { request_id } => {
+            let forgotten = authority.intake.dismiss(&request_id);
+            if forgotten {
+                engine
+                    .owner_job(|reply| Job::HomeAddForget(request_id, reply))
+                    .await?;
+            }
+            Ok(Reply::Dismissed { forgotten })
+        }
     }
 }

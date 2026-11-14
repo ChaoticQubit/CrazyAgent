@@ -18,6 +18,8 @@ export interface SidebarProject {
   name: string;
   flag?: string;
   working?: number;
+  note?: string;
+  href?: string;
 }
 
 /** A project row's alert count: the number on screen and, after it, the words a screen
@@ -54,10 +56,11 @@ export function Sidebar({ route, projects, profileName, engine, onRetry, restart
     <nav className="nav nav-projects" aria-labelledby="nav-projects">
       <p className="nav-label" id="nav-projects">Projects</p>
       <div className="nav-group">
-        {projects?.map((project) => <a key={project.id} className="nav-item" href={formatRoute({ name: "project", id: project.id, tab: "overview" })}
-          aria-current={current(route.name === "project" && route.id === project.id)}>
+        {projects?.map((project) => <a key={project.id} className="nav-item" href={project.href ?? formatRoute({ name: "project", id: project.id, tab: "overview" })}
+          aria-current={current(!project.href && route.name === "project" && route.id === project.id)}>
           {project.working ? <span className="nav-live-dot" aria-hidden="true" /> : <Icon name="folder" />}<span className="name">{project.name}</span>
           {project.working ? <WorkingCount count={project.working} /> : null}{project.flag && <AlertFlag flag={project.flag} />}
+          {project.note && <span className="nav-note">{project.note}</span>}
         </a>)}
       </div>
     </nav>

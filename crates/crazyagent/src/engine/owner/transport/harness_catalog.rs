@@ -6,6 +6,8 @@ use crate::harnesses::update::{
 use crate::harnesses::{HarnessEntry, Search};
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(test, unix))]
+mod tests;
 mod updates;
 pub(super) use updates::{UPDATES_TIMEOUT, slow};
 
@@ -30,6 +32,10 @@ enum Action {
     Install {
         id: String,
     },
+    InstallMany {
+        ids: Vec<String>,
+    },
+    Queued,
     Settings,
     SetSettings {
         mode: UpdateMode,
@@ -59,6 +65,9 @@ enum WireReply {
         versions: Box<HarnessVersions>,
     },
     Started,
+    Queued {
+        ids: Vec<String>,
+    },
     Settings {
         mode: UpdateMode,
         when: CheckWhen,
@@ -202,6 +211,13 @@ pub(super) async fn serve(
         .entries(search, matches!(action, Action::Check))
         .await
         .map_err(|_| failure("harness_catalog_unavailable"))?;
+    let root = super::changes::engine_root(authority)?;
+    let entries = tokio::task::spawn_blocking(move || {
+        let places = crate::tools::Places::from_environment(Some(&root));
+        crate::harnesses::with_needs(entries, &places)
+    })
+    .await
+    .map_err(|_| failure("harness_catalog_unavailable"))?;
     assert!(!entries.is_empty());
     let _barrier = engine.owner_egress.write().await;
     let reply = if &authority.authenticate(packet)? == admission {

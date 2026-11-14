@@ -240,29 +240,248 @@ pub(super) fn read(
 /// Input: the connection, database path, owner admission, the revision the
 /// owner saw, source and mode. Output: the checked plan, or the refusal code
 /// (`stale_revision` when the engine moved on); nothing on disk changes.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn add_plan(
     db: &mut Connection,
     path: &Path,
     a: &Admission,
     expected: &Cursor,
+    request: &RequestId,
     source: &str,
     mode: AddMode,
     overrides: &[AddOverride],
 ) -> Result<AddPlan, EngineError> {
-    let tx = db.transaction().map_err(error)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
     check_owner_admission(&tx, a)?;
     if owner_revision(&tx)? != expected.value() {
         return Err(error("stale_revision"));
     }
+    if pending_move(&tx)?.is_some() {
+        return Err(error("home_move_in_progress"));
+    }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
-    home::plan_add(
+    let plan = home::plan_add(
         &saved,
         &engine_root(path)?,
         source,
         mode,
         overrides,
         &guarded(&tx)?,
+    )?;
+    if destination_held(&tx, plan.destination(), request)? {
+        return Err(error("home_add_in_progress"));
+    }
+    let mode = match mode {
+        AddMode::Move => "move",
+        AddMode::Copy => "copy",
+    };
+    tx.execute(
+        "INSERT OR REPLACE INTO projects_home_add(request, owner, source, destination, mode)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            request.as_str(),
+            a.owner_id,
+            text(plan.source())?,
+            text(plan.destination())?,
+            mode
+        ],
     )
+    .map_err(error)?;
+    assert!(adding(&tx)?);
+    tx.commit().map_err(error)?;
+    Ok(plan)
+}
+
+/// Checks an AddExistingFolder before an intake job downloads its folder: the refusals of
+/// [`add_plan`] that read nothing inside the folder ([`home::check_add`], the pending home
+/// move, an unset home, a destination a running add holds), with no revision check and no
+/// `projects_home_add` row written. Inputs: the connection, database path, owner admission,
+/// the job's request, source, mode and overrides. Output: Ok, or the refusal code.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn add_check(
+    db: &mut Connection,
+    path: &Path,
+    a: &Admission,
+    request: &RequestId,
+    source: &str,
+    mode: AddMode,
+    overrides: &[AddOverride],
+) -> Result<(), EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    if pending_move(&tx)?.is_some() {
+        return Err(error("home_move_in_progress"));
+    }
+    let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
+    let root = engine_root(path)?;
+    let plan = home::check_add(&saved, &root, source, mode, overrides, &guarded(&tx)?)?;
+    if destination_held(&tx, plan.destination(), request)? {
+        return Err(error("home_add_in_progress"));
+    }
+    assert!(plan.destination().starts_with(&saved));
+    assert!(!plan.source().starts_with(&saved));
+    tx.rollback().map_err(error)
+}
+
+/// Whether a running add other than `request` planned `destination`. Two adds of folders
+/// with the same name both find it free on disk until one lands, and an engine start reads
+/// each cut add's end from that one folder, so only one may plan it. Inputs: the connection,
+/// the destination and the asking add's request. Output: the answer.
+fn destination_held(
+    db: &Connection,
+    destination: &Path,
+    request: &RequestId,
+) -> Result<bool, EngineError> {
+    assert!(destination.is_absolute());
+    assert!(!request.as_str().is_empty());
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects_home_add
+         WHERE ended IS NULL AND destination=?1 AND request<>?2)",
+        params![text(destination)?, request.as_str()],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
+/// Whether an add is running: planned, and neither recorded nor settled yet. While one runs
+/// the projects home stays where its plan saw it. Input: the connection. Output: the answer.
+fn adding(db: &Connection) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects_home_add WHERE ended IS NULL)",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
+/// The most running adds one engine start reads; an engine runs one per deferred owner
+/// request and its one intake job.
+const ADDS_MAX: usize = 64;
+
+/// How an add a record never reached is settled. With a request (after its exchange
+/// replied): its running row is forgotten, its disk work already settled in the exchange.
+/// With none (engine start, before any add plans, so no staging is live): each running row
+/// gets its staging folders removed and the end its disk shows, nothing else deleted, and
+/// only the newest ended row is kept for the owner to read. Inputs: the connection and the
+/// request. Output: how many running rows were settled.
+pub(super) fn add_settle(
+    db: &mut Connection,
+    request: Option<&RequestId>,
+) -> Result<usize, EngineError> {
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let settled = match request {
+        Some(request) => tx
+            .execute(
+                "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NULL",
+                [request.as_str()],
+            )
+            .map_err(error)?,
+        None => restart_adds(&tx)?,
+    };
+    assert!(request.is_some() || !adding(&tx)?);
+    tx.commit().map_err(error)?;
+    Ok(settled)
+}
+
+fn restart_adds(tx: &Transaction<'_>) -> Result<usize, EngineError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT request, source, destination, mode FROM projects_home_add
+             WHERE ended IS NULL ORDER BY rowid LIMIT ?1",
+        )
+        .map_err(error)?;
+    let rows: Vec<(String, String, String, String)> = statement
+        .query_map([ADDS_MAX as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    drop(statement);
+    for (request, source, destination, mode) in &rows {
+        let destination = Path::new(destination);
+        if let Some(parent) = destination.parent() {
+            let removed = home::sweep_staging(parent);
+            eprintln!("home_add_restart_staging_removed count={removed}");
+        }
+        let ended = home::add_left(Path::new(source), destination, mode == "move");
+        eprintln!("home_add_restart ended={ended}");
+        tx.execute(
+            "UPDATE projects_home_add SET ended=?1 WHERE request=?2",
+            params![ended, request],
+        )
+        .map_err(error)?;
+    }
+    tx.execute(
+        "DELETE FROM projects_home_add WHERE ended IS NOT NULL AND rowid <>
+         (SELECT max(rowid) FROM projects_home_add WHERE ended IS NOT NULL)",
+        [],
+    )
+    .map_err(error)?;
+    assert!(rows.len() <= ADDS_MAX);
+    Ok(rows.len())
+}
+
+/// An add an engine stop cut short, as the engine start found it: its request, owner,
+/// source, mode and end code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddEnded {
+    pub request: RequestId,
+    pub owner: String,
+    pub source: String,
+    pub mode: AddMode,
+    pub ended: String,
+}
+
+/// The newest add an engine stop cut short and the owner has not dismissed. Input: the
+/// connection. Output: it, or None.
+pub(super) fn add_ended(db: &Connection) -> Result<Option<AddEnded>, EngineError> {
+    let row: Option<(String, String, String, String, String)> = db
+        .query_row(
+            "SELECT request, owner, source, mode, ended FROM projects_home_add
+             WHERE ended IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(error)?;
+    row.map(|(request, owner, source, mode, ended)| {
+        let mode = match mode.as_str() {
+            "move" => AddMode::Move,
+            _ => AddMode::Copy,
+        };
+        Ok(AddEnded {
+            request: RequestId::new(request).map_err(|_| error("home_add_row_invalid"))?,
+            owner,
+            source,
+            mode,
+            ended,
+        })
+    })
+    .transpose()
+}
+
+/// Forgets an ended add the owner dismissed or a new job replaced. Inputs: the connection
+/// and its request. Output: Ok.
+pub(super) fn add_forget(db: &Connection, request: &RequestId) -> Result<(), EngineError> {
+    db.execute(
+        "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NOT NULL",
+        [request.as_str()],
+    )
+    .map_err(error)?;
+    Ok(())
 }
 
 /// A checked Delete everything: the plan with the project's research jobs, or the refusal code.
@@ -658,6 +877,9 @@ pub(super) fn move_plan(
     }
     if delete_planned(&tx)? {
         return Err(error("home_move_delete_in_progress"));
+    }
+    if adding(&tx)? {
+        return Err(error("home_add_in_progress"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
     if let Some(code) = agent_work_inside(&tx, &saved)? {
@@ -1177,6 +1399,9 @@ pub(super) fn execute(
             if pending_move(tx)?.is_some() {
                 return rejected("home_move_in_progress");
             }
+            if adding(tx)? {
+                return rejected("home_add_in_progress");
+            }
             if home::pending(tx)?.is_some() {
                 return rejected("move_project_in_progress");
             }
@@ -1227,6 +1452,13 @@ pub(super) fn record(
     let Command::ProjectsHome { action } = command else {
         return Err(error("home_record_invalid"));
     };
+    if let HomeAction::Added { .. } = action {
+        tx.execute(
+            "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NULL",
+            [request.as_str()],
+        )
+        .map_err(error)?;
+    }
     let real = match effect {
         Err(code) => return Ok(Outcome::Rejected { code: code.clone() }),
         Ok(real) => real,

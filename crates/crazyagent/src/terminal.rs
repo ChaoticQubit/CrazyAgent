@@ -35,6 +35,10 @@ const TEAMMATES_PIN_BYTES_MAX: usize = TEAMMATES_NAME_BYTES + 1 + 10;
 /// answers.
 #[cfg(unix)]
 const TEAMMATES_PIN_PENDING: &str = "pending";
+/// The most digits a lead's servers' deadline record holds, as a server keeper
+/// reads it: every time a system clock gives fits (FBTMUX-P1-R1-L1).
+#[cfg(unix)]
+const SERVERS_DEADLINE_DIGITS_MAX: usize = 19;
 const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
@@ -186,13 +190,14 @@ pub fn pane_id_valid(id: &str) -> bool {
     })
 }
 
+const VIEW_RESET: &[u8] =
+    b"\x1b[?1049l\x1b[?2004l\x1b[?1l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l";
+
 /// One viewer's live view of an agent's terminal: its size, the screen at attach, then output.
-/// `history`, written first, puts the terminal's earlier rows into a fresh view's scrollback
-/// and is empty when the host keeps none; `screen` then redraws the whole current screen in a
-/// fresh terminal of `cols` by `rows`.
-/// `next` gives each later output chunk in order and none once the terminal ends.
-/// A viewer that falls more than `VIEWER_BUFFER_BYTES_MAX` behind loses the oldest output and
-/// reads one `buffer::skipped_marker` chunk in its place.
+/// `history`, written first, fills a fresh view's scrollback (empty when the host keeps none);
+/// `screen` then redraws the whole screen in a fresh `cols` by `rows` terminal. `next` gives
+/// later output in order, `Chunk::Behind` once the viewer lost output (the viewer then attaches
+/// again and writes that stream's `redraw`), and none once the terminal ends.
 #[derive(Debug)]
 pub struct TerminalStream {
     pub agent: AgentId,
@@ -204,17 +209,39 @@ pub struct TerminalStream {
 }
 
 impl TerminalStream {
-    /// Waits for the next output chunk. Takes the stream.
-    /// Returns at most `CHUNK_BYTES_MAX` bytes, or none once the terminal ended.
-    pub async fn next(&mut self) -> Option<Vec<u8>> {
+    /// Waits for the next read. Takes the stream. Returns output of at most
+    /// `CHUNK_BYTES_MAX` bytes, `Chunk::Behind` once output was lost, or none once the
+    /// terminal ended.
+    pub async fn next(&mut self) -> Option<buffer::Chunk> {
         self.chunks.recv().await
     }
 
-    /// Waits for the next output chunk outside an async runtime. Takes the stream.
-    /// Returns at most `CHUNK_BYTES_MAX` bytes, or none once the terminal ended.
-    pub fn next_blocking(&mut self) -> Option<Vec<u8>> {
+    /// Waits for the next read outside an async runtime. Takes the stream. Returns as `next`.
+    pub fn next_blocking(&mut self) -> Option<buffer::Chunk> {
         self.chunks.blocking_recv()
     }
+
+    /// The bytes that bring a view that was already drawing this terminal back to its screen
+    /// now, after it fell behind: every mode a screen can turn on is turned off, then `screen`
+    /// redraws the whole screen with the modes the agent uses. Takes the stream. Returns them.
+    pub fn redraw(&self) -> Vec<u8> {
+        let mut bytes = VIEW_RESET.to_vec();
+        bytes.extend_from_slice(&self.screen);
+        bytes
+    }
+}
+
+/// Opens a fresh viewer in place of one that read `Chunk::Behind`, on a blocking thread, so
+/// the view goes on from the screen as it is now with nothing lost or repeated after it.
+/// Takes the host the old viewer came from and the terminal name. Returns the new stream,
+/// whose `redraw` the view writes first, or the host's code, such as `terminal_agent_unknown`.
+pub async fn attach_again(
+    host: Arc<dyn Host>,
+    agent: AgentId,
+) -> Result<TerminalStream, HostError> {
+    tokio::task::spawn_blocking(move || host.attach(&agent))
+        .await
+        .map_err(|_| failure("terminal_unavailable"))?
 }
 
 /// Runs every agent's interactive app in a real terminal that outlives the engine and its viewers.
@@ -378,6 +405,14 @@ pub trait Host: Send + Sync {
         None
     }
 
+    /// The keepers of a native lead's own and teammates' servers this host started, each as
+    /// its process id and whether it keeps the teammates' server, so a quitting engine can
+    /// freeze both (DEC-158). Takes the name. Returns them, own first; none for a host that
+    /// started no server for the agent.
+    fn server_keepers(&self, _agent: &AgentId) -> Vec<(u32, bool)> {
+        Vec::new()
+    }
+
     /// Lists the agent terminals still running, reconnecting to the host first when needed.
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
     /// Returns the names in order.
@@ -477,6 +512,10 @@ impl Host for OwnServer {
 
     fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
         self.0.end_kept_server(agent)
+    }
+
+    fn server_keepers(&self, agent: &AgentId) -> Vec<(u32, bool)> {
+        self.0.server_keepers(agent)
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
@@ -634,7 +673,8 @@ pub const RENEW_EVERY: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 /// The engine's renewal of its terminal servers' deadlines while it runs (FBTMUX-P1). Each
 /// pass reads the owner's agents on quit setting again and sets every server's deadline that
-/// far ahead, so the holder in a server whose engine never comes back ends it once the time
+/// far ahead, so the holder in a server whose engine never comes back, and for a native
+/// lead's servers their keepers outside the sandboxes (FBTMUX-P1-R1-L1), end it once the time
 /// is up, and an engine that comes back in time renews it before adopting its agents.
 pub struct Renewal {
     stop: Arc<(Mutex<bool>, Condvar)>,
@@ -971,6 +1011,32 @@ fn keep_teammates_server_pid(
     )
 }
 
+/// Moves a native lead's servers' deadline (FBTMUX-P1-R1-L1): keeps it, in whole seconds
+/// since the epoch, in the record beside the lead's profiles that no agent writes and that
+/// each of its servers' keepers reads outside the sandboxes. Takes the engine root, the lead
+/// and the deadline. Returns Ok, `terminal_unavailable` for a time before the epoch, or
+/// `terminal_own_server_unavailable` when the record cannot be kept.
+#[cfg(unix)]
+fn keep_servers_deadline(
+    engine_root: &Path,
+    lead: &AgentId,
+    until: SystemTime,
+) -> Result<(), HostError> {
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let seconds = until
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| failure("terminal_unavailable"))?
+        .as_secs();
+    let text = seconds.to_string();
+    assert!(!text.is_empty() && text.len() <= SERVERS_DEADLINE_DIGITS_MAX);
+    keep_record(
+        &crate::team::runtime::agent_servers_deadline(&engine_root.join("team"), id),
+        &text,
+    )
+}
+
 /// Whether a text is a teammates' socket name as [`renew_teammates_socket`] makes one.
 /// Takes the text, read from a file. Returns the answer.
 #[cfg(unix)]
@@ -998,6 +1064,24 @@ fn lead_temp_socket(engine_root: &Path, lead: &AgentId, name: &str) -> Result<Pa
     let socket = crate::sandbox::toolchains::tmp_path(&home).join(name);
     assert!(socket.is_absolute() && socket.as_os_str().len() <= HARNESS_SOCKET_BYTES_MAX);
     Ok(socket)
+}
+
+/// Opens the engine's terminal host as [`tmux_host`] does, with every server it starts
+/// reading its deadline every `loops` holder loops and ending after `late` passed reads, so
+/// a row sees the quit limit within seconds. Takes the engine root, the program, the spacing
+/// and the count. Returns the host.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn tmux_host_checking(
+    engine_root: &Path,
+    program: Option<PathBuf>,
+    loops: u32,
+    late: u32,
+) -> Arc<dyn Host> {
+    let engine = tmux::Tmux::open(program.clone(), &engine_root.join(FOLDER))
+        .with_deadline_checks(loops, late);
+    Arc::new(kept::LastScreenHost::new(
+        tmux::Servers::new(engine, engine_root, program).with_deadline_checks(loops, late),
+    ))
 }
 
 /// Opens this platform's terminal host for an engine: the ConPTY host on Windows, keeping the

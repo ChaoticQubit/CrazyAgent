@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
 export function createRunDirectories(evidence) {
@@ -28,6 +28,48 @@ export function chooseHome(fresh, env = process.env, realHome = userInfo().homed
   if (info.uid !== process.getuid()) throw new Error(`CRAZYAGENT_E2E_HOME must be owned by this user: ${named}`);
   if (realpathSync(named) === realpathSync(realHome)) throw new Error(`CRAZYAGENT_E2E_HOME must not be the real home: ${named}`);
   return { home: named, prepared: true };
+}
+
+/** The HOME the refused-tool suite gives its app and engine (DEC-162): a new real folder in the
+ * system temp folder, since every folder under the checkout lies in a project the resolver never
+ * looks in, holding the graphify it passes over. A prepared home is refused, so the fixture never
+ * lands in one. Inputs: the environment and the parent folder. Output: { home, prepared: false }. */
+export function refusedToolHome(env = process.env, parent = existsSync("/private/tmp") ? "/private/tmp" : "/tmp") {
+  if (env.CRAZYAGENT_E2E_HOME) throw new Error("the refused-tool suite plants a graphify in its home and needs a fresh one: unset CRAZYAGENT_E2E_HOME");
+  const home = realpathSync(mkdtempSync(join(parent, "car-")));
+  plantRefusedGraphify(home);
+  return { home, prepared: false };
+}
+
+/** Where the refused-tool suite's graphify lives in its home: the Python installation whose
+ * folders the group can change, and the 0777 file a link in it points out to.
+ * Input: the home. Output: { prefix, outside }. */
+export function refusedGraphifyPaths(home) {
+  return { prefix: join(home, ".local/share/uv/python/cpython-9.9.9-dummy"), outside: join(home, "elsewhere/kept") };
+}
+
+/** Lays out a graphify the resolver finds and passes over, as uv lays out a tool: `.local/bin`
+ * links to the tool's script, whose Python links to a real `python3.9` (a copy of `/bin/bash`) in
+ * an installation the group can change (0775); a link in it points out to a 0777 file. Any path
+ * already there fails. Input: the new home. Output: the fixture's paths. */
+function plantRefusedGraphify(home) {
+  const paths = refusedGraphifyPaths(home);
+  const real = join(paths.prefix, "bin");
+  const tool = join(home, ".local/share/uv/tools/graphifyy/bin");
+  const bin = join(home, ".local/bin");
+  for (const folder of [real, tool, bin, dirname(paths.outside)]) mkdirSync(folder, { recursive: true, mode: 0o755 });
+  copyFileSync("/bin/bash", join(real, "python3.9"), constants.COPYFILE_EXCL);
+  chmodSync(join(real, "python3.9"), 0o755);
+  symlinkSync(join(real, "python3.9"), join(tool, "python"));
+  const script = join(tool, "graphify");
+  writeFileSync(script, `#!${join(tool, "python")}\necho 'graphify 0.9.9'\n`, { flag: "wx", mode: 0o755 });
+  chmodSync(script, 0o755);
+  symlinkSync(script, join(bin, "graphify"));
+  writeFileSync(paths.outside, "kept", { flag: "wx" });
+  chmodSync(paths.outside, 0o777);
+  symlinkSync(paths.outside, join(paths.prefix, "outside"));
+  for (const folder of [real, paths.prefix]) chmodSync(folder, 0o775);
+  return paths;
 }
 
 /** Makes one native run's projects folder: a new private Projects-XXXXXX folder in the home,

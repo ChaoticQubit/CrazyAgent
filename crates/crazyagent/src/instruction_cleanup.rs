@@ -209,7 +209,7 @@ mod run {
         PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
         WALL_TIME,
     };
-    use crate::research::accounts::{AccountPick, SettingsResolver};
+    use crate::research::accounts::{AccountPick, Reach, SettingsResolver};
     use crate::research::runner::{
         ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchLimits,
         ResearchRunner, unreached_provider_here,
@@ -295,31 +295,35 @@ mod run {
         format!("{NAME_PREFIX}{started_ms:013}-t{number}")
     }
 
-    /// Picks the account of one try. Inputs: the resolver, the pool rule's answer and the
-    /// installed harnesses, Codex first. Output: the account, or the plain code.
-    fn account(
+    /// Picks the account of one try, passing over a member whose loopback provider refuses
+    /// connects. Inputs: the resolver, the pool rule's answer, the installed harnesses, Codex
+    /// first, and the try, which the down provider's log line names. Output: the account, or
+    /// the plain code.
+    pub(super) fn account(
         resolver: &SettingsResolver,
         pool: CleanupPool<'_>,
         harnesses: &[ResearchHarness],
+        number: u32,
     ) -> Result<ResearchAccount, &'static str> {
         assert!(!harnesses.is_empty() && harnesses.len() <= HARNESSES.len());
         let picked = match pool {
-            CleanupPool::Chosen(pool) => match resolver.pool_pick("", pool, harnesses) {
-                AccountPick::NeedsPool => return Err(POOL_UNKNOWN),
-                pick => pick,
-            },
+            CleanupPool::Chosen(pool) => {
+                match resolver.pool_pick_with("", pool, harnesses, Reach::Reachable) {
+                    AccountPick::NeedsPool => return Err(POOL_UNKNOWN),
+                    pick => pick,
+                }
+            }
             CleanupPool::Project(project) => {
                 let mut waiting = AccountPick::NoUsableAccount;
                 for harness in harnesses {
-                    match resolver.resolve(project.as_str(), harness.id()) {
+                    match resolver.resolve_with(project.as_str(), harness.id(), Reach::Reachable) {
                         None => return Err(UNAVAILABLE),
                         Some((_, AccountPick::NeedsPool)) => return Err(PROJECT_POOL_MISSING),
                         Some((_, pick @ AccountPick::Account { .. })) => {
                             waiting = pick;
                             break;
                         }
-                        Some((_, pick @ AccountPick::Paused { .. })) => waiting = pick,
-                        Some((_, AccountPick::NoUsableAccount)) => {}
+                        Some((_, pick)) => waiting = waiting.or_wait(pick),
                     }
                 }
                 waiting
@@ -328,6 +332,10 @@ mod run {
         match picked {
             AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => {
                 Ok(*account)
+            }
+            AccountPick::Unreached { line } => {
+                eprintln!("{PROVIDER_UNREACHABLE} try={number} {line}");
+                Err(PROVIDER_UNREACHABLE)
             }
             AccountPick::Paused { .. } => Err(PAUSED),
             _ => Err(NO_ACCOUNT),
@@ -384,9 +392,9 @@ mod run {
             if left.is_zero() {
                 return Err(TIMED_OUT);
             }
-            let account = match account(&resolver, pool, &harnesses) {
+            let account = match account(&resolver, pool, &harnesses, number) {
                 Ok(account) => account,
-                Err(code) if number == 1 => return Err(code),
+                Err(code) if number == 1 || code == PROVIDER_UNREACHABLE => return Err(code),
                 Err(_) => return Err(cause),
             };
             if let Some(line) = unreached_provider_here(&account) {

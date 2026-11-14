@@ -4529,6 +4529,7 @@ mod overview_read {
             stale: false,
             checked_ms: None,
             failure: None,
+            waiting_for_account: false,
             refresh: Refresh::AfterLanding,
             apply: Apply::AlwaysAsk,
             needs_home: false,
@@ -4621,6 +4622,33 @@ mod overview_read {
                 "no run can start"
             );
         }
+    }
+
+    /// A tab file can change outside CrazyAgent, so the tabs are read again each time the
+    /// owner picks one of them or opens the Overview again, even with nothing pending; time
+    /// alone still reads nothing.
+    #[test]
+    fn picking_an_overview_tab_or_opening_the_overview_reads_the_tabs_again() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        read(&mut screen, 100, overview());
+        let mut now = 100 + 10 * STEP;
+        assert_eq!(overview_asked(&mut screen, now), None, "nothing is pending");
+        for code in [KeyCode::Right, KeyCode::Left] {
+            assert_eq!(screen.key(key(code)), ProjectReply::Handled);
+            now += 1;
+            let asked = overview_asked(&mut screen, now)
+                .unwrap_or_else(|| panic!("picking a tab with {code:?} reads the tabs again"));
+            screen.apply(&asked, Ok(SetupView::Overview(Box::new(overview()))));
+            assert_eq!(overview_asked(&mut screen, now + 1), None, "{code:?}");
+        }
+        screen.open(Tab::Context);
+        screen.open(Tab::Overview);
+        now += 10 * STEP;
+        assert!(
+            overview_asked(&mut screen, now).is_some(),
+            "opening the Overview again reads the tabs again"
+        );
     }
 
     #[test]

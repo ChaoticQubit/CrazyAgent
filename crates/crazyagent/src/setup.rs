@@ -6,6 +6,8 @@ pub mod fetch;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(unix)]
+pub mod node;
 pub mod pack;
 #[cfg(unix)]
 pub mod pinned;
@@ -100,19 +102,21 @@ pub const TARGET: &str = if cfg!(all(target_os = "macos", target_arch = "aarch64
     "unknown"
 };
 
-/// A system tool the app needs: tmux runs agent terminals, uv installs Graphify and
-/// Graphify builds each project's code graph. Setup finds each one or installs it.
+/// A system tool the app needs: tmux runs agent terminals, uv installs Graphify,
+/// Graphify builds each project's code graph and Node runs the harnesses npm installs.
+/// Setup finds each one or installs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Dependency {
     Tmux,
     Uv,
     Graphify,
+    Node,
 }
 
 impl Dependency {
     /// Every dependency in install order; uv comes before Graphify, which needs it.
-    pub const ALL: [Self; 3] = [Self::Tmux, Self::Uv, Self::Graphify];
+    pub const ALL: [Self; 4] = [Self::Tmux, Self::Uv, Self::Graphify, Self::Node];
 
     /// The program name looked up on the search path, such as `tmux`.
     pub fn program(self) -> &'static str {
@@ -120,19 +124,14 @@ impl Dependency {
             Self::Tmux => "tmux",
             Self::Uv => "uv",
             Self::Graphify => "graphify",
+            Self::Node => "node",
         }
     }
 
     /// Why this dependency cannot run when no answer names another reason: it is found
     /// nowhere the tool resolver looks. Output: the missing tool, with its owner line.
     pub fn not_found(self) -> crate::tools::Missing {
-        crate::tools::Missing {
-            tool: self.program().to_owned(),
-            reason: crate::tools::Reason::NotFound,
-            needs: None,
-            looked: Vec::new(),
-            refused: None,
-        }
+        program_not_found(self.program())
     }
 
     /// The plain name the setup screen shows, such as `Graphify command`, kept apart
@@ -142,6 +141,7 @@ impl Dependency {
             Self::Tmux => "tmux",
             Self::Uv => "uv",
             Self::Graphify => "Graphify command",
+            Self::Node => "Node.js",
         }
     }
 }
@@ -208,7 +208,8 @@ impl From<Version> for String {
 /// checks its SHA-256 and takes one program out of it; `UvTool` installs one pinned
 /// package version from its bundled hash lock; `Homebrew` installs one formula, whose bottles
 /// Homebrew verifies itself; `Winget` installs one package version, whose installer
-/// winget checks against its manifest's SHA-256.
+/// winget checks against its manifest's SHA-256; `Archive` downloads one archive, checks its
+/// SHA-256 and keeps its whole `top` folder, as Node's release is kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pin {
     Release {
@@ -229,12 +230,22 @@ pub enum Pin {
         id: String,
         version: Version,
     },
+    Archive {
+        version: Version,
+        url: String,
+        sha256: String,
+        top: String,
+    },
 }
 
 /// Where one dependency stands on the setup screen. `Checking` means its version check
 /// is still running in the background; the screen reads the status again to see it.
 /// `Missing` carries the tool resolver's owner line for why the tool cannot run
 /// ([`crate::tools::Missing::line`]), the same words a launch that needs it says.
+/// `Refused` is a tool the resolver found and passed over (DEC-162): its line, the file, the
+/// part another user or group can change, the permission fix when one can help, and why the
+/// owner's last fix did not, never counted as missing.
+/// `Unsupported` means setup cannot install it on this system, so no Install is offered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DependencyState {
@@ -243,8 +254,25 @@ pub enum DependencyState {
         #[serde(default)]
         line: String,
     },
+    Refused {
+        line: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fix: Option<ToolFix>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fix_failed: Option<String>,
+    },
     Found {
         version: Version,
+    },
+    Bundled {
+        version: Version,
+    },
+    System {
+        version: Version,
+        note: String,
     },
     Installing,
     Installed {
@@ -253,6 +281,52 @@ pub enum DependencyState {
     Failed {
         reason: String,
     },
+    Unsupported,
+}
+
+impl DependencyState {
+    /// The state of a dependency setup could not find or install: unsupported for
+    /// [`PLATFORM_UNSUPPORTED`], else failed with the code's plain reason. Input: the setup
+    /// code. Output: the state.
+    pub fn refused(code: &str) -> Self {
+        if code == PLATFORM_UNSUPPORTED {
+            return Self::Unsupported;
+        }
+        Self::Failed {
+            reason: plain_reason(code).to_owned(),
+        }
+    }
+}
+
+/// The permission fix a refused tool's row offers (DEC-162): the folder or file it changes,
+/// whether that folder changes as a whole tree, and the command that makes the same change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolFix {
+    pub tree: String,
+    pub recursive: bool,
+    pub command: String,
+}
+
+impl From<&crate::tools::permission_fix::Target> for ToolFix {
+    fn from(target: &crate::tools::permission_fix::Target) -> Self {
+        Self {
+            tree: target.path.to_string_lossy().into_owned(),
+            recursive: target.recursive,
+            command: target.command(),
+        }
+    }
+}
+
+/// The owner's choice for a tool found but not used (DEC-162 Q1): offer the permission fix
+/// with its command, or show only the command, which the engine then enforces by refusing
+/// the fix (`tool_fix_off`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusedTool {
+    #[default]
+    FixButton,
+    CommandOnly,
 }
 
 /// One dependency as the setup screen lists it: which tool, its plain name and its state.
@@ -294,7 +368,8 @@ pub struct PackEntry {
 }
 
 /// Everything the setup screen shows: each dependency, each pack entry, whether a setup
-/// run is going on now, and the pack's version that a switch or removal names.
+/// run is going on now, the pack's version that a switch or removal names, and the owner's
+/// choice for a tool found but not used ([`RefusedTool`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetupStatus {
@@ -304,6 +379,8 @@ pub struct SetupStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
     pub version: u64,
+    #[serde(default)]
+    pub refused_tool: RefusedTool,
 }
 
 /// One Python tool setup installs only from its bundled lock: the package, its version,
@@ -387,7 +464,17 @@ pub fn locked_tool_args(
 /// Implementations never use sudo and never change global configuration.
 /// What looking for one dependency found: its version, why it cannot run
 /// ([`crate::tools::Missing`]), or the check's code.
-pub type Lookup = Result<Result<Version, crate::tools::Missing>, InstallError>;
+pub type Lookup = Result<Result<Located, crate::tools::Missing>, InstallError>;
+
+/// A dependency setup found: the version it reports, whether it is the copy the app ships
+/// beside the engine (DEC-157), which setup shows as bundled and never installs, and why
+/// another tmux runs in place of that copy, if one does ([`crate::tools::BundleNote`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    pub version: Version,
+    pub bundled: bool,
+    pub note: Option<crate::tools::BundleNote>,
+}
 
 pub trait Installer: Send + Sync {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError>;
@@ -396,7 +483,14 @@ pub trait Installer: Send + Sync {
     /// missing ([`crate::tools::Missing`]), the answer the setup screen shows. Input: the
     /// dependency. Output: its version, why it cannot run, or the check's code.
     fn lookup(&self, dep: Dependency) -> Lookup {
-        Ok(self.find(dep)?.ok_or_else(|| dep.not_found()))
+        Ok(self
+            .find(dep)?
+            .map(|version| Located {
+                version,
+                bundled: false,
+                note: None,
+            })
+            .ok_or_else(|| dep.not_found()))
     }
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError>;
 
@@ -409,6 +503,49 @@ pub trait Installer: Send + Sync {
         let _ = name;
         None
     }
+
+    /// Finds one program as [`Installer::program`] does, naming why it cannot run when it
+    /// is found and passed over (DEC-162), the line the onboarding graph step shows. Input:
+    /// the program name. Output: the program, or why it cannot run.
+    fn lookup_program(&self, name: &str) -> Result<std::path::PathBuf, crate::tools::Missing> {
+        self.program(name).ok_or_else(|| program_not_found(name))
+    }
+
+    /// The permission fix target for a tool found and passed over, by this installer's
+    /// places (DEC-162). Input: why the tool cannot run. Output: the target, or none.
+    fn fix_target(
+        &self,
+        missing: &crate::tools::Missing,
+    ) -> Option<crate::tools::permission_fix::Target> {
+        let _ = missing;
+        None
+    }
+
+    /// Removes group and other write from the target this installer resolves for a refused
+    /// dependency, only when both its path and its scope are the ones the owner confirmed
+    /// (DEC-162). Inputs: the dependency, the confirmed path as the row showed it and whether
+    /// the confirm named the whole tree. Output: what changed, or the `tool_fix_*` code.
+    fn fix_permissions(
+        &self,
+        dep: Dependency,
+        confirmed: &str,
+        recursive: bool,
+    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+        let _ = (dep, confirmed, recursive);
+        Err(crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE)
+    }
+}
+
+/// Why a program cannot run when it is found nowhere the tool resolver looks. Input: the
+/// program name. Output: the missing tool, with its owner line.
+pub(crate) fn program_not_found(name: &str) -> crate::tools::Missing {
+    crate::tools::Missing {
+        tool: name.to_owned(),
+        reason: crate::tools::Reason::NotFound,
+        needs: None,
+        looked: Vec::new(),
+        refused: None,
+    }
 }
 
 /// The code every setup step reports on a system setup has no installer for yet.
@@ -418,10 +555,14 @@ pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 /// profile reads: the Setup note, and a refused agent git step.
 pub const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
 
-const REASONS: [(&str, &str); 26] = [
+const REASONS: [(&str, &str); 34] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
+    ),
+    (
+        "setup_archive_unsafe",
+        "The download held a file it should not, so it was not installed.",
     ),
     (
         "setup_download_failed",
@@ -508,6 +649,34 @@ const REASONS: [(&str, &str); 26] = [
         "setup_local_app_data_missing",
         "Windows did not say where your local app data folder is, so setup can't install here.",
     ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_OFF,
+        "Fixing permissions from CrazyAgent is turned off in Settings. Run the command shown instead.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_NOT_NEEDED,
+        "This tool can run now, so nothing needed fixing.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE,
+        "Changing permissions can't fix why this tool is not used. Follow the line shown.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_CHANGED,
+        "What blocks this tool changed since you looked, so nothing was changed. Check the row again.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_REFUSED,
+        "CrazyAgent only fixes folders you own inside your home folder, never system, Homebrew, project or app data folders. Run the command yourself if you are sure.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_TOO_LARGE,
+        "That folder is too large to fix from CrazyAgent. Run the command shown instead.",
+    ),
+    (
+        crate::tools::permission_fix::TOOL_FIX_FAILED,
+        "The permissions could not be changed. Run the command shown instead.",
+    ),
 ];
 
 /// Turns a setup code into the plain sentence the setup screen shows. Input: a code such
@@ -535,6 +704,14 @@ pub fn known_reason(code: &str) -> Option<&'static str> {
         .iter()
         .find(|(known, _)| *known == code)
         .map(|(_, sentence)| *sentence)
+}
+
+/// The engine-owned npm prefix npm harnesses install into, `<engine root>/setup/harnesses`:
+/// inside the setup folder, the one part of the engine data the tool resolver and harness
+/// finding accept as the engine's own and no agent sandbox may write. Input: the engine
+/// root. Output: the folder.
+pub fn harness_prefix(engine_root: &std::path::Path) -> std::path::PathBuf {
+    engine_root.join("setup").join("harnesses")
 }
 
 /// The installer for this Mac, installing into `<engine root>/setup`.
@@ -601,8 +778,9 @@ impl Installer for RefusingInstaller {
 
 /// The pinned install of one dependency for one target triple: uv from its release
 /// archive with the published SHA-256 where one is pinned, or from winget on Windows;
-/// Graphify through `uv tool install`; tmux by its formula name. Inputs: the target and
-/// the dependency. Output: the pin, or `None` when that target has no uv pin.
+/// Graphify through `uv tool install`; tmux by its formula name; Node from its official
+/// archive on Mac and Linux. Inputs: the target and the dependency. Output: the pin, or
+/// `None` when that target has no uv or Node pin.
 pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
     match dep {
         Dependency::Uv => {
@@ -630,7 +808,27 @@ pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
         Dependency::Tmux => Some(Pin::Homebrew {
             formula: "tmux".to_owned(),
         }),
+        Dependency::Node => node_pin(target),
     }
+}
+
+/// The official Node archive for one target as a setup pin. Input: the target.
+/// Output: the pin, or none where no Node archive is pinned.
+#[cfg(unix)]
+fn node_pin(target: &str) -> Option<Pin> {
+    let pinned = node::pin(target)?;
+    Some(Pin::Archive {
+        version: Version(node::NODE_VERSION.to_owned()),
+        url: pinned.url,
+        sha256: pinned.sha256,
+        top: pinned.top,
+    })
+}
+
+/// Pins no Node where setup cannot unpack one. Input: the target, unused. Output: none.
+#[cfg(not(unix))]
+fn node_pin(_target: &str) -> Option<Pin> {
+    None
 }
 
 /// The pinned install of one dependency on this system. Input: the dependency.
@@ -639,15 +837,22 @@ pub fn platform_pin(dep: Dependency) -> Option<Pin> {
     pin_for(TARGET, dep)
 }
 
-/// One owner change to the default pack, as the owner mutations carry it: start setup
-/// with the ticked entries, or switch or remove an installed entry at the pack version the
-/// screen showed.
+/// One owner change to setup, as the owner mutations carry it: start setup with the
+/// ticked entries, switch or remove an installed entry at the pack version the screen
+/// showed, or install one missing dependency alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SetupAction {
     Run { pack: Vec<String> },
     Set { id: String, on: bool, version: u64 },
     Remove { id: String, version: u64 },
+    Install { name: Dependency },
+    FixPermissions {
+        name: Dependency,
+        tree: String,
+        recursive: bool,
+    },
+    SetRefusedTool { choice: RefusedTool },
 }
 
 const PACK_ID_BYTES_MAX: usize = 64;
@@ -675,6 +880,9 @@ impl SetupAction {
                         .all(|(index, id)| !pack[..index].contains(id))
             }
             Self::Set { id, .. } | Self::Remove { id, .. } => valid_pack_id(id),
+            Self::Install { .. } | Self::FixPermissions { .. } | Self::SetRefusedTool { .. } => {
+                true
+            }
         };
         if !valid {
             return Err(InstallError("pack_unknown"));
@@ -877,5 +1085,104 @@ mod tests {
                 "{target}"
             );
         }
+    }
+
+    #[test]
+    fn node_is_a_setup_row_the_owner_installs_alone_from_the_official_archive() {
+        assert_eq!(Dependency::ALL.last(), Some(&Dependency::Node));
+        assert_eq!(Dependency::Node.program(), "node");
+        assert_eq!(Dependency::Node.label(), "Node.js");
+        assert_eq!(
+            serde_json::to_value(Dependency::Node).unwrap(),
+            serde_json::json!("node")
+        );
+        let unix = [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+        ];
+        for target in unix {
+            let pinned = node::pin(target).unwrap();
+            assert_eq!(
+                pin_for(target, Dependency::Node),
+                Some(Pin::Archive {
+                    version: Version::parse(node::NODE_VERSION).unwrap(),
+                    url: pinned.url,
+                    sha256: pinned.sha256,
+                    top: pinned.top,
+                }),
+                "{target}"
+            );
+        }
+        for target in WINGET_TARGETS.into_iter().chain(["unknown"]) {
+            assert_eq!(pin_for(target, Dependency::Node), None, "{target}");
+        }
+        let install = crate::engine::owner::OwnerMutation::InstallDependency {
+            name: Dependency::Node,
+        };
+        assert_eq!(
+            serde_json::to_value(&install).unwrap(),
+            serde_json::json!({"kind": "InstallDependency", "name": "node"})
+        );
+        let action = SetupAction::Install {
+            name: Dependency::Node,
+        };
+        assert!(matches!(
+            install.command().unwrap(),
+            crate::protocol::Command::OwnerSetup { action: mapped } if mapped == action
+        ));
+        assert_eq!(action.validate(), Ok(()));
+        assert_eq!(
+            serde_json::to_value(&action).unwrap(),
+            serde_json::json!({"kind": "install", "name": "node"})
+        );
+    }
+
+    /// DEC-162: the permission fix request names the dependency and the target the row
+    /// showed, and the setting names the owner's choice, each reaching the engine as its
+    /// setup action.
+    #[test]
+    fn the_permission_fix_and_refused_tool_requests_have_one_wire_shape() {
+        let fix = crate::engine::owner::OwnerMutation::FixToolPermissions {
+            name: Dependency::Graphify,
+            tree: "/h/t".into(),
+            recursive: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&fix).unwrap(),
+            serde_json::json!({"kind": "FixToolPermissions", "name": "graphify", "tree": "/h/t", "recursive": true})
+        );
+        assert!(
+            serde_json::from_value::<crate::engine::owner::OwnerMutation>(serde_json::json!(
+                {"kind": "FixToolPermissions", "name": "graphify", "tree": "/h/t"}
+            ))
+            .is_err(),
+            "a fix request without the scope the owner confirmed is refused"
+        );
+        let action = SetupAction::FixPermissions {
+            name: Dependency::Graphify,
+            tree: "/h/t".into(),
+            recursive: true,
+        };
+        assert!(matches!(
+            fix.command().unwrap(),
+            crate::protocol::Command::OwnerSetup { action: mapped } if mapped == action
+        ));
+        let choice = crate::engine::owner::OwnerMutation::SetRefusedTool {
+            choice: RefusedTool::CommandOnly,
+        };
+        assert_eq!(
+            serde_json::to_value(&choice).unwrap(),
+            serde_json::json!({"kind": "SetRefusedTool", "choice": "command_only"})
+        );
+        assert!(matches!(
+            choice.command().unwrap(),
+            crate::protocol::Command::OwnerSetup {
+                action: SetupAction::SetRefusedTool {
+                    choice: RefusedTool::CommandOnly
+                }
+            }
+        ));
     }
 }

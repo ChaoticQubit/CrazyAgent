@@ -17,6 +17,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const RECORD_BYTES_MAX: usize = 4096;
+
+/// The most server keepers a native lead's record names: its own server's and its
+/// teammates' (DEC-158).
+pub const KEEPERS_MAX: usize = 2;
+
+/// The longest process start a keeper pin keeps, as `ps` shows it (DEC-158).
+pub const KEEPER_STARTED_MAX: usize = 64;
 const SETTLE_WAIT: Duration = Duration::from_secs(10);
 const REPLAY_READS_MAX: u64 = 4096;
 const POLL: Duration = Duration::from_millis(100);
@@ -37,9 +44,12 @@ pub enum RecordSource {
 /// project access level the agent started at, where its launch wrote the project context
 /// files that hold MCP secrets, the toolchains its sandbox granted, the loopback port of the
 /// model proxy its profile and variables name (S4b), the project network it started
-/// under (CS-2) and the owner's narrow grants its profile holds (F08). A record from an
-/// engine that did not keep the level, the files, the toolchains, the port, the network or
-/// the grants has none; no grants means none were held.
+/// under (CS-2) and the owner's narrow grants its profile holds (F08). For DEC-158 it also
+/// keeps whether the pane's keeper was given the engine's freeze record, when the pane was
+/// last frozen, how long it was frozen before, and for a native lead the keepers of its
+/// servers. A record from an engine that did not keep the level, the files, the
+/// toolchains, the port, the network, the grants or the freeze facts has none; no grants
+/// means none were held.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -65,6 +75,25 @@ pub struct PaneRecord {
     pub lineage: Option<LineageToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grants: Option<Vec<crate::sandbox::policy::AccessGrant>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeze: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_for_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepers: Option<Vec<KeeperPin>>,
+}
+
+/// One server keeper of a native lead that a quitting engine froze (DEC-158): its process
+/// id, its start as `ps` shows it, so a later engine signals that keeper and never a
+/// process that took its id, and whether it keeps the teammates' server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeeperPin {
+    pub pid: u32,
+    pub started: String,
+    pub mates: bool,
 }
 
 impl PaneRecord {
@@ -102,6 +131,10 @@ impl PaneRecord {
             network: None,
             lineage: None,
             grants: None,
+            freeze: None,
+            frozen_ms: None,
+            frozen_for_ms: None,
+            keepers: None,
         })
     }
 
@@ -149,6 +182,18 @@ impl PaneRecord {
                     .enumerate()
                     .all(|(at, toolchain)| !toolchains[..at].contains(toolchain))
         });
+        let keepers = record.keepers.as_ref().is_none_or(|keepers| {
+            keepers.len() <= KEEPERS_MAX
+                && keepers.iter().all(|keeper| {
+                    keeper.pid > 1
+                        && !keeper.started.is_empty()
+                        && keeper.started.len() <= KEEPER_STARTED_MAX
+                        && keeper
+                            .started
+                            .bytes()
+                            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+                })
+        });
         (path.is_absolute()
             && record.cwd.is_absolute()
             && record.pid > 1
@@ -157,6 +202,7 @@ impl PaneRecord {
             && context
             && toolchains
             && grants
+            && keepers
             && record.proxy != Some(0))
         .then_some(record)
     }

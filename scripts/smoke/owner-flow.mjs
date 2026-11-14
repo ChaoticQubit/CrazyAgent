@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { constants, tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 
@@ -93,6 +93,30 @@ function realProfile() {
   if (!root || !project) return { problem: "real_profile_incomplete: set CRAZYAGENT_MANAGED_RUNTIME and CRAZYAGENT_MANAGED_CLAUDE_PROJECT" };
   if (!isAbsolute(root) || !existsSync(join(root, "engine.db"))) return { problem: "real_profile_runtime_without_engine_db" };
   return { socket: join(root, "engine.sock"), database: join(root, "engine.db"), project, bridge: null, turnMs: REAL_TURN_MS };
+}
+
+/** Checks the folder the engine made for a team agent as its project's access level wants
+ * (DEC-102): Sandboxed, a linked worktree the project's git lists; Own branch and Full, an own
+ * clone with its own .git folder, on the branch the engine stored for it, reading the project's
+ * objects through its one alternates line and holding a commit of the project.
+ * Input: the repository, the folder, the access level and the engine database. Output: null, or what differs. */
+function agentFolderProblem(repo, folder, access, database) {
+  const link = join(folder, ".git");
+  const want = access === "sandboxed" ? "linked worktree" : "own clone";
+  const found = !existsSync(link) ? "nothing" : lstatSync(link).isDirectory() ? "own clone" : lstatSync(link).isFile() ? "linked worktree" : "a link";
+  if (found !== want) return `${access} access wants a ${want}, found ${found}`;
+  const real = realpathSync(folder);
+  if (want === "linked worktree") return git(repo, "worktree", "list", "--porcelain").split("\n").includes(`worktree ${real}`) ? null : "the linked worktree is not in git worktree list";
+  if (git(folder, "rev-parse", "--show-toplevel").trim() !== real) return "the clone is not a repository of its own";
+  const stored = engineRows(database, "SELECT branch FROM landing_agent_branches WHERE worktree=?1", real).map((row) => row.branch)[0];
+  const branch = stored ?? `agent/${basename(real)}`;
+  const head = git(folder, "symbolic-ref", "HEAD").trim();
+  if (head !== `refs/heads/${branch}`) return `the clone is on ${head}, not its branch ${branch}`;
+  const objects = join(realpathSync(repo), ".git", "objects");
+  const alternates = readFileSync(join(link, "objects", "info", "alternates"), "utf8").split("\n").filter(Boolean);
+  if (alternates.length !== 1 || alternates[0] !== objects) return `the clone reads objects from ${alternates.join(", ") || "nothing"}, not the project's ${objects}`;
+  const commit = git(folder, "rev-parse", "HEAD").trim();
+  return git(repo, "cat-file", "-t", commit).trim() === "commit" ? null : `the clone's commit ${commit} is not a commit of the project`;
 }
 
 /** Runs git in a folder and stops the run when it fails.
@@ -801,9 +825,10 @@ async function main() {
       team.agents.push(agent.id);
       if (!agent.worktree) throw new Refused("team_agent_without_worktree", launched(agent, task));
       const folder = join(repo, agent.worktree);
-      const listed = existsSync(folder) && git(repo, "worktree", "list", "--porcelain").split("\n").some((line) => line === `worktree ${realpathSync(folder)}`);
-      if (!listed) throw new Refused("team_worktree_not_added", agent.worktree);
-      return `worktree ${agent.worktree}; launch ${launched(agent, task)}`;
+      const access = engineRows(database, "SELECT body FROM project_agent_policy WHERE project=?1", needs(state.project, "1")).map((row) => JSON.parse(row.body).access)[0] ?? "sandboxed";
+      const problem = agentFolderProblem(repo, folder, access, database);
+      if (problem) throw new Refused("team_worktree_not_added", `${agent.worktree}: ${problem}`);
+      return `${access === "sandboxed" ? "linked worktree" : "own clone"} ${agent.worktree}; launch ${launched(agent, task)}`;
     });
     await step("6c", "the agent shows in the team status and in the agents view", async () => {
       const id = needs(team.agents[0], "6b");

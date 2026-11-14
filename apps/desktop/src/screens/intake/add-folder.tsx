@@ -1,9 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { nextGeneration, pickFolder } from "../../api";
-import {
-  ADD_WARNINGS, addExistingFolder, cancelIcloudDownload, downloadFromIcloud, intakeCopy, loadFolderSize, loadIcloudProgress, loadProjectsHome,
-} from "../../api-intake";
-import { receiptState } from "../../api-projects";
+import { useRef, useState } from "react";
+import { pickFolder } from "../../api";
+import { ADD_WARNINGS, loadFolderSize, loadIntakeJob, loadProjectsHome, startIntake } from "../../api-intake";
 import type { AddFolderMode, AddOverride, FolderSize, IcloudProgress, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, Notice, NotReady, PageHeader, Segmented, Skeleton, formatRoute, navigate } from "../../ui";
@@ -11,8 +8,8 @@ import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
 import {
-  ICLOUD_PROGRESS_MS, addWay, anywayIssues, anywayOverrides, asksAgain, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
-  icloudOutcome, icloudPlaceholders, icloudProgressLine, icloudRun, joinPath, pickedFolderProblem, sizeLine, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayWarning,
+  addWay, anywayIssues, anywayOverrides, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
+  icloudPlaceholders, icloudProgressLine, joinPath, pickedFolderProblem, sizeLine, startReached, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
 } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
@@ -84,7 +81,7 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
       {problem && <p className="pj-error" role="alert">{problem}</p>}
       <span className="pj-row">
         <Button variant="primary" icon={way === "here" ? "list-checks" : way === "move" ? "folder-input" : "copy"} pending={busy}
-          pendingLabel={way === "move" ? "Moving..." : "Copying..."} onClick={onAdd}>{ADD_LABELS[way]}</Button>
+          pendingLabel="Starting..." onClick={onAdd}>{ADD_LABELS[way]}</Button>
         <a className="btn quiet" href={formatRoute({ name: "home" })}>Cancel</a>
       </span>
     </>}
@@ -106,21 +103,23 @@ function AddWarnings({ blocks }: { blocks: AnywayWarning[] }) {
 /** The question before a Move or Copy of a folder with issues: what each issue means, data loss
  * first, then "Move anyway?" or "Copy anyway?". It starts on Use where it is; Move anyway or Copy
  * anyway is the danger button; closing it changes nothing. Inputs: whether it is open, the way,
- * the folder name, its read, the engine refusal it follows, if any, a busy flag, the two answers
- * and the close handler. Output: the dialog, or nothing. */
-export function AnywayDialog({ open, way, name, size, refused, busy, onUseHere, onAnyway, onCancel }: {
+ * the folder name, its read, the engine refusal it follows, if any, the issues when the caller
+ * already knows them (Home's answer to a job), a busy flag, the two answers and the close
+ * handler. Output: the dialog, or nothing. */
+export function AnywayDialog({ open, way, name, size, refused, issues, busy, onUseHere, onAnyway, onCancel }: {
   open: boolean;
   way: AddFolderMode;
   name: string;
   size: Loaded<FolderSize> | null;
   refused: string | null;
+  issues?: AnywayIssue[];
   busy: boolean;
   onUseHere: () => void;
   onAnyway: () => void;
   onCancel?: () => void;
 }) {
   const verb = way === "move" ? "Move" : "Copy";
-  const blocks = anywayWarnings(way, anywayIssues(way, size, refused), size);
+  const blocks = anywayWarnings(way, issues ?? anywayIssues(way, size, refused), size);
   return <Dialog open={open} title={`${verb} ${name} anyway?`} onClose={onCancel ?? onUseHere} busy={busy}
     footer={<><Button disabled={busy} onClick={onUseHere} data-autofocus>Use where it is</Button>
       <Button variant="danger" pending={busy} onClick={onAnyway}>{`${verb} anyway`}</Button></>}>
@@ -189,9 +188,10 @@ export function ICloudDialog({ open, name, source, placeholders, way, downloadin
  * default it is set up where it is on a chosen pool; Move and Copy are offered once the read is
  * done. A Move or Copy with issues asks "Move anyway?" first: yes sends an override for exactly
  * those issues, Use where it is opens the setup in place. A Move with none asks to confirm with
- * the target shown, and a moved or copied folder shows on Home as found. A folder with files only
- * in iCloud asks before all of that whether to download them and then move or copy, shows the
- * download's progress with a stop, and goes on with the chosen way once every file is here. */
+ * the target shown. A folder with files only in iCloud asks before all of that whether to
+ * download them and then move or copy. The move or copy then runs as the engine's intake job,
+ * apart from this page: Add folder goes Home at once, where the job shows its progress, and
+ * leaving or quitting never stops it. */
 export function AddFolder() {
   const session = useAppSession();
   const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");
@@ -202,16 +202,9 @@ export function AddFolder() {
   const [settingUp, setSettingUp] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [asking, setAsking] = useState(false);
-  const [refused, setRefused] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
-  const [icloud, setIcloud] = useState<{ placeholders: number | null } | null>(null);
-  const [downloading, setDownloading] = useState(false);
-  const [progress, setProgress] = useState<IcloudProgress | null>(null);
-  const [stopping, setStopping] = useState(false);
-  const run = useRef<ReturnType<typeof icloudRun> | null>(null);
-  const downloaded = useRef<string | null>(null);
-  useEffect(() => () => run.current?.leave(), []);
+  const [icloud, setIcloud] = useState<{ placeholders: number } | null>(null);
   const root = home.kind === "ok" ? home.value.path : null;
   const way = addWay(mode, size);
 
@@ -219,7 +212,6 @@ export function AddFolder() {
     setProblem("");
     setConfirming(false);
     setAsking(false);
-    setRefused(null);
     setIcloud(null);
     const result = await pickFolder("project");
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "The folder chooser isn't in this build." : result.message); return; }
@@ -239,20 +231,18 @@ export function AddFolder() {
     if (!source || busy || chosen === "here") return;
     setBusy(true);
     setProblem("");
-    const result = await addExistingFolder(source, chosen, overrides, nextGeneration());
+    const before = await loadIntakeJob();
+    const result = await startIntake(source, chosen, overrides);
+    const running = result.kind === "error" ? await loadIntakeJob() : null;
     setBusy(false);
     setConfirming(false);
     setAsking(false);
-    setRefused(null);
     if (result.kind === "not_ready") { setProblem("Adding a folder isn't in this build."); return; }
-    const state = result.kind === "ok" ? receiptState(result.value) : null;
-    const code = result.kind === "error" ? result.code : state?.kind === "rejected" ? state.code : null;
-    if (code !== null && asksAgain(code, overrides)) { setRefused(code); setAsking(true); return; }
-    if (code === "home_icloud_not_downloaded" && downloaded.current !== source) { setIcloud({ placeholders: null }); return; }
-    if (result.kind === "error") { setProblem(intakeCopy(result)); return; }
-    if (state?.kind === "rejected") { setProblem(intakeCopy(state)); return; }
-    if (state?.kind === "unconfirmed") { setProblem("We couldn't confirm the folder was added. Check Home before trying again."); return; }
-    session.showToast(`${folderName(source)} is in your projects folder. Set it up from Home.`);
+    const same = running?.kind === "ok" ? running.value : null;
+    const attached = startReached(source, same, before);
+    if (result.kind === "error" && !attached) { setProblem(result.message); return; }
+    session.refreshIntake(result.kind === "ok" ? result.value : undefined);
+    session.showToast(`Adding ${folderName(source)}. Follow it on Home; you can keep working.`, { name: "home" });
     navigate({ name: "home" });
   };
 
@@ -265,46 +255,23 @@ export function AddFolder() {
   const start = () => {
     const placeholders = icloudPlaceholders(size);
     if (way === "here") setSettingUp(true);
-    else if (placeholders > 0 && downloaded.current !== source) setIcloud({ placeholders });
+    else if (placeholders > 0) setIcloud({ placeholders });
     else proceed(way);
   };
 
-  const download = async (chosen: AddFolderMode) => {
-    if (!source || downloading) return;
+  const download = (chosen: AddFolderMode) => {
     setMode(chosen);
-    setDownloading(true);
-    setProgress(null);
-    setProblem("");
-    const watching = icloudRun(
-      () => void cancelIcloudDownload(),
-      () => void loadIcloudProgress().then((read) => { if (read.kind === "ok" && read.value) setProgress(read.value); }),
-      ICLOUD_PROGRESS_MS,
-    );
-    run.current = watching;
-    const result = await downloadFromIcloud(source);
-    const outcome = icloudOutcome(watching.end(), result);
-    run.current = null;
-    if (outcome.next === "none") return;
-    setDownloading(false);
-    setStopping(false);
     setIcloud(null);
-    if (outcome.next === "add") { downloaded.current = source; proceed(chosen); return; }
-    setProblem(outcome.text);
-  };
-
-  const stop = () => {
-    setStopping(true);
-    run.current?.stop();
+    proceed(chosen);
   };
 
   const anyway = () => {
     if (way === "here") return;
-    void add(anywayOverrides(way, anywayIssues(way, size, refused), size));
+    void add(anywayOverrides(way, anywayIssues(way, size, null), size));
   };
 
   const useHere = () => {
     setAsking(false);
-    setRefused(null);
     setMode("here");
     setSettingUp(true);
   };
@@ -318,10 +285,10 @@ export function AddFolder() {
     <MoveConfirmDialog open={confirming} way={way} name={name} source={source} root={root}
       sameVolume={size?.kind === "ok" ? size.value.same_volume ?? null : null} busy={busy}
       onCancel={() => setConfirming(false)} onConfirm={() => void add([])} />
-    {way !== "here" && <AnywayDialog open={asking} way={way} name={name} size={size} refused={refused} busy={busy}
-      onUseHere={useHere} onAnyway={anyway} onCancel={() => { setAsking(false); setRefused(null); }} />}
+    {way !== "here" && <AnywayDialog open={asking} way={way} name={name} size={size} refused={null} busy={busy}
+      onUseHere={useHere} onAnyway={anyway} onCancel={() => setAsking(false)} />}
     {way !== "here" && source && icloud && <ICloudDialog open name={name} source={source} placeholders={icloud.placeholders} way={way}
-      downloading={downloading} progress={progress} stopping={stopping} onDownload={(chosen) => void download(chosen)} onStop={stop}
+      downloading={false} progress={null} stopping={false} onDownload={download} onStop={() => setIcloud(null)}
       onCancel={() => setIcloud(null)} />}
   </>;
 }

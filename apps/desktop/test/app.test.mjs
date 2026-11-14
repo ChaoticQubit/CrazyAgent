@@ -16,7 +16,7 @@ function session(patch = {}) {
   const forbidden = () => { throw new Error("static rendering must not call the engine"); };
   return {
     engine: "running", unconfirmed: false, profile: { kind: "ok", value: profile }, projects: { kind: "ok", value: [] },
-    toast: "", revision: 1, retry: forbidden, checkUnconfirmed: forbidden, refreshProfile: forbidden, refreshProjects: forbidden,
+    toast: "", revision: 1, intake: null, found: { kind: "loading" }, retry: forbidden, checkUnconfirmed: forbidden, refreshProfile: forbidden, refreshProjects: forbidden,
     showToast: forbidden, noteResult: (result) => result, ...patch,
   };
 }
@@ -279,6 +279,24 @@ test("Get set up keeps Install tools until tmux, uv and graphify are found; the 
   const failedRead = item({ kind: "error", code: "setup_owner_unavailable", message: "CrazyAgent's engine isn't running." });
   assert.equal(failedRead.done, false);
   assert.equal(failedRead.body, "Couldn't check tmux, uv and graphify. Open setup to try again.");
+});
+
+test("Install tools counts a tmux bundled with CrazyAgent as installed, so a 2.4.1 Mac never asks to install tmux (DEC-157)", () => {
+  const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
+  const item = (tools) => setupSteps(ok([account({})]), ok([pool]), ok([]), tools).items.find((entry) => entry.id === "tools");
+  const bundled = { state: "bundled", version: "3.8" };
+  assert.equal(item(toolsRead(bundled, found, found)).done, true);
+  assert.equal(item(toolsRead(bundled, found, found)).body, "tmux, uv and graphify are installed.");
+  assert.equal(item(toolsRead(bundled, found, { state: "missing" })).body,
+    "graphify isn't installed. Live terminals and the team graph need tmux; setting up a project needs graphify.");
+});
+
+test("Install tools counts a system tmux used in place of the bundled one as installed (leader 20:08)", () => {
+  const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
+  const item = (tools) => setupSteps(ok([account({})]), ok([pool]), ok([]), tools).items.find((entry) => entry.id === "tools");
+  const system = { state: "system", version: "3.5a", note: "Using the system tmux, the bundled one is missing; reinstall CrazyAgent." };
+  assert.equal(item(toolsRead(system, found, found)).done, true);
+  assert.equal(item(toolsRead(system, found, found)).body, "tmux, uv and graphify are installed.");
 });
 
 test("Home keeps the Get set up panel with Set up tools after a skipped tools step", () => {

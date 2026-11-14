@@ -15,7 +15,7 @@ let root = null;
 const overview = () => ({
   readme: null,
   tabs: TAB_IDS.map((tab) => ({ tab, text: tab === "features" ? "- Search papers\n- Save notes\n" : null, version: `v-${tab}`, edited: false, proposal: null, proposal_version: "", blocked: null })),
-  competitors: { kind: "missing" }, running: false, stale: false, checked_ms: NOW - 3 * 60_000, failure: null, refresh: "after_landing", apply: "always_ask", needs_home: false,
+  competitors: { kind: "missing" }, running: false, stale: false, checked_ms: NOW - 3 * 60_000, failure: null, waiting_for_account: false, refresh: "after_landing", apply: "always_ask", needs_home: false,
 });
 
 const stored = {

@@ -4,6 +4,8 @@ import { setLearningMark } from "../../api-learning";
 import { BrandMark, Button, Checkbox, ChipInput, Notice, Segmented, SettingLine, TextArea, TextField, navigate, type Route } from "../../ui";
 import { HomeFolderPicker } from "../intake/home-folder";
 import { ToolsSetup } from "../intake/setup-step";
+import { HARNESS_STEP } from "./harnesses";
+import { HarnessesStep } from "./harnesses-step";
 import "../intake/intake.css";
 
 export interface ProfileDraft {
@@ -118,7 +120,7 @@ export async function submitProfile(draft: ProfileDraft): Promise<{ errors: Prof
   return { failure: result.code === "uncertain" ? result.message : `Couldn't save your profile. ${result.message}`, notReady: false };
 }
 
-export type FirstRunStep = "profile" | "home" | "tools" | "accounts";
+export type FirstRunStep = "profile" | "home" | "tools" | "harnesses" | "accounts";
 
 export const FIRST_RUN_STEPS: { id: FirstRunStep; label: string; title: string; intro: string }[] = [
   { id: "profile", label: "Profile", title: "Tell CrazyAgent about you",
@@ -127,6 +129,7 @@ export const FIRST_RUN_STEPS: { id: FirstRunStep; label: string; title: string; 
     intro: "Every project lives in its own folder here. CrazyAgent keeps its own data in a private folder, not in this one." },
   { id: "tools", label: "Tools", title: "Set up tools",
     intro: "CrazyAgent installs tmux, uv and graphify when they're missing, at pinned versions it checks before running, plus the default pack of skills and plugins." },
+  { id: "harnesses", ...HARNESS_STEP },
   { id: "accounts", label: "Accounts", title: "Add an account",
     intro: "Agents need a model account to work. Sign in with ChatGPT or Claude, or add an API key or a local model." },
 ];
@@ -147,7 +150,7 @@ export function skipGuideNote(result: Result<void>): string | undefined {
   return `Couldn't skip the guide, so it stays on Home. ${result.message}`;
 }
 
-/** The first-run flow with no sidebar, in the order profile, projects folder, tools, accounts:
+/** The first-run flow with no sidebar, in the order profile, projects folder, tools, harnesses, accounts:
  * the brand, the step list and a short intro on the left, the step on the right. Finishing goes
  * to Home or to Add account, first skipping the guide when its box is unticked; the handlers get
  * the skip note when that did not save. Inputs: the saved handler, an optional skip handler, the
@@ -211,7 +214,10 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile", profile = nu
       <HomeFolderPicker onSaved={() => setStep("tools")} onContinue={() => setStep("tools")} />
     </section>}
     {step === "tools" && <section className="form" aria-label="Tools">
-      <ToolsSetup onContinue={() => setStep("accounts")} />
+      <ToolsSetup onContinue={() => setStep("harnesses")} />
+    </section>}
+    {step === "harnesses" && <section className="form" aria-label="Harnesses">
+      <HarnessesStep onContinue={() => setStep("accounts")} />
     </section>}
     {step === "accounts" && <section className="form" aria-label="Accounts">
       <div className="row">
