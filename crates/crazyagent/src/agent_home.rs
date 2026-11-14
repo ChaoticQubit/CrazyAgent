@@ -224,21 +224,32 @@ pub fn read_project(folder: &Path) -> Result<String, AgentHomeError> {
 }
 
 /// Saves the project instructions into `<folder>/.crazyagent/instructions.md`, a folder git
-/// ignores. A project made before `.crazyagent/` existed keeps its state in the project
-/// folder itself, so it is refused rather than given a new state folder.
-/// Input: the project folder and the text. Output: unit, `process_project_folder_missing`
-/// without a real `.crazyagent/` folder, or another plain code.
+/// ignores, through a temporary file in [`project_staging`], made when missing. A project
+/// made before `.crazyagent/` existed keeps its state in the project folder itself, so it
+/// is refused rather than given a new state folder. Input: the project folder and the text.
+/// Output: unit, `process_project_folder_missing`, `process_text_unsafe`, or another code.
 pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
     validate(text)?;
     let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
     real_folder(&state).map_err(|_| failure("process_project_folder_missing"))?;
-    write_staged(&project_staging(&state), &state, PROJECT_FILE, text.as_bytes())
+    let staging = project_staging(&state);
+    match fs::create_dir(&staging) {
+        Err(problem) if problem.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(failure("process_text_unwritable"));
+        }
+        _ => {}
+    }
+    real_folder(&staging).map_err(|_| failure("process_text_unsafe"))?;
+    write_staged(&staging, &state, PROJECT_FILE, text.as_bytes())
 }
 
 /// The folder a project instructions save writes its temporary file in before renaming it
-/// into the state folder `state`. Input: the state folder. Output: the staging folder.
+/// into the state folder `state`: its `context/`, on the same volume and kept read-only to
+/// agents and the IDE server by every platform boundary, so none can make, plant or rewrite
+/// the file before the rename publishes it as the owner's text (SA vid 11, rv-sec3 F1).
+/// Input: the state folder. Output: the staging folder.
 pub(crate) fn project_staging(state: &Path) -> PathBuf {
-    state.to_path_buf()
+    state.join(crate::project_setup::CONTEXT_DIRECTORY)
 }
 
 /// Builds what every agent of the project receives from the owner's two instruction texts
