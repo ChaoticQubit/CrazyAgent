@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { SPEND_DEFAULTS, setSpendSettings, usageRefusal, type AllLimited, type LimitedPool, type ResetsSource, type SpendConfirm, type SpendSettings, type SpendView, type UsageReport } from "../../api-usage";
-import { useHeld, type Loaded } from "../../state";
+import { sameJson, useHeld, type Loaded } from "../../state";
 import { LoadError, Notice, NotReady, Segmented, SettingLine, SettingSection } from "../../ui";
 import { andList } from "./account-drawer";
 import { SpendReset } from "./spend-reset";
@@ -111,14 +111,6 @@ export function latestSaves<T, R>(save: (value: T) => Promise<R>): (value: T) =>
 
 const saveSpend = latestSaves(setSpendSettings);
 
-/** Whether two spend settings read the same, a missing Claude free resets source as Don't read.
- * Inputs: the two settings, if read. Output: true when they do. */
-function sameSpend(a: SpendSettings | undefined, b: SpendSettings | undefined): boolean {
-  if (a === undefined || b === undefined) return a === b;
-  return a.confirm === b.confirm && a.all_limited === b.all_limited
-    && (a.resets_source ?? SPEND_DEFAULTS.resets_source) === (b.resets_source ?? SPEND_DEFAULTS.resets_source);
-}
-
 /** The three free resets settings on Pools: until the usage read holds the stored settings, a
  * loading line, its failure with Try again or a not ready line and no control, so nothing shows
  * a default as stored or saves one; then shows a pick at once and stores it, one save at a time,
@@ -129,7 +121,7 @@ export function SpendSettingsSection({ usage, onDone, onRetry }: { usage: Loaded
   const [refused, setRefused] = useState("");
   const read = usage.kind === "ok" ? usage.value : undefined;
   const stored = read?.spend?.settings;
-  const [shown, hold] = useHeld<SpendSettings | undefined>(stored, sameSpend, read);
+  const [shown, hold] = useHeld<SpendSettings | undefined>(stored, sameJson, read);
   const change = (next: SpendSettings) => {
     const settle = hold(next);
     void saveSpend(next).then((result) => {
