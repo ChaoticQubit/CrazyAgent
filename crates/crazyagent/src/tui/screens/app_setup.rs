@@ -196,11 +196,11 @@ pub(in crate::tui) fn provider_retry_words(choice: ProviderRetry) -> (&'static s
     match choice {
         ProviderRetry::StopAtOnce => (
             "Stop at once",
-            "A run fails with the provider's error instead of retrying.",
+            "Runs fail with the provider's error instead of retrying, where the harness allows it.",
         ),
         ProviderRetry::RetryBriefly => (
             "Retry briefly",
-            "Harnesses keep their own retries, but none waits for the network without end.",
+            "Harnesses keep their own retries, but none waits for the network without end, except the Codex master for now.",
         ),
         ProviderRetry::HarnessDefault => (
             "Harness default",
