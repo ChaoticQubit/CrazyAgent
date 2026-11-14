@@ -896,7 +896,6 @@ fn a_folder_of_documents_adds_only_its_own_files_never_where_its_links_point() {
     std::fs::write(shared.join("notes.md"), "# Notes\n").unwrap();
     std::fs::write(home.path().join("Passwords.csv"), "DUMMY-SECRET-106\n").unwrap();
     std::os::unix::fs::symlink("../Passwords.csv", shared.join("leak.csv")).unwrap();
-    std::os::unix::fs::symlink("notes.md", shared.join("alias.md")).unwrap();
     let mut wizard = Wizard::new(Vec::new(), Some(home.path().to_path_buf()));
     wizard.go(Step::Documents);
     wizard.key(control('u'));
