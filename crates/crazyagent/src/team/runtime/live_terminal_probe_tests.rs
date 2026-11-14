@@ -225,6 +225,28 @@ fn owner_switch_on(fixture: &mut Fixture) {
     tx.commit().unwrap();
 }
 
+/// Ticks the runtime until the project's master reported ready, so the start time a row
+/// moves back is the one the runtime keeps: the Ready report, which can land after the
+/// stand-in wrote its launch, sets that start time anew. Takes the fixture, the runtime and
+/// the project. Returns the master's id.
+fn ready_master(fixture: &Fixture, team: &mut TeamRuntime, project: &ProjectId) -> i64 {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(id) = team.master(project)
+            && team.workers[&id].ready
+        {
+            return id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the master never reported ready: {:#?}",
+            fixture.status()
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// r2 F1: the owner's Try again while the live master's switch is already on, as on an
 /// overdue terminal, is a retry from the desktop and the TUI alike (both send LiveMaster
 /// on, DEC-141): the tool probes look again and a master that has not read keys a minute
@@ -256,7 +278,7 @@ fn an_overdue_try_again_looks_for_tools_again_and_restarts_the_master_once() {
         "a young master only gets the look"
     );
 
-    let id = team.master(&project).expect("the master runs");
+    let id = ready_master(&fixture, &mut team, &project);
     team.workers.get_mut(&id).unwrap().spawned = Instant::now()
         .checked_sub(Duration::from_secs(600))
         .unwrap();
@@ -291,7 +313,7 @@ fn an_owner_try_again_is_never_refused_by_the_start_limit() {
     owner_switch_on(&mut fixture);
     fixture.until(&mut team, "the master starts", |f| master_launches(f) == 1);
     for press in 1..=LIVE_STARTS_MAX {
-        let id = team.master(&project).expect("the master runs");
+        let id = ready_master(&fixture, &mut team, &project);
         team.workers.get_mut(&id).unwrap().spawned = Instant::now()
             .checked_sub(Duration::from_secs(600))
             .unwrap();
