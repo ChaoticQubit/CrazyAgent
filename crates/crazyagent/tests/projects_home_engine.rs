@@ -1450,7 +1450,11 @@ async fn an_intake_job_refuses_what_the_plan_sees_before_it_downloads() {
     fs::create_dir_all(home.join("taken")).unwrap();
     let taken = too_deep(&place, "taken");
     let linked = too_deep(&place, "linked");
-    fs::write(linked.join(".git"), "gitdir: /nowhere/.git/worktrees/linked\n").unwrap();
+    fs::write(
+        linked.join(".git"),
+        "gitdir: /nowhere/.git/worktrees/linked\n",
+    )
+    .unwrap();
     let engine = Engine::start().await;
     let owner = homed(&engine, &home).await;
     let owner = &owner.controller;
