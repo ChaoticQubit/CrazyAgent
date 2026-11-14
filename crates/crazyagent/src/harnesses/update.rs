@@ -24,7 +24,15 @@ use std::path::{Component, Path, PathBuf};
 
 pub const VERSION_BYTES_MAX: usize = 64;
 pub const ARGS_MAX: usize = 5;
+/// The Homebrew prefixes the engine trusts for install, check and update on this platform,
+/// as the tool resolver looks in them: Apple silicon's and Intel's everywhere, Linuxbrew's
+/// only on Linux, so a Mac never reads or runs a brew from the home automount.
+#[cfg(target_os = "linux")]
 pub const BREW_PREFIXES: [&str; 3] = ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
+/// The Homebrew prefixes the engine trusts for install, check and update on this platform,
+/// as the tool resolver looks in them: Apple silicon's and Intel's; Linuxbrew's is Linux only.
+#[cfg(not(target_os = "linux"))]
+pub const BREW_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
 pub const POINTER_BYTES_MAX: u64 = 256 * 1024;
 pub const OUTPUT_BYTES_MAX: usize = 64 * 1024;
 
