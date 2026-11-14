@@ -1503,13 +1503,15 @@ async fn start_check(
     Ok(Reply::Server { server: *view })
 }
 
-/// Checks an approved command server inside the boundary agents run it in: its own
-/// project, home and temp folders under `mcp-checks/<id>` in the engine folder, reads of
-/// system paths and the command's folder only, open network without binding the owner's
-/// ports, and only its own secrets. Inputs: the engine folder, server id, command,
-/// arguments, secret values and the configured local model ports to keep. Output: the
-/// tool names, or a plain rejection code, or for a boundary that cannot hold the check
-/// the boundary's own reason ([`crate::plugins::check_refused`]).
+/// Checks an approved command server inside the boundary agents run it in, running what an
+/// agent launch runs ([`crate::context_mode::for_launch`]: the default pack's context-mode
+/// from the engine's shared install): its own project, home and temp folders under
+/// `mcp-checks/<id>` in the engine folder, reads of system paths, the command's folder and
+/// that shared install only, open network without binding the owner's ports, and only its
+/// own secrets. Inputs: the engine folder, server id, approved command, arguments, secret
+/// values and the configured local model ports to keep. Output: the tool names, or a plain
+/// rejection code, or for a boundary that cannot hold the check the boundary's own reason
+/// ([`crate::plugins::check_refused`]).
 #[cfg(unix)]
 fn boundary_check(
     root: &Path,
@@ -1524,6 +1526,17 @@ fn boundary_check(
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     assert!(valid_id(id));
+    let launched = crate::context_mode::for_launch(
+        root,
+        ServerSpec::Stdio {
+            command: command.to_owned(),
+            args: args.to_vec(),
+        },
+    );
+    let ServerSpec::Stdio { command, args } = &launched else {
+        return Err("server_check_command_only".into());
+    };
+    let install = crate::context_mode::shared_install(&launched);
     let program = Path::new(command);
     match std::fs::metadata(program) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1573,6 +1586,10 @@ fn boundary_check(
         .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
+        .and_then(|sandbox| match install {
+            Some(install) => sandbox.allow_read(install),
+            None => Ok(sandbox),
+        })
         .and_then(|sandbox| InstalledSandbox::install(sandbox, &check_profile(&checks, id)))
         .map_err(boundary)?;
     let mut server = std::process::Command::new(program);
