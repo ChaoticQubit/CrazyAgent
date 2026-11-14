@@ -1,4 +1,4 @@
-use super::new_project_input::char_cells;
+use super::new_project_input::cells;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project_team::{Help, Notice, TABS, window};
 use super::settings_plugins::{
@@ -1164,22 +1164,30 @@ fn state(enabled: bool, on_here: Option<bool>, status: Option<ServerStatus>, loo
     }
 }
 
-/// Splits text into lines of at most a width without dropping or merging any
-/// character, so a command shown for approval reads exactly as it will run.
-/// Takes the text and the width in cells. Returns at least one line.
+/// Splits text into lines of at most a width without dropping or merging any character, so
+/// a command shown for approval reads exactly as it will run. Lines are cut between the
+/// graphemes ratatui draws, each measured as ratatui measures it, so an emoji pair or a
+/// joined sequence never pushes a line's tail past the edge (RV-DS241-113 r1 F1). Takes
+/// the text and the width in cells. Returns at least one line.
 pub(in crate::tui) fn exact_lines(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = vec![String::new()];
     let mut used = 0;
-    for character in text.chars() {
-        let size = char_cells(character);
-        if used + size > width && used > 0 {
-            lines.push(String::new());
-            used = 0;
+    for (at, piece) in text.split('\n').enumerate() {
+        let span = ratatui::text::Span::raw(piece);
+        let graphemes = span
+            .styled_graphemes(Style::default())
+            .map(|grapheme| grapheme.symbol);
+        for grapheme in (at > 0).then_some("\n").into_iter().chain(graphemes) {
+            let size = cells(grapheme);
+            if used + size > width && used > 0 {
+                lines.push(String::new());
+                used = 0;
+            }
+            let last = lines.len() - 1;
+            lines[last].push_str(grapheme);
+            used += size;
         }
-        let last = lines.len() - 1;
-        lines[last].push(character);
-        used += size;
     }
     assert_eq!(lines.concat(), text);
     lines
