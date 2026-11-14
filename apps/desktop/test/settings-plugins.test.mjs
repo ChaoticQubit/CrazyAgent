@@ -353,7 +353,11 @@ test("hooks group per plugin and scope in engine order, counting each event once
   assert.deepEqual(groups[0].follows, ["caveman"]);
   assert.deepEqual(plugins.hookGroupSwitch(groups[0]), { checked: true, label: "On for every project", project: false });
   assert.deepEqual(plugins.hookGroupSwitch(groups[1]), { checked: false, label: "Partly on", project: false });
-  assert.deepEqual(plugins.hookGroupSwitch(groups[1], "app"), { checked: false, label: "Partly on", project: true });
+  assert.deepEqual(plugins.hookGroupSwitch(groups[1], "app"), { checked: true, label: "On in this project", project: true }, "a hook off in Settings is not the project's to switch");
+  const here = plugins.hookGroups(packHooks().map((one) => ({ ...one, on_here: one.event !== "SessionStart" })));
+  assert.deepEqual(plugins.hookGroupSwitch(here[1], "app"), { checked: false, label: "Partly on", project: true });
+  const settingsOff = plugins.hookGroups(packHooks().map((one) => ({ ...one, enabled: false, on_here: true })));
+  assert.deepEqual(plugins.hookGroupSwitch(settingsOff[0], "app"), { checked: false, label: "On in this project", project: true });
   const off = plugins.hookGroups(packHooks().map((one) => ({ ...one, enabled: false })));
   assert.deepEqual(plugins.hookGroupSwitch(off[0]), { checked: false, label: "On for every project", project: false });
 });

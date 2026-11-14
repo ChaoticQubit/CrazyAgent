@@ -478,13 +478,15 @@ export function hookGroupName(group: HookGroup): string {
   return `${group.plugin} - ${group.events} ${group.events === 1 ? "event" : "events"}`;
 }
 
-/** What a plugin's hooks switch shows: on when every hook is on, "Partly on" when only some
- * are. Inputs: the group and the project id, if any. Output: checked, label and whether
- * the project switch applies. */
+/** What a plugin's hooks switch shows: on when every hook it can switch is on, "Partly on"
+ * when only some are. In a project, hooks turned off for every project in Settings are not
+ * the project's to switch and are left out. Inputs: the group and the project id, if any.
+ * Output: checked, label and whether the project switch applies. */
 export function hookGroupSwitch(group: HookGroup, projectId?: string): { checked: boolean; label: string; project: boolean } {
-  const each = group.hooks.map((hook) => pluginSwitch(hook, projectId));
+  const first = pluginSwitch(group.hooks[0], projectId);
+  const each = group.hooks.map((hook) => pluginSwitch(hook, projectId)).filter((one, at) => !(one.project && !group.hooks[at].enabled));
   const on = each.filter((one) => one.checked).length;
-  return { checked: on === each.length, label: on > 0 && on < each.length ? "Partly on" : each[0].label, project: each[0].project };
+  return { checked: each.length > 0 && on === each.length, label: on > 0 && on < each.length ? "Partly on" : first.label, project: first.project };
 }
 
 /** The hooks a plugin row's switch changes: those not already in the new state, leaving
