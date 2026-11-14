@@ -1082,7 +1082,7 @@ fn turn_sandbox(
 /// the owner generation, without writing to it. Input: the generation's root. Output: the
 /// settings, or `master_sandbox_unavailable` when they cannot be read, so the turn fails
 /// closed rather than start under another option.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn stored_sandbox_settings(
     root: &Root,
 ) -> Result<crate::sandbox_settings::SandboxSettings, EngineError> {

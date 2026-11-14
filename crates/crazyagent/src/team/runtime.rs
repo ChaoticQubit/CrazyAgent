@@ -14195,7 +14195,7 @@ mod teammates;
 
 /// Who a test's agent is to a leftover hold: no project, so a hold it leaves ends its
 /// processes by the default setting and no owner view lists it. Output: the label.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn test_by() -> HoldBy {
     HoldBy {
         project: None,

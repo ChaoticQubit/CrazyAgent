@@ -160,7 +160,7 @@ impl Places {
     /// Replaces the temp folders the engine's places refuse, so a row can name a folder
     /// outside every temp folder while each folder it makes lies in the real one. Input: the
     /// temp folders. Output: the places.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_temps(mut self, temps: Vec<PathBuf>) -> Self {
         assert!(self.temp_refused);
         self.temps = temps;
@@ -355,7 +355,7 @@ impl Places {
     /// The same places with the app's folder set, as an engine started from that folder
     /// would hold it, for rows that build their own folders. Input: the app's folder.
     /// Output: the places.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn with_app_folder(self, app_folder: PathBuf) -> Self {
         assert!(usable(&app_folder));
         Self {
