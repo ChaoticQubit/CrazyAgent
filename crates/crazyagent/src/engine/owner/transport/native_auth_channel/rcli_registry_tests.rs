@@ -42,7 +42,7 @@ impl RegistryCase {
         .unwrap();
         Self {
             root,
-            tools: owner_folder(),
+            tools: crate::harnesses::finding::owner_folder("rreg-tools-"),
             service,
             _stop: stop,
         }
@@ -55,28 +55,6 @@ impl RegistryCase {
             authority: Arc::clone(&retained.authority),
         }
     }
-}
-
-/// A folder for the rows' harness files outside the engine's own temp folder, which agents
-/// with the owner's temp folder grant write: this user's cache folder on macOS, the temp
-/// folder elsewhere, where agents get no temp grant. Output: the folder, removed when dropped.
-fn owner_folder() -> tempfile::TempDir {
-    if !cfg!(target_os = "macos") {
-        return tempfile::tempdir().unwrap();
-    }
-    let cache = crate::spawn_gate::output(
-        std::process::Command::new("/usr/bin/getconf")
-            .arg("DARWIN_USER_CACHE_DIR")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null()),
-    )
-    .unwrap();
-    let cache = std::fs::canonicalize(String::from_utf8(cache.stdout).unwrap().trim()).unwrap();
-    tempfile::Builder::new()
-        .prefix("rreg-tools-")
-        .tempdir_in(cache)
-        .unwrap()
 }
 
 /// Runs one row against a real engine. The row's harness files go in their own folder,

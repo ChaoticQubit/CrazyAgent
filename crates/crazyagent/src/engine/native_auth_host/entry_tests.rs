@@ -266,10 +266,11 @@ async fn native_auth_registered_claude_follows_its_path_link_across_an_update() 
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut service = start_service(root.path()).await;
+    let installs = crate::harnesses::finding::owner_folder("ep-claude-");
     let executable = root.path().join("crazyagent-pin-only");
-    let old = root.path().join("cask/2.1.309/claude");
-    let new = root.path().join("cask/2.1.322/claude");
-    let link = root.path().join("claude");
+    let old = installs.path().join("cask/2.1.309/claude");
+    let new = installs.path().join("cask/2.1.322/claude");
+    let link = installs.path().join("claude");
     for path in [&executable, &old, &new] {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, path.as_os_str().as_encoded_bytes()).unwrap();

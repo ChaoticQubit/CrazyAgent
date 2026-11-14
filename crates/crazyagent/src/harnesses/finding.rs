@@ -472,3 +472,29 @@ pub fn looked(search: &Search, id: &str) -> Vec<String> {
     assert!(lines.len() <= LOOKED_MAX);
     lines
 }
+
+/// A folder for a row's harness files where an owner's install would be: outside every
+/// folder the agent space holds, the engine's own temp folder among them, and outside the
+/// shared temp folders other users can change; this user's cache folder on macOS, the temp
+/// folder elsewhere. Input: the folder name's prefix. Output: the folder, removed when dropped.
+#[cfg(all(test, unix))]
+pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
+    if !cfg!(target_os = "macos") {
+        return tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+    }
+    let cache = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/getconf")
+            .arg("DARWIN_USER_CACHE_DIR")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let cache = std::fs::canonicalize(String::from_utf8(cache.stdout).unwrap().trim()).unwrap();
+    let folder = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(cache)
+        .unwrap();
+    assert!(folder.path().is_absolute());
+    folder
+}
