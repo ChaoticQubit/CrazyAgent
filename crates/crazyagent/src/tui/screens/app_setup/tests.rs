@@ -2280,3 +2280,49 @@ fn at_80x24_with_every_tool_missing_the_approval_note_and_pack_rows_stay_on_scre
     );
     assert!(rows.last().unwrap().contains("Enter Install and continue"));
 }
+
+/// DS-99 r2 (rv-sec2 F1): below 80x24 the shell draws only "Window too small", so no key
+/// reaches Setup: Enter, Space, arrows, Tab, Esc, the global keys and a paste install,
+/// approve, untick or open nothing the owner cannot see. Back at 80x24 the same Setup shows,
+/// and Enter installs.
+#[test]
+fn below_80x24_no_key_reaches_setup_so_enter_installs_and_approves_nothing() {
+    for (width, height) in [(79, 24), (80, 23)] {
+        let mut shell = first_run(80, 24);
+        jobs(&mut shell);
+        let before = render(&mut shell, 80, 24);
+        find(&render(&mut shell, width, height), "Window too small");
+        for key in [
+            Key::Enter,
+            Key::Char(' '),
+            Key::Down,
+            Key::Up,
+            Key::Tab,
+            Key::BackTab,
+            Key::Esc,
+            Key::Char('?'),
+            Key::Char(']'),
+            Key::ShiftRight,
+            Key::Ctrl('k'),
+            Key::Paste("x\n".to_owned()),
+        ] {
+            shell.key(key);
+        }
+        assert!(
+            jobs(&mut shell).is_empty(),
+            "{width}x{height}: a hidden Setup acted on a key"
+        );
+        assert_eq!(shell.depth(), 1);
+        assert!(!shell.quitting());
+        assert_eq!(
+            render(&mut shell, 80, 24),
+            before,
+            "{width}x{height}: Setup changed while it could not be seen"
+        );
+        shell.key(Key::Enter);
+        assert!(matches!(
+            jobs(&mut shell).as_slice(),
+            [AppSetupJob::Run { .. }]
+        ));
+    }
+}

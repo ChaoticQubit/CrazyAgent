@@ -1297,6 +1297,34 @@ mod tests {
         assert_eq!(shell.depth(), 2, "sections replace each other");
     }
 
+    /// DS-99 r2 (rv-sec2 F1): below 80x24 the shell draws no quit question, so one open there
+    /// takes no arrow or Enter, and Ctrl+Q or Ctrl+C still quits: at once when nothing runs,
+    /// past the hidden question when agents do.
+    #[test]
+    fn below_80x24_only_ctrl_q_acts_and_a_hidden_quit_question_takes_no_enter() {
+        let mut shell = at(Place::Home, ctx());
+        shell.resize(79, 24);
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "nothing running, so no question");
+
+        let mut ctx = ctx();
+        ctx.store.projects = Load::Ready(vec![card("Tidepool", 1)]);
+        let mut shell = at(Place::Home, ctx);
+        shell.key(Key::Ctrl('q'));
+        assert!(matches!(shell.overlay, Some(Overlay::Quit(_))));
+        shell.resize(80, 23);
+        for key in [Key::Right, Key::Enter, Key::Esc, Key::Tab] {
+            shell.key(key);
+        }
+        assert!(!shell.quitting());
+        assert!(matches!(&shell.overlay, Some(Overlay::Quit(ask)) if !ask.quit_focused));
+        shell.key(Key::Ctrl('c'));
+        assert!(
+            shell.quitting(),
+            "a second Ctrl-C quits past the hidden question"
+        );
+    }
+
     #[test]
     fn quit_asks_only_when_agents_run_and_stay_is_the_default() {
         let mut shell = at(Place::Home, ctx());
