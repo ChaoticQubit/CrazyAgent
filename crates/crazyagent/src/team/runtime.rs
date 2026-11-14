@@ -6876,9 +6876,9 @@ impl TeamRuntime {
             let claimed = self
                 .connection
                 .execute(
-                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL, wait=NULL
+                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1
                      WHERE id=?1 AND status='queued'",
-                    params![task, agent, now_ms()],
+                    params![task, agent],
                 )
                 .map_err(error)?;
             assert!(claimed <= 1);
@@ -6901,7 +6901,7 @@ impl TeamRuntime {
             {
                 self.connection
                     .execute(
-                        "UPDATE team_tasks SET status='queued', agent=NULL, attempts=MAX(attempts-1,0), started_ms=NULL
+                        "UPDATE team_tasks SET status='queued', agent=NULL, attempts=MAX(attempts-1,0)
                          WHERE id=?1 AND status='running'",
                         [task],
                     )
@@ -6918,6 +6918,12 @@ impl TeamRuntime {
                 let _ = crate::instruction_files::delivered(edit, &home);
             }
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
+            self.connection
+                .execute(
+                    "UPDATE team_tasks SET started_ms=?2, error=NULL, wait=NULL WHERE id=?1",
+                    params![task, now_ms()],
+                )
+                .map_err(error)?;
             self.connection
                 .execute(
                     "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",
