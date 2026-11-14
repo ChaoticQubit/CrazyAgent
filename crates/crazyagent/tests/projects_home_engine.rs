@@ -8,7 +8,9 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::projects_home::job::{JobState, JobView, Phase};
-use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, FoundState, ProjectsHome};
+use crazyagent::projects_home::{
+    AddMode, AddOverride, COPY_BOUNDS, FoundProject, FoundState, ProjectsHome,
+};
 use crazyagent::protocol::{Cursor, PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -1403,6 +1405,88 @@ async fn an_add_is_refused_the_destination_a_running_add_planned() {
         fs::read_to_string(second.join("p1/f1.txt")).unwrap(),
         "1 1\n"
     );
+    engine.stop().await;
+}
+
+/// Makes a source folder `name` under `place` whose folders nest one level past the copy
+/// depth bound, so a download's listing of it refuses `home_copy_too_large` at once.
+/// Output: the source folder.
+fn too_deep(place: &Path, name: &str) -> PathBuf {
+    let source = place.join("sources").join(name);
+    let deepest = (0..=COPY_BOUNDS.depth).fold(source.clone(), |folder, _| folder.join("d"));
+    fs::create_dir_all(&deepest).unwrap();
+    assert!(deepest.components().count() > COPY_BOUNDS.depth);
+    source
+}
+
+/// Starts an intake job, reads it until it ends and dismisses it. Inputs: the owner, the
+/// job id, the folder and the mode. Output: how the job ended.
+async fn ended(owner: &OwnerController, job: &str, source: &Path, mode: AddMode) -> JobState {
+    let client = owner.owner_client().unwrap();
+    client
+        .intake_start(id(job), text(source), mode, Vec::new())
+        .await
+        .unwrap();
+    let end = job_until(owner, |view| {
+        view.id == id(job)
+            && matches!(
+                view.state,
+                JobState::Done
+                    | JobState::Failed { .. }
+                    | JobState::Cancelled { .. }
+                    | JobState::NeedsAnswer { .. }
+            )
+    })
+    .await;
+    assert!(client.intake_dismiss(id(job)).await.unwrap());
+    end.state
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_refuses_what_the_plan_sees_before_it_downloads() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    fs::create_dir_all(home.join("taken")).unwrap();
+    let taken = too_deep(&place, "taken");
+    let linked = too_deep(&place, "linked");
+    fs::write(linked.join(".git"), "gitdir: /nowhere/.git/worktrees/linked\n").unwrap();
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let owner = &owner.controller;
+    assert_eq!(
+        ended(owner, "taken", &taken, AddMode::Copy).await,
+        JobState::Failed {
+            code: "home_destination_exists".into(),
+            phase: Phase::Downloading,
+        },
+        "a name the home holds is refused before the download"
+    );
+    assert_eq!(
+        ended(owner, "linked-copy", &linked, AddMode::Copy).await,
+        JobState::NeedsAnswer {
+            code: "home_copy_linked_checkout".into(),
+        },
+        "a soft refusal seen without reading the folder is asked before the download"
+    );
+    assert_eq!(
+        ended(owner, "linked-move", &linked, AddMode::Move).await,
+        JobState::NeedsAnswer {
+            code: "home_copy_too_large".into(),
+        },
+        "git links are read inside the folder, so they wait for the download"
+    );
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let running: i64 = db
+        .query_row(
+            "SELECT count(*) FROM projects_home_add WHERE ended IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(running, 0, "a check before the download writes no add row");
+    assert!(fs::read_dir(home.join("taken")).unwrap().next().is_none());
     engine.stop().await;
 }
 
