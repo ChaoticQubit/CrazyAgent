@@ -6139,6 +6139,59 @@ mod tests {
         );
     }
 
+    /// DEC-170 addendum 6 (RV-DS241-26): a rate-limited end hands the attempt back, but the
+    /// third in a row ends the research job failed with the plain line, since its agent can
+    /// write the limit its harness reports. A run that ends another way starts the count
+    /// again.
+    #[test]
+    fn a_rate_limited_end_three_times_in_a_row_fails_the_research_job() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        register_project(&root.database, "alpha", &folder);
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let account = reference("codex-connection");
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let mut ends = Vec::new();
+        for _ in 0..3 {
+            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
+            assert_eq!(held.id, id);
+            ends.push(jobs.rate_limited(&held, &account).unwrap().0);
+        }
+        assert_eq!(
+            ends,
+            [
+                ResearchStatus::Queued,
+                ResearchStatus::Queued,
+                ResearchStatus::Failed
+            ]
+        );
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!(
+            job.error.as_deref(),
+            Some("The account kept hitting its rate limit; run this research again later")
+        );
+        assert_eq!(job.claimer, None);
+        assert!(jobs.claim("alpha", "runner-a", 1).unwrap().is_none());
+
+        let again = jobs
+            .enqueue("alpha", "competitor_research", "codex", false)
+            .unwrap();
+        let mut ends = Vec::new();
+        for step in 0..5 {
+            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
+            assert_eq!(held.id, again);
+            ends.push(if step == 2 {
+                jobs.fail(&held, "Agent stopped with an error", 10).unwrap()
+            } else {
+                jobs.rate_limited(&held, &account).unwrap().0
+            });
+        }
+        assert_eq!(ends, [ResearchStatus::Queued; 5]);
+    }
+
     #[test]
     fn the_research_prompt_asks_for_owner_questions_in_the_shared_shape() {
         let folder = tempfile::tempdir().unwrap();
