@@ -80,7 +80,7 @@ export function ProfileFields({ draft, onDraft, errors, rows = false }: { draft:
   const bio = <TextArea id="profile-bio" label="Short bio" labelOutside={rows} value={draft.bio} onValue={(value) => set({ bio: value })} rows={3} maxLength={BIO_BYTES_MAX} counterAt={BIO_BYTES_MAX - 100} countBytes
     helper="What you work on and what you care about." error={errors.bio} />;
   const stack = <ChipInput id="profile-stack" label="Preferred stack" labelOutside={rows} values={draft.stack} onValues={(value) => set({ stack: value })}
-    suggestions={STACK_SUGGESTIONS} max={STACK_MAX} maxLength={STACK_ITEM_BYTES_MAX} helper={errors.stack ?? "Agents use these unless a project says otherwise."} />;
+    suggestions={STACK_SUGGESTIONS} max={STACK_MAX} maxBytes={STACK_ITEM_BYTES_MAX} helper={errors.stack ?? "Agents use these unless a project says otherwise."} />;
   const replies = <Segmented label="Replies" value={draft.detail} onValue={(detail) => set({ detail })}
     options={[{ value: "terse", label: "Short" }, { value: "detailed", label: "Detailed" }]} />;
   const acting = <Segmented label="Before acting" value={draft.initiative} onValue={(initiative) => set({ initiative })}
