@@ -305,7 +305,7 @@ pub fn installed_with(method: &Method) -> String {
 
 /// How the last update or install of a harness ended, in the desktop's words.
 /// Inputs: the versions and the harness name. Output: the sentence, or None before any job.
-fn last_line(versions: &HarnessVersions, name: &str) -> Option<String> {
+pub(super) fn last_line(versions: &HarnessVersions, name: &str) -> Option<String> {
     let last = versions.last.as_ref()?;
     let unknown = "an unknown version";
     Some(match (last.ok, &last.from, last.code.as_deref()) {
@@ -353,7 +353,9 @@ fn install_state(versions: &HarnessVersions, name: &str) -> String {
     }
 }
 
-fn refusal(versions: &HarnessVersions) -> Option<String> {
+/// Why a harness has no Update, in the desktop's words. Input: the versions. Output: the
+/// sentence, or None when Update is offered or nothing refuses it.
+pub(super) fn refusal(versions: &HarnessVersions) -> Option<String> {
     if versions.method == Method::WithApp {
         return Some(update_copy("harness_update_with_app").to_owned());
     }
@@ -1202,6 +1204,13 @@ impl Harnesses {
                     {
                         lines.push(label("Guide", cut(&sanitize(guide), room, glyphs.ellipsis)));
                     }
+                }
+                if let Some(minimum) = versions.and_then(|versions| versions.sign_in_min.as_deref())
+                {
+                    lines.push(Line::raw(format!(
+                        "{}Sign-in needs {minimum} or newer.",
+                        " ".repeat(LABEL_WIDTH)
+                    )));
                 }
             }
             None => {
