@@ -1,8 +1,8 @@
 use super::buffer::buffer;
 use super::{AgentId, Host, HostError, PaneInfo, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX};
 use crate::harnesses::interactive::InteractiveCommand;
-use std::collections::VecDeque;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 /// How many ended terminals keep their last screen: two full projects of agents. Past it the
 /// screen kept longest ago is forgotten first.
@@ -85,16 +85,65 @@ fn finished_label() -> String {
     format!(" Finished at {} ", clock(now_ms(), local_offset()))
 }
 
+/// The agents with a spawn, kill or keep under way on a host. One agent's steps run one at a
+/// time; other agents' steps never wait on them.
+#[derive(Default)]
+struct Turns {
+    busy: Mutex<HashSet<AgentId>>,
+    freed: Condvar,
+}
+
+impl Turns {
+    /// Waits until no other step of the agent is under way and marks this one. Input: the
+    /// agent. Output: the turn, which ends when dropped.
+    fn take(&self, agent: &AgentId) -> Turn<'_> {
+        let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        while busy.contains(agent) {
+            busy = self
+                .freed
+                .wait(busy)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        assert!(busy.insert(agent.clone()));
+        Turn {
+            turns: self,
+            agent: agent.clone(),
+        }
+    }
+}
+
+/// One agent's step under way on a host; dropping it lets the agent's next step start.
+struct Turn<'a> {
+    turns: &'a Turns,
+    agent: AgentId,
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        let mut busy = self
+            .turns
+            .busy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let ended = busy.remove(&self.agent);
+        drop(busy);
+        self.turns.freed.notify_all();
+        assert!(ended);
+    }
+}
+
 /// A terminal host that keeps the last screen of each terminal it ends, so a viewer opening
 /// an agent between runs sees how its last run finished, labeled with the local time it
 /// ended, instead of a refusal; a new run of the agent forgets it. A kill keeps no newer
-/// screen over one already kept for the run, as before a keeper ends it. A kill and a spawn
-/// each hold the kept screens while they act, so a respawn never lands between a kill and
-/// the screen it keeps. Screens live only in the engine's memory: a terminal that exits on its
-/// own, or an engine restart, keeps none.
+/// screen over one already kept for the run, as before a keeper ends it. One agent's kill,
+/// spawn and keep run one at a time, so a respawn never lands between a kill and the screen
+/// it keeps, and the kept screens are held only to read or change them, so no other agent
+/// waits on that agent's tmux calls. Screens live only in the engine's memory: a terminal
+/// that exits on its own, or an engine restart, keeps none.
 pub(super) struct LastScreenHost<H> {
     inner: H,
     screens: Mutex<LastScreens>,
+    turns: Turns,
 }
 
 impl<H: Host> LastScreenHost<H> {
@@ -103,6 +152,7 @@ impl<H: Host> LastScreenHost<H> {
         Self {
             inner,
             screens: Mutex::new(LastScreens::default()),
+            turns: Turns::default(),
         }
     }
 
@@ -113,9 +163,9 @@ impl<H: Host> LastScreenHost<H> {
 
 impl<H: Host> Host for LastScreenHost<H> {
     fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
-        let mut screens = self.screens();
+        let _turn = self.turns.take(agent);
         let pane = self.inner.spawn(agent, command)?;
-        screens.forget(agent);
+        self.screens().forget(agent);
         Ok(pane)
     }
 
@@ -141,9 +191,10 @@ impl<H: Host> Host for LastScreenHost<H> {
     }
 
     fn keep_last(&self, agent: &AgentId) {
-        let mut screens = self.screens();
+        let _turn = self.turns.take(agent);
         if let Ok(last) = self.inner.snapshot(agent) {
-            screens.keep(agent, &last.screen, last.cols, last.rows, &finished_label());
+            self.screens()
+                .keep(agent, &last.screen, last.cols, last.rows, &finished_label());
         }
     }
 
@@ -164,15 +215,17 @@ impl<H: Host> Host for LastScreenHost<H> {
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
-        let mut screens = self.screens();
-        let last = if screens.holds(agent) {
+        let _turn = self.turns.take(agent);
+        let held = self.screens().holds(agent);
+        let last = if held {
             None
         } else {
             self.inner.snapshot(agent).ok()
         };
         self.inner.kill(agent)?;
         if let Some(last) = last {
-            screens.keep(agent, &last.screen, last.cols, last.rows, &finished_label());
+            self.screens()
+                .keep(agent, &last.screen, last.cols, last.rows, &finished_label());
         }
         Ok(())
     }
@@ -210,9 +263,9 @@ impl<H: Host> Host for LastScreenHost<H> {
         agent: &AgentId,
         command: &InteractiveCommand,
     ) -> Result<PaneRef, HostError> {
-        let mut screens = self.screens();
+        let _turn = self.turns.take(agent);
         let pane = self.inner.spawn_own_server(agent, command)?;
-        screens.forget(agent);
+        self.screens().forget(agent);
         Ok(pane)
     }
     fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {

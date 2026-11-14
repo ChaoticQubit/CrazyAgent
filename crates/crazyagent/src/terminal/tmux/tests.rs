@@ -2175,3 +2175,26 @@ fn a_capture_whose_row_count_is_unknown_closes_the_control_and_forges_nothing() 
         "a pane row forged output for another view"
     );
 }
+
+/// A window layout names every pane it holds, in leaf cells at any depth of splits, and a
+/// layout that is not read names none, so it ends no view.
+#[test]
+fn a_layout_names_the_panes_of_every_leaf_cell() {
+    let ids = |layout: &str| {
+        layout_panes(layout.as_bytes())
+            .into_iter()
+            .map(|pane| String::from_utf8(pane).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids("c0de,80x24,0,0,7"), ["%7"]);
+    assert_eq!(
+        ids("b25f,80x24,0,0{40x24,0,0,1,39x24,41,0,2}"),
+        ["%1", "%2"]
+    );
+    assert_eq!(
+        ids("a1b2,80x24,0,0[80x12,0,0,3,80x11,0,13{40x11,0,13,4,39x11,41,13,5}]"),
+        ["%3", "%4", "%5"]
+    );
+    assert!(ids("").is_empty());
+    assert!(ids("not a layout").is_empty());
+}
