@@ -280,6 +280,7 @@ fn versions_of(installed: &str, latest: Latest) -> HarnessVersions {
         running: false,
         last: None,
         needs: None,
+        sign_in_min: None,
     }
 }
 
@@ -403,6 +404,27 @@ fn c_checks_the_selected_harness_and_the_row_shows_its_version_line() {
     deliver(&mut shell, newer());
     assert!(!shell.busy());
     assert!(frame(&mut shell).contains("Version 2.1.309. Version 2.1.322 is available."));
+}
+
+/// DEC-166: the row of a harness that signs in says which version sign-in needs, in the
+/// desktop's words, and a row whose harness has no sign-in says nothing of it.
+#[test]
+fn a_harness_that_signs_in_says_which_version_sign_in_needs() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    shell.key(Key::Char('c'));
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            sign_in_min: Some("2.1.268".into()),
+            ..newer()
+        },
+    );
+    assert!(frame(&mut shell).contains("Sign-in needs 2.1.268 or newer."));
+    let mut quiet = on_claude(&found);
+    quiet.key(Key::Char('c'));
+    deliver(&mut quiet, newer());
+    assert!(!frame(&mut quiet).contains("Sign-in needs"));
 }
 
 #[test]

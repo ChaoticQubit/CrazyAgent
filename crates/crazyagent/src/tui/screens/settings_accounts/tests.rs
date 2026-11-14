@@ -1,5 +1,6 @@
 use super::super::settings_add_account::{
-    AddAccount, choices, code_left_line, key_problem, provider_tiles, sign_in_problem,
+    AddAccount, UpdateOffer, choices, code_left_line, key_problem, provider_tiles,
+    sign_in_problem, too_old_line, update_offer,
 };
 use super::*;
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod, catalog};
@@ -1523,6 +1524,102 @@ fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used()
         sign_in_problem(claude, &failed("native_auth_made_up", None)),
         "The sign-in did not work. (code: native_auth_made_up)"
     );
+}
+
+/// A Claude Code versions row for the too-old sign-in rows: Homebrew, the given installed
+/// version, its update line and the 2.1.268 sign-in minimum. Input: the installed version.
+/// Output: the row.
+fn too_old_versions(installed: Option<&str>) -> crate::harnesses::update::HarnessVersions {
+    crate::harnesses::update::HarnessVersions {
+        id: "claude-code".into(),
+        method: crate::harnesses::update::Method::Homebrew {
+            cask: "claude-code@latest".into(),
+        },
+        installed: installed.map(str::to_owned),
+        latest: crate::harnesses::update::Latest::NotChecked,
+        command: Some("/opt/homebrew/bin/brew upgrade --cask claude-code@latest".into()),
+        install: None,
+        refusal: None,
+        guide: None,
+        running: false,
+        last: None,
+        needs: None,
+        sign_in_min: Some("2.1.268".into()),
+    }
+}
+
+/// DEC-166: a sign-in refused as too old reads in the TUI word for word as in the app: the
+/// harness, its version when it is below the minimum, and the minimum; without a minimum it
+/// says to update, then choose Check again.
+#[test]
+fn a_sign_in_refused_as_too_old_names_the_version_and_the_minimum_as_the_app_does() {
+    let claude = Some(NativeAuthMethod::ClaudeOfficial);
+    let below = too_old_versions(Some("2.1.200"));
+    assert_eq!(
+        too_old_line(claude, Some(&below)),
+        "Claude Code 2.1.200 is too old to sign in from CrazyAgent; it needs 2.1.268 or newer."
+    );
+    let codex = crate::harnesses::update::HarnessVersions {
+        id: "codex".into(),
+        installed: Some("0.50.0".into()),
+        sign_in_min: Some("0.56.0".into()),
+        ..too_old_versions(None)
+    };
+    assert_eq!(
+        too_old_line(Some(NativeAuthMethod::CodexDeviceCode), Some(&codex)),
+        "Codex 0.50.0 is too old to sign in from CrazyAgent; it needs 0.56.0 or newer."
+    );
+    let only_minimum =
+        "Claude Code is too old to sign in from CrazyAgent; it needs 2.1.268 or newer.";
+    for installed in [None, Some("2.1.300"), Some("garbage")] {
+        assert_eq!(
+            too_old_line(claude, Some(&too_old_versions(installed))),
+            only_minimum,
+            "{installed:?}"
+        );
+    }
+    let unread = "Claude Code is too old to sign in from CrazyAgent. Update Claude Code, then choose Check again.";
+    assert_eq!(too_old_line(claude, None), unread);
+    assert_eq!(
+        sign_in_problem(claude, &failed("native_auth_harness_too_old", None)),
+        unread
+    );
+}
+
+/// DEC-166: the too-old panel offers Update only when updates may run from CrazyAgent and
+/// the harness has an update line, else the line to run, else why it can't be updated here.
+#[test]
+fn the_too_old_panel_offers_update_only_where_settings_harnesses_would() {
+    use crate::harnesses::update::UpdateMode;
+    let row = too_old_versions(Some("2.1.200"));
+    assert_eq!(
+        update_offer(Some(&row), Some(UpdateMode::CheckAndUpdate)),
+        UpdateOffer::Button
+    );
+    assert_eq!(
+        update_offer(Some(&row), Some(UpdateMode::CheckOnly)),
+        UpdateOffer::Command("/opt/homebrew/bin/brew upgrade --cask claude-code@latest".into())
+    );
+    let unknown = crate::harnesses::update::HarnessVersions {
+        method: crate::harnesses::update::Method::Unknown,
+        command: None,
+        refusal: Some("harness_update_unknown_install".into()),
+        ..too_old_versions(Some("2.1.200"))
+    };
+    match update_offer(Some(&unknown), Some(UpdateMode::CheckAndUpdate)) {
+        UpdateOffer::Line(line) => assert!(line.ends_with("Update it with its own installer."), "{line}"),
+        other => panic!("an unknown install has no Update: {other:?}"),
+    }
+    let running = crate::harnesses::update::HarnessVersions {
+        running: true,
+        ..too_old_versions(Some("2.1.200"))
+    };
+    assert_eq!(
+        update_offer(Some(&running), Some(UpdateMode::CheckAndUpdate)),
+        UpdateOffer::Running
+    );
+    assert_eq!(update_offer(None, Some(UpdateMode::CheckAndUpdate)), UpdateOffer::Nothing);
+    assert_eq!(update_offer(Some(&row), None), UpdateOffer::Nothing);
 }
 
 /// A finished view for one phase and, when the engine recorded one, its code. Inputs: the
