@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
-import { connect } from "node:net";
+import { connect, createServer as createTcpServer } from "node:net";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
@@ -24,22 +24,31 @@ export function required(name, what) {
   return value;
 }
 
-/** Finds a local port nothing listens on, for the provider endpoint nobody answers.
- * Input: none. Output: the port. */
+const closedPortEnds = [];
+
+/** Holds a local port that refuses every connect for the rest of this process, for the
+ * provider endpoint nobody answers: held as refusingPort holds one, so no later listener of
+ * the run takes it, and the held connection keeps no process alive. Input: none. Output: the
+ * port. */
 export async function closedPort() {
-  const server = createServer();
-  await new Promise((done) => server.listen(0, "127.0.0.1", done));
-  const { port } = server.address();
-  await new Promise((done) => server.close(done));
+  const { port, ends } = await heldPort();
+  for (const end of ends) end.unref();
+  closedPortEnds.push(...ends);
   return port;
 }
 
-/** Holds a free local port that refuses every connect, as a stopped model provider: a
- * listener takes one connection from this process and stops listening, so the port stays
- * in use by that connection, no other listener gets it, and a connect is refused at once.
- * Input: none. Output: the port and a function that frees it. */
+/** Holds a free local port that refuses every connect, as a stopped model provider, until
+ * the caller frees it. Input: none. Output: the port and a function that frees it. */
 export async function refusingPort() {
-  const server = createServer();
+  const { port, ends } = await heldPort();
+  return { port, free: () => { for (const end of ends) end.destroy(); } };
+}
+
+/** Takes one connection from this process on a fresh local listener and stops listening, so
+ * the port stays in use by that connection, no port-0 listener gets it, and a connect is
+ * refused at once. Input: none. Output: the port and the connection's two ends. */
+async function heldPort() {
+  const server = createTcpServer();
   const accepted = new Promise((done) => server.once("connection", done));
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const { port } = server.address();
@@ -53,7 +62,7 @@ export async function refusingPort() {
   far.on("error", () => {});
   server.close();
   assert.equal(server.listening, false, "the held port has no listener");
-  return { port, free: () => { near.destroy(); far.destroy(); } };
+  return { port, ends: [near, far] };
 }
 
 /** Opens a local port that takes connections but answers no request, for the provider of an
