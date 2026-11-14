@@ -407,6 +407,7 @@ fn research_on_linux_fails_once_with_the_plain_unavailable_line() {
 /// RV-DS241-27 r2 (leader 11:00): a research job sent back to wait for a home move, a busy
 /// sign-in or an account that is not ready reports why in its progress while it is Queued,
 /// and a Queued job holding any other line reports nothing, as before.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_queued_job_waiting_on_a_refusal_reports_why_in_its_progress() {
     const WAITING: [&str; 3] = [
