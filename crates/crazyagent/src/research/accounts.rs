@@ -163,11 +163,10 @@ fn scheduled_pick(
 }
 
 /// Picks the first of `members` that `harness` can use and that is not paused, in the
-/// schedule's order, under [`Reach::Reachable`] also passing over, with one log line each,
-/// a member whose loopback provider refuses connects. Takes the model access, the members in pool order, the harness id,
-/// the signed-in check for managed connections, the pause lookup and the scheduling
-/// choice and the reach rule. Returns the account, else the kept wait of
-/// [`AccountPick::or_wait`], else [`AccountPick::NoUsableAccount`].
+/// schedule's order; under [`Reach::Reachable`] a member whose loopback provider refuses
+/// connects is passed over with one log line. Takes the access, the members in pool order,
+/// the harness id, the sign-in check, the pause lookup, the choice and the reach rule.
+/// Returns the account, else the wait [`AccountPick::or_wait`] kept, else none usable.
 fn members_pick<'a>(
     access: &ModelAccess,
     members: impl IntoIterator<Item = &'a CredentialRef>,
