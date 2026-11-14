@@ -1408,6 +1408,166 @@ async fn an_add_is_refused_the_destination_a_running_add_planned() {
     engine.stop().await;
 }
 
+/// One add runs at a time, so two names a volume treats as one folder (case or Unicode form)
+/// never both plan it: any other folder is refused while the first add copies, and is added
+/// once that add ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_add_runs_at_a_time_whatever_the_other_folder_is_named() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let first = place.join("sources/site");
+    let (cased, unlike) = (place.join("other/Site"), place.join("other/notes"));
+    fs::create_dir(&home).unwrap();
+    tree(&first, 100, 100);
+    tree(&cased, 2, 2);
+    tree(&unlike, 2, 2);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(id("intake-site"), text(&first), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    let mut other = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    for (source, what) in [(&cased, "a name only its case sets apart"), (&unlike, "another")] {
+        assert_eq!(
+            other.apply(add(source, AddMode::Copy)).await,
+            rejected("home_add_in_progress"),
+            "{what} while the first add copies"
+        );
+    }
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    assert_eq!(
+        other.apply(add(&unlike, AddMode::Copy)).await,
+        OwnerResult::Applied,
+        "another folder once the first add ended"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("notes/p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    assert_eq!(
+        fs::read_to_string(cased.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    engine.stop().await;
+}
+
+/// An intake job that starts while a direct add copies ends `home_add_in_progress` before
+/// its download, with its folder kept and nothing of it in the home; the direct add lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_ends_home_add_in_progress_while_a_direct_add_copies() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let (big, small) = (place.join("sources/big"), place.join("sources/small"));
+    fs::create_dir(&home).unwrap();
+    tree(&big, 100, 100);
+    tree(&small, 2, 2);
+    let engine = Engine::start().await;
+    let mut owner = homed(&engine, &home).await;
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    owner
+        .controller
+        .begin_mutation(add(&big, AddMode::Copy), owner.generation + 1)
+        .unwrap();
+    let mut first = owner.controller;
+    let running = tokio::spawn(async move { first.send_pending().await });
+    let started = Instant::now();
+    while !staging(&home) {
+        assert!(!running.is_finished(), "the copy ended before it was seen");
+        assert!(started.elapsed() < Duration::from_secs(20), "no copy");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let watcher = engine.owner().await;
+    assert_eq!(
+        ended(&watcher, "intake-small", &small, AddMode::Copy).await,
+        JobState::Failed {
+            code: "home_add_in_progress".into(),
+            phase: Phase::Downloading,
+        },
+        "a job while a direct add copies"
+    );
+    let answered = running.await.unwrap().unwrap();
+    assert!(
+        matches!(&answered, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied),
+        "{answered:?}"
+    );
+    assert!(!home.join("small").exists(), "no copy of the refused folder");
+    assert_eq!(
+        fs::read_to_string(small.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("big/p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    engine.stop().await;
+}
+
+/// An add's own running row, as a resend of its request finds it, does not hold its plan;
+/// another add's running row does, whatever destination it planned.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_plans_over_its_own_running_row_but_not_over_another_add() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let source = place.join("sources/site");
+    fs::create_dir(&home).unwrap();
+    tree(&source, 2, 2);
+    let engine = Engine::start().await;
+    let mut owner = homed(&engine, &home).await;
+    let database = engine.root.path().join("engine.db");
+    let running = |request: &str, name: &str| {
+        format!(
+            "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+             VALUES ('{request}', 'owner', '{}', '{}', 'copy');",
+            text(&source),
+            text(&home.join(name))
+        )
+    };
+    sql(&database, &running("add-other", "elsewhere"));
+    assert_eq!(
+        owner.apply(add(&source, AddMode::Copy)).await,
+        rejected("home_add_in_progress"),
+        "another add runs"
+    );
+    sql(&database, "DELETE FROM projects_home_add WHERE request='add-other';");
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    owner.generation += 1;
+    let pending = owner
+        .controller
+        .begin_mutation(add(&source, AddMode::Copy), owner.generation)
+        .unwrap();
+    let own = pending.request().request_id.as_str().to_owned();
+    sql(&database, &running(&own, "site"));
+    let answered = owner.controller.send_pending().await.unwrap();
+    assert!(
+        matches!(&answered, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied),
+        "{answered:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("site/p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    engine.stop().await;
+}
+
 /// Makes a source folder `name` under `place` whose folders nest one level past the copy
 /// depth bound, so a download's listing of it refuses `home_copy_too_large` at once.
 /// Output: the source folder.
