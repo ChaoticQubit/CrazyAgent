@@ -313,6 +313,74 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
+/// The project instructions file every later agent and the master get as the owner's text
+/// is read-only to the IDE server under every agent folders choice (SA vid 11): the server
+/// cannot overwrite, replace, remove or move it, nor make it where it is missing, not
+/// through a case variant of its name either, while the rest of the project stays
+/// writable. The owner edits it through the app.
+#[test]
+fn the_project_instructions_file_is_read_only_to_the_ide_server() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    let state = root.join(".crazyagent");
+    for path in [&home, &build, &state, &state.join("context")] {
+        folder(path);
+    }
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let instructions = state.join("instructions.md");
+    let owner = "Owner rules.\n";
+    let write = r#"printf 'DUMMY-MARKER' > "$1""#;
+    for choice in [
+        IdeAgentFiles::AllowAll,
+        IdeAgentFiles::NoDeleteOrRename,
+        IdeAgentFiles::ReadOnly,
+    ] {
+        let rule = AgentFilesRule {
+            choice,
+            older_agents: false,
+        };
+        let profile = install(&mine, &grants, PORT, closed(), &[], rule).unwrap();
+        let _ = fs::remove_file(&instructions);
+        assert!(
+            !sh(&profile, write, &instructions),
+            "{choice:?}: the server makes no instructions file"
+        );
+        assert!(!instructions.exists());
+        fs::write(&instructions, owner).unwrap();
+        assert!(
+            !sh(&profile, write, &instructions),
+            "{choice:?}: the server overwrites no instructions file"
+        );
+        assert!(!sh(&profile, write, &state.join("Instructions.MD")));
+        assert!(!sh(&profile, r#"/bin/rm -f "$1""#, &instructions));
+        assert!(!sh(&profile, r#"/bin/mv "$1" "$1-aside""#, &instructions));
+        let planted = r#"printf 'DUMMY-MARKER' > "$1-new" && /bin/mv "$1-new" "$1""#;
+        assert!(!sh(&profile, planted, &instructions));
+        assert_eq!(fs::read_to_string(&instructions).unwrap(), owner);
+        assert!(sh(&profile, write, &root.join("notes.txt")), "{choice:?}");
+    }
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
 /// A lock outside every writable folder, a read-only folder inside a writable one, and a
 /// read-only folder holding a writable one are refused, so the profile never states a
 /// lock or a read-only grant that a writable grant overrides.
