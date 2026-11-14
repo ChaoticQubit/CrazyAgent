@@ -459,6 +459,105 @@ mod tests {
         );
     }
 
+    /// A host whose kill, once tmux took the agent's window, waits until the test lets it go,
+    /// as a kill waits for a busy reaper; its snapshot answers the agent's last screen, and
+    /// its attach knows no agent, as tmux after kill-window, and says when it was asked.
+    struct KillingSlowly {
+        killing: Mutex<std::sync::mpsc::Sender<()>>,
+        attaching: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Host for KillingSlowly {
+        fn spawn(&self, agent: &AgentId, _: &InteractiveCommand) -> Result<PaneRef, HostError> {
+            Ok(PaneRef {
+                agent: agent.clone(),
+                pane: "%1".into(),
+                pid: 1,
+            })
+        }
+
+        fn attach(&self, _: &AgentId) -> Result<TerminalStream, HostError> {
+            let _ = self.attaching.lock().unwrap().send(());
+            Err(HostError("terminal_agent_unknown".into()))
+        }
+
+        fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+            let (feed, chunks) = buffer();
+            drop(feed);
+            Ok(TerminalStream {
+                agent: agent.clone(),
+                cols: 80,
+                rows: 24,
+                history: Vec::new(),
+                screen: b"last screen".to_vec(),
+                chunks,
+            })
+        }
+
+        fn input(&self, _: &AgentId, _: &[u8]) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        fn resize(&self, _: &AgentId, _: u16, _: u16) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        fn kill(&self, _: &AgentId) -> Result<(), HostError> {
+            let _ = self.killing.lock().unwrap().send(());
+            let _ = self
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(30));
+            Ok(())
+        }
+
+        fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A view opened while the agent's kill sits between tmux ending its window and keeping
+    /// its last screen waits for that kill and shows the kept screen, labeled with its end
+    /// time, instead of `terminal_agent_unknown` (rv-code3 ds-tmux r1 F1).
+    #[test]
+    fn a_view_opened_during_the_agents_kill_waits_for_the_screen_it_keeps() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let (killing_tx, killing) = mpsc::channel();
+        let (attaching_tx, attaching) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let host = Arc::new(LastScreenHost::new(KillingSlowly {
+            killing: Mutex::new(killing_tx),
+            attaching: Mutex::new(attaching_tx),
+            release: Mutex::new(release_rx),
+        }));
+        let killer = {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || host.kill(&agent(1)))
+        };
+        killing
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the kill took the window");
+        let viewer = {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || {
+                host.attach(&agent(1))
+                    .map(|view| view.screen)
+                    .map_err(|problem| problem.0)
+            })
+        };
+        attaching
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the view asked tmux while the kill was under way");
+        release.send(()).unwrap();
+        killer.join().unwrap().unwrap();
+        let screen = viewer.join().unwrap().unwrap();
+        assert!(screen.starts_with(b"last screen"));
+        assert!(contains(&screen, b" Finished at "));
+    }
+
     #[cfg(unix)]
     struct Server(std::path::PathBuf, std::path::PathBuf);
 
