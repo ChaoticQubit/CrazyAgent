@@ -5718,23 +5718,31 @@ fn a_delete_cut_short_offers_keep_the_project_and_delete_again_on_the_banner() {
     let mut shell = Shell::with(ctx, screen);
     let asked = |shell: &mut Shell| {
         let mut recovery = Vec::new();
-        let mut removal = Vec::new();
+        let mut setup = Vec::new();
         while let Some(request) = shell.ctx.next_request() {
             match request {
                 Request::Recovery(query) => recovery.push(*query),
-                Request::Setup(query @ SetupQuery::Removal { .. }) => removal.push(query),
+                Request::Setup(query) => setup.push(query),
                 _ => {}
             }
         }
-        (recovery, removal)
+        (recovery, setup)
     };
-    let (read, _) = asked(&mut shell);
+    let (read, first) = asked(&mut shell);
     assert_eq!(
         read,
         [RecoveryQuery::Read {
             project: notes.clone()
         }]
     );
+    for query in first {
+        shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+            SetupEvent {
+                query,
+                result: Err("project_setup_missing".into()),
+            },
+        )))));
+    }
     let notice: BannerNotice = serde_json::from_value(serde_json::json!({
         "action_kind": "project_delete",
         "id": 9,
@@ -5765,8 +5773,12 @@ fn a_delete_cut_short_offers_keep_the_project_and_delete_again_on_the_banner() {
     }
 
     shell.key(Key::Ctrl('x'));
-    let (recovery, removal) = asked(&mut shell);
+    let (recovery, setup) = asked(&mut shell);
     assert!(recovery.is_empty(), "Delete again clears nothing by itself");
+    let removal: Vec<SetupQuery> = setup
+        .into_iter()
+        .filter(|query| matches!(query, SetupQuery::Removal { .. }))
+        .collect();
     assert_eq!(
         removal,
         [SetupQuery::Removal {

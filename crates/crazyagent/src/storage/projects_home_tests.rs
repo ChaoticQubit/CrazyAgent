@@ -428,3 +428,65 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
     projects_home::add_forget(&connection, &add_3).unwrap();
     assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
 }
+
+/// A delete's mark outlives a settle that only shares its exchange number, since a new engine
+/// process numbers exchanges again: a start ends the mark of a project that went and turns
+/// the mark of a project still there into a notice that names no exchange, and a later settle
+/// ends only the live mark of its own number, failed when the project's records stayed.
+#[test]
+fn a_delete_mark_shown_to_the_owner_outlives_a_settle_of_a_reused_exchange() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = Connection::open(root.path().join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::ledger::initialize(&connection).unwrap();
+    let mark = |project: &str, exchange: i64| {
+        connection
+            .execute(
+                "INSERT INTO ledger_actions(kind,action_key,payload,started_ms)
+                 VALUES ('project_delete',?1,json_object('project',?1,'exchange',?2),1)",
+                params![project, exchange],
+            )
+            .unwrap();
+    };
+    let marks = || -> Vec<(String, String)> {
+        let mut statement = connection
+            .prepare(
+                "SELECT action_key,payload FROM ledger_actions
+                 WHERE kind='project_delete' AND outcome IS NULL ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let outcome = |project: &str| -> Option<String> {
+        connection
+            .query_row(
+                "SELECT outcome FROM ledger_actions WHERE action_key=?1 ORDER BY id DESC",
+                [project],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    connection
+        .execute_batch("INSERT INTO projects(id, body) VALUES ('kept','{}'),('next','{}')")
+        .unwrap();
+    mark("kept", 7);
+    mark("gone", 8);
+    projects_home::delete_settle(&connection, None).unwrap();
+    let shown = marks();
+    assert_eq!(shown.len(), 1, "a start ends the mark of a project that went: {shown:?}");
+    assert_eq!(shown[0].0, "kept");
+    assert_eq!(outcome("gone").as_deref(), Some("done"));
+    let payload: serde_json::Value = serde_json::from_str(&shown[0].1).unwrap();
+    assert_eq!(payload["unknown"], true, "the kept project's mark is shown");
+    assert!(payload.get("exchange").is_none(), "a shown mark names no exchange");
+    mark("next", 7);
+    projects_home::delete_settle(&connection, Some(7)).unwrap();
+    let left = marks();
+    assert_eq!(left.len(), 1, "a settle ends only the live mark of its number: {left:?}");
+    assert_eq!(left[0].0, "kept");
+    assert_eq!(outcome("next").as_deref(), Some("failed"), "its records stayed");
+}

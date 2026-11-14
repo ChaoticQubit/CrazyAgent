@@ -788,6 +788,28 @@ async fn a_delete_cut_short_by_an_engine_stop_waits_for_keep_or_delete_again() {
     engine.stop().await;
 }
 
+/// Remove from dashboard of a project whose delete was cut short ends its mark with its
+/// records, so a project added again under the same id starts with no "A delete was cut
+/// short". Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn removing_a_project_whose_delete_was_cut_short_ends_its_mark() {
+    let mut engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, _) = project(&mut owner).await;
+    drop(owner);
+    cut_short(&engine, PROJECT, 7);
+    engine.restart().await;
+    let mut owner = engine.owner().await;
+    assert_eq!(delete_notices(&owner, &project).await.len(), 1);
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(kept(&engine), 0);
+    assert_eq!(engine.rows(DELETES_PENDING), 0, "the mark goes with the records");
+    drop(owner);
+    engine.stop().await;
+}
+
 /// While a projects home move is pending, the owner can neither pick another home nor move it
 /// without its projects, so the move's own pick is never overwritten. Both go once the move
 /// is forgotten.

@@ -335,6 +335,7 @@ test("a delete an engine stop cut short shows on the project with Keep the proje
   const name = "Cut Short";
   const { id, folder } = await made(name);
   const sql = (statement) => execFileSync(SQLITE, [run.database, statement], { encoding: "utf8" }).trim();
+  await value(run.bridge, "desktop_recovery_banner", { projectId: id });
   await restart(() => sql(`INSERT INTO projects_delete_pending(exchange) VALUES (900);
     INSERT INTO ledger_actions(kind,action_key,payload,started_ms) VALUES ('project_delete','${id}','{"project":"${id}","exchange":900}',1);`));
   assert.equal(sql("SELECT count(*) FROM projects_delete_pending"), "0", "the start still forgets the plan, so a home move may go");
