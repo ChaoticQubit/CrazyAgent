@@ -1541,3 +1541,97 @@ fn a_plugin_screen_removal_updates_the_pack_row_so_setup_can_install_it_again() 
     assert!(!row.skills.contains(&alpha));
     assert_eq!(row.skills.len(), 1);
 }
+
+/// RV-DS241-31: a new pin of a skill entry keeps each pack hook as the owner left it, off
+/// globally or off in one project, instead of seeding the new pin's hooks all on.
+#[test]
+fn a_new_pin_keeps_the_hooks_the_owner_switched_off() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    for project in ["project-1", "project-2"] {
+        connection
+            .execute("INSERT INTO projects(id, body) VALUES(?1, '{}')", [project])
+            .unwrap();
+    }
+    let work = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(first.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let plugin = hook_plugin(work.path(), "caveman");
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    let id_of = |views: &[crate::plugins::HookView], event: &str| {
+        views
+            .iter()
+            .find(|view| view.event == event)
+            .unwrap()
+            .id
+            .clone()
+    };
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: id_of(&views, "SessionStart"),
+            enabled: false,
+        },
+    )
+    .unwrap();
+    let prompt = id_of(&views, "UserPromptSubmit");
+    let version = plugins::plugin_version(&connection, &prompt).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::Switch {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            id: prompt,
+            on: false,
+            version,
+        },
+    )
+    .unwrap();
+    assert!(effective_events(&mut connection, root, "project-1").is_empty());
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+
+    let second = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@2",
+        vec![skill(second.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    assert!(
+        views
+            .iter()
+            .all(|view| view.follows.as_deref() == Some("caveman"))
+    );
+    let start = views
+        .iter()
+        .find(|view| view.event == "SessionStart")
+        .unwrap();
+    assert!(!start.enabled, "a hook switched off stays off");
+    assert!(
+        effective_events(&mut connection, root, "project-1").is_empty(),
+        "a hook switched off in one project stays off there"
+    );
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+}
