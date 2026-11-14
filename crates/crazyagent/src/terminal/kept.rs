@@ -137,8 +137,10 @@ impl Drop for Turn<'_> {
 /// ended, instead of a refusal; a new run of the agent forgets it. A kill keeps no newer
 /// screen over one already kept for the run, as before a keeper ends it. One agent's kill,
 /// spawn and keep run one at a time, so a respawn never lands between a kill and the screen
-/// it keeps, and the kept screens are held only to read or change them, so no other agent
-/// waits on that agent's tmux calls. Screens live only in the engine's memory: a terminal
+/// it keeps, and a view that finds no terminal waits for that agent's step under way before
+/// it reads the kept screen, so a view opened during a kill shows the screen the kill keeps.
+/// The kept screens are held only to read or change them, so no other agent waits on that
+/// agent's tmux calls. Screens live only in the engine's memory: a terminal
 /// that exits on its own, or an engine restart, keeps none.
 pub(super) struct LastScreenHost<H> {
     inner: H,
@@ -172,6 +174,7 @@ impl<H: Host> Host for LastScreenHost<H> {
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
         match self.inner.attach(agent) {
             Err(problem) if problem.0 == "terminal_agent_unknown" => {
+                drop(self.turns.take(agent));
                 self.screens().view(agent).ok_or(problem)
             }
             attached => attached,
