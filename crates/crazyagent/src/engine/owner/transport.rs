@@ -1398,6 +1398,14 @@ impl OwnerServer {
                             crate::protocol::plain_code(&problem.0)
                         );
                     }
+                    match crate::landing::clear_step_locks(&db) {
+                        Ok(0) => {}
+                        Ok(count) => eprintln!("landing_step_lock_removed count={count}"),
+                        Err(problem) => eprintln!(
+                            "landing_step_lock_sweep_failed cause={}",
+                            crate::protocol::plain_code(&problem.0)
+                        ),
+                    }
                     locked
                 })
             })

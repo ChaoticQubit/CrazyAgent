@@ -42,6 +42,42 @@ const STEP_FOLDER: &str = "crazyagent-step";
 #[cfg(target_os = "linux")]
 const INDEX_LOCKED: i32 = 128;
 
+/// The most folders of a repository's `.git/worktrees` the start sweep looks in for a lock
+/// a stopped confined Linux step left ([`clear_step_locks`]).
+#[cfg(target_os = "linux")]
+const STEP_LOCK_FOLDERS_MAX: usize = 512;
+
+/// Removes the `index.lock` a confined Linux step of a stopped engine left: only in a linked
+/// worktree's git folder that holds the engine's step folder, only a plain file, and never
+/// through a link. The engine runs it once at start, before any landing step, so no step of
+/// its own holds such a lock then. Input: the repository's canonical root. Output: how many
+/// locks it removed.
+#[cfg(target_os = "linux")]
+pub(super) fn clear_step_locks(root: &Path) -> usize {
+    let real = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+    let worktrees = root.join(".git").join("worktrees");
+    if !real(&root.join(".git")) || !real(&worktrees) {
+        return 0;
+    }
+    let Ok(folders) = std::fs::read_dir(&worktrees) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for folder in folders.take(STEP_LOCK_FOLDERS_MAX).flatten() {
+        let private = folder.path();
+        let lock = private.join("index.lock");
+        if real(&private)
+            && real(&private.join(STEP_FOLDER))
+            && std::fs::symlink_metadata(&lock).is_ok_and(|meta| meta.is_file())
+            && std::fs::remove_file(&lock).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    assert!(removed <= STEP_LOCK_FOLDERS_MAX);
+    removed
+}
+
 /// The Landlock helper a confined Linux step starts: the one shipped beside the engine, or
 /// for a unit test, which runs from the build folder's `deps`, the one built in that build
 /// folder unless the test stands in another (`LANDLOCK_HELPER`). Output: the path, or None
