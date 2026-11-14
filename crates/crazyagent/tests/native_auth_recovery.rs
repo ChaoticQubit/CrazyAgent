@@ -1139,10 +1139,10 @@ async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_inte
 /// Cancelling the first sign-in while the engine waits for its first probe run settles
 /// Cancelled and frees the account when the late answer finds the harness: the cancel lands
 /// inside the wait, then the probe finds the interpreter in a folder outside every temp
-/// folder and the engine resolves the harness for the cancelled sign-in. The next sign-in,
-/// which the engine admits only once the first one's dispatch ended, shows its challenge,
-/// and by then the engine never called the harness unresolved and left no custodian of the
-/// cancelled sign-in.
+/// folder and the engine resolves the harness for the cancelled sign-in. The next sign-in
+/// shows its challenge, and by then the engine never called the harness unresolved, since
+/// only the cancelled sign-in's custodian, started after the resolve, stores Cancelled, and
+/// left no custodian of the cancelled sign-in.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_a_sign_in_whose_late_probe_finds_its_interpreter_settles_cancelled() {
@@ -1176,7 +1176,7 @@ async fn cancelling_a_sign_in_whose_late_probe_finds_its_interpreter_settles_can
         case.log()
     );
     case.no_fence().await;
-    let next = admitted(&client, &scope, &case).await;
+    let next = waiting_with(&client, &scope, NativeAuthMethod::CodexBrowser).await;
     assert!(
         case.home.path().join("login-probe-done").exists(),
         "{}",
@@ -1193,43 +1193,6 @@ async fn cancelling_a_sign_in_whose_late_probe_finds_its_interpreter_settles_can
     assert_eq!(finished.phase, NativeAuthPhase::Cancelled, "{}", case.log());
     case.no_fence().await;
     gone(custodian).await;
-}
-
-/// Starts a Codex browser sign-in once the engine admits it, starting again while the
-/// engine still holds an earlier sign-in's dispatch and refuses the start as busy, and waits
-/// until it shows its challenge, at most 20 s. Inputs: the owner client, the scope and the
-/// case. Output: the waiting fact.
-#[cfg(target_os = "macos")]
-async fn admitted(client: &OwnerClient, scope: &NativeAuthScope, case: &Case) -> NativeAuthFact {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        match start(client, scope, NativeAuthMethod::CodexBrowser).await {
-            Ok(begun) => {
-                let answer = settle(client, scope, &begun, shown).await;
-                if answer.phase == NativeAuthPhase::AwaitingOwner {
-                    return answer;
-                }
-                assert_eq!(
-                    answer.code.as_deref(),
-                    Some("native_auth_host_busy"),
-                    "{:?}: {}",
-                    answer.phase,
-                    case.log()
-                );
-            }
-            Err(error) => assert!(
-                error.contains("native_auth_host_busy"),
-                "{error}: {}",
-                case.log()
-            ),
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the next sign-in was never admitted: {}",
-            case.log()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
