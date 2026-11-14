@@ -677,8 +677,12 @@ mod install_tests {
             &self,
             dep: Dependency,
             confirmed: &str,
+            recursive: bool,
         ) -> Result<Report, &'static str> {
-            assert_eq!((dep, confirmed), (Dependency::Graphify, "/h/t"));
+            assert_eq!(
+                (dep, confirmed, recursive),
+                (Dependency::Graphify, "/h/t", true)
+            );
             self.0
         }
     }
@@ -723,7 +727,7 @@ mod install_tests {
             Err(error) if error.0 == "setup_busy"
         ));
         let failing = Arc::new(FixFake(Err(TOOL_FIX_CHANGED)));
-        fix_dependency(failing, &root, Dependency::Graphify, "/h/t".into()).await;
+        fix_dependency(failing, &root, Dependency::Graphify, "/h/t".into(), true).await;
         drop(guard);
         let after = progress::snapshot(&root);
         assert_eq!(
@@ -744,7 +748,7 @@ mod install_tests {
             changed: 3,
             ..Report::default()
         })));
-        fix_dependency(fixed, &root, Dependency::Graphify, "/h/t".into()).await;
+        fix_dependency(fixed, &root, Dependency::Graphify, "/h/t".into(), true).await;
         drop(guard);
         assert_eq!(
             progress::snapshot(&root)

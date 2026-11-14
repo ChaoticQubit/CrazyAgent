@@ -1933,12 +1933,13 @@ fn refused_status(choice: crate::setup::RefusedTool) -> SetupStatus {
     status
 }
 
-fn fix_sent(shell: &mut Shell) -> (Dependency, String) {
+fn fix_sent(shell: &mut Shell) -> (Dependency, String, bool) {
     let sent = jobs(shell);
     let [
         AppSetupJob::FixPermissions {
             name,
             tree,
+            recursive,
             generation,
         },
     ] = sent.as_slice()
@@ -1946,7 +1947,7 @@ fn fix_sent(shell: &mut Shell) -> (Dependency, String) {
         panic!("one permission fix required, got {} jobs", sent.len())
     };
     assert!(*generation > 0);
-    (*name, tree.clone())
+    (*name, tree.clone(), *recursive)
 }
 
 #[test]
@@ -1975,7 +1976,11 @@ fn a_refused_tool_reads_found_not_used_and_p_fixes_only_the_tree_the_confirm_nam
 
     shell.key(Key::Char('p'));
     shell.key(Key::Char('y'));
-    assert_eq!(fix_sent(&mut shell), (Dependency::Graphify, "/h/py".into()));
+    assert_eq!(
+        fix_sent(&mut shell),
+        (Dependency::Graphify, "/h/py".into(), true),
+        "y sends the tree and the scope the confirm named"
+    );
     shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
     assert_eq!(lead(&shell), "Fixing permissions on /h/py.");
     assert!(

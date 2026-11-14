@@ -1402,6 +1402,7 @@ fn command_only_refuses_the_permission_fix_in_the_engine() {
     let fix = |tree: &str| SetupAction::FixPermissions {
         name: crate::setup::Dependency::Graphify,
         tree: tree.into(),
+        recursive: true,
     };
     let tree = "/Users/me/.local/share/uv/python/cpython-3.13.1";
     assert_eq!(

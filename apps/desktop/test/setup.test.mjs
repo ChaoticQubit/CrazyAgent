@@ -104,7 +104,7 @@ test("the permission fix and the unused tools setting go through their own deskt
   const build = readFileSync(new URL("../src-tauri/build.rs", import.meta.url), "utf8");
   const routes = readFileSync(new URL("../src-tauri/e2e_bridge/routes.rs", import.meta.url), "utf8");
   const capability = JSON.parse(readFileSync(new URL("../src-tauri/capabilities/main-window.json", import.meta.url), "utf8"));
-  assert.match(source, /export function fixToolPermissions\(name: DependencyName, tree: string, generation: number\)[^{]*\{\s*return invoke<SetupStatus>\("desktop_fix_tool_permissions", \{ name, tree, generation \}\)/);
+  assert.match(source, /export function fixToolPermissions\(name: DependencyName, tree: string, recursive: boolean, generation: number\)[^{]*\{\s*return invoke<SetupStatus>\("desktop_fix_tool_permissions", \{ name, tree, recursive, generation \}\)/);
   assert.match(source, /export function setRefusedTool\(choice: RefusedTool, generation: number\)[^{]*\{\s*return invoke<SetupStatus>\("desktop_set_refused_tool", \{ choice, generation \}\)/);
   for (const [command, permission, label, kind] of [
     ["desktop_fix_tool_permissions", "allow-desktop-fix-tool-permissions", "FixToolPermissions", "fix_tool_permissions"],
@@ -118,7 +118,7 @@ test("the permission fix and the unused tools setting go through their own deskt
     assert.ok(bridge.includes(`OwnerMutation::${label} { .. } => ("${kind}", None, None)`), label);
     assert.ok(source.includes(`"${kind}"`), `the pending change kind ${kind} is known`);
   }
-  assert.match(setup, /pub async fn fix_tool_permissions\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::FixToolPermissions \{ name, tree \}, generation\)/);
+  assert.match(setup, /pub async fn fix_tool_permissions\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::FixToolPermissions \{ name, tree, recursive \}, generation\)/);
   assert.match(setup, /pub async fn set_refused_tool\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::SetRefusedTool \{ choice \}, generation\)/);
   const setupCodes = setup.match(/const SETUP_CODES: \[&str; \d+\] = \[([^\]]*)\]/);
   for (const code of ["tool_fix_off", "tool_fix_not_needed", "tool_fix_unavailable", "tool_fix_changed", "tool_fix_refused", "tool_fix_too_large", "tool_fix_failed"]) {

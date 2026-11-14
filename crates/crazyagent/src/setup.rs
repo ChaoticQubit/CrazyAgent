@@ -1142,14 +1142,23 @@ mod tests {
         let fix = crate::engine::owner::OwnerMutation::FixToolPermissions {
             name: Dependency::Graphify,
             tree: "/h/t".into(),
+            recursive: true,
         };
         assert_eq!(
             serde_json::to_value(&fix).unwrap(),
-            serde_json::json!({"kind": "FixToolPermissions", "name": "graphify", "tree": "/h/t"})
+            serde_json::json!({"kind": "FixToolPermissions", "name": "graphify", "tree": "/h/t", "recursive": true})
+        );
+        assert!(
+            serde_json::from_value::<crate::engine::owner::OwnerMutation>(serde_json::json!(
+                {"kind": "FixToolPermissions", "name": "graphify", "tree": "/h/t"}
+            ))
+            .is_err(),
+            "a fix request without the scope the owner confirmed is refused"
         );
         let action = SetupAction::FixPermissions {
             name: Dependency::Graphify,
             tree: "/h/t".into(),
+            recursive: true,
         };
         assert!(matches!(
             fix.command().unwrap(),

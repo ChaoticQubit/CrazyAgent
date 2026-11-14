@@ -2160,7 +2160,7 @@ fn first_run_shows_only_the_command_for_a_refused_graphify_when_unused_tools_is_
         let tree = prefix.canonicalize().unwrap().display().to_string();
         let reply = owner
             .controller
-            .fix_tool_permissions(Dependency::Graphify, tree, generation)
+            .fix_tool_permissions(Dependency::Graphify, tree, true, generation)
             .await
             .unwrap();
         owner.controller.detach();

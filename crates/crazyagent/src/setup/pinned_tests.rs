@@ -596,15 +596,23 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
     assert_eq!(target.path, prefix.canonicalize().unwrap());
 
     assert_eq!(
-        installer.fix_permissions(Dependency::Graphify, &elsewhere.display().to_string()),
+        installer.fix_permissions(Dependency::Graphify, &elsewhere.display().to_string(), true),
         Err(crate::tools::permission_fix::TOOL_FIX_CHANGED)
     );
     assert_eq!(mode(&python), 0o775);
     assert_eq!(mode(&elsewhere), 0o777);
 
     let confirmed = target.path.display().to_string();
+    assert_eq!(
+        installer.fix_permissions(Dependency::Graphify, &confirmed, false),
+        Err(crate::tools::permission_fix::TOOL_FIX_CHANGED),
+        "a confirmed single folder never runs as the whole tree"
+    );
+    for path in [&python, &prefix.join("bin"), &prefix] {
+        assert_eq!(mode(path), 0o775, "{}", path.display());
+    }
     let report = installer
-        .fix_permissions(Dependency::Graphify, &confirmed)
+        .fix_permissions(Dependency::Graphify, &confirmed, true)
         .unwrap();
     assert_eq!(report.changed, 3);
     for path in [&python, &prefix.join("bin"), &prefix] {
@@ -618,7 +626,7 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
     );
     assert!(installer.program("graphify").is_some());
     assert_eq!(
-        installer.fix_permissions(Dependency::Graphify, &confirmed),
+        installer.fix_permissions(Dependency::Graphify, &confirmed, true),
         Err(crate::tools::permission_fix::TOOL_FIX_NOT_NEEDED)
     );
 }

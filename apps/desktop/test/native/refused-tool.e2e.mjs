@@ -74,7 +74,7 @@ describe("DEC-162: a graphify found and passed over, on the real desktop app and
     await until(async () => (await rowText(PACK_ROW)).includes("To fix it, run in Terminal: chmod -R go-w"), 30000,
       "the Graphify command row did not show the command once Unused tools was Show the command only");
     assert.equal(await shown(fixButton(PACK_ROW)), false, "command only offers no Fix permissions");
-    const answer = await invoke("desktop_fix_tool_permissions", { name: "graphify", tree: prefix, generation: 1 });
+    const answer = await invoke("desktop_fix_tool_permissions", { name: "graphify", tree: prefix, recursive: true, generation: 1 });
     assert.match(answer.failed ?? "", /tool_fix_off/, `the engine refuses a fix while fixing is off: ${JSON.stringify(answer)}`);
     assert.equal(mode(prefix), 0o775, "a refused fix changes nothing");
     await shot("refused-tool-command-only");
