@@ -2108,6 +2108,6 @@ fn process_import_never_labels_the_project_text() {
     run(&root, Action::ConfirmImport { project }, None).unwrap();
     assert_eq!(
         crate::agent_home::read_project(&folder).unwrap(),
-        "OWNER-TEXT-7\n\n## Imported from CLAUDE.md\n\nREPO-RULE-7\n"
+        "OWNER-TEXT-7\n\n### Imported from CLAUDE.md\n\nREPO-RULE-7\n"
     );
 }

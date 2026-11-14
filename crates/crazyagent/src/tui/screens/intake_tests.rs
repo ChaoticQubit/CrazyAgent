@@ -1701,7 +1701,7 @@ async fn a_folder_that_arrives_with_project_instructions_starts_onboarding_with_
         std::fs::write(folder.join("AGENTS.md"), "NEW-RULE\n").unwrap();
         crate::instruction_files::import(&folder).unwrap();
         let again = crate::agent_home::read_project(&folder).unwrap();
-        if again != "OWNER-EDIT\n\n## Imported from AGENTS.md\n\nNEW-RULE\n" {
+        if again != "OWNER-EDIT\n\n### Imported from AGENTS.md\n\nNEW-RULE\n" {
             problems.push(format!("{name}: a later import labelled again: {again:?}"));
         }
     }
