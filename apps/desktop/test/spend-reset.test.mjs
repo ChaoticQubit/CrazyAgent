@@ -81,7 +81,7 @@ test("the Claude free resets setting shows its three options, the default first,
   assert.equal(section.resetsSourceHelp("off"), "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings.");
   const markup = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: client.SPEND_DEFAULTS, refused: "", onChange: noop }));
   assert.match(markup, /aria-label="Claude free resets"/);
-  for (const option of section.RESETS_SOURCE_OPTIONS) assert.match(markup, new RegExp(`>${option.label}<`));
+  for (const option of section.RESETS_SOURCE_OPTIONS) assert.ok(markup.includes(`>${option.label.replace("'", "&#x27;")}<`), option.label);
   assert.doesNotMatch(markup, /changed/);
   for (const source of ["as_claude_code", "off"]) {
     const picked = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: settings("confirm_each", "notice", source), refused: "", onChange: noop }));

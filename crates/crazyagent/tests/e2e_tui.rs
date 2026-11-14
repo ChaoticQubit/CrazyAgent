@@ -1963,6 +1963,12 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
 const RESETS_ID: &str = "e2e-free-resets";
 const RESETS_PROJECT: &str = "Free resets e2e";
 
+/// The screen's words joined by single spaces, so a sentence the TUI wrapped still reads
+/// whole. Input: the screen. Output: the words.
+fn flat(screen: &str) -> String {
+    screen.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Opens Settings, Pools in the TUI on a fresh engine with a saved profile, home and one
 /// project, once the Pools spend part shows its Claude free resets line.
 /// Input: the scratch prefix. Output: the engine, the TUI and the scratch home.
@@ -1996,7 +2002,7 @@ fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
     pty.keys(&["]"]);
     pty.until(
         "] steps to Pools with its Claude free resets line",
-        |screen| screen.contains("Claude free resets (f): "),
+        |screen| flat(screen).contains("Claude free resets (f):"),
     );
     (engine, pty, disk)
 }
@@ -2028,8 +2034,8 @@ fn kept_source(engine: &Engine) -> crazyagent::usage::spend::ResetsSource {
 fn the_tui_reads_claude_free_resets_through_claude_code_by_default() {
     let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-through-");
     pty.until("the default names itself and how it asks", |screen| {
-        screen.contains("Claude free resets (f): Through Claude Code.")
-            && screen.contains("asks Anthropic as Claude Code.")
+        flat(screen).contains("Claude free resets (f): Through Claude Code.")
+            && flat(screen).contains("asks Anthropic as Claude Code.")
     });
     assert_eq!(
         kept_source(&engine),
@@ -2046,8 +2052,8 @@ fn the_tui_saves_claude_free_resets_as_claude_code() {
     let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-as-");
     pty.keys(&["f"]);
     pty.until("f saves As Claude Code and says how it asks", |screen| {
-        screen.contains("Claude free resets (f): As Claude Code.")
-            && screen.contains("the way Claude Code itself asks.")
+        flat(screen).contains("Claude free resets (f): As Claude Code.")
+            && flat(screen).contains("the way Claude Code itself asks.")
     });
     assert_eq!(
         kept_source(&engine),
@@ -2064,14 +2070,14 @@ fn the_tui_saves_claude_free_resets_dont_read() {
     let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-off-");
     pty.keys(&["f"]);
     pty.until("the first f saves As Claude Code", |screen| {
-        screen.contains("Claude free resets (f): As Claude Code.")
+        flat(screen).contains("Claude free resets (f): As Claude Code.")
     });
     pty.keys(&["f"]);
     pty.until(
         "the second f saves Don't read and says what it does",
         |screen| {
-            screen.contains("Claude free resets (f): Don't read.")
-                && screen.contains("Claude accounts say off in Settings.")
+            flat(screen).contains("Claude free resets (f): Don't read.")
+                && flat(screen).contains("Claude accounts say off in Settings.")
         },
     );
     assert_eq!(
