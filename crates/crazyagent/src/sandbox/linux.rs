@@ -1,4 +1,4 @@
-use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
+use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS};
 use super::{
     KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF,
     LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, OWNER_PORTS,
@@ -40,9 +40,13 @@ const OPEN_SOCKETS: &str = "--open-sockets";
 const KEEP_FREE: &str = "--keep-free";
 const PROBE: &str = "--probe";
 /// The most ports one agent is kept off: the owner's fixed ports, the kept local model
-/// ports and every model proxy port.
-const KEEP_FREE_MAX: usize =
-    OWNER_PORTS.len() + KEPT_PORTS_MAX + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize + 1;
+/// ports and every model proxy and model relay port.
+const KEEP_FREE_MAX: usize = OWNER_PORTS.len()
+    + KEPT_PORTS_MAX
+    + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize
+    + 1
+    + (*RELAY_PORTS.end() - *RELAY_PORTS.start()) as usize
+    + 1;
 /// The socket family of SMC, whose listener holds a TCP port and takes plain TCP clients.
 const AF_SMC: u64 = 43;
 const PICKED_PORTS_FILE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
@@ -980,7 +984,7 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
 }
 
 /// The TCP ports no agent listens on: the owner's fixed ports, the kept local model ports
-/// and every model proxy port, as the macOS boundary keeps them. Input: the policy. Output:
+/// and every model proxy and model relay port, as the macOS boundary keeps them. Input: the policy. Output:
 /// those ports, rising and each once.
 fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
     let mut ports: Vec<u16> = OWNER_PORTS
@@ -988,6 +992,7 @@ fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
         .chain(&sandbox.kept_ports)
         .copied()
         .chain(PROXY_PORTS)
+        .chain(RELAY_PORTS)
         .collect();
     ports.sort_unstable();
     ports.dedup();
@@ -1127,8 +1132,9 @@ mod tests {
         assert!(!policy.limit_network);
         let mut expected = vec![1234, 1455, 8080, 11434];
         expected.extend(PROXY_PORTS);
+        expected.extend(crate::sandbox::model_proxy::RELAY_PORTS);
         assert_eq!(policy.keep_free, expected);
-        assert_eq!(policy.keep_free.len(), 4 + 128);
+        assert_eq!(policy.keep_free.len(), 4 + 256);
         assert_eq!(
             HelperRequest::parse(
                 policy
@@ -1234,6 +1240,7 @@ mod tests {
         assert!(policy.limit_network);
         let mut expected = vec![1455, 8080, 11434];
         expected.extend(PROXY_PORTS);
+        expected.extend(crate::sandbox::model_proxy::RELAY_PORTS);
         assert_eq!(policy.keep_free, expected);
         assert_eq!(
             HelperRequest::parse(

@@ -816,6 +816,21 @@ fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
     );
 }
 
+/// SA241 vid 9: a port grant never opens a model relay port to an agent, at either end of
+/// the relay block.
+#[test]
+fn a_port_grant_refuses_the_model_relay_ports() {
+    let data = Path::new("/nonexistent-engine-data");
+    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    for port in [*block.start(), *block.end()] {
+        assert_eq!(
+            checked(&AccessGrant::Port { port }, data),
+            Err("grant_port_reserved"),
+            "port {port}"
+        );
+    }
+}
+
 /// Asks for the owner's Allow on a socket an agent named in the project folder, with a
 /// second socket of the owner's beside it in a folder of its own. Input: the case. Output:
 /// the asked socket's path, the other socket's path, both listeners and the question.
