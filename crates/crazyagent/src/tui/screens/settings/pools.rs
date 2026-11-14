@@ -1520,6 +1520,7 @@ mod tests {
             resets_checked_ms: None,
             credits_checked_ms: None,
             resets_gained_ms: None,
+            resets_unread: None,
         };
         screen.arrive(
             &settings(SettingsEvent::Extras(Ok(vec![

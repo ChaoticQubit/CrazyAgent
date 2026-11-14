@@ -86,6 +86,13 @@ export function applyTheme(choice: ThemeChoice): void {
   }
 }
 
+/** Keeps the value shown when a poll reads the same one, compared as the bridge's JSON, so a
+ * poll that changed nothing never renders the app's tree again (React skips a state set to
+ * the same object). Inputs: the value shown and the one read now. Output: the value to keep. */
+export function keptRead<T>(shown: T, next: T): T {
+  return shown === next || JSON.stringify(shown) === JSON.stringify(next) ? shown : next;
+}
+
 /** Reads the engine state from a connect or status reply.
  * Input: the reply. Output: running when connected, outdated when the engine is another
  * version than this app, otherwise down. */
@@ -281,7 +288,8 @@ export function useSession(): Session {
       if (result.kind === "ok") {
         const line = jobEndLine(intakeSeen.current, result.value);
         intakeSeen.current = result.value;
-        setIntake(result.value);
+        const job = result.value;
+        setIntake((shown) => keptRead(shown, job));
         if (line && result.value) {
           showToast(line, { name: "home" });
           setFoundTick((value) => value + 1);
@@ -301,7 +309,7 @@ export function useSession(): Session {
     const read = async () => {
       const result = await loadFoundProjects();
       if (!live) return;
-      setFound(result);
+      setFound((shown) => keptRead<Loaded<FoundProject[]>>(shown, result));
       if (result.kind !== "not_ready") timer = setTimeout(() => void read(), FOUND_POLL_MS);
     };
     void read();

@@ -270,7 +270,7 @@ pub(super) fn add_plan(
         overrides,
         &guarded(&tx)?,
     )?;
-    if destination_held(&tx, plan.destination(), request)? {
+    if another_add_running(&tx, request)? {
         return Err(error("home_add_in_progress"));
     }
     let mode = match mode {
@@ -290,13 +290,14 @@ pub(super) fn add_plan(
     )
     .map_err(error)?;
     assert!(adding(&tx)?);
+    assert!(!another_add_running(&tx, request)?);
     tx.commit().map_err(error)?;
     Ok(plan)
 }
 
 /// Checks an AddExistingFolder before an intake job downloads its folder: the refusals of
 /// [`add_plan`] that read nothing inside the folder ([`home::check_add`], the pending home
-/// move, an unset home, a destination a running add holds), with no revision check and no
+/// move, an unset home, another running add), with no revision check and no
 /// `projects_home_add` row written. Inputs: the connection, database path, owner admission,
 /// the job's request, source, mode and overrides. Output: Ok, or the refusal code.
 #[allow(clippy::too_many_arguments)]
@@ -317,7 +318,7 @@ pub(super) fn add_check(
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
     let root = engine_root(path)?;
     let plan = home::check_add(&saved, &root, source, mode, overrides, &guarded(&tx)?)?;
-    if destination_held(&tx, plan.destination(), request)? {
+    if another_add_running(&tx, request)? {
         return Err(error("home_add_in_progress"));
     }
     assert!(plan.destination().starts_with(&saved));
@@ -325,24 +326,22 @@ pub(super) fn add_check(
     tx.rollback().map_err(error)
 }
 
-/// Whether a running add other than `request` planned `destination`. Two adds of folders
-/// with the same name both find it free on disk until one lands, and an engine start reads
-/// each cut add's end from that one folder, so only one may plan it. Inputs: the connection,
-/// the destination and the asking add's request. Output: the answer.
-fn destination_held(
-    db: &Connection,
-    destination: &Path,
-    request: &RequestId,
-) -> Result<bool, EngineError> {
-    assert!(destination.is_absolute());
+/// Whether an add other than `request` is running. One add runs at a time: two adds find a
+/// destination free on disk until one lands, an engine start reads each cut add's end from
+/// its destination folder, and names the volume treats as one folder (case, Unicode form)
+/// differ as text. The asking add's own row, as a resend finds it, does not count. Inputs:
+/// the connection and the asking add's request. Output: the answer.
+fn another_add_running(db: &Connection, request: &RequestId) -> Result<bool, EngineError> {
     assert!(!request.as_str().is_empty());
-    db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM projects_home_add
-         WHERE ended IS NULL AND destination=?1 AND request<>?2)",
-        params![text(destination)?, request.as_str()],
-        |row| row.get(0),
-    )
-    .map_err(error)
+    let running: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects_home_add WHERE ended IS NULL AND request<>?1)",
+            [request.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    assert!(!running || adding(db)?);
+    Ok(running)
 }
 
 /// Whether an add is running: planned, and neither recorded nor settled yet. While one runs
@@ -356,8 +355,8 @@ fn adding(db: &Connection) -> Result<bool, EngineError> {
     .map_err(error)
 }
 
-/// The most running adds one engine start reads; an engine runs one per deferred owner
-/// request and its one intake job.
+/// The most running adds one engine start reads; planning admits one running add at a time
+/// ([`another_add_running`]), and the bound holds for any other rows the table has.
 const ADDS_MAX: usize = 64;
 
 /// How an add a record never reached is settled. With a request (after its exchange

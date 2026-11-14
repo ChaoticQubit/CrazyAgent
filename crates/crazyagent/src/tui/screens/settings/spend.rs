@@ -12,7 +12,8 @@ use crate::tui::text::{styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::buttons;
 use crate::usage::spend::{
-    AllLimited, AttemptState, LimitedPool, SpendAttempt, SpendConfirm, SpendSettings, SpendView,
+    AllLimited, AttemptState, LimitedPool, ResetsSource, SpendAttempt, SpendConfirm, SpendSettings,
+    SpendView,
 };
 use ratatui::text::Line;
 use std::collections::HashMap;
@@ -105,6 +106,40 @@ pub(in crate::tui) fn next_all_limited(value: AllLimited) -> AllLimited {
         AllLimited::Notice => AllLimited::NoHint,
         AllLimited::NoHint => AllLimited::AutoSpend,
         AllLimited::AutoSpend => AllLimited::Notice,
+    }
+}
+
+/// The words of a Claude free resets source. Input: the source. Output: the words.
+pub(in crate::tui) fn resets_source_words(value: ResetsSource) -> &'static str {
+    match value {
+        ResetsSource::ThroughClaudeCode => "Through Claude Code",
+        ResetsSource::AsClaudeCode => "As Claude Code",
+        ResetsSource::Off => "Don't read",
+    }
+}
+
+/// The help line of a Claude free resets source, the desktop's words. Input: the source.
+/// Output: the sentence.
+pub(in crate::tui) fn resets_source_help(value: ResetsSource) -> &'static str {
+    match value {
+        ResetsSource::ThroughClaudeCode => {
+            "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code."
+        }
+        ResetsSource::AsClaudeCode => {
+            "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks."
+        }
+        ResetsSource::Off => {
+            "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings."
+        }
+    }
+}
+
+/// The next Claude free resets source, wrapping. Input: the source. Output: the next.
+pub(in crate::tui) fn next_resets_source(value: ResetsSource) -> ResetsSource {
+    match value {
+        ResetsSource::ThroughClaudeCode => ResetsSource::AsClaudeCode,
+        ResetsSource::AsClaudeCode => ResetsSource::Off,
+        ResetsSource::Off => ResetsSource::ThroughClaudeCode,
     }
 }
 
@@ -292,7 +327,11 @@ impl Spend {
         if self.view.is_none() {
             return Vec::new();
         }
-        let mut hints = vec![hint("c", "Spend confirmation"), hint("l", "When limited")];
+        let mut hints = vec![
+            hint("c", "Spend confirmation"),
+            hint("l", "When limited"),
+            hint("f", "Claude resets"),
+        ];
         if self.target(ctx).is_some() {
             hints.push(hint("u", "Use a free reset"));
         }
@@ -304,7 +343,7 @@ impl Spend {
         self.asking.is_some()
     }
 
-    /// Handles this part's keys: c and l step a setting and store it, u uses a free reset
+    /// Handles this part's keys: c, l and f step a setting and store it, u uses a free reset
     /// (asking first under Confirm each), and the confirm's own keys. Inputs: the key and the
     /// context. Output: Handled, or Ignored for a key this part does not take.
     pub(in crate::tui) fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -343,6 +382,13 @@ impl Spend {
                 ctx,
                 SettingsJob::SetSpend(SpendSettings {
                     all_limited: next_all_limited(settings.all_limited),
+                    ..settings
+                }),
+            ),
+            Key::Char('f') => send(
+                ctx,
+                SettingsJob::SetSpend(SpendSettings {
+                    resets_source: next_resets_source(settings.resets_source),
                     ..settings
                 }),
             ),
@@ -440,8 +486,8 @@ impl Spend {
         ))
     }
 
-    /// The Free resets block under the pools once the spend view is read: both settings with
-    /// their help, the limited pool notices and the latest spend of each account they name.
+    /// The Free resets block under the pools once the spend view is read: the three settings
+    /// with their help, the limited pool notices and the latest spend of each account they name.
     /// Inputs: the context and the width. Output: the lines, none before the first read.
     pub(in crate::tui) fn lines(&self, ctx: &Ctx, limit: usize) -> Vec<Line<'static>> {
         let Some(view) = &self.view else {
@@ -466,6 +512,14 @@ impl Spend {
                 "When every pool account is limited (l): {}. {}",
                 all_limited_words(settings.all_limited),
                 all_limited_help(settings)
+            ),
+            &mut lines,
+        );
+        say(
+            format!(
+                "Claude free resets (f): {}. {}",
+                resets_source_words(settings.resets_source),
+                resets_source_help(settings.resets_source)
             ),
             &mut lines,
         );

@@ -479,3 +479,27 @@ fn shared_screen_decoder_preserves_terminal_cells() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn tui_speed_row_reads_screens_and_names_its_times() {
+    let output = crazyagent::spawn_gate::output(
+        Command::new("python3")
+            .env_remove("PYTHONOPTIMIZE")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/qualification/test_tui_speed.py"
+            ))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("tui_speed_checks=7"),
+        "{}\n{}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

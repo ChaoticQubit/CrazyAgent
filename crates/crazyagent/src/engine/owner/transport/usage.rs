@@ -223,8 +223,8 @@ impl OwnerClient {
         }
     }
 
-    /// Stores the owner's spend settings: Spend confirmation and When every pool account is
-    /// limited. Input: the settings. Output: done.
+    /// Stores the owner's spend settings: Spend confirmation, When every pool account is
+    /// limited and Claude free resets. Input: the settings. Output: done.
     pub async fn usage_set_spend(&self, settings: SpendSettings) -> Result<(), EngineError> {
         match self.usage_exchange(Action::SetSpend { settings }).await? {
             Reply::Done => Ok(()),
@@ -400,13 +400,14 @@ async fn prepare(
                 let mut db = usage::open(&read)?;
                 let snapshot = db.transaction().map_err(|_| failure("usage_unavailable"))?;
                 let now = crate::team::now_ms();
+                let source = usage::spend::read(&snapshot)?.resets_source;
                 connections
                     .iter()
                     .map(|connection| {
                         let stored = usage::extras::extras_of(&snapshot, &connection.id, now)?;
                         Ok(AccountExtras {
                             account: connection.id.clone(),
-                            extras: usage::extras::limit_extras(connection, &stored),
+                            extras: usage::extras::limit_extras(connection, &stored, source),
                         })
                     })
                     .collect::<Result<Vec<_>, EngineError>>()
@@ -581,6 +582,7 @@ mod extras_request_tests {
                 resets_checked_ms: Some(i64::MAX),
                 credits_checked_ms: Some(i64::MAX),
                 resets_gained_ms: Some(i64::MAX),
+                resets_unread: None,
             },
         };
         let accounts = (0..EXTRAS_ACCOUNTS_MAX).map(entry).collect::<Vec<_>>();

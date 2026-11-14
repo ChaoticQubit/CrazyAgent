@@ -646,6 +646,7 @@ impl NativeBridge {
             OwnerMutation::SetSandboxSettings { .. } => ("sandbox_settings", None, None),
             OwnerMutation::SetCleanupSettings { .. } => ("cleanup_settings", None, None),
             OwnerMutation::SetQuitSettings { .. } => ("quit_settings", None, None),
+            OwnerMutation::SetProviderRetry { .. } => ("provider_retry", None, None),
             OwnerMutation::SetMasterStepSettings { .. } => ("master_step_settings", None, None),
             OwnerMutation::SetMasterTimeSettings { .. } => ("master_time_settings", None, None),
             OwnerMutation::SetMasterFrameSettings { .. } => ("master_frame_settings", None, None),

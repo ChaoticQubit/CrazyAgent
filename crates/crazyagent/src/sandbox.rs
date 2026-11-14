@@ -1992,8 +1992,10 @@ impl ProjectSandbox {
         let pattern = seatbelt_pattern(root);
         let mut text = format!("{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{pattern}/\")");
         let names: Vec<String> = open.iter().map(|name| regex_escape(name)).collect();
-        for body in regex_bodies(&format!("^{pattern}/"), &names, "(/.*)?$") {
-            text.push_str(&format!("\n    (require-not (regex #\"{body}\"))"));
+        for suffix in ["$", "/"] {
+            for body in regex_bodies(&format!("^{pattern}/"), &names, suffix) {
+                text.push_str(&format!("\n    (require-not (regex #\"{body}\"))"));
+            }
         }
         for own in self.writable_roots().filter(|own| {
             own.starts_with(root) && own.as_path() != root.as_path() && clean_absolute(own)
@@ -3918,17 +3920,17 @@ fn launch_denies(home: &Path) -> String {
     for file in files {
         text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
     }
+    let system = any_case(crate::launch_context::CODEX_SYSTEM_SKILLS);
     text.push_str(&format!(
-        "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n(deny file-write-flags (regex #\"^{skills}/{}(/.*)?$\"))\n",
-        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS),
-        any_case(crate::launch_context::CODEX_SYSTEM_SKILLS)
+        "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n(deny file-write-flags\n  (regex #\"^{skills}/{system}$\")\n  (regex #\"^{skills}/{system}/\"))\n",
+        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
     ));
     let library = format!("{home}/{}", any_case("Library"));
     let preferences = format!("{library}/{}", any_case("Preferences"));
     text.push_str(&format!(
         "(deny {PINNED_WRITES}\n  (regex #\"^{library}$\")\n  (regex #\"^{preferences}$\"))\n(deny file-write-create\n  (require-all\n    (require-any\n      (regex #\"^{library}$\")\n      (regex #\"^{preferences}$\"))\n    (vnode-type SYMLINK)))\n"
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 21);
+    assert_eq!(text.matches("(regex #\"^/").count(), 22);
     text
 }
 

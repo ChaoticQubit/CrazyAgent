@@ -394,6 +394,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   sandbox_settings: "changing the sandbox setting",
   cleanup_settings: "changing when finished agents' worktrees go",
   quit_settings: "changing what quitting does to team agents",
+  provider_retry: "changing what harnesses do when a model provider can't be reached",
   master_step_settings: "changing the master step limit",
   master_time_settings: "changing the master time limit",
   master_frame_settings: "changing the master frame size limit",
@@ -529,6 +530,38 @@ export function getQuitSettings(): Promise<Result<QuitSettings>> {
 /** Saves what quitting does to team agents. Input: the full setting. Output: ok once saved. */
 export function saveQuitSettings(settings: QuitSettings): Promise<Result<void>> {
   return change("desktop_set_quit_settings", { settings, generation: nextGeneration() });
+}
+
+/** What harnesses do when a model provider fails, the engine's `ProviderRetry` (DEC-163). */
+export type ProviderRetry = "stop_at_once" | "retry_briefly" | "harness_default";
+
+/** One harness kind as the engine's settings name it, the engine's `HarnessKind`. */
+export type RetryHarness = "claude-code" | "codex" | "rcli";
+
+/** The engine's line for one option and one harness, saying what the option does to it. */
+export interface RetryNote {
+  option: ProviderRetry;
+  harness: RetryHarness;
+  line: string;
+}
+
+/** The owner's read of the setting, the engine's `ProviderRetryView`: the chosen option and
+ * the engine's line for every option and harness. */
+export interface ProviderRetryView {
+  choice: ProviderRetry;
+  notes: RetryNote[];
+}
+
+/** Reads what harnesses do when a model provider can't be reached. Output: the view, with
+ * Retry briefly chosen before the first save. */
+export function getProviderRetry(): Promise<Result<ProviderRetryView>> {
+  return call<ProviderRetryView>("desktop_provider_retry");
+}
+
+/** Saves what harnesses do when a model provider can't be reached. Input: the option.
+ * Output: ok once saved. */
+export function saveProviderRetry(choice: ProviderRetry): Promise<Result<void>> {
+  return change("desktop_set_provider_retry", { choice, generation: nextGeneration() });
 }
 
 /** The most steps a master takes in one turn, the engine's `StepLimit`. */

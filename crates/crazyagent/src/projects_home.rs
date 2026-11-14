@@ -477,8 +477,9 @@ pub fn same_volume(folder: &Path, home: &Path) -> Option<bool> {
 /// a project uses, and a Copy of a folder that is itself a linked worktree or
 /// submodule checkout. Each override lifts exactly one soft refusal for this add:
 /// `worktrees` the git worktree links, `linked_checkout` the linked checkout, and
-/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`]. The git worktree links
-/// are checked last, after every refusal of [`check_add`].
+/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`]. A Copy's linked checkout
+/// is checked again and a Move's git worktree links last, after every refusal of
+/// [`check_add`], so a source still only in iCloud is not copied or moved past them.
 pub fn plan_add(
     home: &Path,
     engine_root: &Path,
@@ -488,6 +489,9 @@ pub fn plan_add(
     registered: &[Registered],
 ) -> Result<AddPlan, EngineError> {
     let plan = check_add(home, engine_root, source, mode, overrides, registered)?;
+    if copy_linked(plan.source(), mode, overrides) {
+        return Err(refused("home_copy_linked_checkout"));
+    }
     let asked_past = overrides.contains(&AddOverride::Worktrees);
     if mode == AddMode::Move && !asked_past && git_links(plan.source()) {
         return Err(refused("home_move_worktrees"));
@@ -499,9 +503,11 @@ pub fn plan_add(
 
 /// Checks bringing an existing folder into the projects home without reading inside it, so
 /// it can run before the folder's iCloud files are on this Mac: every refusal of
-/// [`plan_add`] but a Move's git worktree links, which reads the folder's git data. It reads
-/// only the source's own path, its `.git` entry's type and the home. Inputs: as
-/// [`plan_add`]. Output: the plan, or the refusal.
+/// [`plan_add`] but a Move's git worktree links, which reads the folder's git data, and a
+/// Copy's linked checkout of a source that is itself an iCloud placeholder, whose entries
+/// only its download can read. It reads only the source's own path and metadata, its `.git`
+/// entry's type otherwise, and the home. Inputs: as [`plan_add`]. Output: the plan, or the
+/// refusal.
 pub fn check_add(
     home: &Path,
     engine_root: &Path,
@@ -535,10 +541,9 @@ pub fn check_add(
     if mode == AddMode::Move && registered.iter().any(|project| in_use(&real, project)) {
         return Err(refused("home_move_project"));
     }
-    if mode == AddMode::Copy
-        && !overrides.contains(&AddOverride::LinkedCheckout)
-        && linked_checkout(&real)
-    {
+    let top = std::fs::symlink_metadata(&real);
+    let placeholder = top.is_ok_and(|metadata| icloud::dataless(&metadata));
+    if !placeholder && copy_linked(&real, mode, overrides) {
         return Err(refused("home_copy_linked_checkout"));
     }
     let bounds = add_bounds(overrides);
@@ -546,6 +551,15 @@ pub fn check_add(
     assert!(real.is_absolute());
     assert!(!destination.starts_with(&real));
     Ok(AddPlan::new(real, destination, mode, bounds))
+}
+
+/// True when a Copy of `folder` is refused as a [`linked_checkout`] the owner did not go
+/// past. Inputs: the real folder, the mode and the add's overrides. Output: the answer.
+fn copy_linked(folder: &Path, mode: AddMode, overrides: &[AddOverride]) -> bool {
+    assert!(folder.is_absolute());
+    let asked_past = overrides.contains(&AddOverride::LinkedCheckout);
+    assert!(!asked_past || mode == AddMode::Copy);
+    mode == AddMode::Copy && !asked_past && linked_checkout(folder)
 }
 
 /// The bounds an add's download listing and copy work within: [`FORCED_COPY_BOUNDS`] once

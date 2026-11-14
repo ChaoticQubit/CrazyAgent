@@ -204,6 +204,8 @@ fn main() {
         "desktop_set_cleanup_settings",
         "desktop_quit_settings",
         "desktop_set_quit_settings",
+        "desktop_provider_retry",
+        "desktop_set_provider_retry",
         "desktop_learning_progress",
         "desktop_set_learning_mark",
         "desktop_master_step_settings",

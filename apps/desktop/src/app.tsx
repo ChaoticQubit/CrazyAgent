@@ -233,6 +233,17 @@ export const ALERT_READ_MS = 10_000;
 
 const NONE_WORKING: ReadonlyMap<string, number> = new Map();
 
+/** Keeps the map shown when a look reads the same counts, so a look that changed nothing never
+ * renders the app's tree again (React skips a state set to the same object). Inputs: the map
+ * shown and the one read now. Output: the map to keep. */
+export function sameOrNext<M extends ReadonlyMap<string, number>>(shown: M, next: M): M {
+  if (shown.size !== next.size) return next;
+  for (const [key, value] of next) {
+    if (shown.get(key) !== value) return next;
+  }
+  return shown;
+}
+
 /** What the sidebar shows from the team alert read: each project's flag count and its agents
  * at work. */
 export interface TeamAlerts {
@@ -273,8 +284,9 @@ export function useTeamAlerts(running: boolean, showToast: (message: string, ope
         last = next.last;
         const flags = withPendingQuestions(unseenByProject(result.value), unseenQuestionAlerts(result.value.projects), pending);
         const total = [...flags.values()].reduce((sum, count) => sum + count, 0);
-        setCounts(flags);
-        setWorking(workingByProject(result.value));
+        const busy = workingByProject(result.value);
+        setCounts((shown) => sameOrNext(shown, flags));
+        setWorking((shown) => sameOrNext(shown, busy));
         if (next.fresh[0]) toast.current(displayText(next.fresh[0].text), alertRoute(next.fresh[0]));
         if (next.fresh.length > 0 || total !== shown) void teamAttention(total, next.fresh.length > 0);
         shown = total;
