@@ -23,9 +23,9 @@ const APP = "How every pool picks an account";
 const POOL_ORDER = "Account order";
 const SOURCE = "Claude free resets";
 const SOURCE_HELP = {
-  through_claude_code: "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code.",
-  as_claude_code: "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks.",
-  off: "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings.",
+  through_claude_code: "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts.",
+  as_claude_code: "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts.",
+  off: "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings. Don't read is the default.",
 };
 const USAGE = [[ALPHA, 20, 6 * DAY_MS], [BRAVO, 60, DAY_MS], [CHARLIE, 40, 3 * DAY_MS]];
 const WHY = {
@@ -342,7 +342,22 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     assert.deepEqual(found.accounts.at(-1), { connection: ids[SIERRA], standing: { kind: "not_signed_in" } });
   });
 
-  it("each row ends with its free resets and credits line in the engine's words, and a new free reset is told once (DEC-154)", async () => {
+  it("Claude free resets on a fresh install: Don't read is picked as the default, the Claude row says off in Settings and a count found there is forgotten (owner answer 2026-11-14)", async () => {
+    assert.equal(await picked(SOURCE), "Don't read");
+    assert.equal((await poolSettings()).resets_source, "off");
+    await until(async () => (await texts("main .set-help")).some((line) => line.includes(SOURCE_HELP.off)), UI_MS, "the default's help line was not shown");
+    assert.equal((await command("desktop_usage_extras", { detail: false })).find((row) => row.account === ids[SIERRA]).extras.resets_unread, "off");
+    seedResets(SIERRA, 2);
+    const off = "Free resets: off in Settings \u00b7 Credits: not reported by Claude Code";
+    await until(async () => (await rowExtras())[SIERRA] === off, 75_000, "the Claude row did not say off in Settings");
+    await until(async () => storedCount(SIERRA) === null, 75_000, "the engine kept a Claude count under the default Don't read");
+    assert.ok(!(await toasts()).some((line) => line.startsWith(`${SIERRA} has a new free reset`)), "a count read under Don't read is never told");
+    await shot("pools-resets-default-dont-read");
+  });
+
+  it("each row ends with its free resets and credits line in the engine's words, and a new free reset is told once, with Through Claude Code picked (DEC-154)", async () => {
+    await click(option(SOURCE, "Through Claude Code"));
+    await until(async () => (await poolSettings()).resets_source === "through_claude_code", UI_MS, "the engine did not keep Through Claude Code");
     const read = new Map((await command("desktop_usage_extras", { detail: false })).map((row) => [row.account, row.extras]));
     for (const name of [ALPHA, BRAVO, CHARLIE, SIERRA]) assert.ok(read.has(ids[name]), `the engine answers ${name}`);
     const url = read.get(ids[ALPHA]);
@@ -374,10 +389,11 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     assert.equal((await command("desktop_usage_extras", { detail: false })).find((row) => row.account === ids[SIERRA]).extras.resets_unread, null);
   });
 
-  it("Claude free resets, Through Claude Code: the default says it asks as Claude Code, and a read Anthropic answers only to Claude Code says so (DEC-154 addendum)", async () => {
+  it("Claude free resets, Through Claude Code: the engine keeps it, its help line says it asks as Claude Code at the accounts' risk, and a read Anthropic answers only to Claude Code says so (DEC-154 addendum)", async () => {
+    await click(option(SOURCE, "Through Claude Code"));
+    await until(async () => (await poolSettings()).resets_source === "through_claude_code", UI_MS, "the engine did not keep Through Claude Code");
     assert.equal(await picked(SOURCE), "Through Claude Code");
-    assert.equal((await poolSettings()).resets_source, "through_claude_code");
-    await until(async () => (await texts("main .set-help")).some((line) => line.includes(SOURCE_HELP.through_claude_code)), UI_MS, "the default's help line was not shown");
+    await until(async () => (await texts("main .set-help")).some((line) => line.includes(SOURCE_HELP.through_claude_code)), UI_MS, "the Through Claude Code help line was not shown");
     seedUnread(SIERRA, "cli_version");
     const asker = "Free resets: couldn't read (Anthropic answers only Claude Code) \u00b7 Credits: not reported by Claude Code";
     await until(async () => (await rowExtras())[SIERRA] === asker, 75_000, "the Claude row did not say Anthropic answers only Claude Code");
@@ -385,7 +401,7 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     await shot("pools-resets-through-claude-code");
   });
 
-  it("Claude free resets, As Claude Code: the engine keeps it, its help line says how it asks, and a read with no reason says so (DEC-154 addendum)", async () => {
+  it("Claude free resets, As Claude Code: the engine keeps it, its help line says how it asks at the accounts' risk, and a read with no reason says so (DEC-154 addendum)", async () => {
     await click(option(SOURCE, "As Claude Code"));
     await until(async () => (await poolSettings()).resets_source === "as_claude_code", UI_MS, "the engine did not keep As Claude Code");
     assert.equal(await picked(SOURCE), "As Claude Code");
@@ -407,9 +423,8 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     await until(async () => storedCount(SIERRA) === null, 75_000, "the engine kept the old Claude count under Don't read");
     const after = await rowExtras();
     for (const name of [ALPHA, BRAVO, CHARLIE]) assert.equal(after[name], before[name], `${name} keeps its line`);
+    assert.equal(await picked(SOURCE), "Don't read");
     await shot("pools-resets-dont-read");
-    await click(option(SOURCE, "Through Claude Code"));
-    await until(async () => (await poolSettings()).resets_source === "through_claude_code", UI_MS, "the engine did not go back to the default");
   });
 
   for (const key of ["balanced", "manual", "use"]) {

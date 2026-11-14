@@ -547,6 +547,53 @@ fn each_claude_free_resets_source_picks_the_detail_user_agent_or_none() {
     assert_eq!(detail_agent(ResetsSource::Off, None), None);
 }
 
+/// A fresh install stores no Claude free resets source, so the engine reads Don't read
+/// (owner answer 2026-11-14): a step with the detail reads due never asks Claude Code its
+/// version, so no detail call names it, while a stored Through Claude Code asks it on the
+/// next due step.
+#[cfg(unix)]
+#[test]
+fn a_fresh_install_reads_dont_read_and_a_due_step_makes_no_detail_call() {
+    use super::spend::{ResetsSource, SpendSettings};
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let team = root.path().join("team");
+    std::fs::create_dir(&team).unwrap();
+    let claude = root.path().join("claude");
+    let runs = root.path().join("runs");
+    let script = format!(
+        "#!/bin/sh\necho x >> '{}'\necho '2.1.330 (Claude Code)'\n",
+        runs.display()
+    );
+    std::fs::write(&claude, script).unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ran = || std::fs::read_to_string(&runs).map_or(0, |text| text.lines().count());
+    let mut usage = Usage::open(
+        &root.path().join("engine.db"),
+        &team,
+        Box::new(|| None),
+        BTreeMap::from([("claude-code", claude.clone())]),
+    )
+    .unwrap();
+    let fresh = spend::read(&usage.db).unwrap().resets_source;
+    assert_eq!(fresh, ResetsSource::Off);
+    assert_eq!(detail_agent(fresh, Some("2.1.330")), None);
+    extras::request_detail(&usage.db, NOW).unwrap();
+    usage.step(NOW).unwrap();
+    assert_eq!(usage.detail_ms, Some(NOW), "the detail reads were due");
+    assert_eq!(ran(), 0, "Don't read asks Claude Code nothing");
+    let stored = SpendSettings {
+        resets_source: ResetsSource::ThroughClaudeCode,
+        ..spend::read(&usage.db).unwrap()
+    };
+    spend::write(&usage.db, stored).unwrap();
+    let later = NOW + POLL_EVERY_MS;
+    extras::request_detail(&usage.db, later).unwrap();
+    usage.step(later).unwrap();
+    assert_eq!(usage.detail_ms, Some(later));
+    assert_eq!(ran(), 1, "a stored Through Claude Code asks it");
+}
+
 /// "Don't read" forgets the stored free resets of every Claude account and only those, so
 /// spend and the limited pool notice never act on an old count.
 #[test]

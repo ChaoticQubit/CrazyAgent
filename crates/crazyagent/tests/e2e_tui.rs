@@ -2030,15 +2030,38 @@ fn kept_source(engine: &Engine) -> crazyagent::usage::spend::ResetsSource {
         })
 }
 
-/// Through Claude Code (the default, DEC-154 addendum): Pools says CrazyAgent asks Claude
-/// Code first and, while Claude Code can't report free resets, asks Anthropic as Claude Code.
+/// A fresh install (owner answer 2026-11-14): Pools says Don't read is the default, and the
+/// engine reads Claude free resets as Don't read with nothing stored.
 #[test]
-fn the_tui_reads_claude_free_resets_through_claude_code_by_default() {
-    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-through-");
-    pty.until("the default names itself and how it asks", |screen| {
-        flat(screen).contains("Claude free resets (f): Through Claude Code.")
-            && flat(screen).contains("asks Anthropic as Claude Code.")
+fn the_tui_reads_claude_free_resets_dont_read_by_default() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-default-");
+    pty.until("the default names itself and what it does", |screen| {
+        flat(screen).contains("Claude free resets (f): Don't read.")
+            && flat(screen).contains("Claude accounts say off in Settings.")
+            && flat(screen).contains("Don't read is the default.")
     });
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::Off
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// Through Claude Code (DEC-154 addendum): f saves it in the engine, and Pools says
+/// CrazyAgent asks Anthropic as Claude Code, which Anthropic may treat as against its terms.
+#[test]
+fn the_tui_saves_claude_free_resets_through_claude_code() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-through-");
+    pty.keys(&["f"]);
+    pty.until(
+        "f saves Through Claude Code and says how it asks and the risk",
+        |screen| {
+            flat(screen).contains("Claude free resets (f): Through Claude Code.")
+                && flat(screen).contains("asks Anthropic as Claude Code")
+                && flat(screen).contains("Anthropic may treat this as against its terms")
+        },
+    );
     assert_eq!(
         kept_source(&engine),
         crazyagent::usage::spend::ResetsSource::ThroughClaudeCode
@@ -2047,16 +2070,25 @@ fn the_tui_reads_claude_free_resets_through_claude_code_by_default() {
     engine.stop();
 }
 
-/// As Claude Code (DEC-154 addendum): f saves it in the engine, and Pools says CrazyAgent
-/// asks the way Claude Code itself asks.
+/// As Claude Code (DEC-154 addendum): f twice saves it in the engine, and Pools says
+/// CrazyAgent asks the way Claude Code itself asks, which Anthropic may treat as against its
+/// terms.
 #[test]
 fn the_tui_saves_claude_free_resets_as_claude_code() {
     let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-as-");
     pty.keys(&["f"]);
-    pty.until("f saves As Claude Code and says how it asks", |screen| {
-        flat(screen).contains("Claude free resets (f): As Claude Code.")
-            && flat(screen).contains("the way Claude Code itself asks.")
+    pty.until("the first f saves Through Claude Code", |screen| {
+        flat(screen).contains("Claude free resets (f): Through Claude Code.")
     });
+    pty.keys(&["f"]);
+    pty.until(
+        "the second f saves As Claude Code and says how it asks and the risk",
+        |screen| {
+            flat(screen).contains("Claude free resets (f): As Claude Code.")
+                && flat(screen).contains("the way Claude Code itself asks.")
+                && flat(screen).contains("Anthropic may treat this as against its terms")
+        },
+    );
     assert_eq!(
         kept_source(&engine),
         crazyagent::usage::spend::ResetsSource::AsClaudeCode
@@ -2065,18 +2097,27 @@ fn the_tui_saves_claude_free_resets_as_claude_code() {
     engine.stop();
 }
 
-/// Don't read (DEC-154 addendum): f twice saves it in the engine, and Pools says Claude
-/// accounts say off in Settings.
+/// Don't read (DEC-154 addendum): from As Claude Code, f saves it in the engine again, and
+/// Pools says Claude accounts say off in Settings. The row leaves Don't read and comes back,
+/// so the engine's Off is a stored choice, not the empty store's default.
 #[test]
 fn the_tui_saves_claude_free_resets_dont_read() {
     let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-off-");
     pty.keys(&["f"]);
-    pty.until("the first f saves As Claude Code", |screen| {
-        flat(screen).contains("Claude free resets (f): As Claude Code.")
+    pty.until("the first f saves Through Claude Code", |screen| {
+        flat(screen).contains("Claude free resets (f): Through Claude Code.")
     });
     pty.keys(&["f"]);
+    pty.until("the second f saves As Claude Code", |screen| {
+        flat(screen).contains("Claude free resets (f): As Claude Code.")
+    });
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::AsClaudeCode
+    );
+    pty.keys(&["f"]);
     pty.until(
-        "the second f saves Don't read and says what it does",
+        "the third f saves Don't read and says what it does",
         |screen| {
             flat(screen).contains("Claude free resets (f): Don't read.")
                 && flat(screen).contains("Claude accounts say off in Settings.")
