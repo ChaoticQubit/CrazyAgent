@@ -1408,6 +1408,166 @@ async fn an_add_is_refused_the_destination_a_running_add_planned() {
     engine.stop().await;
 }
 
+/// One add runs at a time, so two names a volume treats as one folder (case or Unicode form)
+/// never both plan it: any other folder is refused while the first add copies, and is added
+/// once that add ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_add_runs_at_a_time_whatever_the_other_folder_is_named() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let first = place.join("sources/site");
+    let (cased, unlike) = (place.join("other/Site"), place.join("other/notes"));
+    fs::create_dir(&home).unwrap();
+    tree(&first, 100, 100);
+    tree(&cased, 2, 2);
+    tree(&unlike, 2, 2);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(id("intake-site"), text(&first), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    let mut other = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    for (source, what) in [(&cased, "a name only its case sets apart"), (&unlike, "another")] {
+        assert_eq!(
+            other.apply(add(source, AddMode::Copy)).await,
+            rejected("home_add_in_progress"),
+            "{what} while the first add copies"
+        );
+    }
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    assert_eq!(
+        other.apply(add(&unlike, AddMode::Copy)).await,
+        OwnerResult::Applied,
+        "another folder once the first add ended"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("notes/p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    assert_eq!(
+        fs::read_to_string(cased.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    engine.stop().await;
+}
+
+/// An intake job that starts while a direct add copies ends `home_add_in_progress` before
+/// its download, with its folder kept and nothing of it in the home; the direct add lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_ends_home_add_in_progress_while_a_direct_add_copies() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let (big, small) = (place.join("sources/big"), place.join("sources/small"));
+    fs::create_dir(&home).unwrap();
+    tree(&big, 100, 100);
+    tree(&small, 2, 2);
+    let engine = Engine::start().await;
+    let mut owner = homed(&engine, &home).await;
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    owner
+        .controller
+        .begin_mutation(add(&big, AddMode::Copy), owner.generation + 1)
+        .unwrap();
+    let mut first = owner.controller;
+    let running = tokio::spawn(async move { first.send_pending().await });
+    let started = Instant::now();
+    while !staging(&home) {
+        assert!(!running.is_finished(), "the copy ended before it was seen");
+        assert!(started.elapsed() < Duration::from_secs(20), "no copy");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let watcher = engine.owner().await;
+    assert_eq!(
+        ended(&watcher, "intake-small", &small, AddMode::Copy).await,
+        JobState::Failed {
+            code: "home_add_in_progress".into(),
+            phase: Phase::Downloading,
+        },
+        "a job while a direct add copies"
+    );
+    let answered = running.await.unwrap().unwrap();
+    assert!(
+        matches!(&answered, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied),
+        "{answered:?}"
+    );
+    assert!(!home.join("small").exists(), "no copy of the refused folder");
+    assert_eq!(
+        fs::read_to_string(small.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("big/p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    engine.stop().await;
+}
+
+/// An add's own running row, as a resend of its request finds it, does not hold its plan;
+/// another add's running row does, whatever destination it planned.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_plans_over_its_own_running_row_but_not_over_another_add() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let source = place.join("sources/site");
+    fs::create_dir(&home).unwrap();
+    tree(&source, 2, 2);
+    let engine = Engine::start().await;
+    let mut owner = homed(&engine, &home).await;
+    let database = engine.root.path().join("engine.db");
+    let running = |request: &str, name: &str| {
+        format!(
+            "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+             VALUES ('{request}', 'owner', '{}', '{}', 'copy');",
+            text(&source),
+            text(&home.join(name))
+        )
+    };
+    sql(&database, &running("add-other", "elsewhere"));
+    assert_eq!(
+        owner.apply(add(&source, AddMode::Copy)).await,
+        rejected("home_add_in_progress"),
+        "another add runs"
+    );
+    sql(&database, "DELETE FROM projects_home_add WHERE request='add-other';");
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    owner.generation += 1;
+    let pending = owner
+        .controller
+        .begin_mutation(add(&source, AddMode::Copy), owner.generation)
+        .unwrap();
+    let own = pending.request().request_id.as_str().to_owned();
+    sql(&database, &running(&own, "site"));
+    let answered = owner.controller.send_pending().await.unwrap();
+    assert!(
+        matches!(&answered, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied),
+        "{answered:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("site/p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    engine.stop().await;
+}
+
 /// Makes a source folder `name` under `place` whose folders nest one level past the copy
 /// depth bound, so a download's listing of it refuses `home_copy_too_large` at once.
 /// Output: the source folder.
@@ -1736,5 +1896,64 @@ async fn an_intake_job_downloads_a_real_icloud_folder_with_moving_counts_and_cop
         start.elapsed()
     );
     assert!(files > 0);
+    engine.stop().await;
+}
+
+/// Turns off macOS's fetch of iCloud placeholders for this whole test process, as a launchd
+/// agent runs: a lookup inside a placeholder folder then fails with EDEADLK instead of
+/// downloading it. It holds for the life of the process, so the row that calls it runs alone.
+#[cfg(target_os = "macos")]
+fn no_icloud_fetch() {
+    use libc::c_int;
+    const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: c_int = 3;
+    const IOPOL_SCOPE_PROCESS: c_int = 0;
+    const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: c_int = 1;
+    unsafe extern "C" {
+        fn setiopolicy_np(kind: c_int, scope: c_int, policy: c_int) -> c_int;
+    }
+    let off = IOPOL_MATERIALIZE_DATALESS_FILES_OFF;
+    let kind = IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES;
+    let set = unsafe { setiopolicy_np(kind, IOPOL_SCOPE_PROCESS, off) };
+    assert_eq!(set, 0, "{}", std::io::Error::last_os_error());
+}
+
+/// Copies a real evicted iCloud Drive folder that is itself a placeholder while the engine may
+/// not fetch from iCloud, as the launchd agent may not: the check before the download does not
+/// look up `.git` inside it, so a plain folder is not asked about as a linked checkout, and the
+/// job lands the copy. The folder is named in `CRAZYAGENT_ICLOUD_SCRATCH`, holds no `.git` file
+/// and is evicted first with `brctl evict`; run by hand and alone.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an evicted folder of iCloud Drive named in CRAZYAGENT_ICLOUD_SCRATCH"]
+async fn an_evicted_icloud_folder_is_not_asked_about_a_linked_checkout_before_its_download() {
+    use crazyagent::projects_home::{icloud::dataless, linked_checkout};
+    let source = PathBuf::from(std::env::var_os("CRAZYAGENT_ICLOUD_SCRATCH").unwrap());
+    let top = fs::symlink_metadata(&source).unwrap();
+    assert!(dataless(&top), "evict {} first", source.display());
+    no_icloud_fetch();
+    let disk = tempfile::tempdir().unwrap();
+    let home = disk.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    let copy = AddMode::Copy;
+    client
+        .intake_start(id("intake-evicted"), text(&source), copy, Vec::new())
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let ended = loop {
+        let job = client.intake_status().await.unwrap().expect("a job");
+        match &job.state {
+            JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing => {}
+            _ => break job,
+        }
+        assert!(start.elapsed() < Duration::from_secs(1800), "{job:?}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    assert_eq!(ended.state, JobState::Done, "a plain folder only in iCloud");
+    assert!(!linked_checkout(&source), "the downloaded folder is plain");
+    assert!(same_files(&source, &home.join(source.file_name().unwrap())) > 0);
     engine.stop().await;
 }
