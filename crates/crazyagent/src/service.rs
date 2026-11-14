@@ -745,11 +745,11 @@ WantedBy=default.target\n",
 }
 
 /// The first entry on a path that someone other than this user or root can change: an
-/// entry another user owns, a world-writable entry such as `/tmp`, or a file or folder an
-/// untrusted group can write ([`trusted_group`]), except a sticky store such as /nix/store
-/// above an entry's own folder ([`first_changeable_part`]). It reads the path as written and
-/// with its links resolved; an unreadable entry counts. Input: the absolute path. Output:
-/// the entry.
+/// entry another user owns, a world-writable entry such as `/tmp`, a file or folder an
+/// untrusted group can write ([`trusted_group`]), or one whose access list lets someone else
+/// change it, except a sticky store such as /nix/store above an entry's own folder
+/// ([`first_changeable_part`]). It reads the path as written and with its links resolved; an
+/// unreadable entry or access list counts. Input: the absolute path. Output: the entry.
 #[cfg(unix)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
     changeable(path, false)
@@ -771,21 +771,39 @@ pub(crate) fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
 fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
     let resolved = canonical(path);
-    [path, resolved.as_path()].into_iter().find_map(|path| {
-        let parts: Vec<Part> = path.ancestors().map(read_part).collect();
-        first_changeable_part(&parts, me, open_stores)
+    let mut read: Vec<(PathBuf, Part)> = Vec::new();
+    for path in [path, resolved.as_path()] {
+        let mut parts = Vec::new();
+        for entry in path.ancestors() {
+            let part = match read.iter().find(|(seen, _)| seen == entry) {
+                Some((_, part)) => *part,
+                None => {
+                    let part = read_part(entry);
+                    read.push((entry.to_path_buf(), part));
+                    part
+                }
+            };
+            parts.push(part);
+        }
+        assert_eq!(parts.len(), path.ancestors().count());
+        if let Some(entry) = first_changeable_part(&parts, me, open_stores)
             .and_then(|depth| path.ancestors().nth(depth))
-            .map(Path::to_path_buf)
-    })
+        {
+            return Some(entry.to_path_buf());
+        }
+    }
+    None
 }
 
-/// One part of a path as the ownership rule reads it: missing, unreadable, or its owner,
-/// group, mode and whether it is a folder or a link.
+/// One part of a path as the ownership rule reads it: missing, unreadable, carrying an
+/// access list that lets someone other than this user or root change it ([`acl`]), or its
+/// owner, group, mode and whether it is a folder or a link.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Part {
     Missing,
     Unreadable,
+    Shared,
     Found {
         owner: u32,
         group: u32,
@@ -795,18 +813,31 @@ pub(crate) enum Part {
     },
 }
 
-/// Reads one part of a path without following a link. Input: the part. Output: the read.
+/// Reads one part of a path without following a link. A link's own access list is never
+/// read, as its mode is not. Input: the part. Output: the read.
 #[cfg(unix)]
 fn read_part(entry: &Path) -> Part {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(entry) {
-        Ok(metadata) => Part::Found {
-            owner: metadata.uid(),
-            group: metadata.gid(),
-            mode: metadata.mode(),
-            folder: metadata.is_dir(),
-            link: metadata.file_type().is_symlink(),
-        },
+        Ok(metadata) => {
+            let link = metadata.file_type().is_symlink();
+            #[cfg(target_os = "macos")]
+            let shared = (!link).then(|| acl::shared(entry));
+            #[cfg(not(target_os = "macos"))]
+            let shared = (!link).then(|| acl::shared(entry, current_uid(), trusted_group));
+            match shared {
+                Some(None) => return Part::Unreadable,
+                Some(Some(true)) => return Part::Shared,
+                Some(Some(false)) | None => {}
+            }
+            Part::Found {
+                owner: metadata.uid(),
+                group: metadata.gid(),
+                mode: metadata.mode(),
+                folder: metadata.is_dir(),
+                link,
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Part::Missing,
         Err(_) => Part::Unreadable,
     }
@@ -822,7 +853,7 @@ pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) 
     for (depth, part) in parts.iter().enumerate() {
         let changeable = match *part {
             Part::Missing => false,
-            Part::Unreadable => true,
+            Part::Unreadable | Part::Shared => true,
             Part::Found {
                 owner,
                 group,
@@ -1674,6 +1705,9 @@ if (-not (($p -split ';') -contains $f)) {{ \
         .env(WINDOWS_PATH_FOLDER_VARIABLE, folder);
     command
 }
+
+#[cfg(unix)]
+mod acl;
 
 #[cfg(test)]
 mod tests;
