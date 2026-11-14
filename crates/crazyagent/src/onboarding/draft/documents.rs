@@ -103,8 +103,6 @@ const RESEARCH_WORDS: [&str; 9] = [
 ];
 const MILESTONE_WORDS: [&str; 3] = ["Phase", "Milestone", "Release"];
 const CHECKBOXES: [&str; 6] = ["- [ ]", "- [x]", "- [X]", "* [ ]", "* [x]", "* [X]"];
-const IGNORES_UNKNOWN: &str =
-    "No project document was read: the project's git could not tell which files it ignores.";
 
 /// What the local heading scan says of one document: its kind, the kind's score and, for a
 /// roadmap, its marks.
@@ -737,66 +735,6 @@ fn text_beneath(root: &Folder, path: &str, max: usize) -> Option<String> {
     let text = clip(&text, max).trim_end().to_owned();
     assert!(text.len() <= max);
     (!text.is_empty()).then_some(text)
-}
-
-/// The Project documents part of the mapping prompt: each document read under its path and
-/// size in a fence longer than any backtick run in its text, the local heading scan's
-/// roadmap or research line with its marks first inside the fence, as the marks are file
-/// text, then the paths and sizes of the
-/// documents whose text is not read, or why none was read when the project's git could not
-/// say what it ignores. Takes the documents, the listed paths and whether git said nothing.
-/// Returns the text, empty when there are none.
-pub(crate) fn section(
-    documents: &[Document],
-    unread: &[(String, u64)],
-    ignores_unknown: bool,
-) -> String {
-    if ignores_unknown {
-        assert!(documents.is_empty() && unread.is_empty());
-        return format!("\n## Project documents\n\n{IGNORES_UNKNOWN}\n");
-    }
-    let mut text = String::new();
-    if documents.is_empty() && unread.is_empty() {
-        return text;
-    }
-    text.push_str("\n## Project documents\n\n");
-    for document in documents {
-        let shown = if document.cut {
-            format!(", the first {} shown", document.text.len())
-        } else {
-            String::new()
-        };
-        let scan = match document.kind {
-            FoundKind::Roadmap if document.marks.is_empty() => "Local scan: roadmap\n".to_owned(),
-            FoundKind::Roadmap => format!("Local scan: roadmap ({})\n", document.marks.join("; ")),
-            FoundKind::Research => "Local scan: research\n".to_owned(),
-            FoundKind::Other => String::new(),
-        };
-        let fence = "`".repeat(longest_run(&format!("{scan}{}", document.text)).max(2) + 1);
-        text.push_str(&format!(
-            "### {} ({} bytes{shown})\n\n{fence}\n{scan}{}\n{fence}\n\n",
-            document.path, document.size, document.text
-        ));
-    }
-    if !unread.is_empty() {
-        let listed: Vec<String> = unread
-            .iter()
-            .map(|(path, size)| format!("{path} ({size} bytes)"))
-            .collect();
-        text.push_str(&format!(
-            "Also in the repository, text not read: {}\n",
-            listed.join(", ")
-        ));
-    }
-    text
-}
-
-/// The longest run of backticks in `text`.
-fn longest_run(text: &str) -> usize {
-    text.split(|character| character != '`')
-        .map(str::len)
-        .max()
-        .unwrap_or(0)
 }
 
 /// The research an answer's `research` value names: only the five kinds the prompt offers,

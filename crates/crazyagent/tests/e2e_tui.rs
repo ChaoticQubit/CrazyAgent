@@ -23,6 +23,8 @@ const SHIFT_RIGHT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "43"];
 const SHIFT_LEFT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "44"];
 const SETTLE_TIME: Duration = Duration::from_secs(180);
 const TURN_TIME: Duration = Duration::from_secs(60);
+const NODE_TIME: Duration = Duration::from_secs(600);
+const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const REPO: &str = "plant-shop";
 const ABOUT: &str = "A small shop that sells house plants online.";
 const STACK: &str = "TypeScript";
@@ -1070,13 +1072,17 @@ impl ScriptPty {
     }
 
     fn until(&self, what: &str, check: impl Fn(&str) -> bool) {
+        self.until_within(what, SCREEN_TIME, check);
+    }
+
+    fn until_within(&self, what: &str, limit: Duration, check: impl Fn(&str) -> bool) {
         let start = Instant::now();
         loop {
             let screen = self.screen();
             if check(&screen) {
                 return;
             }
-            assert!(start.elapsed() < SCREEN_TIME, "{what}:\n{screen}");
+            assert!(start.elapsed() < limit, "{what}:\n{screen}");
             std::thread::sleep(POLL_TIME);
         }
     }
@@ -1607,6 +1613,7 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
         screen.contains("c Continue without")
     });
     pty.type_bytes(b"c");
+    pass_harness_step(&mut pty);
     pty.until("the Accounts step opens with the ticked guide", |screen| {
         screen.contains("Add an account")
             && screen.contains("[> Add account ]   [ Skip for now ]")
@@ -1614,6 +1621,143 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
             && screen.contains("[x] Show the guide on Home")
     });
     pty
+}
+
+/// Waits for first run's Harnesses step with only RCLI picked and Continue focused, then
+/// continues without installing anything. Input: the TUI after Setup. Output: none; the TUI
+/// is on its way to the Accounts step.
+fn pass_harness_step(pty: &mut ScriptPty) {
+    pty.until("the Harnesses step opens with only RCLI picked", |screen| {
+        screen.contains("Choose your harnesses")
+            && screen.contains("[x] RCLI")
+            && screen.contains("[> Continue ]")
+    });
+    pty.type_bytes(b"\r");
+}
+
+/// DEC-157: after Setup, first run asks for harnesses with only RCLI picked and locked,
+/// Codex and Claude Code unpicked, and Continue with no picks goes on to Accounts without
+/// starting an install.
+#[test]
+fn first_run_shows_the_harness_step_with_only_rcli_picked() {
+    let mut engine = Engine::start("ca-e2e-harness-step-");
+    let home = scratch("ca-e2e-harness-step-home-");
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty.type_bytes(b"c");
+    pty.until(
+        "the Harnesses step lists RCLI picked and the others unpicked",
+        |screen| {
+            screen.contains("Choose your harnesses")
+                && screen.contains("[x] RCLI")
+                && screen.contains("Comes with CrazyAgent.")
+                && screen.contains("[ ] Codex")
+                && screen.contains("[ ] Claude Code")
+                && screen.contains("Enter Continue")
+                && !screen.contains("Install picked harnesses")
+        },
+    );
+    pty.type_bytes(b"\r");
+    pty.until("Continue goes on to the Accounts step", |screen| {
+        screen.contains("Add an account") && !screen.contains("Choose your harnesses")
+    });
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-157: on a clean Mac whose Codex was built by npm and that has no Node, the Harnesses
+/// step says Codex can't run with the resolver's line and offers Node.js; n installs the
+/// pinned Node into the engine root, the step shows it installing, and the Codex row then
+/// leaves Can't run. Needs the clean-Mac gate build and the network to nodejs.org.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate and the network: Node.js downloads from nodejs.org"
+)]
+fn first_run_installs_node_for_a_codex_that_cannot_run_and_its_row_leaves_cant_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = scratch("ca-e2e-node-home-");
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    let codex = home.path().join(".local/bin/codex");
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    std::fs::write(&codex, "#!/usr/bin/env node\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let gate = scratch("ca-e2e-node-gate-");
+    let mut engine = Engine::new("ca-e2e-node-");
+    engine.home = Some(home.path().to_path_buf());
+    engine.env.push(("PATH", SYSTEM_PATH.into()));
+    engine
+        .env
+        .push(("CRAZYAGENT_GATE_SYSTEM_ROOT", gate.path().into()));
+    engine.launch();
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty.type_bytes(b"c");
+    pty.until_within(
+        "the Harnesses step says Codex can't run without Node and offers Node.js once setup's check ends",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Choose your harnesses")
+                && screen.contains("Can't run")
+                && screen.contains("codex needs node, which is missing.")
+                && screen.contains("n Install Node.js")
+                && !screen.contains("Already on this Mac.")
+        },
+    );
+    pty.type_bytes(b"n");
+    pty.until("the step shows Node.js installing", |screen| {
+        screen.contains("Installing Node.js.") && !screen.contains("n Install Node.js")
+    });
+    pty.until_within(
+        "the Codex row leaves Can't run once the engine's Node is in",
+        NODE_TIME,
+        |screen| {
+            screen.contains("Already on this Mac.")
+                && !screen.contains("Can't run")
+                && !screen.contains("Installing Node.js.")
+        },
+    );
+    assert!(
+        engine.path().join("setup/bin/node").exists(),
+        "Node went into the engine root, not the computer"
+    );
+    pty.type_bytes(b"\r");
+    pty.until("Continue goes on to the Accounts step", |screen| {
+        screen.contains("Add an account") && !screen.contains("Choose your harnesses")
+    });
+    drop(pty);
+    engine.stop();
 }
 
 /// DEC-153: keeping the Learn CrazyAgent guide ticked and picking Skip for now ends first run
@@ -1750,6 +1894,7 @@ fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_th
         screen.contains("c Continue without")
     });
     pty.type_bytes(b"c");
+    pass_harness_step(&mut pty);
     pty.until("the Accounts step opens with the ticked guide", |screen| {
         screen.contains("[x] Show the guide on Home")
     });

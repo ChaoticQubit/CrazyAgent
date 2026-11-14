@@ -76,6 +76,8 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
+/// How long [`unreached_provider`] waits for a loopback model provider to take a connection.
+const PROVIDER_REACH_TIME: Duration = Duration::from_secs(2);
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 /// The `RunError::Invalid` text of a run whose agent state folder already exists,
@@ -90,14 +92,23 @@ const PANE_PREFIX: &str = "research-";
 const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
 /// The variable that caps the output tokens of each Claude Code request.
 const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
-const CLAUDE_ARGUMENTS: [&str; 6] = [
-    "--print",
-    "--output-format",
-    "text",
-    "--strict-mcp-config",
-    "--setting-sources",
-    "",
-];
+const CLAUDE_ARGUMENTS: [&str; 4] = ["--print", "--strict-mcp-config", "--setting-sources", ""];
+/// What every Claude Code research run prints: one JSON event per line, from which the
+/// engine joins the whole answer the run ends with, where `--print` text keeps only the
+/// last part of an answer Claude Code continued past the output cap (DEC-160).
+const CLAUDE_EVENTS: [&str; 3] = ["--output-format", "stream-json", "--verbose"];
+/// The stdout log of a run that prints one JSON event per line.
+const EVENTS_LOG: &str = "events.jsonl";
+/// The longest Claude Code event line the engine parses. A longer one, such as a tool
+/// result that holds a large file, is told apart by its raw bytes ([`LongLine`]).
+const CLAUDE_LINE_BYTES_MAX: usize = 8 * 1024 * 1024;
+/// How a Claude Code user event line begins: Claude Code writes its type first.
+const CLAUDE_USER_LINE: &[u8] = b"{\"type\":\"user\"";
+/// The key that names the sub-agent a Claude Code event belongs to, as raw JSON: inside a
+/// string its quotes would be escaped, so in a line it can only be a key.
+const CLAUDE_PARENT_KEY: &[u8] = b"\"parent_tool_use_id\":";
+/// The model name Claude Code gives the messages it writes itself, such as its API errors.
+const CLAUDE_OWN_MODEL: &str = "<synthetic>";
 /// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
 const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
 
@@ -1121,7 +1132,8 @@ impl ResearchRunner {
             let group = session.process_group();
             #[cfg(unix)]
             let mut lifeline = Lifeline::watch(group)?;
-            let ending = self.supervise_pane(jobs, job, &granted, &mut session, &prompt, &output);
+            let ending =
+                self.supervise_pane(jobs, job, &granted, &mut session, &prompt, harness, &output);
             let stopped = session.stop();
             #[cfg(unix)]
             lifeline.release();
@@ -1157,16 +1169,16 @@ impl ResearchRunner {
         let words = harness_words(&program)?;
         let mut launch = Command::new(&words[0]);
         launch.args(&words[1..]);
-        let (output, stdout_log) = match harness {
+        let output = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
                 codex_arguments(&mut launch, &worktree, &output, &home, job.tools, account)?;
-                (output, "events.jsonl")
+                output
             }
             ResearchHarness::ClaudeCode => {
                 claude_arguments(&mut launch, &home, &tmp, job.tools, None, account)?;
                 launch.args(installed.arguments());
-                (agent.join("output.md"), "output.md")
+                agent.join("output.md")
             }
         };
         launch.current_dir(&worktree);
@@ -1201,15 +1213,18 @@ impl ResearchRunner {
         let counted = Arc::new(AtomicU64::new(0));
         let limited = Arc::new(AtomicBool::new(false));
         let mut drains = Vec::new();
-        for (stream, name, watch) in [
+        let follow = (harness == ResearchHarness::ClaudeCode)
+            .then(|| ClaudeStream::new(report_bound(self.limits.report_bytes_max)));
+        for (stream, name, watch, follow) in [
             (
                 running
                     .child
                     .stdout
                     .take()
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
-                stdout_log,
+                EVENTS_LOG,
                 None,
+                follow,
             ),
             (
                 running
@@ -1219,6 +1234,7 @@ impl ResearchRunner {
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
                 "stderr.log",
                 (harness == ResearchHarness::Codex).then(|| limited.clone()),
+                None,
             ),
         ] {
             let Some(stream) = stream else { continue };
@@ -1226,7 +1242,7 @@ impl ResearchRunner {
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
             drains.push(std::thread::spawn(move || {
-                drain_watching(stream, &counted, log, log_max, watch.as_deref())
+                drain_watching(stream, &counted, log, log_max, watch.as_deref(), follow)
             }));
         }
         if let Some(mut stdin) = running.child.stdin.take() {
@@ -1240,10 +1256,18 @@ impl ResearchRunner {
         while drains.iter().any(|drain| !drain.is_finished()) && draining.elapsed() < DRAIN_WAIT {
             std::thread::sleep(POLL);
         }
-        #[cfg(unix)]
+        let followed = drains
+            .into_iter()
+            .filter(JoinHandle::is_finished)
+            .find_map(|drain| drain.join().ok().flatten());
+        assert!(followed.is_none() || harness == ResearchHarness::ClaudeCode);
         let ending = if matches!(ending, Ending::Exited(false))
-            && refused_for_limit(harness, &agent, &output, self.limits.output_bytes_max)
-        {
+            && refused_for_limit(
+                harness,
+                &agent,
+                followed.as_ref(),
+                self.limits.output_bytes_max,
+            ) {
             Ending::RateLimited
         } else {
             ending
@@ -1258,6 +1282,10 @@ impl ResearchRunner {
         }
         drop(credential);
         drop(lease);
+        if let Some(answer) = followed.as_ref().and_then(ClaudeStream::answer) {
+            assert!(answer.len() as u64 <= self.limits.report_bytes_max);
+            write_private(&agent, &output, answer.as_bytes())?;
+        }
         Ok((ending, group, output))
     }
 
@@ -1371,8 +1399,8 @@ impl ResearchRunner {
     /// Types the research prompt into the agent's pane and follows its session record until
     /// the turn ends or reports a rate or usage limit, the job is cancelled, the saved policy
     /// no longer covers what it was granted, the runner stops or a limit passes. The agent's
-    /// last reply becomes the report at `output`, as `codex exec -o` and `claude -p` give.
-    /// Returns how the run ended.
+    /// [`Reply`] becomes the report at `output`. Returns how the run ended.
+    #[allow(clippy::too_many_arguments)]
     fn supervise_pane(
         &self,
         jobs: &ResearchJobs,
@@ -1380,9 +1408,10 @@ impl ResearchRunner {
         granted: &Granted,
         session: &mut TerminalSession,
         prompt: &str,
+        harness: ResearchHarness,
         output: &Path,
     ) -> Result<Ending, RunError> {
-        let mut last = String::new();
+        let mut reply = Reply::new(harness, report_bound(self.limits.report_bytes_max));
         let mut counted: u64 = 0;
         if let Err(problem) = session.send_or_cancel(prompt, &self.stopping) {
             if problem.0 == "launch_cancelled" {
@@ -1409,8 +1438,9 @@ impl ResearchRunner {
             match session.next_event(POLL) {
                 Ok(Some(LaunchEvent::Text { text })) => {
                     counted += text.len() as u64;
-                    last = text;
+                    reply.said(&text);
                 }
+                Ok(Some(LaunchEvent::ToolUse { .. })) => reply.tool(),
                 Ok(Some(LaunchEvent::TurnFinished { success })) => break Ending::Exited(success),
                 Ok(Some(LaunchEvent::TurnError { rate_limited: true })) => {
                     break Ending::RateLimited;
@@ -1426,9 +1456,11 @@ impl ResearchRunner {
             }
         };
         let _ = jobs.heartbeat(job, counted);
-        if matches!(ending, Ending::Exited(true)) {
-            assert!(last.len() as u64 <= counted);
-            write_private(&self.state.join("agents"), output, last.as_bytes())?;
+        if matches!(ending, Ending::Exited(true))
+            && let Some(text) = reply.text()
+        {
+            assert!(text.len() as u64 <= counted);
+            write_private(&self.state.join("agents"), output, text.as_bytes())?;
         }
         Ok(ending)
     }
@@ -1582,7 +1614,7 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub output_tokens: Option<u32>,
 }
 
-/// How a read-only agent run ended: its last message, a plain failure, out
+/// How a read-only agent run ended: its answer, a plain failure, out
 /// of time, or stopped by its caller or the runner's shutdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReadOnlyEnding {
@@ -1599,7 +1631,8 @@ impl ResearchRunner {
     /// Runs one agent with tools off that can read `run.folder`, its secret files
     /// closed but the ones the owner shared back (DEC-147.9), but write only
     /// its own engine-owned work, home and temp folders, reaching nothing but
-    /// its model endpoint. A managed account is held under the engine custody
+    /// its model endpoint and none of the engine root's secrets, which no
+    /// granted folder may hold. A managed account is held under the engine custody
     /// lease for the whole run. Takes the run and `stop`, polled while the
     /// agent runs. Returns how it ended; the agent's process group is stopped
     /// on every path, including a panic or an early error.
@@ -1705,6 +1738,7 @@ impl ResearchRunner {
             &tmp,
             SandboxNetwork::Only(vec![model_remote(account)?]),
         )?
+        .guard_engine(self.engine_folder()?)?
         .allow_read(&folder)?;
         let program =
             crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())?;
@@ -1753,7 +1787,7 @@ impl ResearchRunner {
             }
             ResearchHarness::ClaudeCode => {
                 claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
-                (agent.join("output.md"), "output.md")
+                (agent.join(EVENTS_LOG), EVENTS_LOG)
             }
         };
         command
@@ -1837,8 +1871,14 @@ impl ResearchRunner {
             return Ok(ending);
         }
         let answer = read_bounded(&agent, &output, self.limits.report_bytes_max)
+            .ok()
+            .and_then(|text| match harness {
+                ResearchHarness::Codex => Some(text),
+                ResearchHarness::ClaudeCode => claude_answer(&text),
+            })
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
+        assert!(answer.len() as u64 <= self.limits.report_bytes_max);
         Ok(if answer.is_empty() {
             ReadOnlyEnding::Failed("Agent returned no answer".into())
         } else {
@@ -2080,6 +2120,60 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
     }
 }
 
+/// Tells whether a loopback endpoint account's model provider refuses every connect, so a
+/// caller can fail at once with a plain line in place of a harness retrying it for minutes.
+/// Managed accounts, remote endpoints and any other connect error are not named. Input: the
+/// account. Output: the owner's line naming the provider's host and port, else none.
+pub(crate) fn unreached_provider(account: &ResearchAccount) -> Option<String> {
+    let (ResearchAccount::Endpoint { base_url, .. }
+    | ResearchAccount::AnthropicEndpoint { base_url, .. }) = account
+    else {
+        return None;
+    };
+    let Ok(SandboxRemote::Loopback(port)) = model_remote(account) else {
+        return None;
+    };
+    let url = endpoint_url(base_url).ok()?;
+    let addresses: Vec<std::net::SocketAddr> = match url.host()? {
+        url::Host::Ipv4(address) => vec![(address, port).into()],
+        url::Host::Ipv6(address) => vec![(address, port).into()],
+        url::Host::Domain(_) => vec![
+            (std::net::Ipv4Addr::LOCALHOST, port).into(),
+            (std::net::Ipv6Addr::LOCALHOST, port).into(),
+        ],
+    };
+    assert!(
+        !addresses.is_empty() && addresses.iter().all(|address| address.ip().is_loopback()),
+        "a loopback endpoint is checked on loopback addresses only"
+    );
+    let unreached = addresses.iter().all(|address| {
+        refused(crate::spawn_gate::connect_tcp_std_timeout(address, PROVIDER_REACH_TIME).map(drop))
+    });
+    let host = url.host_str()?;
+    unreached.then(|| {
+        format!(
+            "Can't reach the model provider at {host}:{port}. Start it or pick another account in this pool, then try again."
+        )
+    })
+}
+
+/// [`unreached_provider`] where this OS runs confined model runs, else none, so a run's own
+/// line that confined runs are unavailable here keeps its place. Every read-only run's caller
+/// asks it before the run. Input: the account. Output: the owner's line, or none.
+pub(crate) fn unreached_provider_here(account: &ResearchAccount) -> Option<String> {
+    if confined_unavailable(std::env::consts::OS).is_some() {
+        return None;
+    }
+    unreached_provider(account)
+}
+
+/// Tells whether one connect to a loopback model provider proves nothing listens there:
+/// only a refused connect does, never a success, a timeout or another error such as too
+/// many open files. Input: the connect's outcome. Output: true only for a refusal.
+fn refused(outcome: std::io::Result<()>) -> bool {
+    matches!(outcome, Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused)
+}
+
 /// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
 /// Code agent under the None network reaches through its model proxy (S4b).
 pub(crate) const CLAUDE_MODEL_HOSTS: &[(&str, u16)] = &[("api.anthropic.com", 443)];
@@ -2251,6 +2345,7 @@ fn claude_arguments(
     };
     command
         .args(CLAUDE_ARGUMENTS)
+        .args(CLAUDE_EVENTS)
         .arg("--settings")
         .arg(settings)
         .env("CLAUDE_CONFIG_DIR", home)
@@ -3234,19 +3329,22 @@ impl Drop for Lifeline {
 /// at most `log_max` bytes, until the stream ends.
 #[cfg(unix)]
 pub(crate) fn drain(stream: Box<dyn Read + Send>, counted: &AtomicU64, log: File, log_max: u64) {
-    drain_watching(stream, counted, log, log_max, None);
+    assert!(drain_watching(stream, counted, log, log_max, None, None).is_none());
 }
 
 /// Drains like [`drain`]. With `limited`, it sets the flag once a line shows
 /// Codex waiting to retry a request refused for a rate or usage limit; a line
-/// is checked on at most its first 16 KiB.
+/// is checked on at most its first 16 KiB. With `follow`, it reads every byte
+/// into that Claude Code stream, also past the log bound, and returns it.
 fn drain_watching(
     mut stream: Box<dyn Read + Send>,
     counted: &AtomicU64,
     mut log: File,
     log_max: u64,
     limited: Option<&AtomicBool>,
-) {
+    mut follow: Option<ClaudeStream>,
+) -> Option<ClaudeStream> {
+    assert!(limited.is_none() || follow.is_none());
     let mut buffer = [0_u8; 8192];
     let mut logged = 0_u64;
     let mut line = Vec::new();
@@ -3260,6 +3358,9 @@ fn drain_watching(
             logged += room as u64;
         }
         assert!(logged <= log_max);
+        if let Some(follow) = follow.as_mut() {
+            follow.read(&buffer[..read]);
+        }
         let Some(limited) = limited else { continue };
         for &byte in &buffer[..read] {
             if byte == b'\n' {
@@ -3273,6 +3374,10 @@ fn drain_watching(
         }
         assert!(line.len() <= LOG_LINE_BYTES_MAX);
     }
+    if let Some(follow) = follow.as_mut() {
+        follow.close();
+    }
+    follow
 }
 
 /// Tells whether one Codex log line is Codex waiting to retry a request the provider
@@ -3302,20 +3407,21 @@ fn endpoint_keychain(state: &Path, harness: ResearchHarness, home: &Path) -> Res
 }
 
 /// Tells whether a research agent that exited failing was refused for a rate or usage
-/// limit: Codex's own failure message in its stdout log, or the first line of Claude
-/// Code's printed reply. Takes the harness, the agent state folder, the report path and
-/// the log bound; both are read bounded and never through a link.
-#[cfg(unix)]
-fn refused_for_limit(harness: ResearchHarness, agent: &Path, output: &Path, max: u64) -> bool {
+/// limit: Codex's own failure message in its stdout log, read bounded and never through
+/// a link, or a limit line Claude Code ended its stream with. Takes the harness, the agent
+/// state folder, the Claude Code stream the run was read into, if any, and the log bound.
+fn refused_for_limit(
+    harness: ResearchHarness,
+    agent: &Path,
+    followed: Option<&ClaudeStream>,
+    max: u64,
+) -> bool {
     match harness {
         ResearchHarness::Codex => {
-            rate_limited(&agent_failure(&agent.join("events.jsonl"), harness, max))
+            assert!(followed.is_none());
+            rate_limited(&agent_failure(&agent.join(EVENTS_LOG), harness, max))
         }
-        ResearchHarness::ClaudeCode => read_bounded(agent, output, max).is_ok_and(|text| {
-            text.lines()
-                .find(|line| !line.trim().is_empty())
-                .is_some_and(rate_limited)
-        }),
+        ResearchHarness::ClaudeCode => followed.is_some_and(ClaudeStream::limited),
     }
 }
 
@@ -3343,12 +3449,284 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
+/// The reply a research agent ends its turn with, kept as its words arrive: for Claude Code
+/// every part it said since its last tool call, joined, as it goes on with an answer cut at
+/// the output cap in a new message; for Codex its last message. A reply that outgrows
+/// `bytes_max` is none, as a report that long is refused, until a tool call starts over.
+struct Reply {
+    harness: ResearchHarness,
+    text: String,
+    bytes_max: usize,
+    over: bool,
+}
+
+impl Reply {
+    /// An empty reply. Inputs: the harness and the most bytes it may hold. Output: the reply.
+    fn new(harness: ResearchHarness, bytes_max: usize) -> Self {
+        Self {
+            harness,
+            text: String::new(),
+            bytes_max,
+            over: false,
+        }
+    }
+
+    /// Takes words the agent said. Input: the words. Output: none.
+    fn said(&mut self, words: &str) {
+        if self.harness == ResearchHarness::Codex {
+            self.start_over();
+        }
+        if !self.over && self.text.len().saturating_add(words.len()) > self.bytes_max {
+            self.over = true;
+            self.text = String::new();
+        }
+        if !self.over {
+            self.text.push_str(words);
+        }
+        assert!(self.text.len() <= self.bytes_max);
+        assert!(!self.over || self.text.is_empty());
+    }
+
+    /// Takes a tool call the agent made: a Claude Code reply starts over. Output: none.
+    fn tool(&mut self) {
+        if self.harness == ResearchHarness::ClaudeCode {
+            self.start_over();
+        }
+        assert!(self.text.len() <= self.bytes_max);
+    }
+
+    /// Empties the reply. Output: none.
+    fn start_over(&mut self) {
+        self.text.clear();
+        self.over = false;
+        assert!(self.text.is_empty());
+    }
+
+    /// The reply. Output: its text, or `None` once it outgrew its bound.
+    fn text(&self) -> Option<&str> {
+        assert!(self.text.len() <= self.bytes_max);
+        assert!(!self.over || self.text.is_empty());
+        (!self.over).then_some(self.text.as_str())
+    }
+}
+
+/// A Claude Code run's JSON event lines, read as they arrive into the [`Reply`] its main
+/// thread ends with: a sub-agent's events are skipped, and Claude Code's own error messages
+/// are kept apart from the model's words. A line past [`CLAUDE_LINE_BYTES_MAX`] is a main
+/// tool result, a sub-agent's line, or else leaves the run with no answer ([`LongLine`]).
+struct ClaudeStream {
+    reply: Reply,
+    line: Vec<u8>,
+    long: Option<LongLine>,
+    unread: bool,
+    finished: bool,
+    limited: bool,
+}
+
+impl ClaudeStream {
+    /// An empty stream. Input: the most bytes its reply may hold. Output: the stream.
+    fn new(bytes_max: usize) -> Self {
+        Self {
+            reply: Reply::new(ResearchHarness::ClaudeCode, bytes_max),
+            line: Vec::new(),
+            long: None,
+            unread: false,
+            finished: false,
+            limited: false,
+        }
+    }
+
+    /// Reads bytes the run printed, any part of a line or many lines. Input: the bytes.
+    /// Output: none.
+    fn read(&mut self, bytes: &[u8]) {
+        for part in bytes.split_inclusive(|&byte| byte == b'\n') {
+            let (body, ended) = match part.strip_suffix(b"\n") {
+                Some(body) => (body, true),
+                None => (part, false),
+            };
+            if let Some(long) = self.long.as_mut() {
+                long.pass(body);
+            } else if self.line.len().saturating_add(body.len()) > CLAUDE_LINE_BYTES_MAX {
+                let mut long = LongLine::default();
+                long.pass(&self.line);
+                long.pass(body);
+                self.long = Some(long);
+                self.line = Vec::new();
+            } else {
+                self.line.extend_from_slice(body);
+            }
+            if ended {
+                self.end_line();
+            }
+        }
+        assert!(self.line.len() <= CLAUDE_LINE_BYTES_MAX);
+        assert!(self.long.is_none() || self.line.is_empty());
+    }
+
+    /// Reads the last line of a stream that ended without a line break. Output: none.
+    fn close(&mut self) {
+        if self.long.is_some() || !self.line.is_empty() {
+            self.end_line();
+        }
+        assert!(self.line.is_empty());
+        assert!(self.long.is_none());
+    }
+
+    /// Takes the line read so far as one event: a long line of a sub-agent is skipped, a long
+    /// user line of the main thread is its tool result, and any other long line leaves the
+    /// run with no answer. Output: none.
+    fn end_line(&mut self) {
+        match self.long.take() {
+            Some(long) if long.parent == Some(true) => {}
+            Some(long) if long.head.starts_with(CLAUDE_USER_LINE) => self.reply.tool(),
+            Some(_) => self.unread = true,
+            None => {
+                if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&self.line) {
+                    self.event(&event);
+                }
+            }
+        }
+        self.line.clear();
+        assert!(self.long.is_none());
+    }
+
+    /// Takes one event of the run. Input: the event. Output: none.
+    fn event(&mut self, event: &serde_json::Value) {
+        if !event["parent_tool_use_id"].is_null() {
+            return;
+        }
+        let blocks = || event["message"]["content"].as_array().into_iter().flatten();
+        match event["type"].as_str() {
+            Some("assistant") if claude_error(event) => {
+                let said = blocks().filter_map(|block| block["text"].as_str());
+                self.limited |= said.chain(event["error"].as_str()).any(limit_line);
+            }
+            Some("assistant") => {
+                for block in blocks().filter(|block| block["type"] == "text") {
+                    self.reply.said(block["text"].as_str().unwrap_or_default());
+                }
+            }
+            Some("user") if blocks().any(|block| block["type"] == "tool_result") => {
+                self.reply.tool();
+            }
+            Some("result") => {
+                self.finished = event["subtype"] == "success" && event["is_error"] == false;
+                self.limited |=
+                    event["is_error"] == true && event["result"].as_str().is_some_and(limit_line);
+            }
+            _ => {}
+        }
+    }
+
+    /// The answer the run ended with. Output: the reply, or `None` while the stream holds
+    /// no successful result, a line it could not read, or a reply past its bound.
+    fn answer(&self) -> Option<&str> {
+        assert!(self.line.is_empty());
+        if self.finished && !self.unread {
+            self.reply.text()
+        } else {
+            None
+        }
+    }
+
+    /// Whether Claude Code ended the run on a rate or usage limit. Output: the answer.
+    fn limited(&self) -> bool {
+        assert!(self.line.is_empty());
+        self.limited
+    }
+}
+
+/// What the engine keeps of a Claude Code line past [`CLAUDE_LINE_BYTES_MAX`] as its bytes
+/// pass: how it begins, its last bytes, and whether its [`CLAUDE_PARENT_KEY`] names a
+/// sub-agent (`Some(true)`) or the main thread (`Some(false)`, a `null` value), once seen.
+#[derive(Default)]
+struct LongLine {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    parent: Option<bool>,
+}
+
+impl LongLine {
+    /// Takes the next bytes of the line. Input: the bytes. Output: none.
+    fn pass(&mut self, bytes: &[u8]) {
+        let room = CLAUDE_USER_LINE.len().saturating_sub(self.head.len());
+        self.head.extend_from_slice(&bytes[..room.min(bytes.len())]);
+        if self.parent.is_none() {
+            let reach = bytes.len().min(CLAUDE_PARENT_KEY.len());
+            let joint: Vec<u8> = self.tail.iter().chain(&bytes[..reach]).copied().collect();
+            self.parent = parent_named(&joint).or_else(|| parent_named(bytes));
+        }
+        self.tail
+            .extend_from_slice(&bytes[bytes.len().saturating_sub(CLAUDE_PARENT_KEY.len())..]);
+        let cut = self.tail.len().saturating_sub(CLAUDE_PARENT_KEY.len());
+        self.tail.drain(..cut);
+        assert!(self.head.len() <= CLAUDE_USER_LINE.len());
+        assert!(self.tail.len() <= CLAUDE_PARENT_KEY.len());
+    }
+}
+
+/// The first [`CLAUDE_PARENT_KEY`] in raw line bytes that its value's first byte follows.
+/// Input: the bytes. Output: true for a sub-agent, false for `null`, or `None` when no key
+/// with a value byte is in them.
+fn parent_named(bytes: &[u8]) -> Option<bool> {
+    let parent = bytes
+        .windows(CLAUDE_PARENT_KEY.len() + 1)
+        .filter(|window| window.starts_with(CLAUDE_PARENT_KEY))
+        .find_map(|window| match window[CLAUDE_PARENT_KEY.len()] {
+            b'"' => Some(true),
+            b'n' => Some(false),
+            _ => None,
+        });
+    assert!(parent.is_none() || bytes.len() > CLAUDE_PARENT_KEY.len());
+    parent
+}
+
+/// Whether a message's first line that holds words names a rate or usage limit. Input:
+/// the message. Output: the answer.
+fn limit_line(message: &str) -> bool {
+    message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(rate_limited)
+}
+
+/// The report bound as a byte count a [`Reply`] can hold. Input: the bound. Output: the count.
+fn report_bound(bytes_max: u64) -> usize {
+    usize::try_from(bytes_max).unwrap_or(usize::MAX)
+}
+
+/// The whole answer of a Claude Code run in its JSON event lines, read by [`ClaudeStream`],
+/// so an answer Claude Code continued past the output cap comes back whole, where `--print`
+/// text keeps only the last part (DEC-160). Input: the event lines. Output: the answer, or
+/// `None` while the stream ends in no successful result, such as a log cut at its bound or
+/// a run Claude Code ended on an error.
+#[cfg(unix)]
+fn claude_answer(events: &str) -> Option<String> {
+    let mut stream = ClaudeStream::new(events.len());
+    stream.read(events.as_bytes());
+    stream.close();
+    let answer = stream.answer().map(str::to_owned);
+    assert!(
+        answer
+            .as_ref()
+            .is_none_or(|answer| answer.len() <= events.len())
+    );
+    answer
+}
+
+/// Whether one assistant event of a Claude Code stream is Claude Code's own error message,
+/// such as the one it ends a run with when an answer is cut once more after its last
+/// continue request, rather than the model's words. Input: the event. Output: the answer.
+fn claude_error(event: &serde_json::Value) -> bool {
+    assert!(event["type"] == "assistant");
+    event["is_api_error_message"] == true || event["message"]["model"] == CLAUDE_OWN_MODEL
+}
+
 /// The plain reason a read-only agent stopped with an error: Codex's own
 /// message from its last `turn.failed` event, else its last `error` event,
 /// else the generic reason; a message that is a provider's JSON error body
 /// gives its inner message. Takes the agent's stdout log, its harness and
 /// the log bound; the log is read bounded and never through a link.
-#[cfg(unix)]
 fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     const GENERIC: &str = "Agent stopped with an error";
     if harness != ResearchHarness::Codex {
@@ -4245,6 +4623,113 @@ mod tests {
         assert!(!runner.can_run(ResearchHarness::ClaudeCode));
     }
 
+    /// A loopback provider that refuses connections is named at once with its host and port
+    /// and the way out, for either endpoint kind; one that listens and a remote endpoint are
+    /// never named, and no check waits on a remote host.
+    #[test]
+    fn a_loopback_provider_that_refuses_connections_is_named_at_once_and_a_listening_one_is_not() {
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let open = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let listening = open.local_addr().unwrap().port();
+        let codex = |base_url: String| ResearchAccount::Endpoint {
+            base_url,
+            model: "local-model".into(),
+            key: None,
+        };
+        let claude = |base_url: String| ResearchAccount::AnthropicEndpoint {
+            base_url,
+            model: "local-model".into(),
+            key: None,
+        };
+        let line = format!(
+            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
+        );
+        let started = Instant::now();
+        assert_eq!(
+            unreached_provider(&codex(format!("http://127.0.0.1:{port}/v1"))),
+            Some(line.clone())
+        );
+        assert_eq!(
+            unreached_provider(&claude(format!("http://127.0.0.1:{port}"))),
+            Some(line)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            unreached_provider(&codex(format!("http://127.0.0.1:{listening}/v1"))),
+            None
+        );
+        assert_eq!(
+            unreached_provider(&claude(format!("http://localhost:{listening}"))),
+            None
+        );
+        let started = Instant::now();
+        assert_eq!(
+            unreached_provider(&codex("https://models.example.test/v1".into())),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drop(open);
+    }
+
+    /// The reach check every read-only run's caller asks names a refusing loopback provider
+    /// only where this OS runs confined model runs; elsewhere the run's own unavailable line
+    /// keeps its place.
+    #[test]
+    fn the_reach_check_here_names_a_refusing_provider_only_where_confined_runs_exist() {
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "local-model".into(),
+            key: None,
+        };
+        let line = format!(
+            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
+        );
+        assert_eq!(
+            unreached_provider_here(&account),
+            confined_unavailable(std::env::consts::OS)
+                .is_none()
+                .then_some(line)
+        );
+    }
+
+    /// MR-L1: only a refused connect proves nothing listens on a loopback provider. A
+    /// success, a connect that ran out of time, too many open files or any other error never
+    /// does, so such a mapping step still runs its try as before.
+    #[test]
+    fn only_a_refused_connect_counts_as_an_unreached_provider() {
+        use std::io::{Error, ErrorKind};
+        assert!(refused(Err(Error::from(ErrorKind::ConnectionRefused))));
+        assert!(!refused(Ok(())));
+        assert!(!refused(Err(Error::from(ErrorKind::TimedOut))));
+        assert!(!refused(Err(Error::from_raw_os_error(libc::EMFILE))));
+        assert!(!refused(Err(Error::from(ErrorKind::AddrNotAvailable))));
+        assert!(!refused(Err(Error::from(ErrorKind::PermissionDenied))));
+    }
+
+    /// REACH-FLAKE: the port a reach row names for a down provider stays in use while the row
+    /// runs, so the system gives it to no port-0 bind and refuses a bind that names it without
+    /// `SO_REUSEADDR`, and every connect to it is refused at once: the row never finds a
+    /// provider it did not start on that port.
+    #[test]
+    fn a_port_kept_for_a_down_provider_refuses_connects_and_no_plain_bind_takes_it() {
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        let taken = crate::spawn_gate::bind_tcp_std_exclusive(address);
+        assert_eq!(
+            taken.as_ref().map(drop).map_err(std::io::Error::kind),
+            Err(std::io::ErrorKind::AddrInUse),
+            "a plain bind took the port the row named for a down provider"
+        );
+        assert!(refused(
+            crate::spawn_gate::connect_tcp_std_timeout(&address, PROVIDER_REACH_TIME).map(drop)
+        ));
+    }
+
     #[test]
     #[cfg(target_os = "macos")]
     fn a_read_only_run_counts_under_its_project_even_on_an_endpoint_account() {
@@ -4368,6 +4853,70 @@ mod tests {
         );
     }
 
+    /// CONFIGURED-HOMES-GUARD: a read-only run's profile denies the folder of configured SDK
+    /// homes in the engine root, as every guarded sandbox does, and its stand-in harness,
+    /// which reads a keyed account's dummy config there, never gets the text.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_denies_every_configured_sdk_home() {
+        let root = engine_root();
+        let engine = root.database.parent().unwrap().to_path_buf();
+        let homes = engine.join("configured-sdk-homes");
+        let config = homes
+            .join("6".repeat(64))
+            .join(".backboard")
+            .join("config.json");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let dummy = "configured-homes-guard-dummy-read-only-config";
+        fs::write(&config, dummy).unwrap();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            &codex,
+            format!("#!/bin/sh\ncat '{}'\nexit 0\n", config.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-6",
+            agent: "overview",
+            project: None,
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-6.sb"))
+            .expect("the guarded run still installs its profile");
+        assert!(
+            profile.contains(&format!("\n  (subpath \"{}\")", homes.display())),
+            "{profile}"
+        );
+        let events = root
+            .state
+            .join("agents")
+            .join("overview-alpha-6")
+            .join("events.jsonl");
+        assert!(events.is_file());
+        assert!(!fs::read_to_string(&events).unwrap().contains(dummy));
+    }
+
     /// L4 r1 H1: a read-only run follows the project's shared folders choice too. Under
     /// Chosen an untracked local folder not picked stays closed, and a saved Read-write never
     /// opens the picked one for writes, since a read-only run only reads.
@@ -4447,6 +4996,158 @@ mod tests {
             )),
             "{profile}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    const PROFILE_CREDENTIAL: &str = "sec-ro-guard-dummy-profile-credential";
+
+    /// Writes a dummy sign-in credential where a native profile keeps its own, under
+    /// `<engine>/native-profiles/<key>/home`. Input: the engine root. Output: the path of
+    /// the dummy `.credentials.json`, which holds [`PROFILE_CREDENTIAL`].
+    #[cfg(target_os = "macos")]
+    fn native_profile_credential(engine: &Path) -> PathBuf {
+        let home = engine
+            .join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER)
+            .join("5".repeat(64))
+            .join("home");
+        fs::create_dir_all(&home).unwrap();
+        let credential = home.join(".credentials.json");
+        fs::write(&credential, PROFILE_CREDENTIAL).unwrap();
+        assert!(credential.starts_with(engine));
+        credential
+    }
+
+    /// A runner whose Codex is a stand-in at `codex` that prints the file at `target` and
+    /// exits. Inputs: the engine root fixture, the stand-in path and the file it reads.
+    /// Output: the runner.
+    #[cfg(target_os = "macos")]
+    fn reading_runner(root: &EngineRoot, codex: &Path, target: &Path) -> ResearchRunner {
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            codex,
+            format!("#!/bin/sh\ncat '{}'\nexit 0\n", target.display()),
+        )
+        .unwrap();
+        fs::set_permissions(codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.to_path_buf();
+        ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+            .unwrap()
+            .with_harness_lookup(Arc::new(move |harness: &str| {
+                (harness == "codex").then(|| pinned.clone())
+            }))
+    }
+
+    /// Tells whether any regular file under `folder`, not following links, holds `text`.
+    /// Input: the folder and the text. Output: true when one does.
+    #[cfg(target_os = "macos")]
+    fn holds_text(folder: &Path, text: &str) -> bool {
+        fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => holds_text(&entry.path(), text),
+                Ok(kind) if kind.is_file() => fs::read(entry.path()).is_ok_and(|bytes| {
+                    bytes
+                        .windows(text.len())
+                        .any(|part| part == text.as_bytes())
+                }),
+                _ => false,
+            })
+    }
+
+    /// SEC-RO-GUARD: a read-only run gets the engine-secret wall every other sandbox gets.
+    /// Its Seatbelt profile names the native sign-in profiles folder, the run still starts
+    /// with its own home, work and temp folders inside the engine root, and a stand-in agent
+    /// that tries to read a profile's credentials gets nothing.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_cannot_read_a_native_profile_credential() {
+        let root = engine_root();
+        let engine = root.database.parent().unwrap().to_path_buf();
+        let credential = native_profile_credential(&engine);
+        let runner = reading_runner(&root, &root.base.join("bin").join("codex"), &credential);
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-3",
+            agent: "overview",
+            project: None,
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-3.sb"))
+            .expect("the guarded run still installs its profile");
+        let profiles = engine.join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER);
+        assert!(
+            profile.contains(&format!("(subpath \"{}\")", profiles.display())),
+            "{profile}"
+        );
+        let agent = root.state.join("agents").join("overview-alpha-3");
+        assert!(agent.join("events.jsonl").is_file());
+        assert!(!holds_text(&agent, PROFILE_CREDENTIAL));
+    }
+
+    /// SEC-RO-GUARD: no read-only grant may hold the engine root. A run folder holding it
+    /// and a harness installed in it are each refused before the agent starts, so the
+    /// stand-in never reads a native profile's credentials.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_grant_that_holds_the_engine_root_is_refused() {
+        let root = engine_root();
+        let engine = root.database.parent().unwrap().to_path_buf();
+        let credential = native_profile_credential(&engine);
+        let repo = root.base.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let cases = [
+            (
+                "overview-alpha-4",
+                root.base.clone(),
+                root.base.join("bin").join("codex"),
+            ),
+            ("overview-alpha-5", repo, engine.join("codex")),
+        ];
+        for (name, folder, codex) in cases {
+            assert!(engine.starts_with(&folder) || engine.starts_with(codex.parent().unwrap()));
+            let runner = reading_runner(&root, &codex, &credential);
+            let run = ReadOnlyRun {
+                name,
+                agent: "overview",
+                project: None,
+                folder: &folder,
+                prompt: "Describe this project.",
+                account: &account,
+                wall_time: Duration::from_secs(5),
+                output_tokens: None,
+            };
+            let ending = runner.run_read_only(&run, &|| false);
+            assert!(
+                matches!(
+                    &ending,
+                    Err(RunError::Sandbox(SandboxError::Invalid(reason)))
+                        if reason == crate::sandbox::SECRET_ROOT_REFUSED
+                ),
+                "{name}: {ending:?}"
+            );
+            assert!(!holds_text(
+                &root.state.join("agents").join(name),
+                PROFILE_CREDENTIAL
+            ));
+        }
     }
 
     fn host() -> HostStamp {
@@ -5729,10 +6430,18 @@ mod tests {
             "{off:?}"
         );
         assert!(has(&off, ["--max-turns", "1"]), "{off:?}");
+        assert!(has(&off, ["--output-format", "stream-json"]), "{off:?}");
+        assert!(
+            off.iter().any(|argument| argument == "--verbose"),
+            "{off:?}"
+        );
+        assert!(!has(&off, ["--output-format", "text"]), "{off:?}");
         assert_eq!(cap.as_deref(), Some("16000"));
         assert!(CLAUDE_NO_TOOLS_PROMPT.contains("no tools"));
         let (on, cap) = launch(true, None);
         assert!(has(&on, ["--tools", "default"]), "{on:?}");
+        assert!(has(&on, ["--output-format", "stream-json"]), "{on:?}");
+        assert!(!has(&on, ["--output-format", "text"]), "{on:?}");
         assert!(
             !on.iter()
                 .any(|argument| argument == "--system-prompt" || argument == "--max-turns")
@@ -5781,6 +6490,279 @@ mod tests {
             "a folder the engine made gets its repository"
         );
         ensure_repository(&created, &home).unwrap();
+    }
+
+    const STREAM_START: &str = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n";
+    const STREAM_THINKING: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",",
+        "\"content\":[{\"type\":\"thinking\",\"thinking\":\"\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_FIRST: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"## Numbers\\n\\n1. one\\n2. tw\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_CONTINUE: &str = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"Output token limit hit. Resume directly\"}]}}\n",
+    );
+    const STREAM_SECOND: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"o\\n3. three\\n\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_OWN_ERROR: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"content\":[{",
+        "\"type\":\"text\",\"text\":\"API Error: the response exceeded the output token ",
+        "maximum\"}]},\"is_api_error_message\":true,\"error\":\"max_output_tokens\"}\n",
+    );
+    const STREAM_DONE: &str = concat!(
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,",
+        "\"result\":\"o\\n3. three\\n\"}\n",
+    );
+    const STREAM_FAILED: &str = concat!(
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,",
+        "\"result\":\"API Error\"}\n",
+    );
+    const STREAM_NARRATION: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"I will read the notes first.\\n\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_TOOL: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"tool_use\",",
+        "\"id\":\"toolu_1\",\"name\":\"Read\",\"input\":{}}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_TOOL_RESULT: &str = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",",
+        "\"tool_use_id\":\"toolu_1\",\"content\":\"alpha\"}]},\"parent_tool_use_id\":null}\n",
+    );
+    const STREAM_HELPER_TEXT: &str = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"m\",\"content\":[{\"type\":\"text\",",
+        "\"text\":\"Notes from the helper.\\n\"}]},\"parent_tool_use_id\":\"toolu_2\"}\n",
+    );
+    const STREAM_HELPER_RESULT: &str = concat!(
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",",
+        "\"tool_use_id\":\"toolu_3\",\"content\":\"beta\"}]},\"parent_tool_use_id\":\"toolu_2\"}\n",
+    );
+
+    /// DEC-160: Claude Code continues an answer cut at the output cap in new requests, and
+    /// `--print` text kept only the last one, so the mapping stored a JSON tail as the
+    /// overview. The answer is every assistant message's text, joined in order.
+    #[test]
+    fn a_tools_off_claude_answer_continued_past_its_output_cap_comes_back_whole() {
+        let stream = [
+            STREAM_START,
+            STREAM_THINKING,
+            STREAM_FIRST,
+            STREAM_CONTINUE,
+            STREAM_THINKING,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]
+        .concat();
+        assert_eq!(
+            claude_answer(&stream).as_deref(),
+            Some("## Numbers\n\n1. one\n2. two\n3. three\n")
+        );
+    }
+
+    /// An answer is taken only from a stream that ends in a successful result, and never
+    /// holds Claude Code's own error message.
+    #[test]
+    fn a_claude_stream_without_a_successful_result_gives_no_answer() {
+        let cut = [STREAM_START, STREAM_FIRST, STREAM_CONTINUE, STREAM_SECOND].concat();
+        assert_eq!(claude_answer(&cut), None);
+        let failed = [STREAM_START, STREAM_FIRST, STREAM_OWN_ERROR, STREAM_FAILED].concat();
+        assert_eq!(claude_answer(&failed), None);
+        let noted = [STREAM_START, STREAM_SECOND, STREAM_OWN_ERROR, STREAM_DONE].concat();
+        assert_eq!(claude_answer(&noted).as_deref(), Some("o\n3. three\n"));
+        assert_eq!(claude_answer(""), None);
+    }
+
+    /// A Claude Code run with tools gives back only the answer it ends with: the words after
+    /// its last tool result, continued past the output cap, without the notes it wrote before
+    /// a tool call, the words of a sub-agent, or a sub-agent's tool result cutting it short.
+    #[test]
+    fn a_claude_answer_after_its_tools_comes_back_whole_without_its_working_notes() {
+        let stream = [
+            STREAM_START,
+            STREAM_NARRATION,
+            STREAM_TOOL,
+            STREAM_TOOL_RESULT,
+            STREAM_FIRST,
+            STREAM_HELPER_TEXT,
+            STREAM_HELPER_RESULT,
+            STREAM_CONTINUE,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]
+        .concat();
+        assert_eq!(
+            claude_answer(&stream).as_deref(),
+            Some("## Numbers\n\n1. one\n2. two\n3. three\n")
+        );
+    }
+
+    /// A Claude Code pane's reply is every part it said since its last tool call, so an
+    /// answer continued past the output cap stays whole; a Codex pane's reply is its last
+    /// message; a reply that outgrows the report bound is none until a tool call starts over.
+    #[test]
+    fn a_research_pane_keeps_the_whole_answer_its_agent_ends_with() {
+        let mut claude = Reply::new(ResearchHarness::ClaudeCode, 64);
+        claude.said("I will read the notes first.\n");
+        claude.tool();
+        claude.said("1. one\n2. tw");
+        claude.said("o\n3. three\n");
+        assert_eq!(claude.text(), Some("1. one\n2. two\n3. three\n"));
+        let mut codex = Reply::new(ResearchHarness::Codex, 64);
+        codex.said("Reading the notes.");
+        codex.tool();
+        codex.said("The report.");
+        assert_eq!(codex.text(), Some("The report."));
+        let mut long = Reply::new(ResearchHarness::ClaudeCode, 8);
+        long.said("1234");
+        long.said("56789");
+        assert_eq!(long.text(), None);
+        let mut again = Reply::new(ResearchHarness::ClaudeCode, 8);
+        again.said("123456789");
+        again.tool();
+        again.said("1234");
+        assert_eq!(again.text(), Some("1234"));
+    }
+
+    /// A long line's parent key is found wherever the reads split it, and the same words
+    /// inside a string, where their quotes are escaped, are no key.
+    #[test]
+    fn a_long_claude_line_names_its_parent_however_its_bytes_are_split() {
+        let lines: [(&[u8], Option<bool>); 3] = [
+            (
+                br#"{"type":"user","message":{},"parent_tool_use_id":null}"#,
+                Some(false),
+            ),
+            (
+                br#"{"type":"user","message":{"text":"\"parent_tool_use_id\":\"x"},"parent_tool_use_id":"toolu_2"}"#,
+                Some(true),
+            ),
+            (br#"{"type":"assistant","message":{}}"#, None),
+        ];
+        for (line, parent) in lines {
+            for split in 0..=line.len() {
+                let mut long = LongLine::default();
+                long.pass(&line[..split]);
+                long.pass(&line[split..]);
+                assert_eq!(long.parent, parent, "split at {split}");
+                assert_eq!(long.head.starts_with(CLAUDE_USER_LINE), parent.is_some());
+            }
+            let mut bytewise = LongLine::default();
+            for byte in line {
+                bytewise.pass(std::slice::from_ref(byte));
+            }
+            assert_eq!(bytewise.parent, parent);
+        }
+    }
+
+    /// A tool result past the line bound, such as a large PDF the agent read, which Claude
+    /// Code prints twice in one line, is still the main thread's tool result or a sub-agent's
+    /// line, so the answer the run ends with after it is kept whole (rv-code F1 r1).
+    #[test]
+    fn a_finished_claude_report_survives_a_tool_result_line_past_the_line_bound() {
+        let long = |parent: &str| {
+            let data = "A".repeat(CLAUDE_LINE_BYTES_MAX / 2);
+            format!(
+                concat!(
+                    "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{",
+                    "\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",",
+                    "\"content\":\"{data}\"}}]}},\"parent_tool_use_id\":{parent},",
+                    "\"tool_use_result\":{{\"file\":\"{data}\"}}}}\n",
+                ),
+                data = data,
+                parent = parent,
+            )
+        };
+        let read = |lines: &[&str]| {
+            let mut stream = ClaudeStream::new(1024);
+            for part in lines.concat().as_bytes().chunks(8192) {
+                stream.read(part);
+            }
+            stream.close();
+            stream
+        };
+        let numbers = Some("## Numbers\n\n1. one\n2. two\n3. three\n");
+        let main = long("null");
+        assert!(main.len() > CLAUDE_LINE_BYTES_MAX);
+        let after = read(&[
+            STREAM_START,
+            STREAM_NARRATION,
+            STREAM_TOOL,
+            &main,
+            STREAM_FIRST,
+            STREAM_CONTINUE,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]);
+        assert_eq!(after.answer(), numbers);
+        let helper = long("\"toolu_2\"");
+        assert!(helper.len() > CLAUDE_LINE_BYTES_MAX);
+        let during = read(&[
+            STREAM_START,
+            STREAM_TOOL,
+            STREAM_TOOL_RESULT,
+            STREAM_FIRST,
+            &helper,
+            STREAM_CONTINUE,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]);
+        assert_eq!(during.answer(), numbers);
+    }
+
+    /// A Claude Code stream is read as its bytes arrive, lines split over reads and a last
+    /// line with no break included; a line past the line bound leaves the run with no
+    /// answer rather than a guess; a limit line Claude Code ends on is told from other errors.
+    #[test]
+    fn a_claude_stream_read_in_pieces_keeps_its_answer_and_never_guesses_past_a_long_line() {
+        let whole = [
+            STREAM_START,
+            STREAM_FIRST,
+            STREAM_CONTINUE,
+            STREAM_SECOND,
+            STREAM_DONE,
+        ]
+        .concat();
+        let read = |bytes: &[u8], piece: usize| {
+            let mut stream = ClaudeStream::new(1024);
+            for part in bytes.chunks(piece) {
+                stream.read(part);
+            }
+            stream.close();
+            stream
+        };
+        let numbers = Some("## Numbers\n\n1. one\n2. two\n3. three\n");
+        assert_eq!(read(whole.as_bytes(), 7).answer(), numbers);
+        assert_eq!(read(whole.trim_end().as_bytes(), 1).answer(), numbers);
+        assert_eq!(read(whole.as_bytes(), whole.len()).answer(), numbers);
+        let mut long = ClaudeStream::new(1024);
+        long.read(STREAM_FIRST.as_bytes());
+        long.read(&vec![b'x'; CLAUDE_LINE_BYTES_MAX + 1]);
+        long.read(
+            [STREAM_CONTINUE, STREAM_SECOND, STREAM_DONE]
+                .concat()
+                .as_bytes(),
+        );
+        long.close();
+        assert_eq!(long.answer(), None);
+        let failed = [STREAM_START, STREAM_FIRST, STREAM_OWN_ERROR, STREAM_FAILED].concat();
+        let failed = read(failed.as_bytes(), 64);
+        assert_eq!(failed.answer(), None);
+        assert!(!failed.limited());
+        let limited = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"content\":[{",
+            "\"type\":\"text\",\"text\":\"Claude AI usage limit reached\"}]},",
+            "\"is_api_error_message\":true}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,",
+            "\"result\":\"Claude AI usage limit reached\"}\n",
+        );
+        let limited = read(limited.as_bytes(), 64);
+        assert_eq!(limited.answer(), None);
+        assert!(limited.limited());
     }
 }
 

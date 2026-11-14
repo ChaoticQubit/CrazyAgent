@@ -15,7 +15,7 @@ use crate::research::jobs::JobError;
 use crate::research::runner::ResearchLimits;
 use crate::research::runner::{
     RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
-    confined_unavailable,
+    confined_unavailable, unreached_provider_here,
 };
 use crate::sandbox::SandboxError;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -1007,6 +1007,9 @@ fn mapping_step(
             }
             _ => return (Step::failed(NO_ACCOUNT), kept),
         };
+        if let Some(line) = unreached_provider_here(&account) {
+            return (Step::failed(&line), kept);
+        }
         let _ = record_try(
             database,
             &work.claimer,

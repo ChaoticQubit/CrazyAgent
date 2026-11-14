@@ -2570,11 +2570,10 @@ fn owner_apply_with(
     assert_eq!(next > revision, changed);
     if changed
         && let OwnerOperation::Apply {
-            mutation: OwnerMutation::CreateDemo { .. },
+            mutation: OwnerMutation::CreateDemo { project_id, .. },
         } = &request.operation
-        && let Err(e) = crate::demo::plant_question(db)
     {
-        eprintln!("demo_question_not_planted cause={}", e.0);
+        crate::questions::refresh_page(db, project_id);
     }
     Ok(OwnerApplied {
         result,

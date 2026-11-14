@@ -23,8 +23,8 @@ impl TestAgent {
         Self::confined(None)
     }
 
-    /// Like `new`, with an existing folder as the agent's writable home, the way the team
-    /// runtime gives an agent a managed profile's home. Input: the 0700 home.
+    /// Like `new`, with an existing folder as the agent's writable home, as the team runtime
+    /// gives each agent a home of its own. Input: the 0700 home. Output: the confined agent.
     pub(crate) fn with_home(home: &Path) -> Self {
         Self::confined(Some(home.canonicalize().unwrap()))
     }

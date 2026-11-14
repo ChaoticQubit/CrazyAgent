@@ -4529,6 +4529,7 @@ mod overview_read {
             stale: false,
             checked_ms: None,
             failure: None,
+            waiting_for_account: false,
             refresh: Refresh::AfterLanding,
             apply: Apply::AlwaysAsk,
             needs_home: false,

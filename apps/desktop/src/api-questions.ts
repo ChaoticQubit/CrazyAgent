@@ -15,7 +15,8 @@ export type ClosedBy = "master" | "replaced" | "relay";
 
 /** One question an agent or an engine step asked the owner, as the engine recorded it. The
  * `version` goes back with an answer or a dismissal, so a question that changed since the
- * owner read it is refused as stale. */
+ * owner read it is refused as stale. The engine names a sub-agent asker by the name its team
+ * keeps and says whether a waiting team question is urgent and its asker paused (S4-R1). */
 export interface OwnerQuestion {
   id: number;
   project_id: string;
@@ -31,7 +32,15 @@ export interface OwnerQuestion {
   closed_by?: ClosedBy | null;
   created_ms: number;
   settled_ms: number | null;
+  asker_name?: string | null;
+  urgent?: boolean;
+  paused?: boolean;
 }
+
+/** The word a question shows while it is urgent, the engine's `URGENT_WORD` (DEC-141). */
+export const URGENT_WORD = "Urgent";
+/** The note a question shows while its asker is paused, the engine's `PAUSED_NOTE`. */
+export const PAUSED_NOTE = "The agent is paused until you answer.";
 
 /** What one "Dismiss all" did: the questions dismissed, the ones that changed since the owner
  * read them, and each one refused with its code. */
@@ -132,12 +141,14 @@ export function notReady<T>(result: Result<T>): boolean {
 }
 
 /** Who asked, in plain words, from the engine's asker name such as `master:<session>`,
- * `agent:<team id>`, `engine:research:<kind>` or `terminal:<agent id>`. Input: the asker.
- * Output: the label. */
-export function askerLabel(asker: string): string {
+ * `agent:<team id>`, `engine:research:<kind>` or `terminal:<agent id>`, and a sub-agent by
+ * the name the engine sent with it, else by its number (S4-R1). Inputs: the asker and the
+ * name, if any. Output: the label. */
+export function askerLabel(asker: string, name: string | null = null): string {
   const [kind, ...rest] = asker.split(":");
   const tail = rest.join(":");
   if (kind === "master") return "Master";
+  if (kind === "agent" && name) return displayText(name);
   if (kind === "agent" && tail) return `Agent ${displayText(tail)}`;
   if (kind === "terminal" && tail) return `Asked in the terminal of agent ${displayText(tail)}`;
   if (kind === "engine") {

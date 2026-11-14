@@ -210,9 +210,18 @@ export async function menu(label, item) {
 }
 
 /** Goes through first run the way an owner does up to its last page: saves the profile,
- * continues past the projects folder and skips tool setup (nothing is installed), then waits
- * for the Accounts step. Input: the owner's name. */
+ * continues past the projects folder, skips tool setup and continues past the harnesses with
+ * nothing picked (nothing is installed), then waits for the Accounts step. Input: the owner's name. */
 export async function reachAccountsStep(name) {
+  await reachHarnessStep(name);
+  await passHarnessStep();
+  await until(() => says("h1", "Add an account"), 15000, "the accounts step did not open");
+}
+
+/** Goes through first run the way an owner does up to the Harnesses step: saves the profile,
+ * continues past the projects folder and skips tool setup, so nothing is installed.
+ * Input: the owner's name. Output: none; fails when a step does not open. */
+export async function reachHarnessStep(name) {
   await until(() => shown("#profile-name"), 60000, "first-run Welcome page did not appear");
   assert.deepEqual(await texts("h1"), ["Tell CrazyAgent about you"]);
   await type("#profile-name", name);
@@ -224,7 +233,17 @@ export async function reachAccountsStep(name) {
   await until(() => says("h1", "Set up tools"), 15000, "the tools step did not open");
   await until(async () => await shown("button=Skip for now") || await shown("button=Continue"), 30000, "the tools step offered no way on");
   await click(await shown("button=Skip for now") ? "button=Skip for now" : "button=Continue");
-  await until(() => says("h1", "Add an account"), 15000, "the accounts step did not open");
+  await until(() => says("h1", "Choose your harnesses"), 15000, "the harnesses step did not open");
+}
+
+/** Waits for first run's Harnesses step with only RCLI picked, then continues without
+ * installing: with no picks the step offers Continue and no Install. Input: none.
+ * Output: none; fails when the step does not open or offers Install. */
+export async function passHarnessStep() {
+  await until(() => says("h1", "Choose your harnesses"), 15000, "the harnesses step did not open");
+  await until(() => shown("button=Continue"), 15000, "the harnesses step offered no Continue");
+  assert.equal(await shown("button=Install picked harnesses"), false, "nothing is picked to install");
+  await click("button=Continue");
 }
 
 /** Goes through first run the way an owner does and picks Add account on its last page, which

@@ -1246,6 +1246,8 @@ async fn first_run_setup_continues_without_installing_and_home_lists_what_is_mis
     assert!(help.contains("c Continue without installing"), "{rows:#?}");
 
     shell.key(Key::Char('c'));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
+    shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
     shell.key(Key::Right);
     shell.key(Key::Enter);
@@ -1302,6 +1304,8 @@ fn tools_found(status: &crate::setup::SetupStatus) -> bool {
         matches!(
             tool.state,
             crate::setup::DependencyState::Found { .. }
+                | crate::setup::DependencyState::Bundled { .. }
+                | crate::setup::DependencyState::System { .. }
                 | crate::setup::DependencyState::Installed { .. }
         )
     })
@@ -2011,14 +2015,36 @@ fn the_review_marks_what_is_missing_and_clears_it_as_the_owner_fills_it() {
     };
     assert_eq!(read, project);
     let rows = render(&mut shell, 80, 40);
-    assert!(shows(&rows, "Missing: About, Platforms."), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "CrazyAgent couldn't work out what the project is about and the target"
+        ),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(
+            &rows,
+            "platforms from the project's files. Fill them in below."
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Fill in"), "{rows:#?}");
+    assert!(!shows(&rows, "Missing"), "{rows:#?}");
     assert!(shows(&rows, "Languages: Rust"), "{rows:#?}");
     assert!(shows(&rows, "Tests: cargo test"), "{rows:#?}");
 
     shell.key(Key::Tab);
     keys(&mut shell, "Keeps notes in the terminal.");
     let rows = render(&mut shell, 80, 40);
-    assert!(shows(&rows, "Missing: Platforms."), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "CrazyAgent couldn't work out the target platforms from the project's files."
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Fill it in below."), "{rows:#?}");
     shell.key(Key::Tab);
     shell.key(Key::Tab);
     shell.key(Key::Right);

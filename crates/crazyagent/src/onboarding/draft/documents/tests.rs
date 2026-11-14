@@ -231,7 +231,7 @@ fn the_prompt_shows_the_local_scan_first_inside_each_documents_fence() {
         kind,
         marks: marks.iter().map(|mark| (*mark).to_owned()).collect(),
     };
-    let text = section(
+    let text = crate::onboarding::draft::documents_section(
         &[
             document("a.md", FoundKind::Roadmap, &["M0 Start", "M1 Ship"]),
             document("b.md", FoundKind::Research, &[]),

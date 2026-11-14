@@ -416,6 +416,7 @@ fn an_overview_goes_over_the_wire_in_the_shape_the_desktop_reads() {
     assert_eq!(wire["refresh"], "after_landing");
     assert_eq!(wire["apply"], "always_ask");
     assert_eq!(wire["needs_home"], false);
+    assert_eq!(wire["waiting_for_account"], false);
     assert_eq!(wire["tabs"][3]["blocked"], serde_json::Value::Null);
     std::fs::write(folder.path().join(".crazyagent/overview/features.md"), "\n").unwrap();
     let blank = serde_json::to_value(read(&db, &project, folder.path(), 1).unwrap()).unwrap();
@@ -1694,6 +1695,50 @@ fn a_run_that_got_an_account_drops_the_no_account_line_and_keeps_any_other() {
     assert_eq!(overview.failure.as_deref(), Some(UNFINISHED));
 }
 
+/// Only the wait for an account is told as a wait (IW-L1, DEC-147 addendum): the reply says
+/// so while the stored line is the no-account line, also once a run is claimed and until
+/// the pick drops it, and never for an ended real failure, neither while a Refresh waits
+/// to run nor while that run writes.
+#[test]
+fn only_the_no_account_line_is_told_as_a_wait_and_an_ended_failure_never_is() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    assert!(
+        !read(&db, &project, folder.path(), 0)
+            .unwrap()
+            .waiting_for_account
+    );
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let (_, waiting) = runs.claims.pop().unwrap();
+    assert!(wait_for_account(&db, &project, waiting, NO_ACCOUNT, 5).unwrap());
+    let overview = read(&db, &project, folder.path(), 6).unwrap();
+    assert!(overview.waiting_for_account && overview.stale && !overview.running);
+
+    assert_eq!(tick(&db, &mut runs, 6).unwrap(), 1);
+    let found = runs.claims.last().unwrap().1;
+    let overview = read(&db, &project, folder.path(), 7).unwrap();
+    assert!(overview.running && overview.waiting_for_account);
+    assert!(account_found(&db, &project, found).unwrap());
+    let overview = read(&db, &project, folder.path(), 7).unwrap();
+    assert!(overview.running && !overview.waiting_for_account);
+    assert_eq!(
+        runs.end(&db, folder.path(), Ended::Failed(UNFINISHED), 8),
+        1
+    );
+    let ended = read(&db, &project, folder.path(), 9).unwrap();
+    assert_eq!(ended.failure.as_deref(), Some(UNFINISHED));
+    assert!(!ended.waiting_for_account && !ended.stale && !ended.running);
+
+    refresh(&db, &project).unwrap();
+    let queued = read(&db, &project, folder.path(), 10).unwrap();
+    assert_eq!(queued.failure.as_deref(), Some(UNFINISHED));
+    assert!(queued.stale && !queued.running && !queued.waiting_for_account);
+    assert_eq!(tick(&db, &mut runs, 10).unwrap(), 1);
+    let writing = read(&db, &project, folder.path(), 11).unwrap();
+    assert_eq!(writing.failure.as_deref(), Some(UNFINISHED));
+    assert!(writing.running && !writing.waiting_for_account);
+}
+
 #[test]
 fn the_prompt_asks_for_every_tab_and_never_lets_the_agent_leave_one_out() {
     for with_competitors in [false, true] {
@@ -1747,4 +1792,80 @@ fn a_project_outside_the_projects_home_never_shows_a_run_failure_or_a_due_run() 
     assert!(overview.needs_home);
     assert!(overview.failure.is_none());
     assert!(!overview.stale && !overview.running);
+    assert!(!overview.waiting_for_account);
+}
+
+/// An Overview reply from an engine before IW-L1 has no `waiting_for_account` and still
+/// reads, as no wait for an account, so a newer client keeps its Overview during update
+/// skew (IW-L1 r1, DEC-147 addendum).
+#[test]
+fn an_overview_from_an_engine_without_the_wait_flag_reads_as_no_wait() {
+    let (db, project, folder) = case();
+    let mut overview = read(&db, &project, folder.path(), 0).unwrap();
+    overview.waiting_for_account = true;
+    let mut wire = serde_json::to_value(&overview).unwrap();
+    let fields = wire.as_object_mut().unwrap();
+    assert_eq!(fields.remove("waiting_for_account"), Some(true.into()));
+    let older: Overview = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        older,
+        Overview {
+            waiting_for_account: false,
+            ..overview
+        }
+    );
+}
+
+/// A writing run whose loopback provider refuses connections fails at once with the plain
+/// reach line, before its evidence is read or any agent folder is made, in place of a
+/// harness retrying the dead port until the run's time is over.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach_line() {
+    use crate::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
+    use std::os::unix::fs::PermissionsExt;
+    let private = |path: &Path| {
+        std::fs::create_dir(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("ca-reach-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let engine = base.join("engine");
+    private(&engine);
+    let database = engine.join("engine.db");
+    let sqlite = Connection::open(&database).unwrap();
+    sqlite.execute_batch("PRAGMA user_version=1").unwrap();
+    drop(sqlite);
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let state = engine.join("research");
+    private(&state);
+    let root = base.join("repo");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    let runner =
+        ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
+    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "local-model".into(),
+        key: None,
+    };
+    let line = format!(
+        "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
+    );
+    let db = Connection::open_in_memory().unwrap();
+    let project = ProjectId::new("plant-shop").unwrap();
+    match agent::answer(&runner, &db, &project, &root, &account) {
+        Err(agent::Unwritten::Failed(words)) => assert_eq!(words, line),
+        _ => panic!("the writing run did not fail with the reach line"),
+    }
+    assert!(
+        std::fs::read_dir(state.join("agents"))
+            .map_or(true, |mut entries| entries.next().is_none()),
+        "no agent folder was made"
+    );
 }

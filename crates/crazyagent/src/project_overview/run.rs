@@ -480,6 +480,13 @@ pub fn account_found(
     Ok(cleared == 1)
 }
 
+/// Tells whether a stored run line is the wait for an account that [`wait_for_account`]
+/// writes and [`account_found`] drops, so the views show it as a wait and any other line
+/// as a failure (IW-L1). Input: the stored line. Output: the answer.
+pub(crate) fn waits_for_account(stored: &str) -> bool {
+    stored == line(NO_ACCOUNT)
+}
+
 /// Makes the Overview tables and closes every run an engine that stopped left open: a run
 /// lives on a thread of its engine, so at engine start none can still report, and each is
 /// closed with [`UNFINISHED`] without a new try. Input: the connection. Output: how many

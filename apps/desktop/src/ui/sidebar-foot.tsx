@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon, type IconName } from "./icon";
 import { ConfirmDialog } from "./overlay";
 import { USER_MENU_TABS, type UserMenuTab } from "./router";
@@ -83,7 +83,7 @@ export function SidebarFoot({ name, engine, onRetry, restart, menu }: {
     setDismissed(true);
     if (foot.current?.contains(document.activeElement)) me.current?.focus();
   };
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!menuShown) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;

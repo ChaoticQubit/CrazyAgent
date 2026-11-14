@@ -120,7 +120,7 @@ pub(in crate::tui) fn on_quit_words(on_quit: OnQuit) -> (&'static str, &'static 
     match on_quit {
         OnQuit::KeepRunning => (
             "Keep team agents running",
-            "They go on with their work, and CrazyAgent takes them over when it opens again.",
+            "They go on with their work, and CrazyAgent takes them over when it opens again. An agent under network None is frozen instead, until CrazyAgent opens again.",
         ),
         OnQuit::Stop => (
             "Stop team agents",
@@ -251,7 +251,7 @@ pub fn setup_plain(code: &str) -> String {
 /// The sentence for why a tool or default skill did not install.
 /// Input: the reason the engine sent, which is the setup sentence it already chose.
 /// Output: that sentence; a plain code instead gets the setup sentence for the code.
-fn setup_reason(reason: &str) -> String {
+pub(super) fn setup_reason(reason: &str) -> String {
     if plain_code(reason) {
         setup_plain(reason)
     } else {
@@ -293,9 +293,14 @@ fn tool_word(state: &DependencyState) -> String {
         DependencyState::Checking => "Checking".into(),
         DependencyState::Missing { .. } => "Not installed".into(),
         DependencyState::Found { version } => format!("Found {}", version.as_str()),
+        DependencyState::Bundled { version } => {
+            format!("Bundled with CrazyAgent {}", version.as_str())
+        }
+        DependencyState::System { version, .. } => format!("Found {}", version.as_str()),
         DependencyState::Installing => "Installing".into(),
         DependencyState::Installed { version } => format!("Installed {}", version.as_str()),
         DependencyState::Failed { .. } => "Failed".into(),
+        DependencyState::Unsupported => "Not supported".into(),
     }
 }
 
@@ -372,7 +377,7 @@ enum Sent {
 
 /// The setup page: the tools CrazyAgent needs on this machine and the default
 /// skills and plugins pack, with ticks. First run shows it after the projects
-/// home folder: Enter installs and continues to the Accounts step, and continuing past the
+/// home folder: Enter installs and continues to the Harnesses step, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
 /// remove, the projects home folder, the GitHub account, the Linux sockets
 /// setting, when finished agents' worktrees go, what quitting does to team agents and
@@ -1452,14 +1457,14 @@ impl AppSetup {
         }
     }
 
-    /// Leaves first run's Setup for the Accounts step, the only way first run
+    /// Leaves first run's Setup for the Harnesses step, the only way first run
     /// leaves this page. Input: the context. Output: the flow that replaces Setup.
     fn next_step(ctx: &mut Ctx) -> Flow {
-        Flow::Replace(open(&Place::FirstRunAccounts, ctx))
+        Flow::Replace(open(&Place::HarnessSetup, ctx))
     }
 
     /// True when no setup run is going and no change waits for the engine.
-    /// Input: none. Output: whether first run may leave for its Accounts step.
+    /// Input: none. Output: whether first run may leave for its Harnesses step.
     fn quiet(&self) -> bool {
         !self.started && self.sent.is_none()
     }
@@ -1500,6 +1505,9 @@ impl AppSetup {
                 DependencyState::Failed { reason } => Some(setup_reason(reason)),
                 DependencyState::Missing { line } if !line.is_empty() => {
                     Some(super::new_project_view::printable(line.clone()))
+                }
+                DependencyState::System { note, .. } => {
+                    Some(super::new_project_view::printable(note.clone()))
                 }
                 _ => None,
             };
@@ -2030,7 +2038,12 @@ impl Screen for AppSetup {
         let mut hints = Vec::new();
         match &self.setup {
             Load::Ready(_) if self.first_run => {
-                hints.push(hint("Enter", "Install and continue"));
+                let enter = if self.finished_with_problems && self.quiet() {
+                    "Try again"
+                } else {
+                    "Install and continue"
+                };
+                hints.push(hint("Enter", enter));
                 if self.quiet() {
                     let skip = if self.finished_with_problems {
                         "Continue without it"
@@ -2159,6 +2172,7 @@ impl Screen for AppSetup {
         match event {
             AppSetupEvent::Status(result) => return self.read_setup(result, ctx),
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
+            AppSetupEvent::Installed(_) => {}
             AppSetupEvent::PackChanged(result)
             | AppSetupEvent::HomeSet(result)
             | AppSetupEvent::SandboxSet(result)

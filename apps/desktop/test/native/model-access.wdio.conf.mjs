@@ -20,6 +20,8 @@ const SPECS = {
   "pools-spend": "pools-spend.e2e.mjs",
   "first-run-guide": "first-run-guide.e2e.mjs",
   "first-run-skip-guide": "first-run-skip-guide.e2e.mjs",
+  "first-run-harnesses": "first-run-harnesses.e2e.mjs",
+  "first-run-harnesses-node": "first-run-harnesses-node.e2e.mjs",
   "learning-replay-guide": "learning-replay-guide.e2e.mjs",
   "learning-replay-first-run": "learning-replay-first-run.e2e.mjs",
 };

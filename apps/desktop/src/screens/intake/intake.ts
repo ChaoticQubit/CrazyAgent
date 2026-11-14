@@ -589,14 +589,20 @@ export function projectFolder(stored: StoredSetup): string {
   return name === ".crazyagent" ? clean.slice(0, clean.length - name.length - 1) : clean;
 }
 
-const MISSING_LABELS: Record<string, string> = {
-  name: "Project name", about: "What is it about", tech_stack: "Tech stack", platforms: "Target platforms",
+const MISSING_WORDS: Record<string, string> = {
+  name: "the project name", about: "what the project is about", tech_stack: "the tech stack", platforms: "the target platforms",
 };
 
-/** Names what the mapping agent couldn't find, as the form labels say it, once each.
- * Input: the missing item keys. Output: plain labels in order. */
-export function missingLabels(missing: string[]): string[] {
-  return [...new Set(missing)].map((item) => MISSING_LABELS[item] ?? displayText(item.replaceAll("_", " ")));
+/** The one line for the setup fields the mapping agent couldn't fill, in the words the TUI uses
+ * too (DEC-160, DEC-141): what CrazyAgent couldn't work out from the project's files, each once
+ * and in order, and what to do. Input: the missing field keys. Output: the line, or null when
+ * nothing is missing. */
+export function missingLine(missing: string[]): string | null {
+  const words = [...new Set(missing)].map((item) => MISSING_WORDS[item] ?? displayText(item.replaceAll("_", " ")));
+  const last = words.pop();
+  if (last === undefined) return null;
+  const list = words.length === 0 ? last : `${words.join(", ")} and ${last}`;
+  return `CrazyAgent couldn't work out ${list} from the project's files. Fill ${words.length === 0 ? "it" : "them"} in below.`;
 }
 
 /** Starts the review form from the mapping agent's draft, keeping the saved pool and team. A
@@ -707,7 +713,10 @@ const DEPENDENCY_ABOUT: Record<DependencyName, string> = {
   tmux: "Runs each agent in a live terminal.",
   uv: "Installs graphify.",
   graphify: "Builds a code graph of each project.",
+  node: "Runs the harnesses CrazyAgent installs with npm.",
 };
+
+const INSTALL_ALONE: ReadonlySet<DependencyName> = new Set<DependencyName>(["node"]);
 
 /** Badge word, tone and detail line for a tool or pack entry state.
  * Input: the state. Output: the fixed word, its tone and one line or null. */
@@ -715,9 +724,12 @@ export function stateView(state: DependencyState): { word: string; tone: Tone; l
   switch (state.state) {
     case "found": return { word: "Found", tone: "ok", line: `Version ${displayText(state.version)} on this Mac.` };
     case "installed": return { word: "Installed", tone: "ok", line: `Version ${displayText(state.version)} installed.` };
+    case "bundled": return { word: "Bundled", tone: "ok", line: `Bundled with CrazyAgent, version ${displayText(state.version)}.` };
+    case "system": return { word: "Found", tone: "ok", line: displayText(state.note) };
     case "installing": return { word: "Installing", tone: "info", line: null };
     case "checking": return { word: "Checking", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
+    case "unsupported": return { word: "Not supported", tone: "neutral", line: "Not supported on this system." };
     default: return { word: "Not installed", tone: "warn", line: state.state === "missing" && state.line ? displayText(state.line) : "Setup installs it." };
   }
 }
@@ -739,6 +751,13 @@ export function packStateView(state: PackState, hooksRefused: string | null = nu
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
     default: return { word: "Not installed", tone: "neutral", line: null };
   }
+}
+
+/** The pack ids Try again sends after a run with failures: every ticked entry that is not
+ * installed, so a failed one runs again and an installed one is left alone; the tools are
+ * checked again on every run. Inputs: the setup read and the ticks. Output: the ids. */
+export function retryTicks(status: SetupStatus, ticks: readonly string[]): string[] {
+  return status.pack.filter((item) => ticks.includes(item.id) && !installed(item)).map((item) => item.id);
 }
 
 /** Tells whether a pack entry is installed, so Settings can switch or remove it.
@@ -801,6 +820,21 @@ export function toolsChecking(status: SetupStatus): boolean {
   return status.dependencies.some((item) => item.state.state === "checking");
 }
 
+/** Tells whether a tool row offers its own Install: Node alone, while it is missing or failed
+ * and no setup run, install or check goes on. Inputs: the row and the status. Output: the answer. */
+export function rowInstall(dependency: Dependency, status: SetupStatus): boolean {
+  const wanted = dependency.state.state === "missing" || dependency.state.state === "failed";
+  return INSTALL_ALONE.has(dependency.name) && wanted && !setupBusy(status) && !toolsChecking(status);
+}
+
+/** Tells whether Settings, Pack offers Install tools: a tool is missing or failed, never one
+ * setup can't install on this system, and nothing is running or checking. Input: the status.
+ * Output: the answer. */
+export function toolsOffer(status: SetupStatus): boolean {
+  const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed");
+  return wanted && !setupBusy(status) && !toolsChecking(status);
+}
+
 /** Tells whether setup is still working. Input: the status. Output: true while it runs or
  * anything is installing. */
 export function setupBusy(status: SetupStatus): boolean {
@@ -812,7 +846,7 @@ export function setupBusy(status: SetupStatus): boolean {
 export function setupProgress(status: SetupStatus, ticked: string[]): { done: number; total: number; failed: number } {
   const states = [...status.dependencies.map((item) => item.state.state),
     ...status.pack.filter((item) => ticked.includes(item.id)).map((item) => item.state.state)];
-  const settledStates = new Set(["found", "installed", "on", "off", "failed"]);
+  const settledStates = new Set(["found", "installed", "bundled", "system", "on", "off", "failed", "unsupported"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
 }
 
@@ -845,7 +879,7 @@ export function setupPollMs(failures: number): number {
 }
 
 const TOOLS: DependencyName[] = ["tmux", "uv", "graphify"];
-const TOOL_PRESENT = new Set(["found", "installed"]);
+const TOOL_PRESENT = new Set(["found", "installed", "bundled", "system"]);
 const TOOLS_NEED = "Live terminals and the team graph need tmux; setting up a project needs graphify.";
 
 /** Joins tool names the way the setup panel says them: "tmux", "tmux and uv", "tmux, uv and graphify". */
@@ -854,7 +888,7 @@ function namesLine(names: string[]): string {
 }
 
 /** Works out the Install tools item from the setup read: done once tmux, uv and graphify are
- * each found or installed; the default pack never blocks it. While the read or a tool is still
+ * each found, installed, bundled or used in place of the bundled one; the default pack never blocks it. While the read or a tool is still
  * checking it is not done and says so without an error. Input: the setup read.
  * Output: whether it is done and its one-line body. */
 export function toolsStep(tools: Loaded<SetupStatus>): { done: boolean; body: string } {

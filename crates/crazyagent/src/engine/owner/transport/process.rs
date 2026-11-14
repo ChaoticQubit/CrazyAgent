@@ -39,6 +39,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "instructions_cleanup_pool_not_asked",
     "instructions_cleanup_pool_unknown",
     "instructions_cleanup_project_pool_missing",
+    "instructions_cleanup_provider_unreachable",
     "instructions_cleanup_timed_out",
     "instructions_cleanup_too_large",
     "instructions_cleanup_unavailable",

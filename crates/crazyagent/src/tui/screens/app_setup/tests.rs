@@ -245,6 +245,40 @@ fn typed(shell: &mut Shell, text: &str) {
     }
 }
 
+/// DEC-157, desktop parity with intake.ts: a tmux the app ships reads Bundled with
+/// CrazyAgent and its version, with the ready glyph.
+#[test]
+fn a_bundled_tmux_reads_bundled_with_crazyagent_and_its_version() {
+    let word = tool_word(&DependencyState::Bundled {
+        version: version("3.8"),
+    });
+    assert_eq!(word, "Bundled with CrazyAgent 3.8");
+    assert_eq!(Status::of(&word), Some(Status::Ok));
+}
+
+/// Leader 20:08, desktop parity with intake.ts: a system tmux used in place of the bundled
+/// one reads Found and its version, with the note under it, at every width.
+#[test]
+fn a_system_tmux_in_place_of_the_bundled_one_reads_found_with_its_note_under_it() {
+    for (width, height) in [(80, 24), (120, 36)] {
+        let mut status = first_run_status();
+        status.dependencies[0].state = DependencyState::System {
+            version: version("3.5a"),
+            note: crate::tools::BundleNote::CannotRun.line().to_owned(),
+        };
+        let mut shell = Shell::with(ctx(width, height), Box::new(AppSetup::new(true)));
+        assert!(matches!(jobs(&mut shell).as_slice(), [AppSetupJob::Status]));
+        shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+        let rows = render(&mut shell, width, height);
+        assert!(find(&rows, "tmux").contains("Found 3.5a"));
+        find(&rows, "Using the system tmux,");
+        assert!(
+            rows.iter()
+                .all(|row| row.chars().count() <= usize::from(width))
+        );
+    }
+}
+
 #[test]
 fn setup_status_words_carry_a_glyph() {
     assert_eq!(Status::of("Found 3.5a"), Some(Status::Ok));
@@ -403,7 +437,7 @@ fn continuing_installs_the_ticked_entries_then_opens_home() {
     done.pack[1].state = PackState::Available;
     done.pack[2].state = PackState::On;
     shell.arrive(event(AppSetupEvent::Status(Ok(done))));
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
 #[test]
@@ -415,7 +449,7 @@ fn first_run_offers_to_continue_without_installing_and_runs_nothing() {
         assert!(help.contains("Enter Install and continue"), "{help}");
         assert!(help.contains("c Continue without installing"), "{help}");
         shell.key(Key::Char('c'));
-        assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+        assert_eq!(shell.place(), Some(Place::HarnessSetup));
         let runs = jobs(&mut shell)
             .iter()
             .filter(|job| matches!(job, AppSetupJob::Run { .. }))
@@ -451,7 +485,37 @@ fn a_failed_install_keeps_first_run_here_until_the_owner_continues() {
         "caveman: The source could not be downloaded.",
     );
     shell.key(Key::Char('c'));
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
+}
+
+#[test]
+fn a_failed_install_offers_try_again_which_runs_only_what_is_not_installed() {
+    let mut shell = first_run(120, 36);
+    shell.key(Key::Enter);
+    jobs(&mut shell);
+    shell.arrive(event(AppSetupEvent::Ran(Ok(()))));
+    jobs(&mut shell);
+    let mut finished = installed_status();
+    finished.dependencies[0].state = DependencyState::Failed {
+        reason: "setup_homebrew_missing".into(),
+    };
+    finished.pack[2].state = PackState::Failed {
+        reason: "pack_fetch_failed".into(),
+    };
+    shell.arrive(event(AppSetupEvent::Status(Ok(finished))));
+    let rows = render(&mut shell, 120, 36);
+    let help = bar(&rows);
+    assert!(help.contains("Enter Try again"), "{help}");
+    assert!(help.contains("c Continue without it"), "{help}");
+    shell.key(Key::Enter);
+    let runs: Vec<Vec<String>> = jobs(&mut shell)
+        .into_iter()
+        .filter_map(|job| match job {
+            AppSetupJob::Run { pack, .. } => Some(pack),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(runs, vec![vec!["caveman".to_owned()]]);
 }
 
 #[test]
@@ -570,7 +634,7 @@ fn without_engine_support_first_run_says_not_ready_and_continues() {
     find(&rows, "Not ready yet.");
     assert!(bar(&rows).contains("Enter Continue"));
     shell.key(Key::Enter);
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
 #[test]
@@ -1816,4 +1880,16 @@ fn every_app_settings_hint_stays_on_the_bar_from_80_by_24_to_240_columns() {
             &format!("{width}x{height}"),
         );
     }
+}
+
+/// DEC-158: keeping team agents tells the owner that an agent under network None is frozen
+/// until CrazyAgent opens again, in the same words as the desktop Settings.
+#[test]
+fn keeping_team_agents_says_an_agent_under_network_none_is_frozen_until_crazyagent_opens() {
+    let (title, detail) = on_quit_words(OnQuit::KeepRunning);
+    assert_eq!(title, "Keep team agents running");
+    assert_eq!(
+        detail,
+        "They go on with their work, and CrazyAgent takes them over when it opens again. An agent under network None is frozen instead, until CrazyAgent opens again."
+    );
 }

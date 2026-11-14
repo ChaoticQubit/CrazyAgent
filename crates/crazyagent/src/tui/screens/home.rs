@@ -243,17 +243,22 @@ fn checking(status: &SetupStatus) -> bool {
         .any(|tool| tool.state == DependencyState::Checking)
 }
 
-/// Names the tools the setup check did not find, in its order. Home's short line
-/// calls the Graphify command just Graphify, as there is no pack row beside it.
-/// Input: the setup status. Output: the names of tools neither found nor installed.
+/// Names the tools the setup check did not find, in its order, leaving out Node, which
+/// only npm harnesses need. Home's short line calls the Graphify command just Graphify, as
+/// there is no pack row beside it. Input: the setup status. Output: the names of tools not
+/// found, bundled or installed.
 fn missing_tools(status: &SetupStatus) -> Vec<String> {
     status
         .dependencies
         .iter()
+        .filter(|tool| tool.name != Dependency::Node)
         .filter(|tool| {
             !matches!(
                 tool.state,
-                DependencyState::Found { .. } | DependencyState::Installed { .. }
+                DependencyState::Found { .. }
+                    | DependencyState::Bundled { .. }
+                    | DependencyState::System { .. }
+                    | DependencyState::Installed { .. }
             )
         })
         .map(|tool| match tool.name {
@@ -1820,6 +1825,41 @@ pub(in crate::tui) mod tests {
         assert_eq!(missing_tools(&status), ["uv", "Graphify"]);
         status.dependencies[1].state = DependencyState::Checking;
         assert_eq!(missing_tools(&status), ["uv", "Graphify"]);
+    }
+
+    /// DEC-157, desktop parity with toolsStep: a tmux the app ships counts as installed, so
+    /// Get set up never asks to install tmux on a Mac that has it bundled.
+    #[test]
+    fn a_bundled_tmux_counts_as_installed() {
+        let mut status = tools(&[]);
+        status.dependencies[0].state = DependencyState::Bundled {
+            version: Version::parse("3.8").unwrap(),
+        };
+        assert_eq!(missing_tools(&status), Vec::<String>::new());
+    }
+
+    /// Leader 20:08: a system tmux used in place of the bundled one is a working tmux, so it
+    /// counts as installed like the desktop's Install tools step.
+    #[test]
+    fn a_system_tmux_in_place_of_the_bundled_one_counts_as_installed() {
+        let mut status = tools(&[]);
+        status.dependencies[0].state = DependencyState::System {
+            version: Version::parse("3.5a").unwrap(),
+            note: crate::tools::BundleNote::Missing.line().to_owned(),
+        };
+        assert_eq!(missing_tools(&status), Vec::<String>::new());
+    }
+
+    #[test]
+    fn node_is_not_a_tool_home_waits_for_as_only_npm_harnesses_need_it() {
+        assert_eq!(
+            missing_tools(&tools(&[Dependency::Node])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            missing_tools(&tools(&[Dependency::Uv, Dependency::Node])),
+            ["uv"]
+        );
     }
 
     #[test]

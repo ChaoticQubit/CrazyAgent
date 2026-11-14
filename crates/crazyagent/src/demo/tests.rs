@@ -349,6 +349,55 @@ fn the_demo_reads_each_step_from_its_own_rows_and_a_new_demo_never_inherits_a_de
     assert!(fresh.goal_sent && fresh.agent_started && !fresh.change_set_accepted);
 }
 
+fn goal_sent(db: &mut Connection, config: &EffectiveConfig) -> bool {
+    let tx = db.transaction().unwrap();
+    view(&tx, config).unwrap().steps.goal_sent
+}
+
+#[test]
+fn a_goal_typed_into_the_live_master_terminal_ticks_goal_sent_but_engine_words_and_older_rows_do_not()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = database(temp.path());
+    let config = config();
+    let id = ProjectId::new(PROJECT_ID).unwrap();
+    db.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
+        .unwrap();
+    let tx = db.transaction().unwrap();
+    record(&tx, &id, 1_000).unwrap();
+    tx.commit().unwrap();
+    assert!(
+        !goal_sent(&mut db, &config),
+        "a database with no master conversation yet still reads"
+    );
+    crate::master_sessions::mark_live_turn(
+        &db,
+        &id,
+        "live-1",
+        "claude",
+        Some(&crate::master_sessions::Fed::Engine(
+            "The owner answered the demo question.".into(),
+        )),
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO session_messages(session,seq,project,speaker,mode,harness,text,at_ms,source,source_key)
+         VALUES('kept',1,?1,'owner','live','claude','An older goal.',900,'terminal','t1'),
+               ('kept',2,?1,'master','live','claude','Done.',1500,'terminal','r2')",
+        [PROJECT_ID],
+    )
+    .unwrap();
+    assert!(
+        !goal_sent(&mut db, &config),
+        "engine words, the master's own words and owner words a deleted demo left are no goal"
+    );
+    crate::master_sessions::mark_owner_turn(&db, &id, "live-1", "claude").unwrap();
+    assert!(
+        goal_sent(&mut db, &config),
+        "the owner's own turn typed into the live master terminal is the goal sent"
+    );
+}
+
 #[test]
 fn a_demo_that_would_start_wider_than_sandboxed_stops_at_the_assertion() {
     use crate::sandbox::policy::{AccessGrant, AgentAccess, AgentPolicy};
@@ -382,18 +431,66 @@ fn a_demo_that_would_start_wider_than_sandboxed_stops_at_the_assertion() {
     assert!(trips(), "a hidden folder");
 }
 
+fn pending_demo_questions(db: &Connection) -> i64 {
+    db.query_row(
+        "SELECT COUNT(*) FROM questions_log WHERE project=?1 AND asker='engine:demo' AND status='pending'",
+        [PROJECT_ID],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn recording_the_demo_plants_its_question_in_the_same_transaction_and_a_question_that_cannot_be_planted_never_stops_the_demo()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = database(temp.path());
+    db.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
+        .unwrap();
+    let id = ProjectId::new(PROJECT_ID).unwrap();
+    let tx = db.transaction().unwrap();
+    record(&tx, &id, 1_000).unwrap();
+    assert_eq!(
+        pending_demo_questions(&tx),
+        1,
+        "the question is in the create's own transaction, so no stop after its commit can lose it"
+    );
+    tx.rollback().unwrap();
+    assert_eq!(
+        pending_demo_questions(&db),
+        0,
+        "a create that never commits plants nothing"
+    );
+    db.execute_batch(
+        "CREATE TRIGGER no_demo_question BEFORE INSERT ON questions_log
+         WHEN NEW.asker='engine:demo' BEGIN SELECT RAISE(ABORT,'blocked'); END;",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    record(&tx, &id, 2_000).unwrap();
+    assert_eq!(pending_demo_questions(&tx), 0);
+    tx.commit().unwrap();
+    let tx = db.transaction().unwrap();
+    assert!(
+        exists(&tx).unwrap(),
+        "a question that cannot be planted never fails the demo, whose folder is already in place"
+    );
+}
+
 #[test]
 fn the_planted_question_is_the_engines_own_once_and_its_answer_ticks_the_step() {
     let temp = tempfile::tempdir().unwrap();
     let mut db = database(temp.path());
     db.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
         .unwrap();
-    let first = plant_question(&db).unwrap();
+    let tx = db.transaction().unwrap();
+    let first = plant_question(&tx).unwrap();
     assert_eq!(
-        plant_question(&db).unwrap(),
+        plant_question(&tx).unwrap(),
         first,
         "asked once while it waits"
     );
+    tx.commit().unwrap();
     let (asker, source, question, status): (String, String, String, String) = db
         .query_row(
             "SELECT asker,source,question,status FROM questions_log WHERE id=?1",

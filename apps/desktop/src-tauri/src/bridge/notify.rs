@@ -91,8 +91,9 @@ pub fn asker_label(asker: &str) -> String {
 }
 
 /// The notification text for a pending question, built from the engine's record: the
-/// project's name in the title, who asked and the question's first line in the body.
-/// Inputs: the project's name, if known, and the question. Output: the notice.
+/// project's name in the title, who asked, by the name the engine sent when it sent one,
+/// and the question's first line in the body. Inputs: the project's name, if known, and the
+/// question. Output: the notice.
 pub fn notice(project: Option<&str>, question: &Question) -> Notice {
     let name = project.map(|name| plain_line(name, TITLE_CHARS_MAX - 20));
     let title = match name {
@@ -102,7 +103,10 @@ pub fn notice(project: Option<&str>, question: &Question) -> Notice {
     let body = plain_line(
         &format!(
             "{}: {}",
-            asker_label(&question.asker),
+            question.asker_name.as_deref().map_or_else(
+                || asker_label(&question.asker),
+                |name| plain_line(name, TITLE_CHARS_MAX)
+            ),
             plain_line(&question.question, BODY_CHARS_MAX)
         ),
         BODY_CHARS_MAX,
@@ -405,6 +409,9 @@ mod tests {
             created_ms: 1,
             settled_ms: None,
             closed_by: None,
+            asker_name: None,
+            urgent: false,
+            paused: false,
         }
     }
 
@@ -426,6 +433,19 @@ mod tests {
         assert_eq!(
             notice(None, &question("master:s-1", "Ship it?")).title,
             "A project needs your answer"
+        );
+        let named = Question {
+            asker_name: Some("Ada (@menu-prices)".into()),
+            ..question("agent:7", "Which database?")
+        };
+        assert_eq!(
+            notice(None, &named).body,
+            "Ada (@menu-prices): Which database?",
+            "the asker's name the engine sent (V241-QUESTION-UX P1)"
+        );
+        assert_eq!(
+            notice(None, &question("agent:7", "Which database?")).body,
+            "Agent 7: Which database?"
         );
         assert_eq!(
             notice(

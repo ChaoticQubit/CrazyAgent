@@ -1812,6 +1812,7 @@ fn every_edit_with_ai_refusal_has_its_own_plain_sentence() {
         cleanup::TIMED_OUT,
         cleanup::OFF,
         cleanup::UNAVAILABLE,
+        cleanup::PROVIDER_UNREACHABLE,
     ];
     let mut sentences = std::collections::BTreeSet::new();
     for code in codes {

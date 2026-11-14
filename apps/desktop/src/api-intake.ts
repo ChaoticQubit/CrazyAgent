@@ -3,12 +3,12 @@ import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
-  githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
+  githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
   AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt, OnboardingView,
-  ProjectsHome, SetupStatus,
+  DependencyName, ProjectsHome, SetupStatus,
 } from "./engine-client";
 
 export const FOUND_PROJECTS_MAX = 500;
@@ -364,6 +364,12 @@ export function loadSetupStatus(): Promise<Result<SetupStatus>> {
 export function runSetup(pack: string[]): Promise<Result<SetupStatus>> {
   if (pack.length > SETUP_PACK_MAX) throw new Error(`setup pack holds at most ${SETUP_PACK_MAX} entries`);
   return wrap(() => startSetup(pack, nextGeneration()));
+}
+
+/** Installs one missing tool alone, such as Node for the harnesses npm installs.
+ * Input: its name. Output: the status as the install starts. */
+export function installDependency(name: DependencyName): Promise<Result<SetupStatus>> {
+  return wrap(() => startInstall(name, nextGeneration()));
 }
 
 /** Switches one installed pack entry on or off for every project.

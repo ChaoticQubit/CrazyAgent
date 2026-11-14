@@ -1,3 +1,8 @@
+use super::app_setup::{setup_plain, setup_reason};
+use super::harness_setup::{
+    CANT_RUN, INSTALL_NODE, INSTALLING_NODE, NodeOffer, TRY_AGAIN, node_needed, node_offer,
+    node_reads_again,
+};
 use super::project_markdown::sanitize;
 use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
@@ -5,6 +10,8 @@ use super::{Flow, Place, Screen, SettingsSection};
 use crate::harnesses::finding::{self, Found};
 use crate::harnesses::update::{HarnessVersions, Latest, Method, UpdateMode, UpdateSettings};
 use crate::harnesses::{AccountKind, HarnessEntry, HarnessStatus, ToolControl};
+use crate::setup::{Dependency, DependencyState, SetupStatus};
+use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
@@ -26,6 +33,7 @@ const CHROME_ROWS: usize = 4 + 1;
 const SUBTITLE: &str = "Agents run inside these tools. CrazyAgent finds them on this Mac. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.";
 const MODAL_WIDTH: u16 = 72;
 const UPDATE_POLLS_MAX: usize = 240;
+const NODE_POLLS_MAX: usize = 240;
 const UNKNOWN_INSTALL: &str = "harness_update_unknown_install";
 const LOOKUP_FAILED: &str = "harness_update_lookup_failed";
 const OUTCOME_UNKNOWN: &str = "The update ended in a way CrazyAgent doesn't know.";
@@ -77,7 +85,7 @@ const PATH_COPY: [(&str, &str); 13] = [
     ),
     ("owner_runtime_stale", "The engine restarted. Try again."),
 ];
-const COPY: [(&str, &str); 26] = [
+const COPY: [(&str, &str); 28] = [
     (
         UNKNOWN_INSTALL,
         "CrazyAgent can't tell how this was installed, so it won't update it.",
@@ -167,6 +175,14 @@ const COPY: [(&str, &str); 26] = [
         "The install finished, but CrazyAgent can't find the harness. Choose Check again.",
     ),
     ("harness_install_failed", "The install didn't finish."),
+    (
+        "harness_install_needs_node",
+        "CrazyAgent installs this one with npm, and Node.js isn't on this Mac yet.",
+    ),
+    (
+        "harness_install_list_invalid",
+        "CrazyAgent couldn't install that list of harnesses. Pick them again.",
+    ),
 ];
 
 /// What an owner-confirmed job does to a harness: update an installed one or install a
@@ -353,25 +369,58 @@ fn refusal(versions: &HarnessVersions) -> Option<String> {
     })
 }
 
+/// The resolver's line for a found harness it can't run, made safe to show, the first-run
+/// step's line: the versions read's, else the catalog's until that read arrives; a running
+/// update or install wins, as on the first-run step. Inputs: the catalog entry and its
+/// versions, none while unread. Output: the line, or none when the harness is missing, busy
+/// or runs.
+fn needs_line(entry: &HarnessEntry, versions: Option<&HarnessVersions>) -> Option<String> {
+    entry.executable.as_ref()?;
+    let line = match (versions, &entry.status) {
+        (Some(versions), _) if versions.running => return None,
+        (Some(versions), _) => &versions.needs.as_ref()?.line,
+        (None, HarnessStatus::CantRun { reason }) => reason,
+        (None, _) => return None,
+    };
+    Some(sanitize(line))
+}
+
+/// The Status cell word of a harness row: Can't run, the first-run step's word, for a found
+/// harness the resolver can't run, Ready when a read newer than the catalog's Can't run says
+/// it runs, else the catalog's word. Inputs: the catalog entry and its versions. Output: the
+/// word.
+fn row_word(entry: &HarnessEntry, versions: Option<&HarnessVersions>) -> &'static str {
+    if needs_line(entry, versions).is_some() {
+        return CANT_RUN;
+    }
+    if matches!(entry.status, HarnessStatus::CantRun { .. }) && versions.is_some() {
+        return "Ready";
+    }
+    status_word(entry)
+}
+
 /// The Status cell word of a harness.
-/// Input: the catalog entry. Output: "Ready", "Not installed", or "Can't start"
-/// for one that is installed but has no CrazyAgent launcher.
+/// Input: the catalog entry. Output: "Ready", "Not installed", "Can't start" for one that is
+/// installed but has no CrazyAgent launcher, or "Can't run" for one the resolver can't start.
 pub fn status_word(entry: &HarnessEntry) -> &'static str {
     match entry.status {
         HarnessStatus::Ready => "Ready",
         HarnessStatus::NotInstalled => "Not installed",
         HarnessStatus::Limited { .. } => "Can't start",
+        HarnessStatus::CantRun { .. } => CANT_RUN,
     }
 }
 
 /// The Control cell word of a harness.
 /// Input: the catalog entry. Output: "Full control", "Limited control" or
-/// "Unknown" while it is not installed and nothing limits it.
+/// "Unknown" while it is not installed or can't run and nothing limits it.
 pub fn control_word(entry: &HarnessEntry) -> &'static str {
     match (&entry.status, &entry.tools) {
         (HarnessStatus::Limited { .. }, _) | (_, ToolControl::Limited { .. }) => "Limited control",
         (HarnessStatus::Ready, ToolControl::Switchable) => "Full control",
-        (HarnessStatus::NotInstalled, ToolControl::Switchable) => "Unknown",
+        (HarnessStatus::NotInstalled | HarnessStatus::CantRun { .. }, ToolControl::Switchable) => {
+            "Unknown"
+        }
     }
 }
 
@@ -449,6 +498,11 @@ pub struct Harnesses {
     finding: BTreeSet<String>,
     choosing: Option<(String, TextField)>,
     looked: Option<String>,
+    node: Option<DependencyState>,
+    setup_busy: bool,
+    setup_asked: bool,
+    sending_node: bool,
+    node_polls: usize,
 }
 
 impl Default for Harnesses {
@@ -478,6 +532,11 @@ impl Harnesses {
             finding: BTreeSet::new(),
             choosing: None,
             looked: None,
+            node: None,
+            setup_busy: false,
+            setup_asked: false,
+            sending_node: false,
+            node_polls: 0,
         }
     }
 
@@ -510,9 +569,163 @@ impl Harnesses {
     }
 
     fn chosen(&self) -> Option<&HarnessEntry> {
+        self.entries.get(self.selected).filter(|entry| {
+            entry.executable.is_some() && needs_line(entry, self.versions.get(&entry.id)).is_none()
+        })
+    }
+
+    fn blocked_selected(&self) -> bool {
         self.entries
             .get(self.selected)
-            .filter(|entry| entry.executable.is_some())
+            .is_some_and(|entry| needs_line(entry, self.versions.get(&entry.id)).is_some())
+    }
+
+    /// Reads again, with no lookup, every harness whose last read the test keeps: Try again
+    /// reads the found ones the resolver can't run, a settled Node.js install the ones that
+    /// needed Node. Inputs: the test and the context. Output: none; each reply updates its row.
+    fn read_where(
+        &mut self,
+        keep: impl Fn(&HarnessEntry, &HarnessVersions) -> bool,
+        ctx: &mut Ctx,
+    ) {
+        let ids: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                self.versions
+                    .get(&entry.id)
+                    .is_some_and(|versions| keep(entry, versions))
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        assert!(ids.len() <= self.entries.len());
+        for id in ids {
+            self.ask_versions(&id, false, ctx);
+        }
+    }
+
+    /// Where the page's one Node.js install stands, the first-run step's kinds, from the
+    /// harnesses read so far and setup's Node row. Output: the offer.
+    fn node_offer(&self) -> NodeOffer {
+        let needed = self.versions.values().any(node_needed);
+        node_offer(needed, self.node.as_ref(), self.setup_busy)
+    }
+
+    fn read_setup(&mut self, ctx: &mut Ctx) {
+        if self.setup_asked {
+            return;
+        }
+        self.setup_asked = true;
+        send(ctx, SettingsJob::AppSetup(AppSetupJob::Status));
+    }
+
+    /// Reads setup's Node row again with a fresh poll budget, as r does, when a listed harness
+    /// needs Node. Input: the context. Output: none.
+    fn reread_node(&mut self, ctx: &mut Ctx) {
+        if !self.versions.values().any(node_needed) {
+            return;
+        }
+        self.node_polls = 0;
+        self.read_setup(ctx);
+        assert!(self.setup_asked);
+    }
+
+    fn install_node(&mut self, ctx: &mut Ctx) {
+        let wanted = matches!(
+            self.node_offer(),
+            NodeOffer::Offer | NodeOffer::Failed { .. }
+        );
+        if !wanted || self.sending_node {
+            return;
+        }
+        self.sending_node = true;
+        let generation = ctx.next_generation();
+        send(
+            ctx,
+            SettingsJob::AppSetup(AppSetupJob::Install {
+                name: Dependency::Node,
+                generation,
+            }),
+        );
+    }
+
+    /// Takes setup's Node row; while it is settled and a harness still needs Node, or once a
+    /// Node.js install the page waited on settles, the harnesses that needed Node are read
+    /// again, and the catalog once on settling, so the rows, the catalog's Can't run and the Home
+    /// count follow. A failed read keeps what the page knew and the next refresh reads again.
+    /// Inputs: the read and the context. Output: none.
+    fn arrive_setup(&mut self, result: &Result<SetupStatus, String>, ctx: &mut Ctx) {
+        if !std::mem::take(&mut self.setup_asked) {
+            return;
+        }
+        let Ok(status) = result else {
+            return;
+        };
+        let waited = self.node_offer() == NodeOffer::Installing;
+        self.setup_busy = status.running;
+        self.node = status
+            .dependencies
+            .iter()
+            .find(|tool| tool.name == Dependency::Node)
+            .map(|tool| tool.state.clone());
+        let settled = matches!(
+            self.node,
+            Some(DependencyState::Found { .. } | DependencyState::Installed { .. })
+        );
+        let needed = self.versions.values().any(node_needed);
+        if settled && (waited || needed) {
+            self.read_where(|_, versions| node_needed(versions), ctx);
+        }
+    }
+
+    /// Whether a harness needed a program before this read: the catalog lists it as Can't run
+    /// or its last read said so. A read that clears it reads the catalog again, so the row
+    /// shows the engine's real word, Limited included, never a stale Ready.
+    /// Input: the catalog id. Output: true when the catalog or the last read held a need.
+    fn needed_before(&self, id: &str) -> bool {
+        let entry = self.entries.iter().find(|entry| entry.id == id);
+        assert!(entry.is_some(), "a read is kept only for a listed harness");
+        let listed =
+            entry.is_some_and(|entry| matches!(entry.status, HarnessStatus::CantRun { .. }));
+        listed
+            || self
+                .versions
+                .get(id)
+                .is_some_and(|versions| versions.needs.is_some())
+    }
+
+    fn arrive_node(&mut self, result: &Result<(), String>, ctx: &mut Ctx) {
+        if !std::mem::take(&mut self.sending_node) {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.node = Some(DependencyState::Installing);
+                self.node_polls = 0;
+                self.read_setup(ctx);
+            }
+            Err(code) => ctx.say(Message::error(
+                "Could not install Node.js.",
+                &setup_plain(code),
+            )),
+        }
+    }
+
+    /// The page's Node.js lines under the list, the first-run step's words: the install being
+    /// sent, the install running, or setup's reason it failed. Inputs: the width and context.
+    /// Output: the lines, none while nothing needs Node.
+    fn node_lines(&self, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        if self.sending_node {
+            return vec![ctx.loading(INSTALL_NODE)];
+        }
+        match self.node_offer() {
+            NodeOffer::Installing => vec![Line::raw(INSTALLING_NODE)],
+            NodeOffer::Failed { reason } => wrap(&setup_reason(&reason), limit)
+                .into_iter()
+                .map(|part| styled(part, Role::Error, &ctx.theme))
+                .collect(),
+            NodeOffer::None | NodeOffer::Offer => Vec::new(),
+        }
     }
 
     fn ask_versions(&mut self, id: &str, look: bool, ctx: &mut Ctx) {
@@ -537,11 +750,11 @@ impl Harnesses {
         }
         self.opened = true;
         let look = settings.when == crate::harnesses::update::CheckWhen::OnOpen;
+        let off = settings.mode == UpdateMode::Off;
         let reads: Vec<(String, bool)> = self
             .entries
             .iter()
-            .filter(|entry| entry.executable.is_none() || settings.mode != UpdateMode::Off)
-            .map(|entry| (entry.id.clone(), look && entry.executable.is_some()))
+            .map(|entry| (entry.id.clone(), look && !off && entry.executable.is_some()))
             .collect();
         for (id, look) in reads {
             self.ask_versions(&id, look, ctx);
@@ -820,15 +1033,24 @@ impl Harnesses {
                 return;
             }
             Err(code) => {
-                ctx.say(Message::error(
-                    "Could not check for updates.",
-                    plain_update(code),
-                ));
+                let lead = if self.mode() == UpdateMode::Off {
+                    format!("Could not read {}.", self.name_of(id))
+                } else {
+                    "Could not check for updates.".to_owned()
+                };
+                ctx.say(Message::error(&lead, plain_update(code)));
                 return;
             }
         };
+        let cleared = versions.needs.is_none() && !versions.running && self.needed_before(id);
         self.versions.insert(id.to_owned(), versions.clone());
         assert!(self.versions.len() <= self.entries.len());
+        if self.node.is_none() && node_needed(versions) {
+            self.read_setup(ctx);
+        }
+        if cleared {
+            self.reload(ctx);
+        }
         let stale = self.confirm.take_if(|open| {
             open.id == id
                 && (versions.running || job_line(versions, open.job) != Some(open.line.as_str()))
@@ -896,6 +1118,7 @@ impl Harnesses {
         };
         (ctx.height as usize)
             .saturating_sub(CHROME_ROWS + head + 1 + DETAIL_ROWS + 1 + ctx.extra_hint_rows())
+            .saturating_sub(self.node_lines(limit, ctx).len())
             .max(1)
             .min(self.entries.len().max(1))
     }
@@ -910,6 +1133,7 @@ impl Harnesses {
         entry: &HarnessEntry,
         versions: Option<&HarnessVersions>,
         found: Option<&Found>,
+        off: bool,
         limit: usize,
         ctx: &Ctx,
     ) -> Vec<Line<'static>> {
@@ -922,16 +1146,24 @@ impl Harnesses {
             ])
         };
         let name = styled(entry.name.clone(), Role::Accent, theme);
-        let head = if matches!(entry.status, HarnessStatus::Ready) {
+        let needs = needs_line(entry, versions);
+        let head = if matches!(entry.status, HarnessStatus::Ready) && needs.is_none() {
             name
         } else {
             let room = (width(&entry.name) + 2).max(LABEL_WIDTH);
             join([
                 pad(name, room, glyphs),
-                status(status_word(entry), theme, glyphs),
+                status(row_word(entry, versions), theme, glyphs),
             ])
         };
         let mut lines = vec![head];
+        if let Some(line) = &needs {
+            lines.extend(
+                wrap(line, limit.max(8))
+                    .into_iter()
+                    .map(|part| styled(part, Role::Error, theme)),
+            );
+        }
         if let Some(found) = found.filter(|_| entry.executable.is_none()) {
             let line = found_line(&entry.name, file_name(&entry.id), found);
             lines.extend(wrap(&line, limit.max(8)).into_iter().map(Line::raw));
@@ -951,7 +1183,7 @@ impl Harnesses {
                         lines.push(Line::raw(format!("{}{part}", " ".repeat(LABEL_WIDTH))));
                     }
                 }
-                if let Some(versions) = versions {
+                if let Some(versions) = versions.filter(|_| needs.is_none() && !off) {
                     let mut text = version_line(versions);
                     if let Some(state) = update_state(versions, &entry.name) {
                         text = format!("{text} {state}");
@@ -1080,7 +1312,7 @@ impl Harnesses {
             .map(|(index, entry)| {
                 let values = vec![
                     Line::raw(entry.name.clone()),
-                    status(status_word(entry), theme, glyphs),
+                    status(row_word(entry, self.versions.get(&entry.id)), theme, glyphs),
                     status(control_word(entry), theme, glyphs),
                     Line::raw(works_with(&entry.account_kinds)),
                 ];
@@ -1100,12 +1332,14 @@ impl Harnesses {
         } else {
             lines.extend(rows);
         }
+        lines.extend(self.node_lines(limit, ctx));
         if let Some(entry) = self.entries.get(selected) {
             lines.push(Line::default());
             lines.extend(Self::detail(
                 entry,
                 self.versions.get(&entry.id),
                 self.found.get(&entry.id),
+                self.mode() == UpdateMode::Off,
                 limit,
                 ctx,
             ));
@@ -1136,7 +1370,8 @@ impl Harnesses {
     }
 
     /// The folders the engine looked in for a harness, at most [`LOOKED_SHOWN_MAX`] of them
-    /// with a count of the rest. Inputs: the id and the context. Output: the modal and hints.
+    /// with a count of the rest, a folder passed over for a temp folder followed by that whole
+    /// reason. Inputs: the id and the context. Output: the modal and hints.
     fn looked_modal(&self, id: &str, ctx: &Ctx) -> (Modal, Vec<Hint>) {
         let file = file_name(id);
         let room = usize::from(MODAL_WIDTH) - 4;
@@ -1152,11 +1387,18 @@ impl Harnesses {
         .map(Line::raw)
         .collect();
         for folder in looked.iter().take(LOOKED_SHOWN_MAX) {
+            let (place, reason) = match folder.strip_suffix(finding::TEMP_SKIPPED) {
+                Some(place) => (place, Some(finding::TEMP_SKIPPED.trim_start())),
+                None => (folder.as_str(), None),
+            };
             body.push(styled(
-                cut(&sanitize(folder), room, ctx.glyphs.ellipsis),
+                cut(&sanitize(place), room, ctx.glyphs.ellipsis),
                 Role::Accent,
                 &ctx.theme,
             ));
+            if let Some(reason) = reason {
+                body.extend(wrap(reason, room).into_iter().map(Line::raw));
+            }
         }
         if looked.len() > LOOKED_SHOWN_MAX {
             body.push(Line::raw(format!(
@@ -1197,7 +1439,12 @@ impl Screen for Harnesses {
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
-        let mut hints = vec![hint(&arrows, "Move"), hint("r", "Check again")];
+        let again = if self.blocked_selected() {
+            TRY_AGAIN
+        } else {
+            "Check again"
+        };
+        let mut hints = vec![hint(&arrows, "Move"), hint("r", again)];
         let mode = self.mode();
         let missing = self
             .entries
@@ -1225,6 +1472,13 @@ impl Screen for Harnesses {
                 hints.push(hint("u", "Update"));
             }
         }
+        let offered = matches!(
+            self.node_offer(),
+            NodeOffer::Offer | NodeOffer::Failed { .. }
+        );
+        if offered && !self.sending_node {
+            hints.push(hint("n", INSTALL_NODE));
+        }
         hints.extend([sections_hint(ctx.glyphs), hint("Esc", "Home")]);
         hints
     }
@@ -1247,7 +1501,13 @@ impl Screen for Harnesses {
             Key::Char('r') => {
                 self.found.clear();
                 self.reload(ctx);
+                self.read_where(
+                    |entry, versions| needs_line(entry, Some(versions)).is_some(),
+                    ctx,
+                );
+                self.reread_node(ctx);
             }
+            Key::Char('n') => self.install_node(ctx),
             Key::Char('c') => self.check(ctx),
             Key::Char('u') => self.update(ctx),
             Key::Char('i') => self.install(ctx),
@@ -1290,6 +1550,14 @@ impl Screen for Harnesses {
             }
             Some(SettingsEvent::HarnessChosen(id, path, result)) => {
                 self.arrive_found(id, Some(path), result, ctx);
+                return Flow::Handled;
+            }
+            Some(SettingsEvent::AppSetup(AppSetupEvent::Status(result))) => {
+                self.arrive_setup(result, ctx);
+                return Flow::Handled;
+            }
+            Some(SettingsEvent::AppSetup(AppSetupEvent::Installed(result))) => {
+                self.arrive_node(result, ctx);
                 return Flow::Handled;
             }
             Some(SettingsEvent::HarnessUpdateSettings(result)) => {
@@ -1336,6 +1604,13 @@ impl Screen for Harnesses {
             send(ctx, SettingsJob::HarnessUpdateSettings);
         }
         self.poll(ctx);
+        let needed = self.versions.values().any(node_needed);
+        let waiting = node_reads_again(needed, self.node.as_ref(), self.setup_busy);
+        if waiting && !self.setup_asked && self.node_polls < NODE_POLLS_MAX {
+            self.node_polls += 1;
+            self.read_setup(ctx);
+        }
+        assert!(self.node_polls <= NODE_POLLS_MAX);
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
@@ -1415,6 +1690,7 @@ impl Screen for Harnesses {
             || !self.asking.is_empty()
             || self.running.is_some()
             || !self.finding.is_empty()
+            || self.sending_node
     }
 
     fn place(&self) -> Option<Place> {
@@ -1422,7 +1698,9 @@ impl Screen for Harnesses {
     }
 }
 
-fn plain_update(code: &str) -> &'static str {
+/// The plain sentence for a harness code, or for any other engine code the sentence the
+/// Settings pages use. Input: the code. Output: one sentence.
+pub(super) fn plain_update(code: &str) -> &'static str {
     if code.starts_with("harness_update_") || code.starts_with("harness_install_") {
         update_copy(code)
     } else {

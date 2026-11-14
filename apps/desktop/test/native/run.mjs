@@ -24,9 +24,9 @@ const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
 const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
 assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "pools-spend", "first-run-guide", "first-run-skip-guide",
-  "learning-replay-guide", "learning-replay-first-run"].includes(suite),
+  "first-run-harnesses", "first-run-harnesses-node", "learning-replay-guide", "learning-replay-first-run"].includes(suite),
   "closed native suite required");
-const WEBDRIVER_SECONDS = suite === "pools-screen" || suite === "pools-spend" ? 900 : 300;
+const WEBDRIVER_SECONDS = suite === "pools-screen" || suite === "pools-spend" || suite === "first-run-harnesses-node" ? 900 : 300;
 let interrupted = false;
 
 function interrupt() {
@@ -205,13 +205,27 @@ function captured(entry) {
   };
 }
 
+/** The engine's environment for one suite: the run's own, or for the Node suite a clean Mac's:
+ * a Codex the app's npm put in the engine prefix `<engine root>/setup/harnesses`, the one folder
+ * the resolver accepts here (it refuses PATH folders in a project or a temp folder), no Node on
+ * PATH and an empty clean-Mac gate root; the suite's home is never written.
+ * Input: the run environment. Output: the engine environment. */
+function engineEnvironment(env) {
+  if (suite !== "first-run-harnesses-node") return env;
+  const bin = join(engineRoot, "setup", "harnesses", "bin");
+  mkdirSync(bin, { recursive: true, mode: 0o700 });
+  writeFileSync(join(bin, "codex"), "#!/usr/bin/env node\n", { mode: 0o755 });
+  const gate = mkdtempSync(join(evidence, "gate-"));
+  return { ...env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CRAZYAGENT_GATE_SYSTEM_ROOT: gate };
+}
+
 async function execute() {
   const binaries = [binary(app), binary(fixture)];
   const { env, projects } = await environment();
   const port = await unusedPort();
   const engine = launch("engine", fixture,
     [suite === "model-access-read-only" ? "serve" : "serve-model-access",
-      engineRoot, projects], env, WEBDRIVER_SECONDS + 30);
+      engineRoot, projects], engineEnvironment(env), WEBDRIVER_SECONDS + 30);
   let failure = null;
   let code = 1;
   try {

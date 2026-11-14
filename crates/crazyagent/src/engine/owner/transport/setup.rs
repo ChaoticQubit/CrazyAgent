@@ -19,7 +19,6 @@ struct Prepared {
     plugin: Option<PathBuf>,
 }
 
-const RECHECK_AFTER: Duration = Duration::from_secs(30);
 const FIRST_CHECK_WAIT: Duration = Duration::from_millis(500);
 const CHECK_POLL: Duration = Duration::from_millis(20);
 
@@ -66,7 +65,7 @@ fn platform_installer(root: &Path) -> Arc<dyn Installer> {
 
 /// Finishes one owner request that touches setup, after the engine answered it: a setup
 /// status read gets each dependency's state from the last background version check, an
-/// applied setup run starts installing in the background, and every removal, applied or
+/// applied setup run or one-dependency install starts in the background, and every removal, applied or
 /// not, sweeps the folders and secrets it moved aside or left, an applied agent policy
 /// reaches the project's open IDE, and a Reconcile answered Committed with an applied result
 /// reaches every open IDE, since a Save's lost reply leaves that the only call after its
@@ -110,6 +109,14 @@ pub(super) async fn after_owner(
             OwnerResponse::Applied { operation },
         ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
             start_run(engine.storage.sender.clone(), engine_root(authority)?, pack)?;
+        }
+        (
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::InstallDependency { name },
+            },
+            OwnerResponse::Applied { operation },
+        ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
+            start_install(engine_root(authority)?, *name)?;
         }
         (
             OwnerOperation::Apply {
@@ -157,11 +164,9 @@ fn follow_saved_levels(authority: &Arc<Authority>) {
 fn follow_saved_levels(_authority: &Arc<Authority>) {}
 
 fn start_check(root: &Path) {
+    let mark = crate::tools::probe::mark();
     let begin = progress::with(root, |state| {
-        let stale = state
-            .checked
-            .as_ref()
-            .is_none_or(|checked| checked.at.elapsed() >= RECHECK_AFTER);
+        let stale = progress::check_due(state.checked.as_ref(), mark, std::time::Instant::now());
         let begin = stale && !state.checking;
         if begin {
             state.checking = true;
@@ -183,6 +188,7 @@ fn start_check(root: &Path) {
                 state.checked = Some(progress::Checked {
                     at: std::time::Instant::now(),
                     found: found.to_vec(),
+                    probe: mark,
                 });
             });
         }
@@ -249,10 +255,52 @@ pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
     begun
 }
 
+/// Installs one missing dependency alone in the background, as the setup row's Install and
+/// the harness picker ask: found first and left as it is when present, then installed from
+/// its pin. Only that row changes, and the next status read checks every tool again.
+/// Inputs: the engine root and the dependency. Output: Ok once it runs, or `setup_busy`.
+pub(super) fn start_install(root: PathBuf, dep: Dependency) -> Result<(), EngineError> {
+    let guard = begin_install(root, dep)?;
+    tokio::spawn(async move {
+        let root = guard.0.clone();
+        install_dependency(platform_installer(&root), &root, dep).await;
+        progress::with(&root, |state| state.checked = None);
+        drop(guard);
+    });
+    Ok(())
+}
+
+/// Marks a one-dependency install as the running setup: refused while any run goes on,
+/// else running with only that dependency's earlier row cleared. Inputs: the engine root
+/// and the dependency. Output: the guard that ends the run, or `setup_busy`.
+fn begin_install(root: PathBuf, dep: Dependency) -> Result<RunGuard, EngineError> {
+    let begun = progress::with(&root, |state| {
+        if state.running {
+            return false;
+        }
+        state.running = true;
+        state.dependencies.remove(&dep);
+        true
+    });
+    if !begun {
+        return Err(failure("setup_busy"));
+    }
+    assert!(progress::snapshot(&root).running);
+    Ok(RunGuard(root))
+}
+
 async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency) {
     let finder = installer.clone();
     let found = tokio::task::spawn_blocking(move || finder.find(dep)).await;
     if matches!(found, Ok(Ok(Some(_)))) {
+        return;
+    }
+    if let Ok(Err(code)) = &found
+        && code.0 == crate::setup::PLATFORM_UNSUPPORTED
+    {
+        progress::with(root, |state| {
+            state.dependencies.insert(dep, DependencyState::Unsupported);
+        });
         return;
     }
     progress::with(root, |state| {
@@ -265,9 +313,7 @@ async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dep
     .await;
     let next = match outcome {
         Ok(Ok(version)) => DependencyState::Installed { version },
-        Ok(Err(code)) => DependencyState::Failed {
-            reason: plain_reason(code.0).to_owned(),
-        },
+        Ok(Err(code)) => DependencyState::refused(code.0),
         Err(_) => DependencyState::Failed {
             reason: plain_reason("setup_install_failed").to_owned(),
         },
@@ -488,4 +534,41 @@ async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackMan
         install_entry(sender, installer.clone(), root, bundled.clone(), entry).await;
     }
     backfill_hooks(sender.clone(), root.to_path_buf()).await;
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+    use crate::setup::Version;
+
+    #[test]
+    fn one_dependency_install_waits_for_no_run_and_clears_only_its_own_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let installed = DependencyState::Installed {
+            version: Version::parse("0.9.9").unwrap(),
+        };
+        progress::with(&root, |state| {
+            state.dependencies.insert(
+                Dependency::Node,
+                DependencyState::Failed {
+                    reason: "earlier".into(),
+                },
+            );
+            state.dependencies.insert(Dependency::Uv, installed.clone());
+            state.pack.insert("caveman".into(), PackState::Installing);
+        });
+        let guard = begin_install(root.clone(), Dependency::Node).unwrap();
+        let during = progress::snapshot(&root);
+        assert!(during.running);
+        assert_eq!(during.dependencies.get(&Dependency::Node), None);
+        assert_eq!(during.dependencies.get(&Dependency::Uv), Some(&installed));
+        assert_eq!(during.pack.len(), 1);
+        assert!(matches!(
+            begin_install(root.clone(), Dependency::Uv),
+            Err(error) if error.0 == "setup_busy"
+        ));
+        drop(guard);
+        assert!(!progress::snapshot(&root).running);
+    }
 }

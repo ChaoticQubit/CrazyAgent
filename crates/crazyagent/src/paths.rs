@@ -186,6 +186,14 @@ pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
     private(path, &metadata, 0o700, "700")
 }
 
+/// Whether a folder already is one [`private_folder`] leaves: a real folder, not a link,
+/// owned by this user with mode 700 where Unix modes exist. Nothing is created. Input: the
+/// folder. Output: the answer, false for a missing folder.
+pub(crate) fn is_private_folder(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && private(path, &metadata, 0o700, "700").is_ok())
+}
+
 fn private_settings(path: &Path, defaults: &str) -> Result<(), PathsError> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -263,20 +271,25 @@ fn executable_file(path: &Path) -> Option<PathBuf> {
     (metadata.is_file() && runnable).then_some(real)
 }
 
-/// Finds the PATH entry a shell would run for a name, skipping relative PATH folders.
-/// Inputs: the name and a PATH value. Output: the absolute entry with its links kept,
-/// or none when no entry leads to a runnable file.
-fn path_entry(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+/// Finds the PATH entry a shell would run for a name, skipping relative PATH folders, folders
+/// in the temp folders given and entries leading into one ([`crate::tools::leads_into_temp`]).
+/// Inputs: the name, a PATH value and the temp folders, none to refuse nothing. Output: the
+/// absolute entry with its links kept, or none when no entry leads to a runnable file.
+fn path_entry(name: &str, path: Option<&OsStr>, temps: &[PathBuf]) -> Option<PathBuf> {
     for folder in std::env::split_paths(path?) {
-        if !folder.is_absolute() {
+        if !folder.is_absolute() || crate::tools::in_temp_of(&folder, temps) {
             continue;
         }
         for file in executable_names(name) {
             let entry = folder.join(file);
-            if executable_file(&entry).is_some() {
-                assert!(entry.is_absolute());
-                return Some(entry);
+            let Some(real) = executable_file(&entry) else {
+                continue;
+            };
+            if crate::tools::leads_into_temp(&entry, &real, temps) {
+                continue;
             }
+            assert!(entry.is_absolute());
+            return Some(entry);
         }
     }
     None
@@ -286,7 +299,7 @@ fn path_entry(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
 /// Inputs: the name and a PATH value. Output: the first match with every link resolved,
 /// or none when it is missing.
 pub fn find_in_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
-    path_entry(name, path).and_then(|entry| executable_file(&entry))
+    path_entry(name, path, &[]).and_then(|entry| executable_file(&entry))
 }
 
 /// The harness executables one engine start registers; none means not installed.
@@ -301,7 +314,8 @@ pub struct Harnesses {
 /// the given paths (flags, else the owner's chosen files), the engine search, the PATH value
 /// and the folder holding the running executable. Output: each given path, else the `codex`
 /// and `claude` entries the search finds as the catalog does (PATH, system, then HOME
-/// folders), and the RCLI host next to the executable, then on PATH, links kept.
+/// folders), and the RCLI host next to the executable, then in the engine's places with that
+/// PATH ([`crate::tools::Places::engine`]), which set aside a temp folder, links kept.
 pub fn resolve_harnesses(
     given: Harnesses,
     search: &crate::harnesses::Search,
@@ -315,11 +329,7 @@ pub fn resolve_harnesses(
             .or_else(|| harness_entry("claude-code", search, path)),
         rcli: rcli_entry(
             given.rcli,
-            &crate::tools::Places::new(
-                path.map(|path| std::env::split_paths(path).collect())
-                    .unwrap_or_default(),
-                None,
-            ),
+            &crate::tools::Places::engine(None, None, None, path),
             executable_folder,
         ),
     }
@@ -361,11 +371,11 @@ pub fn rcli_entry(
 /// Input: the launch harness id. Output: the entry, or none.
 pub type HarnessLookup = std::sync::Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
 
-/// Finds the entry of a harness CrazyAgent starts itself, the one lookup engine start, the
-/// catalog, Check again and the install pin share: the search's folders first, then PATH by
-/// the platform's executable names. Inputs: the catalog id, the engine search and the PATH
-/// value. Output: the entry with its links kept; none for an alias or unknown id, for a
-/// harness without a launch adapter and for a harness found nowhere.
+/// Finds the entry of a harness CrazyAgent starts itself, as engine start, the catalog, Check
+/// again and the install pin do: the search's folders, then PATH outside the temp folders the
+/// search refuses. Inputs: the catalog id, the engine search and the PATH value. Output: the
+/// entry with its links kept; none for an alias, an unknown id, a harness with a launch
+/// adapter or one found nowhere.
 pub fn harness_entry(
     harness: &str,
     search: &crate::harnesses::Search,
@@ -375,7 +385,8 @@ pub fn harness_entry(
         .filter(|spec| spec.id == harness && spec.launch.is_none())?;
     let entry = search.find(harness).or_else(|| {
         spec.binaries.iter().find_map(|name| {
-            path_entry(name, path).filter(|entry| !crate::harnesses::is_shim(search.home(), entry))
+            path_entry(name, path, search.temps())
+                .filter(|entry| !crate::harnesses::is_shim(search.home(), entry))
         })
     })?;
     assert!(entry.is_absolute());
@@ -384,8 +395,9 @@ pub fn harness_entry(
 
 /// Every file a pin may check for a harness CrazyAgent starts itself, in the order
 /// [`harness_entry`] looks: the search's candidates, shims included, then each PATH match by
-/// the platform's executable names, each once. Inputs: the catalog id, the engine search and
-/// the PATH value. Output: the absolute entries, bounded; empty for a harness with an adapter.
+/// the platform's executable names outside the temp folders the search refuses, each once.
+/// Inputs: the catalog id, the engine search and the PATH value. Output: the absolute
+/// entries, bounded; empty for a harness with an adapter.
 pub fn harness_candidates(
     harness: &str,
     search: &crate::harnesses::Search,
@@ -400,7 +412,7 @@ pub fn harness_candidates(
     for entry in spec
         .binaries
         .iter()
-        .filter_map(|name| path_entry(name, path))
+        .filter_map(|name| path_entry(name, path, search.temps()))
     {
         if !entries.contains(&entry) {
             entries.push(entry);
@@ -414,15 +426,32 @@ pub fn harness_candidates(
 /// Resolves a harness entry kept at engine start to the real file a launch runs and its
 /// sandbox grants, as the entry stands now. Inputs: the absolute entry and the PATH value.
 /// Output: the entry's real file; when an entry in a PATH folder is gone, the first PATH
-/// match for its name; else NotFound, which a launch reports as not installed.
+/// match for its name, never one in a temp folder or leading into one for an entry outside
+/// every temp folder; else NotFound, which a launch reports as not installed.
 pub fn launch_executable(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
+    launch_executable_in(entry, path, &crate::tools::temp_roots())
+}
+
+/// Resolves a harness entry as [`launch_executable`] does with the temp folders given, so a
+/// row can name a folder outside every temp folder while each folder it makes lies in the
+/// real one. Inputs: the entry, the PATH value and the temp folders. Output: the real file.
+fn launch_executable_in(
+    entry: &Path,
+    path: Option<&OsStr>,
+    temps: &[PathBuf],
+) -> std::io::Result<PathBuf> {
     assert!(entry.is_absolute(), "harness entry {}", entry.display());
     let on_path = || {
         let folder = entry.parent()?;
         let name = entry.file_name()?.to_str()?;
+        let refused: &[PathBuf] = if crate::tools::in_temp_of(folder, temps) {
+            &[]
+        } else {
+            temps
+        };
         std::env::split_paths(path?)
             .any(|listed| listed == folder)
-            .then(|| find_in_path(name, path))
+            .then(|| path_entry(name, path, refused).and_then(|entry| executable_file(&entry)))
             .flatten()
     };
     let real = executable_file(entry).or_else(on_path).ok_or_else(|| {
@@ -757,6 +786,16 @@ mod tests {
         let app = root.join("app");
         let bin = root.join("bin");
         program(&bin.join(RCLI_EXECUTABLE), 0o755);
+        let places = crate::tools::Places::new(vec![bin.clone()], None);
+        assert_eq!(
+            rcli_entry(None, &places, Some(&app)),
+            Some(bin.join(RCLI_EXECUTABLE))
+        );
+        program(&app.join(RCLI_EXECUTABLE), 0o755);
+        assert_eq!(
+            rcli_entry(None, &places, Some(&app)),
+            Some(app.join(RCLI_EXECUTABLE))
+        );
         let path = std::env::join_paths([bin.clone()]).unwrap();
         let found = resolve_harnesses(
             Harnesses::default(),
@@ -764,15 +803,20 @@ mod tests {
             Some(&path),
             Some(&app),
         );
-        assert_eq!(found.rcli, Some(bin.join(RCLI_EXECUTABLE)));
-        program(&app.join(RCLI_EXECUTABLE), 0o755);
-        let found = resolve_harnesses(
-            Harnesses::default(),
-            &on_path(&path),
-            Some(&path),
-            Some(&app),
-        );
         assert_eq!(found.rcli, Some(app.join(RCLI_EXECUTABLE)));
+    }
+
+    /// 2.4.1 r1 RH-L1: the RCLI host is looked for in the engine's places, so one only in a
+    /// temp folder on the inherited PATH, which agents with the owner's temp folder grant or
+    /// other users write, is never registered.
+    #[test]
+    fn an_rcli_host_only_in_a_temp_folder_on_path_is_not_registered() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        program(&bin.join(RCLI_EXECUTABLE), 0o755);
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        let found = resolve_harnesses(Harnesses::default(), &on_path(&path), Some(&path), None);
+        assert_eq!(found.rcli, None);
     }
 
     /// Keeps only the folders of `places` inside `root`, in their order, so a row sees the
@@ -950,6 +994,101 @@ mod tests {
         }
     }
 
+    /// V241-HARNESS-TEMP door 2 (DEC-157): the PATH walk harness_entry adds after the engine's
+    /// search never takes a match in a temp folder, nor one in a kept folder whose real file
+    /// lies in one; an explicit search still takes it.
+    #[test]
+    fn harness_entry_on_the_engine_search_never_takes_a_temp_path_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let temps = vec![root.join("tmp")];
+        let in_temp = root.join("tmp/bin");
+        let kept = root.join("kept/bin");
+        program(&in_temp.join("claude"), 0o755);
+        program(&root.join("tmp/real/codex"), 0o755);
+        std::fs::create_dir_all(&kept).unwrap();
+        std::os::unix::fs::symlink(root.join("tmp/real/codex"), kept.join("codex")).unwrap();
+        let path = std::env::join_paths([in_temp.clone(), kept.clone()]).unwrap();
+        let engine = crate::harnesses::Search::engine_in(None, &[], None, &temps);
+        assert_eq!(harness_entry("claude-code", &engine, Some(&path)), None);
+        assert_eq!(harness_entry("codex", &engine, Some(&path)), None);
+        assert_eq!(
+            harness_entry("claude-code", &on_path(&path), Some(&path)),
+            Some(in_temp.join("claude"))
+        );
+    }
+
+    /// V241-HARNESS-TEMP door 2 (DEC-157): every candidate a pin checks on the engine's
+    /// search leaves out a PATH match in a temp folder and one leading into a temp folder;
+    /// an explicit search still lists them.
+    #[test]
+    fn harness_candidates_on_the_engine_search_never_list_a_temp_path_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let temps = vec![root.join("tmp")];
+        let in_temp = root.join("tmp/bin");
+        let kept = root.join("kept/bin");
+        program(&in_temp.join("claude"), 0o755);
+        program(&root.join("tmp/real/codex"), 0o755);
+        std::fs::create_dir_all(&kept).unwrap();
+        std::os::unix::fs::symlink(root.join("tmp/real/codex"), kept.join("codex")).unwrap();
+        let path = std::env::join_paths([in_temp.clone(), kept.clone()]).unwrap();
+        let engine = crate::harnesses::Search::engine_in(None, &[], None, &temps);
+        assert_eq!(
+            harness_candidates("claude-code", &engine, Some(&path)),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(
+            harness_candidates("codex", &engine, Some(&path)),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(
+            harness_candidates("claude-code", &on_path(&path), Some(&path)),
+            vec![in_temp.join("claude")]
+        );
+        assert_eq!(
+            harness_candidates("codex", &on_path(&path), Some(&path)),
+            vec![kept.join("codex")]
+        );
+    }
+
+    /// V241-HARNESS-TEMP door 3 (DEC-157): when a pinned entry outside temp is gone, the launch
+    /// fallback skips a PATH match in a temp folder and takes a later one outside temp, or
+    /// none; an entry already in a temp folder keeps its fallback there.
+    #[test]
+    fn a_launch_fallback_never_moves_from_outside_temp_to_a_temp_path_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let temps = vec![root.join("tmp")];
+        let kept = root.join("kept/bin");
+        std::fs::create_dir_all(&kept).unwrap();
+        let entry = kept.join("codex");
+        let in_temp = root.join("tmp/bin/codex");
+        program(&in_temp, 0o755);
+        let path = std::env::join_paths([kept.clone(), root.join("tmp/bin")]).unwrap();
+        assert_eq!(
+            launch_executable_in(&entry, Some(&path), &temps)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let later = root.join("later/bin/codex");
+        program(&later, 0o755);
+        let path =
+            std::env::join_paths([kept, root.join("tmp/bin"), root.join("later/bin")]).unwrap();
+        assert_eq!(
+            launch_executable_in(&entry, Some(&path), &temps).unwrap(),
+            later
+        );
+        let old = root.join("tmp/old");
+        std::fs::create_dir_all(&old).unwrap();
+        let path = std::env::join_paths([old.clone(), root.join("tmp/bin")]).unwrap();
+        assert_eq!(
+            launch_executable_in(&old.join("codex"), Some(&path), &temps).unwrap(),
+            in_temp
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn the_catalog_and_engine_start_find_the_same_codex_and_claude() {
@@ -970,10 +1109,11 @@ mod tests {
         ];
         for (id, entry) in layouts {
             program(&entry, 0o755);
-            let search = crate::harnesses::Search::engine(
+            let search = crate::harnesses::Search::engine_in(
                 Some(&path),
                 std::slice::from_ref(&system),
                 Some(home.clone()),
+                &[root.join("tmp")],
             );
             let started = resolve_harnesses(Harnesses::default(), &search, Some(&path), None);
             let catalog = crate::harnesses::catalog(&search);

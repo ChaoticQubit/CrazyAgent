@@ -48,7 +48,9 @@ const REQUESTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS access_requests (
 
 const GRANT_JSON_BYTES_MAX: usize = 256;
 const LAUNCHD_LISTENERS: &str = "/private/tmp/com.apple.launchd.";
+#[cfg(unix)]
 const PER_USER_TEMP: &str = "/private/var/folders/";
+#[cfg(unix)]
 const IDE_FOLDERS_SCANNED_MAX: usize = 256;
 const HOST_ESCAPE_WORDS: [&str; 8] = [
     "docker",
@@ -363,6 +365,7 @@ fn socket_fit(_real: &Path) -> Result<(), &'static str> {
 /// user owns that no group or other user can write, or in a sticky folder of the user or
 /// root, where no other user can replace it. Inputs: the socket's kind and owner when it
 /// exists, its folder's owner and mode, and the user. Output: done or the refusal code.
+#[cfg(unix)]
 fn ownership(socket: Option<(bool, u32)>, parent: (u32, u32), me: u32) -> Result<(), &'static str> {
     let Some((true, owner)) = socket else {
         return Err("grant_socket_missing");

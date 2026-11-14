@@ -856,6 +856,10 @@ fn claude_aside(value: &Value) -> bool {
     !texts.is_empty() && !interrupt && !claude_prompt(value, &texts)
 }
 
+/// The facts of one Claude Code session line. A reply cut at the output cap does not end
+/// the turn, since Claude Code asks the model to go on and ends a turn it gives up with its
+/// own error line, and its text gains no line break, so the parts join as one answer.
+/// Takes the line. Returns the facts.
 fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
     let message = &value["message"];
     match value["type"].as_str() {
@@ -913,6 +917,7 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
             ]
         }
         Some("assistant") => {
+            let cut = message["stop_reason"] == "max_tokens";
             let mut facts = Vec::new();
             let mut said = false;
             for item in message["content"].as_array().into_iter().flatten() {
@@ -920,7 +925,13 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
                     Some("text") => {
                         if let Some(text) = item["text"].as_str().filter(|text| !text.is_empty()) {
                             said = true;
-                            facts.push(line_text(text));
+                            facts.push(if cut {
+                                TranscriptEvent::Text {
+                                    text: text.to_owned(),
+                                }
+                            } else {
+                                line_text(text)
+                            });
                         }
                     }
                     Some("tool_use") => facts.push(TranscriptEvent::ToolUse {
@@ -929,12 +940,13 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
                     _ => {}
                 }
             }
-            match message["stop_reason"].as_str() {
-                Some("end_turn" | "stop_sequence") if said => {
-                    facts.push(TranscriptEvent::TurnFinished { success: true });
-                }
-                Some("max_tokens") => facts.push(TranscriptEvent::TurnFinished { success: false }),
-                _ => {}
+            if said
+                && matches!(
+                    message["stop_reason"].as_str(),
+                    Some("end_turn" | "stop_sequence")
+                )
+            {
+                facts.push(TranscriptEvent::TurnFinished { success: true });
             }
             facts
         }

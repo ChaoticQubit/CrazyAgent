@@ -270,7 +270,7 @@ impl StatusLine {
             (false, None) => row,
         };
         if let Some(problem) = &status.problem {
-            row = if status.running || status.stale {
+            row = if status.waiting_for_account && (status.running || status.stale) {
                 row.push(format!("   {problem}"), look.muted)
             } else {
                 row.push(format!("   ! {problem}"), look.warning)

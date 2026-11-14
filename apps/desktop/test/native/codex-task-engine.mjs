@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, endTerminals, owner, required, serveApp, silentProvider, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -173,7 +173,7 @@ async function addProject(bridge, repo, generation) {
  * the owner's repositories, serves the built app to a browser page on the first project's
  * Agents tab, runs the steps and stops everything. Inputs: the test context, the temporary
  * folder prefix, the steps (given the first project, every project, the engine root, the
- * owner on the page, the page, the served app and the bridge), how many projects, one to
+ * owner on the page, the page, the served app, the bridge and the listening model provider), how many projects, one to
  * four, the stand-in Codex script and whether the engine gets its own private temp folder
  * beside its root, as the owner's engine does, instead of the one holding it. Output: none. */
 export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_CODEX, { ownTemp = false } = {}) {
@@ -193,7 +193,7 @@ export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_COD
   const temp = ownTemp ? join(root, "tmp") : tmpdir();
   for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, ...repos, ...(ownTemp ? [temp] : [])]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   repos.forEach(ownerRepo);
-  const provider = await closedPort();
+  const provider = await silentProvider();
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
 allowed_destinations = []
@@ -201,7 +201,7 @@ allowed_destinations = []
 [model_access]
 accounts = ["local-account"]
 connections = [
-  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/v1" }, model = { id = "e2e-model", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider.port}/v1" }, model = { id = "e2e-model", author = "openai-compatible" }, auth = { method = "none" } },
 ]
 pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
@@ -237,7 +237,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
         await me.unfold("Agents and tasks");
         await me.waitFor("the Hand off form on the Agents tab", (text) => text.includes("Hand off"));
-        await steps({ project, projects: ids, runtime, me, page, site, bridge });
+        await steps({ project, projects: ids, runtime, me, page, site, bridge, provider });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -252,6 +252,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     log.closing = true;
     writeFileSync(join(evidence, "calls.json"), JSON.stringify(log.calls, null, 1));
     site?.server.close();
+    provider.server.close();
     await stop(bridgeProcess);
     await stop(engine);
     await endTerminals(runtime);

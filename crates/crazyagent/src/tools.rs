@@ -27,6 +27,9 @@ const TEMP_FOLDERS: [&str; 7] = [
 ];
 const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+/// The file name of the tmux the app ships beside the engine (DEC-157), which the name
+/// `tmux` finds before every folder ([`Places::bundled`]).
+pub const BUNDLED_TMUX: &str = "crazyagent-tmux";
 /// Linux package folders often missing from the engine's PATH: Linuxbrew, where setup
 /// installs tmux, and the NixOS system and default profiles. They are looked in before the
 /// system folders, under the same entry checks as every other place.
@@ -78,13 +81,21 @@ pub const TMUX_MISSING: &str =
 
 /// The folders the resolver looks in, in order, built once from what the engine knows: no
 /// program is run, no shell file is read and every folder is absolute and bounded. No
-/// folder agents can write is kept ([`Places::agent_writable`]); the engine's data folder,
-/// which holds the agents' HOMEs and worktrees, is kept here so its files are refused too.
+/// folder agents can write is kept ([`Places::agent_writable`]), the engine's data folder
+/// included; one in the engine's `setup` folder is set aside so [`resolve`] names a tool
+/// there, and the engine's own places set aside a PATH or probed temp folder the same way
+/// ([`Places::set_aside_temp`]). The app's folder is kept on its own for the tools the app
+/// ships ([`Places::bundled`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Places {
     folders: Vec<PathBuf>,
     home: Option<PathBuf>,
     engine_roots: Vec<PathBuf>,
+    temp_refused: bool,
+    temps: Vec<PathBuf>,
+    refused_setup: Vec<PathBuf>,
+    refused_temp: Vec<PathBuf>,
+    app_folder: Option<PathBuf>,
 }
 
 impl Places {
@@ -93,13 +104,19 @@ impl Places {
     /// inside a project or a `.crazyagent` folder. Inputs: the folders in order and HOME.
     /// Output: the bounded places.
     pub fn new(folders: Vec<PathBuf>, home: Option<PathBuf>) -> Self {
-        Self::kept(folders, home, Vec::new())
+        Self::kept(folders, home, Vec::new(), false)
     }
 
     /// Keeps the folders in order, dropping relative, oversized and repeated ones and every
-    /// one agents can write, at most [`PLACES_MAX`]. Inputs: the folders, HOME and the
-    /// engine data folders. Output: the bounded places.
-    fn kept(folders: Vec<PathBuf>, home: Option<PathBuf>, engine_roots: Vec<PathBuf>) -> Self {
+    /// one agents can write, at most [`PLACES_MAX`], and sets aside one of those in an engine
+    /// `setup` folder ([`Places::in_engine_setup`]). Inputs: the folders, HOME, the engine
+    /// data folders and whether probed temp folders are refused. Output: the bounded places.
+    fn kept(
+        folders: Vec<PathBuf>,
+        home: Option<PathBuf>,
+        engine_roots: Vec<PathBuf>,
+        temp_refused: bool,
+    ) -> Self {
         let mut places = Self {
             folders: Vec::new(),
             home: home.filter(|home| usable(home)),
@@ -107,31 +124,83 @@ impl Places {
                 .into_iter()
                 .filter(|root| usable(root))
                 .collect(),
+            temp_refused,
+            temps: if temp_refused {
+                temp_roots()
+            } else {
+                Vec::new()
+            },
+            refused_setup: Vec::new(),
+            refused_temp: Vec::new(),
+            app_folder: None,
         };
         for folder in folders {
             if places.folders.len() == PLACES_MAX {
                 break;
             }
-            if usable(&folder)
-                && !places.folders.contains(&folder)
-                && !places.agent_writable(&folder)
-            {
+            if !usable(&folder) || places.folders.contains(&folder) {
+                continue;
+            }
+            if !places.agent_writable(&folder) {
                 places.folders.push(folder);
+            } else if places.in_engine_setup(&folder)
+                && !places.refused_setup.contains(&folder)
+                && places.refused_setup.len() < PLACES_MAX
+            {
+                places.refused_setup.push(folder);
             }
         }
         assert!(places.folders.len() <= PLACES_MAX);
+        assert!(places.refused_setup.len() <= PLACES_MAX);
         assert!(places.engine_roots.iter().all(|root| root.is_absolute()));
         places
     }
 
-    /// Builds the engine's places: the app's own folder, the engine's setup folder, Homebrew
-    /// on Apple silicon and Intel, all fixed and ahead of the PATH the engine inherited, then
-    /// the PATH folders other than the system ones and those in a temp folder, the HOME
-    /// folders the harness catalog uses (nvm, fnm, pnpm, ~/.local/bin, ~/.cargo/bin and
-    /// more), the real installs of volta, asdf, mise and fnm, each harness's own install
-    /// folders under HOME, then the system folders last. A folder agents can write is never
-    /// kept ([`Places::agent_writable`]). Inputs: the engine root, the app's folder, HOME and
-    /// the PATH value. Output: the bounded places.
+    /// Replaces the temp folders the engine's places refuse, so a row can name a folder
+    /// outside every temp folder while each folder it makes lies in the real one. Input: the
+    /// temp folders. Output: the places.
+    #[cfg(test)]
+    fn with_temps(mut self, temps: Vec<PathBuf>) -> Self {
+        assert!(self.temp_refused);
+        self.temps = temps;
+        self
+    }
+
+    /// Sets aside temp folders the engine's places refuse, never looked in, so [`resolve`]
+    /// names a tool found only there instead of calling it missing; at most [`PLACES_MAX`].
+    /// Input: the folders, absolute ones kept. Output: the places.
+    fn set_aside_temp(mut self, folders: impl IntoIterator<Item = PathBuf>) -> Self {
+        for folder in folders {
+            if self.refused_temp.len() == PLACES_MAX {
+                break;
+            }
+            if usable(&folder) && !self.refused_temp.contains(&folder) {
+                self.refused_temp.push(folder);
+            }
+        }
+        assert!(self.refused_temp.len() <= PLACES_MAX);
+        assert!(self.temp_refused || self.refused_temp.is_empty());
+        self
+    }
+
+    /// Whether a folder lies in an engine data folder's `setup` folder, which agents can
+    /// write only when that data folder sits inside a project or a `.crazyagent` folder.
+    /// Input: the folder. Output: the answer.
+    fn in_engine_setup(&self, folder: &Path) -> bool {
+        self.engine_roots
+            .iter()
+            .any(|root| folder.starts_with(root.join("setup")))
+    }
+
+    /// Builds the engine's places: the app's own folder, Homebrew on Apple silicon and Intel
+    /// ahead of the PATH the engine inherited, then the PATH folders other than the system
+    /// ones, those in a temp folder set aside, the HOME folders the harness catalog uses (nvm,
+    /// fnm, pnpm, ~/.local/bin, ~/.cargo/bin and more), the real installs of volta, asdf, mise
+    /// and fnm, each harness's own install folders under HOME, the system folders, and last the
+    /// engine's own folders ([`engine_folders`]): the owner's installs win, the app's are the
+    /// fallback. A folder agents can write is never kept ([`Places::agent_writable`]); the
+    /// app's folder is also kept for the tools it ships ([`Places::bundled`]). Inputs: the
+    /// engine root, the app's folder, HOME and the PATH. Output: the places.
     pub fn engine(
         engine_root: Option<&Path>,
         app_folder: Option<&Path>,
@@ -141,14 +210,19 @@ impl Places {
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
         let homebrew: Vec<PathBuf> = HOMEBREW_FOLDERS.iter().map(PathBuf::from).collect();
         let mut folders: Vec<PathBuf> = Vec::new();
+        let mut temp: Vec<PathBuf> = Vec::new();
         folders.extend(app_folder.map(Path::to_path_buf));
-        folders.extend(engine_root.map(|root| root.join("setup").join("bin")));
         folders.extend(homebrew_folders());
         if let Some(path) = path {
-            folders.extend(
-                std::env::split_paths(path)
-                    .filter(|f| !system.contains(f) && !homebrew.contains(f) && !in_temp(f)),
-            );
+            for folder in
+                std::env::split_paths(path).filter(|f| !system.contains(f) && !homebrew.contains(f))
+            {
+                if in_temp(&folder) {
+                    temp.push(folder);
+                } else {
+                    folders.push(folder);
+                }
+            }
         }
         if let Some(home) = home.as_deref().filter(|home| home.is_absolute()) {
             folders.extend(crate::harnesses::home_places(home));
@@ -163,7 +237,13 @@ impl Places {
         #[cfg(target_os = "linux")]
         folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
         folders.extend(system);
-        Self::kept(folders, home, engine_roots(engine_root))
+        folders.extend(engine_root.into_iter().flat_map(engine_folders));
+        Self {
+            app_folder: app_folder
+                .filter(|folder| usable(folder))
+                .map(Path::to_path_buf),
+            ..Self::kept(folders, home, engine_roots(engine_root), true).set_aside_temp(temp)
+        }
     }
 
     /// Builds the engine's places from this process's HOME and PATH and the folder of the
@@ -203,23 +283,84 @@ impl Places {
 
     /// Adds the folders the background probes found ([`probe::folders`]), such as npm's
     /// global prefix and the login shell's PATH, after every folder known without running a
-    /// program and before the system folders; folders agents can write are dropped. The
-    /// probes keep only folders [`probe::kept`] passes, which also drops shared temp folders
-    /// others can change. Input: the probed folders. Output: the places.
+    /// program and before the system folders and the engine's own folders, which stay last;
+    /// folders agents can write are dropped, and on the engine's places ([`Places::engine`])
+    /// one in a temp folder, which agents with the owner's temp folder grant or other users
+    /// write, is set aside ([`Places::set_aside_temp`]); under the clean-Mac gate root only
+    /// folders in that root or HOME are kept ([`probed_kept`]). The app's folder stays as it
+    /// was. Input: the folders. Output: the places.
     pub fn with_probed(self, probed: Vec<PathBuf>) -> Self {
-        let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
+        let probed = probed_kept(probed, gate_root().as_deref(), self.home.as_deref());
+        let mut tail: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
+        tail.extend(
+            self.engine_roots
+                .iter()
+                .flat_map(|root| engine_folders(root)),
+        );
+        let temp_refused = self.temp_refused;
         let (last, mut folders): (Vec<PathBuf>, Vec<PathBuf>) = self
             .folders
             .into_iter()
-            .partition(|folder| system.contains(folder));
-        folders.extend(probed.into_iter().filter(|folder| !system.contains(folder)));
+            .partition(|folder| tail.contains(folder));
+        let (temp, probed): (Vec<PathBuf>, Vec<PathBuf>) = probed
+            .into_iter()
+            .filter(|folder| !tail.contains(folder))
+            .partition(|folder| temp_refused && in_temp(folder));
+        folders.extend(probed);
         folders.extend(last);
-        Self::kept(folders, self.home, self.engine_roots)
+        let set_aside = self.refused_setup;
+        let carried = self.refused_temp;
+        let app_folder = self.app_folder;
+        let mut places = Self::kept(folders, self.home, self.engine_roots, temp_refused);
+        for folder in set_aside {
+            if !places.refused_setup.contains(&folder) && places.refused_setup.len() < PLACES_MAX {
+                places.refused_setup.push(folder);
+            }
+        }
+        Self {
+            app_folder,
+            ..places.set_aside_temp(carried.into_iter().chain(temp))
+        }
     }
 
     /// The folders looked in, in order. Output: the folders.
     pub fn folders(&self) -> &[PathBuf] {
         &self.folders
+    }
+
+    /// The copy of a tool the app ships beside the engine, looked at before every folder and
+    /// checked as any file found: [`BUNDLED_TMUX`] in the app's folder for the name `tmux`
+    /// (DEC-157), none for any other name or with no app folder. Input: the program name.
+    /// Output: the file, which may not exist.
+    pub fn bundled(&self, name: &str) -> Option<PathBuf> {
+        let file = match name {
+            "tmux" => BUNDLED_TMUX,
+            _ => return None,
+        };
+        let bundled = self.app_folder.as_ref()?.join(file);
+        assert!(bundled.is_absolute());
+        Some(bundled)
+    }
+
+    /// The same places with no copy the app ships, for the usual order once that copy cannot
+    /// run. Output: the places.
+    pub fn without_bundled(&self) -> Self {
+        Self {
+            app_folder: None,
+            ..self.clone()
+        }
+    }
+
+    /// The same places with the app's folder set, as an engine started from that folder
+    /// would hold it, for rows that build their own folders. Input: the app's folder.
+    /// Output: the places.
+    #[cfg(test)]
+    pub(crate) fn with_app_folder(self, app_folder: PathBuf) -> Self {
+        assert!(usable(&app_folder));
+        Self {
+            app_folder: Some(app_folder),
+            ..self
+        }
     }
 
     /// HOME, for the shim checks. Output: HOME, or none.
@@ -228,15 +369,16 @@ impl Places {
     }
 
     /// Whether agents can write a folder or file, read as written and with its links
-    /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]) or inside
-    /// the engine's data folder outside its `setup` folder. Input: the path. Output: the
-    /// answer.
+    /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside
+    /// the engine's data folder outside its `setup` folder, or inside an agent's short temp
+    /// folder ([`crate::sandbox::toolchains::in_agent_tmp`]). Input: the path. Output: the answer.
     pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
         std::iter::once(path).chain(real.as_deref()).any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
                 || in_project(self.home(), path)
                 || in_engine_data(&self.engine_roots, path)
+                || crate::sandbox::toolchains::in_agent_tmp(path)
         })
     }
 }
@@ -249,6 +391,16 @@ pub(crate) fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
     roots
         .iter()
         .any(|root| path.starts_with(root) && !path.starts_with(root.join("setup")))
+}
+
+/// The engine's own folders, looked in after every folder of the owner: its setup `bin`,
+/// then its npm harness prefix's `bin` ([`crate::setup::harness_prefix`]). Input: the engine
+/// root. Output: the two folders in that order.
+fn engine_folders(root: &Path) -> [PathBuf; 2] {
+    [
+        root.join("setup").join("bin"),
+        crate::setup::harness_prefix(root).join("bin"),
+    ]
 }
 
 /// The engine data folder as given and with its links resolved. Input: the folder, or
@@ -285,18 +437,50 @@ fn in_project(home: Option<&Path>, path: &Path) -> bool {
         })
 }
 
+/// Whether a file found through a place outside every temp folder really lies in one, as an
+/// owner link from `~/.local/bin` into the temp folder does, which agents with the owner's
+/// temp folder grant can replace; a file whose place is itself in a temp folder (a test HOME,
+/// an engine root, a mounted app) does not. Inputs: the file as written, its real path and
+/// the temp folders. Output: the answer.
+pub(crate) fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
+    let inside = |path: &Path| temps.iter().any(|temp| path.starts_with(temp));
+    !inside(written) && inside(real)
+}
+
+/// The temp folders: the shared ones and this user's own, as given and with its links
+/// resolved, so a path matches however it is written; an owner temp folder of `/` is
+/// dropped. Output: the absolute folders.
+pub(crate) fn temp_roots() -> Vec<PathBuf> {
+    let owner = std::env::temp_dir();
+    let real = owner.canonicalize().ok();
+    let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
+    roots.extend(
+        std::iter::once(owner)
+            .chain(real)
+            .filter(|root| root.is_absolute() && root.parent().is_some()),
+    );
+    assert!(roots.len() <= TEMP_FOLDERS.len() + 2);
+    roots
+}
+
 /// Whether a folder is in a temp folder, which other users, or agents with the temp folder
 /// grant, can write: this user's temp folder or a shared one, as written and with its links
 /// resolved. Input: the folder. Output: the answer.
 fn in_temp(folder: &Path) -> bool {
-    let owner = std::env::temp_dir();
+    in_temp_of(folder, &temp_roots())
+}
+
+/// Whether a folder is in one of the temp folders given, as written and with its links
+/// resolved; none given refuses nothing. Inputs: the folder and the temp folders. Output:
+/// the answer.
+pub(crate) fn in_temp_of(folder: &Path, temps: &[PathBuf]) -> bool {
+    if temps.is_empty() {
+        return false;
+    }
     let real = folder.canonicalize().ok();
     std::iter::once(folder)
         .chain(real.as_deref())
-        .any(|folder| {
-            (owner.is_absolute() && folder.starts_with(&owner))
-                || TEMP_FOLDERS.iter().any(|temp| folder.starts_with(temp))
-        })
+        .any(|folder| temps.iter().any(|temp| folder.starts_with(temp)))
 }
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
@@ -395,13 +579,16 @@ impl Reason {
 }
 
 /// Why the resolver passed over a file it found: a part another user or group can change,
-/// named so the owner knows what to fix, a file agents can write, or a version-manager shim
-/// with no real install found behind it.
+/// named so the owner knows what to fix, a file agents can write, a version-manager shim
+/// with no real install found behind it, or a file in a temp folder the engine's places
+/// refuse or reached through a link into one, which agents with the owner's temp folder
+/// grant or other users write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     OthersCanChange(PathBuf),
     AgentsCanWrite,
     Shim,
+    InTemp,
 }
 
 /// A file the resolver found and passed over, and why.
@@ -453,13 +640,75 @@ impl Missing {
     }
 }
 
-/// Finds a tool by its program name wherever the places look, passing over version-manager
-/// shims, files agents can write and files others can change, then reads how it runs; a
-/// miss names the first file passed over, if any ([`Refused`]), and asks the background
+/// Finds a tool by its program name, first the copy the app ships ([`Places::bundled`]),
+/// then wherever the places look, passing over version-manager shims, files agents can
+/// write and files others can change, then reads how it runs; a miss names the first file
+/// passed over ([`Refused`]), a set-aside `setup` folder's first, and asks the background
 /// probes to look again ([`probe::missed`]). Harness launches call [`resolve_entry`].
 /// Inputs: the program name and the places. Output: the tool, or why it cannot run.
 pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
     resolve_at(name, places, 0)
+}
+
+/// Whether this build ships tmux beside the engine: the release job sets
+/// `CRAZYAGENT_BUNDLES_TMUX=1` for every target that bundles `crazyagent-tmux`, so a dev
+/// build or a Windows build never says the bundled one is missing.
+pub const SHIPS_BUNDLED_TMUX: bool = match option_env!("CRAZYAGENT_BUNDLES_TMUX") {
+    Some(mark) => matches!(mark.as_bytes(), [b'1']),
+    None => false,
+};
+
+/// Why the engine runs another tmux than the one the app ships (DEC-157 15:41): the bundled
+/// file is not there, or it is there but cannot run (refused, or no supported version read).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BundleNote {
+    Missing,
+    CannotRun,
+}
+
+impl BundleNote {
+    /// The owner line the setup row shows under the tmux in use, word for word in the TUI
+    /// and the desktop app. Output: the line.
+    pub fn line(self) -> &'static str {
+        match self {
+            Self::Missing => {
+                "Using the system tmux, the bundled one is missing; reinstall CrazyAgent."
+            }
+            Self::CannotRun => {
+                "Using the system tmux, the bundled one can't run; reinstall CrazyAgent."
+            }
+        }
+    }
+}
+
+/// Finds the tmux the engine uses, the one answer for setup, the terminal and the sandbox
+/// grant: the bundled copy when it passes the entry checks and `runs`, else the usual
+/// order with the reason the bundled one was not used; with no other tmux, the usual
+/// search's own miss. Inputs: the places, whether this build ships tmux and the check that
+/// the bundled copy runs. Output: the tmux and its note, or why none can run.
+pub fn resolve_tmux(
+    places: &Places,
+    ships_bundle: bool,
+    runs: impl Fn(&Resolved) -> bool,
+) -> Result<(Resolved, Option<BundleNote>), Missing> {
+    let Some(bundled) = places.bundled("tmux") else {
+        return resolve("tmux", places).map(|found| (found, None));
+    };
+    let note = if std::fs::symlink_metadata(&bundled).is_ok() {
+        Some(BundleNote::CannotRun)
+    } else if ships_bundle {
+        Some(BundleNote::Missing)
+    } else {
+        None
+    };
+    match resolve("tmux", places) {
+        Ok(found) if found.entry == bundled && runs(&found) => Ok((found, None)),
+        Ok(found) if found.entry != bundled => Ok((found, note)),
+        _ => resolve("tmux", &places.without_bundled()).map(|found| {
+            assert_ne!(found.entry, bundled);
+            (found, note)
+        }),
+    }
 }
 
 /// Reads how an entry already chosen runs, such as a harness file the engine pinned: its
@@ -482,21 +731,42 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
     if !valid_name(name) {
         return Err(not_found());
     }
-    let mut refused = None;
-    let found =
-        places.folders.iter().map(|folder| folder.join(name)).find(
-            |candidate| match check_candidate(places, candidate) {
-                Some(Ok(())) => true,
-                Some(Err(why)) => {
-                    refused.get_or_insert_with(|| Refused {
-                        file: candidate.clone(),
-                        why,
-                    });
-                    false
-                }
-                None => false,
-            },
-        );
+    let in_setup = places
+        .refused_setup
+        .iter()
+        .map(|folder| (folder.join(name), false));
+    let in_temp_folder = places
+        .refused_temp
+        .iter()
+        .map(|folder| (folder.join(name), true));
+    let mut refused = in_setup
+        .chain(in_temp_folder)
+        .find_map(|(candidate, temp)| {
+            let why = match check_candidate(places, &candidate)? {
+                Err(why) => why,
+                Ok(()) if temp => Refusal::InTemp,
+                Ok(()) => return None,
+            };
+            Some(Refused {
+                file: candidate,
+                why,
+            })
+        });
+    let found = places
+        .bundled(name)
+        .into_iter()
+        .chain(places.folders.iter().map(|folder| folder.join(name)))
+        .find(|candidate| match check_candidate(places, candidate) {
+            Some(Ok(())) => true,
+            Some(Err(why)) => {
+                refused.get_or_insert_with(|| Refused {
+                    file: candidate.clone(),
+                    why,
+                });
+                false
+            }
+            None => false,
+        });
     let Some(found) = found else {
         probe::missed();
         return Err(match refused {
@@ -566,9 +836,22 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     }
     let through_shim =
         shebang.by_name.is_none() && crate::harnesses::is_shim(places.home(), &shebang.interpreter);
+    let into_temp = places.temp_refused
+        && shebang
+            .interpreter
+            .canonicalize()
+            .is_ok_and(|real| leads_into_temp(entry, &real, &places.temps));
     let interpreter = match &shebang.by_name {
         Some(name) => named_interpreter(name, &program, places, depth + 1),
         None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
+        None if into_temp => Err(Missing {
+            reason: Reason::Refused,
+            refused: Some(Box::new(Refused {
+                file: shebang.interpreter.clone(),
+                why: Refusal::InTemp,
+            })),
+            ..not_there()
+        }),
         None => entry_at(&shebang.interpreter, places, depth + 1),
     }
     .map_err(|missing| match missing.reason {
@@ -694,6 +977,26 @@ pub(crate) fn homebrew_folders() -> Vec<PathBuf> {
         .collect()
 }
 
+/// The probed folders a build looks in: every one in a release; under the clean-Mac
+/// gate's stand-in system root, only those inside that root or HOME, since the login
+/// shell also reads this computer's own /etc files and can name its real Homebrew.
+/// Inputs: the probed folders, the gate's root and HOME. Output: the folders kept.
+fn probed_kept(
+    probed: Vec<PathBuf>,
+    gate_root: Option<&Path>,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
+    let Some(root) = gate_root else {
+        return probed;
+    };
+    probed
+        .into_iter()
+        .filter(|folder| {
+            folder.starts_with(root) || home.is_some_and(|home| folder.starts_with(home))
+        })
+        .collect()
+}
+
 /// The clean-Mac gate's stand-in system root, from `CRAZYAGENT_GATE_SYSTEM_ROOT` when it
 /// names an absolute folder. Output: the root, or none.
 #[cfg(feature = "clean-mac-gate")]
@@ -768,10 +1071,13 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             part.display()
         ),
         Refusal::AgentsCanWrite => format!(
-            "{tool} can't start: {file} is not used because agents can change it there (inside a project, a .crazyagent folder or the app's data). Use a copy outside your projects, then try again."
+            "{tool} can't start: {file} is not used because agents can change it there (inside a project, a .crazyagent folder, an agent's temp folder or the app's data). Use a copy outside those places, then try again."
         ),
         Refusal::Shim => format!(
             "{tool} can't start: {file} is a version manager shim with no install found behind it. Add a version with that version manager, then try again."
+        ),
+        Refusal::InTemp => format!(
+            "{tool} can't start: {file} is not used because it is in a temp folder or links to one, which agents or other users can change. Install it outside temp folders, then try again."
         ),
     }
 }
@@ -792,19 +1098,23 @@ fn install_hint(tool: &str) -> &'static str {
 
 /// Checks a found file: none when it is not an executable file whose links resolve, else
 /// passed, or passed over as a version-manager shim, as a file agents can write, as found or
-/// through its links ([`Places::agent_writable`]), or with the part another user or group
-/// can change ([`crate::service::changeable_past_sticky`]). Inputs: the places and the
-/// file. Output: the check.
+/// through its links ([`Places::agent_writable`]), with the part another user or group can
+/// change ([`crate::service::changeable_past_sticky`]), or, on the engine's places, as a file
+/// that leads into a temp folder ([`leads_into_temp`]). Inputs: the places and the file.
+/// Output: the check.
 fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
-    if !executable_file(candidate) || candidate.canonicalize().is_err() {
+    if !executable_file(candidate) {
         return None;
     }
+    let real = candidate.canonicalize().ok()?;
     Some(if crate::harnesses::is_shim(places.home(), candidate) {
         Err(Refusal::Shim)
     } else if places.agent_writable(candidate) {
         Err(Refusal::AgentsCanWrite)
     } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
         Err(Refusal::OthersCanChange(part))
+    } else if places.temp_refused && leads_into_temp(candidate, &real, &places.temps) {
+        Err(Refusal::InTemp)
     } else {
         Ok(())
     })

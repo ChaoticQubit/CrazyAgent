@@ -98,7 +98,10 @@ async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine()
     assert_eq!(labels.len(), specs().len());
     assert_eq!(labels[0], ("Codex", "Ready"));
     assert!(labels.iter().all(|(_, label)| {
-        *label == "Ready" || *label == "Not installed" || label.starts_with("Limited control: ")
+        *label == "Ready"
+            || *label == "Not installed"
+            || label.starts_with("Limited control: ")
+            || label.starts_with("Can't run: ")
     }));
 }
 

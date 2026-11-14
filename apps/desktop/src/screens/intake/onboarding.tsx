@@ -11,7 +11,7 @@ import { BasicsFields, LINKED_COPY, ResearchSwitches, RoadmapSwitch } from "../n
 import { basicsErrors, editRequest, type ProjectDraft } from "../new-project/wizard";
 import { MarkdownView } from "../project/markdown";
 import { ImportMoveCommit } from "../process";
-import { ONBOARDING_POLL_MS, confirmKept, confirmReady, inRepo, mappingRetry, missingLabels, offerProposed, onboardingDraft, projectFolder, settled, startedProject, stepView, withProposed } from "./intake";
+import { ONBOARDING_POLL_MS, confirmKept, confirmReady, inRepo, mappingRetry, missingLine, offerProposed, onboardingDraft, projectFolder, settled, startedProject, stepView, withProposed } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -56,7 +56,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   if (view.kind === "error") return <div className="pj in-page">{header}<LoadError message={view.message} onRetry={onRetry ?? (() => navigate({ name: "home" }))} /></div>;
   const value = view.value;
   const gate = confirmReady(value);
-  const missing = missingLabels(value.missing);
+  const missing = missingLine(value.missing);
   const offerRetry = mappingRetry(value) && !skipped;
   const repo = inRepo(value.facts);
   const unlinked = finished ? (Object.keys(repo.research) as ResearchKind[]) : dropped.filter((key): key is ResearchKind => key !== "roadmap");
@@ -87,7 +87,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
     {importMove}
     {value.overview && <Panel title="Overview"><MarkdownView source={value.overview} onOpenLink={onOpenLink} /></Panel>}
     {value.folder_overview && <Panel title="Overview found in the folder"><p className="pj-help">The mapping agent did not write this: it came with the folder or was changed since.</p><MarkdownView source={value.folder_overview} onOpenLink={onOpenLink} /></Panel>}
-    {draft && missing.length > 0 && <Notice tone="warn">Not found: {missing.join(", ")}. Add them below.</Notice>}
+    {draft && missing && <Notice tone="info">{missing}</Notice>}
     {draft && <form className="pj-stack" aria-label="Project details" noValidate onSubmit={(event) => { event.preventDefault(); onConfirm(); }}>
       <BasicsFields prefix="ob" draft={draft} onChange={onDraft} catalog={catalog} errors={errors} showErrors={showErrors} missing={value.missing} />
       <fieldset className="pj-field">

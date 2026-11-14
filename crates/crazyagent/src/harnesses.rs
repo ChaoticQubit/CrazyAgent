@@ -76,23 +76,27 @@ pub enum AccountKind {
 }
 
 /// States whether a harness can be used from CrazyAgent on this machine.
-/// Limited carries a plain reason the app shows to the owner.
+/// Limited carries a plain reason the app shows to the owner; CantRun carries the tool
+/// resolver's owner line for a found harness that cannot start, so it is never counted ready.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HarnessStatus {
     Ready,
     NotInstalled,
     Limited { reason: String },
+    CantRun { reason: String },
 }
 
 impl HarnessStatus {
     /// Renders the status in the plain words the clients show.
-    /// Input: the status. Output: "Ready", "Not installed" or "Limited control: <reason>".
+    /// Input: the status. Output: "Ready", "Not installed", "Limited control: <reason>" or
+    /// "Can't run: <reason>".
     pub fn label(&self) -> String {
         match self {
             Self::Ready => "Ready".into(),
             Self::NotInstalled => "Not installed".into(),
             Self::Limited { reason } => format!("Limited control: {reason}"),
+            Self::CantRun { reason } => format!("Can't run: {reason}"),
         }
     }
 }
@@ -160,7 +164,10 @@ pub struct Search {
     directories: Vec<PathBuf>,
     home: Option<PathBuf>,
     home_places: Vec<PathBuf>,
+    engine: Option<PathBuf>,
     registered: Vec<(String, PathBuf)>,
+    temps: Vec<PathBuf>,
+    set_aside: Vec<PathBuf>,
 }
 
 impl Search {
@@ -189,18 +196,42 @@ impl Search {
             directories,
             home,
             home_places,
+            engine: None,
             registered,
+            temps: Vec::new(),
+            set_aside: Vec::new(),
         }
     }
 
     /// Builds the one search engine start, the catalog, Check again and sign-in all use: the
-    /// PATH folders, then the system folders no other user can change, then the HOME folders
-    /// (see [`home_places`]). Inputs: the PATH value, the system folders and HOME.
-    /// Output: the bounded search.
+    /// PATH folders except those in a temp folder, as the tool resolver sets them aside, though
+    /// a HOME folder keeps its PATH place; then the system folders no other user can change,
+    /// then the HOME folders ([`home_places`]). Inputs: the PATH value, the system folders and
+    /// HOME. Output: the search.
     pub fn engine(path: Option<&OsStr>, system: &[PathBuf], home: Option<PathBuf>) -> Self {
-        let mut directories: Vec<PathBuf> = path
-            .map(|path| std::env::split_paths(path).collect())
+        Self::engine_in(path, system, home, &crate::tools::temp_roots())
+    }
+
+    /// Builds the engine search as [`Search::engine`] does with the temp folders given, so a
+    /// row can name a folder outside every temp folder while each folder it makes lies in the
+    /// real one. Inputs: the PATH value, the system folders, HOME and the temp folders.
+    /// Output: the bounded search.
+    pub(crate) fn engine_in(
+        path: Option<&OsStr>,
+        system: &[PathBuf],
+        home: Option<PathBuf>,
+        temps: &[PathBuf],
+    ) -> Self {
+        let kept: Vec<PathBuf> = home
+            .as_deref()
+            .filter(|home| usable_path(home))
+            .map(home_places)
             .unwrap_or_default();
+        let (set_aside, mut directories): (Vec<PathBuf>, Vec<PathBuf>) = path
+            .map(|path| std::env::split_paths(path).collect::<Vec<PathBuf>>())
+            .unwrap_or_default()
+            .into_iter()
+            .partition(|folder| crate::tools::in_temp_of(folder, temps) && !kept.contains(folder));
         for folder in system {
             if !directories.contains(folder)
                 && crate::service::changeable_by_others(folder).is_none()
@@ -208,7 +239,77 @@ impl Search {
                 directories.push(folder.clone());
             }
         }
-        Self::new(directories, home, Vec::new())
+        let mut search = Self::new(directories, home, Vec::new());
+        search.temps = temps.to_vec();
+        for folder in set_aside {
+            if search.set_aside.len() == SEARCH_DIRECTORIES_MAX {
+                break;
+            }
+            if usable_path(&folder) && !search.set_aside.contains(&folder) {
+                search.set_aside.push(folder);
+            }
+        }
+        assert!(search.set_aside.len() <= SEARCH_DIRECTORIES_MAX);
+        assert!(search.set_aside.iter().all(|folder| folder.is_absolute()));
+        search
+    }
+
+    /// The temp folders this search refuses: none for a search built from explicit folders
+    /// ([`Search::new`]). Output: the folders.
+    pub(crate) fn temps(&self) -> &[PathBuf] {
+        &self.temps
+    }
+
+    /// The folders where this search passed over one harness for a temp folder: a set-aside
+    /// PATH folder holding it, unless the same folder is looked in anyway, as a HOME folder
+    /// is, then a looked-in folder whose file for it leads into a temp folder. Input: the
+    /// catalog id. Output: the folders, bounded; empty for an alias or unknown id.
+    pub fn temp_skipped(&self, id: &str) -> Vec<PathBuf> {
+        let Some(spec) = spec(id).filter(|spec| spec.id == id) else {
+            return Vec::new();
+        };
+        let mut folders = self.set_aside_holding(spec);
+        for folder in self.places(spec) {
+            let leads = spec.binaries.iter().any(|binary| {
+                let file = folder.join(binary);
+                executable_file(&file) && self.links_into_temp(&file)
+            });
+            if leads && !folders.contains(&folder) {
+                folders.push(folder);
+            }
+        }
+        assert!(
+            folders.len()
+                <= SEARCH_DIRECTORIES_MAX
+                    + SEARCH_DIRECTORIES_MAX
+                    + HOME_PLACES_MAX
+                    + LOCATIONS_MAX
+        );
+        folders
+    }
+
+    /// The set-aside PATH folders that hold a file for one spec and are not looked in anyway.
+    /// Input: the spec. Output: the folders, in PATH order.
+    fn set_aside_holding(&self, spec: &HarnessSpec) -> Vec<PathBuf> {
+        let places = self.places(spec);
+        self.set_aside
+            .iter()
+            .filter(|folder| !places.contains(folder))
+            .filter(|folder| {
+                spec.binaries
+                    .iter()
+                    .any(|binary| executable_file(&folder.join(binary)))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a file this search found in a kept folder really lies in a temp folder it
+    /// refuses ([`crate::tools::leads_into_temp`]). Input: the file. Output: the answer.
+    fn links_into_temp(&self, file: &Path) -> bool {
+        !self.temps.is_empty()
+            && std::fs::canonicalize(file)
+                .is_ok_and(|real| crate::tools::leads_into_temp(file, &real, &self.temps))
     }
 
     /// Builds the engine search from this process's PATH and HOME and the built-in system
@@ -249,14 +350,16 @@ impl Search {
         self.hits(spec, CANDIDATES_MAX, true)
     }
 
-    /// The folders this search looks in for one harness, in order, then the version-manager
-    /// shim folders it never uses, for the owner's "where we looked" line. Input: the catalog
-    /// id. Output: the folders, bounded; empty for an alias or unknown id.
+    /// The folders this search looks in for one harness, in order, after the set-aside temp
+    /// PATH folders that hold it ([`Search::temp_skipped`]), then the version-manager shim
+    /// folders it never uses, for the owner's "where we looked" line. Input: the catalog id.
+    /// Output: the folders, bounded; empty for an alias or unknown id.
     pub fn looked(&self, id: &str) -> Vec<PathBuf> {
         let Some(spec) = spec(id).filter(|spec| spec.id == id) else {
             return Vec::new();
         };
-        let mut folders = self.places(spec);
+        let mut folders = self.set_aside_holding(spec);
+        folders.extend(self.places(spec));
         if let Some(home) = &self.home {
             for shim in SHIM_DIRECTORIES
                 .iter()
@@ -270,8 +373,10 @@ impl Search {
         assert!(
             folders.len()
                 <= SEARCH_DIRECTORIES_MAX
+                    + SEARCH_DIRECTORIES_MAX
                     + HOME_PLACES_MAX
                     + LOCATIONS_MAX
+                    + 1
                     + SHIM_DIRECTORIES.len()
         );
         folders
@@ -283,14 +388,23 @@ impl Search {
         self.home.as_deref()
     }
 
-    /// The folders searched for one spec, in order: the search folders, the HOME folders and
-    /// the spec's own install folders under HOME. Input: the spec. Output: the folders.
+    /// The folders searched for one spec, in order: the search folders, the HOME folders, the
+    /// spec's own install folders under HOME, and last the engine's npm prefix `bin`
+    /// ([`Search::with_engine`]), so an owner's install always wins over the app's.
+    /// Input: the spec. Output: the folders.
     fn places(&self, spec: &HarnessSpec) -> Vec<PathBuf> {
         assert!(spec.locations.len() <= LOCATIONS_MAX);
         let mut folders: Vec<PathBuf> = self.directories.clone();
         folders.extend(self.home_places.iter().cloned());
         if let Some(home) = &self.home {
             folders.extend(spec.locations.iter().map(|relative| below(home, relative)));
+        }
+        if let Some(engine) = self
+            .engine
+            .as_ref()
+            .filter(|engine| !folders.contains(engine))
+        {
+            folders.push(engine.clone());
         }
         folders
     }
@@ -301,6 +415,19 @@ impl Search {
         if usable_path(&path) {
             self.registered.push((id.to_owned(), path));
         }
+        self
+    }
+
+    /// Sets the `bin` folder of the engine's own npm prefix
+    /// ([`crate::setup::harness_prefix`]), where an npm harness the engine installed lives, as
+    /// the last folder looked in, after every folder of the owner, even before the first
+    /// install makes it; a folder others can change is left out. Input: the engine root.
+    /// Output: the search.
+    pub fn with_engine(mut self, engine_root: &Path) -> Self {
+        let folder = crate::setup::harness_prefix(engine_root).join("bin");
+        let kept = usable_path(&folder) && crate::service::changeable_by_others(&folder).is_none();
+        self.engine = kept.then_some(folder);
+        assert!(self.engine.iter().all(|engine| engine.is_absolute()));
         self
     }
 
@@ -327,6 +454,7 @@ impl Search {
                 let candidate = directory.join(binary);
                 if found.contains(&candidate)
                     || !executable_file(&candidate)
+                    || self.links_into_temp(&candidate)
                     || (!shims && is_shim(self.home(), &candidate))
                 {
                     continue;
@@ -569,6 +697,36 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
         .collect();
     assert_eq!(entries.len(), specs().len());
     entries
+}
+
+/// Marks each found harness the tool resolver can't start, read as a launch reads it, as
+/// Can't run with the resolver's owner line, over any other status, so no client counts it
+/// ready. Nothing is run. Inputs: the catalog rows and the resolver's places. Output: the
+/// rows in the same order.
+pub(crate) fn with_needs(
+    entries: Vec<HarnessEntry>,
+    places: &crate::tools::Places,
+) -> Vec<HarnessEntry> {
+    let count = entries.len();
+    let marked: Vec<HarnessEntry> = entries
+        .into_iter()
+        .map(|mut entry| {
+            let needs = entry
+                .executable
+                .as_deref()
+                .and_then(|executable| update::needs(executable, places));
+            if let Some(needs) = needs {
+                entry.status = HarnessStatus::CantRun { reason: needs.line };
+                entry.status_label = entry.status.label();
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(marked.len(), count);
+    assert!(marked.iter().all(|entry| {
+        entry.executable.is_some() || !matches!(entry.status, HarnessStatus::CantRun { .. })
+    }));
+    marked
 }
 
 /// The engine's last harness probe and the search it ran with, so a catalog read answers at

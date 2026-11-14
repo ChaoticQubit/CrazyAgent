@@ -328,6 +328,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "instructions_cleanup_pool_not_asked" => "A project's edit runs on the project's own pool, so nothing was sent. Try again.".into(),
         "instructions_cleanup_pool_unknown" => "That pool no longer exists, so nothing was sent. Pick another one.".into(),
         "instructions_cleanup_project_pool_missing" => "This project has no pool yet, so nothing was sent. Give it one under Pools, then try again.".into(),
+        "instructions_cleanup_provider_unreachable" => "Can't reach this pool's model provider, so nothing was sent. Start it or pick another account, then try again.".into(),
         "instructions_cleanup_no_account" => "No account in the pool can run this edit, so nothing was sent. Sign one in under Pools, then try again.".into(),
         "instructions_cleanup_paused" => "Every account in the pool hit its limit, so nothing was sent. Try again later.".into(),
         "instructions_cleanup_busy" => "Another Edit with AI is still running. Wait for it, then try again.".into(),

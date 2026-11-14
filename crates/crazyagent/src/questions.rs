@@ -29,6 +29,12 @@ pub const CONTEXT_BYTES_MAX: usize = 4096;
 pub const ANSWER_BYTES_MAX: usize = 4096;
 /// The most bytes of the research kind or change set an engine asker names.
 pub const NAME_BYTES_MAX: usize = 64;
+/// The most bytes of the asker's name a page sends with one question.
+pub const ASKER_NAME_BYTES_MAX: usize = 512;
+/// The word a question shows while it is urgent, on every client (S4-R1, DEC-141).
+pub const URGENT_WORD: &str = "Urgent";
+/// The note a question shows while its asker is paused until the owner answers.
+pub const PAUSED_NOTE: &str = "The agent is paused until you answer.";
 /// The most questions of one asker that wait for the owner at once.
 pub const PENDING_PER_ASKER_MAX: i64 = 8;
 /// The most questions of one project that wait for the owner at once.
@@ -113,12 +119,14 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS questions_log (
 CREATE INDEX IF NOT EXISTS questions_log_status ON questions_log(project, status, id);
 CREATE INDEX IF NOT EXISTS questions_log_asker ON questions_log(project, asker, status);";
 
-/// The most bytes one question's stored texts hold.
+/// The most bytes one question's texts hold, as stored and with the asker's name a page
+/// sends.
 const STORED_BYTES_MAX: usize = QUESTION_BYTES_MAX
     + OPTIONS_MAX * OPTION_BYTES_MAX
     + RECOMMENDED_BYTES_MAX
     + CONTEXT_BYTES_MAX
     + ANSWER_BYTES_MAX
+    + ASKER_NAME_BYTES_MAX
     + 256;
 
 const _: () = assert!(2 * STORED_BYTES_MAX + 1024 <= LISTED_BYTES_MAX);
@@ -247,7 +255,9 @@ pub struct Ask {
 }
 
 /// One logged question with its outcome and the version an answer or dismissal names: 0
-/// while pending, written once when it settles (SS-1 item `question:<project>:<id>`).
+/// while pending, written once when it settles (SS-1 item `question:<project>:<id>`). A page
+/// read also names a sub-agent asker by the name its team keeps and says whether a waiting
+/// team question is urgent and its asker paused (S4-R1); other reads leave them unset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
     pub id: u64,
@@ -266,6 +276,12 @@ pub struct Question {
     pub settled_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_by: Option<ClosedBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asker_name: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub urgent: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 /// One page of a project's questions, pending ones first; `next` goes back as `after`.
@@ -567,14 +583,27 @@ pub fn raise(
     source: &EngineSource,
     ask: &Ask,
 ) -> Result<u64, EngineError> {
-    let asker = source
-        .name()
-        .ok_or_else(|| failure("questions_ask_invalid"))?;
     let tx = immediate(db)?;
-    let id = insert(&tx, project, &asker, "engine", ask, true, None)?;
+    let id = raise_in(&tx, project, source, ask)?;
     tx.commit().map_err(unavailable)?;
     page::refresh(db, project);
     Ok(id)
+}
+
+/// Logs a question an engine step raises inside the caller's transaction, as `raise` does,
+/// so it commits or rolls back with the caller's other rows; the caller rewrites the
+/// project's questions page with `refresh_page` after its commit. Inputs: the transaction,
+/// the project, the step and the ask. Output: as `raise`.
+pub(crate) fn raise_in(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    source: &EngineSource,
+    ask: &Ask,
+) -> Result<u64, EngineError> {
+    let asker = source
+        .name()
+        .ok_or_else(|| failure("questions_ask_invalid"))?;
+    insert(tx, project, &asker, "engine", ask, true, None)
 }
 
 /// Records the owner's answer from a Questions view, naming the version the owner read. A
@@ -1206,7 +1235,8 @@ pub fn page(db: &Connection, project: &ProjectId, after: Option<u64>) -> Result<
     let mut items = Vec::new();
     let mut bytes = 0;
     let mut more = false;
-    for question in rows {
+    for mut question in rows {
+        shown(&tx, &mut question)?;
         let size = serde_json::to_vec(&question).map_err(unavailable)?.len();
         assert!(size <= 2 * STORED_BYTES_MAX + 1024);
         if items.len() == LISTED_MAX || bytes + size > LISTED_BYTES_MAX {
@@ -1827,9 +1857,49 @@ fn select(
             created_ms: u64::try_from(created).map_err(unavailable)?,
             settled_ms,
             closed_by: ClosedBy::parse(&closed_by),
+            asker_name: None,
+            urgent: false,
+            paused: false,
         });
     }
     Ok(questions)
+}
+
+/// Fills what a page shows beside a stored question (S4-R1): the name the team keeps for a
+/// sub-agent asker (DEC-096), none without one, and for a waiting question linked to a team
+/// message whether it is urgent and its asker still paused by it. Inputs: the transaction
+/// and the question. Output: nothing, or the read's failure.
+fn shown(tx: &Transaction<'_>, question: &mut Question) -> Result<(), EngineError> {
+    let agent = question
+        .asker
+        .strip_prefix("agent:")
+        .and_then(|id| id.parse::<i64>().ok());
+    if let Some(agent) = agent {
+        question.asker_name = crate::team::names::kept_label(tx, &question.project, agent)
+            .map_err(unavailable)?
+            .map(|name| bound_text(&name, ASKER_NAME_BYTES_MAX));
+    }
+    if question.status != QuestionStatus::Pending {
+        return Ok(());
+    }
+    let message: Option<i64> = tx
+        .query_row(
+            "SELECT coord_message FROM questions_log WHERE id=?1",
+            [column(question.id)],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if let Some(message) = message {
+        (question.urgent, question.paused) =
+            crate::team::questions::marks(tx, message).map_err(unavailable)?;
+    }
+    assert!(
+        question
+            .asker_name
+            .as_ref()
+            .is_none_or(|name| name.len() <= ASKER_NAME_BYTES_MAX)
+    );
+    Ok(())
 }
 
 /// Names the versioned item of one owner question. Inputs: the project and question id.

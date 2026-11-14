@@ -6,6 +6,7 @@ pub mod clone_repo;
 pub(in crate::tui) mod console;
 pub(in crate::tui) mod demo;
 pub(in crate::tui) mod first_run_accounts;
+pub(in crate::tui) mod harness_setup;
 pub mod home;
 pub mod home_folder;
 pub(in crate::tui) mod intake;
@@ -214,6 +215,7 @@ pub enum Place {
     HomeFolder {
         first_run: bool,
     },
+    HarnessSetup,
     FirstRunAccounts,
     AddProject,
     AddFolder,
@@ -386,6 +388,7 @@ pub trait Screen {
             | Place::NewProject
             | Place::Setup { .. }
             | Place::HomeFolder { .. }
+            | Place::HarnessSetup
             | Place::FirstRunAccounts
             | Place::AddProject
             | Place::AddFolder
@@ -429,6 +432,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
             name.clone(),
         )),
         Place::HomeFolder { first_run } => Box::new(home_folder::HomeFolder::new(*first_run, ctx)),
+        Place::HarnessSetup => Box::new(harness_setup::HarnessSetup::new()),
         Place::FirstRunAccounts => Box::new(first_run_accounts::FirstRunAccounts::new()),
         Place::AddProject => Box::new(add_project::AddProject::new()),
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),

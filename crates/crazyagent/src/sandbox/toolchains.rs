@@ -631,6 +631,27 @@ pub fn tmp_path(home: &Path) -> PathBuf {
     path
 }
 
+/// Whether a path lies in an agent's short temp folder ([`tmp_path`]): the folder in
+/// [`TMP_PARENT`] named `ca-` and 16 lowercase hex digits, which the agent writes though
+/// this user owns it. A folder named otherwise there, such as a test's scratch, is not one.
+/// Input: the path. Output: the answer.
+pub(crate) fn in_agent_tmp(path: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix(TMP_PARENT) else {
+        return false;
+    };
+    let Some(std::path::Component::Normal(name)) = rest.components().next() else {
+        return false;
+    };
+    name.to_str()
+        .and_then(|name| name.strip_prefix(TMP_PREFIX))
+        .is_some_and(|hash| {
+            hash.len() == 2 * TMP_HASH_BYTES
+                && hash
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
 /// Makes the agent's short temp folder with mode 0700, or reuses the one this user already
 /// owns there and makes it private again, and writes the agent's own `git` into it (see
 /// [`with_agent_git`]) as the worker copy that refuses `crazyagent/main` too, which

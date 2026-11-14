@@ -219,6 +219,13 @@ fn guarded_engine_runtime_secrets_stay_unreadable_and_no_read_root_may_hold_them
         &secret_text,
     )
     .unwrap();
+    let profile_home = case
+        .runtime
+        .join("native-profiles")
+        .join("a".repeat(64))
+        .join("home");
+    fs::create_dir_all(&profile_home).unwrap();
+    fs::write(profile_home.join(".credentials.json"), &secret_text).unwrap();
     walled(
         sandbox(&case)
             .allow_read(&case.runtime)
@@ -239,6 +246,7 @@ fn guarded_engine_runtime_secrets_stay_unreadable_and_no_read_root_may_hold_them
         case.runtime.join("engine.db"),
         case.runtime.join("engine.db-wal"),
         case.runtime.join("account-keys").join("key-a"),
+        profile_home.join(".credentials.json"),
     ] {
         let output = shell(&sandbox, &profile, &format!("cat {}", quoted(&secret)));
         assert!(!output.status.success(), "{}", secret.display());
@@ -280,6 +288,36 @@ fn guard_refuses_agent_roots_inside_engine_secrets() {
     )
     .unwrap();
     assert!(sandbox.guard_engine(&case.runtime).is_err());
+}
+
+/// CONFIGURED-HOMES-GUARD: an agent guarded on the engine root, as jobs, team agents,
+/// read-only runs and the IDE are, has the folder of configured SDK homes denied in its
+/// profile, so a real child cannot read or list a keyed account's config there.
+#[test]
+fn a_guarded_agent_cannot_read_a_configured_sdk_home() {
+    let case = case();
+    let secret_text = format!("rcli_test{}", random_hex(18));
+    let homes = case.runtime.join("configured-sdk-homes");
+    let config = homes
+        .join("c".repeat(64))
+        .join(".backboard")
+        .join("config.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, &secret_text).unwrap();
+    let sandbox = sandbox(&case).guard_engine(&case.runtime).unwrap();
+    assert!(
+        sandbox
+            .profile()
+            .contains(&format!("\n  (subpath \"{}\")", homes.display()))
+    );
+    let profile = case.profiles.join("homes.sb");
+    let read = shell(&sandbox, &profile, &format!("cat {}", quoted(&config)));
+    assert!(!read.status.success());
+    assert!(!holds(&read.stdout, &secret_text));
+    assert!(String::from_utf8_lossy(&read.stderr).contains("Operation not permitted"));
+    let list = shell(&sandbox, &profile, &format!("ls {}", quoted(&homes)));
+    assert!(!list.status.success());
+    assert!(!holds(&list.stdout, &"c".repeat(64)));
 }
 
 #[test]

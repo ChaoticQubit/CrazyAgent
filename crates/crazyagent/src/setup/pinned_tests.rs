@@ -38,7 +38,11 @@ fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
     );
     assert_eq!(
         installer.lookup(Dependency::Tmux).unwrap(),
-        Ok(Version::parse("3.5a").unwrap())
+        Ok(crate::setup::Located {
+            version: Version::parse("3.5a").unwrap(),
+            bundled: false,
+            note: None,
+        })
     );
     script(
         "graphify",
@@ -49,6 +53,98 @@ fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
     assert_eq!(
         needs,
         crate::tools::resolve("graphify", &places).unwrap_err()
+    );
+}
+
+/// DEC-157: setup finds the tmux the engine uses, the `crazyagent-tmux` the app ships beside
+/// the engine, reads its version through the same words and marks it bundled, so its row says
+/// Bundled with CrazyAgent; with the file gone it is never marked bundled.
+#[test]
+fn setup_marks_the_tmux_the_app_ships_beside_the_engine_as_bundled() {
+    let root = private_root();
+    let app = root.path().join("CrazyAgent.app/Contents/MacOS");
+    std::fs::create_dir_all(&app).unwrap();
+    let sidecar = app.join("crazyagent-tmux");
+    std::fs::write(&sidecar, "#!/bin/sh\necho 'tmux 3.8'\n").unwrap();
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let places = crate::tools::Places::engine(
+        None,
+        Some(&app),
+        Some(root.path().join("home")),
+        Some(std::ffi::OsStr::new("")),
+    );
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places);
+    assert_eq!(
+        installer.lookup(Dependency::Tmux).unwrap(),
+        Ok(crate::setup::Located {
+            version: Version::parse("3.8").unwrap(),
+            bundled: true,
+            note: None,
+        })
+    );
+    std::fs::remove_file(&sidecar).unwrap();
+    assert!(!matches!(
+        installer.lookup(Dependency::Tmux),
+        Ok(Ok(crate::setup::Located { bundled: true, .. }))
+    ));
+}
+
+/// Leader 20:08: a bundled tmux that cannot run, one that fails its version read or reports a
+/// tmux older than the supported 3.2, is passed over for the system tmux, and setup says the
+/// bundled one can't run; the terminal, and so its sandbox grant, picks that same system tmux.
+#[test]
+fn setup_and_the_terminal_use_the_system_tmux_when_the_bundled_one_cannot_run() {
+    let root = private_root();
+    let app = root.path().join("CrazyAgent.app/Contents/MacOS");
+    let system = root.path().join("system/bin");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&system).unwrap();
+    let tmux = system.join("tmux");
+    std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.5a'\n").unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let places = crate::tools::Places::new(vec![system], Some(root.path().join("home")))
+        .with_app_folder(app.clone());
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
+    for (number, broken) in ["#!/bin/sh\nexit 1\n", "#!/bin/sh\necho 'tmux 3.1'\n"]
+        .into_iter()
+        .enumerate()
+    {
+        let sidecar = app.join(format!("crazyagent-tmux.{number}"));
+        std::fs::write(&sidecar, broken).unwrap();
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&sidecar, app.join("crazyagent-tmux")).unwrap();
+        assert_eq!(
+            installer.lookup(Dependency::Tmux).unwrap(),
+            Ok(crate::setup::Located {
+                version: Version::parse("3.5a").unwrap(),
+                bundled: false,
+                note: Some(crate::tools::BundleNote::CannotRun),
+            }),
+            "{broken}"
+        );
+        assert_eq!(
+            crate::terminal::tmux::installed_at(&places),
+            Some(tmux.canonicalize().unwrap()),
+            "{broken}"
+        );
+    }
+    let fixed = app.join("crazyagent-tmux.fixed");
+    std::fs::write(&fixed, "#!/bin/sh\necho 'tmux 3.8'\n").unwrap();
+    std::fs::set_permissions(&fixed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&fixed, app.join("crazyagent-tmux")).unwrap();
+    let sidecar = app.join("crazyagent-tmux");
+    assert_eq!(
+        installer.lookup(Dependency::Tmux).unwrap(),
+        Ok(crate::setup::Located {
+            version: Version::parse("3.8").unwrap(),
+            bundled: true,
+            note: None,
+        }),
+        "a failed read is never kept once the bundled file is replaced"
+    );
+    assert_eq!(
+        crate::terminal::tmux::installed_at(&places),
+        Some(sidecar.canonicalize().unwrap())
     );
 }
 
@@ -79,6 +175,10 @@ fn a_broken_first_copy_shows_failed_and_a_later_good_copy_is_not_used() {
         checked: Some(crate::setup::progress::Checked {
             at: std::time::Instant::now(),
             found: vec![(Dependency::Tmux, installer.lookup(Dependency::Tmux))],
+            probe: crate::tools::probe::Mark {
+                generation: 1,
+                first_run_pending: false,
+            },
         }),
         ..crate::setup::progress::Progress::default()
     };
@@ -89,6 +189,30 @@ fn a_broken_first_copy_shows_failed_and_a_later_good_copy_is_not_used() {
             reason: crate::setup::plain_reason("setup_version_unreadable").to_owned()
         }
     );
+}
+
+/// SETUP-PROBE-GAP: setup's tmux row and the terminal read the same places, so a tmux only
+/// in a folder the login-shell probe found, such as MacPorts' `/opt/local/bin`, is the file
+/// setup shows and the one a terminal starts, never found by one and missing for the other.
+#[test]
+fn a_tmux_only_on_the_login_path_is_the_one_setup_shows_and_the_terminal_starts() {
+    let root = private_root();
+    let login = root.path().join("opt/local/bin");
+    std::fs::create_dir_all(&login).unwrap();
+    let tmux = login.join("tmux");
+    std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.5a'\n").unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let before = crate::tools::Places::new(Vec::new(), None);
+    assert_eq!(crate::terminal::tmux::installed_at(&before), None);
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), before.clone());
+    assert_eq!(installer.locate(Dependency::Tmux), None);
+    let places = before.with_probed(vec![login]);
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
+    let (entry, version) = installer.locate(Dependency::Tmux).unwrap();
+    assert_eq!(version, Version::parse("3.5a").unwrap());
+    let started = crate::terminal::tmux::installed_at(&places).unwrap();
+    assert_eq!(started, entry.canonicalize().unwrap());
+    assert_eq!(started, tmux.canonicalize().unwrap());
 }
 
 fn found(name: &str) -> PathBuf {

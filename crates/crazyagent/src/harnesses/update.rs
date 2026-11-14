@@ -7,10 +7,11 @@ pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
     UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
 };
+pub(crate) use state::needs;
 pub use state::{
-    BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_NOT_FOUND,
-    INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS, UPDATE_FAILED, UPDATE_OFF,
-    Updates, initialize, set_settings, settings,
+    BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_LIST_INVALID,
+    INSTALL_NOT_FOUND, INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS,
+    UPDATE_FAILED, UPDATE_OFF, Updates, initialize, set_settings, settings,
 };
 
 use crate::harnesses;
@@ -35,6 +36,7 @@ pub const NEEDS_ADMIN: &str = "harness_update_needs_admin";
 pub const UNSUPPORTED_HERE: &str = "harness_update_unsupported_here";
 pub const CHECK_UNREADABLE: &str = "harness_update_check_unreadable";
 pub const NO_INSTALLER: &str = "harness_install_no_tool";
+pub const NEEDS_NODE: &str = "harness_install_needs_node";
 
 const VERSION_WORDS_MAX: usize = 8;
 const VERSION_PARTS_MAX: usize = 6;
@@ -95,7 +97,8 @@ pub struct LastUpdate {
 
 /// Everything a client shows on one harness row about versions. `command` is the exact update
 /// line of an installed harness, `install` the exact install line of a missing one, `refusal`
-/// the code for why a button is not offered and `guide` the vendor's page for that case.
+/// the code for why a button is not offered, `guide` the vendor's page for that case and
+/// `needs` what an installed harness lacks before it can run, as the tool resolver reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessVersions {
@@ -109,6 +112,18 @@ pub struct HarnessVersions {
     pub guide: Option<String>,
     pub running: bool,
     pub last: Option<LastUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs: Option<HarnessNeeds>,
+}
+
+/// What an installed harness lacks before it can run, from the tool resolver
+/// (`crate::tools::resolve_entry`): the program its first line asks for, such as `node`
+/// for an npm-built Codex, and the resolver's one owner line for it. No path is sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessNeeds {
+    pub program: Option<String>,
+    pub line: String,
 }
 
 /// The owner's choice for harness updates: check and update, check only, or neither.
@@ -164,13 +179,28 @@ pub struct UpdateSettings {
 }
 
 /// The folders an install is recognized by: the owner's home, the Homebrew prefixes in the
-/// order they are tried, and whether Homebrew casks can be installed on this platform.
-/// Tests pass temp folders; the engine passes the real ones.
+/// order they are tried, whether Homebrew casks can be installed on this platform, the npm
+/// that installs npm harnesses into the engine's own prefix, when a usable Node is found, and
+/// the tool resolver's places a harness runs from. Tests pass temp folders; the engine
+/// passes the real ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roots {
     pub home: PathBuf,
     pub brew_prefixes: Vec<PathBuf>,
     pub casks: bool,
+    pub npm: Option<NpmInstall>,
+    pub places: crate::tools::Places,
+}
+
+/// The npm an npm harness installs with and the node entry it runs, found by the one
+/// Node test of setup (`crate::setup::node::usable`), the folders its run puts first (Node's
+/// own, then the prefix's `bin`) and the engine-owned prefix it installs into, never global.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmInstall {
+    pub node: PathBuf,
+    pub program: PathBuf,
+    pub search: Vec<PathBuf>,
+    pub prefix: PathBuf,
 }
 
 /// One command the engine may start: an absolute program, arguments that are all strings of
@@ -730,6 +760,27 @@ fn npm_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
     }
 }
 
+/// The npm command for one npm prefix: the engine's npm with its search folders when the
+/// prefix is the engine's own, else the npm in that prefix's `bin`. Inputs: the prefix, the
+/// roots and the arguments. Output: the command, not yet checked.
+fn npm_for(prefix: &Path, roots: &Roots, args: Vec<&'static str>) -> Fixed {
+    match roots.npm.as_ref().filter(|engine| engine.prefix == prefix) {
+        Some(engine) => engine_npm_fixed(engine, args),
+        None => npm_fixed(prefix, args),
+    }
+}
+
+fn engine_npm_fixed(engine: &NpmInstall, args: Vec<&'static str>) -> Fixed {
+    assert!(!engine.search.is_empty() && engine.search.len() <= 2);
+    assert!(engine.prefix.is_absolute());
+    Fixed {
+        program: engine.program.clone(),
+        args,
+        search: engine.search.clone(),
+        prefix: Some(engine.prefix.clone()),
+    }
+}
+
 fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
     let mut args = vec!["install", "-g"];
     args.extend(npm.flags);
@@ -782,7 +833,7 @@ pub fn update_command(
             modules,
             npm,
         } => {
-            let fixed = checked(npm_fixed(&prefix, npm_install_args(npm)))?;
+            let fixed = checked(npm_for(&prefix, roots, npm_install_args(npm)))?;
             if owned(&modules) {
                 Ok(fixed)
             } else {
@@ -805,16 +856,20 @@ pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixe
             };
             checked(brew_fixed(prefix, args)).map(Some)
         }
-        Found::Npm { prefix, npm, .. } => {
-            checked(npm_fixed(&prefix, vec!["view", npm.package, "version"])).map(Some)
-        }
+        Found::Npm { prefix, npm, .. } => checked(npm_for(
+            &prefix,
+            roots,
+            vec!["view", npm.package, "version"],
+        ))
+        .map(Some),
     }
 }
 
 /// Builds the one install command of a harness that is not installed: Homebrew first with
-/// the table's installable name (casks only where `roots.casks`), else npm with the table's
-/// package and the vendor's flags. A missing or untrusted tool is skipped, never an error of
-/// its own. Inputs: the harness id and the roots. Output: the command, or the refusal code.
+/// the table's installable name (casks only where `roots.casks`), else the found npm
+/// (`roots.npm`) with the table's package and the vendor's flags into the engine's prefix.
+/// An untrusted tool is skipped; an npm harness with no usable Node is refused as needing
+/// Node. Inputs: the harness id and the roots. Output: the command, or the refusal code.
 pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
     let id = harnesses::canonical(id);
     if id == BUNDLED {
@@ -834,12 +889,15 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
     });
     let with_npm = || {
         let npm = recipe.npm.as_ref()?;
-        roots.brew_prefixes.iter().find_map(|prefix| {
-            let fixed = checked(npm_fixed(prefix, npm_install_args(npm))).ok()?;
-            owned(&prefix.join("lib").join(MODULES)).then_some(fixed)
-        })
+        let engine = roots.npm.as_ref()?;
+        checked(engine_npm_fixed(engine, npm_install_args(npm))).ok()
     };
-    let fixed = with_brew.or_else(with_npm).ok_or(NO_INSTALLER)?;
+    let refusal = if recipe.npm.is_some() && roots.npm.is_none() {
+        NEEDS_NODE
+    } else {
+        NO_INSTALLER
+    };
+    let fixed = with_brew.or_else(with_npm).ok_or(refusal)?;
     assert!(fixed.args.first() == Some(&"install"));
     assert!(fixed.args.len() <= ARGS_MAX);
     assert!(fixed.program.is_absolute());

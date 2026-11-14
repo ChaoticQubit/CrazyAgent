@@ -341,19 +341,6 @@ fn validate_file(
     Err(error("rcli_master_unavailable"))
 }
 
-/// Refuses an rcli file of a given size limit where its Unix owner, mode and link count
-/// cannot be checked. Takes the path, metadata, kind and limit, all unused.
-/// Returns `rcli_master_unavailable`.
-#[cfg(not(unix))]
-fn validate_file_within(
-    _path: &Path,
-    _metadata: &Metadata,
-    _executable: bool,
-    _maximum: u64,
-) -> Result<(), ProtocolError> {
-    Err(error("rcli_master_unavailable"))
-}
-
 /// Reports no file stamp where the platform has no device, inode, mode or change time;
 /// `checked_file` and `validate_file` refuse there before any stamp is compared.
 /// Takes the metadata, unused. Returns zeros.

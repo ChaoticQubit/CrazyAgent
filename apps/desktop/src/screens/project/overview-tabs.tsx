@@ -259,12 +259,13 @@ function queued(overview: ProjectOverview): boolean {
   return overview.stale && !overview.running && overview.refresh !== "off" && !overview.needs_home;
 }
 
-/** The stored failure line: an alert only for a run that ended. While a run is queued or
- * writing, as one waiting for an account is, the same reason shows under a status, since
- * that refresh has not failed. Input: the overview. Output: the line, or null with none. */
+/** The stored failure line: an alert, also while a new run is queued or writing, except the
+ * engine's wait for an account, whose reason shows under a status while its run is queued or
+ * writing, since that refresh has not failed (IW-L1). Input: the overview. Output: the line,
+ * or null with none. */
 function failureLine(overview: ProjectOverview): ReactNode {
   if (!overview.failure) return null;
-  if (overview.running || queued(overview)) return <p className="pj-muted" role="status">{displayText(overview.failure)}</p>;
+  if (overview.waiting_for_account && (overview.running || queued(overview))) return <p className="pj-muted" role="status">{displayText(overview.failure)}</p>;
   return <p className="pj-error" role="alert">Couldn't refresh the tabs. {displayText(overview.failure)}</p>;
 }
 
