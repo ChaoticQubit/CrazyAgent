@@ -1552,6 +1552,7 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         folder_overview: None,
         finished: false,
         imported: Vec::new(),
+        carried: false,
         proposed: None,
     };
     let mut draft = draft;

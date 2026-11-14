@@ -78,6 +78,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
       <span className="pj-row">This setup was saved without the mapping's description and tech stack.
         <Button onClick={onUseProposed}>Use the mapping's answers</Button></span>
     </Notice>}
+    {value.carried === true && <Notice tone="warn">The repository came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.</Notice>}
     {(value.imported ?? []).length > 0 && <Notice tone="info">
       <span className="pj-stack">
         <span>CrazyAgent copied these instruction files into .crazyagent/instructions.md and moved them to .crazyagent/imported/:</span>

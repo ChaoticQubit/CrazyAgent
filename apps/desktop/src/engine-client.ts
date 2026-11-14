@@ -1468,6 +1468,7 @@ export interface OnboardingView {
   folder_overview: string | null;
   finished: boolean;
   imported?: ImportFile[];
+  carried?: boolean;
   proposed?: ProjectSetup | null;
 }
 
