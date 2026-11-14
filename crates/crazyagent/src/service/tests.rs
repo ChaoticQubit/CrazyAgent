@@ -1265,6 +1265,12 @@ fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a
         "the entry's own folder keeps the full checks"
     );
     assert_eq!(
+        changeable_past_sticky(&loose),
+        None,
+        "for the tools setup and the resolver run, a present entry the group cannot replace \
+         passes in the store itself (rv-sec2 corrections F2)"
+    );
+    assert_eq!(
         changeable_by_others(&store.join("gone/bin/tool")),
         Some(store.clone()),
         "the group could make a missing folder below the store"
@@ -1337,11 +1343,12 @@ fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
     );
 }
 
-/// rv-sec2 corrections F2 (DS-89): a file directly in a sticky store such as /nix/store,
-/// where nix-darwin's /opt/homebrew/bin/brew link resolves, passes: the store's group cannot
-/// unlink or rename an entry root owns there. A group-writable parent with no sticky bit, a
-/// sticky one another user owns, one over a missing entry, and a world-writable sticky one
-/// such as /tmp as the entry's own folder still count.
+/// rv-sec2 corrections F2 (DS-89): for the tools the resolver and setup run, a file directly
+/// in a sticky store such as /nix/store, where nix-darwin's /opt/homebrew/bin/brew link
+/// resolves, passes: the store's group cannot unlink or rename an entry root owns there. The
+/// service check is unchanged, and a group-writable parent with no sticky bit, a sticky one
+/// another user owns, one over a missing entry, and a world-writable sticky one such as /tmp
+/// as the entry's own folder still count.
 #[cfg(unix)]
 #[test]
 fn a_file_directly_in_a_sticky_group_store_passes_and_an_unsticky_parent_does_not() {
@@ -1358,13 +1365,15 @@ fn a_file_directly_in_a_sticky_group_store_passes_and_an_unsticky_parent_does_no
     let system = found(0, 0, 0o755, true);
     let brew = found(0, 0, 0o555, false);
     let store = found(0, NIXBLD, 0o1775, true);
-    for open_stores in [true, false] {
-        assert_eq!(
-            first_changeable_part(&[brew, store, system, system], ME, open_stores),
-            None,
-            "open_stores {open_stores}"
-        );
-    }
+    assert_eq!(
+        first_changeable_part(&[brew, store, system, system], ME, true),
+        None
+    );
+    assert_eq!(
+        first_changeable_part(&[brew, store, system, system], ME, false),
+        Some(1),
+        "the service check is unchanged"
+    );
     let unsticky = found(0, NIXBLD, 0o775, true);
     assert_eq!(
         first_changeable_part(&[brew, unsticky, system, system], ME, true),
