@@ -1849,7 +1849,7 @@ fn settings_show_retry_briefly_by_default_with_the_three_options_and_each_harnes
     let shown = flat(&rows);
     for line in [
         "Claude Code: its own retries, up to 10 with longer waits each time.",
-        "Codex: its own retries, without waiting for the network without end. The Codex master keeps its own retries and that wait for now.",
+        "Codex: its own retries, without waiting for the network without end.",
         "RCLI: one try. The engine never repeats an RCLI request.",
     ] {
         assert!(shown.contains(line), "{line} in {shown}");

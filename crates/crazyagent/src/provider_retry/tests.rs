@@ -218,18 +218,18 @@ fn a_launch_runs_under_the_stored_choice_or_sets_nothing() {
     assert_eq!(for_launch(&without), ProviderRetry::HarnessDefault);
 }
 
-/// The Codex app-server master builds its own settings and takes none of these until the
-/// Q7 slice (DEC-163 addendum 6), so the Codex lines of Stop at once and Retry briefly say
-/// it keeps its own retries for now; Harness default already says so for every Codex run.
+/// The Codex app-server master takes the setting like every other Codex run (DEC-163 Q7), so
+/// the Codex lines of Stop at once and Retry briefly no longer set the master apart, and
+/// Harness default still says Codex keeps its own retries.
 #[test]
-fn the_codex_lines_say_the_codex_master_keeps_its_own_retries_for_now() {
+fn the_codex_lines_cover_the_codex_master_like_every_codex_run() {
     assert_eq!(
         ProviderRetry::StopAtOnce.harness_line(HarnessKind::Codex),
-        "Codex: no retries on an API key or address account. With a ChatGPT sign-in Codex takes no retry count, so it only stops waiting for the network without end. The Codex master keeps its own retries for now."
+        "Codex: no retries on an API key or address account. With a ChatGPT sign-in Codex takes no retry count, so it only stops waiting for the network without end."
     );
     assert_eq!(
         ProviderRetry::RetryBriefly.harness_line(HarnessKind::Codex),
-        "Codex: its own retries, without waiting for the network without end. The Codex master keeps its own retries and that wait for now."
+        "Codex: its own retries, without waiting for the network without end."
     );
     assert_eq!(
         ProviderRetry::HarnessDefault.harness_line(HarnessKind::Codex),
