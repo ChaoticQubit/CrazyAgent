@@ -69,6 +69,24 @@ pub struct Service {
     pub user: Option<String>,
 }
 
+/// What a client does with the installed engine service when no engine answers
+/// ([`Service::repair`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Repair {
+    /// Starts the installed definition as it is.
+    Start,
+    /// Writes and registers this service's definition in place of what is installed.
+    Install,
+    /// Neither: this engine is on a disk image, another disk or a temporary folder
+    /// ([`transient`]), where a login service never points, and nothing usable is installed
+    /// ([`Service::refuse`]).
+    Refuse,
+    /// Neither, for a forced reinstall: the installed definition runs another program that
+    /// still exists and the app's engine may not replace it ([`Service::may_replace`]), as
+    /// with a newer engine known at the data root or a dev build, so the definition is kept.
+    Keep,
+}
+
 /// What a service manager reports about the engine service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
@@ -554,11 +572,105 @@ WantedBy=default.target\n",
 
     /// Whether a plain start must replace the installed definition instead of starting it:
     /// only when this service runs a private copy in place of the `bundled` engine and the
-    /// file on disk is not [`Service::current`], as with a unit an older build left on an
-    /// AppImage mount path. Any other installed service starts as it is, so a launch PATH
+    /// file on disk is not [`Service::current`], as with a unit naming the copy with another
+    /// PATH. A definition naming a gone or other program is decided before this in
+    /// [`Service::repair`]. Any other installed service starts as it is, so a launch PATH
     /// that differs never stops or restarts a running engine. Input: the bundled engine.
     pub fn stale(&self, bundled: &Path) -> bool {
         self.executable != bundled && !self.current()
+    }
+
+    /// The program the installed definition runs when it is gone or [`transient`], as after
+    /// the app was moved or renamed, or first opened from a disk image or a Gatekeeper
+    /// AppTranslocation folder: a definition naming it can never be started as it is.
+    /// Output: none when nothing readable is installed or the program it names is usable.
+    pub fn broken_program(&self) -> Option<PathBuf> {
+        self.installed_program()
+            .filter(|program| transient(program) || !program.is_file())
+    }
+
+    /// The program the installed definition runs, read back as it was written: the first
+    /// `ProgramArguments` string of a plist or the first word of a systemd `ExecStart=`.
+    /// Output: none when nothing readable is installed, the program is not an absolute path,
+    /// or on Windows, whose task runs the program through `cmd.exe` and is UTF-16.
+    fn installed_program(&self) -> Option<PathBuf> {
+        let installed = bounded_text(&self.definition)?;
+        let program = match self.platform {
+            Platform::MacOs => installed
+                .lines()
+                .skip_while(|line| !line.contains("<key>ProgramArguments</key>"))
+                .find_map(plist_string)?,
+            Platform::Linux => systemd_unquoted(
+                installed
+                    .lines()
+                    .find_map(|line| line.strip_prefix("ExecStart="))?,
+            )?,
+            Platform::Windows => return None,
+        };
+        Some(PathBuf::from(program)).filter(|program| program.is_absolute())
+    }
+
+    /// What to do with the engine service when no engine answers. Another program the
+    /// installed definition runs that still exists and the `bundled` engine may not replace
+    /// ([`Self::may_replace`], judged on the app's own engine and not on an AppImage's private
+    /// copy) is kept on a forced reinstall and started as it is otherwise (RV-DS241-129, DS-118
+    /// r2 F1). So is any usable definition while this service runs such a private copy, one
+    /// path every AppImage shares, which keeps a newer engine's bytes while one is known there
+    /// ([`newer_engine_at`], [`persistable`], DS-118 r3 F1). Else this definition is installed
+    /// when asked, when none is installed, when the installed one names a broken program
+    /// ([`Self::broken_program`]) or another program, or when it is [`Self::stale`]; otherwise
+    /// the installed one starts as it is. An engine that is itself [`transient`] is never
+    /// installed: it starts a usable installed definition and is refused otherwise. Inputs:
+    /// the bundled engine, whether a definition is installed and whether the owner asked for a
+    /// reinstall. Output: the repair.
+    pub fn repair(&self, bundled: &Path, installed: bool, reinstall: bool) -> Repair {
+        let broken = installed && self.broken_program().is_some();
+        let another = installed && !broken && self.runs_another_program();
+        let newer_copy =
+            installed && !broken && self.executable != bundled && newer_engine_at(&self.root);
+        let replaceable = !another
+            || Service {
+                executable: bundled.to_path_buf(),
+                ..self.clone()
+            }
+            .may_replace();
+        if newer_copy || !replaceable {
+            return if reinstall {
+                Repair::Keep
+            } else {
+                Repair::Start
+            };
+        }
+        let replace = reinstall || !installed || broken || another || self.stale(bundled);
+        if !replace {
+            return Repair::Start;
+        }
+        if !transient(&self.executable) {
+            return Repair::Install;
+        }
+        if installed && !broken && !reinstall {
+            Repair::Start
+        } else {
+            Repair::Refuse
+        }
+    }
+
+    /// The refusal of [`Repair::Refuse`], after removing an installed definition that names a
+    /// broken program ([`Self::broken_program`]), so launchd or systemd no longer runs a gone,
+    /// /Volumes or translocated path at login or on a restart; a usable definition stays.
+    /// Output: the error saying to move the app to Applications, with any removal failure.
+    pub fn refuse(&self) -> ServiceError {
+        let refused = transient_refused(&self.executable);
+        if self.broken_program().is_none() {
+            return refused;
+        }
+        match self.uninstall() {
+            Ok(()) => refused,
+            Err(error) => failure(format!(
+                "{}; the login service naming a gone or temporary path could not be removed: {}",
+                refused.0, error.0
+            )),
+        }
     }
 
     /// The executable as [`Self::definition_text`] writes it on this platform: XML-escaped in
@@ -608,21 +720,15 @@ WantedBy=default.target\n",
         ]
         .into_iter()
         .flatten()
-        .all(|known| {
-            crate::update::is_newer(&known, crate::version::VERSION).is_ok_and(|newer| !newer)
-        })
+        .all(|known| !newer_than_this(&known))
     }
 
     /// The version of the app bundle the installed plist runs, from that bundle's Info.plist
     /// read as text. Output: none when either file is not plain text, is larger than its cap,
     /// or the plist names no app bundle.
     fn installed_bundle_version(&self) -> Option<String> {
-        let installed = bounded_text(&self.definition)?;
-        let program = installed
-            .lines()
-            .skip_while(|line| !line.contains("<key>ProgramArguments</key>"))
-            .find_map(plist_string)?;
-        let bundle = Path::new(&program).ancestors().find(|folder| {
+        let program = self.installed_program()?;
+        let bundle = program.ancestors().find(|folder| {
             folder
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
@@ -663,6 +769,9 @@ WantedBy=default.target\n",
     /// name, so the engine starts now and at every login. Output: an error naming the
     /// failing step.
     pub fn install(&self) -> Result<(), ServiceError> {
+        if transient(&self.executable) {
+            return Err(transient_refused(&self.executable));
+        }
         if !self.executable.is_file() {
             return Err(failure(format!(
                 "{}: the engine executable is missing",
@@ -716,12 +825,21 @@ WantedBy=default.target\n",
         Ok(())
     }
 
-    /// Starts the installed engine service. Output: an error when it is not installed.
+    /// Starts the installed engine service. Output: an error when it is not installed, or
+    /// when it names a program that is gone or [`transient`] ([`Self::broken_program`]),
+    /// which is never started as it is.
     pub fn start(&self) -> Result<(), ServiceError> {
         if !self.definition.is_file() {
             return Err(failure(
                 "the engine service is not installed; run: crazyagent service install",
             ));
+        }
+        if let Some(program) = self.broken_program() {
+            return Err(failure(format!(
+                "the engine service runs {}, which is gone or on a disk image, another disk or \
+                 a temporary folder; reinstall it: crazyagent service install",
+                program.display()
+            )));
         }
         let loaded = self.platform == Platform::MacOs && self.loaded()?;
         run_checked(&self.start_command(current_uid(), loaded))
@@ -939,6 +1057,28 @@ pub(crate) fn changeable_past_sticky(_path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Whether a path lies on a disk image or another disk (`/Volumes/...`) or in a Gatekeeper
+/// AppTranslocation folder, which go away when the image is ejected, the disk is removed or
+/// the app is moved, and which another disk of the same name could later take the place of.
+/// Read as written, without touching the file system. Input: the path. Output: the answer.
+pub fn transient(path: &Path) -> bool {
+    path.starts_with("/Volumes")
+        || path
+            .components()
+            .any(|part| part.as_os_str() == "AppTranslocation")
+}
+
+/// The refusal for a login service that would run an engine on a disk image, another disk
+/// or a temporary folder ([`transient`]). Input: the engine. Output: the error saying to
+/// move the app to Applications first.
+pub fn transient_refused(executable: &Path) -> ServiceError {
+    failure(format!(
+        "{}: a login service never runs the engine from a disk image, another disk or a \
+         temporary folder; move CrazyAgent to Applications, then open it again",
+        executable.display()
+    ))
+}
+
 /// Refuses an engine that a login service or the command line link would keep running
 /// after this app exits when another user can change its path ([`changeable_by_others`]).
 /// Input: the executable. Output: Ok, or an error naming the entry and the fix.
@@ -963,7 +1103,10 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// (leader 20:15), one stable path across versions, each file refreshed by an atomic rename
 /// whenever it differs. The copy an older version kept in `<data root>/bin` stays, since a
 /// login service may still name it; `service start` retires it after the service names this
-/// one ([`retire_old_copies`]). Nothing is ever copied from another folder, so an engine other
+/// one ([`retire_old_copies`]). The version written goes in `<data root>/setup/bin-version`,
+/// and while a newer engine is known there ([`newer_engine_at`]) this user's private copy is
+/// kept as it is, so an older AppImage never puts its bytes over the engine every AppImage
+/// runs there (DS-118 r3 F1). Nothing is ever copied from another folder, so an engine other
 /// users can change is returned as it is and refused where it would be kept. Inputs: the
 /// bundled engine, the layout and the AppImage mount folder when there is one. Output: the
 /// executable to keep.
@@ -995,6 +1138,10 @@ pub fn persistable(
     layout.prepare()?;
     let copies = layout.root().join("setup").join("bin");
     crate::paths::private_folder(&copies)?;
+    let installed = copies.join(main);
+    if newer_engine_at(layout.root()) && private_file(&installed) {
+        return Ok(installed);
+    }
     for name in &names {
         let copy = copies.join(name);
         if kept(&source.join(name), &copy) {
@@ -1008,9 +1155,48 @@ pub fn persistable(
         copy_private(&source.join(name), &staged).map_err(fail)?;
         std::fs::rename(&staged, &copy).map_err(fail)?;
     }
-    let installed = copies.join(main);
+    let recorded = copy_version_file(layout.root());
+    if bounded_text(&recorded).as_deref().map(str::trim) != Some(crate::version::VERSION) {
+        let fail = |error: std::io::Error| failure(format!("{}: {error}", recorded.display()));
+        let staged = recorded.with_file_name(format!(".bin-version.{}", std::process::id()));
+        if std::fs::symlink_metadata(&staged).is_ok() {
+            std::fs::remove_file(&staged).map_err(fail)?;
+        }
+        std::fs::write(&staged, crate::version::VERSION).map_err(fail)?;
+        std::fs::rename(&staged, &recorded).map_err(fail)?;
+    }
     assert!(installed.starts_with(&copies) && installed.is_file());
     Ok(installed)
+}
+
+/// The file in which [`persistable`] records the version of the engine it last put in
+/// `<root>/setup/bin`. Input: the data root. Output: the path.
+fn copy_version_file(root: &Path) -> PathBuf {
+    root.join("setup").join("bin-version")
+}
+
+/// Whether an engine newer than this one is known at the data root `root`: the one whose
+/// locator is there while it runs ([`crate::engine::bootstrap::reported_engine_version`]), or
+/// the one whose bytes [`persistable`] last put in `<root>/setup/bin`, as its version file says
+/// after it stopped. A version file that holds no version counts for nothing. Input: the data
+/// root. Output: the answer.
+fn newer_engine_at(root: &Path) -> bool {
+    let recorded = bounded_text(&copy_version_file(root))
+        .map(|text| text.trim().to_owned())
+        .filter(|known| crate::update::is_newer(known, crate::version::VERSION).is_ok());
+    [
+        crate::engine::bootstrap::reported_engine_version(root),
+        recorded,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|known| newer_than_this(&known))
+}
+
+/// Whether a known engine version is newer than this engine, or cannot be read as a version,
+/// so this engine never takes its place. Input: the known version. Output: the answer.
+fn newer_than_this(known: &str) -> bool {
+    !crate::update::is_newer(known, crate::version::VERSION).is_ok_and(|newer| !newer)
 }
 
 /// Retires the copy an older version kept in `<data root>/bin` once the login service names
@@ -1055,10 +1241,10 @@ fn retire_old_copies_with(layout: &Layout, installed: &Path, cli: Option<&Path>)
     let _ = std::fs::remove_dir(old);
 }
 
-/// Whether `copy` is a regular file with exactly the bytes of `source`, private to this
-/// user where Unix modes exist. Inputs: the bundled file and its copy. Output: the answer.
-fn kept(source: &Path, copy: &Path) -> bool {
-    let private = std::fs::symlink_metadata(copy).is_ok_and(|metadata| {
+/// Whether `copy` is a regular file private to this user where Unix modes exist, so no other
+/// user has put or changed its bytes. Input: the copy. Output: the answer.
+fn private_file(copy: &Path) -> bool {
+    std::fs::symlink_metadata(copy).is_ok_and(|metadata| {
         #[cfg(unix)]
         let private = {
             use std::os::unix::fs::MetadataExt;
@@ -1067,8 +1253,13 @@ fn kept(source: &Path, copy: &Path) -> bool {
         #[cfg(not(unix))]
         let private = true;
         metadata.is_file() && private
-    });
-    private
+    })
+}
+
+/// Whether `copy` is a regular file with exactly the bytes of `source`, private to this
+/// user where Unix modes exist. Inputs: the bundled file and its copy. Output: the answer.
+fn kept(source: &Path, copy: &Path) -> bool {
+    private_file(copy)
         && std::fs::metadata(source)
             .map(|metadata| metadata.len())
             .ok()
@@ -1141,6 +1332,27 @@ fn plist_string(line: &str) -> Option<String> {
             .replace("&apos;", "'")
             .replace("&amp;", "&"),
     )
+}
+
+/// Reads back the first word of an ExecStart= line as [`systemd_quoted`] wrote it.
+/// Input: the line after `ExecStart=`. Output: the word, or none when it is not quoted so.
+fn systemd_unquoted(text: &str) -> Option<String> {
+    let mut characters = text.strip_prefix('"')?.chars();
+    let mut word = String::new();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' => return Some(word),
+            '\\' => word.push(characters.next()?),
+            '%' | '$' => {
+                if characters.next()? != character {
+                    return None;
+                }
+                word.push(character);
+            }
+            other => word.push(other),
+        }
+    }
+    None
 }
 
 /// Quotes one word of an ExecStart= line, where systemd also expands `$` variables, so a
@@ -1452,7 +1664,19 @@ pub async fn ensure_running(
     layout.prepare()?;
     let since = log_length(layout);
     if service.status()?.installed {
-        service.start()?;
+        let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+        let kept = Service {
+            executable: persistable(&service.executable, layout, appdir.as_deref())?,
+            ..service.clone()
+        };
+        match kept.repair(executable, true, false) {
+            Repair::Start | Repair::Keep => service.start()?,
+            Repair::Install => {
+                kept.install()?;
+                retire_old_copies(layout, &kept.executable);
+            }
+            Repair::Refuse => return Err(service.refuse()),
+        }
         wait_started(layout, service, bound, since).await?;
         return Ok(Started::Service);
     }

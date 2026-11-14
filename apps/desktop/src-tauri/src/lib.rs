@@ -163,13 +163,16 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
     Ok((layout, service))
 }
 
-/// Installs the service when it is missing, when `reinstall` asks or when it is
-/// [`crazyagent::service::Service::stale`], else starts it as it is, then waits for the
-/// engine while the service still runs it ([`crazyagent::service::wait_started`]). The
-/// service runs the sidecar, or its private copy when the sidecar sits in the AppImage
-/// mount folder; a sidecar other users can change is refused. Inputs: the layout, the
-/// service and whether to replace the definition with this app's sidecar. Output: Ok once
-/// it answers.
+/// Installs the service or starts it as it is, as [`crazyagent::service::Service::repair`]
+/// says: a definition naming a gone, /Volumes or translocated program is never started as
+/// it is (RV-DS241-118), and a sidecar on a disk image or in a temporary folder is never
+/// installed (`engine_app_not_installed`); a refusal removes a definition naming a broken
+/// program first. Restart engine never replaces another program this engine may not
+/// (`engine_newer_than_app`, RV-DS241-129). Then it waits for the engine while the service
+/// still runs it ([`crazyagent::service::wait_started`]). The service runs the sidecar, or its
+/// private copy when the sidecar sits in the AppImage mount folder; a sidecar other users can
+/// change is refused. Inputs: the layout, the service and whether to replace the definition
+/// with this app's sidecar. Output: Ok once it answers.
 async fn start_engine(
     layout: &crazyagent::paths::Layout,
     service: &crazyagent::service::Service,
@@ -187,22 +190,30 @@ async fn start_engine(
             .map_err(|_| engine_failure("engine_service_failed"))?,
         ..service.clone()
     };
-    if reinstall || !installed || service.stale(bundled) {
-        if !service.executable.is_file() {
-            return Err(engine_failure("engine_sidecar_missing"));
+    match service.repair(bundled, installed, reinstall) {
+        crazyagent::service::Repair::Refuse => {
+            service.refuse();
+            return Err(engine_failure("engine_app_not_installed"));
         }
-        if installed {
+        crazyagent::service::Repair::Keep => {
+            return Err(engine_failure("engine_newer_than_app"));
+        }
+        crazyagent::service::Repair::Install => {
+            if !service.executable.is_file() {
+                return Err(engine_failure("engine_sidecar_missing"));
+            }
+            if installed {
+                service
+                    .stop()
+                    .map_err(|_| engine_failure("engine_service_failed"))?;
+            }
             service
-                .stop()
+                .install()
                 .map_err(|_| engine_failure("engine_service_failed"))?;
         }
-        service
-            .install()
-            .map_err(|_| engine_failure("engine_service_failed"))?;
-    } else {
-        service
+        crazyagent::service::Repair::Start => service
             .start()
-            .map_err(|_| engine_failure("engine_service_failed"))?;
+            .map_err(|_| engine_failure("engine_service_failed"))?,
     }
     crazyagent::service::wait_started(layout, &service, crazyagent::service::READY_TIMEOUT, since)
         .await
