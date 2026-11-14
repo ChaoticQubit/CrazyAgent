@@ -743,3 +743,90 @@ fn a_pane_record_keeps_its_lineage_token_and_refuses_a_malformed_one() {
     assert_ne!(malformed, text);
     assert_eq!(PaneRecord::decode(&malformed), None);
 }
+
+/// RV-DS241-72: an agent can grow its record without end, so adoption reads it only while the
+/// launch's run time lasts, at most `REPLAY_WAIT`; the session then exists, and its own polls,
+/// which Stop and the run-time limit reach, read the rest.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adoption_replay_stops_when_the_run_time_is_over_and_leaves_the_rest_to_the_session() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(6).unwrap();
+    let filler = format!(
+        r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+        "x".repeat(4096)
+    );
+    let lines = vec![filler.as_str(); 2_048];
+    let file = fixture.transcript(&lines);
+    let length = std::fs::metadata(&file).unwrap().len();
+    assert!(length > 4 * READ_BYTES_MAX as u64);
+    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+    let launched = PaneRecord {
+        since_ms: record.since_ms - 60_000,
+        ..record
+    };
+    let limits = LaunchLimits {
+        run_time: Duration::from_secs(30),
+        ..LaunchLimits::default()
+    };
+
+    let session = TerminalSession::adopt(host.clone(), agent, &launched, limits).unwrap();
+    assert!(
+        session.reader.bytes() < length,
+        "a launch past its run time is not replayed to the end: {} of {length} bytes read",
+        session.reader.bytes()
+    );
+    drop(session);
+    assert!(host.alive().unwrap().is_empty());
+}
+
+/// RV-DS241-75: a pane whose first process is not the one its record names is not taken
+/// over, so no later stop signals a process group the system gave that number again; the
+/// recorded group and the pane are both left alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_whose_process_is_not_the_recorded_one_is_not_adopted_and_its_group_is_left_alone() {
+    use std::os::unix::process::CommandExt;
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(7).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN, TURN_DONE]);
+    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+    let mut other = crate::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let reused = PaneRecord {
+        pid: other.id(),
+        ..record
+    };
+
+    let refused = match TerminalSession::adopt(
+        host.clone(),
+        agent.clone(),
+        &reused,
+        LaunchLimits::default(),
+    ) {
+        Ok(session) => {
+            session.leave();
+            None
+        }
+        Err(problem) => Some(problem.0),
+    };
+    let untouched = other.try_wait().unwrap().is_none();
+    let _ = other.kill();
+    let _ = other.wait();
+    assert_eq!(refused.as_deref(), Some("launch_closed"));
+    assert!(untouched, "the recorded process group was never signalled");
+    assert_eq!(
+        host.alive().unwrap(),
+        std::slice::from_ref(&agent),
+        "a pane that is not the record's is left running"
+    );
+}
