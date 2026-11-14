@@ -411,6 +411,17 @@ fn busy(
     Ok((leased > 0).then_some("move_project_master_session"))
 }
 
+/// Tells whether a project's folder or a repository it declares, as recorded, is
+/// `destination` or inside it, so moving another project there would rewrite onto its
+/// stored rows. A folder that holds the destination does not count. Inputs: the
+/// destination and the project. Output: the answer.
+fn names_inside(destination: &Path, project: &Registered) -> bool {
+    assert!(destination.is_absolute());
+    std::iter::once(&project.folder)
+        .chain(&project.repositories)
+        .any(|used| used.starts_with(destination))
+}
+
 /// Tells whether an agent of the project works in a linked git worktree of its
 /// repository, which a Copy leaves with the original. Inputs: the transaction and the
 /// project folder. Output: the answer.
@@ -435,9 +446,11 @@ fn linked_agent_copies(tx: &Transaction<'_>, origin: &Path) -> Result<bool, Engi
 /// (`move_project_folder_link`), another project using the folder (`home_move_project`),
 /// what [`busy`] names, a Copy while an agent works in a linked worktree
 /// (`move_project_copy_worktrees`), a Move that breaks git worktrees kept outside the
-/// folder unless the owner went past it (`home_move_worktrees`), and every refusal of
-/// [`plan_add`]. Inputs: the transaction, the engine database path, the engine data
-/// folder, the guarded projects and the request. Output: the plan.
+/// folder unless the owner went past it (`home_move_worktrees`), every refusal of
+/// [`plan_add`], and a destination another project's folder or repository still names,
+/// even one gone from disk (`home_destination_exists`), whose stored rows the move would
+/// take over. Inputs: the transaction, the engine database path, the engine data folder,
+/// the guarded projects and the request. Output: the plan.
 pub(crate) fn plan(
     tx: &Transaction<'_>,
     database: &Path,
@@ -509,6 +522,12 @@ pub(crate) fn plan(
     let add = plan_add(&home, engine_root, source, asked.mode, &overrides, &others)?;
     assert_eq!(add.source(), real);
     assert!(add.destination().starts_with(&home));
+    if others
+        .iter()
+        .any(|other| names_inside(add.destination(), other))
+    {
+        return Err(refused("home_destination_exists"));
+    }
     tx.execute(
         "INSERT INTO projects_home_project_move VALUES (1,?1,?2,?3,?4,?5,?6)",
         params![
@@ -650,9 +669,11 @@ fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, 
 /// Rewrites every stored path of the project's old folder to the same place in the new
 /// one, by whole path parts: the setup's folder, the repositories the project declares
 /// and each column of [`PATH_COLUMNS`]. A stale row already at the new path gives way to
-/// the moved one. Records of what was said or done (prompts, messages, events) and of the
-/// master's identity-pinned working copies keep the old path. Inputs: the transaction,
-/// the project and both folders. Output: Ok, or the bound a moved path breaks.
+/// the moved one; [`plan`] refused a destination any other project still names, so such a
+/// row belongs to no project, and a plain UPDATE that failed here would leave a folder
+/// already moved unrecorded. Records of what was said or done (prompts, messages, events)
+/// and of the master's identity-pinned working copies keep the old path. Inputs: the
+/// transaction, the project and both folders. Output: Ok, or the bound a moved path breaks.
 fn rewrite(
     tx: &Transaction<'_>,
     project: &ProjectId,
