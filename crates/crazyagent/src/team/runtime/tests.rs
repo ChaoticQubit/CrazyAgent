@@ -21,6 +21,10 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "macos")]
+#[path = "lead_takeover_tests.rs"]
+mod lead_takeover_tests;
+
+#[cfg(target_os = "macos")]
 #[path = "keyed_relay_tests.rs"]
 mod keyed_relay_tests;
 
