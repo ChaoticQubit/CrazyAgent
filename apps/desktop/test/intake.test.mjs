@@ -1006,10 +1006,10 @@ test("a failed setup read keeps the shown setup, says so, backs off, and a newer
   assert.doesNotMatch(html(ToolsSetupView, base), /role="alert"/);
 });
 
-test("first run walks profile, projects folder, tools and accounts in that order", () => {
+test("first run walks profile, projects folder, tools, harnesses and accounts in that order", () => {
   const steps = (step) => html(Welcome, { onSaved: noop, initialStep: step });
   assert.match(steps("profile"), /<h1>Tell CrazyAgent about you<\/h1>/);
-  assert.match(steps("profile"), /<li aria-current="step">Profile<\/li><li>Projects folder<\/li><li>Tools<\/li><li>Accounts<\/li>/);
+  assert.match(steps("profile"), /<li aria-current="step">Profile<\/li><li>Projects folder<\/li><li>Tools<\/li><li>Harnesses<\/li><li>Accounts<\/li>/);
   assert.match(steps("home"), /<h1>Choose your projects folder<\/h1>/);
   assert.match(steps("tools"), /<h1>Set up tools<\/h1>/);
   const accounts = steps("accounts");
