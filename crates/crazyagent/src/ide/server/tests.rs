@@ -1370,6 +1370,145 @@ fn a_git_a_full_access_session_left_in_its_temp_folder_leaves_a_confined_start_a
     assert_ne!(confined, full);
 }
 
+/// Names a folder as the temp folder a project's last confined start recorded, as a start
+/// writes it. Inputs: the project's IDE folder and the recorded path.
+fn record_server_tmp(folder: &Path, tmp: &Path) {
+    fs::write(folder.join("server-tmp"), format!("{}\n", tmp.display())).unwrap();
+}
+
+/// The temp folder a server's installed profile binds its sockets in, which is the one its
+/// start made. Input: the project's IDE folder. Output: the folder.
+fn profile_tmp(folder: &Path) -> PathBuf {
+    let text = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+    let bind = "(local unix-socket (subpath \"";
+    let at = text.find(bind).unwrap() + bind.len();
+    PathBuf::from(&text[at..at + text[at..].find('"').unwrap()])
+}
+
+/// A confined server's stop removes the temp folder its start made, so confined starts
+/// leave no folder behind in the system temp folder (rv-code2 r5 F1).
+#[tokio::test]
+async fn a_confined_server_s_stop_removes_its_temp_folder() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let id = project("stop-removes-tmp");
+    servers
+        .open(&id, checkout.path(), &cached_build())
+        .await
+        .unwrap();
+    let folder = servers.project_folder(&id).unwrap();
+    let tmp = profile_tmp(&folder);
+    let made = tmp.is_dir();
+    assert!(servers.stop(&id).await);
+    let left = fs::symlink_metadata(&tmp).is_ok();
+    let _ = fs::remove_dir_all(&tmp);
+    assert!(made, "the start made its temp folder");
+    assert!(!left, "the stop left the server's temp folder");
+}
+
+/// The next start of a project removes the temp folder a crashed or killed engine left
+/// recorded for it, with whatever the session left there, before it makes its own, and
+/// records the new one (rv-code2 r5 F1).
+#[test]
+fn the_next_start_removes_the_temp_folder_a_crash_left_recorded() {
+    let (checkout, data, keys) = (scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("crash-left-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let left = crate::sandbox::toolchains::make_tmp(&keys.path().join("crashed")).unwrap();
+    fs::create_dir_all(left.join("pip-req-build").join(".git")).unwrap();
+    record_server_tmp(&folder, &left);
+    let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+    let gone = fs::symlink_metadata(&left).is_err();
+    let recorded = fs::read_to_string(folder.join("server-tmp")).unwrap_or_default();
+    for made in [Some(&left), started.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    let started = started.unwrap();
+    assert!(gone, "the start kept the temp folder a crash left recorded");
+    assert_eq!(recorded, format!("{}\n", started.display()));
+}
+
+/// A recorded temp folder is removed only when it is one short temp folder this user owns
+/// privately: a link in its place, the server data folder, a folder in the system temp
+/// folder named otherwise, and one open to others stay, as does everything they hold. A
+/// folder of another user cannot be planted without root; the same ownership check covers
+/// it (rv-code2 r5 F1).
+#[test]
+fn a_recorded_path_that_is_not_an_own_short_temp_folder_is_left_alone() {
+    let (checkout, data, keys, outside) = (scratch(), scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let keep = outside.path().join("keep");
+    fs::write(&keep, "owner data\n").unwrap();
+    let link = crate::sandbox::toolchains::tmp_path(&keys.path().join("link"));
+    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+    let open = crate::sandbox::toolchains::make_tmp(&keys.path().join("open")).unwrap();
+    fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+    let named = scratch();
+    let plants: [(&str, Option<&Path>); 4] = [
+        ("link", Some(link.as_path())),
+        ("server-data", None),
+        ("named-otherwise", Some(named.path())),
+        ("open-to-others", Some(open.as_path())),
+    ];
+    let mut kept = Vec::new();
+    for (at, (name, recorded)) in plants.iter().enumerate() {
+        let id = project(&format!("left-alone-{at}"));
+        let folder = servers.prepare(&id).unwrap();
+        let home = folder.join(SERVER_DATA);
+        fs::write(home.join("keep"), "server data\n").unwrap();
+        let recorded = recorded.map_or_else(|| home.clone(), Path::to_path_buf);
+        record_server_tmp(&folder, &recorded);
+        let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+        kept.push((
+            *name,
+            fs::symlink_metadata(&recorded).is_ok() && home.join("keep").is_file(),
+        ));
+        if let Ok(made) = started {
+            let _ = fs::remove_dir_all(made);
+        }
+    }
+    let outside_kept = keep.is_file();
+    let _ = fs::remove_file(&link);
+    let _ = fs::remove_dir_all(&open);
+    for (name, stayed) in kept {
+        assert!(stayed, "{name} was removed");
+    }
+    assert!(outside_kept, "a file behind the recorded link was removed");
+}
+
+/// Removing a recorded temp folder never follows a link in it: a link to an outside file
+/// and one to an outside folder go with the temp folder, and what they point at stays
+/// (rv-code2 r5 F1).
+#[test]
+fn removing_a_recorded_temp_folder_never_follows_a_link_in_it() {
+    let (checkout, data, keys, outside) = (scratch(), scratch(), scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("links-in-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let file = outside.path().join("keep");
+    let inner = outside.path().join("kept").join("inner");
+    fs::write(&file, "owner data\n").unwrap();
+    fs::create_dir_all(inner.parent().unwrap()).unwrap();
+    fs::write(&inner, "owner data\n").unwrap();
+    let left = crate::sandbox::toolchains::make_tmp(&keys.path().join("links")).unwrap();
+    std::os::unix::fs::symlink(&file, left.join("file-link")).unwrap();
+    std::os::unix::fs::symlink(inner.parent().unwrap(), left.join("folder-link")).unwrap();
+    record_server_tmp(&folder, &left);
+    let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+    let gone = fs::symlink_metadata(&left).is_err();
+    for made in [Some(&left), started.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    assert!(started.is_ok());
+    assert!(gone, "the recorded temp folder was kept");
+    assert!(file.is_file(), "a file a link in the temp folder named was removed");
+    assert!(inner.is_file(), "a folder a link in the temp folder named was emptied");
+}
+
 /// Runs git as a built IDE server starts it: the engine's shim under the server's installed
 /// profile and environment, with the owner's home as `HOME`, as the app has it. Inputs: the
 /// built command, the IDE folder, the owner's home, the working folder and git's arguments.
