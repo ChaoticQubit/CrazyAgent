@@ -37,6 +37,11 @@ thread_local! {
 #[cfg(target_os = "linux")]
 const STEP_FOLDER: &str = "crazyagent-step";
 
+/// The exit git gives when it finds the index already locked, which a confined Linux step
+/// answers with in git's place, since the engine takes that lock for it.
+#[cfg(target_os = "linux")]
+const INDEX_LOCKED: i32 = 128;
+
 /// The Landlock helper a confined Linux step starts: the one shipped beside the engine, or
 /// for a unit test, which runs from the build folder's `deps`, the one built in that build
 /// folder unless the test stands in another (`LANDLOCK_HELPER`). Output: the path, or None
@@ -520,14 +525,17 @@ impl Repo {
 
     /// Runs one confined Linux step on the copy of the worktree's index in the engine's step
     /// folder, holding the worktree's `index.lock` the whole time as git would, and once git
-    /// exits 0 puts the copy in place of the index; the step itself never writes the git
-    /// folder ([`Self::confined`]). Input: the step. Output: its output, or
-    /// `changes_git_failed` when the index cannot be locked, copied or put back.
+    /// exits 0 having rewritten the copy puts it in place of the index, so a step that only
+    /// reads leaves the index as it was; the step itself never writes the git folder
+    /// ([`Self::confined`]). Input: the step. Output: its output, git's [`INDEX_LOCKED`] exit
+    /// when the lock is already held, or `changes_git_failed` when the index cannot be
+    /// locked, copied or put back.
     #[cfg(target_os = "linux")]
     fn swapped(
         &self,
         step: impl FnOnce() -> Result<Output, EngineError>,
     ) -> Result<Output, EngineError> {
+        use std::os::unix::fs::MetadataExt;
         let copy = self
             .index
             .as_deref()
@@ -539,24 +547,42 @@ impl Repo {
         let index = self.git_dir.join("index");
         let lock = self.git_dir.join("index.lock");
         let failed = || failure("changes_git_failed");
-        for stale in [copy.to_path_buf(), copy.with_extension("lock")] {
-            match std::fs::remove_file(&stale) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err(failed()),
-            }
-        }
-        std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&lock)
-            .map_err(|_| failed())?;
-        let ran = match std::fs::copy(&index, copy) {
-            Ok(_) => step(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => step(),
-            Err(_) => Err(failed()),
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(Output {
+                    code: INDEX_LOCKED,
+                    stdout: Vec::new(),
+                    overflow: false,
+                });
+            }
+            Err(_) => return Err(failed()),
+        }
+        let gone = |done: std::io::Result<()>| {
+            done.err()
+                .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
         };
-        let kept = matches!(&ran, Ok(output) if output.code == 0)
+        let file = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .ok()
+                .map(|meta| (meta.dev(), meta.ino()))
+        };
+        let prepared = gone(std::fs::remove_file(copy))
+            && gone(std::fs::remove_file(copy.with_extension("lock")))
+            && gone(std::fs::copy(&index, copy).map(|_| ()));
+        let ran = if prepared {
+            let copied = file(copy);
+            step().map(|output| (copied, output))
+        } else {
+            Err(failed())
+        };
+        let rewritten = matches!(&ran, Ok((copied, output))
+            if output.code == 0 && file(copy).is_some_and(|now| Some(now) != *copied));
+        let kept = rewritten
             && std::fs::rename(copy, &lock).is_ok()
             && std::fs::rename(&lock, &index).is_ok();
         if !kept {
@@ -564,8 +590,8 @@ impl Repo {
         }
         let _ = std::fs::remove_file(copy);
         match ran {
-            Ok(output) if output.code == 0 && !kept => Err(failed()),
-            ran => ran,
+            Ok(_) if rewritten && !kept => Err(failed()),
+            ran => ran.map(|(_, output)| output),
         }
     }
 

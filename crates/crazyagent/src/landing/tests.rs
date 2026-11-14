@@ -15259,6 +15259,40 @@ fn without_landlock_every_landing_git_step_on_an_agent_worktree_refuses() {
     git::LANDLOCK_HELPER.with(|helper| *helper.borrow_mut() = None);
 }
 
+/// On Linux the engine takes the worktree's `index.lock` for a confined step, so a step that
+/// finds it held answers as git would, exit 128 with the lock and the index left as they
+/// were, and a reset reports it did not hold instead of failing; a step that only reads
+/// leaves the index file in place and the lock free.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_meets_a_held_index_lock_as_git_does() {
+    let case = Case::new();
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let index = case.workspace.git_dir.join("index");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let before = std::fs::read(&index).unwrap();
+    write(&lock, "held\n");
+    let held = repo
+        .exec(&["read-tree", "-u", "-m", "HEAD", "HEAD"], None, &[], 4096)
+        .unwrap();
+    assert_eq!(held.code, 128);
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), "held\n");
+    assert_eq!(std::fs::read(&index).unwrap(), before);
+    std::fs::remove_file(&lock).unwrap();
+    let placed = std::fs::metadata(&index).unwrap().ino();
+    let read = repo
+        .exec(
+            &["diff-index", "--quiet", "--cached", "HEAD"],
+            None,
+            &[],
+            4096,
+        )
+        .unwrap();
+    assert_eq!(read.code, 0);
+    assert_eq!(std::fs::metadata(&index).unwrap().ino(), placed);
+    assert!(!lock.exists());
+}
+
 /// An owner repository whose config names a thousand stale branches lists more keys than
 /// the listing bound holds (ScholarScope, v2.2.1 item 8): an agent's own clone of it is
 /// still made, since engine git asks only for the filter keys it reads.
