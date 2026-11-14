@@ -332,7 +332,7 @@ StandardError=append:{log}\n\
 WantedBy=default.target\n",
                 executable = self.written_executable(),
                 root = systemd_quoted(&root),
-                path = systemd_quoted(&format!("PATH={}", self.path.to_string_lossy())),
+                path = systemd_environment_quoted(&format!("PATH={}", self.path.to_string_lossy())),
                 log = systemd_specifiers(&log),
             ),
             Platform::Windows => {
@@ -1063,14 +1063,23 @@ fn plist_string(line: &str) -> Option<String> {
     )
 }
 
+/// Quotes one word of an ExecStart= line, where systemd also expands `$` variables, so a
+/// `$` is doubled on top of [`systemd_environment_quoted`]. Input: the word. Output: the
+/// quoted text.
 fn systemd_quoted(text: &str) -> String {
+    systemd_environment_quoted(&text.replace('$', "$$"))
+}
+
+/// Quotes a value for systemd: backslash and double quote are escaped and `%` (a specifier)
+/// is doubled. Environment= expands no variables, so `$` is written as is. Input: the value.
+/// Output: the quoted text.
+fn systemd_environment_quoted(text: &str) -> String {
     let mut quoted = String::from("\"");
     for character in text.chars() {
         match character {
             '\\' => quoted.push_str("\\\\"),
             '"' => quoted.push_str("\\\""),
             '%' => quoted.push_str("%%"),
-            '$' => quoted.push_str("$$"),
             other => quoted.push(other),
         }
     }
@@ -1657,16 +1666,26 @@ pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError>
 /// on the command line.
 pub const WINDOWS_PATH_FOLDER_VARIABLE: &str = "CRAZYAGENT_PATH_FOLDER";
 
-/// The PowerShell command that appends a folder to the user's PATH once. Input: the
-/// folder, handed over in [`WINDOWS_PATH_FOLDER_VARIABLE`] so it is read as data, never
-/// as script. Output: the command; it fails when that variable arrives empty.
+/// The PowerShell command that appends a folder to the user's PATH once. It reads the
+/// stored value as written, %VAR% references unexpanded, and stores it back with the
+/// registry kind it had (REG_EXPAND_SZ for a new value), so references keep following their
+/// variables. Deleting a CrazyAgent-only user variable through .NET then announces the
+/// change to running programs the way a PATH set through .NET would. Input: the folder,
+/// handed over in [`WINDOWS_PATH_FOLDER_VARIABLE`] so it is read as data, never as script.
+/// Output: the command; it fails when that variable arrives empty.
 pub fn windows_path_command(folder: &Path) -> std::process::Command {
     let script = format!(
-        "$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE}; if ([string]::IsNullOrEmpty($f)) {{ exit 2 }}; \
-$p=[Environment]::GetEnvironmentVariable('Path','User'); \
-if ($null -eq $p) {{ $p='' }}; \
-if (-not (($p -split ';') -contains $f)) {{ \
-[Environment]::SetEnvironmentVariable('Path', (($p.TrimEnd(';'), $f) -join ';').TrimStart(';'), 'User') }}"
+        "$ErrorActionPreference='Stop'; \
+$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE}; if ([string]::IsNullOrEmpty($f)) {{ exit 2 }}; \
+$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
+$p=''; $t=[Microsoft.Win32.RegistryValueKind]::ExpandString; \
+if ($k.GetValueNames() -contains 'Path') {{ \
+$p=[string]$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); \
+$t=$k.GetValueKind('Path') }}; \
+if (-not ((($p -split ';') | ForEach-Object {{ [Environment]::ExpandEnvironmentVariables($_) }}) -contains $f)) {{ \
+$v=(($p.TrimEnd(';'), $f) -join ';').TrimStart(';'); \
+Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $v -Type $t; \
+[Environment]::SetEnvironmentVariable('CRAZYAGENT_PATH_REFRESH', $null, 'User') }}"
     );
     let mut command = std::process::Command::new("powershell.exe");
     command
