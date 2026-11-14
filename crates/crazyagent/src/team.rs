@@ -5113,6 +5113,26 @@ pub(crate) fn owner_start_alone(
     Ok(())
 }
 
+/// Clears the master's or a lead's stop of one agent that starts again, never the owner's:
+/// an owner-stopped agent starts only through the owner's own Wake, restart or task, which
+/// clear that stop themselves, so a stop the owner makes while a start is under way stays
+/// and is applied again (AW-1, RV-DS241-125). Takes a connection, the project and the
+/// agent. Returns any SQLite failure.
+pub(crate) fn clear_stop_unless_owner(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<(), EngineError> {
+    assert!(agent > 0, "clear_stop_unless_owner_needs_a_stored_agent");
+    connection
+        .execute(
+            "DELETE FROM team_owner_stops WHERE agent=?1 AND project=?2 AND stopped_by<>'owner'",
+            params![agent, project.as_str()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
 /// The start of the usage hour that holds a time, as usage rows record it. Takes ms since
 /// the epoch. Returns the hour's start in the same unit.
 fn hour_of(ms: i64) -> i64 {

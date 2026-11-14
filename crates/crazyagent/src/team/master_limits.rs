@@ -424,13 +424,25 @@ pub(crate) fn clock_ended(
 /// When a project's live master reaches its run time: the latest of its pane's start, the
 /// owner's last team action, the owner's last team message and the owner's last key in its
 /// terminal, plus the owner's
-/// Master run time. The runtime's stop and the time left the clients show both read it.
-/// Takes a connection and the project. Returns the deadline in milliseconds, none under No
-/// limit or while no live master pane runs, or any SQLite failure.
+/// Master run time. The time left the clients show reads it. Takes a connection and the
+/// project. Returns the deadline in milliseconds, none under No limit or while no live
+/// master pane runs, or any SQLite failure.
 pub fn run_deadline(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<Option<i64>, EngineError> {
+    Ok(run_end(connection, project)?.map(|(deadline, _)| deadline))
+}
+
+/// The deadline [`run_deadline`] gives together with the Master run time it was counted
+/// from, both from one read of the setting, so the runtime's stop names the run time that
+/// set its deadline even when the owner changes it at once (RV-DS241-126). Takes a
+/// connection and the project. Returns the deadline in milliseconds and the run time in
+/// seconds, none under No limit or while no live master pane runs, or any SQLite failure.
+pub fn run_end(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<(i64, u32)>, EngineError> {
     let Some(secs) = read(connection, project)?.run_secs else {
         return Ok(None);
     };
@@ -449,7 +461,10 @@ pub fn run_deadline(
         .map_err(error)?;
     Ok(since.map(|since| {
         assert!(since >= 0);
-        since.saturating_add(i64::from(secs).saturating_mul(1000))
+        (
+            since.saturating_add(i64::from(secs).saturating_mul(1000)),
+            secs,
+        )
     }))
 }
 
