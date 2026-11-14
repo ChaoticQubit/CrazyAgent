@@ -1866,8 +1866,8 @@ fn settings_show_retry_briefly_by_default_with_the_three_options_and_each_harnes
     find(&rows, "  Harness default");
     let shown = flat(&rows);
     for summary in [
-        "A run fails with the provider's error instead of retrying.",
-        "Harnesses keep their own retries, but none waits for the network without end.",
+        "Runs fail with the provider's error instead of retrying, where the harness allows it.",
+        "Harnesses keep their own retries, but none waits for the network without end, except the Codex master for now.",
         "CrazyAgent sets nothing, so each harness does what it does on its own.",
         "New runs take the choice; runs already going keep theirs. Each harness line is proven on read-only runs.",
     ] {

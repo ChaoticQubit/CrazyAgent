@@ -55,6 +55,16 @@ test("the section names the three options in order, each with what it does and t
   assert.ok(!/—/u.test(shown));
 });
 
+test("the summaries promise only what every harness line under them keeps, the Codex master included, the TUI's words", () => {
+  assert.deepEqual(settings.PROVIDER_RETRY_CHOICES.map((option) => option.summary), [
+    "Runs fail with the provider's error instead of retrying, where the harness allows it.",
+    "Harnesses keep their own retries, but none waits for the network without end, except the Codex master for now.",
+    "CrazyAgent sets nothing, so each harness does what it does on its own.",
+  ]);
+  assert.match(LINES.stop_at_once.join(" "), /The Codex master keeps its own retries for now\./);
+  assert.match(LINES.retry_briefly.join(" "), /The Codex master keeps its own retries and that wait for now\./);
+});
+
 test("the lines are the engine's words, not the app's", () => {
   const changed = { ...LINES, stop_at_once: ["Claude Code: engine words one.", "Codex: engine words two.", "RCLI: engine words three."] };
   const shown = text(view(ok("stop_at_once", changed)));
