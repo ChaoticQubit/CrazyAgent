@@ -430,9 +430,11 @@ impl Places {
 /// The folders of every project the engine set up, as recorded and with links resolved, read
 /// read-only from the data folder's `engine.db`: an agent can write its project's whole folder,
 /// with or without a `.crazyagent` folder in it. No database yet, or one with no setups table,
-/// is no project. A database that cannot be read, a setup that does not parse or more than
-/// [`PROJECT_ROOTS_MAX`] setups give none, never a partial list. Input: the data folder.
-/// Output: the folders, or none.
+/// is no project. A database that cannot be read or more than [`PROJECT_ROOTS_MAX`] setups
+/// give none, never a partial list. Each setup is read for its folder alone
+/// ([`setup_folder`]), so one another version wrote still counts, and a row that names no
+/// folder is skipped alone and counted in the engine log. Input: the data folder. Output:
+/// the folders, or none.
 fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     let database = data_root.join("engine.db");
     match std::fs::symlink_metadata(&database) {
@@ -460,10 +462,12 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
         return Some(Vec::new());
     }
     let limit = i64::try_from(PROJECT_ROOTS_MAX + 1).ok()?;
-    let bodies: Vec<String> = tx
+    let bodies: Vec<Option<String>> = tx
         .prepare("SELECT body FROM project_setups LIMIT ?1")
         .ok()?
-        .query_map([limit], |row| row.get(0))
+        .query_map([limit], |row| {
+            Ok(row.get_ref(0)?.as_str().ok().map(str::to_owned))
+        })
         .ok()?
         .collect::<Result<_, _>>()
         .ok()?;
@@ -471,9 +475,12 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
         return None;
     }
     let mut roots = Vec::with_capacity(2 * bodies.len());
+    let mut skipped = 0usize;
     for body in bodies {
-        let setup: crate::project_setup::StoredSetup = serde_json::from_str(&body).ok()?;
-        let folder = setup.project_folder();
+        let Some(folder) = body.as_deref().and_then(setup_folder) else {
+            skipped += 1;
+            continue;
+        };
         if !folder.is_absolute() {
             continue;
         }
@@ -484,9 +491,23 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
             }
         }
     }
+    if skipped > 0 {
+        eprintln!("engine_places_setup_rows_skipped count={skipped}");
+    }
+    assert!(skipped <= PROJECT_ROOTS_MAX);
     assert!(roots.len() <= 2 * PROJECT_ROOTS_MAX);
     assert!(roots.iter().all(|root| root.is_absolute()));
     Some(roots)
+}
+
+/// The project folder one stored setup names, read from its `folder` field alone so any
+/// other field another version added or dropped changes nothing
+/// ([`crate::project_setup::project_folder_of`]). Input: the stored body. Output: the
+/// folder, or none for a body that is not JSON or names no folder.
+fn setup_folder(body: &str) -> Option<PathBuf> {
+    let body: serde_json::Value = serde_json::from_str(body).ok()?;
+    let folder = body.get("folder")?.as_str()?;
+    Some(crate::project_setup::project_folder_of(Path::new(folder)))
 }
 
 /// Whether a path lies in the engine's data folder outside its `setup` folder, where the

@@ -491,13 +491,19 @@ impl StoredSetup {
     /// The project's own folder: the recorded folder, or the folder holding
     /// it when onboarding recorded the project's `.crazyagent/` folder.
     pub fn project_folder(&self) -> PathBuf {
-        let folder = Path::new(&self.folder);
-        match folder.parent() {
-            Some(parent) if folder.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY) => {
-                parent.to_path_buf()
-            }
-            _ => folder.to_path_buf(),
+        project_folder_of(Path::new(&self.folder))
+    }
+}
+
+/// A project's own folder from the folder a setup recorded: that folder, or the folder
+/// holding it when onboarding recorded the project's `.crazyagent/` folder. Input: the
+/// recorded folder. Output: the project folder.
+pub(crate) fn project_folder_of(folder: &Path) -> PathBuf {
+    match folder.parent() {
+        Some(parent) if folder.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY) => {
+            parent.to_path_buf()
         }
+        _ => folder.to_path_buf(),
     }
 }
 

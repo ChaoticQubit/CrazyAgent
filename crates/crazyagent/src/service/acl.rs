@@ -25,24 +25,115 @@ const TRUSTED_PRINCIPALS: [&str; 3] = ["user:root", "group:wheel", "group:admin"
 #[cfg(target_os = "macos")]
 const LIST_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Whether an entry carries an access-list entry that lets someone other than this user or
-/// root change it, read from `/bin/ls -lde` without following a link. Input: the entry.
-/// Output: the answer, or none when the listing cannot be read, which counts as changeable.
+/// The most entries whose access-list answer is kept for the life of the process; the store
+/// starts over when it fills.
 #[cfg(target_os = "macos")]
-pub(super) fn shared(entry: &Path) -> Option<bool> {
+const KEPT_MAX: usize = 4096;
+
+/// An entry as it was when its access list was read: device, inode and change time to the
+/// nanosecond, which any change to its access list, mode or owner moves.
+#[cfg(target_os = "macos")]
+type Stamp = (u64, u64, i64, i64);
+
+/// The access-list answers read so far, by entry, each with the stamp it was read at.
+#[cfg(target_os = "macos")]
+static KEPT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (Stamp, bool)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Whether each entry carries an access-list entry that lets someone other than this user or
+/// root change it. An answer kept for an entry whose stamp has not moved is reused, and the
+/// rest are read in one `/bin/ls -lde` ([`list`]); only answers read are kept. Input: the
+/// entries, none a link, each with what `lstat` read of it first. Output: one answer per
+/// entry, in order; none when it cannot be read, which counts as changeable.
+#[cfg(target_os = "macos")]
+pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<bool>> {
+    use std::sync::PoisonError;
+    /// The stamp of what `lstat` read of an entry. Input: the read. Output: the stamp.
+    fn stamp(metadata: &std::fs::Metadata) -> Stamp {
+        use std::os::unix::fs::MetadataExt;
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    }
+    let mut answers = vec![None; entries.len()];
+    let mut missed = Vec::new();
+    {
+        let kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
+        for (index, (entry, metadata)) in entries.iter().enumerate() {
+            match kept.get(*entry) {
+                Some((read, answer)) if *read == stamp(metadata) => answers[index] = Some(*answer),
+                _ => missed.push(index),
+            }
+        }
+    }
+    if missed.is_empty() {
+        return answers;
+    }
+    let listed: Vec<&Path> = missed.iter().map(|index| entries[*index].0).collect();
+    let read = list(&listed);
+    assert_eq!(read.len(), missed.len());
+    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
+    for (index, answer) in missed.into_iter().zip(read) {
+        answers[index] = answer;
+        if let Some(answer) = answer {
+            if kept.len() >= KEPT_MAX {
+                kept.clear();
+            }
+            let (entry, metadata) = entries[index];
+            kept.insert(entry.to_path_buf(), (stamp(metadata), answer));
+        }
+    }
+    assert!(kept.len() <= KEPT_MAX);
+    assert_eq!(answers.len(), entries.len());
+    answers
+}
+
+/// Lists entries in one `/bin/ls -lde` that follows no link and reads each one's block
+/// ([`listed_shared_all`]). A name that is not text or holds a line break gets none, and so
+/// does every entry when the listing fails, runs out of time or fills the output bound, as a
+/// cut listing could drop access-list lines. Input: the entries. Output: one answer per
+/// entry, in order.
+#[cfg(target_os = "macos")]
+fn list(entries: &[&Path]) -> Vec<Option<bool>> {
+    let names: Vec<Option<&str>> = entries
+        .iter()
+        .map(|entry| entry.to_str().filter(|name| !name.contains('\n')))
+        .collect();
+    let operands: Vec<&str> = names.iter().flatten().copied().collect();
+    if operands.is_empty() {
+        return vec![None; entries.len()];
+    }
+    #[cfg(test)]
+    LISTINGS.with(|listings| {
+        listings
+            .borrow_mut()
+            .push(operands.iter().map(std::path::PathBuf::from).collect())
+    });
     let mut command = std::process::Command::new("/bin/ls");
     command
         .env_clear()
         .env("LC_ALL", "C")
         .arg("-lde")
-        .arg(entry);
-    #[cfg(test)]
-    LISTINGS.with(|listings| listings.borrow_mut().push(vec![entry.to_path_buf()]));
-    let (ok, output) = crate::setup::process::run_command(command, LIST_TIME).ok()?;
-    if !ok || output.len() >= crate::setup::process::OUTPUT_BYTES_MAX {
-        return None;
-    }
-    listed_shared(&String::from_utf8_lossy(&output), own_name())
+        .arg("--")
+        .args(&operands);
+    let text = match crate::setup::process::run_command(command, LIST_TIME) {
+        Ok((true, output)) if output.len() < crate::setup::process::OUTPUT_BYTES_MAX => {
+            String::from_utf8_lossy(&output).into_owned()
+        }
+        _ => return vec![None; entries.len()],
+    };
+    let mut read = listed_shared_all(&text, &operands, own_name()).into_iter();
+    let answers: Vec<Option<bool>> = names
+        .iter()
+        .map(|name| name.and_then(|_| read.next().flatten()))
+        .collect();
+    assert!(read.next().is_none());
+    assert_eq!(answers.len(), entries.len());
+    answers
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -104,16 +195,55 @@ pub(super) fn listed_shared(text: &str, me: Option<&str>) -> Option<bool> {
     Some(shared)
 }
 
-/// Reads one `ls -lde` listing of several entries block by block. Inputs: the listing, the
-/// entries as listed and this user's name, if known. Output: one answer per entry, in order.
+/// Reads one `ls -lde` listing of several entries block by block: an entry's line, then its
+/// access-list lines, each indented ([`listed_shared`]). A block goes to the one entry its
+/// first line ends with, after a space, the longest when one name ends another. Inputs: the
+/// listing, the entries as listed and this user's name, if known. Output: one answer per
+/// entry, in order; none for an entry with no block or two, or whose block does not read,
+/// and none for every entry when a block names no entry or an access-list line comes first.
 #[cfg(any(test, target_os = "macos"))]
 pub(super) fn listed_shared_all(
     text: &str,
     entries: &[&str],
     me: Option<&str>,
 ) -> Vec<Option<bool>> {
-    let _ = (text, me);
-    vec![None; entries.len()]
+    let none = vec![None; entries.len()];
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in text.lines() {
+        if !line.starts_with(' ') {
+            blocks.push(vec![line]);
+            continue;
+        }
+        match blocks.last_mut() {
+            Some(block) => block.push(line),
+            None => return none,
+        }
+    }
+    let mut answers = none.clone();
+    let mut blocks_of = vec![0usize; entries.len()];
+    for block in &blocks {
+        let named = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                block[0]
+                    .strip_suffix(**entry)
+                    .is_some_and(|rest| rest.ends_with(' '))
+            })
+            .max_by_key(|(_, entry)| entry.len());
+        let Some((index, _)) = named else {
+            return none;
+        };
+        blocks_of[index] += 1;
+        answers[index] = listed_shared(&block.join("\n"), me);
+    }
+    for (answer, count) in answers.iter_mut().zip(&blocks_of) {
+        if *count != 1 {
+            *answer = None;
+        }
+    }
+    assert_eq!(answers.len(), entries.len());
+    answers
 }
 
 /// The largest POSIX access list read, far above the entries a folder carries.
