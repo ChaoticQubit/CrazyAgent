@@ -32,10 +32,7 @@ pub fn label(
     source: &str,
 ) -> String {
     let source = Path::new(source);
-    if source
-        .components()
-        .any(|part| part == Component::ParentDir)
-    {
+    if source.components().any(|part| part == Component::ParentDir) {
         return ADDED_BY_YOU.into();
     }
     if let Some(entry) = pack_entry(setup, entries, source) {
@@ -112,9 +109,7 @@ fn depth_in(setup: &Path, entry: &PackManifestEntry, source: &Path) -> Option<us
         ),
     };
     let path = Path::new(path);
-    inside
-        .starts_with(path)
-        .then(|| path.components().count())
+    inside.starts_with(path).then(|| path.components().count())
 }
 
 #[cfg(test)]

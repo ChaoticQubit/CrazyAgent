@@ -814,7 +814,10 @@ mod managed_capabilities_tests {
                 }
             }
         }
-        assert_eq!(signing, 3, "claude-code, its connection name claude, and codex");
+        assert_eq!(
+            signing, 3,
+            "claude-code, its connection name claude, and codex"
+        );
     }
 
     #[test]

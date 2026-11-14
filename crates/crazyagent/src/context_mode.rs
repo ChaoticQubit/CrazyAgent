@@ -22,9 +22,8 @@ const INSTALL_TIME: Duration = Duration::from_secs(900);
 const INSTALL_BACKOFF: Duration = Duration::from_secs(600);
 const INSTALLS_MAX: usize = 16;
 
-const _: () = assert!(
-    INSTALL_BACKOFF.as_secs().div_ceil(60) == crate::plugins::INSTALL_RETRY_MINUTES_MAX
-);
+const _: () =
+    assert!(INSTALL_BACKOFF.as_secs().div_ceil(60) == crate::plugins::INSTALL_RETRY_MINUTES_MAX);
 
 static INSTALLING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 

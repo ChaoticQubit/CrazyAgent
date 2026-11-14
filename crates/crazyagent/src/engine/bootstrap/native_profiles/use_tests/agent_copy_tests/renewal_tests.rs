@@ -585,13 +585,20 @@ done
     )
     .unwrap();
     std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let version = std::process::Command::new(&old)
-        .arg("--version")
-        .output()
-        .unwrap();
+    let version = crate::spawn_gate::output(
+        std::process::Command::new(&old)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
     let installed =
         crate::harnesses::update::installed_version(&String::from_utf8_lossy(&version.stdout));
-    assert!(crate::harnesses::sign_in_too_old("codex", installed.as_deref()));
+    assert!(crate::harnesses::sign_in_too_old(
+        "codex",
+        installed.as_deref()
+    ));
     let agent = agent_home(&case);
     let guard = execution(&mut case);
     let copy = guard.hand_to_agent(&agent, TURN, &old).unwrap();

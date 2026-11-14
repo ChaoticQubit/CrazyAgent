@@ -4824,10 +4824,8 @@ mod tests {
             |_, port| Ok(vec![std::net::SocketAddr::from(([192, 0, 2, 1], port))]),
             |_| Ok(()),
         );
-        let failed_here = ProviderReach::new(
-            |_, _| Err(io::Error::from_raw_os_error(24)),
-            |_| Ok(()),
-        );
+        let failed_here =
+            ProviderReach::new(|_, _| Err(io::Error::from_raw_os_error(24)), |_| Ok(()));
         let codex = |base_url: &str| ResearchAccount::Endpoint {
             base_url: base_url.into(),
             model: "remote-model".into(),
@@ -4895,7 +4893,11 @@ mod tests {
             managed_claude,
         ] {
             assert_eq!(unreached_provider(&found, &account), None, "{account:?}");
-            assert_eq!(unreached_provider(&failed_here, &account), None, "{account:?}");
+            assert_eq!(
+                unreached_provider(&failed_here, &account),
+                None,
+                "{account:?}"
+            );
         }
     }
 
@@ -4929,7 +4931,11 @@ mod tests {
                 model: None,
             },
         ] {
-            assert_eq!(unreached_loopback_here(&refusing, &account), None, "{account:?}");
+            assert_eq!(
+                unreached_loopback_here(&refusing, &account),
+                None,
+                "{account:?}"
+            );
         }
         let expected = confined_unavailable(std::env::consts::OS).is_none().then(|| {
             "Can't reach the model provider at 127.0.0.1:9. Start it or pick another account in this pool, then try again.".to_owned()

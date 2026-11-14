@@ -620,8 +620,16 @@ mod tests {
         assert!(STREAM_WAKE < TICK);
         assert!(TICK < IDLE_WAKE);
         for waiting in [false, true] {
-            assert_eq!(wake(false, true, waiting), STREAM_WAKE, "a fresh reply is due");
-            assert_eq!(wake(true, false, waiting), STREAM_WAKE, "a terminal streams");
+            assert_eq!(
+                wake(false, true, waiting),
+                STREAM_WAKE,
+                "a fresh reply is due"
+            );
+            assert_eq!(
+                wake(true, false, waiting),
+                STREAM_WAKE,
+                "a terminal streams"
+            );
         }
         assert_eq!(wake(false, false, true), TICK, "something else waits");
         assert_eq!(wake(false, false, false), IDLE_WAKE, "nothing waits");
@@ -632,9 +640,18 @@ mod tests {
         let asked = Instant::now();
         assert!(replying(true, Some(asked), asked));
         assert!(replying(true, Some(asked), asked + REPLY_WATCH / 2));
-        assert!(!replying(true, Some(asked), asked + REPLY_WATCH), "a long job ticks");
-        assert!(!replying(false, Some(asked), asked), "the reply landed or a create failed");
-        assert!(!replying(true, None, asked), "nothing went out from this loop");
+        assert!(
+            !replying(true, Some(asked), asked + REPLY_WATCH),
+            "a long job ticks"
+        );
+        assert!(
+            !replying(false, Some(asked), asked),
+            "the reply landed or a create failed"
+        );
+        assert!(
+            !replying(true, None, asked),
+            "nothing went out from this loop"
+        );
     }
 
     #[test]

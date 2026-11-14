@@ -843,16 +843,29 @@ pub fn platform_pin(dep: Dependency) -> Option<Pin> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SetupAction {
-    Run { pack: Vec<String> },
-    Set { id: String, on: bool, version: u64 },
-    Remove { id: String, version: u64 },
-    Install { name: Dependency },
+    Run {
+        pack: Vec<String>,
+    },
+    Set {
+        id: String,
+        on: bool,
+        version: u64,
+    },
+    Remove {
+        id: String,
+        version: u64,
+    },
+    Install {
+        name: Dependency,
+    },
     FixPermissions {
         name: Dependency,
         tree: String,
         recursive: bool,
     },
-    SetRefusedTool { choice: RefusedTool },
+    SetRefusedTool {
+        choice: RefusedTool,
+    },
 }
 
 const PACK_ID_BYTES_MAX: usize = 64;

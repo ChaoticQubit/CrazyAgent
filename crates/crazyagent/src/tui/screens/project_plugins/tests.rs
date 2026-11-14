@@ -1494,15 +1494,39 @@ fn project_hooks() -> Vec<HookView> {
         on("caveman", "UserPromptSubmit"),
         on("caveman", "SubagentStart"),
         on("caveman", "SessionEnd"),
-        hook("context-mode", "PreToolUse", Some("Bash"), Scope::Global, true, Some(true)),
-        hook("context-mode", "PreToolUse", Some("Read"), Scope::Global, false, Some(true)),
-        hook("context-mode", "SessionStart", None, Scope::Global, true, Some(false)),
+        hook(
+            "context-mode",
+            "PreToolUse",
+            Some("Bash"),
+            Scope::Global,
+            true,
+            Some(true),
+        ),
+        hook(
+            "context-mode",
+            "PreToolUse",
+            Some("Read"),
+            Scope::Global,
+            false,
+            Some(true),
+        ),
+        hook(
+            "context-mode",
+            "SessionStart",
+            None,
+            Scope::Global,
+            true,
+            Some(false),
+        ),
     ]
 }
 
 fn with_hooks(hooks: Vec<HookView>) -> ProjectPlugins {
     let mut view = ProjectPlugins::new(project());
-    assert!(matches!(view.next_job(), Some(SettingsJob::ProjectPlugins { .. })));
+    assert!(matches!(
+        view.next_job(),
+        Some(SettingsJob::ProjectPlugins { .. })
+    ));
     view.apply(&SettingsEvent::ProjectPlugins(
         project(),
         Ok((Vec::new(), Vec::new())),
@@ -1560,7 +1584,11 @@ fn hooks_in_a_project_show_one_row_per_plugin_and_enter_shows_its_events() {
 fn space_on_a_plugin_row_switches_its_hooks_here_and_never_one_off_in_settings() {
     let mut view = with_hooks(project_hooks());
     match sent(view.key(press(KeyCode::Char(' ')))) {
-        PluginChange::Switches { project: asked, items, on } => {
+        PluginChange::Switches {
+            project: asked,
+            items,
+            on,
+        } => {
             assert_eq!(asked, project());
             assert!(!on);
             assert_eq!(
@@ -1645,7 +1673,10 @@ fn space_on_a_plugin_row_switches_its_hooks_here_and_never_one_off_in_settings()
             "tide is a plugin's hooks. Press Space to turn them off."
         ))
     );
-    assert!(view.removing.is_none(), "a plugin's hooks are never removed here");
+    assert!(
+        view.removing.is_none(),
+        "a plugin's hooks are never removed here"
+    );
 }
 
 async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
@@ -1865,7 +1896,10 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     assert!(sent.contains(&"plugin change"), "{sent:?}");
     assert_eq!(
         enabled_by_event(&global().await.unwrap()),
-        [("PreToolUse".to_owned(), false), ("SessionStart".to_owned(), false)],
+        [
+            ("PreToolUse".to_owned(), false),
+            ("SessionStart".to_owned(), false)
+        ],
         "Space on the plugin row turned both hooks off"
     );
     let shown = render(&mut shell, 120, 36);
@@ -1897,7 +1931,10 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     assert!(sent.contains(&"plugin change"), "{sent:?}");
     assert_eq!(
         enabled_by_event(&global().await.unwrap()),
-        [("PreToolUse".to_owned(), true), ("SessionStart".to_owned(), true)],
+        [
+            ("PreToolUse".to_owned(), true),
+            ("SessionStart".to_owned(), true)
+        ],
         "Space on a Partly on plugin row turned the other hook on"
     );
 
@@ -1929,7 +1966,10 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     );
     assert_eq!(
         enabled_by_event(&global().await.unwrap()),
-        [("PreToolUse".to_owned(), true), ("SessionStart".to_owned(), true)],
+        [
+            ("PreToolUse".to_owned(), true),
+            ("SessionStart".to_owned(), true)
+        ],
         "every other project keeps them"
     );
     let shown = render(&mut shell, 120, 36);

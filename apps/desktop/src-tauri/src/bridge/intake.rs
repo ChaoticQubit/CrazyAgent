@@ -792,8 +792,15 @@ impl NativeBridge {
         recursive: bool,
         generation: u64,
     ) -> Result<SetupStatus, BridgeError> {
-        self.setup_change(OwnerMutation::FixToolPermissions { name, tree, recursive }, generation)
-            .await
+        self.setup_change(
+            OwnerMutation::FixToolPermissions {
+                name,
+                tree,
+                recursive,
+            },
+            generation,
+        )
+        .await
     }
 
     /// Saves what setup offers for a tool found and passed over, the fix button or only the

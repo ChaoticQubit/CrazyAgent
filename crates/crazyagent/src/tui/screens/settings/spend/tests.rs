@@ -201,7 +201,8 @@ fn the_default_claude_free_resets_source_is_dont_read_and_says_so() {
 }
 
 #[test]
-fn option_claude_free_resets_through_claude_code_says_it_asks_as_claude_code_at_the_accounts_risk() {
+fn option_claude_free_resets_through_claude_code_says_it_asks_as_claude_code_at_the_accounts_risk()
+{
     let (spend, ctx) = ready(view(
         with_source(ResetsSource::ThroughClaudeCode),
         Vec::new(),
@@ -214,7 +215,8 @@ fn option_claude_free_resets_through_claude_code_says_it_asks_as_claude_code_at_
 }
 
 #[test]
-fn option_claude_free_resets_as_claude_code_says_it_asks_the_way_claude_code_does_at_the_accounts_risk() {
+fn option_claude_free_resets_as_claude_code_says_it_asks_the_way_claude_code_does_at_the_accounts_risk()
+ {
     let (spend, ctx) = ready(view(with_source(ResetsSource::AsClaudeCode), Vec::new()));
     let text = shown(&spend, &ctx);
     assert!(text.contains(

@@ -15,8 +15,7 @@ const GROUP_WIDTH: usize = 13;
 const GROUP_ITEMS_SHOWN: usize = 2;
 const GROUP_LINES_MAX: usize = 2;
 const QUIET_CODES: [&str; 2] = ["trusted_connection_unavailable", "not_ready"];
-const KEPT_STOPPED: &str =
-    "If you keep the project, its agents stay stopped until you start them again with S Start all on its Team screen.";
+const KEPT_STOPPED: &str = "If you keep the project, its agents stay stopped until you start them again with S Start all on its Team screen.";
 
 /// One item the owner can act on in the banner: a failed resume by its agent, or a notice
 /// by its ledger kind and number.

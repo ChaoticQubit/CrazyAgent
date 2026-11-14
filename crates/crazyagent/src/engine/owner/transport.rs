@@ -3572,7 +3572,7 @@ mod tests {
         let found = || {
             crate::terminal::tmux::installed_at(&crate::tools::Places::new(vec![bin.clone()], None))
         };
-        let host = || engine.terminal_on(root.path(), &found).unwrap();
+        let host = || engine.terminal_on(root.path(), found).unwrap();
         assert_eq!(found(), None);
         let first = host();
         assert!(Arc::ptr_eq(&first, &host()));

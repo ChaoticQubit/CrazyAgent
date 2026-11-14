@@ -106,7 +106,10 @@ fn a_bundled_skill_names_its_entry() {
     )];
     let bundled = Path::new(SETUP).join("bundled");
     assert_eq!(
-        of(&entries, &bundled.join("skills/software-practices/code-review")),
+        of(
+            &entries,
+            &bundled.join("skills/software-practices/code-review")
+        ),
         "Default pack: software-practices"
     );
     assert_eq!(
@@ -131,7 +134,10 @@ fn imports_name_the_harness_folder_they_came_from() {
         of(&[], &home.join(".codex/skills/graph")),
         "Imported from Codex"
     );
-    assert_eq!(of(&[], &home.join(".claude/skills-old/notes")), ADDED_BY_YOU);
+    assert_eq!(
+        of(&[], &home.join(".claude/skills-old/notes")),
+        ADDED_BY_YOU
+    );
     assert_eq!(of(&[], &home.join("Skills/notes")), ADDED_BY_YOU);
     assert_eq!(of(&[], Path::new("/picked/notes")), ADDED_BY_YOU);
     let unknown_home = label(

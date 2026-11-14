@@ -53,8 +53,7 @@ impl ProviderReach {
                 })
             },
             |address| {
-                crate::spawn_gate::connect_tcp_std_timeout(&address, PROVIDER_REACH_TIME)
-                    .map(drop)
+                crate::spawn_gate::connect_tcp_std_timeout(&address, PROVIDER_REACH_TIME).map(drop)
             },
         )
     }

@@ -663,20 +663,35 @@ impl TooOld {
     /// The too-old panel: the line, the update offer or its confirm, how a finished update
     /// went, and which key checks again. Inputs: the sign-in method, the width and context.
     /// Output: the lines.
-    fn lines(&self, native: Option<NativeAuthMethod>, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    fn lines(
+        &self,
+        native: Option<NativeAuthMethod>,
+        limit: usize,
+        ctx: &Ctx,
+    ) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let (harness, _) = harness_words(native);
-        let mut lines: Vec<Line<'static>> = wrap(&too_old_line(native, self.versions.as_ref()), limit)
-            .into_iter()
-            .map(|part| styled(part, Role::Error, theme))
-            .collect();
+        let mut lines: Vec<Line<'static>> =
+            wrap(&too_old_line(native, self.versions.as_ref()), limit)
+                .into_iter()
+                .map(|part| styled(part, Role::Error, theme))
+                .collect();
         let offer = update_offer(self.versions.as_ref(), self.mode);
-        let command = self.versions.as_ref().and_then(|versions| versions.command.clone());
+        let command = self
+            .versions
+            .as_ref()
+            .and_then(|versions| versions.command.clone());
         match (&offer, command) {
             (UpdateOffer::Button, Some(command)) if self.confirming => {
                 lines.push(Line::default());
-                lines.push(Line::raw(format!("Update {harness}? CrazyAgent runs exactly this line:")));
-                lines.extend(wrap(&format!("  {command}"), limit).into_iter().map(Line::raw));
+                lines.push(Line::raw(format!(
+                    "Update {harness}? CrazyAgent runs exactly this line:"
+                )));
+                lines.extend(
+                    wrap(&format!("  {command}"), limit)
+                        .into_iter()
+                        .map(Line::raw),
+                );
                 lines.push(Line::raw("Press Enter to update, or Esc to go back."));
                 return lines;
             }
@@ -685,10 +700,18 @@ impl TooOld {
                 Span::raw(format!(" Updating {harness}...")),
             ])),
             (UpdateOffer::Command(command), _) => {
-                lines.push(Line::raw(format!("To update {harness}, run this in Terminal:")));
-                lines.extend(wrap(&format!("  {command}"), limit).into_iter().map(Line::raw));
+                lines.push(Line::raw(format!(
+                    "To update {harness}, run this in Terminal:"
+                )));
+                lines.extend(
+                    wrap(&format!("  {command}"), limit)
+                        .into_iter()
+                        .map(Line::raw),
+                );
             }
-            (UpdateOffer::Line(line), _) => lines.extend(wrap(line, limit).into_iter().map(Line::raw)),
+            (UpdateOffer::Line(line), _) => {
+                lines.extend(wrap(line, limit).into_iter().map(Line::raw))
+            }
             _ => {}
         }
         if let Some(after) = self
@@ -1901,7 +1924,10 @@ fn harness_id(native: Option<NativeAuthMethod>) -> &'static str {
 /// (DEC-166), word for word as the app says it: the version and the minimum when the
 /// versions row names them, else how to fix it. Inputs: the sign-in method and the versions
 /// row, if read. Output: the line.
-pub(super) fn too_old_line(native: Option<NativeAuthMethod>, versions: Option<&HarnessVersions>) -> String {
+pub(super) fn too_old_line(
+    native: Option<NativeAuthMethod>,
+    versions: Option<&HarnessVersions>,
+) -> String {
     let (harness, _) = harness_words(native);
     let Some(minimum) = versions
         .and_then(|versions| versions.sign_in_min.as_deref())
@@ -1916,7 +1942,9 @@ pub(super) fn too_old_line(native: Option<NativeAuthMethod>, versions: Option<&H
         Some(installed) => format!(
             "{harness} {installed} is too old to sign in from CrazyAgent; it needs {minimum} or newer."
         ),
-        None => format!("{harness} is too old to sign in from CrazyAgent; it needs {minimum} or newer."),
+        None => {
+            format!("{harness} is too old to sign in from CrazyAgent; it needs {minimum} or newer.")
+        }
     }
 }
 
@@ -1934,7 +1962,10 @@ pub(super) enum UpdateOffer {
 /// may run and the harness has an update line, else that line to run in Terminal, else why it
 /// can't be updated here. Inputs: the versions row and update mode, None until read.
 /// Output: the offer.
-pub(super) fn update_offer(versions: Option<&HarnessVersions>, mode: Option<UpdateMode>) -> UpdateOffer {
+pub(super) fn update_offer(
+    versions: Option<&HarnessVersions>,
+    mode: Option<UpdateMode>,
+) -> UpdateOffer {
     let (Some(versions), Some(mode)) = (versions, mode) else {
         return UpdateOffer::Nothing;
     };
@@ -2185,7 +2216,10 @@ impl Screen for AddAccount {
         }
         if let Stage::SignIn(sign_in) = &mut self.stage
             && let Some(old) = sign_in.old.as_mut()
-            && old.versions.as_ref().is_some_and(|versions| versions.running)
+            && old
+                .versions
+                .as_ref()
+                .is_some_and(|versions| versions.running)
             && old.polls < UPDATE_POLLS_MAX
             && self.waiting == Waiting::Nothing
         {

@@ -208,7 +208,11 @@ pub fn hook_groups(hooks: &[HookView]) -> Vec<HookGroup> {
             }
         };
         let group = &mut groups[at];
-        if !group.hooks.iter().any(|&seen| hooks[seen].event == hook.event) {
+        if !group
+            .hooks
+            .iter()
+            .any(|&seen| hooks[seen].event == hook.event)
+        {
             group.events += 1;
         }
         if let Some(follows) = &hook.follows
@@ -233,7 +237,11 @@ pub fn hook_group_state(
     on: impl Fn(&HookView) -> bool,
 ) -> HookGroupState {
     assert!(!group.hooks.is_empty());
-    let count = group.hooks.iter().filter(|&&index| on(&hooks[index])).count();
+    let count = group
+        .hooks
+        .iter()
+        .filter(|&&index| on(&hooks[index]))
+        .count();
     if count == 0 {
         HookGroupState::Off
     } else if count == group.hooks.len() {

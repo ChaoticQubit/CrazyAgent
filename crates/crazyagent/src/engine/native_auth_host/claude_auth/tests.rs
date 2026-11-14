@@ -170,7 +170,10 @@ fn a_claude_status_without_its_config_directory_reads_as_too_old_to_sign_in() {
     );
     let mut logged_out: serde_json::Value =
         serde_json::from_slice(&status(false, "none", home.to_str().unwrap())).unwrap();
-    logged_out.as_object_mut().unwrap().remove("configDirectory");
+    logged_out
+        .as_object_mut()
+        .unwrap()
+        .remove("configDirectory");
     assert_eq!(
         verified_claude_account(&serde_json::to_vec(&logged_out).unwrap(), home)
             .unwrap_err()
@@ -179,7 +182,9 @@ fn a_claude_status_without_its_config_directory_reads_as_too_old_to_sign_in() {
     );
     for field in ["loggedIn", "authMethod", "apiProvider"] {
         assert_eq!(
-            verified_claude_account(&without(field), home).unwrap_err().0,
+            verified_claude_account(&without(field), home)
+                .unwrap_err()
+                .0,
             "native_auth_claude_status_invalid",
             "{field}"
         );

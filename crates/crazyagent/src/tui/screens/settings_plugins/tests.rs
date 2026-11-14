@@ -1584,8 +1584,14 @@ fn hooks_group_per_plugin_and_scope_counting_distinct_events() {
         HookGroupState::Partly
     );
     assert_eq!(HookGroupState::Partly.word(), "Partly on");
-    assert_eq!(hook_group_line(&groups[0]), "4 events, runs while caveman is on");
-    assert_eq!(hook_group_line(&groups[2]), "1 event, runs while caveman is on");
+    assert_eq!(
+        hook_group_line(&groups[0]),
+        "4 events, runs while caveman is on"
+    );
+    assert_eq!(
+        hook_group_line(&groups[2]),
+        "1 event, runs while caveman is on"
+    );
 }
 
 #[test]
@@ -1603,7 +1609,10 @@ fn the_hooks_list_shows_one_row_per_plugin_and_enter_shows_its_events() {
         2,
         "one caveman row, naming the skill it runs with:\n{folded}"
     );
-    assert!(folded.contains("4 events, runs while caveman is on"), "{folded}");
+    assert!(
+        folded.contains("4 events, runs while caveman is on"),
+        "{folded}"
+    );
     assert!(folded.contains("Partly on"), "{folded}");
     assert!(
         !folded.contains("SubagentStart"),
@@ -1611,7 +1620,12 @@ fn the_hooks_list_shows_one_row_per_plugin_and_enter_shows_its_events() {
     );
     screen.key(&Key::Enter, &mut ctx);
     let open = body_text(&mut screen, &ctx);
-    for event in ["SessionStart", "UserPromptSubmit", "SubagentStart", "SessionEnd"] {
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "SubagentStart",
+        "SessionEnd",
+    ] {
         assert!(open.contains(event), "{event} shows under caveman:\n{open}");
     }
     assert!(

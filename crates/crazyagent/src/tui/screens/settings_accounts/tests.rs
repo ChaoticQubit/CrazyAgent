@@ -1,6 +1,6 @@
 use super::super::settings_add_account::{
-    AddAccount, UpdateOffer, choices, code_left_line, key_problem, provider_tiles,
-    sign_in_problem, too_old_line, update_offer,
+    AddAccount, UpdateOffer, choices, code_left_line, key_problem, provider_tiles, sign_in_problem,
+    too_old_line, update_offer,
 };
 use super::*;
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod, catalog};
@@ -1614,7 +1614,10 @@ fn the_too_old_panel_offers_update_only_where_settings_harnesses_would() {
         ..too_old_versions(Some("2.1.200"))
     };
     match update_offer(Some(&unknown), Some(UpdateMode::CheckAndUpdate)) {
-        UpdateOffer::Line(line) => assert!(line.ends_with("Update it with its own installer."), "{line}"),
+        UpdateOffer::Line(line) => assert!(
+            line.ends_with("Update it with its own installer."),
+            "{line}"
+        ),
         other => panic!("an unknown install has no Update: {other:?}"),
     }
     let running = crate::harnesses::update::HarnessVersions {
@@ -1625,7 +1628,10 @@ fn the_too_old_panel_offers_update_only_where_settings_harnesses_would() {
         update_offer(Some(&running), Some(UpdateMode::CheckAndUpdate)),
         UpdateOffer::Running
     );
-    assert_eq!(update_offer(None, Some(UpdateMode::CheckAndUpdate)), UpdateOffer::Nothing);
+    assert_eq!(
+        update_offer(None, Some(UpdateMode::CheckAndUpdate)),
+        UpdateOffer::Nothing
+    );
     assert_eq!(update_offer(Some(&row), None), UpdateOffer::Nothing);
 }
 

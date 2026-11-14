@@ -425,7 +425,10 @@ impl ProjectPlugins {
             .hook_rows()
             .iter()
             .position(|item| *item == Item::HookPlugin(at));
-        assert!(row.is_some(), "a plugin row stays listed when its events open");
+        assert!(
+            row.is_some(),
+            "a plugin row stays listed when its events open"
+        );
         self.cursor = listed + row.unwrap_or_default();
     }
 
@@ -801,12 +804,21 @@ impl ProjectPlugins {
                 ],
                 Item::Hook(index) => vec![
                     Row::of(format!("  {}", self.hooks[index].event), look.fg),
-                    state(self.hooks[index].enabled, self.hooks[index].on_here, None, look),
+                    state(
+                        self.hooks[index].enabled,
+                        self.hooks[index].on_here,
+                        None,
+                        look,
+                    ),
                     Row::default(),
                 ],
                 Item::Skill(_) | Item::Server(_) => Vec::new(),
             };
-            assert_eq!(cells.len(), 3, "the hooks list holds only plugin and event rows");
+            assert_eq!(
+                cells.len(),
+                3,
+                "the hooks list holds only plugin and event rows"
+            );
             if wide {
                 cells.push(match item {
                     Item::HookPlugin(at) => Row::of(hook_group_line(&groups[at]), look.muted),

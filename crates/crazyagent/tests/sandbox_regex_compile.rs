@@ -178,8 +178,16 @@ fn the_codex_system_skills_flag_deny_compiles_clean_and_holds_for_every_spelling
         let (flagged, pid) = run(&sandbox, &profile, "/usr/bin/chflags", &["uchg", path]);
         pids.push(pid);
         assert!(!flagged, "{path}");
-        assert_eq!(fs::metadata(&skill).unwrap().st_flags() & UF_IMMUTABLE, 0, "{path}");
-        assert_eq!(fs::metadata(&system).unwrap().st_flags() & UF_IMMUTABLE, 0, "{path}");
+        assert_eq!(
+            fs::metadata(&skill).unwrap().st_flags() & UF_IMMUTABLE,
+            0,
+            "{path}"
+        );
+        assert_eq!(
+            fs::metadata(&system).unwrap().st_flags() & UF_IMMUTABLE,
+            0,
+            "{path}"
+        );
     }
     let (flagged, pid) = run(
         &sandbox,

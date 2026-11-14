@@ -2253,9 +2253,18 @@ fn an_installed_version_is_below_a_sign_in_minimum_only_when_it_reads_lower() {
 #[test]
 fn a_sign_in_is_too_old_only_below_the_harness_minimum_with_a_known_version() {
     assert!(crate::harnesses::sign_in_too_old("claude", Some("2.1.200")));
-    assert!(crate::harnesses::sign_in_too_old("claude-code", Some("2.1.40")));
-    assert!(!crate::harnesses::sign_in_too_old("claude", Some("2.1.268")));
-    assert!(!crate::harnesses::sign_in_too_old("claude-code", Some("2.1.325")));
+    assert!(crate::harnesses::sign_in_too_old(
+        "claude-code",
+        Some("2.1.40")
+    ));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "claude",
+        Some("2.1.268")
+    ));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "claude-code",
+        Some("2.1.325")
+    ));
     assert!(!crate::harnesses::sign_in_too_old("claude", None));
     assert!(crate::harnesses::sign_in_too_old("codex", Some("0.55.0")));
     assert!(!crate::harnesses::sign_in_too_old(
@@ -2263,8 +2272,14 @@ fn a_sign_in_is_too_old_only_below_the_harness_minimum_with_a_known_version() {
         Some(crate::adapters::codex::SIGN_IN_MIN)
     ));
     assert!(!crate::harnesses::sign_in_too_old("codex", None));
-    assert!(!crate::harnesses::sign_in_too_old("gemini-cli", Some("0.0.1")));
-    assert!(!crate::harnesses::sign_in_too_old("not-a-harness", Some("0.0.1")));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "gemini-cli",
+        Some("0.0.1")
+    ));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "not-a-harness",
+        Some("0.0.1")
+    ));
 }
 
 /// DEC-166: the versions row of a harness that signs in names its sign-in minimum, installed

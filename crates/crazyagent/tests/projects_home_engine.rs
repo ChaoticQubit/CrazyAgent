@@ -1434,7 +1434,10 @@ async fn one_add_runs_at_a_time_whatever_the_other_folder_is_named() {
         controller: engine.owner().await,
         generation: 0,
     };
-    for (source, what) in [(&cased, "a name only its case sets apart"), (&unlike, "another")] {
+    for (source, what) in [
+        (&cased, "a name only its case sets apart"),
+        (&unlike, "another"),
+    ] {
         assert_eq!(
             other.apply(add(source, AddMode::Copy)).await,
             rejected("home_add_in_progress"),
@@ -1503,7 +1506,10 @@ async fn an_intake_job_ends_home_add_in_progress_while_a_direct_add_copies() {
             if operation.result == OwnerResult::Applied),
         "{answered:?}"
     );
-    assert!(!home.join("small").exists(), "no copy of the refused folder");
+    assert!(
+        !home.join("small").exists(),
+        "no copy of the refused folder"
+    );
     assert_eq!(
         fs::read_to_string(small.join("p1/f1.txt")).unwrap(),
         "1 1\n"
@@ -1542,7 +1548,10 @@ async fn an_add_plans_over_its_own_running_row_but_not_over_another_add() {
         rejected("home_add_in_progress"),
         "another add runs"
     );
-    sql(&database, "DELETE FROM projects_home_add WHERE request='add-other';");
+    sql(
+        &database,
+        "DELETE FROM projects_home_add WHERE request='add-other';",
+    );
     owner
         .controller
         .read(OwnerRead::ProjectsHome)
@@ -1831,7 +1840,7 @@ async fn an_engine_start_sweeps_the_staging_an_engine_stop_left_in_the_home() {
     let home = place.join("projects");
     fs::create_dir(&home).unwrap();
     let mut engine = Engine::start().await;
-    let owner = homed(&engine, &home).await;
+    let mut owner = homed(&engine, &home).await;
     let id = "0123456789abcdef".repeat(4);
     let new = staged(&home, &format!(".crazyagent-new-{id}"));
     let adding = staged(&home, ".crazyagent-adding-00ff00ff00ff00ff");

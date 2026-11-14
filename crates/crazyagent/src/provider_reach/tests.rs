@@ -17,7 +17,9 @@ fn refusal() -> io::Result<()> {
 }
 
 fn no_address() -> io::Result<Vec<SocketAddr>> {
-    Err(io::Error::other("nodename nor servname provided, or not known"))
+    Err(io::Error::other(
+        "nodename nor servname provided, or not known",
+    ))
 }
 
 /// A reach on stand-ins that keeps every name it looked up and every address it dialed.
@@ -114,11 +116,20 @@ fn a_lookup_that_failed_on_this_machine_names_nothing_and_dials_nothing() {
     const SYSTEM_ERRORS: [i32; 3] = [24, 23, 12];
     const HOSTS: &[(&str, u16)] = &[("chatgpt.com", 443), ("api.openai.com", 443)];
     for number in SYSTEM_ERRORS {
-        let (failed, looked, dialed) =
-            stand_in(move |_| Err(io::Error::from_raw_os_error(number)), |_| refusal());
-        assert!(!failed.unreached_name("models.example.test", 443), "{number}");
+        let (failed, looked, dialed) = stand_in(
+            move |_| Err(io::Error::from_raw_os_error(number)),
+            |_| refusal(),
+        );
+        assert!(
+            !failed.unreached_name("models.example.test", 443),
+            "{number}"
+        );
         assert!(!failed.offline(HOSTS), "{number}");
-        assert_eq!(*looked.lock().unwrap(), ["models.example.test", "chatgpt.com"], "{number}");
+        assert_eq!(
+            *looked.lock().unwrap(),
+            ["models.example.test", "chatgpt.com"],
+            "{number}"
+        );
         assert!(dialed.lock().unwrap().is_empty(), "{number}");
     }
     assert_eq!(no_address().unwrap_err().raw_os_error(), None);

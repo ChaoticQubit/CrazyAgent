@@ -2501,11 +2501,7 @@ fn version_arm(line: Option<String>) -> String {
 /// HOME. Each prints its old version (or none), updates to its new one with its own updater
 /// (`claude update`, `npm install`), and fails every other call, a sign-in included. Inputs:
 /// the HOME and each harness's old and new version. Output: the PATH the engine runs with.
-fn old_harnesses(
-    home: &Path,
-    claude: (Option<&str>, &str),
-    codex: (Option<&str>, &str),
-) -> String {
+fn old_harnesses(home: &Path, claude: (Option<&str>, &str), codex: (Option<&str>, &str)) -> String {
     let text = home.to_str().unwrap();
     assert!(!text.contains('\'') && !text.contains('"'));
     let versions = home.join(".local/share/claude/versions");
@@ -2583,7 +2579,9 @@ fn picked_row(screen: &str, label: &str) -> bool {
 /// DEC-166: moves down a list until the label is the picked row, then chooses it. Inputs: the
 /// TUI and the label. Output: none.
 fn choose_row(pty: &mut ScriptPty, label: &str) {
-    pty.until(&format!("{label} is listed"), |screen| screen.contains(label));
+    pty.until(&format!("{label} is listed"), |screen| {
+        screen.contains(label)
+    });
     for _ in 0..STEPS_MAX {
         if picked_row(&pty.screen(), label) {
             pty.type_bytes(b"\r");
@@ -2637,18 +2635,23 @@ fn too_old_then_updated_in_the_tui(
     let path = old_harnesses(home.path(), claude, codex);
     let mut engine = stand_in_engine(prefix, home.path(), path);
     let mut pty = start_sign_in(&engine, home.path(), pick.0, pick.1);
-    let line = format!(
-        "{name} {old} is too old to sign in from CrazyAgent; it needs {minimum} or newer."
+    let line =
+        format!("{name} {old} is too old to sign in from CrazyAgent; it needs {minimum} or newer.");
+    pty.until_within(
+        "the too-old line with Update and Check again",
+        SIGN_IN_TIME,
+        |screen| {
+            line.split("; ").all(|part| screen.contains(part))
+                && screen.contains(&format!("Update {name}"))
+                && screen.contains("Check again")
+                && !screen.contains("Press n to try again.")
+        },
     );
-    pty.until_within("the too-old line with Update and Check again", SIGN_IN_TIME, |screen| {
-        line.split("; ").all(|part| screen.contains(part))
-            && screen.contains(&format!("Update {name}"))
-            && screen.contains("Check again")
-            && !screen.contains("Press n to try again.")
-    });
     pty.type_bytes(b"u");
     pty.until("the Update confirm", |screen| {
-        screen.contains(&format!("Update {name}? CrazyAgent runs exactly this line:"))
+        screen.contains(&format!(
+            "Update {name}? CrazyAgent runs exactly this line:"
+        ))
     });
     pty.type_bytes(b"\r");
     pty.until_within("the finished update", UPDATE_TIME, |screen| {
