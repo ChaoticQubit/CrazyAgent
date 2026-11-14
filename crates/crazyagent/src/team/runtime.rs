@@ -13944,31 +13944,45 @@ fn end_keepers(pins: &[KeeperPin]) -> bool {
     end_seen_keepers(pins, keeper_seen)
 }
 
-/// Ends the keepers as [`end_keepers`] does, each keeper's state read by `seen`: running
-/// as its pin names, gone, or none when it cannot be read. Only a keeper seen running is
-/// signalled, since an unread id may by then name another process; every keeper not seen
-/// gone is waited for. Takes the keepers and the reader. Returns whether they all exited
-/// in time.
+/// Ends the keepers as [`end_keepers`] does, each keeper's state read by `seen` on every
+/// pass of the wait: running as its pin names, gone, or none when it cannot be read. A
+/// keeper is signalled once, on the first read that sees it running, never on an unread
+/// id, which may by then name another process; every keeper not seen gone is waited for.
+/// Takes the keepers and the reader. Returns whether they all exited in time.
 #[cfg(target_os = "macos")]
 fn end_seen_keepers(pins: &[KeeperPin], seen: impl Fn(&KeeperPin) -> Option<bool>) -> bool {
     use crate::harnesses::terminal_session::{KEEPER_POLL, KEEPER_WAIT};
-    for pin in pins.iter().filter(|pin| seen(pin) == Some(true)) {
-        if let Some(process) = i32::try_from(pin.pid)
-            .ok()
-            .filter(|pid| *pid > 1)
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process(process, rustix::process::Signal::TERM);
-        }
-    }
+    let mut signalled = vec![false; pins.len()];
     let deadline = Instant::now() + KEEPER_WAIT;
-    while pins.iter().any(|pin| seen(pin) != Some(false)) {
+    loop {
+        let mut left = false;
+        for (pin, sent) in pins.iter().zip(signalled.iter_mut()) {
+            match seen(pin) {
+                Some(false) => continue,
+                Some(true) if !*sent => {
+                    *sent = true;
+                    if let Some(process) = i32::try_from(pin.pid)
+                        .ok()
+                        .filter(|pid| *pid > 1)
+                        .and_then(rustix::process::Pid::from_raw)
+                    {
+                        let _ =
+                            rustix::process::kill_process(process, rustix::process::Signal::TERM);
+                    }
+                }
+                Some(true) | None => {}
+            }
+            left = true;
+        }
+        assert_eq!(signalled.len(), pins.len());
+        if !left {
+            return true;
+        }
         if Instant::now() >= deadline {
             return false;
         }
         std::thread::sleep(KEEPER_POLL);
     }
-    true
 }
 
 /// Ends no keeper where no keeper runs (DEC-094). Takes unused. Returns true.
