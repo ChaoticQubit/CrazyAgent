@@ -192,6 +192,9 @@ async fn start_engine(
         crazyagent::service::Repair::Refuse => {
             return Err(engine_failure("engine_app_not_installed"));
         }
+        crazyagent::service::Repair::Keep => {
+            return Err(engine_failure("engine_newer_than_app"));
+        }
         crazyagent::service::Repair::Install => {
             if !service.executable.is_file() {
                 return Err(engine_failure("engine_sidecar_missing"));

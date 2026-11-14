@@ -64,6 +64,11 @@ test("the engine-down state offers Restart engine, which repairs the login servi
   assert.doesNotMatch(plain, /role="alert"/);
 });
 
+test("Restart engine never replaces a newer engine, or one a test build may not, and says why (RV-DS241-129)", async () => {
+  const { plainError } = await import("../src/api.ts");
+  assert.equal(plainError("engine_newer_than_app"), "Your login service runs a newer CrazyAgent engine than this app, or this app is a test build, so Restart engine keeps that engine. Open the newer CrazyAgent or update this one, then restart the engine.");
+});
+
 test("an engine of another version asks for a restart with both versions, not the engine-down state", () => {
   const { engineState } = state;
   const ok = { kind: "ok", value: { connected: true, pending: false } };

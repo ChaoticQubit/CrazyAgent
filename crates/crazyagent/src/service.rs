@@ -78,8 +78,13 @@ pub enum Repair {
     /// Writes and registers this service's definition in place of what is installed.
     Install,
     /// Neither: this engine is on a disk image, another disk or a temporary folder
-    /// ([`transient`]), where a login service never points, and nothing usable is installed.
+    /// ([`transient`]), where a login service never points, and nothing usable is installed
+    /// ([`Service::refuse`]).
     Refuse,
+    /// Neither, for a forced reinstall: the installed definition runs another program that
+    /// still exists and this engine may not replace it ([`Service::may_replace`]), as with a
+    /// newer engine known at the data root or a dev build, so the definition is kept.
+    Keep,
 }
 
 /// What a service manager reports about the engine service.
@@ -629,6 +634,14 @@ WantedBy=default.target\n",
         } else {
             Repair::Refuse
         }
+    }
+
+    /// The refusal of [`Repair::Refuse`], after removing an installed definition that names a
+    /// broken program ([`Self::broken_program`]), so launchd or systemd no longer runs a gone,
+    /// /Volumes or translocated path at login or on a restart; a usable definition stays.
+    /// Output: the error saying to move the app to Applications, with any removal failure.
+    pub fn refuse(&self) -> ServiceError {
+        transient_refused(&self.executable)
     }
 
     /// The executable as [`Self::definition_text`] writes it on this platform: XML-escaped in
@@ -1579,7 +1592,7 @@ pub async fn ensure_running(
             ..service.clone()
         };
         match kept.repair(executable, true, false) {
-            Repair::Start => service.start()?,
+            Repair::Start | Repair::Keep => service.start()?,
             Repair::Install => {
                 kept.install()?;
                 retire_old_copies(layout, &kept.executable);

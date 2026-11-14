@@ -1438,6 +1438,182 @@ fn a_definition_naming_a_volumes_or_translocated_program_is_never_started_as_is(
     }
 }
 
+/// The service with a launchd label or unit name of its own, unique to this run and
+/// moment, so a row that reaches the service manager never meets the owner's engine.
+/// Inputs: the service and a tag. Output: the relabelled service.
+#[cfg(unix)]
+fn labelled(mut service: Service, tag: &str) -> Service {
+    service.name = format!(
+        "dev.crazyagent.test.{tag}.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    service
+}
+
+/// RV-DS241-129: Restart engine, a forced reinstall, never points the login service away
+/// from another program that still exists when this engine may not replace it, as with a
+/// newer engine known at the data root or a dev build: the definition is kept
+/// (`engine_newer_than_app`). A broken definition, this engine's own, or one it may replace
+/// is still reinstalled, and a plain start still starts the kept one as it is.
+#[cfg(unix)]
+#[test]
+fn a_forced_reinstall_never_replaces_another_program_this_engine_may_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    let other = app_engine(temp.path(), "Newer");
+    let built = dev_engine(temp.path());
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join(format!("{platform:?}-engine"));
+        std::fs::create_dir_all(&own.root).unwrap();
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        let mut newer = own.clone();
+        newer.executable = other.clone();
+        write_definition(&own.definition, &newer.definition_text().unwrap(), platform).unwrap();
+        assert!(own.may_replace());
+        assert_eq!(own.repair(&bundled, true, true), Repair::Install);
+        let mut dev = own.clone();
+        dev.executable = built.clone();
+        assert_eq!(dev.repair(&built, true, true), Repair::Keep);
+        assert_eq!(dev.repair(&built, true, false), Repair::Start);
+        std::fs::write(
+            own.root.join("owner-current"),
+            br#"{"engine_version":"99.0.0"}"#,
+        )
+        .unwrap();
+        assert!(!own.may_replace());
+        assert_eq!(own.repair(&bundled, true, true), Repair::Keep);
+        assert_eq!(own.repair(&bundled, true, false), Repair::Start);
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert_eq!(own.repair(&bundled, true, true), Repair::Install);
+        let mut gone = own.clone();
+        gone.executable = temp.path().join("Gone").join("crazyagent");
+        write_definition(&own.definition, &gone.definition_text().unwrap(), platform).unwrap();
+        assert_eq!(own.repair(&bundled, true, true), Repair::Install);
+        assert_eq!(dev.repair(&built, true, true), Repair::Install);
+    }
+}
+
+/// DS-118 r1 F1 (rv-code): a refused start removes an installed definition naming a broken
+/// program, so launchd no longer runs a gone, /Volumes or translocated path at login or on a
+/// KeepAlive retry, and keeps a usable one. The service has a label of its own, never the
+/// owner's.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refusal_removes_a_definition_naming_a_broken_program_and_keeps_a_usable_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mounted = Path::new("/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent");
+    let bundled = app_engine(temp.path(), "Applications");
+    let mut there = labelled(service(Platform::MacOs), "refuse");
+    there.root = temp.path().join("engine");
+    there.executable = mounted.to_path_buf();
+    there.definition = temp.path().join(format!("{}.plist", there.name));
+    write_definition(
+        &there.definition,
+        &there.definition_text().unwrap(),
+        Platform::MacOs,
+    )
+    .unwrap();
+    assert_eq!(there.repair(mounted, true, false), Repair::Refuse);
+    let refused = there.refuse().0;
+    assert!(
+        refused.contains("move CrazyAgent to Applications"),
+        "{refused}"
+    );
+    assert!(
+        !there.definition.exists(),
+        "the broken definition is removed"
+    );
+    let mut usable = there.clone();
+    usable.executable = bundled;
+    write_definition(
+        &there.definition,
+        &usable.definition_text().unwrap(),
+        Platform::MacOs,
+    )
+    .unwrap();
+    assert_eq!(there.repair(mounted, true, true), Repair::Refuse);
+    let refused = there.refuse().0;
+    assert!(
+        refused.contains("move CrazyAgent to Applications"),
+        "{refused}"
+    );
+    assert!(there.definition.is_file(), "a usable definition stays");
+}
+
+/// DS-118 r1 F1 (rv-secreview): `start()` refuses a definition naming a gone, /Volumes or
+/// translocated program before any service command, so no caller starts it as it is. The
+/// row uses the systemd form and a name of its own, so even without the guard it never
+/// reaches launchd or the owner's unit.
+#[cfg(unix)]
+#[test]
+fn start_refuses_a_definition_naming_a_broken_program_before_any_service_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    let mut own = labelled(service(Platform::Linux), "start");
+    own.root = temp.path().join("engine");
+    own.executable = bundled;
+    own.definition = temp.path().join(&own.name);
+    for program in [
+        temp.path().join("Gone").join("crazyagent"),
+        PathBuf::from("/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent"),
+        PathBuf::from(
+            "/private/var/folders/ab/xyz/T/AppTranslocation/0A1B2C3D/d/CrazyAgent.app/Contents/MacOS/crazyagent",
+        ),
+    ] {
+        let mut broken = own.clone();
+        broken.executable = program.clone();
+        write_definition(
+            &own.definition,
+            &broken.definition_text().unwrap(),
+            Platform::Linux,
+        )
+        .unwrap();
+        let refused = own.start().unwrap_err().0;
+        assert!(
+            refused.contains(&program.display().to_string()),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("reinstall it: crazyagent service install"),
+            "{refused}"
+        );
+        assert!(own.definition.is_file());
+    }
+}
+
+/// DS-118 r1 F1 (rv-secreview): `install()` refuses an engine on a disk image or in a
+/// translocated folder before it prepares, writes or registers anything, so no login
+/// service ever names such a path.
+#[cfg(unix)]
+#[test]
+fn install_refuses_a_transient_engine_before_writing_anything() {
+    let temp = tempfile::tempdir().unwrap();
+    for platform in [Platform::MacOs, Platform::Linux] {
+        for program in [
+            "/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent",
+            "/private/var/folders/ab/xyz/T/AppTranslocation/0A1B2C3D/d/CrazyAgent.app/Contents/MacOS/crazyagent",
+        ] {
+            let mut there = labelled(service(platform), "install");
+            there.root = temp.path().join("engine");
+            there.executable = PathBuf::from(program);
+            there.definition = temp.path().join(format!("{platform:?}.definition"));
+            let refused = there.install().unwrap_err().0;
+            assert!(
+                refused.contains("move CrazyAgent to Applications"),
+                "{refused}"
+            );
+            assert!(!there.definition.exists());
+            assert!(!there.root.exists(), "nothing was prepared");
+        }
+    }
+}
+
 /// RV-DS241-118: a program path written escaped (XML in a plist; quoted, with `$$` and `%%`,
 /// for systemd) reads back as itself, so an engine kept in such a folder is never taken for
 /// a gone one and starts as it is.
