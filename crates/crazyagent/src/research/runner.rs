@@ -3878,6 +3878,61 @@ fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     )
 }
 
+/// The names of the plain files in the owner's documents folder, at most
+/// `DOCUMENTS_LISTED_MAX` entries read, from the folder opened below the project's context
+/// folder with no link followed (RV-DS241-29), so a documents folder that is a link lists
+/// nothing. Inputs: the context folder and the documents folder in it. Output: the names,
+/// none when the folder is missing, a link or unreadable.
+#[cfg(unix)]
+fn document_names(context: &Path, documents: &Path) -> Vec<String> {
+    use rustix::fs::{AtFlags, Dir, FileType, OFlags, statat};
+    let Ok(below) = documents.strip_prefix(context) else {
+        return Vec::new();
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(folder) = crate::platform::open_beneath(context, below, flags) else {
+        return Vec::new();
+    };
+    let Ok(listing) = Dir::read_from(&folder) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for entry in listing
+        .flatten()
+        .filter(|entry| !matches!(entry.file_name().to_bytes(), b"." | b".."))
+        .take(DOCUMENTS_LISTED_MAX)
+    {
+        let plain = statat(&folder, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
+        if plain
+            && let Ok(name) = entry.file_name().to_str()
+            && !name.chars().any(char::is_control)
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// The names of the plain files in the owner's documents folder, at most
+/// `DOCUMENTS_LISTED_MAX` entries read, none when the folder is a link. Inputs: the context
+/// folder, unused, and the documents folder. Output: the names. Written, not tested.
+#[cfg(not(unix))]
+fn document_names(_context: &Path, documents: &Path) -> Vec<String> {
+    let real = fs::symlink_metadata(documents)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    let Some(entries) = real.then(|| fs::read_dir(documents).ok()).flatten() else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .take(DOCUMENTS_LISTED_MAX)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| !name.chars().any(char::is_control))
+        .collect()
+}
+
 /// Reads a report or brief an agent may have replaced, opened from a folder the engine
 /// holds with no link followed in any part below it and no FIFO waited on, so an agent
 /// that swapped its temp folder for a link is refused; the file is kept only when regular
@@ -3917,17 +3972,7 @@ fn research_prompt(
         Err(error) => return Err(error.into()),
     };
     let documents_dir = context.join("documents");
-    let mut documents = Vec::new();
-    if let Ok(entries) = fs::read_dir(&documents_dir) {
-        for entry in entries.flatten().take(DOCUMENTS_LISTED_MAX) {
-            if entry.file_type().is_ok_and(|kind| kind.is_file())
-                && let Some(name) = entry.file_name().to_str()
-                && !name.chars().any(char::is_control)
-            {
-                documents.push(name.to_string());
-            }
-        }
-    }
+    let mut documents = document_names(&context, &documents_dir);
     documents.sort();
     let label = kind_label(kind);
     let mut prompt = format!(
