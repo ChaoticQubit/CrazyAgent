@@ -460,12 +460,12 @@ export function ApplyChoices({ name, value, onChange }: {
   </fieldset>;
 }
 
-/** The allowed extras: each saved or added one with what it means and Remove, and a form to
- * add one socket, one port or the owner's temp folder within their bounds (F08). Inputs: the id
- * prefix, the engine's view, the extras as edited, the chosen level and the change handler.
- * Output: the fieldset. */
-export function GrantsEditor({ prefix, view, grants, access, onChange }: {
-  prefix: string; view: PolicyView; grants: AccessGrant[]; access: AgentAccess; onChange: (grants: AccessGrant[]) => void;
+/** The allowed extras: each saved or added one with what it means and Remove, a form to add one
+ * socket, one port or the owner's temp folder within their bounds (F08) and, on Linux below Full
+ * access, that a port is open on every host. Inputs: the id prefix, the engine's view, the extras
+ * as edited, the chosen level, the change handler and this desktop's platform. Output: the fieldset. */
+export function GrantsEditor({ prefix, view, grants, access, onChange, platform = desktopPlatform() }: {
+  prefix: string; view: PolicyView; grants: AccessGrant[]; access: AgentAccess; onChange: (grants: AccessGrant[]) => void; platform?: string;
 }) {
   const [kind, setKind] = useState<"socket" | "port">("port");
   const [typed, setTyped] = useState("");
@@ -485,6 +485,7 @@ export function GrantsEditor({ prefix, view, grants, access, onChange }: {
   return <fieldset className="pj-field">
     <legend>Allowed extras</legend>
     <p className="pj-help">One socket, one port on this computer or your temp folder that agents may reach beyond their level. Agents can also ask for one; you answer in Questions.</p>
+    {access !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_PORTS_ANY_HOST}</p>}
     <ul className="pj-paths" aria-label="Allowed extras">
       {grants.length === 0 && <li className="pj-muted">No extras.</li>}
       {grants.map((grant) => <li key={grantLabel(grant)}>

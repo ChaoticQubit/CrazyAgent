@@ -751,11 +751,19 @@ pub fn meaning(grant: &AccessGrant) -> &'static str {
     }
 }
 
-/// What one grant lets agents do as its access question says it, from [`meaning`]. Inputs:
-/// the grant and whether the engine runs on Linux. Output: the sentences.
+/// What one grant lets agents do as its access question says it: [`meaning`], and for a
+/// port on Linux, where Landlock limits ports and not hosts, that the port is open to agents
+/// on every host ([`crate::sandbox::LINUX_PORTS_ANY_HOST_LINE`]). Inputs: the grant and
+/// whether the engine runs on Linux. Output: the sentences.
 pub fn asked_meaning(grant: &AccessGrant, linux: bool) -> String {
-    let _ = linux;
-    meaning(grant).to_owned()
+    match grant {
+        AccessGrant::Port { .. } if linux => format!(
+            "{} {}",
+            meaning(grant),
+            crate::sandbox::LINUX_PORTS_ANY_HOST_LINE
+        ),
+        _ => meaning(grant).to_owned(),
+    }
 }
 
 fn capital(text: &str) -> String {
