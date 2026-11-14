@@ -1499,6 +1499,66 @@ fn a_forced_reinstall_never_replaces_another_program_this_engine_may_not() {
     }
 }
 
+/// DS-118 r2 F1 (rv-secreview): an AppImage app's login service runs the private copy in
+/// `<root>/setup/bin`, so whether this app may replace another program is judged on the
+/// app's own engine in its `.mount_` folder, not on the copy, which is in no app bundle.
+/// Restart engine and a plain start then replace an older program, and a newer one known
+/// at the data root is kept on Restart engine and started as it is on a plain start. A
+/// definition naming the copy with another PATH is still refreshed.
+#[cfg(unix)]
+#[test]
+fn an_appimage_copy_is_judged_by_the_app_engine_it_was_copied_from() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = temp
+        .path()
+        .join(".mount_CrazyAgentX")
+        .join("usr")
+        .join("bin")
+        .join("crazyagent");
+    std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    std::fs::write(&bundled, b"engine").unwrap();
+    let mut copy = service(Platform::Linux);
+    copy.root = temp.path().join("engine");
+    copy.executable = copy.root.join("setup").join("bin").join("crazyagent");
+    std::fs::create_dir_all(copy.executable.parent().unwrap()).unwrap();
+    std::fs::write(&copy.executable, b"engine").unwrap();
+    copy.definition = temp.path().join("crazyagent.service");
+    let old = copy.root.join("bin").join("crazyagent");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, b"older engine").unwrap();
+    let mut older = copy.clone();
+    older.executable = old;
+    write_definition(
+        &copy.definition,
+        &older.definition_text().unwrap(),
+        Platform::Linux,
+    )
+    .unwrap();
+    assert!(copy.runs_another_program());
+    assert_eq!(copy.broken_program(), None);
+    assert!(!copy.may_replace(), "the copy is in no app bundle");
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Install);
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Install);
+    std::fs::write(
+        copy.root.join("owner-current"),
+        br#"{"engine_version":"99.0.0"}"#,
+    )
+    .unwrap();
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Keep);
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    let mut elsewhere = copy.clone();
+    elsewhere.path = OsString::from("/usr/bin:/bin");
+    write_definition(
+        &copy.definition,
+        &elsewhere.definition_text().unwrap(),
+        Platform::Linux,
+    )
+    .unwrap();
+    assert!(!copy.runs_another_program());
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Install);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Install);
+}
+
 /// DS-118 r1 F1 (rv-code): a refused start removes an installed definition naming a broken
 /// program, so launchd no longer runs a gone, /Volumes or translocated path at login or on a
 /// KeepAlive retry, and keeps a usable one. The service has a label of its own, never the
