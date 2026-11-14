@@ -238,7 +238,7 @@ test("the project Metrics tab asks the engine for that project's report and metr
   });
 });
 
-test("picking a project on the app page reads that project, hides Account limits and sends Shown with the other money choices", async () => {
+test("picking a project on the app page reads that project, hides Account limits and sends only the Shown choice (money one)", async () => {
   await withPage(async (page) => {
     await open(page, "light", 1440, { ...ANSWERS, desktop_usage_set_money: null });
     assert.equal(await page.evaluate(`document.querySelectorAll(".usage-limits").length`), 1, "every project shows the account limits");
@@ -251,7 +251,7 @@ test("picking a project on the app page reads that project, hides Account limits
     assert.equal(await page.evaluate(`document.querySelectorAll(".usage-limits").length`), 0, "a picked project hides the account limits");
     assert.match(await page.evaluate(`document.getElementById("mount").textContent`), /Limits belong to accounts, not projects\./);
     await clickOn(page, "[role=radio]", "Shown");
-    assert.deepEqual(await page.evaluate(`Fixture.sentTo("desktop_usage_set_money")`), [{ settings: { main_number: "tokens", prices: "off", project_limits: "shown" } }]);
+    assert.deepEqual(await page.evaluate(`Fixture.sentTo("desktop_usage_set_money")`), [{ choice: { field: "project_limits", value: "shown" } }]);
   });
 });
 

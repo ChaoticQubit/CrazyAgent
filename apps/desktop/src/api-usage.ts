@@ -184,6 +184,13 @@ export interface SpendSettings {
   resets_source?: ResetsSource;
 }
 
+/** One Pools setting the owner changed, the only one a save sends, so a change another window
+ * made to the other two is never written back over. */
+export type SpendChoice =
+  | { field: "confirm"; value: SpendConfirm }
+  | { field: "all_limited"; value: AllLimited }
+  | { field: "resets_source"; value: ResetsSource };
+
 /** One account's latest spend: who asked, where it stands and its outcome code. */
 export interface SpendAttempt {
   account: string;
@@ -411,9 +418,16 @@ export function refreshUsage(): Promise<Result<void>> {
   return call<void>("desktop_usage_refresh");
 }
 
-/** Stores the owner's main number and price source. Input: the settings. Output: done. */
-export function setMoney(settings: MoneySettings): Promise<Result<void>> {
-  return call<void>("desktop_usage_set_money", { settings });
+/** One of the owner's dollars and Metrics page choices with its new value. */
+export type MoneyChoice =
+  | { field: "main_number"; value: MoneySettings["main_number"] }
+  | { field: "prices"; value: MoneySettings["prices"] }
+  | { field: "project_limits"; value: NonNullable<MoneySettings["project_limits"]> };
+
+/** Stores one of the owner's dollars and Metrics page choices; the engine keeps the other
+ * two as stored. Input: the choice and its value. Output: done. */
+export function setMoneyOne(choice: MoneyChoice): Promise<Result<void>> {
+  return call<void>("desktop_usage_set_money", { choice });
 }
 
 /** Applies the owner's choice of the recount, once. Input: whether to use the new numbers.
@@ -434,9 +448,10 @@ export function spendReset(account: string, confirmed: boolean): Promise<Result<
   return call<void>("desktop_usage_spend", { account, confirmed });
 }
 
-/** Stores the owner's spend settings. Input: the settings. Output: done. */
-export function setSpendSettings(settings: SpendSettings): Promise<Result<void>> {
-  return call<void>("desktop_usage_set_spend", { settings });
+/** Stores one of the owner's Pools settings and leaves the other two as the engine holds them.
+ * Input: the setting and its value. Output: done. */
+export function setSpendOne(choice: SpendChoice): Promise<Result<void>> {
+  return call<void>("desktop_usage_set_spend", { choice });
 }
 
 /** Reads the notices for the code the app adapts from others. Output: the text. */

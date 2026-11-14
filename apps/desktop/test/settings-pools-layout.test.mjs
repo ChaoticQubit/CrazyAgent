@@ -113,7 +113,7 @@ test("each Claude free resets source picked reads every row's free resets again 
     }
     return { reads, kept: await page.evaluate("Fixture.spendSettingsSent()") };
   });
-  assert.deepEqual(seen.kept.map((settings) => settings.resets_source), ["through_claude_code", "as_claude_code", "off"]);
+  assert.deepEqual(seen.kept, ["through_claude_code", "as_claude_code", "off"].map((value) => ({ field: "resets_source", value })));
   assert.deepEqual(seen.reads.slice(1).map((reads, at) => reads - seen.reads[at]), [1, 1, 1], JSON.stringify(seen));
 });
 

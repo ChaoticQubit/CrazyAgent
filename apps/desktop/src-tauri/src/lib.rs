@@ -64,9 +64,9 @@ use crazyagent::team::cleanup::FinishedAgent;
 use crazyagent::team::{TeamGraph, TeamStatus, TerminalsPerWindow};
 use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
-use crazyagent::usage::money::MoneySettings;
+use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
-use crazyagent::usage::spend::SpendSettings;
+use crazyagent::usage::spend::SpendChoice;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -3778,10 +3778,10 @@ fn desktop_usage_notices(webview: Webview) -> Result<&'static str, BridgeError> 
 async fn desktop_usage_set_money(
     webview: Webview,
     state: State<'_, NativeState>,
-    settings: MoneySettings,
+    choice: MoneyChoice,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.usage_set_money(settings)?;
+    let call = lock(&state).await?.usage_set_money_one(choice)?;
     call.await
 }
 
@@ -3801,10 +3801,10 @@ async fn desktop_usage_spend(
 async fn desktop_usage_set_spend(
     webview: Webview,
     state: State<'_, NativeState>,
-    settings: SpendSettings,
+    choice: SpendChoice,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.usage_set_spend(settings)?;
+    let call = lock(&state).await?.usage_set_spend_one(choice)?;
     call.await
 }
 
