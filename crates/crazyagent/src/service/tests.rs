@@ -1862,6 +1862,12 @@ fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a
         "the entry's own folder keeps the full checks"
     );
     assert_eq!(
+        changeable_past_sticky(&loose),
+        None,
+        "for the tools setup and the resolver run, a present entry the group cannot replace \
+         passes in the store itself (rv-sec2 corrections F2)"
+    );
+    assert_eq!(
         changeable_by_others(&store.join("gone/bin/tool")),
         Some(store.clone()),
         "the group could make a missing folder below the store"
@@ -1880,7 +1886,7 @@ fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a
 /// folder (root 1777) above this user's 0700 folder passes for the tools the resolver runs
 /// and stays changeable for the engine service; a part another user owns below it is
 /// refused; a /nix/store-like folder (root:nixbld 1775) above 0555 packages passes for
-/// both; a missing part below a store, or a store as the entry's own folder, is refused.
+/// both; a missing part below a store, or /tmp as the entry's own folder, is refused.
 #[cfg(unix)]
 #[test]
 fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
@@ -1931,6 +1937,58 @@ fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
         first_changeable_part(&plain, ME, true),
         Some(2),
         "a group-writable folder with no sticky bit"
+    );
+}
+
+/// rv-sec2 corrections F2 (DS-89): for the tools the resolver and setup run, a file directly
+/// in a sticky store such as /nix/store, where nix-darwin's /opt/homebrew/bin/brew link
+/// resolves, passes: the store's group cannot unlink or rename an entry root owns there. The
+/// service check is unchanged, and a group-writable parent with no sticky bit, a sticky one
+/// another user owns, one over a missing entry, and a world-writable sticky one such as /tmp
+/// as the entry's own folder still count.
+#[cfg(unix)]
+#[test]
+fn a_file_directly_in_a_sticky_group_store_passes_and_an_unsticky_parent_does_not() {
+    const ME: u32 = 501;
+    const OTHER: u32 = 502;
+    const NIXBLD: u32 = 30_000;
+    let found = |owner, group, mode, folder| Part::Found {
+        owner,
+        group,
+        mode,
+        folder,
+        link: false,
+    };
+    let system = found(0, 0, 0o755, true);
+    let brew = found(0, 0, 0o555, false);
+    let store = found(0, NIXBLD, 0o1775, true);
+    assert_eq!(
+        first_changeable_part(&[brew, store, system, system], ME, true),
+        None
+    );
+    assert_eq!(
+        first_changeable_part(&[brew, store, system, system], ME, false),
+        Some(1),
+        "the service check is unchanged"
+    );
+    let unsticky = found(0, NIXBLD, 0o775, true);
+    assert_eq!(
+        first_changeable_part(&[brew, unsticky, system, system], ME, true),
+        Some(1)
+    );
+    let theirs = found(OTHER, NIXBLD, 0o1775, true);
+    assert_eq!(
+        first_changeable_part(&[brew, theirs, system, system], ME, true),
+        Some(1)
+    );
+    assert_eq!(
+        first_changeable_part(&[Part::Missing, store, system, system], ME, true),
+        Some(1)
+    );
+    let tmp = found(0, 0, 0o1777, true);
+    assert_eq!(
+        first_changeable_part(&[brew, tmp, system], ME, true),
+        Some(1)
     );
 }
 

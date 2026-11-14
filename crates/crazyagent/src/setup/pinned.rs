@@ -216,19 +216,9 @@ impl PinnedInstaller {
             self.download(url, sha256, &archive, &staging)?;
             let out = staging.join("out");
             private_folder(&out)?;
-            let (unpacked, _) = run(
-                Path::new(TAR),
-                &[
-                    "-xzf".into(),
-                    archive.clone().into_os_string(),
-                    "-C".into(),
-                    out.clone().into_os_string(),
-                    member.into(),
-                ],
-                &self.env(),
-                &staging,
-                DOWNLOAD_TIME,
-            )?;
+            let mut words = unpack_args(&archive, &out);
+            words.push(member.into());
+            let (unpacked, _) = run(Path::new(TAR), &words, &self.env(), &staging, DOWNLOAD_TIME)?;
             let program = out.join(member_path);
             let regular = std::fs::symlink_metadata(&program).is_ok_and(|m| m.is_file());
             if !unpacked || !regular {
@@ -407,8 +397,9 @@ impl PinnedInstaller {
                 && env.and_then(Path::parent) == Some(home)
                 && runnable(&target)
                 && env.is_some_and(|env| {
-                    std::fs::read(env.join(LOCK_FILE))
-                        .is_ok_and(|text| text == lock.requirements.as_bytes())
+                    runnable(&env.join("venv/bin/python"))
+                        && std::fs::read(env.join(LOCK_FILE))
+                            .is_ok_and(|text| text == lock.requirements.as_bytes())
                 })
         })
     }
@@ -471,6 +462,20 @@ pub(super) fn link(target: &Path, at: &Path) -> Result<(), InstallError> {
         let _ = std::fs::remove_file(&staged);
         unavailable
     })
+}
+
+/// The words that make tar unpack one archive into a folder, before any member names, as
+/// this user's files under this user's mode mask, never the archive's owners or modes, which
+/// tar keeps by default for root. Inputs: the archive and the folder. Output: tar's arguments.
+pub(super) fn unpack_args(archive: &Path, into: &Path) -> Vec<OsString> {
+    vec![
+        "--no-same-owner".into(),
+        "--no-same-permissions".into(),
+        "-xzf".into(),
+        archive.into(),
+        "-C".into(),
+        into.into(),
+    ]
 }
 
 /// Tells whether a path is a regular file someone may run. Input: the path.

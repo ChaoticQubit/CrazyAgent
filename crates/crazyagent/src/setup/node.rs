@@ -230,12 +230,7 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
         private_folder(&out)?;
         let (unpacked, _) = run(
             Path::new(TAR),
-            &[
-                "-xzf".into(),
-                archive.into_os_string(),
-                "-C".into(),
-                out.clone().into_os_string(),
-            ],
+            &super::pinned::unpack_args(&archive, &out),
             &installer.env(),
             &staging,
             UNPACK_TIME,
@@ -267,14 +262,16 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
     result
 }
 
-/// Checks an unpacked tree before it is kept: only plain folders, files and links, no file
-/// with a set-id or sticky bit or that others can write, every link relative, inside the
-/// tree by its words and by its resolved real path, and no more entries, file bytes or depth
-/// than the bounds allow. The walk never descends a link. Inputs: the tree's top folder and
-/// the bounds. Output: Ok, or `setup_archive_unsafe`.
+/// Checks an unpacked tree before it is kept: only plain folders, files and links this user
+/// owns, none with a set-id or sticky bit or that others can write, every link relative and
+/// inside the tree by its words and its real path, and no more entries, bytes or depth than
+/// the bounds allow. The walk never descends a link. Inputs: the tree's top folder and the
+/// bounds. Output: Ok, or `setup_archive_unsafe`.
 pub(crate) fn check_tree(top: &Path, limits: Limits) -> Result<(), InstallError> {
     let unsafe_tree = InstallError("setup_archive_unsafe");
-    let top_ok = std::fs::symlink_metadata(top).is_ok_and(|metadata| metadata.is_dir());
+    let uid = rustix::process::getuid().as_raw();
+    let top_ok = std::fs::symlink_metadata(top)
+        .is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == uid);
     if !top_ok {
         return Err(unsafe_tree);
     }
@@ -293,7 +290,10 @@ pub(crate) fn check_tree(top: &Path, limits: Limits) -> Result<(), InstallError>
             let metadata = std::fs::symlink_metadata(&path).map_err(|_| unsafe_tree)?;
             let kind = metadata.file_type();
             let mode = metadata.permissions().mode();
-            if mode & 0o7000 != 0 || (!kind.is_symlink() && mode & 0o002 != 0) {
+            if metadata.uid() != uid
+                || mode & 0o7000 != 0
+                || (!kind.is_symlink() && mode & 0o002 != 0)
+            {
                 return Err(unsafe_tree);
             }
             if kind.is_dir() {

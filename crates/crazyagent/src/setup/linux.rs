@@ -20,6 +20,8 @@ pub const SYSTEM_PATH: [&str; 4] = [
 
 const INSTALL_LIMIT: Duration = Duration::from_secs(15 * 60);
 const FORMULA_BYTES_MAX: usize = 64;
+const INSTALL_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
+const KEPT_ENV: [&str; 5] = ["HOME", "USER", "LOGNAME", "LANG", "TMPDIR"];
 
 /// A distribution package manager setup may use for tmux, only when the engine already runs
 /// as root. Setup never calls sudo.
@@ -42,11 +44,11 @@ impl PackageManager {
     }
 }
 
-/// The command that installs tmux's package. Input: the pinned formula or package name,
-/// Homebrew's `brew` when present, whether the engine runs as root, and the distribution's
-/// package manager. Output: `brew install` when Homebrew is present; otherwise apt or dnf,
-/// only as root; `setup_homebrew_missing` when neither applies, so the owner installs tmux;
-/// `setup_pin_invalid` for a name that is empty, too long or could read as a flag.
+/// The command that installs tmux, with only a fixed `PATH` and this user's home, name,
+/// language and temp folder. Input: the formula, Linuxbrew's `brew` when present, whether the
+/// engine is root, and the package manager. Output: `brew install` when not root, refused as
+/// `setup_homebrew_unsafe` when others can change `brew`; else apt or dnf as root; else
+/// `setup_homebrew_missing`; `setup_pin_invalid` for an empty, long or flag-like name.
 pub fn tmux_command(
     formula: &str,
     brew: Option<&Path>,
@@ -65,8 +67,11 @@ pub fn tmux_command(
     if !plain {
         return Err(InstallError("setup_pin_invalid"));
     }
-    if let Some(brew) = brew {
-        let mut command = Command::new(brew);
+    if let Some(brew) = brew.filter(|_| !root) {
+        if crate::service::changeable_past_sticky(brew).is_some() {
+            return Err(InstallError("setup_homebrew_unsafe"));
+        }
+        let mut command = kept_environment(brew);
         command
             .args(["install", "--formula", formula])
             .env("HOMEBREW_NO_AUTO_UPDATE", "1")
@@ -75,14 +80,14 @@ pub fn tmux_command(
     }
     match (root, manager) {
         (true, Some(PackageManager::Apt)) => {
-            let mut command = Command::new(APT_GET);
+            let mut command = kept_environment(Path::new(APT_GET));
             command
                 .args(["install", "-y", "--no-install-recommends", formula])
                 .env("DEBIAN_FRONTEND", "noninteractive");
             Ok(command)
         }
         (true, Some(PackageManager::Dnf)) => {
-            let mut command = Command::new(DNF);
+            let mut command = kept_environment(Path::new(DNF));
             command.args(["install", "-y", formula]);
             Ok(command)
         }
@@ -90,8 +95,23 @@ pub fn tmux_command(
     }
 }
 
-/// The Linux installer. tmux comes from Homebrew on Linux, or from apt or dnf when the
-/// engine already runs as root; setup never calls sudo. uv and Graphify go through the
+/// A command for one installer with the engine's environment cleared, keeping only a fixed
+/// `PATH` and the names in `KEPT_ENV` that are set. Input: the installer's absolute path.
+/// Output: the command, with no arguments yet.
+fn kept_environment(program: &Path) -> Command {
+    assert!(program.is_absolute());
+    let mut command = Command::new(program);
+    command.env_clear().env("PATH", INSTALL_PATH);
+    for name in KEPT_ENV {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+}
+
+/// The Linux installer. tmux comes from Homebrew on Linux for an engine that is not root,
+/// or from apt or dnf when the engine already runs as root; setup never calls sudo. uv and Graphify go through the
 /// shared pinned installer, the same checksum-verified path as macOS.
 pub struct LinuxInstaller {
     common: Box<dyn Installer>,
@@ -208,7 +228,10 @@ mod tests {
 
     #[test]
     fn tmux_installs_through_homebrew_or_a_root_package_manager_and_never_sudo() {
-        let brew = Path::new(LINUXBREW);
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let own = fake_brew(root.path(), "own", "#!/bin/sh\nexit 0\n");
+        let brew = own.as_path();
         let homebrew = tmux_command("tmux", Some(brew), false, Some(PackageManager::Apt)).unwrap();
         assert_eq!(homebrew.get_program(), brew.as_os_str());
         assert!(homebrew.get_args().eq(["install", "--formula", "tmux"]));
@@ -237,6 +260,70 @@ mod tests {
             assert_eq!(
                 tmux_command(formula, Some(brew), true, Some(PackageManager::Apt)).err(),
                 Some(InstallError("setup_pin_invalid"))
+            );
+        }
+    }
+
+    fn fake_brew(root: &Path, folder: &str, text: &str) -> PathBuf {
+        let brew = root.join(folder).join("brew");
+        std::fs::create_dir_all(brew.parent().unwrap()).unwrap();
+        std::fs::write(&brew, text).unwrap();
+        std::fs::set_permissions(&brew, std::fs::Permissions::from_mode(0o700)).unwrap();
+        brew
+    }
+
+    /// A root engine installs tmux with apt or dnf and never runs Homebrew, which would run
+    /// whatever the account owning Linuxbrew put there; as any other user a `brew` in a
+    /// folder another account can change is refused with its own code and never started.
+    #[test]
+    fn tmux_never_runs_homebrew_as_root_or_from_a_folder_others_can_change() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let own = fake_brew(root.path(), "own", "#!/bin/sh\nexit 0\n");
+        let shared = fake_brew(root.path(), "shared", "#!/bin/sh\nexit 0\n");
+        std::fs::set_permissions(
+            shared.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        let apt = tmux_command("tmux", Some(&own), true, Some(PackageManager::Apt)).unwrap();
+        assert_eq!(apt.get_program(), APT_GET);
+        assert_eq!(
+            tmux_command("tmux", Some(&own), true, None).err(),
+            Some(InstallError("setup_homebrew_missing"))
+        );
+        let homebrew = tmux_command("tmux", Some(&own), false, None).unwrap();
+        assert_eq!(homebrew.get_program(), own.as_os_str());
+        assert_eq!(
+            tmux_command("tmux", Some(&shared), false, Some(PackageManager::Apt)).err(),
+            Some(InstallError("setup_homebrew_unsafe"))
+        );
+        assert!(crate::setup::known_reason("setup_homebrew_unsafe").is_some());
+    }
+
+    /// Homebrew starts with only what it needs, a fixed PATH and this user's home, name,
+    /// language and temp folder, so no API key or token in the engine's environment reaches
+    /// a tmux install; the shell that runs the fixture adds only its own working names.
+    #[test]
+    fn homebrew_starts_with_only_the_kept_environment() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let brew = fake_brew(root.path(), "own", "#!/bin/sh\nexec /usr/bin/env\n");
+        let mut command = tmux_command("tmux", Some(&brew), false, None).unwrap();
+        let output = run_bounded(&mut command, Duration::from_secs(30), true).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let names: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .collect();
+        assert!(names.contains(&"PATH"), "{text}");
+        let kept = [
+            "PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "PWD", "OLDPWD", "SHLVL", "_",
+        ];
+        for name in names {
+            assert!(
+                kept.contains(&name) || name.starts_with("HOMEBREW_"),
+                "{name} reached Homebrew"
             );
         }
     }
