@@ -1289,7 +1289,7 @@ fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a
 /// folder (root 1777) above this user's 0700 folder passes for the tools the resolver runs
 /// and stays changeable for the engine service; a part another user owns below it is
 /// refused; a /nix/store-like folder (root:nixbld 1775) above 0555 packages passes for
-/// both; a missing part below a store, or a store as the entry's own folder, is refused.
+/// both; a missing part below a store, or /tmp as the entry's own folder, is refused.
 #[cfg(unix)]
 #[test]
 fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
