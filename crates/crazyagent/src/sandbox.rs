@@ -15,6 +15,8 @@ use std::process::Command;
 
 pub mod elf;
 pub mod extra_paths;
+#[cfg(all(test, target_os = "macos"))]
+mod git_deny_tests;
 pub mod grants;
 pub mod hidden_paths;
 pub mod ide_shell;
