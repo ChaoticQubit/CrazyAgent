@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(test, unix))]
 mod tests;
 mod updates;
-pub(super) use updates::{UPDATES_TIMEOUT, sign_in_version, slow};
+#[cfg(unix)]
+pub(super) use updates::sign_in_version;
+pub(super) use updates::{UPDATES_TIMEOUT, slow};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
