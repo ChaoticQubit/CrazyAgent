@@ -1200,29 +1200,30 @@ fn only_linux_refuses_the_graph_build_with_a_plain_line() {
     assert_eq!(graph::unavailable("macos"), None);
 }
 
-/// The graph step runs the graphify setup put in `<engine root>/setup/bin` first, a stand-in
-/// here so the row reads the same in any HOME, and looks again on each step: once it is gone
-/// the engine finds what an engine with no setup install finds. macOS only: by DEC-094 a
-/// Linux host installs no graphify (`only_linux_refuses_the_graph_build_with_a_plain_line`).
+/// The graph step's installer finds the graphify setup put in `<engine root>/setup/bin`, a
+/// stand-in here, and looks again on each step: once it is gone it finds none. The installer
+/// looks only in that folder, not this Mac's own installs, which come first on the engine's
+/// places, so the row reads the same in any HOME. macOS only: by DEC-094 a Linux host
+/// installs no graphify (`only_linux_refuses_the_graph_build_with_a_plain_line`).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
+    use crate::setup::Installer;
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     let bin = root.path().join("setup/bin");
+    let installer = crate::setup::pinned::PinnedInstaller::with_places(
+        root.path(),
+        Vec::new(),
+        crate::tools::Places::new(vec![bin.clone()], None),
+    );
+    let graphify = crate::setup::Dependency::Graphify.program();
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(bin.join("graphify"), "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(bin.join("graphify"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(
-        service::engine_graphify(root.path()),
-        Ok(bin.join("graphify"))
-    );
+    assert_eq!(installer.program(graphify), Some(bin.join("graphify")));
     std::fs::remove_file(bin.join("graphify")).unwrap();
-    let elsewhere = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
-    assert_eq!(
-        service::engine_graphify(root.path()),
-        service::engine_graphify(elsewhere.path())
-    );
+    assert_eq!(installer.program(graphify), None);
 }
 
 /// Makes a stand-in graphify below `root`, laid out as uv 0.13 lays out a tool: the

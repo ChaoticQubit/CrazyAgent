@@ -244,11 +244,26 @@ impl Engine {
     /// Takes the engine root. Returns the host, or `terminal_unavailable`.
     #[cfg(unix)]
     pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
+        self.terminal_on(root, || crate::terminal::tmux::installed(root))
+    }
+
+    /// Gives the terminal host on the tmux program `find` gives, as [`Engine::terminal`] does
+    /// with the program found now: the kept host while that program is its program, else a
+    /// new host on it, kept in its place. `find` runs while the host's lock is held, so a
+    /// caller that found an older program never replaces a host opened on a newer one. Takes
+    /// the engine root and the finder, none when tmux is not installed. Returns the host, or
+    /// `terminal_unavailable`.
+    #[cfg(unix)]
+    pub(super) fn terminal_on(
+        &self,
+        root: &Path,
+        find: impl FnOnce() -> Option<std::path::PathBuf>,
+    ) -> Result<Arc<dyn Host>, EngineError> {
         let mut slot = self
             .terminal
             .lock()
             .map_err(|_| failure("terminal_unavailable"))?;
-        let found = crate::terminal::tmux::installed(root);
+        let found = find();
         if let Some((program, host)) = slot.as_ref()
             && *program == found
         {
