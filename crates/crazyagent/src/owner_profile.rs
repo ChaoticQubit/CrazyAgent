@@ -69,23 +69,32 @@ fn single_line(text: &str) -> bool {
 impl OwnerProfile {
     /// Checks every field against its bound before the profile is stored.
     /// Input: an untrusted profile. Output: Ok, or the code naming the first
-    /// field that is blank, too long or holds control characters.
+    /// field that is blank, too long or holds control or hidden characters
+    /// ([`crate::memory::hidden_text`]).
     pub fn validate(&self) -> Result<(), EngineError> {
+        use crate::memory::hidden_text;
         if self.name.trim().is_empty()
             || self.name.len() > NAME_BYTES_MAX
             || !single_line(&self.name)
+            || hidden_text(&self.name)
         {
             return Err(error("owner_profile_name"));
         }
-        if self.role.len() > ROLE_BYTES_MAX || !single_line(&self.role) {
+        if self.role.len() > ROLE_BYTES_MAX || !single_line(&self.role) || hidden_text(&self.role) {
             return Err(error("owner_profile_role"));
         }
-        if self.bio.len() > BIO_BYTES_MAX || self.bio.chars().any(|c| c.is_control() && c != '\n') {
+        if self.bio.len() > BIO_BYTES_MAX
+            || self.bio.chars().any(|c| c.is_control() && c != '\n')
+            || hidden_text(&self.bio)
+        {
             return Err(error("owner_profile_bio"));
         }
         if self.preferred_stack.len() > STACK_ITEMS_MAX
             || self.preferred_stack.iter().any(|item| {
-                item.trim().is_empty() || item.len() > STACK_ITEM_BYTES_MAX || !single_line(item)
+                item.trim().is_empty()
+                    || item.len() > STACK_ITEM_BYTES_MAX
+                    || !single_line(item)
+                    || hidden_text(item)
             })
             || (1..self.preferred_stack.len())
                 .any(|index| self.preferred_stack[..index].contains(&self.preferred_stack[index]))
@@ -93,6 +102,26 @@ impl OwnerProfile {
             return Err(error("owner_profile_stack"));
         }
         Ok(())
+    }
+
+    /// The profile with every hidden character taken out of every field
+    /// ([`crate::memory::without_hidden`]), for one stored before they were
+    /// refused; a stack entry left blank is dropped and a repeated one kept
+    /// once. Input: a stored profile. Output: the cleaned profile.
+    fn without_hidden(mut self) -> Self {
+        use crate::memory::without_hidden;
+        self.name = without_hidden(&self.name);
+        self.role = without_hidden(&self.role);
+        self.bio = without_hidden(&self.bio);
+        let mut stack: Vec<String> = Vec::with_capacity(self.preferred_stack.len());
+        for item in self.preferred_stack.iter().map(|item| without_hidden(item)) {
+            if !item.trim().is_empty() && !stack.contains(&item) {
+                stack.push(item);
+            }
+        }
+        assert!(stack.len() <= self.preferred_stack.len());
+        self.preferred_stack = stack;
+        self
     }
 
     /// Writes the short owner preface placed before each master prompt.
@@ -131,12 +160,18 @@ impl OwnerProfile {
 /// codes that are not about the owner profile.
 pub fn plain_problem(code: &str) -> Option<&'static str> {
     match code {
-        "owner_profile_name" => Some("Enter your name, up to 100 characters."),
-        "owner_profile_role" => Some("Keep the role on one line, up to 100 characters."),
-        "owner_profile_bio" => Some("Keep the bio under 1000 characters."),
-        "owner_profile_stack" => {
-            Some("List up to 12 different technologies, each up to 40 characters.")
-        }
+        "owner_profile_name" => Some(
+            "Enter your name on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters.",
+        ),
+        "owner_profile_role" => Some(
+            "Keep your role on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters.",
+        ),
+        "owner_profile_bio" => Some(
+            "Keep your bio to 1000 bytes (about 1000 English letters or 333 Chinese, Hindi or Thai ones), with no tabs, special or hidden characters.",
+        ),
+        "owner_profile_stack" => Some(
+            "List up to 12 different technologies, each on one line, up to 40 bytes, with no hidden characters.",
+        ),
         _ => None,
     }
 }
@@ -175,8 +210,9 @@ pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineE
         .map_err(error)?;
     body.map(|body| {
         let body = body.ok_or_else(|| error("owner_profile_bounds"))?;
-        let profile: OwnerProfile =
-            serde_json::from_str(&body).map_err(|_| error("owner_profile_invalid"))?;
+        let profile: OwnerProfile = serde_json::from_str::<OwnerProfile>(&body)
+            .map_err(|_| error("owner_profile_invalid"))?
+            .without_hidden();
         profile
             .validate()
             .map_err(|_| error("owner_profile_invalid"))?;
