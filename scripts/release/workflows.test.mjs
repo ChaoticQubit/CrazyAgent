@@ -1265,3 +1265,62 @@ test("the hdiutil retry runs every other hdiutil command, and a create over an e
   assert.equal(over.kept, "kept", "an image that was there before is never deleted");
   assert.deepEqual(over.sleeps, []);
 });
+
+const NOTES_SCRIPT = fileURLToPath(new URL("./notes.mjs", import.meta.url));
+const NOTES_CHANGELOG = "# Changelog\n\n## [0.0.0] - 2026-11-13 12:07 UTC - Dev build\n\n### Added\n\n- A `quoted` line with $HOME and 100%.\n\n## [0.0.0-older] - 2026-11-01 - Released\n\n- Old.\n";
+
+/**
+ * Runs publish's "Write release notes" step in a temporary checkout. Inputs: the channel, the version,
+ * the changelog text (null for none) and the signing marks by target. Output: the step's status, its
+ * stderr, notes.txt (the release body) and update-notes.txt (the updater manifest's notes).
+ */
+async function writeNotes({ channel, version, changelog, signing }) {
+  const body = runBody(await releaseStep("publish", "Write release notes"));
+  const root = mkdtempSync(join(tmpdir(), "ca-relnotes-"));
+  try {
+    mkdirSync(join(root, "scripts", "release"), { recursive: true });
+    mkdirSync(join(root, "signing"));
+    copyFileSync(NOTES_SCRIPT, join(root, "scripts", "release", "notes.mjs"));
+    if (changelog !== null) writeFileSync(join(root, "CHANGELOG.md"), changelog);
+    for (const [target, mark] of Object.entries(signing)) writeFileSync(join(root, "signing", `${target}.txt`), mark);
+    writeFileSync(join(root, "step.sh"), body);
+    const run = spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", join(root, "step.sh")], {
+      cwd: root, encoding: "utf8", timeout: STEP_MS,
+      env: { PATH: `${stepBin()}:/usr/bin:/bin`, HOME: root, GITHUB_SHA: COMMIT, CHANNEL: channel, VERSION: version },
+    });
+    assert.equal(run.error, undefined, `the step ends within ${STEP_MS} ms`);
+    const read = (name) => (existsSync(join(root, name)) ? readFileSync(join(root, name), "utf8") : null);
+    return { status: run.status, stderr: run.stderr, notes: read("notes.txt"), update: read("update-notes.txt") };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("release notes carry the version's CHANGELOG section after the title and signing lines; the updater keeps the short notes", async () => {
+  const dev = await writeNotes({ channel: "dev", version: "0.0.0-dev.202611131207", changelog: NOTES_CHANGELOG, signing: { "aarch64-apple-darwin": "signed", "x86_64-unknown-linux-gnu": "unsigned" } });
+  assert.equal(dev.status, 0, dev.stderr);
+  const short = "Dev build 0.0.0-dev.202611131207 of 0123456.\nNot code signed: x86_64-unknown-linux-gnu\n";
+  assert.equal(dev.update, short);
+  assert.equal(dev.notes, `${short}\n### Added\n\n- A \`quoted\` line with $HOME and 100%.\n`);
+
+  const stable = await writeNotes({ channel: "stable", version: "0.0.0", changelog: NOTES_CHANGELOG, signing: { "aarch64-apple-darwin": "signed" } });
+  assert.equal(stable.status, 0, stable.stderr);
+  assert.equal(stable.update, "CrazyAgent 0.0.0\n");
+  assert.equal(stable.notes, "CrazyAgent 0.0.0\n\n### Added\n\n- A `quoted` line with $HOME and 100%.\n");
+});
+
+test("release notes keep today's one line when the CHANGELOG has no section for the version or is missing", async () => {
+  for (const changelog of [null, "# Changelog\n\n## [9.9.9] - 2026-11-13 - Released\n\n- Other.\n"]) {
+    const run = await writeNotes({ channel: "stable", version: "0.0.0", changelog, signing: { "x86_64-apple-darwin": "unsigned" } });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.notes, "CrazyAgent 0.0.0\nNot code signed: x86_64-apple-darwin\n");
+    assert.equal(run.update, run.notes);
+  }
+});
+
+test("the updater manifest reads the short notes, and the release body and dev pointer read the full notes", async () => {
+  const manifest = await releaseStep("publish", "Write update manifests and checksums");
+  assert.match(manifest, / --notes "\$\(cat update-notes\.txt\)" /);
+  assert(!manifest.includes("cat notes.txt"), "the 4096-character manifest bound never meets a CHANGELOG section");
+  assert.match(await releaseStep("publish", "Publish dev build"), /-F body=@notes\.txt /);
+});
