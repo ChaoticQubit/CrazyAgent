@@ -908,24 +908,32 @@ pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<Path
 }
 
 /// Writes one engine record in the profiles folder no agent writes, in place of any earlier
-/// one: a staged file only this user reads, renamed over the record so no reader sees part
-/// of it. Takes the record path and its text. Returns Ok, or
+/// one: a staged file only this user reads, under a random name of its own so no other
+/// writer's staged file is met or removed (RV-DS241-22), renamed over the record so no
+/// reader sees part of it. Takes the record path and its text. Returns Ok, or
 /// `terminal_own_server_unavailable`.
 #[cfg(unix)]
 fn keep_record(kept: &Path, text: &str) -> Result<(), HostError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let staging = kept.with_extension(format!("{}.tmp", std::process::id()));
-    let written = std::fs::OpenOptions::new()
+    const STAGING_NONCE_BYTES: usize = 16;
+    let mut nonce = [0_u8; STAGING_NONCE_BYTES];
+    getrandom::fill(&mut nonce).map_err(|_| failure(OWN_SERVER_UNAVAILABLE))?;
+    let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(digits.len(), 2 * STAGING_NONCE_BYTES);
+    let staging = kept.with_extension(format!("{digits}.tmp"));
+    let Ok(mut file) = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(&staging)
-        .and_then(|mut file| {
-            file.write_all(text.as_bytes())
-                .and_then(|()| file.sync_all())
-        })
+    else {
+        return Err(failure(OWN_SERVER_UNAVAILABLE));
+    };
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
         .and_then(|()| std::fs::rename(&staging, kept));
     if written.is_err() {
         let _ = std::fs::remove_file(&staging);
