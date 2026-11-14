@@ -29878,7 +29878,8 @@ fn ended_native_lead_on<T>(
 /// [`LEAVING_CLAUDE`] does only once the first move took, so a refused move fails the row.
 #[cfg(target_os = "macos")]
 const SOCKET_TIME_CLAUDE: &str = r#"#!/bin/sh
-s="${TMPDIR%/}/tmux.sock"
+t="${TMPDIR%/}"
+s="${t%/*}/tmux.sock"
 [ -S "$s" ] && /usr/bin/touch -t 209901010000 "$s" || exit 1
 /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid" &
 while /usr/bin/touch -t 209901010000 "$s"; do /bin/sleep 0.5; done
@@ -29891,7 +29892,8 @@ exec /bin/sleep 300
 /// only once the holder ended, so a refused end fails the row.
 #[cfg(target_os = "macos")]
 const HOLDER_ENDING_CLAUDE: &str = r#"#!/bin/sh
-s="${TMPDIR%/}/tmux.sock"
+t="${TMPDIR%/}"
+s="${t%/*}/tmux.sock"
 tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
 /usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid" &
 exec /bin/sleep 300
@@ -29904,7 +29906,8 @@ exec /bin/sleep 300
 /// end fails the row.
 #[cfg(target_os = "macos")]
 const WARDEN_ENDING_CLAUDE: &str = r#"#!/bin/sh
-s="${TMPDIR%/}/tmux.sock"
+t="${TMPDIR%/}"
+s="${t%/*}/tmux.sock"
 p=$(tmux -S "$s" display-message -p '#{pid}') && [ -n "$p" ] || exit 1
 /usr/bin/pkill -9 -P "$p" perl || exit 1
 tmux -S "$s" kill-window -t crazyagent:_crazyagent || exit 1
