@@ -2059,6 +2059,7 @@ fn a_harness_the_resolver_refuses_as_agent_writable_is_never_asked_its_version()
             ),
         );
         let link = work.join("node_modules/.bin/codex");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert!(matches!(
             method("codex", &real, &machine.roots()),
