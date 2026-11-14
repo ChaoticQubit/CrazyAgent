@@ -454,8 +454,6 @@ pub(super) fn link(target: &Path, at: &Path) -> Result<(), InstallError> {
     })
 }
 
-/// Tells whether a path is a regular file someone may run. Input: the path.
-/// Output: true for a file with any execute bit, following links.
 /// The words that make tar unpack one archive into a folder, before any member names, as
 /// this user's files under this user's mode mask, never the archive's owners or modes, which
 /// tar keeps by default for root. Inputs: the archive and the folder. Output: tar's arguments.
@@ -470,6 +468,8 @@ pub(super) fn unpack_args(archive: &Path, into: &Path) -> Vec<OsString> {
     ]
 }
 
+/// Tells whether a path is a regular file someone may run. Input: the path.
+/// Output: true for a file with any execute bit, following links.
 pub(super) fn runnable(path: &Path) -> bool {
     std::fs::metadata(path)
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
