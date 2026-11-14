@@ -5,10 +5,11 @@ import {
   accessSync, closeSync, constants, mkdirSync, mkdtempSync, openSync,
   readFileSync, statSync, writeFileSync, writeSync,
 } from "node:fs";
-import { createConnection, createServer } from "node:net";
+import { createConnection } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
+import { freeLowPort } from "./e2e-harness.mjs";
 import { chooseHome, clearWebStore, createRunDirectories, lockHome, runProjects } from "./run-layout.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -143,17 +144,6 @@ async function ready(entry) {
   throw new Error("fixture readiness timeout");
 }
 
-async function unusedPort() {
-  const server = createServer();
-  await new Promise((accept, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", accept);
-  });
-  const port = server.address().port;
-  await new Promise((accept, reject) => server.close((error) => error ? reject(error) : accept()));
-  return port;
-}
-
 async function portOpen(port) {
   return new Promise((accept, reject) => {
     const socket = createConnection({ port, host: "127.0.0.1" });
@@ -222,7 +212,7 @@ function engineEnvironment(env) {
 async function execute() {
   const binaries = [binary(app), binary(fixture)];
   const { env, projects } = await environment();
-  const port = await unusedPort();
+  const port = await freeLowPort();
   const engine = launch("engine", fixture,
     [suite === "model-access-read-only" ? "serve" : "serve-model-access",
       engineRoot, projects], engineEnvironment(env), WEBDRIVER_SECONDS + 30);

@@ -337,3 +337,30 @@ export function owner({ evaluate, send }, evidence) {
   };
   return { seen, waitFor, click, follow, type, enter, capture, unfold, asks };
 }
+
+let nextLowPort = null;
+
+/** Picks a loopback port nothing listens on now from 20000 to 28999, below every port the
+ * system hands out by itself and below both model proxy blocks, so no port-0 listener takes
+ * it before the caller's own server does. Each call starts past the last port it gave.
+ * Input: none. Output: the port. */
+export async function freeLowPort() {
+  const start = 20000;
+  const span = 9000;
+  const first = nextLowPort ?? (process.pid * 2654435761) % span;
+  for (let step = 0; step < span; step += 1) {
+    const offset = (first + step) % span;
+    const server = createServer();
+    const bound = await new Promise((done) => {
+      server.once("error", () => done(false));
+      server.listen(start + offset, "127.0.0.1", () => done(true));
+    });
+    if (bound) {
+      await new Promise((done) => server.close(done));
+      nextLowPort = (offset + 1) % span;
+      assert.ok(start + offset <= 28999);
+      return start + offset;
+    }
+  }
+  throw new Error("every low loopback port is taken");
+}
