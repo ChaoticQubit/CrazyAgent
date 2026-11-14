@@ -1942,6 +1942,68 @@ async fn the_conversation_read_refuses_a_foreign_session_and_a_page_out_of_bound
     case.close().await;
 }
 
+/// A master's home folder swapped for a link to a folder outside the home, back and forth
+/// while a deleted session's transcript is removed, never makes the engine remove anything
+/// out there: each removal acts through the folder it opened, never through the path again
+/// (RV-DS241-21).
+#[test]
+fn a_transcript_removal_never_deletes_through_a_home_folder_swapped_for_a_link() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let projects = home.join(".claude/projects");
+    let slug = projects.join("-session-repository");
+    let swap = projects.join("swap");
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(&slug).unwrap();
+    std::fs::create_dir_all(outside.join("conversation-kept")).unwrap();
+    std::os::unix::fs::symlink(&outside, &swap).unwrap();
+    let kept = crate::harnesses::terminal_session::Resume {
+        id: "conversation-kept".into(),
+        record: slug.join("conversation-kept.jsonl"),
+    };
+    let record = outside.join("conversation-kept.jsonl");
+    let folder = outside.join("conversation-kept/agent-a.jsonl");
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = Arc::clone(&stop);
+        let (slug, swap) = (slug.clone(), swap.clone());
+        std::thread::spawn(move || {
+            let mut swaps = 0_u64;
+            while !stop.load(Ordering::Relaxed) {
+                rustix::fs::renameat_with(
+                    rustix::fs::CWD,
+                    &slug,
+                    rustix::fs::CWD,
+                    &swap,
+                    rustix::fs::RenameFlags::EXCHANGE,
+                )
+                .unwrap();
+                swaps += 1;
+            }
+            swaps
+        })
+    };
+    let mut reached = Vec::new();
+    for attempt in 0..4000 {
+        std::fs::write(&record, "outside\n").unwrap();
+        std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
+        std::fs::write(&folder, "outside\n").unwrap();
+        let _ = remove_transcript(&home, &kept);
+        if !record.is_file() || !folder.is_file() {
+            reached.push(attempt);
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    assert!(swapper.join().unwrap() > 0);
+    assert_eq!(
+        reached,
+        Vec::<i32>::new(),
+        "attempts that removed a file outside the master's home"
+    );
+}
+
 #[tokio::test]
 async fn deleting_a_session_keeps_the_learning_tick_its_owner_messages_gave() {
     let case = Case::new().await;
