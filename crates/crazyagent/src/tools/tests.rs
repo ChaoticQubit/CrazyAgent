@@ -1315,11 +1315,12 @@ fn a_folder_in_a_set_up_project_without_a_crazyagent_folder_is_agent_writable() 
     );
 }
 
-/// RV-DS241-23: what the engine's places read of its set-up projects. No `engine.db` yet, or
-/// one with no setups table, is no project; a database that cannot be read, a setup that does
-/// not parse or more setups than the cap give none, never a partial list.
+/// RV-DS241-23 r2: what the engine's places read of its set-up projects. No `engine.db` yet,
+/// or one with no setups table, is no project; a database that cannot be read or more setups
+/// than the cap give none, never a partial list. A setup is read for its folder alone, so one
+/// written by another version still counts, and a row that names no folder is skipped alone.
 #[test]
-fn the_set_up_projects_are_read_whole_or_not_at_all() {
+fn the_set_up_projects_are_read_row_by_row_and_whole_only_when_the_database_is_unread() {
     let (_folder, home) = scratch();
     let project = home.join("work/app");
     std::fs::create_dir_all(&project).unwrap();
@@ -1347,16 +1348,47 @@ fn the_set_up_projects_are_read_whole_or_not_at_all() {
     .unwrap();
     assert_eq!(registered_projects(&broken), None);
 
-    let unparsed = home.join("unparsed");
-    engine_with_projects(&unparsed, &[&project]);
-    rusqlite::Connection::open(unparsed.join("engine.db"))
+    let skipped = home.join("skipped");
+    engine_with_projects(&skipped, &[&project]);
+    let connection = rusqlite::Connection::open(skipped.join("engine.db")).unwrap();
+    for (index, body) in ["{}", "not json", "{\"folder\": 7}", "[]", "\"\""]
+        .iter()
+        .enumerate()
+    {
+        connection
+            .execute(
+                "INSERT INTO project_setups(project, body) VALUES (?1, ?2)",
+                [format!("bad-{index}").as_str(), *body],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    assert_eq!(
+        registered_projects(&skipped),
+        Some(vec![project.clone()]),
+        "each bad row is skipped alone"
+    );
+
+    let other = home.join("work/other");
+    std::fs::create_dir_all(&other).unwrap();
+    let drifted = home.join("drifted");
+    engine_with_projects(&drifted, &[&project]);
+    let body = serde_json::json!({
+        "folder": other.join(".crazyagent").display().to_string(),
+        "added_later": {"kind": "field"},
+    });
+    rusqlite::Connection::open(drifted.join("engine.db"))
         .unwrap()
         .execute(
-            "INSERT INTO project_setups(project, body) VALUES ('other', '{}')",
-            [],
+            "INSERT INTO project_setups(project, body) VALUES ('drifted', ?1)",
+            [body.to_string()],
         )
         .unwrap();
-    assert_eq!(registered_projects(&unparsed), None);
+    assert_eq!(
+        registered_projects(&drifted),
+        Some(vec![project.clone(), other.clone()]),
+        "a setup another version wrote counts its folder"
+    );
 
     let many = home.join("many");
     engine_with_projects(&many, &[]);

@@ -1556,6 +1556,62 @@ fn an_access_listing_that_lets_others_change_an_entry_is_shared() {
     }
 }
 
+/// RV-DS241-18 r2: one `ls -lde` listing of several entries is read block by block, each
+/// block going to the one entry its first line ends with, the longest when one name ends
+/// another. An entry with no block or two gets none, and so does one whose block does not
+/// read, alone; a listing with a block for no entry or an access-list line before any entry
+/// gives none for every entry.
+#[cfg(unix)]
+#[test]
+fn a_listing_of_several_entries_is_read_block_by_block() {
+    let me = Some("me");
+    let line = |name: &str| format!("drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 {name}\n");
+    let open = " 0: group:staff allow add_file,delete_child\n";
+    let closed = " 0: group:everyone deny delete\n";
+    let entries = ["/Volumes/My /c", "/c", "/Users/me/bin", "/Users/me"];
+    let text = format!(
+        "{}{}{open}{}{closed}{}",
+        line("/Users/me"),
+        line("/Users/me/bin"),
+        line("/Volumes/My /c"),
+        line("/c")
+    );
+    assert_eq!(
+        acl::listed_shared_all(&text, &entries, me),
+        vec![Some(false), Some(false), Some(true), Some(false)]
+    );
+    assert_eq!(
+        acl::listed_shared_all(&line("/Users/me"), &["/Users/me", "/gone"], me),
+        vec![Some(false), None],
+        "an entry the listing left out"
+    );
+    assert_eq!(
+        acl::listed_shared_all(&format!("{0}{0}", line("/a")), &["/a"], me),
+        vec![None],
+        "an entry listed twice"
+    );
+    assert_eq!(
+        acl::listed_shared_all(
+            &format!("{} 0: group:staff\n{}{open}", line("/a"), line("/b")),
+            &["/a", "/b"],
+            me
+        ),
+        vec![None, Some(true)],
+        "a block that does not read fails alone"
+    );
+    for whole in [
+        format!("{open}{}", line("/a")),
+        format!("{}{}{open}", line("/a"), line("/zzz")),
+        String::new(),
+    ] {
+        assert_eq!(
+            acl::listed_shared_all(&whole, &["/a", "/b"], me),
+            vec![None, None],
+            "{whole:?}"
+        );
+    }
+}
+
 /// RV-DS241-18: a Linux `system.posix_acl_access` value names an entry changeable by others
 /// when a named user other than this user or root, or a named group the trusted-group rule
 /// does not trust, has write; the owner, group and other entries stay with the mode bits,
@@ -1650,4 +1706,59 @@ fn a_tool_folder_staff_may_change_through_its_access_list_is_changeable() {
     assert_eq!(mode_of(&folder), 0o755, "the mode bits still read private");
     assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
     assert_eq!(changeable_past_sticky(&tool), Some(folder.clone()));
+}
+
+/// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
+/// space or an accent included; a repeat lists none of the parts it read, and an access-list
+/// change moves only the changed part's change time, so that part alone is listed again and
+/// the change counts.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts() {
+    let temp = durable_folder();
+    let kit = temp.path().join("tool kit \u{e9}");
+    let folder = kit.join("bin");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    let ours = |listings: &[Vec<PathBuf>]| -> Vec<PathBuf> {
+        listings
+            .iter()
+            .flatten()
+            .filter(|listed| listed.starts_with(temp.path()))
+            .cloned()
+            .collect()
+    };
+    acl::take_listings();
+    assert_eq!(changeable_by_others(&tool), None);
+    let first = acl::take_listings();
+    assert_eq!(first.len(), 1, "one listing for every part: {first:?}");
+    for part in [&tool, &folder, &kit] {
+        assert!(first[0].contains(part), "{part:?} in {first:?}");
+    }
+
+    assert_eq!(changeable_by_others(&tool), None);
+    let repeat = acl::take_listings();
+    assert!(repeat.len() <= 1, "{repeat:?}");
+    assert_eq!(
+        ours(&repeat),
+        Vec::<PathBuf>::new(),
+        "nothing read is listed again"
+    );
+
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("group:staff allow add_file,delete_child")
+            .arg(&folder),
+    )
+    .unwrap();
+    assert!(status.success());
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    let changed = acl::take_listings();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(
+        ours(&changed),
+        vec![folder.clone()],
+        "the changed part alone"
+    );
 }

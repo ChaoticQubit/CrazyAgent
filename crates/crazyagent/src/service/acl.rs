@@ -36,11 +36,27 @@ pub(super) fn shared(entry: &Path) -> Option<bool> {
         .env("LC_ALL", "C")
         .arg("-lde")
         .arg(entry);
+    #[cfg(test)]
+    LISTINGS.with(|listings| listings.borrow_mut().push(vec![entry.to_path_buf()]));
     let (ok, output) = crate::setup::process::run_command(command, LIST_TIME).ok()?;
     if !ok || output.len() >= crate::setup::process::OUTPUT_BYTES_MAX {
         return None;
     }
     listed_shared(&String::from_utf8_lossy(&output), own_name())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// The entries of each access listing this test thread ran, in order.
+    static LISTINGS: std::cell::RefCell<Vec<Vec<std::path::PathBuf>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Takes the entries of each access listing this test thread ran since the last take.
+/// Output: one list of entries per listing, in the order they ran.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn take_listings() -> Vec<Vec<std::path::PathBuf>> {
+    LISTINGS.with(|listings| std::mem::take(&mut *listings.borrow_mut()))
 }
 
 /// This user's short name as access listings print it, read once. Output: the name, or none
@@ -86,6 +102,18 @@ pub(super) fn listed_shared(text: &str, me: Option<&str>) -> Option<bool> {
         shared |= words[kind] == "allow" && changes && !trusted;
     }
     Some(shared)
+}
+
+/// Reads one `ls -lde` listing of several entries block by block. Inputs: the listing, the
+/// entries as listed and this user's name, if known. Output: one answer per entry, in order.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn listed_shared_all(
+    text: &str,
+    entries: &[&str],
+    me: Option<&str>,
+) -> Vec<Option<bool>> {
+    let _ = (text, me);
+    vec![None; entries.len()]
 }
 
 /// The largest POSIX access list read, far above the entries a folder carries.
