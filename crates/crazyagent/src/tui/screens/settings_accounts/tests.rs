@@ -1580,6 +1580,13 @@ fn a_sign_in_refused_as_too_old_names_the_version_and_the_minimum_as_the_app_doe
     }
     let unread = "Claude Code is too old to sign in from CrazyAgent. Update Claude Code, then choose Check again.";
     assert_eq!(too_old_line(claude, None), unread);
+    for minimum in ["", "latest", "2", "2.1.268-beta"] {
+        let odd = crate::harnesses::update::HarnessVersions {
+            sign_in_min: Some(minimum.into()),
+            ..below.clone()
+        };
+        assert_eq!(too_old_line(claude, Some(&odd)), unread, "{minimum:?}");
+    }
     assert_eq!(
         sign_in_problem(claude, &failed("native_auth_harness_too_old", None)),
         unread

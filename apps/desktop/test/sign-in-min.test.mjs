@@ -33,6 +33,10 @@ test("DEC-166: without a version below the minimum the line names only the minim
     { text: "Claude Code is too old to sign in from CrazyAgent. Update Claude Code, then choose Check again.", hint: "too_old" });
   assert.deepEqual(signIn.signInFailure(CODE, "chatgpt", undefined, { ...codex, sign_in_min: null }),
     { text: "Codex is too old to sign in from CrazyAgent. Update Codex, then choose Check again.", hint: "too_old" });
+  for (const minimum of ["", "latest", "2", "2.1.268-beta"]) {
+    assert.equal(signIn.signInFailure(CODE, "claude", undefined, { ...claude, sign_in_min: minimum }).text,
+      "Claude Code is too old to sign in from CrazyAgent. Update Claude Code, then choose Check again.", `a minimum that is not a version, ${JSON.stringify(minimum)}, is no minimum`);
+  }
 });
 
 test("DEC-166: the too-old panel offers Update with the harness's own command and Check again", () => {
