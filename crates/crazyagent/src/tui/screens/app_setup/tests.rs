@@ -2063,3 +2063,15 @@ fn the_unused_tools_setting_saves_the_command_only_choice() {
     shell.arrive(event(AppSetupEvent::RefusedToolSet(Ok(()))));
     assert_eq!(lead(&shell), "Unused tools: Show the command only.");
 }
+
+/// DEC-158: keeping team agents tells the owner that an agent under network None is frozen
+/// until CrazyAgent opens again, in the same words as the desktop Settings.
+#[test]
+fn keeping_team_agents_says_an_agent_under_network_none_is_frozen_until_crazyagent_opens() {
+    let (title, detail) = on_quit_words(OnQuit::KeepRunning);
+    assert_eq!(title, "Keep team agents running");
+    assert_eq!(
+        detail,
+        "They go on with their work, and CrazyAgent takes them over when it opens again. An agent under network None is frozen instead, until CrazyAgent opens again."
+    );
+}

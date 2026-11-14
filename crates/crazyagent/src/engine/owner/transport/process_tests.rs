@@ -1943,6 +1943,10 @@ fn an_empty_file_a_failed_run_and_an_unusable_reply_change_nothing() {
             "instructions_cleanup_unavailable",
         ),
         (
+            Err(cleanup::PROVIDER_UNREACHABLE),
+            "instructions_cleanup_provider_unreachable",
+        ),
+        (
             Ok("I would rather not."),
             "instructions_cleanup_no_proposal",
         ),

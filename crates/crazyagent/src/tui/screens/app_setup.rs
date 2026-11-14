@@ -127,7 +127,7 @@ pub(in crate::tui) fn on_quit_words(on_quit: OnQuit) -> (&'static str, &'static 
     match on_quit {
         OnQuit::KeepRunning => (
             "Keep team agents running",
-            "They go on with their work, and CrazyAgent takes them over when it opens again.",
+            "They go on with their work, and CrazyAgent takes them over when it opens again. An agent under network None is frozen instead, until CrazyAgent opens again.",
         ),
         OnQuit::Stop => (
             "Stop team agents",

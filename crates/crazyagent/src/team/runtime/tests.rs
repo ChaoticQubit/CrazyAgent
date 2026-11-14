@@ -28,6 +28,10 @@ mod keyed_relay_tests;
 #[path = "live_terminal_probe_tests.rs"]
 mod live_terminal_probe_tests;
 
+#[cfg(target_os = "macos")]
+#[path = "freeze_tests.rs"]
+mod freeze_tests;
+
 const PROJECT: &str = "team-panes";
 
 const ENDPOINT: &str = "local-a";
@@ -15332,6 +15336,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         hookless: false,
         scratch_pin: None,
         proxy: None,
+        freeze_record: None,
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
@@ -17331,6 +17336,7 @@ fn between_turns(
         checked: None,
         narrowed: None,
         ran_before: Duration::ZERO,
+        proxy: None,
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,
@@ -22959,6 +22965,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         scratch_pin: None,
         toolchains: Vec::new(),
         proxy: None,
+        freeze_record: None,
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
@@ -24546,7 +24553,7 @@ fn adopt_refuses_per_turn_pane_with_reason() {
             .unwrap();
         let record = fixture.pane(&host, id);
         assert_eq!(
-            team.adopt(&host, id, &record, &access).unwrap(),
+            team.adopt(&host, id, &record, &access, None).unwrap(),
             Err(reason.to_owned())
         );
         let status: String = fixture
@@ -24686,6 +24693,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         scratch_pin: None,
         toolchains: Vec::new(),
         proxy: None,
+        freeze_record: None,
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
@@ -33014,6 +33022,68 @@ fn a_restarted_engine_gives_the_adopted_live_master_a_fresh_run_time() {
         ),
         0
     );
+    again.shutdown().unwrap();
+}
+
+/// A restarted engine taking over the live master's pane marks it starting with no process
+/// group until that pane reports ready again, so the team graph names no terminal for a
+/// master still being taken over, as for a fresh start, and names it once the pane runs
+/// (DEC-161 3b).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adopted_live_master_names_its_terminal_only_once_its_pane_reports_ready() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let limits = TeamLimits {
+        master_idle_stop: Duration::from_secs(3600),
+        ..TeamLimits::default()
+    };
+    let (mut team, id) = idle_live_master(&fixture, &host, limits.master_idle_stop);
+    assert_eq!(team.shutdown().unwrap(), names(&[id]));
+    assert_eq!(host.alive().unwrap(), names(&[id]));
+    let group = |fixture: &Fixture| -> Option<i64> {
+        fixture
+            .connection
+            .query_row(
+                "SELECT process_group FROM team_agents WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let master = |fixture: &Fixture| {
+        crate::team::graph::graph(&fixture.status(), &Default::default()).nodes[0]
+            .terminal
+            .clone()
+    };
+    assert!(group(&fixture).is_some(), "the kept pane ran under a group");
+    let access = fixture.access.clone();
+    let mut again = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", fixture.base.join("bin").join("codex"))]),
+        Box::new(move || Some(access.clone())),
+        limits,
+    )
+    .unwrap()
+    .with_terminal(host.clone())
+    .unwrap();
+    assert_eq!(fixture.agent_status(id).0, AgentStatus::Starting);
+    assert_eq!(
+        group(&fixture),
+        None,
+        "a pane being taken over has no process group until it reports ready"
+    );
+    assert_eq!(
+        master(&fixture),
+        None,
+        "no terminal is offered while the master is taken over"
+    );
+    fixture.until(&mut again, "the next engine adopts the live master", |f| {
+        f.agent_status(id) == (AgentStatus::Idle, None) && f.recorded(id)
+    });
+    assert!(group(&fixture).is_some());
+    assert_eq!(master(&fixture), Some(AgentId::team(id).unwrap()));
     again.shutdown().unwrap();
 }
 

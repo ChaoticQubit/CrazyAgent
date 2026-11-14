@@ -864,10 +864,12 @@ impl Grants {
             return Err(invalid("a writable root sits inside a protected path"));
         }
         let secrets = sandbox.secret_paths();
+        let carved = sandbox.carved_home.as_ref();
         assert!(read.iter().chain(&write).all(|grant| {
-            secrets
-                .iter()
-                .all(|secret| !grant.starts_with(secret) && !secret.starts_with(grant))
+            secrets.iter().all(|secret| {
+                (carved == Some(grant) && grant.parent() == Some(secret.as_path()))
+                    || (!grant.starts_with(secret) && !secret.starts_with(grant))
+            })
         }));
         Ok(Self { read, write })
     }

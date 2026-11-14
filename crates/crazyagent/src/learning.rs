@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COUNT_MAX: u32 = 99;
 
+#[cfg_attr(not(unix), allow(dead_code))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS learning_marks (
     step TEXT PRIMARY KEY,
     marked_ms INTEGER NOT NULL
@@ -235,6 +236,7 @@ struct Signal {
 
 /// Creates the marks table when it is missing. Input: the engine database. Output: Ok, or
 /// `learning_progress_unavailable`.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(unavailable)
 }

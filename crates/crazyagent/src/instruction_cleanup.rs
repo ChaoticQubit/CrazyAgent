@@ -36,6 +36,8 @@ pub const TIMED_OUT: &str = "instructions_cleanup_timed_out";
 pub const OFF: &str = "instructions_cleanup_off";
 /// This engine cannot run a cleanup: no harness, no settings files or no confined runs.
 pub const UNAVAILABLE: &str = "instructions_cleanup_unavailable";
+/// The pool's loopback model provider refused every connect, so nothing was sent.
+pub const PROVIDER_UNREACHABLE: &str = "instructions_cleanup_provider_unreachable";
 
 /// The longest one cleanup may take, every try included.
 pub const WALL_TIME: Duration = Duration::from_secs(5 * 60);
@@ -204,12 +206,13 @@ pub struct Request<'a> {
 mod run {
     use super::{
         BUSY, CleanupPool, FAILED, NO_ACCOUNT, OUTPUT_TOKENS_MAX, PAUSED, POOL_UNKNOWN,
-        PROJECT_POOL_MISSING, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE, WALL_TIME,
+        PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
+        WALL_TIME,
     };
     use crate::research::accounts::{AccountPick, SettingsResolver};
     use crate::research::runner::{
         ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchLimits,
-        ResearchRunner,
+        ResearchRunner, unreached_provider_here,
     };
     use std::os::unix::fs::DirBuilderExt;
     use std::path::{Path, PathBuf};
@@ -386,6 +389,10 @@ mod run {
                 Err(code) if number == 1 => return Err(code),
                 Err(_) => return Err(cause),
             };
+            if let Some(line) = unreached_provider_here(&account) {
+                eprintln!("{PROVIDER_UNREACHABLE} try={number} {line}");
+                return Err(PROVIDER_UNREACHABLE);
+            }
             let name = run_name(started_ms, number);
             let run = ReadOnlyRun {
                 name: &name,

@@ -3890,8 +3890,8 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
     let agent = |status: &str| {
         engine
             .execute(
-                "INSERT INTO team_agents(project, role, harness, tools, status, created_ms, heartbeat_ms)
-                 VALUES (?1, 'sub', 'claude-code', 1, ?2, ?3, ?3)",
+                "INSERT INTO team_agents(project, role, harness, tools, status, created_ms, heartbeat_ms, process_group)
+                 VALUES (?1, 'sub', 'claude-code', 1, ?2, ?3, ?3, 2000000000)",
                 rusqlite::params![project().as_str(), status, now],
             )
             .unwrap();

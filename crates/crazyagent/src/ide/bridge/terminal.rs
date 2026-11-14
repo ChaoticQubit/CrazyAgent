@@ -7,9 +7,10 @@ use crate::protocol::{ProjectId, encode_frame};
 use crate::sandbox::SandboxError;
 use crate::sandbox::ide_shell::{self, Launch, TERMINAL_VARIABLES};
 use crate::sandbox::policy::AgentAccess;
+use crate::terminal::buffer::Chunk;
 use crate::terminal::{
     AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame,
-    TerminalRequest, TerminalStream,
+    TerminalRequest, TerminalStream, attach_again,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -293,6 +294,21 @@ async fn greet(writer: &mut OwnedWriteHalf, viewer: &TerminalStream) -> Result<(
     Ok(())
 }
 
+/// Writes a fresh viewer's redrawn screen to an IDE terminal that fell behind, in output
+/// frames of at most `CHUNK_BYTES_MAX` bytes. Inputs: the writer and the fresh viewer.
+/// Output: Ok once written, or the first failed write's error.
+async fn redraw(writer: &mut OwnedWriteHalf, viewer: &TerminalStream) -> Result<(), EngineError> {
+    let bytes = viewer.redraw();
+    assert!(!bytes.is_empty());
+    for chunk in bytes.chunks(CHUNK_BYTES_MAX) {
+        let output = TerminalFrame::Output {
+            bytes: chunk.to_vec(),
+        };
+        send(writer, &output).await?;
+    }
+    Ok(())
+}
+
 /// Streams the pane's output and applies the extension's input and resizes until one side
 /// ends or the capability no longer admits this project, which each input and resize is
 /// checked against first (CA-SEC-005); a revoked, replaced or ended grant stops it before
@@ -358,11 +374,21 @@ async fn relay(
                 }
             },
             chunk = viewer.next() => match chunk {
-                Some(bytes) => {
+                Some(Chunk::Output(bytes)) => {
                     if send(writer, &TerminalFrame::Output { bytes }).await.is_err() {
                         break "terminal_viewer_gone";
                     }
                 }
+                Some(Chunk::Behind) => match attach_again(host.clone(), name.clone()).await {
+                    Ok(fresh) => {
+                        *viewer = fresh;
+                        if redraw(writer, viewer).await.is_err() {
+                            break "terminal_viewer_gone";
+                        }
+                    }
+                    Err(error) if error.0 == "terminal_agent_unknown" => break "terminal_ended",
+                    Err(_) => break "terminal_unavailable",
+                },
                 None => break "terminal_ended",
             },
             _ = check.tick() => {

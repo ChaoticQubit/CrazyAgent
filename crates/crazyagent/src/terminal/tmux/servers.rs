@@ -284,6 +284,10 @@ impl Servers {
                 .env_clear()
                 .env("PATH", super::SERVER_PATH)
                 .env(crate::sandbox::KEEPER_DEADLINE, &deadline)
+                .env(
+                    crate::sandbox::KEEPER_STATE,
+                    crate::team::runtime::agent_servers_state(&self.root.join("team"), id, mates),
+                )
                 .current_dir(folder)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -780,6 +784,17 @@ impl Host for Servers {
         }
         self.on(agent, |server| Ok(server.unkept(agent)))
             .unwrap_or(true)
+    }
+
+    fn server_keepers(&self, agent: &AgentId) -> Vec<(u32, bool)> {
+        [(&self.keepers, false), (&self.mates_keepers, true)]
+            .into_iter()
+            .filter_map(|(kept, mates)| {
+                let mut keepers = kept.lock().ok()?;
+                let keeper = keepers.get_mut(agent)?;
+                keeper_runs(keeper).then(|| (keeper.id(), mates))
+            })
+            .collect()
     }
 
     fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {

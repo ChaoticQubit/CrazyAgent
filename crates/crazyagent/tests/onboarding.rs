@@ -1903,9 +1903,7 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
 async fn a_mapping_step_whose_provider_refuses_connections_stops_at_once_with_the_reach_line() {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
-    let closed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+    let (_held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "e2e-model".into(),
@@ -1930,7 +1928,7 @@ async fn a_mapping_step_whose_provider_refuses_connections_stops_at_once_with_th
     assert_eq!(
         view.mapping,
         failed(&format!(
-            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then retry setup."
+            "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
         )),
         "{view:?}"
     );
