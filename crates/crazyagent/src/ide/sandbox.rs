@@ -47,7 +47,9 @@ pub fn qualified() -> bool {
 /// profile for the project folder: deny by default, system reads, the project writable except
 /// its git hooks, git config and context, the owner's secrets and keychain denied, the
 /// project's toolchains readable, `home` and `tmp` writable and the build readable. On top,
-/// the whole engine data root is denied, then only the grants are given back, then every key
+/// the whole engine data root is denied, then only the grants are given back, with the base
+/// write denies in `home` and the writable folders given again after them
+/// ([`crate::sandbox::regranted_denies`]), then every key
 /// file directly in a folder of the data root (the owner keys) and the engine database are
 /// denied again, then every locked folder is denied for writing, case-insensitively as APFS
 /// matches names, with its folders up to its grant kept from being moved, then agent IDE
@@ -122,7 +124,9 @@ pub fn profile(
     for folder in std::iter::once(&grants.home).chain(grants.writable.iter()) {
         text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
     }
-    text.push(')');
+    let regranted = crate::sandbox::regranted_denies(grants.home, grants.writable);
+    text.push_str(")\n");
+    text.push_str(regranted.trim_end());
     if !grants.readable.is_empty() || !grants.read_only.is_empty() {
         text.push_str("\n(allow file-read*");
         for file in grants.readable {
@@ -163,6 +167,10 @@ pub fn profile(
     )));
     assert!(text.ends_with("(global-name \"com.apple.FSEvents\"))\n"));
     assert!(!closed || !text.contains("(remote ip"));
+    assert!(crate::sandbox::denies_follow_write_allows(
+        &text,
+        &[regranted.trim_end().to_string()]
+    ));
     if text.len() > PROFILE_BYTES_MAX || !sbpl_overlong(&text).is_empty() {
         return Err(failure("ide_sandbox_invalid"));
     }
