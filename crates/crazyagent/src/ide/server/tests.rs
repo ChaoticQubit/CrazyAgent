@@ -1267,12 +1267,13 @@ fn names_near_git_and_links_out_of_the_server_data_folder_leave_a_start_alone() 
     assert!(server_command(&servers, &full, &root, &folder).is_ok());
 }
 
-/// A repository a server of an older profile moved from its data folder into its temp
-/// folder, which every start of that project reuses, stops a confined start with
-/// `ide_server_data_git` and stays where it was, so no later server renames it from there
-/// into the project (SA vid 101 residue one rename further, rv-sec2 r1 F1).
+/// A repository a server of an older profile moved from its data folder into the temp
+/// folder every start of the project used to share is outside the next confined start: that
+/// start gets a temp folder of its own, its profile never names the old one, so no server
+/// renames the repository from there into the project, and nothing is deleted (SA vid 101
+/// residue one rename further, rv-sec2 r1 F1, rv-sec3 r4 addendum).
 #[test]
-fn a_git_moved_into_the_server_temp_folder_stops_a_confined_start() {
+fn a_git_moved_into_the_old_server_temp_folder_is_outside_the_next_confined_start() {
     let (checkout, data) = (scratch(), scratch());
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let root = fs::canonicalize(checkout.path()).unwrap();
@@ -1281,17 +1282,66 @@ fn a_git_moved_into_the_server_temp_folder_stops_a_confined_start() {
     let tmp = crate::sandbox::toolchains::make_tmp(&folder.join(SERVER_DATA)).unwrap();
     let planted = tmp.join("x").join(".git");
     fs::create_dir_all(planted.join("hooks")).unwrap();
-    let started = server_command(&servers, &id, &root, &folder);
+    let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+    let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap_or_default();
     let kept = planted.is_dir();
-    fs::remove_dir_all(&tmp).unwrap();
-    assert_eq!(started.unwrap_err().0, "ide_server_data_git");
-    assert!(kept, "the planted .git was removed instead of refusing the start");
+    for made in [Some(&tmp), started.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    let started = started.expect("a .git in the old temp folder refused a confined start");
+    assert_ne!(started, tmp);
+    assert!(
+        !profile.contains(tmp.to_str().unwrap()),
+        "the confined start's profile names the old temp folder"
+    );
+    assert!(kept, "the planted .git was removed");
+}
+
+/// A confined session that leaves its temp folder unusable for the walk, with a `.git`, a
+/// folder it shut with mode 000 or more entries than any check reads, never stops the next
+/// confined start of the project: each confined start gets a temp folder no earlier start
+/// used, and the old one is outside its profile (rv-sec3 r4 addendum).
+#[test]
+fn a_confined_start_never_reuses_an_earlier_start_s_temp_folder() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("left-its-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let first = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
+    let shut = first.join("shut");
+    fs::create_dir_all(first.join("clone").join(".git")).unwrap();
+    fs::create_dir_all(&shut).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let next = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
+    let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap_or_default();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o700)).unwrap();
+    for made in [Some(&first), next.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    let next = next.expect("an earlier start's temp folder refused the next confined start");
+    assert_ne!(next, first);
+    assert!(
+        !profile.contains(first.to_str().unwrap()),
+        "the next start's profile names the earlier start's temp folder"
+    );
+}
+
+/// The temp folder a built server command gives the server as `TMPDIR`. Input: the command.
+/// Output: the folder.
+fn server_tmp(built: &Command) -> PathBuf {
+    PathBuf::from(
+        built
+            .get_envs()
+            .find(|(key, _)| key.to_str() == Some("TMPDIR"))
+            .and_then(|(_, value)| value)
+            .unwrap(),
+    )
 }
 
 /// A `.git` a Full access session left in its temp folder, as a temporary clone or a git
-/// build leaves one, never refuses a later confined start of the project: that start gets a
-/// temp folder of its own, which is still walked and refused while it holds a `.git`
-/// (rv-sec3 r2+r3 F1).
+/// build leaves one, never refuses a later confined start of the project, which gets a temp
+/// folder of its own (rv-sec3 r2+r3 F1).
 #[test]
 fn a_git_a_full_access_session_left_in_its_temp_folder_leaves_a_confined_start_alone() {
     let (checkout, data) = (scratch(), scratch());
@@ -1300,32 +1350,16 @@ fn a_git_a_full_access_session_left_in_its_temp_folder_leaves_a_confined_start_a
     let id = project("full-then-confined");
     set_level(data.path(), &id, AgentAccess::Full);
     let folder = servers.prepare(&id).unwrap();
-    let temp = |built: &Command| {
-        PathBuf::from(
-            built
-                .get_envs()
-                .find(|(key, _)| key.to_str() == Some("TMPDIR"))
-                .and_then(|(_, value)| value)
-                .unwrap(),
-        )
-    };
-    let full = temp(&server_command(&servers, &id, &root, &folder).unwrap());
+    let full = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
     fs::create_dir_all(full.join("clone").join(".git").join("hooks")).unwrap();
     set_level(data.path(), &id, AgentAccess::Sandboxed);
-    let confined = server_command(&servers, &id, &root, &folder).map(|built| temp(&built));
-    let walked = confined.as_ref().ok().map(|confined| {
-        fs::create_dir_all(confined.join("clone").join(".git")).unwrap();
-        server_command(&servers, &id, &root, &folder)
-            .map(|_| ())
-            .map_err(|refused| refused.0)
-    });
+    let confined = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
     for made in [Some(&full), confined.as_ref().ok()].into_iter().flatten() {
         let _ = fs::remove_dir_all(made);
     }
     let confined =
         confined.expect("a .git in the Full access temp folder refused a confined start");
     assert_ne!(confined, full);
-    assert_eq!(walked, Some(Err("ide_server_data_git".to_owned())));
 }
 
 /// Runs git as a built IDE server starts it: the engine's shim under the server's installed

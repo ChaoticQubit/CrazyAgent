@@ -64,8 +64,9 @@ test("an unqualified platform shows Unavailable with the platform name and offer
   assert.match(exclude, /\.git\/info\/exclude/);
   assert.match(exclude, /a plain file under 1 MiB, not links, then open the IDE again\.$/);
   const residue = client.openFailure("ide_server_data_git");
-  assert.match(residue, /its data or temp folder for this project holds something named \.git/);
-  assert.match(residue, /Delete this project's server-data folder .* then open the IDE again\. If it still doesn't start, restart the computer, which empties the IDE's temp folder\.$/);
+  assert.match(residue, /its data folder for this project holds something named \.git/);
+  assert.match(residue, /Delete this project's server-data folder .* then open the IDE again\.$/);
+  assert.doesNotMatch(residue, /temp folder|restart/);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/ide_tab.rs", import.meta.url), "utf8");
   for (const code of ["ide_project_folder_invalid", "git_exclude_invalid", "ide_server_data_git"]) assert.ok(engine.includes(`"${code}",`), code);
 });
