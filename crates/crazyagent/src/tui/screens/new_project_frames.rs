@@ -499,7 +499,7 @@ fn only_on_linux_below_full_access_does_review_say_nested_git_is_not_blocked() {
     );
     let look = Look::plain();
     let shown = |wizard: &Wizard| {
-        compose(&wizard_screen(wizard, 120, 60, &look), 120, 60, "", &look)
+        compose(&wizard_screen(wizard, 80, 120, &look), 80, 120, "", &look)
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
